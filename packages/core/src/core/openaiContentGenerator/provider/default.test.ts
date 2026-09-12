@@ -81,12 +81,25 @@ describe('DefaultOpenAICompatibleProvider', () => {
     mockCliConfig = {
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getProxy: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('session-1'),
     } as unknown as Config;
 
     provider = new DefaultOpenAICompatibleProvider(
       mockContentGeneratorConfig,
       mockCliConfig,
     );
+  });
+
+  it('preserves the explicit output cap on a non-GPT batch route', () => {
+    const request = provider.buildRequest(
+      {
+        model: 'google/gemini-2.5-flash:batch',
+        messages: [],
+        max_tokens: 65536,
+      },
+      'test',
+    );
+    expect(request.max_tokens).toBe(65536);
   });
 
   afterEach(() => {
@@ -175,10 +188,35 @@ describe('DefaultOpenAICompatibleProvider', () => {
           defaultHeaders: {
             'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
           },
+          fetch: expect.any(Function),
         }),
       );
 
       expect(client).toBeDefined();
+    });
+
+    it('installs session ID injection on the runtime fetch', async () => {
+      const runtimeFetch = vi.fn(
+        async (_input: string | URL | Request, _init?: RequestInit) =>
+          new Response(),
+      );
+      vi.mocked(buildRuntimeFetchOptions).mockReturnValue({
+        fetch: runtimeFetch,
+      });
+
+      const client = provider.buildClient() as unknown as {
+        config: { fetch: typeof fetch };
+      };
+      await client.config.fetch(
+        'https://routify-pub.alibaba-inc.com/protocol/openai/v1',
+      );
+      await client.config.fetch('https://api.openai.com/v1');
+
+      const routifyHeaders = new Headers(
+        runtimeFetch.mock.calls[0][1]?.headers,
+      );
+      expect(routifyHeaders.get('session_id')).toBe('session-1');
+      expect(runtimeFetch.mock.calls[1][1]).toBeUndefined();
     });
 
     it('should use default timeout and maxRetries when not provided', () => {
@@ -478,7 +516,8 @@ describe('DefaultOpenAICompatibleProvider', () => {
         'prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+      expect(result['reasoning_effort']).toBe('xhigh');
+      expect(result['reasoning']).toBeUndefined();
     });
 
     it('leaves an accepted effort tier untouched', () => {
@@ -493,7 +532,8 @@ describe('DefaultOpenAICompatibleProvider', () => {
         'prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+      expect(result['reasoning_effort']).toBe('xhigh');
+      expect(result['reasoning']).toBeUndefined();
     });
 
     it('keeps an unrecognized effort string as-is rather than rewriting it', () => {
@@ -508,8 +548,25 @@ describe('DefaultOpenAICompatibleProvider', () => {
         'prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning']).toEqual({ effort: 'ludicrous' });
+      expect(result['reasoning_effort']).toBe('ludicrous');
+      expect(result['reasoning']).toBeUndefined();
     });
+
+    it.each(['', 42])(
+      'does not translate an invalid configured effort %j',
+      (effort) => {
+        const result = provider.buildRequest(
+          {
+            model: 'gpt-5.4',
+            messages: [],
+            reasoning: { effort },
+          } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+          'prompt-id',
+        ) as unknown as Record<string, unknown>;
+        expect(result['reasoning_effort']).toBeUndefined();
+        expect(result['reasoning']).toEqual({ effort });
+      },
+    );
 
     it('warns once however many requests the same provider clamps', () => {
       mockDebugLogger.warn.mockClear();
@@ -523,6 +580,83 @@ describe('DefaultOpenAICompatibleProvider', () => {
       provider.buildRequest(req, 'second');
 
       expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['gpt-5.1', 'max', 'high'],
+      ['gpt-5.1-codex-max', 'max', 'xhigh'],
+      ['gpt-5.4', 'max', 'xhigh'],
+      ['gpt-5.6-sol', 'max', 'max'],
+      ['gpt-6-astra', 'high', 'high'],
+      ['gpt-6-astra', 'max', 'max'],
+      ['gpt-5-pro', 'low', 'high'],
+      ['gpt-5.4-pro', 'low', 'medium'],
+    ])(
+      'maps %s effort %s to %s without mutating the input',
+      (model, effort, expected) => {
+        const request = {
+          model,
+          messages: [{ role: 'user' as const, content: 'Hello' }],
+          reasoning: { effort },
+        };
+        const result = provider.buildRequest(
+          request,
+          'prompt-id',
+        ) as unknown as Record<string, unknown>;
+        expect(result['reasoning_effort']).toBe(expected);
+        expect(result['reasoning']).toBeUndefined();
+        expect(request.reasoning).toEqual({ effort });
+      },
+    );
+
+    it.each([undefined, null, ''])(
+      'preserves a sibling budget with a %s flat override',
+      (override) => {
+        mockContentGeneratorConfig.extra_body = { reasoning_effort: override };
+        const request = {
+          model: 'gpt-5.4',
+          messages: [],
+          reasoning: { effort: 'high', budget_tokens: 42000 },
+        };
+        const result = provider.buildRequest(
+          request,
+          'prompt-id',
+        ) as unknown as Record<string, unknown>;
+        expect(result['reasoning_effort']).toBe('high');
+        expect(result['reasoning']).toEqual({ budget_tokens: 42000 });
+        expect(request.reasoning).toEqual({
+          effort: 'high',
+          budget_tokens: 42000,
+        });
+      },
+    );
+
+    it('keeps the OpenRouter nested reasoning protocol', () => {
+      mockContentGeneratorConfig.baseUrl = 'https://openrouter.ai/api/v1';
+      const result = provider.buildRequest(
+        {
+          model: 'openai/gpt-5.4',
+          messages: [],
+          reasoning: { effort: 'max' },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+      expect(result['reasoning_effort']).toBeUndefined();
+    });
+
+    it('preserves an explicit flat effort over the configured effort', () => {
+      mockContentGeneratorConfig.extra_body = { reasoning_effort: 'low' };
+      const result = provider.buildRequest(
+        {
+          model: 'gpt-5.4',
+          messages: [],
+          reasoning: { effort: 'high' },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['reasoning_effort']).toBe('low');
+      expect(result['reasoning']).toBeUndefined();
     });
 
     it('answers the ceiling for the request model, not the configured one', () => {
@@ -539,8 +673,8 @@ describe('DefaultOpenAICompatibleProvider', () => {
     });
 
     it('leaves a samplingParams reasoning object verbatim', () => {
-      // The pipeline hands samplingParams keys straight to the wire and skips
-      // the reasoning injection, so this object is the user's own value.
+      // Explicit nested reasoning bypasses injection and clamping, unlike
+      // unrelated GPT sampling options that retain the configured effort.
       const providerWithSampling = new DefaultOpenAICompatibleProvider(
         {
           ...mockContentGeneratorConfig,

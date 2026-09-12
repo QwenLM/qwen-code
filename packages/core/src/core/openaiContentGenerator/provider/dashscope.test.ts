@@ -115,6 +115,62 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     });
   });
 
+  it.each([
+    [{ thinking_budget: 4096 }, { thinking_budget: 4096 }],
+    [{ enable_thinking: false }, { reasoning_effort: 'none' }],
+    [{ enable_thinking: true }, { reasoning_effort: 'low' }],
+    [
+      { reasoning_effort: 'medium', thinking_budget: 4096 },
+      { reasoning_effort: 'medium' },
+    ],
+  ])(
+    'honors configured tiered protocols with extra_body %j',
+    (extraBody, expected) => {
+      const model = 'qwen-custom-tiered';
+      const getResolvedModelConfig = vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['low', 'medium', 'xhigh'],
+            defaultEffort: 'xhigh',
+            disableField: 'reasoning_effort',
+          },
+        },
+      });
+      mockCliConfig.getResolvedModelConfig = getResolvedModelConfig;
+      mockContentGeneratorConfig.authType = AuthType.USE_OPENAI;
+      mockContentGeneratorConfig.model = 'qwen-configured-main';
+      mockContentGeneratorConfig.reasoning = { effort: 'low' };
+      mockContentGeneratorConfig.extra_body = extraBody;
+      const wire = provider.buildRequest(
+        { model, messages: [] },
+        'test',
+      ) as unknown as Record<string, unknown>;
+      expect({
+        enable_thinking: wire['enable_thinking'],
+        reasoning_effort: wire['reasoning_effort'],
+        thinking_budget: wire['thinking_budget'],
+      }).toEqual({
+        enable_thinking: undefined,
+        reasoning_effort: undefined,
+        thinking_budget: undefined,
+        ...expected,
+      });
+      expect(getResolvedModelConfig).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        model,
+        mockContentGeneratorConfig.baseUrl,
+      );
+      mockContentGeneratorConfig.reasoning = { effort: 'high' };
+      mockContentGeneratorConfig.extra_body = undefined;
+      const invalid = provider.buildRequest(
+        { model, messages: [] },
+        'test',
+      ) as unknown as Record<string, unknown>;
+      expect(invalid['reasoning_effort']).toBeUndefined();
+    },
+  );
+
   it('enables content-only thinking-tag leak detection', () => {
     expect(provider.getResponseParsingOptions()).toEqual({
       contentOnlyThinkingTagLeaks: true,
@@ -582,10 +638,31 @@ describe('DashScopeOpenAICompatibleProvider', () => {
             'X-DashScope-UserAgent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
             'X-DashScope-AuthType': AuthType.QWEN_OAUTH,
           },
+          fetch: expect.any(Function),
         }),
       );
 
       expect(client).toBeDefined();
+    });
+
+    it('installs session ID injection on the runtime fetch', async () => {
+      const runtimeFetch = vi.fn(
+        async (_input: string | URL | Request, _init?: RequestInit) =>
+          new Response(),
+      );
+      vi.mocked(buildRuntimeFetchOptions).mockReturnValue({
+        fetch: runtimeFetch,
+      });
+
+      const client = provider.buildClient() as unknown as {
+        config: { fetch: typeof fetch };
+      };
+      await client.config.fetch(
+        'https://routify-pub.alibaba-inc.com/protocol/openai/v1',
+      );
+
+      const headers = new Headers(runtimeFetch.mock.calls[0][1]?.headers);
+      expect(headers.get('session_id')).toBe('test-session-id');
     });
 
     it('should use default timeout and maxRetries when not provided', () => {
@@ -658,6 +735,39 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ],
       temperature: 0.7,
     };
+
+    it.each([
+      ['gpt-5.4', 'high', 'high'],
+      ['gpt-5.4', 'max', 'xhigh'],
+      ['gpt-6-astra', 'max', 'max'],
+    ] as const)(
+      'maps %s effort %s to flat %s on an IdeaLab gateway',
+      (model, effort, expected) => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+            model,
+            reasoning: { effort },
+            samplingParams: { max_completion_tokens: 1024 },
+          },
+          mockCliConfig,
+        );
+        const result = generator.buildRequest(
+          {
+            ...baseRequest,
+            model,
+            reasoning: { effort },
+            max_completion_tokens: 1024,
+          } as OpenAI.Chat.ChatCompletionCreateParams,
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+        expect(result['reasoning_effort']).toBe(expected);
+        expect(result['reasoning']).toBeUndefined();
+        expect(result['max_completion_tokens']).toBe(1024);
+      },
+    );
 
     it('should add cache control to system message only for non-streaming requests', () => {
       const request = { ...baseRequest, stream: false };
@@ -2503,6 +2613,175 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         .content as OpenAI.Chat.ChatCompletionContentPart[];
       // Empty content array should remain empty
       expect(content).toEqual([]);
+    });
+  });
+
+  describe('reattach boundary cache control (issue #11627)', () => {
+    const reattachImageBlock = {
+      type: 'image_url' as const,
+      image_url: { url: 'data:image/png;base64,AAAA' },
+    };
+
+    it('places the conversation breakpoint before reattached parts appended to the last user message', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Stable user text' },
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      expect(content).toHaveLength(3);
+      // Breakpoint lands on the stable text block, not the reattach marker/image.
+      expect(content?.[0]).toMatchObject({
+        type: 'text',
+        text: 'Stable user text',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(content?.[2]).not.toHaveProperty('cache_control');
+    });
+
+    it('walks back to the previous message when the whole last message is reattach', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          { role: 'user', content: 'Stable user text' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      // The last message is entirely reattach content: it must not be marked.
+      const lastContent = result.messages[2]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      expect(lastContent?.[0]).not.toHaveProperty('cache_control');
+      expect(lastContent?.[1]).not.toHaveProperty('cache_control');
+      // The breakpoint moves onto the previous stable message instead.
+      expect(result.messages[1]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'Stable user text',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
+    it('keeps the last-block anchor when no reattach boundary is supplied', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Stable user text' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      // Unchanged behavior: last block keeps the breakpoint.
+      expect(content?.[1]).toMatchObject({
+        type: 'image_url',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+    });
+
+    it('skips an empty-string tool result when walking back to a stable block', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          { role: 'tool', tool_call_id: 'call_1', content: '' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      // The empty tool result stays a bare string — not rewritten into a
+      // fabricated zero-length text part carrying cache_control.
+      expect(result.messages[1]?.content).toBe('');
+      // The breakpoint degrades to the system message (system-only caching).
+      expect(result.messages[0]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'System prompt',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
+    it('walks the anchor back past a current-turn inline image to stable text', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'look at this screenshot' },
+              reattachImageBlock,
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      // Breakpoint lands on the prompt text, not the inline image the next
+      // turn textualizes.
+      expect(content?.[0]).toMatchObject({
+        type: 'text',
+        text: 'look at this screenshot',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[1]).not.toHaveProperty('cache_control');
     });
   });
 

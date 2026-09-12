@@ -23,7 +23,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, useState } from 'react';
 import { render, screen } from '@testing-library/react';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
@@ -61,6 +61,7 @@ const mocks = vi.hoisted(() => {
     slashCommands: [] as unknown[],
     fileSearchResults: [] as string[],
     fileSearchDelay: Promise.resolve() as Promise<void>,
+    textareaProps: null as Record<string, unknown> | null,
   };
 
   function createFakeEditor() {
@@ -169,7 +170,8 @@ const mocks = vi.hoisted(() => {
   async function buildJsxRuntime() {
     const React = await import('react');
     const FakeTextarea = React.forwardRef(
-      (_props: unknown, ref: React.Ref<unknown>) => {
+      (props: Record<string, unknown>, ref: React.Ref<unknown>) => {
+        state.textareaProps = props;
         const editor = React.useMemo(() => {
           const created = createFakeEditor();
           state.editors.push(created);
@@ -582,6 +584,153 @@ describe('OpenTuiInputPrompt submit guard', () => {
     expect(editor.plainText).toBe('queued text');
   });
 
+  it('an empty-buffer ! toggles shell mode on and off (U-33)', async () => {
+    let toggleCount = 0;
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onToggleShellMode={() => {
+          toggleCount += 1;
+        }}
+      />,
+    );
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: '!', sequence: '!' }));
+    });
+    expect(toggleCount).toBe(1);
+    expect(editor.plainText).toBe('');
+  });
+
+  it('one physical ! toggles shell mode exactly once on press+release (R5-3)', async () => {
+    // The parent's toggle is a relative flip, so a duplicated dispatch
+    // (kitty-protocol terminals report the release of a printable key too)
+    // is a net no-op and the mode ends up off. The release half must be
+    // ignored, exactly like every other printable-sequence consumer here.
+    let shellActive = false;
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onToggleShellMode={() => {
+          shellActive = !shellActive;
+        }}
+      />,
+    );
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(
+        baseKeyEvent({ name: '1', sequence: '!', shift: true }),
+      );
+      lastKeyboardHandler()(
+        baseKeyEvent({
+          name: '1',
+          sequence: '!',
+          shift: true,
+          eventType: 'release',
+        }),
+      );
+    });
+    expect(shellActive).toBe(true);
+    expect(editor.plainText).toBe('');
+  });
+
+  it('a non-empty buffer inserts ! instead of toggling (U-33)', async () => {
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onToggleShellMode={() => {
+          throw new Error('must not toggle');
+        }}
+      />,
+    );
+    const editor = currentEditor();
+    await typeText('echo hi');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: '!', sequence: '!' }));
+    });
+    expect(editor.plainText).toBe('echo hi!');
+  });
+
+  it('Esc in shell mode exits the mode before the queue restore (U-33)', async () => {
+    const onToggleShellMode = vi.fn();
+    const onPopQueue = vi.fn(() => 'queued text');
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        shellModeActive
+        onToggleShellMode={onToggleShellMode}
+        queueLength={1}
+        onPopQueue={onPopQueue}
+      />,
+    );
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
+    });
+    expect(onToggleShellMode).toHaveBeenCalledTimes(1);
+    expect(onPopQueue).not.toHaveBeenCalled();
+  });
+
+  it('Esc in shell mode while streaming exits the mode and interrupts (R1-57)', async () => {
+    // Ink does both on one keypress: InputPrompt exits the mode with no
+    // streaming gate and AppContainer's broadcast handler cancels the turn.
+    const onToggleShellMode = vi.fn();
+    const onInterrupt = vi.fn();
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        streaming
+        shellModeActive
+        onToggleShellMode={onToggleShellMode}
+        onInterrupt={onInterrupt}
+      />,
+    );
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
+    });
+    expect(onToggleShellMode).toHaveBeenCalledTimes(1);
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('`!` does not toggle shell mode while a stale dropdown is open (R1-54)', async () => {
+    let releaseSearch!: () => void;
+    mocks.state.fileSearchResults = ['hit-file.txt'];
+    mocks.state.fileSearchDelay = new Promise<void>((resolve) => {
+      releaseSearch = resolve;
+    });
+    const onToggleShellMode = vi.fn();
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onToggleShellMode={onToggleShellMode}
+      />,
+    );
+    const editor = currentEditor();
+    await typeText('@x');
+    await act(async () => {});
+    // Clear the buffer by Ctrl+C: the stale search result repopulates the
+    // dropdown over the empty buffer, exactly ink's !showCompletionSuggestions
+    // hazard.
+    await act(async () => {
+      lastKeyboardHandler()(
+        baseKeyEvent({ name: 'c', sequence: '\x03', ctrl: true }),
+      );
+    });
+    expect(editor.plainText).toBe('');
+    releaseSearch();
+    await act(async () => {});
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: '!', sequence: '!' }));
+    });
+    expect(onToggleShellMode).not.toHaveBeenCalled();
+    expect(editor.plainText).toBe('!');
+  });
+
   it('Up at the top edge pops queued prompts into the composer', async () => {
     let queued: string | null = 'from queue';
     render(
@@ -601,6 +750,28 @@ describe('OpenTuiInputPrompt submit guard', () => {
       lastKeyboardHandler()(baseKeyEvent({ name: 'up', sequence: '\x1b[A' }));
     });
     expect(editor.plainText).toBe('from queue');
+  });
+
+  it('Up and ctrl+p touch neither the queue nor the history in shell mode', async () => {
+    const onPopQueue = vi.fn(() => 'queued text');
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={['npm test']}
+        shellModeActive
+        queueLength={1}
+        onPopQueue={onPopQueue}
+      />,
+    );
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'up', sequence: '\x1b[A' }));
+      lastKeyboardHandler()(
+        baseKeyEvent({ name: 'p', ctrl: true, sequence: '\x10' }),
+      );
+    });
+    expect(onPopQueue).not.toHaveBeenCalled();
+    expect(editor.plainText).toBe('');
   });
 });
 
@@ -876,12 +1047,36 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
   async function renderWithCommands(
     commands: unknown[],
     onSubmit: (text: string) => void = () => {},
+    onSuggestionsVisibilityChange?: (visible: boolean) => void,
   ) {
     mocks.state.slashCommands = commands;
-    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={onSubmit}
+        userMessages={[]}
+        onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+      />,
+    );
     // Let loadInteractiveCommands resolve into commandsRef.
     await act(async () => {});
   }
+
+  it('publishes completion-list visibility so the shell can hide the footer', async () => {
+    const seen: boolean[] = [];
+    await renderWithCommands(
+      [{ name: 'help', description: 'Show help', kind: 'built-in' }],
+      () => {},
+      (visible) => seen.push(visible),
+    );
+    await typeText('/he');
+    expect(seen).toContain(true);
+
+    // Tab fills `/help `, which matches nothing, so the list closes again.
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+    });
+    expect(seen[seen.length - 1]).toBe(false);
+  });
 
   it('Enter fills the highlighted candidate instead of submitting `/he`', async () => {
     const submitted: string[] = [];
@@ -931,6 +1126,70 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
       lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
     expect(submitted).toEqual(['/help']);
+  });
+
+  it('Enter submits the live exact command when the dropdown trails the buffer', async () => {
+    const submitted: string[] = [];
+    await renderWithCommands(
+      [
+        {
+          name: 'model',
+          description: 'Set the model',
+          kind: 'built-in',
+          action: () => undefined,
+          completionPriority: 1,
+        },
+        {
+          name: 'quit',
+          description: 'Quit',
+          kind: 'built-in',
+          action: () => undefined,
+        },
+      ],
+      (text) => submitted.push(text),
+    );
+    const editor = currentEditor();
+    // Publish the dropdown for the `/` prefix alone: `/model` highlighted, no
+    // perfect match. This is the state Enter would read if it trusted it.
+    await typeText('/');
+    // Then move the buffer without a flush — what a render loop busy with a
+    // streaming turn does to the last keystrokes before an Enter.
+    editor.setText('/quit');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    // Counterfactual (mutation-checked): trusting the stale row splices it
+    // into the live buffer instead — the range still describes `/`, so
+    // `/quit` comes out as `/model quit` and nothing is ever submitted.
+    expect(submitted).toEqual(['/quit']);
+    expect(editor.plainText).toBe('');
+  });
+
+  it('Enter does not submit a partial command the trailing dropdown called perfect', async () => {
+    const submitted: string[] = [];
+    await renderWithCommands(
+      [
+        {
+          name: 'quit',
+          description: 'Quit',
+          kind: 'built-in',
+          action: () => undefined,
+        },
+        { name: 'clear', description: 'Clear', kind: 'built-in' },
+      ],
+      (text) => submitted.push(text),
+    );
+    // The mirror image: a perfect match published for `/quit`, then the buffer
+    // moves back to a partial. The stale verdict must not submit it as text.
+    const editor = currentEditor();
+    await typeText('/quit');
+    editor.setText('/cle');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(submitted).toEqual([]);
+    // Non-vacuity: Enter took the accept path instead of doing nothing at all.
+    expect(editor.plainText).not.toBe('/cle');
   });
 
   it('after navigating, Enter fills the highlighted sub-command', async () => {
@@ -1030,10 +1289,11 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
 });
 
 describe('OpenTuiInputPrompt approval-mode indicator', () => {
-  // The mode text is the only on-screen proof an auto-accept mode took
-  // effect, and the OpenTUI interactive e2e leg's readiness poll greps the
-  // terminal for it. Asserted through the same translation call the component
-  // makes, so a non-English locale cannot flip the pin.
+  // ink's InputPrompt uses its status text only as an aria-label, never as a
+  // visible row, and this renderer has no aria surface — so the composer owns
+  // only the prefix glyph. The readable mode name belongs to the footer
+  // (OpenTuiFooter, through formatApprovalModeName), which is how ink splits
+  // it between InputPrompt and AutoAcceptIndicator.
   const renderWithMode = (approvalMode: ApprovalMode) =>
     render(
       <OpenTuiInputPrompt
@@ -1044,21 +1304,458 @@ describe('OpenTuiInputPrompt approval-mode indicator', () => {
     );
 
   it.each<[ApprovalMode, string]>([
-    [ApprovalMode.YOLO, 'YOLO mode'],
-    [ApprovalMode.AUTO_EDIT, 'Accepting edits'],
-    [ApprovalMode.AUTO, 'Auto mode'],
-  ])('draws the %s status text', (approvalMode, key) => {
+    [ApprovalMode.YOLO, '*'],
+    [ApprovalMode.AUTO_EDIT, '>'],
+    [ApprovalMode.AUTO, '>'],
+    [ApprovalMode.PLAN, '>'],
+    [ApprovalMode.DEFAULT, '>'],
+  ])('draws the %s prefix', (approvalMode, prefix) => {
     renderWithMode(approvalMode);
-    expect(screen.getByText(t(key))).toBeTruthy();
+    expect(screen.getByText(prefix)).toBeTruthy();
   });
 
-  it.each<ApprovalMode>([ApprovalMode.PLAN, ApprovalMode.DEFAULT])(
-    'draws no status text for %s, matching ink',
-    (approvalMode) => {
-      renderWithMode(approvalMode);
-      for (const key of ['YOLO mode', 'Accepting edits', 'Auto mode']) {
-        expect(screen.queryByText(t(key))).toBeNull();
-      }
-    },
-  );
+  it.each<ApprovalMode>([
+    ApprovalMode.YOLO,
+    ApprovalMode.AUTO_EDIT,
+    ApprovalMode.AUTO,
+    ApprovalMode.PLAN,
+    ApprovalMode.DEFAULT,
+  ])('draws no visible mode name for %s, matching ink', (approvalMode) => {
+    renderWithMode(approvalMode);
+    for (const key of [
+      'YOLO mode',
+      'Accepting edits',
+      'Auto mode',
+      'plan mode',
+      'Ask permissions',
+      'Shell mode',
+    ]) {
+      expect(screen.queryByText(t(key))).toBeNull();
+    }
+  });
+
+  it('replaces the prefix with ! while shell mode is active (R1-16)', () => {
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        approvalMode={ApprovalMode.YOLO}
+        shellModeActive
+      />,
+    );
+    expect(screen.getByText('!')).toBeTruthy();
+    expect(screen.queryByText('*')).toBeNull();
+  });
+});
+
+describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
+  const SUGGESTION = 'Try /model fast';
+
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+    mocks.state.fileSearchResults = [];
+    mocks.state.fileSearchDelay = Promise.resolve();
+    mocks.state.textareaProps = null;
+  });
+
+  function renderWithSuggestion(
+    overrides: {
+      onSubmit?: (text: string) => void;
+      onPromptSuggestionDismiss?: () => void;
+      onPromptSuggestionAbort?: () => void;
+    } = {},
+  ) {
+    const dismiss = vi.fn();
+    const abort = vi.fn();
+    const submitted: string[] = [];
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={(text) => {
+          submitted.push(text);
+          overrides.onSubmit?.(text);
+        }}
+        userMessages={[]}
+        promptSuggestion={SUGGESTION}
+        onPromptSuggestionDismiss={
+          overrides.onPromptSuggestionDismiss ?? dismiss
+        }
+        onPromptSuggestionAbort={overrides.onPromptSuggestionAbort ?? abort}
+      />,
+    );
+    return { dismiss, abort, submitted };
+  }
+
+  it('shows the suggestion as the ghost placeholder', () => {
+    renderWithSuggestion();
+    expect(mocks.state.textareaProps?.['placeholder']).toBe(SUGGESTION);
+  });
+
+  it('keeps the default placeholder without a suggestion', () => {
+    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    const placeholder = mocks.state.textareaProps?.['placeholder'];
+    expect(typeof placeholder).toBe('string');
+    expect(placeholder).not.toBe(SUGGESTION);
+  });
+
+  it('Enter fills the suggestion instead of submitting', async () => {
+    const { dismiss, submitted } = renderWithSuggestion();
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(editor.plainText).toBe(SUGGESTION);
+    expect(submitted).toEqual([]);
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['tab', '\t'],
+    ['right', '\x1b[C'],
+  ])('%s fills the suggestion without submitting', async (name, sequence) => {
+    const { dismiss, submitted } = renderWithSuggestion();
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name, sequence }));
+    });
+    expect(editor.plainText).toBe(SUGGESTION);
+    expect(submitted).toEqual([]);
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('typing over the ghost aborts it but still inserts the character', async () => {
+    const { abort } = renderWithSuggestion();
+    const editor = currentEditor();
+    await typeText('x');
+    expect(editor.plainText).toBe('x');
+    // Abort (not dismiss): the persisted suggestion must survive so
+    // type-then-delete restores the ghost (ink AppContainer parity).
+    expect(abort).toHaveBeenCalledTimes(1);
+  });
+
+  it('backspace restores the ghost after typing over it (R2-2)', async () => {
+    // A parent-shaped harness: the entry layer owns the suggestion state and
+    // only clears it on dismiss, so a hard clear on the typing path loses the
+    // ghost for good while abort keeps it restorable.
+    const dismiss = vi.fn();
+    function SuggestionParent() {
+      const [suggestion, setSuggestion] = useState<string | null>(SUGGESTION);
+      return (
+        <OpenTuiInputPrompt
+          onSubmit={() => {}}
+          userMessages={[]}
+          promptSuggestion={suggestion}
+          onPromptSuggestionDismiss={() => {
+            dismiss();
+            setSuggestion(null);
+          }}
+          onPromptSuggestionAbort={() => {}}
+        />
+      );
+    }
+    render(<SuggestionParent />);
+    const editor = currentEditor();
+    await typeText('x');
+    expect(editor.plainText).toBe('x');
+    await pressRaw('\x7f');
+    expect(editor.plainText).toBe('');
+    expect(mocks.state.textareaProps?.['placeholder']).toBe(SUGGESTION);
+  });
+
+  it('dismisses the ghost when a submitOnAccept completion submits (R6-1)', async () => {
+    // A submitOnAccept command only opens a dialog — streaming never flips,
+    // so the entry's turn-boundary clear never runs. The submit path itself
+    // must dismiss, or the consumed suggestion survives as the ghost.
+    mocks.state.slashCommands = [
+      {
+        name: 'skills',
+        description: 'Manage skills',
+        kind: 'built-in',
+        submitOnAccept: true,
+      },
+    ];
+    const dismiss = vi.fn();
+    const submitted: string[] = [];
+    function SuggestionParent() {
+      const [suggestion, setSuggestion] = useState<string | null>(SUGGESTION);
+      return (
+        <OpenTuiInputPrompt
+          onSubmit={(text) => {
+            submitted.push(text);
+          }}
+          userMessages={[]}
+          promptSuggestion={suggestion}
+          onPromptSuggestionDismiss={() => {
+            dismiss();
+            setSuggestion(null);
+          }}
+          onPromptSuggestionAbort={() => {}}
+        />
+      );
+    }
+    render(<SuggestionParent />);
+    // Let loadInteractiveCommands resolve into commandsRef.
+    await act(async () => {});
+    await typeText('/skil');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(submitted).toEqual(['/skills']);
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(mocks.state.textareaProps?.['placeholder']).not.toBe(SUGGESTION);
+  });
+
+  it('paste dismisses the ghost before inserting (R1-53)', async () => {
+    // Ink dismisses on key.paste too: a paste into an empty buffer must not
+    // leave the suggestion acceptable behind the inserted content.
+    const dismiss = vi.fn();
+    function SuggestionParent() {
+      const [suggestion, setSuggestion] = useState<string | null>(SUGGESTION);
+      return (
+        <OpenTuiInputPrompt
+          onSubmit={() => {}}
+          userMessages={[]}
+          promptSuggestion={suggestion}
+          onPromptSuggestionDismiss={() => {
+            dismiss();
+            setSuggestion(null);
+          }}
+          onPromptSuggestionAbort={() => {}}
+        />
+      );
+    }
+    render(<SuggestionParent />);
+    const handler = mocks.state.pasteHandlers.at(-1);
+    if (!handler) throw new Error('no paste handler registered');
+    await act(async () => {
+      handler({
+        bytes: new TextEncoder().encode('y'.repeat(1500)),
+        preventDefault: vi.fn(),
+      });
+    });
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(currentEditor().plainText).toBe('[Pasted Content 1500 chars]');
+    await pressRaw('\x7f');
+    expect(currentEditor().plainText).toBe('');
+    expect(mocks.state.textareaProps?.['placeholder']).not.toBe(SUGGESTION);
+  });
+
+  it('submit clears the persisted suggestion', async () => {
+    const { dismiss } = renderWithSuggestion();
+    await typeText('hi');
+    // The typing path now aborts (not dismisses), so exactly one dismiss —
+    // the submit path's — reaches the mock; deleting it must red this.
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+
+  // The mocked useTerminalDimensions reports width 80, so a row has
+  // columns = 80 and a description keeps 80 - 8 (dropdown margins, active
+  // marker, gutter) minus whatever the widest label column took. Asserting the
+  // exact surviving prefix is what pins that arithmetic: jsdom has no layout, so
+  // an over-allocated budget only shows up as a wrapped row on a real terminal.
+  async function dropdownText(command: Record<string, unknown>) {
+    mocks.state.slashCommands = [command];
+    const { container } = render(
+      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+    );
+    // Let loadInteractiveCommands resolve into commandsRef.
+    await act(async () => {});
+    await typeText('/');
+    return container.textContent ?? '';
+  }
+
+  it('draws the source badge ink puts next to the label', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose a hung session',
+      source: 'bundled-skill',
+    });
+    expect(text).toContain('stuck [Skill]');
+  });
+
+  it('counts the badge toward the label column, not on top of it', async () => {
+    // `stuck [Skill]` is 13 wide, so the description keeps 80 - 8 - 13 = 59
+    // columns and truncateToWidth leaves 58 x's plus the ellipsis. Without the
+    // badge in the measurement the same row would keep 66.
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'x'.repeat(120),
+      source: 'bundled-skill',
+    });
+    expect(text).toContain(`${'x'.repeat(58)}…`);
+    expect(text).not.toContain(`${'x'.repeat(59)}…`);
+  });
+
+  it('truncates an over-long description to a single line', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'x'.repeat(120),
+    });
+    expect(text).toContain(`${'x'.repeat(66)}…`);
+    expect(text).not.toContain('x'.repeat(120));
+  });
+
+  it('collapses the newlines a multi-line SKILL.md description carries', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose\n  a hung\n  session',
+    });
+    expect(text).toContain('Diagnose a hung session');
+  });
+
+  // The wrap alignment measured on a real terminal only holds while these stay
+  // three separate flex children: concatenated into one text run, a long hint
+  // word-wraps the whole run and the row grows to three lines instead of ink's
+  // two. jsdom has no layout, so this pins the structure behind the frame.
+  it('keeps the label, hint and badge as three separate text runs', async () => {
+    mocks.state.slashCommands = [
+      {
+        name: 'stuck',
+        description: 'Diagnose a hung session',
+        source: 'bundled-skill',
+        argumentHint: '[PID or symptom]',
+      },
+    ];
+    const { container } = render(
+      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+    );
+    await act(async () => {});
+    await typeText('/');
+    const runs = [...container.querySelectorAll('span')].map(
+      (span) => span.textContent,
+    );
+    expect(runs).toContain('stuck');
+    expect(runs).toContain(' [PID or symptom]');
+    expect(runs).toContain(' [Skill]');
+    expect(runs).not.toContain('stuck [PID or symptom] [Skill]');
+  });
+});
+
+describe('OpenTuiInputPrompt Windows Tab approval-mode fallback (F-2)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+
+  const shiftTab = baseKeyEvent({
+    name: 'tab',
+    sequence: '\x1b[Z',
+    shift: true,
+  });
+
+  function renderWithCycle(onCycleApprovalMode: () => void) {
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onCycleApprovalMode={onCycleApprovalMode}
+      />,
+    );
+  }
+
+  async function withPlatform(
+    platform: NodeJS.Platform,
+    run: () => Promise<void>,
+  ) {
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: platform,
+      configurable: true,
+    });
+    try {
+      await run();
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: original,
+        configurable: true,
+      });
+    }
+  }
+
+  it('leaves a real Shift+Tab to the shell', async () => {
+    // The shell broadcasts Shift+Tab to every useKeyboard subscriber, this
+    // composer included, so cycling here too would advance the mode twice.
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await withPlatform('win32', async () => {
+      await act(async () => {
+        lastKeyboardHandler()(shiftTab);
+      });
+    });
+    expect(cycles).toBe(0);
+  });
+
+  it('leaves a bare Tab alone off Windows', async () => {
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+    });
+    expect(cycles).toBe(0);
+  });
+
+  it('accepts a bare Tab on Windows, where terminals cannot tell them apart', async () => {
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await withPlatform('win32', async () => {
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+      });
+    });
+    expect(cycles).toBe(1);
+  });
+
+  it('does not also cycle when the bare Tab was spent on a completion', async () => {
+    // The Windows fallback only needs no extra guard because both completion
+    // consumers return, so a Tab that filled `/help ` never reaches the cycle
+    // branch. ink has to thread shouldBlockTab across two components for the
+    // same reason (#4171).
+    mocks.state.slashCommands = [
+      { name: 'help', description: 'Show help', kind: 'built-in' },
+    ];
+    let cycles = 0;
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onCycleApprovalMode={() => {
+          cycles += 1;
+        }}
+      />,
+    );
+    await act(async () => {});
+    await withPlatform('win32', async () => {
+      await typeText('/he');
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+      });
+    });
+    expect(currentEditor().plainText).toBe('/help ');
+    expect(cycles).toBe(0);
+  });
 });

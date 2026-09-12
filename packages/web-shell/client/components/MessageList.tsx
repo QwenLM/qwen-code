@@ -28,6 +28,11 @@ import type {
 } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
+  groupParallelAgents as groupParallelAgentsBase,
+  isAgentOnlyToolGroup,
+  type ParallelAgentDisplayItem,
+} from '../adapters/parallelAgentGrouping';
+import {
   backgroundShellTaskId,
   isBackgroundSubAgentToolCall,
   isTerminalBackgroundAgentStatus,
@@ -56,15 +61,21 @@ import {
 } from './artifacts/TurnOutputs';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
+import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import {
   isActiveToolStatus,
+  isCompletedAskUserQuestion,
+  isAskUserQuestionToolName,
   toolContainsCallId,
 } from './messages/toolFormatting';
 import { getMcpAppDisplay } from './messages/McpApp';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
-import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
+import {
+  SESSION_TIMELINE_MIN_VISIBLE_ENTRIES,
+  WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS,
+} from '../constants/sessions';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 
 const noopTurnOutputAction = () => undefined;
@@ -76,8 +87,9 @@ const AGENT_SUMMARY_COLLAPSE_DELAY_MS = 400;
 // lost notification cannot hide the final footer forever.
 const UNMATCHED_AGENT_COMPLETION_GRACE_MS = 5_000;
 
-interface MessageListProps {
+export interface MessageListProps {
   messages: Message[];
+  frozenViewport?: boolean;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
@@ -86,7 +98,16 @@ interface MessageListProps {
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   onInsightReportOpen?: (path: string) => void;
-  onEditUserMessage?: (targetTurnIndex: number, content: string) => void;
+  /** Open the in-place editor; return true when a host owns the lifecycle. */
+  onEditUserMessage?: (
+    targetTurnIndex: number,
+    content: string,
+  ) => boolean | void;
+  /** Send the text confirmed in the in-place editor. `false` keeps it open. */
+  onSubmitUserMessageEdit?: (
+    targetTurnIndex: number,
+    content: string,
+  ) => boolean | void | Promise<boolean | void>;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
   hasOlderHistory?: boolean;
@@ -233,28 +254,15 @@ function getLastTurnStartMessageId(messages: Message[]): string | null {
 }
 
 export type DisplayItem =
-  | {
-      type: 'message';
-      key: string;
-      message: Message;
+  | (Extract<ParallelAgentDisplayItem, { type: 'message' }> & {
       /** Metrics info for the final answer assistant message. */
       turnCollapse?: TurnCollapseHead;
-    }
+    })
+  | Extract<ParallelAgentDisplayItem, { type: 'parallel_agents' }>
   | {
       type: 'turn_collapse';
       key: string;
       turnCollapse: TurnCollapseHead;
-    }
-  | {
-      type: 'parallel_agents';
-      key: string;
-      turnId: string;
-      agents: ACPToolCall[];
-      /**
-       * Wall-clock time of the first grouped launch, carried so the grouped
-       * box reveals its time on hover exactly like a standalone message row.
-       */
-      timestamp?: number;
     }
   | {
       type: 'turn_outputs';
@@ -300,36 +308,6 @@ export interface SessionTimelineRange {
   currentIndex: number;
 }
 
-// Synthetic compact summaries carry a folded thought next to their single
-// tool; the parallel-agent path must never swallow that row, so agent-only
-// detection excludes them.
-function isAgentOnlyToolGroup(msg: Message): boolean {
-  return (
-    msg.role === 'tool_group' &&
-    summaryRunFirstMemberId(msg.id) === undefined &&
-    msg.tools.length === 1 &&
-    isSubAgentToolCall(msg.tools[0])
-  );
-}
-
-function isBackgroundAgentOnlyToolGroup(msg: Message): boolean {
-  return (
-    msg.role === 'tool_group' &&
-    summaryRunFirstMemberId(msg.id) === undefined &&
-    msg.tools.length === 1 &&
-    isBackgroundSubAgentToolCall(msg.tools[0])
-  );
-}
-
-function isBackgroundLaunchNarration(msg: Message): boolean {
-  // The daemon often streams short main-agent thought text between background
-  // launches, e.g. "agent A is running, now starting agent B". The CLI treats
-  // those as internal launch narration and shows a single Parallel agents box.
-  // Only skip thought-only messages here; any user-facing assistant content
-  // still breaks the group and remains visible.
-  return msg.role === 'thinking';
-}
-
 function isForceExpandGroup(
   msg: Message,
   pendingApproval: PermissionRequest | null,
@@ -343,7 +321,11 @@ function isForceExpandGroup(
   return false;
 }
 
-function splitMcpAppToolGroups(messages: Message[]): Message[] {
+function isStandaloneTool(tool: ACPToolCall): boolean {
+  return isCompletedAskUserQuestion(tool) || !!getMcpAppDisplay(tool.rawOutput);
+}
+
+function splitStandaloneToolGroups(messages: Message[]): Message[] {
   const result: Message[] = [];
   let changed = false;
 
@@ -351,7 +333,7 @@ function splitMcpAppToolGroups(messages: Message[]): Message[] {
     if (
       message.role !== 'tool_group' ||
       message.tools.length < 2 ||
-      !message.tools.some((tool) => getMcpAppDisplay(tool.rawOutput))
+      !message.tools.some(isStandaloneTool)
     ) {
       result.push(message);
       continue;
@@ -373,7 +355,7 @@ function splitMcpAppToolGroups(messages: Message[]): Message[] {
     };
 
     for (const tool of message.tools) {
-      if (getMcpAppDisplay(tool.rawOutput)) {
+      if (isStandaloneTool(tool)) {
         pushSegment(segment);
         segment = [];
         pushSegment([tool]);
@@ -397,7 +379,7 @@ function mergeCompactToolGroups(
   const isMergedToolGroup = (m: Message): boolean =>
     m.role === 'tool_group' &&
     !isForceExpandGroup(m, pendingApproval) &&
-    !m.tools.some((tool) => getMcpAppDisplay(tool.rawOutput));
+    !m.tools.some(isStandaloneTool);
 
   while (i < messages.length) {
     const msg = messages[i];
@@ -515,81 +497,9 @@ function updateCompactStreamingThinkingTail(
 }
 
 export function groupParallelAgents(sourceMessages: Message[]): DisplayItem[] {
-  const messages = normalizeTerminalBackgroundAgentTools(sourceMessages);
-  const items: DisplayItem[] = [];
-  let i = 0;
-  while (i < messages.length) {
-    if (isBackgroundAgentOnlyToolGroup(messages[i])) {
-      const grouped: Message[] = [];
-      let j = i;
-      while (j < messages.length) {
-        const current = messages[j];
-        if (isBackgroundAgentOnlyToolGroup(current)) {
-          grouped.push(current);
-          j++;
-          continue;
-        }
-        if (isBackgroundLaunchNarration(current)) {
-          let nextAgentIdx = j + 1;
-          while (
-            nextAgentIdx < messages.length &&
-            isBackgroundLaunchNarration(messages[nextAgentIdx])
-          ) {
-            nextAgentIdx++;
-          }
-          if (
-            nextAgentIdx < messages.length &&
-            isBackgroundAgentOnlyToolGroup(messages[nextAgentIdx])
-          ) {
-            j = nextAgentIdx;
-            continue;
-          }
-        }
-        break;
-      }
-
-      if (grouped.length >= 2) {
-        items.push({
-          type: 'parallel_agents',
-          key: `par-${grouped[0].id}`,
-          turnId: grouped[0].id,
-          agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
-          timestamp: grouped[0].timestamp,
-        });
-        i = j;
-        continue;
-      }
-    }
-
-    if (isAgentOnlyToolGroup(messages[i])) {
-      const start = i;
-      while (i < messages.length && isAgentOnlyToolGroup(messages[i])) i++;
-      if (i - start >= 2) {
-        const grouped = messages.slice(start, i);
-        items.push({
-          type: 'parallel_agents',
-          key: `par-${grouped[0].id}`,
-          turnId: grouped[0].id,
-          agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
-          timestamp: grouped[0].timestamp,
-        });
-      } else {
-        items.push({
-          type: 'message',
-          key: messages[start].id,
-          message: messages[start],
-        });
-      }
-    } else {
-      items.push({
-        type: 'message',
-        key: messages[i].id,
-        message: messages[i],
-      });
-      i++;
-    }
-  }
-  return items;
+  return groupParallelAgentsBase(
+    normalizeTerminalBackgroundAgentTools(sourceMessages),
+  );
 }
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
@@ -845,6 +755,7 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'turn_collapse') return false;
   switch (item.message.role) {
     case 'tool_group':
+      return !item.message.tools.some(isCompletedAskUserQuestion);
     case 'plan':
       return true;
     case 'assistant':
@@ -1472,7 +1383,11 @@ function itemToolCallCount(item: DisplayItem): number {
   if (item.type === 'parallel_agents') return item.agents.length;
   if (item.type === 'turn_outputs') return 0;
   if (item.type === 'turn_collapse') return 0;
-  return item.message.role === 'tool_group' ? item.message.tools.length : 0;
+  return item.message.role === 'tool_group'
+    ? item.message.tools.filter(
+        (tool) => !isAskUserQuestionToolName(tool.toolName),
+      ).length
+    : 0;
 }
 
 /**
@@ -2035,6 +1950,7 @@ export function applyTurnCollapse(
     const answerIdx = findFinalAnswerIndex(items, start, end);
     let hiddenCount = 0;
     let terminalTs: number | undefined;
+    let cancelledElapsedMs: number | undefined;
     let assistantTs: number | undefined;
     let inputTokens = 0;
     let outputTokens = 0;
@@ -2063,6 +1979,24 @@ export function applyTurnCollapse(
       ) {
         // Compact mode folds thinking into tool summaries; count it too.
         thinkingCount += item.message.thoughts.length;
+      }
+      if (
+        item.type === 'message' &&
+        item.message.role === 'system' &&
+        item.message.source === 'prompt_cancelled'
+      ) {
+        const data = item.message.data;
+        const elapsed =
+          data && typeof data === 'object' && 'elapsedMs' in data
+            ? data.elapsedMs
+            : undefined;
+        if (
+          typeof elapsed === 'number' &&
+          Number.isFinite(elapsed) &&
+          elapsed >= 0
+        ) {
+          cancelledElapsedMs = elapsed;
+        }
       }
       const terminalTimestamp = terminalTurnTimestamp(item);
       if (terminalTimestamp !== undefined) {
@@ -2103,11 +2037,12 @@ export function applyTurnCollapse(
         : undefined;
     const lastStepTs = terminalTs ?? assistantTs;
     const elapsedMs =
-      promptTs !== undefined &&
+      cancelledElapsedMs ??
+      (promptTs !== undefined &&
       lastStepTs !== undefined &&
       lastStepTs >= promptTs
         ? lastStepTs - promptTs
-        : undefined;
+        : undefined);
     const hasMetrics =
       hasUsage || elapsedMs !== undefined || liveStartedAt !== undefined;
 
@@ -2270,6 +2205,32 @@ function displayItemMatchesLocateTarget(
   return false;
 }
 
+function displayItemSourceBlockIds(
+  item: DisplayItem | undefined,
+  messages: readonly Message[],
+): string | undefined {
+  if (!item) return undefined;
+  if (item.type === 'message') return item.message.sourceBlockIds?.join(',');
+  const sources = messages.filter((message) => {
+    if (item.type === 'parallel_agents') {
+      return (
+        message.role === 'tool_group' &&
+        item.agents.some((agent) =>
+          message.tools.some((tool) => toolContainsCallId(tool, agent.callId)),
+        )
+      );
+    }
+    return (
+      message.id ===
+      (item.type === 'turn_outputs' ? item.turnId : item.turnCollapse.turnId)
+    );
+  });
+  return (
+    sources.flatMap((message) => message.sourceBlockIds ?? []).join(',') ||
+    undefined
+  );
+}
+
 export interface MessageListHandle {
   /**
    * Scroll the transcript so the given message is visible and briefly
@@ -2289,7 +2250,6 @@ const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
 const LOAD_OLDER_HISTORY_THRESHOLD_PX = 160;
 const OLDER_HISTORY_ANCHOR_WAIT_FRAMES = 30;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
-const SESSION_TIMELINE_MIN_VISIBLE_ENTRIES = 4;
 
 export function shouldUseVirtualScroll(
   totalCount: number,
@@ -2319,7 +2279,7 @@ type Translate = (
 ) => string;
 
 function durationMetricText(elapsedMs: number | undefined): string {
-  return elapsedMs !== undefined && elapsedMs > 0
+  return elapsedMs !== undefined && elapsedMs >= 0
     ? formatDuration(elapsedMs)
     : '';
 }
@@ -2900,6 +2860,7 @@ export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
+      frozenViewport = false,
       sessionKey,
       terminalBackgroundShellTaskIds,
       pendingApproval,
@@ -2908,6 +2869,7 @@ export const MessageList = memo(
       onAttachmentPreview,
       onInsightReportOpen,
       onEditUserMessage,
+      onSubmitUserMessageEdit,
       loadingTranscript,
       catchingUp,
       hasOlderHistory = false,
@@ -2951,6 +2913,8 @@ export const MessageList = memo(
     },
     ref,
   ) {
+    const frozenViewportRef = useRef(frozenViewport);
+    frozenViewportRef.current = frozenViewport;
     const { t } = useI18n();
     const transcriptRenderMode = useTranscriptRenderMode();
     const compactMode = useContext(CompactModeContext);
@@ -2966,6 +2930,13 @@ export const MessageList = memo(
       }
       return { lastId, turnIndexById };
     }, [messages]);
+    const historicalEdgeTurns = useMemo(() => {
+      if (!frozenViewport) return undefined;
+      const ids = [...editableUserTurn.turnIndexById.keys()];
+      return new Set(
+        ids.filter((_, index) => index === 0 || index === ids.length - 1),
+      );
+    }, [editableUserTurn, frozenViewport]);
     // Render-phase caches below are reusable only against this post-commit
     // identity. An abandoned render cannot advance it, so its cache writes are
     // rejected by the next committed render.
@@ -3005,14 +2976,14 @@ export const MessageList = memo(
         } else if (tail?.role === 'thinking') {
           value = compactMode
             ? updateCompactStreamingThinkingTail(cached.value, tail)
-            : splitMcpAppToolGroups(messages);
+            : splitStandaloneToolGroups(messages);
         }
       }
       if (!value) {
-        const standaloneMcpApps = splitMcpAppToolGroups(messages);
+        const standaloneTools = splitStandaloneToolGroups(messages);
         value = compactMode
-          ? mergeCompactToolGroups(standaloneMcpApps, pendingApproval)
-          : standaloneMcpApps;
+          ? mergeCompactToolGroups(standaloneTools, pendingApproval)
+          : standaloneTools;
       }
       mergedMessagesCache.current = {
         sourceMessages: messages,
@@ -3339,8 +3310,11 @@ export const MessageList = memo(
       }
       return { key: null };
     }, [backgroundSummaryGraceActive, displayItems]);
-    const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
-      useState(false);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const isSessionTimelineVisible = useChatNavigationVisible(
+      containerRef,
+      !hideSessionTimeline,
+    );
     const [automaticallyExpandedAgentKeys, setAutomaticallyExpandedAgentKeys] =
       useState<ReadonlySet<string>>(() => new Set());
     const handleAutomaticAgentExpansionChange = useCallback(
@@ -3360,8 +3334,7 @@ export const MessageList = memo(
       t: typeof t;
       entries: SessionTimelineEntry[];
     } | null>(null);
-    // Signature + entries are O(transcript text); only pay for them while the
-    // rail can actually show (container >= 1160px — never on mobile).
+    // Signature + entries are O(transcript text); only pay while the rail can show.
     const sessionTimelineEntries = useMemo(() => {
       if (!isSessionTimelineVisible) return EMPTY_SESSION_TIMELINE_ENTRIES;
       const signature = getSessionTimelineSignature(mergedMessages);
@@ -3473,6 +3446,7 @@ export const MessageList = memo(
     const turnLayoutAnimationTimer = useRef<number | undefined>(undefined);
     const turnLayoutAnimations = useRef<Animation[]>([]);
     const shouldFollow = useRef(true);
+    if (frozenViewport) shouldFollow.current = false;
     const followPausedByUserRef = useRef(false);
     const userScrollIntentUntil = useRef(0);
     const lastScrollTop = useRef(0);
@@ -3480,6 +3454,9 @@ export const MessageList = memo(
     const olderHistoryLoadGeneration = useRef(0);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
+    const locateScrollTimer = useRef<ReturnType<typeof setTimeout> | null>(
+      null,
+    );
     const pendingBottomFollowAfterCooldown = useRef(false);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
@@ -3502,7 +3479,6 @@ export const MessageList = memo(
     const pendingFollowRecheckFrame = useRef<number | undefined>(undefined);
     const pendingOverflowFrame = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
-    const containerRef = useRef<HTMLDivElement>(null);
     const olderHistoryRetryBlocked = useRef(false);
     const olderHistoryAnchorFrame = useRef<number | undefined>(undefined);
     const olderHistoryAnchorWaitFrame = useRef<number | undefined>(undefined);
@@ -3521,7 +3497,8 @@ export const MessageList = memo(
     const transcriptBlockCountRef = useRef(transcriptBlockCount);
     const transcriptReloadPausedRef = useRef(transcriptReloadPaused);
     transcriptBlockCountRef.current = transcriptBlockCount;
-    transcriptReloadPausedRef.current = transcriptReloadPaused;
+    transcriptReloadPausedRef.current =
+      transcriptReloadPaused || frozenViewport;
     const lastUnderfillAutoLoad = useRef<{
       loader: typeof onLoadOlderHistory;
       totalVirtualSize: number;
@@ -3599,6 +3576,7 @@ export const MessageList = memo(
 
     const setShouldFollow = useCallback(
       (value: boolean) => {
+        if (frozenViewportRef.current) value = false;
         if (shouldFollow.current === value) return;
         shouldFollow.current = value;
         scheduleScrollOverflowReport();
@@ -3618,6 +3596,7 @@ export const MessageList = memo(
     const visibleItems = useMemo(() => {
       reusedVisibleStreamingTailRef.current = false;
       const dependencies = [
+        historicalEdgeTurns,
         collapseOverrides,
         isResponding,
         activeTurnStartedAt,
@@ -3675,7 +3654,7 @@ export const MessageList = memo(
           }
         }
       }
-      const collapsedItems = applyTurnCollapse(displayItems, {
+      const turnItems = applyTurnCollapse(displayItems, {
         overrides: collapseOverrides,
         isResponding,
         activeTurnStartedAt,
@@ -3688,9 +3667,26 @@ export const MessageList = memo(
         automaticallyExpandedAgentKeys,
         pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
         includeSubagentToolUsageInMetrics,
-        paginatedExpanded: paginatedExpandedTurns,
+        paginatedExpanded: historicalEdgeTurns
+          ? new Set([...paginatedExpandedTurns, ...historicalEdgeTurns])
+          : paginatedExpandedTurns,
         enabled: collapseEnabled,
       });
+      const collapsedItems = historicalEdgeTurns
+        ? turnItems.map((item) => {
+            if (
+              !('turnCollapse' in item) ||
+              !item.turnCollapse ||
+              !historicalEdgeTurns.has(item.turnCollapse.turnId)
+            )
+              return item;
+            const { turnId, collapsed, hiddenCount } = item.turnCollapse;
+            return {
+              ...item,
+              turnCollapse: { turnId, collapsed, hiddenCount },
+            };
+          })
+        : turnItems;
       let metricsApplied = false;
       const itemsWithMetrics = firstTurnMetrics
         ? collapsedItems.map((item) => {
@@ -3758,6 +3754,7 @@ export const MessageList = memo(
       unmatchedCompletionGraceExpired,
       orderedSummaryGraceExpired,
       collapseEnabled,
+      historicalEdgeTurns,
       hideFirstUserMessage,
       firstTurnMetrics,
       includeSubagentToolUsageInMetrics,
@@ -3803,30 +3800,6 @@ export const MessageList = memo(
 
     const hasEnoughSessionTimelineEntries =
       sessionTimelineEntries.length >= SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
-
-    useLayoutEffect(() => {
-      if (hideSessionTimeline) {
-        setIsSessionTimelineVisible((prev) => (prev ? false : prev));
-        return;
-      }
-
-      const el = containerRef.current;
-      if (!el) return;
-
-      const updateVisibility = () => {
-        const width = el.getBoundingClientRect().width;
-        const nextVisible = width >= 1160;
-        setIsSessionTimelineVisible((prev) =>
-          prev === nextVisible ? prev : nextVisible,
-        );
-      };
-
-      updateVisibility();
-      if (typeof ResizeObserver === 'undefined') return;
-      const observer = new ResizeObserver(updateVisibility);
-      observer.observe(el);
-      return () => observer.disconnect();
-    }, [hideSessionTimeline]);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //
@@ -4166,7 +4139,7 @@ export const MessageList = memo(
       (event: ReactMouseEvent<HTMLDivElement>) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
-        if (!target.closest('[aria-expanded]')) return;
+        if (!target.closest('[aria-expanded], summary')) return;
         followPausedByUserRef.current = true;
         setShouldFollow(false);
         scheduleFollowRecheck();
@@ -4212,6 +4185,7 @@ export const MessageList = memo(
     // Rule 6: skip if content doesn't overflow (no scrollbar).
     const scrollToBottom = useCallback(
       (behavior: ScrollBehavior = 'auto') => {
+        if (frozenViewportRef.current) return;
         const el = getScrollElement();
         if (!el) return;
         if (el.scrollHeight <= el.clientHeight) return;
@@ -4537,6 +4511,10 @@ export const MessageList = memo(
 
     useEffect(
       () => () => {
+        if (locateScrollTimer.current !== null) {
+          clearTimeout(locateScrollTimer.current);
+          locateScrollTimer.current = null;
+        }
         if (sessionTimelineFrame.current !== null) {
           cancelAnimationFrame(sessionTimelineFrame.current);
           sessionTimelineFrame.current = null;
@@ -4584,7 +4562,15 @@ export const MessageList = memo(
         const gen = scrollCooldownCount.current;
         scrollCooldown.current = true;
         if (useVirtualScroll) {
-          virtualizer.scrollToIndex(rowIndex, { align: 'center' });
+          if (frozenViewportRef.current) {
+            // The viewport restores its own pixel anchor; index reconciliation
+            // would keep recentering it after a later user scroll.
+            const offset = virtualizer.getOffsetForIndex(rowIndex, 'center');
+            if (offset && containerRef.current)
+              containerRef.current.scrollTop = offset[0];
+          } else {
+            virtualizer.scrollToIndex(rowIndex, { align: 'center' });
+          }
         } else {
           containerRef.current
             ?.querySelector(`[data-index="${rowIndex}"]`)
@@ -4592,7 +4578,11 @@ export const MessageList = memo(
         }
         // Release once the scroll has settled (the virtualizer may re-scroll
         // a frame or two later after measuring the target row).
-        setTimeout(() => {
+        if (locateScrollTimer.current !== null) {
+          clearTimeout(locateScrollTimer.current);
+        }
+        locateScrollTimer.current = setTimeout(() => {
+          locateScrollTimer.current = null;
           if (scrollCooldownCount.current === gen) {
             scrollCooldown.current = false;
             scheduleSessionTimelineRangeUpdate();
@@ -5470,7 +5460,8 @@ export const MessageList = memo(
             | undefined;
           if (
             displayItem.message.role === 'assistant' &&
-            finalAssistantTurnId
+            finalAssistantTurnId &&
+            !frozenViewport
           ) {
             assistantTurnFooterInfo = {
               turnId: finalAssistantTurnId,
@@ -5490,6 +5481,22 @@ export const MessageList = memo(
             displayItem.message.role === 'user'
               ? displayItem.message.content
               : undefined;
+          // Only the newest user turn can be edited, and only while the
+          // transcript still holds the turn the rewind would target.
+          const userMessageEditTarget =
+            editableUserContent !== undefined &&
+            displayItem.message.id === editableUserTurn.lastId &&
+            !isResponding &&
+            !hasOlderHistory &&
+            !historyCapacityReached
+              ? {
+                  turnIndex:
+                    editableUserTurn.turnIndexById.get(
+                      displayItem.message.id,
+                    ) ?? 0,
+                  content: editableUserContent,
+                }
+              : undefined;
 
           return (
             <MessageItem
@@ -5500,19 +5507,20 @@ export const MessageList = memo(
               onAttachmentPreview={onAttachmentPreview}
               onInsightReportOpen={onInsightReportOpen}
               onEditUserMessage={
-                onEditUserMessage &&
-                !isResponding &&
-                !hasOlderHistory &&
-                !historyCapacityReached &&
-                displayItem.message.role === 'user' &&
-                editableUserContent !== undefined &&
-                displayItem.message.id === editableUserTurn.lastId
+                onEditUserMessage && userMessageEditTarget
                   ? () =>
                       onEditUserMessage(
-                        editableUserTurn.turnIndexById.get(
-                          displayItem.message.id,
-                        ) ?? 0,
-                        editableUserContent,
+                        userMessageEditTarget.turnIndex,
+                        userMessageEditTarget.content,
+                      )
+                  : undefined
+              }
+              onSubmitUserMessageEdit={
+                onSubmitUserMessageEdit && userMessageEditTarget
+                  ? (content) =>
+                      onSubmitUserMessageEdit(
+                        userMessageEditTarget.turnIndex,
+                        content,
                       )
                   : undefined
               }
@@ -5578,6 +5586,7 @@ export const MessageList = memo(
         onAttachmentPreview,
         onInsightReportOpen,
         onEditUserMessage,
+        onSubmitUserMessageEdit,
         editableUserTurn,
         hasOlderHistory,
         historyCapacityReached,
@@ -5586,6 +5595,7 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        frozenViewport,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
@@ -5720,6 +5730,10 @@ export const MessageList = memo(
                   ),
                 )}
                 data-message-row-key={String(getItemKey(virtualRow.index))}
+                data-source-block-ids={displayItemSourceBlockIds(
+                  visibleItems[virtualRow.index - headerOffset],
+                  messages,
+                )}
                 data-web-shell-message-row
                 style={{
                   position: 'absolute',
@@ -5742,6 +5756,10 @@ export const MessageList = memo(
                 data-index={index}
                 className={getRowClassName(item)}
                 data-message-row-key={String(key)}
+                data-source-block-ids={displayItemSourceBlockIds(
+                  item,
+                  messages,
+                )}
                 data-web-shell-message-row
               >
                 {renderVirtualItem(index)}

@@ -24,6 +24,7 @@ import type {
   ServeWorkspacePreflightStatus,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge';
+import type { SkillToggleBlock } from '../../config/skill-settings.js';
 import type { WorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import type {
   PermissionRuleType,
@@ -126,6 +127,16 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
   ): Promise<ServeWorkspaceSkillsStatus>;
 
+  /** Live runtime Skills catalog without daemon-local fallback. */
+  getWorkspaceSkillsRuntimeStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<ServeWorkspaceSkillsStatus>;
+
+  /** Daemon-local Skills inventory without starting or querying ACP. */
+  getWorkspaceSkillsConfigStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<ServeWorkspaceSkillsStatus>;
+
   /** Model-provider status for the bound workspace. */
   getWorkspaceProvidersStatus(
     ctx: WorkspaceRequestContext,
@@ -209,6 +220,7 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
     skillName: string,
     enabled: boolean,
+    opts?: { refreshRuntime?: boolean },
   ): Promise<WorkspaceSkillToggleResult>;
 
   /** Toggle multiple skills with one settings write and one session refresh. */
@@ -222,6 +234,7 @@ export interface DaemonWorkspaceService {
   installWorkspaceSkill(
     ctx: WorkspaceRequestContext,
     request: WorkspaceSkillInstallRequest,
+    opts?: { refreshRuntime?: boolean },
   ): Promise<WorkspaceSkillMutationResult>;
 
   /** Delete a managed project- or user-level Skill. */
@@ -229,6 +242,7 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
     skillName: string,
     scope: WorkspaceSkillScope,
+    opts?: { refreshRuntime?: boolean },
   ): Promise<WorkspaceSkillMutationResult>;
 
   /** Scaffold (init) a QWEN.md file in the workspace. */
@@ -345,12 +359,22 @@ export interface WorkspaceVoiceSettingsUpdate {
   voiceModel?: string;
 }
 
-export type WorkspaceSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+export type WorkspaceSkillToggleActivation =
+  | 'applied'
+  | 'deferred'
+  | 'reconciling'
+  | 'partial';
 
 export interface WorkspaceSkillToggleResult {
   skillName: string;
   enabled: boolean;
   changed: boolean;
+  /**
+   * The settings entry that forbids the toggle from taking effect, when the
+   * write was refused for one. A client that flips its row optimistically
+   * must read this or it shows an enable the config still denies.
+   */
+  block?: SkillToggleBlock;
   activation: WorkspaceSkillToggleActivation;
   sessionsRefreshed: number;
   sessionsFailed: number;
@@ -382,6 +406,8 @@ export interface WorkspaceSkillBatchToggleResult {
 export interface PersistDisabledSkillResult {
   changed: boolean;
   disabled: string[];
+  /** Set with `changed: false` when a standing entry refused the write. */
+  block?: SkillToggleBlock;
   settingsChanges?: Array<{
     key: 'skills.disabled' | 'skills.enabled';
     value: string[] | undefined;

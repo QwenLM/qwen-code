@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, expectTypeOf } from 'vitest';
+import type { DaemonContinueSessionResult } from '../../src/daemon/index.js';
 import * as Public from '../../src/index.js';
+
 import {
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
   PENDING_PROMPT_ADDED_EVENT,
@@ -93,6 +95,10 @@ import type {
   DaemonPendingPromptSummary,
   DaemonPendingPromptsResult,
   DaemonSessionLspStatus,
+  DaemonSessionAgentsStatus,
+  DaemonAgentTrace,
+  DaemonAgentTraceNode,
+  DaemonSessionResourcesStatus,
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
@@ -101,6 +107,9 @@ import type {
   DaemonSessionEvent,
   DaemonSessionCatalogVersion,
   DaemonSessionLiveState,
+  DaemonSessionTurnIndexEntry,
+  DaemonSessionTurnIndexPage,
+  DaemonSessionTurnIndexPageOptions,
   DaemonWorkspaceSessionLiveState,
   DaemonSessionRecapResult,
   DaemonSkillBatchToggleError,
@@ -173,11 +182,24 @@ import type {
   DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
   DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
   DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
+  DaemonSessionResourcesStatus as DaemonEntrySessionResourcesStatus,
   DaemonUiDebugReason as DaemonEntryUiDebugReason,
   DaemonUnrecognizedDiagnostic as DaemonEntryUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
 } from '../../src/daemon/index.js';
 
+describe('continuation compatibility', () => {
+  it('accepts an older daemon response without an event epoch', () => {
+    const accepted: DaemonContinueSessionResult = {
+      accepted: true,
+      interruption: 'interrupted_prompt',
+      promptId: 'continue-1',
+      lastEventId: 17,
+    };
+    expect(accepted.eventEpoch).toBeUndefined();
+    expectTypeOf(accepted.eventEpoch).toEqualTypeOf<string | undefined>();
+  });
+});
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
   it('exports the runtime narrow + reducer surface', () => {
     expect(typeof Public.asKnownDaemonEvent).toBe('function');
@@ -236,6 +258,15 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonStandaloneWorkingDirectory>().not.toBeNever();
     expectTypeOf<DaemonStandaloneCreationRecovery>().not.toBeNever();
     expectTypeOf<DaemonSessionRestoreStrategy>().not.toBeNever();
+    expectTypeOf<DaemonSessionTurnIndexEntry>().not.toBeNever();
+    expectTypeOf<DaemonSessionTurnIndexPage>().not.toBeNever();
+    expectTypeOf<DaemonSessionTurnIndexPageOptions>().not.toBeNever();
+  });
+
+  it('exports session agent types from the package entry', () => {
+    expectTypeOf<DaemonSessionAgentsStatus>().not.toBeNever();
+    expectTypeOf<DaemonAgentTrace>().not.toBeNever();
+    expectTypeOf<DaemonAgentTraceNode>().not.toBeNever();
   });
 
   it('round-trips a raw DaemonEvent through the public narrow helper', () => {
@@ -324,6 +355,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
+    expectTypeOf<DaemonSessionResourcesStatus>().toEqualTypeOf<DaemonEntrySessionResourcesStatus>();
     expectTypeOf<DaemonTrustChangeRequestedData>().not.toBeNever();
     expectTypeOf<DaemonTrustChangeRequestedEvent>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceTrustChangeRequest>().not.toBeNever();
@@ -563,6 +595,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       sessionId: string;
       clientCount: number;
       hasActivePrompt: boolean;
+      activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
       isWaitingForPermission: boolean;
       isWaitingForUserQuestion: boolean;
       updatedAt?: string;

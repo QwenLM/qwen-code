@@ -5,6 +5,8 @@
  */
 
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -831,6 +833,12 @@ function makeBridge(
         refreshed: params.syncOutputLanguage,
       };
     },
+    getSessionSources: vi.fn(async () => ({ revision: 0, sources: [] })),
+    upsertSessionSource: vi.fn(async () => ({
+      revision: 1,
+      change: 'created',
+    })),
+    removeSessionSource: vi.fn(async () => ({ revision: 1, removed: true })),
     async addSessionArtifact(
       sessionId: string,
       artifact: Parameters<AcpSessionBridge['addSessionArtifact']>[1],
@@ -1569,6 +1577,103 @@ describe('multi-workspace session dispatch', () => {
     expect(primaryBridge.rewindCalls).toEqual([]);
     expect(secondaryBridge.rewindCalls).toHaveLength(3);
   });
+
+  const sourceAuth = (test: request.Test) =>
+    test.set('Host', host()).set('Authorization', TEST_AUTHORIZATION);
+
+  it('session sources use the trusted secondary owner for all metadata operations', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const sessionId = '22222222-2222-4222-a222-222222222222';
+    const input = {
+      title: 'Secondary source',
+      locator: { type: 'url', url: 'https://example.com/' },
+    };
+    const listed = await sourceAuth(
+      request(app).get(`/session/${sessionId}/sources`),
+    );
+    const added = await sourceAuth(
+      request(app).post(`/session/${sessionId}/sources`),
+    )
+      .set('X-Qwen-Client-Id', 'client-secondary')
+      .send(input);
+    const removed = await sourceAuth(
+      request(app).delete(`/session/${sessionId}/sources/source-1`),
+    ).set('X-Qwen-Client-Id', 'client-secondary');
+    expect([listed.status, added.status, removed.status]).toEqual([
+      200, 200, 200,
+    ]);
+    expect(secondaryBridge.getSessionSources).toHaveBeenCalledWith(
+      sessionId,
+      undefined,
+    );
+    expect(secondaryBridge.upsertSessionSource).toHaveBeenCalledWith(
+      sessionId,
+      input,
+      { clientId: 'client-secondary' },
+    );
+    expect(secondaryBridge.removeSessionSource).toHaveBeenCalledWith(
+      sessionId,
+      'source-1',
+      { clientId: 'client-secondary' },
+    );
+    expect(primaryBridge.getSessionSources).not.toHaveBeenCalled();
+    expect(primaryBridge.upsertSessionSource).not.toHaveBeenCalled();
+    expect(primaryBridge.removeSessionSource).not.toHaveBeenCalled();
+  });
+
+  it.each(['unknown', 'untrusted', 'ambiguous', 'replacing'] as const)(
+    'session sources fail closed for %s owners without primary fallback',
+    async (state) => {
+      const sessionId =
+        state === 'unknown'
+          ? 'missing'
+          : '22222222-2222-4222-a222-222222222222';
+      const harness = makeHarness({
+        token: TEST_TOKEN,
+        secondaryTrusted: state !== 'untrusted',
+        ...(state === 'ambiguous'
+          ? { primarySummaries: [makeSummary(sessionId, PRIMARY_CWD)] }
+          : {}),
+      });
+      if (state === 'replacing') {
+        harness.registry.beginReplacement(
+          harness.registry.getEntryByWorkspaceId('secondary-id')!,
+          'policy-2',
+        );
+      }
+      const responses = [
+        await sourceAuth(
+          request(harness.app).get(`/session/${sessionId}/sources`),
+        ),
+        await sourceAuth(
+          request(harness.app).post(`/session/${sessionId}/sources`),
+        )
+          .set('X-Qwen-Client-Id', 'client-secondary')
+          .send({}),
+        await sourceAuth(
+          request(harness.app).delete(`/session/${sessionId}/sources/source-1`),
+        ).set('X-Qwen-Client-Id', 'client-secondary'),
+      ];
+      const status = {
+        unknown: 404,
+        untrusted: 403,
+        ambiguous: 500,
+        replacing: 404,
+      }[state];
+      expect(responses.map((response) => response.status)).toEqual([
+        status,
+        status,
+        status,
+      ]);
+      for (const bridge of [harness.primaryBridge, harness.secondaryBridge]) {
+        expect(bridge.getSessionSources).not.toHaveBeenCalled();
+        expect(bridge.upsertSessionSource).not.toHaveBeenCalled();
+        expect(bridge.removeSessionSource).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it('fails closed for unknown, untrusted, and ambiguous rewind owners', async () => {
     const unknown = makeHarness();
@@ -3169,6 +3274,26 @@ describe('multi-workspace session dispatch', () => {
     expect(primaryBridge.setApprovalModeCalls).toEqual([]);
   });
 
+  it('routes DAC planning controls to the live-session owner without a primary fallback', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/approval-mode')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ mode: 'auto-edit', planMode: true });
+
+    expect(res.status).toBe(200);
+    expect(secondaryBridge.setApprovalModeCalls).toEqual([
+      expect.objectContaining({
+        sessionId: '22222222-2222-4222-a222-222222222222',
+        mode: 'auto-edit',
+        opts: { persist: false, planMode: true },
+        context: { clientId: 'secondary-client' },
+      }),
+    ]);
+    expect(primaryBridge.setApprovalModeCalls).toEqual([]);
+  });
+
   it('still rejects model/approval-mode mutations on an untrusted non-primary session', async () => {
     // Opening these routes to non-primary owners must not bypass the trust
     // gate: an untrusted workspace runtime is refused before the bridge runs.
@@ -3371,6 +3496,115 @@ describe('multi-workspace session dispatch', () => {
     } finally {
       await fsp.rm(secondaryPath, { force: true });
     }
+  });
+
+  it('reads a saved HTML version only from its registered session and owner runtime', async () => {
+    const root = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-snapshot-route-'),
+    );
+    const primaryRoot = path.join(root, 'primary');
+    const secondaryRoot = path.join(root, 'secondary');
+    const id = 'fce7cbe1-15de-422d-9b9a-2e2ab3370ca4';
+    const relativeFile = path.join('artifacts', 'snapshots', id, 'index.html');
+    const file = path.join(secondaryRoot, relativeFile);
+    const html = '<h1>Saved secondary version</h1>';
+    try {
+      for (const runtimeRoot of [primaryRoot, secondaryRoot]) {
+        await fsp.mkdir(path.dirname(path.join(runtimeRoot, relativeFile)), {
+          recursive: true,
+        });
+        await fsp.writeFile(path.join(runtimeRoot, relativeFile), html);
+      }
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        token: TEST_TOKEN,
+        primaryRuntimeBaseDir: primaryRoot,
+        secondaryRuntimeBaseDir: secondaryRoot,
+      });
+      const sessionId = '22222222-2222-4222-a222-222222222222';
+      const artifact = {
+        id: 'saved-version',
+        title: 'Saved version',
+        kind: 'html' as const,
+        storage: 'published' as const,
+        source: 'tool' as const,
+        toolName: 'artifact',
+        status: 'available' as const,
+        retention: 'restorable' as const,
+        clientRetained: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        url: pathToFileURL(file).href,
+        managedId: `preview-${id}`,
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          'qwen.published.sha256': createHash('sha256')
+            .update(html)
+            .digest('hex'),
+        },
+      };
+      const listSecondary = vi.fn(async () => ({
+        v: 1 as const,
+        sessionId,
+        artifacts: [artifact],
+        generatedAt: new Date().toISOString(),
+        limits: { maxArtifacts: 200 },
+      }));
+      const listPrimary = vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: '11111111-1111-4111-a111-111111111111',
+        artifacts: [],
+        generatedAt: new Date().toISOString(),
+        limits: { maxArtifacts: 200 },
+      }));
+      secondaryBridge.getSessionArtifacts = listSecondary;
+      primaryBridge.getSessionArtifacts = listPrimary;
+      const read = (ownerId = sessionId, artifactId = artifact.id) =>
+        request(app)
+          .get(`/session/${ownerId}/artifacts/${artifactId}/content`)
+          .set('Host', host())
+          .set('Authorization', TEST_AUTHORIZATION)
+          .set('X-Qwen-Client-Id', 'secondary-client');
+      const response = await read();
+      expect(response.status).toBe(200);
+      expect(response.text).toBe(html);
+      expect(response.headers['content-disposition']).toContain('attachment');
+      expect(response.headers['x-content-type-options']).toBe('nosniff');
+      expect(response.headers['cache-control']).toBe('private, no-store');
+      expect(listSecondary).toHaveBeenCalledWith(sessionId, {
+        clientId: 'secondary-client',
+      });
+      expect(listPrimary).not.toHaveBeenCalled();
+      expect((await read(sessionId, 'unregistered')).status).toBe(404);
+      expect((await read('11111111-1111-4111-a111-111111111111')).status).toBe(
+        404,
+      );
+      await fsp.writeFile(file, '<h1>Modified</h1>');
+      expect((await read()).status).toBe(404);
+      await fsp.unlink(file);
+      expect((await read()).status).toBe(404);
+      // An identical version in the primary runtime must never be a fallback.
+      expect(
+        await fsp.readFile(path.join(primaryRoot, relativeFile), 'utf8'),
+      ).toBe(html);
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects saved HTML reads for an untrusted owner before listing its artifacts', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+    });
+    const listArtifacts = vi.fn();
+    primaryBridge.getSessionArtifacts = listArtifacts;
+    secondaryBridge.getSessionArtifacts = listArtifacts;
+    const response = await request(app)
+      .get(
+        '/session/22222222-2222-4222-a222-222222222222/artifacts/saved/content',
+      )
+      .set('Host', host());
+    expect(response.status).toBe(403);
+    expect(listArtifacts).not.toHaveBeenCalled();
   });
 
   it('routes continue, language, and artifact mutations to the owning non-primary bridge', async () => {
@@ -4850,6 +5084,68 @@ describe('multi-workspace session dispatch', () => {
       expect(response.body.pageBytes).toBeGreaterThan(
         response.body.maxBytes as number,
       );
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+    });
+  });
+
+  it('serves workspace-qualified turn index and anchored transcript without starting the bridge', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440282';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'secondary navigation prompt',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+
+      const index = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/turn-index`)
+        .set('Host', host())
+        .expect(200);
+      expect(index.body).toMatchObject({
+        totalTurns: 1,
+        start: 0,
+        turns: [
+          {
+            ordinal: 0,
+            kind: 'prompt',
+            label: 'secondary navigation prompt',
+          },
+        ],
+      });
+
+      const turnId = index.body.turns[0].turnId as string;
+      const snapshot = index.body.snapshot as string;
+      const outOfRange = await request(app)
+        .get(
+          `/workspaces/secondary-id/session/${sessionId}/turn-index?snapshot=${encodeURIComponent(snapshot)}&start=2`,
+        )
+        .set('Host', host());
+      expect(outOfRange.status).toBe(400);
+      expect(outOfRange.body.code).toBe('invalid_transcript_cursor');
+      const anchored = await request(app)
+        .get(
+          `/workspaces/secondary-id/session/${sessionId}/transcript?atRecordId=${encodeURIComponent(turnId)}&snapshot=${encodeURIComponent(snapshot)}`,
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(anchored.body.targetRecordId).toBe(turnId);
+      expect(anchored.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            data: expect.objectContaining({
+              sessionUpdate: 'user_message_chunk',
+            }),
+          }),
+        ]),
+      );
+      expect(primaryBridge.spawnCalls).toEqual([]);
+      expect(primaryBridge.restoreCalls).toEqual([]);
       expect(secondaryBridge.spawnCalls).toEqual([]);
       expect(secondaryBridge.restoreCalls).toEqual([]);
     });

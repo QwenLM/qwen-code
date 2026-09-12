@@ -110,7 +110,6 @@ function createObservedContactChannel(
   const channel = new ObservedContactFeishuChannel(
     'test',
     createConfig({
-      blockStreaming: 'on',
       groupPolicy: 'open',
       groups: { '*': { requireMention: false } },
     }),
@@ -720,6 +719,340 @@ describe('FeishuChannel', () => {
       expect(bridge.prompt).toHaveBeenCalledTimes(1);
     } finally {
       fetchSpy.mockRestore();
+    }
+  });
+
+  it('dispatches both media and ordinary text', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+    const event = (
+      messageId: string,
+      messageType: string,
+      content: Record<string, unknown>,
+    ) => ({
+      message: {
+        message_id: messageId,
+        chat_id: 'oc_dm',
+        chat_type: 'p2p',
+        message_type: messageType,
+        content: JSON.stringify(content),
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    onMessage(event('media-image', 'image', { image_key: 'img_1' }));
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+    onMessage(event('plain-text', 'text', { text: 'inspect this' }));
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+  });
+
+  it('preserves text after platform-normalized mentions with spaced names', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+    const event = (messageId: string, text: string) => ({
+      message: {
+        message_id: messageId,
+        chat_id: 'oc_group',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({ text }),
+        mentions: [
+          {
+            key: '@_user_1',
+            id: { open_id: 'ou_bot' },
+            name: 'Qwen Bot',
+          },
+          {
+            key: '@_user_2',
+            id: { open_id: 'ou_alice' },
+            name: 'Alice Smith',
+          },
+        ],
+      },
+      sender: {
+        sender_id: { open_id: 'ou_user' },
+        sender_type: 'user',
+      },
+    });
+
+    onMessage(
+      event(
+        'prefixed-spaced-mention',
+        '@_user_1 @_user_2 /review inspect this',
+      ),
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('inspect this'),
+      expect.anything(),
+    );
+    expect(vi.mocked(bridge.prompt).mock.calls[0]?.[1]).toContain(
+      '@Alice Smith /review inspect this',
+    );
+
+    onMessage(
+      event(
+        'unprefixed-spaced-mention',
+        '@_user_1 @_user_2 inspect without prefix',
+      ),
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+  });
+
+  it('preserves a mentioned member whose name extends the bot name', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'overlapping-mention-names',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 /review inspect this',
+          }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+            {
+              key: '@_user_2',
+              id: { open_id: 'ou_member' },
+              name: 'Qwen Bot 2',
+            },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('inspect this');
+    expect(prompt).toContain('/review');
+  });
+
+  it('removes the structured bot mention without corrupting a longer member name', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'member-before-bot',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 /review inspect this',
+          }),
+          mentions: [
+            {
+              key: '@_user_1',
+              id: { open_id: 'ou_member' },
+              name: 'Qwen Fan',
+            },
+            { key: '@_user_2', id: { open_id: 'ou_bot' }, name: 'Qwen' },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('inspect this');
+    expect(prompt).toContain('/review');
+  });
+
+  it('preserves a mentioned member alongside literal at-sign text', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'at-prefix-boundary',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 @bot do X',
+          }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen' },
+            {
+              key: '@_user_2',
+              id: { open_id: 'ou_member' },
+              name: 'botswana',
+            },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('do X');
+    expect(prompt).toContain('@botswana @bot do X');
+  });
+
+  it('keeps a member mention within slash-prefixed text', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    onMessage({
+      message: {
+        message_id: 'payload-mention',
+        chat_id: 'oc_group',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({
+          text: '@_user_1 /review please talk to @_user_2',
+        }),
+        mentions: [
+          { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+          { key: '@_user_2', id: { open_id: 'ou_alice' }, name: 'Alice Smith' },
+        ],
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('please talk to @Alice Smith');
+    expect(prompt).toContain('/review');
+  });
+
+  it('preserves a rich-text post behind a spaced mention', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    onMessage({
+      message: {
+        message_id: 'post-prefixed',
+        chat_id: 'oc_dm',
+        chat_type: 'p2p',
+        message_type: 'post',
+        content: JSON.stringify({
+          zh_cn: {
+            content: [
+              [
+                { tag: 'at', user_name: 'Qwen Bot' },
+                { tag: 'text', text: ' /review inspect this' },
+              ],
+            ],
+          },
+        }),
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    expect(String(vi.mocked(bridge.prompt).mock.calls[0]?.[1])).toContain(
+      'inspect this',
+    );
+  });
+
+  it('keeps a media placeholder out of the next prompt as group history', async () => {
+    // Synthetic media placeholders must not be quoted as user-authored history.
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = mkdtempSync(join(tmpdir(), 'feishu-history-'));
+    process.env['QWEN_HOME'] = qwenHome;
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({
+        groupHistoryLimit: 10,
+        groups: { '*': { requireMention: true } },
+      }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    try {
+      onMessage({
+        message: {
+          message_id: 'history-image',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'image',
+          content: JSON.stringify({ image_key: 'img_1' }),
+        },
+        sender: { sender_id: { open_id: 'ou_alice' }, sender_type: 'user' },
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      onMessage({
+        message: {
+          message_id: 'history-trigger',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({ text: '@_user_1 /review summarize' }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      });
+
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled());
+      const prompt = String(
+        vi.mocked(bridge.prompt).mock.calls.at(-1)?.[1] ?? '',
+      );
+      expect(prompt).toContain('summarize');
+      expect(prompt).not.toContain('(image)');
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      rmSync(qwenHome, { recursive: true, force: true });
     }
   });
 

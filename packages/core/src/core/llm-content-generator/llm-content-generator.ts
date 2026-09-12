@@ -13,6 +13,7 @@ import type {
   ThinkingLevel,
   Content,
   Part,
+  HttpOptions,
 } from '@google/genai';
 import { GoogleGenAI } from '@google/genai';
 import type {
@@ -26,6 +27,14 @@ import {
   reportLlmResponse,
   type GenAiAttemptHandle,
 } from '../../telemetry/gen-ai-request.js';
+import type { Config } from '../../config/config.js';
+import { buildSessionIdHeaders } from '../outbound-session-id.js';
+import {
+  expandDynamicHeaders,
+  hasDynamicPlaceholder,
+  warnIfDynamicHeadersDisabled,
+} from '../outbound-dynamic-headers.js';
+import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
 
 const debugLogger = createDebugLogger('GEMINI');
 
@@ -60,7 +69,9 @@ function observeLlmStream(
  */
 export class LlmContentGenerator implements ContentGenerator {
   private readonly googleGenAI: GoogleGenAI;
+  private readonly clientBaseUrl?: string;
   private readonly contentGeneratorConfig?: ContentGeneratorConfig;
+  private readonly cliConfig?: Config;
   // Latch so the effort-clamp warning fires once per generator lifetime
   // instead of on every request that needs the downgrade.
   private effortClampWarned = false;
@@ -69,11 +80,24 @@ export class LlmContentGenerator implements ContentGenerator {
     options: {
       apiKey?: string;
       vertexai?: boolean;
-      httpOptions?: { headers: Record<string, string> };
+      httpOptions?: HttpOptions;
     },
     contentGeneratorConfig?: ContentGeneratorConfig,
+    cliConfig?: Config,
   ) {
-    const customHeaders = contentGeneratorConfig?.customHeaders;
+    // Only placeholder-free entries may be baked into the client: a
+    // placeholder value put here would be frozen at whatever the session
+    // was when the client was built, and overriding it later would rely
+    // on the SDK letting request-level headers win over client-level
+    // ones. `buildHttpOptions` supplies the placeholder-bearing entries
+    // per request instead, so the literal never reaches the client.
+    const allCustomHeaders = contentGeneratorConfig?.customHeaders;
+    if (cliConfig) warnIfDynamicHeadersDisabled(allCustomHeaders, cliConfig);
+    const staticEntries = Object.entries(allCustomHeaders ?? {}).filter(
+      ([, value]) => typeof value !== 'string' || !hasDynamicPlaceholder(value),
+    );
+    const customHeaders =
+      staticEntries.length > 0 ? Object.fromEntries(staticEntries) : undefined;
     const finalOptions = customHeaders
       ? (() => {
           const baseHttpOptions = options.httpOptions;
@@ -93,7 +117,39 @@ export class LlmContentGenerator implements ContentGenerator {
       : options;
 
     this.googleGenAI = new GoogleGenAI(finalOptions);
+    this.clientBaseUrl = finalOptions.httpOptions?.baseUrl;
     this.contentGeneratorConfig = contentGeneratorConfig;
+    this.cliConfig = cliConfig;
+  }
+
+  private buildHttpOptions(httpOptions?: HttpOptions): HttpOptions | undefined {
+    if (!this.cliConfig) return httpOptions;
+
+    // The placeholder-bearing entries were deliberately kept out of the
+    // client options (see the constructor), so this is the only place
+    // they are supplied — resolved fresh for each request.
+    const dynamicHeaders = expandDynamicHeaders(
+      this.contentGeneratorConfig?.customHeaders,
+      this.cliConfig,
+    );
+    const destination = httpOptions?.baseUrl ?? this.clientBaseUrl;
+    const sessionHeaders = destination
+      ? buildSessionIdHeaders(this.cliConfig, destination)
+      : {};
+    if (
+      Object.keys(sessionHeaders).length === 0 &&
+      Object.keys(dynamicHeaders).length === 0
+    ) {
+      return httpOptions;
+    }
+    return {
+      ...httpOptions,
+      headers: {
+        ...httpOptions?.headers,
+        ...dynamicHeaders,
+        ...sessionHeaders,
+      },
+    };
   }
 
   private buildGenerateContentConfig(
@@ -101,6 +157,7 @@ export class LlmContentGenerator implements ContentGenerator {
   ): GenerateContentConfig {
     const configSamplingParams = this.contentGeneratorConfig?.samplingParams;
     const requestConfig = request.config || {};
+    const httpOptions = this.buildHttpOptions(requestConfig.httpOptions);
 
     // Helper function to get parameter value with priority: config > request > default
     const getParameterValue = <T>(
@@ -117,6 +174,7 @@ export class LlmContentGenerator implements ContentGenerator {
 
     return {
       ...requestConfig,
+      ...(httpOptions ? { httpOptions } : {}),
       temperature: getParameterValue<number>(
         configSamplingParams?.temperature,
         'temperature',
@@ -295,6 +353,13 @@ export class LlmContentGenerator implements ContentGenerator {
 
     const result = { ...part };
 
+    // `partMetadata` is client-side bookkeeping only (the reattach boundary
+    // from issue #11627), never part of the wire payload. The Gemini Developer
+    // API route (`partToMldev`) copies it through, but the Vertex AI route
+    // (`partToVertex`) rejects it unconditionally when building the request,
+    // so drop it before the SDK sees it.
+    delete result.partMetadata;
+
     // Strip displayName from inlineData
     if (result.inlineData) {
       const { displayName: _, ...inlineDataWithoutDisplayName } =
@@ -307,6 +372,17 @@ export class LlmContentGenerator implements ContentGenerator {
       const { displayName: _, ...fileDataWithoutDisplayName } =
         result.fileData as { displayName?: string; [key: string]: unknown };
       result.fileData = fileDataWithoutDisplayName as Part['fileData'];
+    }
+
+    // `thoughtSignature` carries no origin marker, so a Responses-API
+    // reasoning replay payload (`{"id":…,"encrypted_content":…}`) reaches the
+    // Gemini wire unchanged after a provider switch. It is not a Gemini-native
+    // signature, so drop it — wire-only, since `result` is a copy and the
+    // caller's history keeps the payload for a later switch back. `thought`
+    // and `text` are untouched, so the visible reasoning summary survives.
+    // https://github.com/QwenLM/qwen-code/issues/9453
+    if (isResponsesReasoningSignature(result.thoughtSignature)) {
+      delete result.thoughtSignature;
     }
 
     // Handle functionResponse parts (which may contain nested media parts)
@@ -367,6 +443,10 @@ export class LlmContentGenerator implements ContentGenerator {
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
-    return this.googleGenAI.models.embedContent(request);
+    const httpOptions = this.buildHttpOptions(request.config?.httpOptions);
+    return this.googleGenAI.models.embedContent({
+      ...request,
+      ...(httpOptions ? { config: { ...request.config, httpOptions } } : {}),
+    });
   }
 }

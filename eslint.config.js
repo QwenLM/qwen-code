@@ -12,8 +12,6 @@ import prettierConfig from 'eslint-config-prettier';
 import importPlugin from 'eslint-plugin-import';
 import vitest from '@vitest/eslint-plugin';
 import globals from 'globals';
-// For more info, see https://github.com/storybookjs/eslint-plugin-storybook#configuration-flat-config-format
-import storybook from 'eslint-plugin-storybook';
 import checkFile from 'eslint-plugin-check-file';
 import noCoreRootBarrelImport from './eslint-rules/no-core-root-barrel-import.js';
 import noUtilsUpwardImport from './eslint-rules/no-utils-upward-import.js';
@@ -36,12 +34,28 @@ const generalRestrictedSyntaxSelectors = [
   },
 ];
 
+// Undeclared imports are checked in shipped sources only: tests resolve
+// shared tooling such as vitest from the root manifest by design.
+const extraneousDependencyTestFiles = [
+  '**/*.test.{ts,tsx}',
+  '**/*.spec.{ts,tsx}',
+  '**/__tests__/**',
+  '**/test/**',
+  '**/tests/**',
+];
+const extraneousDependencyOptions = {
+  devDependencies: true,
+  optionalDependencies: true,
+  peerDependencies: true,
+};
+
 export default tseslint.config(
   {
     // Global ignores
     ignores: [
       'node_modules/*',
       'packages/**/dist/**',
+      'packages/web-templates/src/generated/**',
       'integrations/**/dist/**',
       'bundle/**',
       'package/bundle/**',
@@ -220,6 +234,39 @@ export default tseslint.config(
       'prefer-const': ['error', { destructuring: 'all' }],
       radix: 'error',
       'default-case': 'error',
+    },
+  },
+  {
+    // A package must declare what its own sources import. npm and the hoisted
+    // pnpm layout both resolve a sibling's or the root's dependency, so a
+    // missing declaration stays invisible until the package is installed on
+    // its own — the check an isolated node_modules layout would add. Type-only
+    // imports are exempt because they disappear at build time.
+    files: [
+      'packages/**/src/**/*.{ts,tsx}',
+      'integrations/**/src/**/*.{ts,tsx}',
+    ],
+    ignores: extraneousDependencyTestFiles,
+    rules: {
+      'import/no-extraneous-dependencies': [
+        'error',
+        extraneousDependencyOptions,
+      ],
+    },
+  },
+  {
+    // export-html and insight carry a package.json only for "type" and their
+    // build script; web-templates declares what they import.
+    files: ['packages/web-templates/src/**/*.{ts,tsx}'],
+    ignores: extraneousDependencyTestFiles,
+    rules: {
+      'import/no-extraneous-dependencies': [
+        'error',
+        {
+          ...extraneousDependencyOptions,
+          packageDir: `${import.meta.dirname}/packages/web-templates`,
+        },
+      ],
     },
   },
   {
@@ -420,6 +467,8 @@ export default tseslint.config(
       'packages/*/scripts/**/*.js',
       'packages/*/scripts/**/*.mjs',
       'packages/*/build.mjs',
+      // web-templates' export-html template build scripts also run with `node`.
+      'packages/*/src/export-html/*.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.
       'docs/**/*.mjs',
       // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
@@ -504,11 +553,6 @@ export default tseslint.config(
   // VS Code IDE companion - out of scope for no-console rule
   {
     files: ['packages/vscode-ide-companion/**/*.ts', 'packages/vscode-ide-companion/**/*.tsx', 'packages/vscode-ide-companion/**/*.js'],
-    rules: { 'no-console': 'off' },
-  },
-  // WebUI package - UI component library with Storybook
-  {
-    files: ['packages/webui/**/*.ts', 'packages/webui/**/*.tsx', 'packages/webui/**/*.js'],
     rules: { 'no-console': 'off' },
   },
   // Chrome extension (chrome-extension) - the MV3 background service
@@ -611,5 +655,4 @@ export default tseslint.config(
       'react/react-in-jsx-scope': 'off',
     },
   },
-  storybook.configs['flat/recommended'],
 );
