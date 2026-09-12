@@ -794,7 +794,7 @@ function tryResume(
   recordResume(out);
   // The plan is not rewritten on resume, so a `--deadline` passed now cannot
   // land in it; say so rather than let the flag look honoured.
-  if (parseDeadlineOption(args.deadline) !== 'default') {
+  if (parseDeadlineOption(process.env, args.deadline) !== 'default') {
     writeStderrLine(
       'fetch-pr: --deadline is ignored on a resumed run — the plan keeps ' +
         'the wall it recorded at capture.',
@@ -856,7 +856,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // other argument checks — before detection, auth, and the worktree lease —
   // not at the plan write after all of that. The same parse runs again inside
   // `captureDeadline`; it is pure.
-  parseDeadlineOption(args.deadline);
+  parseDeadlineOption(process.env, args.deadline);
   // Validate before coercing: Number('1e3') is 1000, so an unvalidated token
   // would fetch a DIFFERENT PR's head while the ref/worktree/report all carry
   // the caller's label. `[1-9]` also rejects `0` (no PR zero — the message

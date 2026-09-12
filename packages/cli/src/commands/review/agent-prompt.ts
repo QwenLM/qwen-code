@@ -2916,6 +2916,7 @@ function requireAuditableChunks(report: PlanReport): DiffChunk[] {
  */
 function admitReverseAuditRound(
   planPath: string,
+  report: PlanReport,
   round: number | undefined,
   cap: number,
   fanOutWidth: number,
@@ -2958,6 +2959,7 @@ function admitReverseAuditRound(
     expectedAdmissionSeconds(planPath, round, fanOutWidth, process.env),
     undefined,
     planPath,
+    report,
   );
   if (spent !== null) {
     writeBudgetStop(planPath, spent, round);
@@ -3186,6 +3188,7 @@ function runAllChunks(
     role === 'reverse-audit' &&
     !admitReverseAuditRound(
       planPath,
+      report,
       round,
       reverseAuditRoundCap(
         report,
@@ -3676,6 +3679,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     !args.allChunks &&
     !admitReverseAuditRound(
       args.plan,
+      report,
       args.round,
       reverseAuditRoundCap(
         report,
@@ -3787,6 +3791,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       !roundAdmitted &&
       !admitReverseAuditRound(
         args.plan,
+        report,
         args.round,
         reverseAuditRoundCap(
           report,

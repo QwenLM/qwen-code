@@ -205,7 +205,9 @@ export const DEADLINE_OPTION = {
     'that no longer fits inside it plus the tail reserve, and a `--resume` ' +
     "from a new session renews it. Omit for the topology's default (8h on a 3A diff, 12h on a " +
     '3B one, 16h when huge), which bounds a run that has stopped converging ' +
-    'without touching a healthy one; `none` records no wall. A ' +
+    'without touching a healthy one; `none` records no wall; a wall too ' +
+    'short to admit round 1 (under about fifty minutes with the default ' +
+    'reserve) is refused up front. A ' +
     'QWEN_REVIEW_DEADLINE_EPOCH in the environment (CI) wins over both. An ' +
     "explicit deadline, like the environment's, applies the huge tier's " +
     'round reduction; the default does not.',

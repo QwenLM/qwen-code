@@ -109,12 +109,14 @@ export const DEFAULT_DEADLINE_SECONDS: Readonly<Record<SizeTier, number>> = {
  * applies to the budget it exports (`attempt_timeout / 3`, capped at 4800),
  * so a wall the plan carries and one the environment carries price their
  * tails alike. The floor differs on purpose: the workflow floors at 600, but
- * `verifyBudgetExhausted` rests on the compose floor sitting strictly inside
- * the reserve, and a reserve under 1200 would invert that — so a plan wall
- * floors at the compose floor. A wall under about fifty minutes cannot admit
- * round 1 at all (the round-1 estimate is `DEFAULT_ROUND_SECONDS` and the
- * reserve at least this floor); that is the same arithmetic the workflow's
- * shortest budgets meet. Only for a plan-sourced deadline: an environment
+ * `verifyBudgetExhausted` rests on the compose floor never exceeding the
+ * reserve, and a reserve under 1200 would invert that — so a plan wall
+ * floors AT the compose floor (equal at the floor, inside above it; the
+ * round gate still fires first either way, because it prices the round on
+ * top of the reserve). A wall under about fifty minutes cannot admit round
+ * 1 at all (the round-1 estimate is `DEFAULT_ROUND_SECONDS` and the reserve
+ * at least this floor), and `parseDeadlineOption` refuses such a flag up
+ * front. Only for a plan-sourced deadline: an environment
  * deadline keeps `RESERVE_ENV` / `DEFAULT_RESERVE_SECONDS`, which the
  * workflow already scales.
  */
@@ -482,7 +484,10 @@ export type DeadlineOption = { seconds: number } | 'none' | 'default';
  * — a wall that silently became the default because a value did not parse
  * is a wall the operator does not know they have.
  */
-export function parseDeadlineOption(raw: unknown): DeadlineOption {
+export function parseDeadlineOption(
+  env: NodeJS.ProcessEnv,
+  raw: unknown,
+): DeadlineOption {
   if (raw === undefined) return 'default';
   const usage = () =>
     new TypeError(
@@ -500,7 +505,36 @@ export function parseDeadlineOption(raw: unknown): DeadlineOption {
   // had already priced the tier as explicitly clocked.
   const minutes = /^\d+$/.test(text) ? Number(text) : Number.NaN;
   if (!Number.isSafeInteger(minutes) || minutes <= 0) throw usage();
-  return { seconds: minutes * 60 };
+  const seconds = minutes * 60;
+  // A wall that provably cannot admit round 1 is refused here, not
+  // discovered at round 1 after the capture: the gate needs the round-1
+  // estimate plus the reserve the wall implies (or the environment's
+  // override) to fit.
+  const floor = minimumDeadlineSeconds(env, seconds);
+  if (seconds < floor) {
+    throw new TypeError(
+      `--deadline ${minutes} cannot admit even round 1: the round-1 ` +
+        `estimate (${DEFAULT_ROUND_SECONDS / 60} min) plus the tail reserve ` +
+        `it would keep need at least ${Math.ceil(floor / 60)} minutes`,
+    );
+  }
+  return { seconds };
+}
+
+/**
+ * The shortest wall under which round 1 is admissible: the round-1 estimate
+ * plus the reserve the wall implies — `RESERVE_ENV` when set, else
+ * `planReserveSeconds` — which is exactly the sum `reverseAuditBudgetExhausted`
+ * requires to remain at admission.
+ */
+export function minimumDeadlineSeconds(
+  env: NodeJS.ProcessEnv,
+  wallSeconds: number,
+): number {
+  return (
+    readNonNegativeSeconds(env, RESERVE_ENV, planReserveSeconds(wallSeconds)) +
+    DEFAULT_ROUND_SECONDS
+  );
 }
 
 /** The plan fields a capture writes for its wall — empty for `none`. */
@@ -525,7 +559,7 @@ export function captureDeadline(
   raw: string | undefined,
   size: DiffSize,
 ): { fields: PlanDeadlineFields; explicit: boolean } {
-  const option = parseDeadlineOption(raw);
+  const option = parseDeadlineOption(env, raw);
   const envExplicit = readEnvDeadlineSeconds(env) !== null;
   if (option === 'none') return { fields: {}, explicit: envExplicit };
   if (option === 'default') {
