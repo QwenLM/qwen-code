@@ -8,7 +8,6 @@ import type { Content, Part, Schema } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { reportError } from '../utils/errorReporting.js';
-import { stripMarkdownFence } from './goal-checkpoint-verifier.js';
 
 const debugLogger = createDebugLogger('GOAL_JUDGE');
 
@@ -436,15 +435,12 @@ function extractText(response: unknown): string {
 }
 
 function parseJudgeReply(text: string): JudgeWireResult | null {
-  const stripped = stripMarkdownFence(text);
-  // The fence helper's multi-line branch discards the opening fence line, so a
-  // reply whose payload is glued to that line (` ```json {"ok":true}` with the
-  // closing fence on the next line) unwraps to brace-less text. Fall back to
-  // the raw reply when the unwrap produced no `{`, keeping the tolerant scan
-  // below able to find the payload.
-  const cleaned = (stripped.includes('{') ? stripped : text).trim();
   // Accept the JSON anywhere in the reply: tolerant to chatty preambles when
-  // the model ignores structured-output mode.
+  // the model ignores structured-output mode. A markdown fence (backticks or
+  // tildes) and its info string carry no braces, so the index scan finds the
+  // payload without unwrapping first, and stays linear (no backtracking) on
+  // unbounded model output.
+  const cleaned = text.trim();
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start === -1 || end === -1 || end < start) return null;

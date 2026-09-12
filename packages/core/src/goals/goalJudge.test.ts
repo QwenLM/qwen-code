@@ -746,6 +746,20 @@ describe('judgeGoal', () => {
     expect(verdict.kind).toBe('met');
   });
 
+  it('parses a glued pretty-printed reply quoting a braced excerpt', async () => {
+    const client = makeMockClient({
+      reply:
+        '```json {\n  "ok": true,\n  "reason": "met",\n  "evidence": ["function foo() { return 1; }"]\n}\n```',
+    });
+    const config = makeConfig({ client });
+    const verdict = await judgeGoal(config, {
+      condition: 'x',
+      lastAssistantText: 'function foo() { return 1; }',
+      signal: new AbortController().signal,
+    });
+    expect(verdict.kind).toBe('met');
+  });
+
   it(
     'returns an error for an opening fence that never closes',
     { timeout: 5_000 },
