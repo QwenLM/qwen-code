@@ -46,7 +46,7 @@ const debugLogger = createDebugLogger('PERMISSIONS');
  *   request.
  * - `deferred`: registered but hidden from the eager model request — the
  *   same treatment `shouldDefer` tools get. The tool stays listed in
- *   `/tools`, discoverable and loadable via ToolSearch, and a call to it
+ *   `/tools`, discoverable via ToolSearch, callable through ToolCall, and a call to it
  *   goes through the normal approval flow. This is what happens to
  *   built-in tools not named in an active `settings.tools.eager`
  *   allowlist: their schemas stay out of the eager request (#9827) without
@@ -727,8 +727,8 @@ export class PermissionManager {
    *
    * Returns `true` for `registered` AND `deferred` tools: a deferred tool
    * is still registered — it is merely hidden from the eager model request
-   * and loadable via ToolSearch — so a call to it must flow through the
-   * normal approval evaluation, not a permission error (#10075). Only
+   * and reachable via ToolSearch + ToolCall — so a call to it must flow
+   * through the normal approval evaluation, not a permission error (#10075). Only
    * `disabled` tools (whole-tool deny rule, or unlisted in the legacy
    * `coreTools` allowlist) return `false`.
    *
@@ -777,6 +777,7 @@ export class PermissionManager {
       canonicalName === ToolNames.STRUCTURED_OUTPUT ||
       PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) ||
       canonicalName === ToolNames.TASK_STOP ||
+      canonicalName === ToolNames.TOOL_CALL ||
       canonicalName === ToolNames.TOOL_SEARCH ||
       canonicalName.startsWith('mcp__') ||
       canonicalName.startsWith('computer_use__')
@@ -789,7 +790,7 @@ export class PermissionManager {
    * While the `settings.tools.eager` allowlist is active (see
    * `isEagerToolAllowListActive`), a built-in tool not named in it is
    * `deferred`, NOT `disabled`: it stays registered — listed in `/tools`,
-   * discoverable and loadable via ToolSearch — but its schema is kept out
+   * discoverable and callable through the ToolSearch + ToolCall bridge — but its schema is kept out
    * of the eager model request, which is the #9827 guarantee. Call-time
    * approval for such a tool falls back to the normal permission
    * evaluation (ask / approval-mode), so nothing loses capability
@@ -830,20 +831,20 @@ export class PermissionManager {
    *   goal and only strips capability, including ToolSearch
    *   discoverability. The legacy `tools.core` gate never dropped them
    *   either (non-core tools bypassed it) (#9827).
-   * - `tool_search`: the deferred-tool discovery surface itself. When
-   *   ToolSearch is absent from the registry, client.ts
+   * - `tool_search` and `tool_call`: the deferred-tool discovery and
+   *   invocation surfaces. When either bridge is absent from the registry,
+   *   client.ts
    *   (`resolveDeferredToolsForReminder`) eagerly force-reveals EVERY
    *   registered deferred tool — all `mcp__*` tools and the deferred
    *   `computer_use__*` family — into the eager model request, and
    *   `preloadDeferredToolsWithinBudget` early-returns without it, so
-   *   gating tool_search under a narrow allowlist inverts the
+   *   gating either bridge under a narrow allowlist inverts the
    *   schema-shrink goal into maximal schema bloat for exactly the
    *   deferred families the exemptions above preserve for ToolSearch
-   *   discoverability. tool_search itself is never `shouldDefer`
-   *   (tool-search.ts), so its own schema cost is unchanged by keeping
-   *   it listed. Pre-#9827 it always bypassed the legacy coreTools gate
-   *   as a non-core tool (#9827). ToolSearch is precisely what makes the
-   *   deferred-not-disabled semantic usable (#10075).
+   *   discoverability. The bridge tools are never `shouldDefer`, so their
+   *   own schema cost is unchanged by keeping them listed. ToolSearch and
+   *   ToolCall together make the deferred-not-disabled semantic usable
+   *   (#10075).
    *
    * `disabled` is reserved for the hard gates: a whole-tool deny rule
    * (deny always wins over eager-allowlist membership), or the legacy

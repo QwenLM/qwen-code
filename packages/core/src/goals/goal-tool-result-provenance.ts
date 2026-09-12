@@ -5,13 +5,14 @@
  */
 
 import type { RecordToolResultOptions } from '../services/chatRecordingService.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import type { GoalTurnPermit } from './goal-protocol.js';
 import { goalTurnContext } from './goal-turn-context.js';
 
 /** The slice of a tool-call request this reads. */
 export interface GoalToolResultRequest {
   name: string;
+  args?: Record<string, unknown>;
   goalContext?: GoalTurnPermit;
 }
 
@@ -41,9 +42,22 @@ export function goalToolResultProvenance(
 ): RecordToolResultOptions | undefined {
   const { goalContext } = request;
   if (!goalContext) return undefined;
+  const requestName = canonicalToolName(request.name);
+  const bridgedName = request.args?.['name'];
+  const toolName =
+    requestName === ToolNames.TOOL_CALL && typeof bridgedName === 'string'
+      ? canonicalToolName(bridgedName)
+      : requestName;
+  // The bridge resolves target names case-insensitively (tool-call.ts), so a
+  // bridged "GET_GOAL" executes as get_goal; the exclusion must classify by
+  // the same identity or the Goal's own bookkeeping leaks into the evidence
+  // catalog as an ordinary external_fact. GET_GOAL / UPDATE_GOAL are already
+  // lowercase.
+  const lowerToolName =
+    typeof toolName === 'string' ? toolName.toLowerCase() : toolName;
   if (
-    request.name === ToolNames.GET_GOAL ||
-    request.name === ToolNames.UPDATE_GOAL
+    lowerToolName === ToolNames.GET_GOAL ||
+    lowerToolName === ToolNames.UPDATE_GOAL
   ) {
     return { goalContext: { ...goalContext }, provenance: 'goal_runtime' };
   }
@@ -60,10 +74,12 @@ export function goalToolResultProvenance(
  */
 export function ambientGoalToolResultProvenance(
   toolName: string,
+  args?: Record<string, unknown>,
 ): RecordToolResultOptions | undefined {
   const goalContext = goalTurnContext.getStore();
   return goalToolResultProvenance({
     name: toolName,
+    ...(args ? { args } : {}),
     ...(goalContext ? { goalContext } : {}),
   });
 }

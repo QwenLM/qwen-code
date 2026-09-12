@@ -41,6 +41,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import {
   logMemoryDream,
   logMemoryExtract,
@@ -271,9 +272,44 @@ function updateRecord(
 }
 
 function partWritesToMemory(part: Part, projectRoot: string): boolean {
-  const name = part.functionCall?.name;
+  let name = part.functionCall?.name
+    ? canonicalToolName(part.functionCall.name)
+    : undefined;
+  let args = part.functionCall?.args as Record<string, unknown> | undefined;
+  if (name === ToolNames.TOOL_CALL) {
+    const targetName = args?.['name'];
+    const targetArgs = args?.['arguments'];
+    if (typeof targetName === 'string') {
+      name = canonicalToolName(targetName);
+      if (
+        typeof targetArgs === 'object' &&
+        targetArgs !== null &&
+        !Array.isArray(targetArgs)
+      ) {
+        args = targetArgs as Record<string, unknown>;
+      } else {
+        args = undefined;
+        if (typeof targetArgs === 'string') {
+          const trimmedArgs = targetArgs.trim();
+          if (trimmedArgs.startsWith('{') && trimmedArgs.endsWith('}')) {
+            try {
+              const parsedArgs: unknown = JSON.parse(trimmedArgs);
+              if (
+                typeof parsedArgs === 'object' &&
+                parsedArgs !== null &&
+                !Array.isArray(parsedArgs)
+              ) {
+                args = parsedArgs as Record<string, unknown>;
+              }
+            } catch {
+              // Invalid JSON cannot describe a memory-writing target.
+            }
+          }
+        }
+      }
+    }
+  }
   if (name && WRITE_TOOL_NAMES.has(name)) {
-    const args = part.functionCall?.args as Record<string, unknown> | undefined;
     const filePath =
       args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
     if (

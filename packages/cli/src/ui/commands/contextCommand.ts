@@ -126,7 +126,7 @@ export async function collectContextData(
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
   // Match what's actually sent to the model: deferred tools — MCP tools and
   // low-frequency built-ins like web_fetch / monitor / cron_* — are absent
-  // from the prompt unless ToolSearch has revealed them this session. See
+  // from the prompt unless session setup has revealed them. See
   // client.ts which calls getFunctionDeclarations() with no args. The
   // per-tool loop below applies the same filter so allToolsTokens stays
   // aligned with the breakdown sum.

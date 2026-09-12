@@ -47,8 +47,8 @@ export interface SkillConfig {
    * This is an additive grant only: it never hides or restricts the tools the
    * model can see, and since #10075 `permissions.allow` no longer affects
    * registration at all. A tool the `settings.tools.eager` allowlist omits
-   * stays deferred (registered and loadable via `tool_search`) regardless of
-   * this grant. An eager-by-default tool omitted by `tools.eager` needs its
+   * stays deferred — registered, inspectable via `tool_search`, invokable via
+   * `tool_call` — regardless of this grant. An eager-by-default tool omitted by `tools.eager` needs its
    * name added plus a restart; a tool deferred by default needs
    * `tools.visible` instead (#9827).
    * Malformed entries are ignored. See `applySkillAllowedTools`.

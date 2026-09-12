@@ -999,6 +999,7 @@ export class BackgroundAgentResumeService {
           resumeHistory ?? [],
           currentForkRuntime!,
           meta.executionAllowedTools,
+          meta.disallowedTools,
           meta.agentId,
           meta.description,
         );
@@ -1753,6 +1754,7 @@ export class BackgroundAgentResumeService {
     initialMessages: Content[],
     runtime: CurrentForkRuntime,
     executionAllowedTools?: string[],
+    disallowedTools?: string[],
     subagentId?: string,
     taskName?: string,
   ): Promise<AgentHeadless> {
@@ -1770,6 +1772,12 @@ export class BackgroundAgentResumeService {
         runtime.toolNames,
         buildForkExecutionAllowlist(executionAllowedTools, runtime.toolNames),
       ),
+      // Restore the persisted blocklist beside the allowlist: the
+      // invocation-level re-check is the only enforcement a wildcard
+      // allowlist entry (e.g. mcp__*) cannot provide on its own.
+      ...(disallowedTools?.length
+        ? { disallowedTools: [...disallowedTools] }
+        : {}),
     };
 
     return AgentHeadless.create(

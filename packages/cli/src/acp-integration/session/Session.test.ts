@@ -573,6 +573,7 @@ describe('Session', () => {
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
+    isDeferredAndHidden: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
     registerPermissionDeferredFactory: ReturnType<typeof vi.fn>;
     revealDeferredTool: ReturnType<typeof vi.fn>;
@@ -901,6 +902,7 @@ describe('Session', () => {
     mockToolRegistry = {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
+      isDeferredAndHidden: vi.fn().mockReturnValue(false),
       registerTool: vi.fn(),
       registerPermissionDeferredFactory: vi.fn(),
       revealDeferredTool: vi.fn(),
@@ -1032,6 +1034,9 @@ describe('Session', () => {
       setCurrentSessionScheduledTaskCreator: vi.fn(),
       getCurrentSessionScheduledTaskCreator: vi.fn(),
       getExtensions: vi.fn().mockReturnValue([]),
+      // Threaded into resolveDeferredToolCall so the ACP bridge applies the
+      // same depth-gated AgentTool re-admission as the terminal scheduler.
+      getMaxSubagentDepth: vi.fn().mockReturnValue(5),
     } as unknown as Config;
 
     mockClient = {
@@ -15311,6 +15316,110 @@ describe('Session', () => {
             }),
           ],
         });
+      });
+
+      it('routes tool_call through a hidden deferred tool in ACP', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'created issue',
+          returnDisplay: 'created issue',
+        });
+        const bridge = {
+          name: core.ToolNames.TOOL_CALL,
+          kind: core.Kind.Other,
+          description: 'Deferred tool bridge',
+          build: vi.fn((params: Record<string, unknown>) => ({ params })),
+        };
+        // The bridge needs both halves registered: resolution rejects a
+        // hidden target when tool_search is unregistered (R1-5 guard).
+        const toolSearch = {
+          name: core.ToolNames.TOOL_SEARCH,
+          kind: core.Kind.Other,
+          description: 'Deferred tool discovery',
+          build: vi.fn((params: Record<string, unknown>) => ({ params })),
+        };
+        const target = {
+          name: 'mcp__github__create_issue',
+          kind: core.Kind.Other,
+          displayName: 'CreateIssue',
+          description: 'Creates an issue',
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+          build: vi.fn().mockImplementation((params) => ({
+            params,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('create issue'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute,
+          })),
+        };
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === bridge.name
+            ? bridge
+            : name === target.name
+              ? target
+              : name === toolSearch.name
+                ? toolSearch
+                : undefined,
+        );
+        mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+          name === bridge.name
+            ? bridge
+            : name === target.name
+              ? target
+              : name === toolSearch.name
+                ? toolSearch
+                : undefined,
+        );
+        mockToolRegistry.isDeferredAndHidden.mockImplementation(
+          (name: string) => name === target.name,
+        );
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-tool-call-bridge',
+          [
+            {
+              id: 'bridge-call',
+              name: core.ToolNames.TOOL_CALL,
+              args: {
+                name: target.name,
+                arguments: { title: 'Cache-safe tools' },
+              },
+            },
+          ],
+          toolLoopState,
+        );
+
+        expect(execute).toHaveBeenCalledOnce();
+        expect(target.build).toHaveBeenCalledWith({
+          title: 'Cache-safe tools',
+        });
+        expect(result.parts[0]?.functionResponse).toMatchObject({
+          id: 'bridge-call',
+          name: core.ToolNames.TOOL_CALL,
+          response: { output: 'created issue' },
+        });
+        expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+          target.name,
+          { title: 'Cache-safe tools' },
+        );
       });
 
       it('does not stop disabled tools as repeated invalid parameter calls', async () => {
@@ -39855,6 +39964,44 @@ describe('Session', () => {
           }),
         }),
       );
+    });
+
+    it('records a duplicated bridged Goal read as Goal bookkeeping', async () => {
+      const permit: core.GoalTurnPermit = {
+        goalId: 'goal-duplicate',
+        revision: 1,
+        turnId: 'turn-duplicate',
+      };
+      const args = { name: 'get_goal', arguments: {} };
+      vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
+        new Map([['goal_1', core.getToolCallFingerprint('tool_call', args)]]),
+      );
+      const [duplicatePart] = core.normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'goal_1',
+              name: 'tool_call',
+              args,
+            },
+          },
+        ],
+        new Set(['goal_1']),
+        new Set<string>(),
+      );
+
+      await core.goalTurnContext.run(permit, () =>
+        (session as unknown as ToolCallInternals).runToolCalls(
+          new AbortController().signal,
+          'prompt-goal-duplicate',
+          [duplicatePart.functionCall!],
+        ),
+      );
+
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledOnce();
+      expect(
+        mockChatRecordingService.recordToolResult.mock.calls[0]?.[2],
+      ).toEqual({ goalContext: permit, provenance: 'goal_runtime' });
     });
 
     it('executes an id-colliding functionCall whose args differ from the handled call', async () => {

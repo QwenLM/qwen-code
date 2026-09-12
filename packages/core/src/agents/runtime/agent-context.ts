@@ -35,6 +35,25 @@ interface AgentContext {
   readonly agentId?: string;
   readonly runtimeView?: RuntimeContentGeneratorView;
   /**
+   * The owning agent's effective positive `toolConfig.tools` allowlist.
+   * `undefined` means the configured surface is intentionally unrestricted
+   * (absent, empty, or wildcard), or that a separate execution allowlist owns
+   * the policy (forks use `tools` only as a cache-parity declaration
+   * snapshot). Published so a fork cannot widen its parent's configured
+   * surface by unioning the live registry into its execution allowlist.
+   */
+  readonly configuredToolAllowlist?: readonly string[];
+  /**
+   * The owning agent's per-agent `toolConfig.disallowedTools` blocklist.
+   * Published by `AgentCore.runInAgentFrames` so a tool that reshapes a
+   * child agent's tool surface — AgentTool's fork — keeps the blocklist one
+   * level down instead of the fork's execution allowlist re-admitting a
+   * tool the parent was configured never to reach. Re-set (even to
+   * `undefined`) on every agent frame: a nested agent without a blocklist
+   * must not see its parent's.
+   */
+  readonly disallowedTools?: readonly string[];
+  /**
    * Nesting depth — 0 for a top-level subagent (called from a user's
    * top-level interaction), +1 per nested `runWithAgentContext` frame.
    * Auto-incremented by default; resume paths (background resume,
@@ -69,6 +88,46 @@ export function runWithRuntimeContentGenerator<T>(
 ): Promise<T> {
   const current = storage.getStore() ?? {};
   return storage.run({ ...current, runtimeView: view }, fn);
+}
+
+/**
+ * Sets the owning agent's `disallowedTools` blocklist for the duration of
+ * `fn`. Always establishes the field — including as `undefined` — so a
+ * nested agent's frame shadows the parent's blocklist rather than
+ * inheriting it.
+ */
+export function runWithAgentDisallowedTools<T>(
+  disallowedTools: readonly string[] | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const current = storage.getStore() ?? {};
+  return storage.run({ ...current, disallowedTools }, fn);
+}
+
+/**
+ * Sets the owning agent's effective configured tool allowlist for `fn`.
+ * Always establishes the field so nested agents shadow their parent frame.
+ */
+export function runWithAgentConfiguredToolAllowlist<T>(
+  configuredToolAllowlist: readonly string[] | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const current = storage.getStore() ?? {};
+  return storage.run({ ...current, configuredToolAllowlist }, fn);
+}
+
+/** The owning agent's effective positive configured tool allowlist. */
+export function getCurrentAgentConfiguredToolAllowlist():
+  | readonly string[]
+  | undefined {
+  return storage.getStore()?.configuredToolAllowlist;
+}
+
+/** The owning agent's `disallowedTools` blocklist, if its frame set one. */
+export function getCurrentAgentDisallowedTools():
+  | readonly string[]
+  | undefined {
+  return storage.getStore()?.disallowedTools;
 }
 
 export function getCurrentAgentId(): string | null {
