@@ -5,6 +5,8 @@
  */
 
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { loadProjectMcpServers } from './mcpJson.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
@@ -57,6 +59,18 @@ export function assembleMcpServers(
 }
 
 /**
+ * Canonical root key for the cross-call literal-source map. The approvals
+ * file folds win32 drive-letter case (`normalizeProjectRoot` in
+ * `mcpApprovals.ts`); the literal lookup must agree with that spelling or
+ * a caller passing a different casing of the same root would silently
+ * miss the literal and re-prompt despite an unchanged `.mcp.json`.
+ */
+function literalSourceRootKey(projectRoot: string): string {
+  const resolved = path.resolve(projectRoot);
+  return os.platform() === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+/**
  * The pre-expansion `.mcp.json` configs of the most recent
  * {@link assembleMcpServers} run per project root, for approval hashing
  * (#11499). Approval hashes must bind to the file's literal text: project
@@ -76,7 +90,10 @@ export function setProjectMcpLiteralSource(
   projectRoot: string,
   literalServers: Record<string, MCPServerConfig>,
 ): void {
-  projectMcpLiteralSources.set(projectRoot, literalServers);
+  projectMcpLiteralSources.set(
+    literalSourceRootKey(projectRoot),
+    literalServers,
+  );
 }
 
 /** FOR TESTING ONLY. */
@@ -87,5 +104,5 @@ export function resetProjectMcpLiteralSourceForTesting(): void {
 export function getProjectMcpLiteralSource(
   projectRoot: string,
 ): Record<string, MCPServerConfig> | undefined {
-  return projectMcpLiteralSources.get(projectRoot);
+  return projectMcpLiteralSources.get(literalSourceRootKey(projectRoot));
 }

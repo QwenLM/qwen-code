@@ -32,13 +32,25 @@ export const MCP_APPROVALS_FILENAME = 'mcpApprovals.json';
  * literal config when that is available, and to the live config otherwise
  * (settings-sourced servers are resolved upstream and keep the existing
  * binding).
+ *
+ * The literal is consulted ONLY for a config whose scope is `'project'`:
+ * `assembleMcpServers` lets `'workspace'`/`'system'` entries override a
+ * same-named `.mcp.json` entry, and the executing (overriding) server must
+ * never have its approval bound to a literal from a file it does not come
+ * from — that would silently defeat the edit-re-triggers-approval gate in
+ * the fail-open direction.
  */
 function approvalConfigHash(
   projectRoot: string,
   serverName: string,
   config: MCPServerConfig,
 ): string {
-  const literal = getProjectMcpLiteralSource(projectRoot)?.[serverName];
+  const literal =
+    config.scope === 'project'
+      ? getProjectMcpLiteralSource(normalizeProjectRoot(projectRoot))?.[
+          serverName
+        ]
+      : undefined;
   return hashMcpServerConfig(literal ?? config);
 }
 

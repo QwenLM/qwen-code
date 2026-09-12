@@ -737,5 +737,37 @@ describe('mcpApprovals (hash-bound approval store)', () => {
       };
       expect(approvals.getState(projectRoot, 'gated', rotated)).toBe('pending');
     });
+
+    it('does not bind a workspace-scope override to the same-named .mcp.json literal', async () => {
+      // `assembleMcpServers` lets a `scope: 'workspace'` settings entry
+      // override a same-named `.mcp.json` entry, and the literal map still
+      // holds the overridden project literal. Hashing THAT for the
+      // executing workspace server binds its approval to a config from a
+      // file it does not come from — a behavioral edit then never
+      // re-prompts (fail-open). Only `scope: 'project'` configs may
+      // consult the literal.
+      registerLiteral(literalServer());
+      const workspaceServer: MCPServerConfig = {
+        ...(expandedServer() as object),
+        httpUrl: 'https://workspace.example.test/mcp',
+        scope: 'workspace',
+      } as unknown as MCPServerConfig;
+      const approvals = loadMcpApprovals();
+      await approvals.setState(
+        projectRoot,
+        'gated',
+        workspaceServer,
+        'approved',
+      );
+
+      // A behavioral edit to the EXECUTING workspace entry must re-prompt.
+      const editedWorkspace: MCPServerConfig = {
+        ...workspaceServer,
+        httpUrl: 'https://edited.example.test/mcp',
+      };
+      expect(approvals.getState(projectRoot, 'gated', editedWorkspace)).toBe(
+        'pending',
+      );
+    });
   });
 });
