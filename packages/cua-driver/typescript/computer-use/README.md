@@ -38,6 +38,13 @@ Revision and lineage identifiers are internal to `ComputerUse` and are not
 returned on `WindowObservation`. Normal callers receive the current `mode`, an
 optional `resyncReason`, AX text/elements, and an optional screenshot. Protocol
 metrics live under `diagnostics`; the raw native response is not exposed.
+`context` preserves native `backgroundInput`, `degraded`, `degradedReason`,
+`escalation`, `windowBounds`, `screenshotScale`, `screenshotFrameValid`, and
+`screenshotError` when available. Consult this context before deciding whether
+pixel input or an explicit foreground request is appropriate. Coordinates for
+SDK actions remain screenshot pixels; `windowBounds` describes screen points.
+The native revision's `capture_complete` flag takes precedence over a legacy
+root-level flag.
 
 Treat a full response as the complete current AX state. Apply later diffs to
 that state; a no-change response leaves it intact. `elements` remains the

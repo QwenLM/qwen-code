@@ -1,6 +1,7 @@
-//! macOS app enumeration via NSWorkspace and NSRunningApplication.
+//! macOS app enumeration via live Process Manager queries and AppKit metadata.
 
 pub mod nsworkspace;
+mod process_manager;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -38,30 +39,29 @@ pub struct AppInfo {
 
 /// Enumerate running apps with NSApplicationActivationPolicyRegular.
 ///
-/// This stays entirely inside AppKit so listing or classifying an application
-/// never triggers the macOS Automation permission for System Events.
+/// Query process membership directly, then read metadata through AppKit. This
+/// does not require System Events or a host-driven AppKit main run loop.
 pub fn list_running_apps() -> Vec<AppInfo> {
     list_running_apps_native()
 }
 
 fn list_running_apps_native() -> Vec<AppInfo> {
-    use objc2_app_kit::{NSApplicationActivationPolicy, NSWorkspace};
+    use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 
     let mut apps = Vec::new();
+    let active_pid = frontmost_pid();
     unsafe {
-        let workspace = NSWorkspace::sharedWorkspace();
-        let running = workspace.runningApplications();
-        for index in 0..running.count() {
-            let app = running.objectAtIndex(index);
-            if app.isTerminated()
-                || app.activationPolicy() != NSApplicationActivationPolicy::Regular
-            {
+        for pid in process_manager::running_pids() {
+            let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+            else {
+                continue;
+            };
+            if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
                 continue;
             }
             let Some(name) = app.localizedName().map(|value| value.to_string()) else {
                 continue;
             };
-            let pid = app.processIdentifier();
             if name.is_empty() || pid <= 0 {
                 continue;
             }
@@ -70,7 +70,7 @@ fn list_running_apps_native() -> Vec<AppInfo> {
                 pid,
                 bundle_id: app.bundleIdentifier().map(|value| value.to_string()),
                 running: true,
-                active: app.isActive(),
+                active: active_pid == Some(pid),
                 launch_path: None,
                 kind: Some("desktop".to_owned()),
                 last_used: None,
@@ -543,67 +543,35 @@ pub(crate) fn unix_secs_to_rfc3339(secs: i64) -> String {
 }
 
 fn read_app_plist(plist_path: &std::path::Path) -> Option<AppInfo> {
-    let bundle_id_out = Command::new("plutil")
-        .args([
-            "-extract",
-            "CFBundleIdentifier",
-            "raw",
-            "-o",
-            "-",
-            plist_path.to_str()?,
-        ])
-        .output()
-        .ok()?;
-    if !bundle_id_out.status.success() {
-        return None;
-    }
-    let bundle_id = String::from_utf8_lossy(&bundle_id_out.stdout)
-        .trim()
-        .to_string();
-    if bundle_id.is_empty() {
-        return None;
-    }
+    use core_foundation::{
+        base::{CFType, TCFType},
+        data::CFData,
+        dictionary::CFDictionary,
+        propertylist::{create_with_data, kCFPropertyListImmutable},
+        string::CFString,
+    };
 
-    let name_out = Command::new("plutil")
-        .args([
-            "-extract",
-            "CFBundleDisplayName",
-            "raw",
-            "-o",
-            "-",
-            plist_path.to_str()?,
-        ])
-        .output()
-        .ok();
-    let name = name_out
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
+    let bytes = std::fs::read(plist_path).ok()?;
+    let (raw, _) = create_with_data(CFData::from_buffer(&bytes), kCFPropertyListImmutable).ok()?;
+    let plist: CFType = unsafe { TCFType::wrap_under_create_rule(raw) };
+    let dict = plist.downcast::<CFDictionary>()?;
+    let string = |key: &str| {
+        let value = dict.find(CFString::new(key).as_CFTypeRef())?;
+        let value: CFType = unsafe { TCFType::wrap_under_get_rule(*value) };
+        let text = value.downcast::<CFString>()?.to_string().trim().to_owned();
+        (!text.is_empty()).then_some(text)
+    };
+    let bundle_id = string("CFBundleIdentifier")?;
+    let name = string("CFBundleDisplayName")
+        .or_else(|| string("CFBundleName"))
         .unwrap_or_else(|| {
-            // Fallback: CFBundleName.
-            Command::new("plutil")
-                .args([
-                    "-extract",
-                    "CFBundleName",
-                    "raw",
-                    "-o",
-                    "-",
-                    plist_path.to_str().unwrap_or(""),
-                ])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| {
-                    plist_path
-                        .parent()
-                        .and_then(|p| p.parent())
-                        .and_then(|p| p.file_stem())
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("")
-                        .to_string()
-                })
+            plist_path
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_owned()
         });
 
     if name.is_empty() {
@@ -622,17 +590,10 @@ fn read_app_plist(plist_path: &std::path::Path) -> Option<AppInfo> {
     })
 }
 
-/// Return the pid of the current frontmost application via
-/// `NSWorkspace.shared.frontmostApplication`. `None` if there isn't one
-/// (rare — e.g. screensaver).
+/// Return the live frontmost application's pid, including in embedded hosts
+/// without an AppKit main loop. `None` when the system cannot resolve it.
 pub fn frontmost_pid() -> Option<i32> {
-    use objc2_app_kit::NSWorkspace;
-    unsafe {
-        let ws = NSWorkspace::sharedWorkspace();
-        let app = ws.frontmostApplication()?;
-        let pid: i32 = app.processIdentifier();
-        Some(pid)
-    }
+    process_manager::frontmost_pid()
 }
 
 /// Re-activate the app with `pid` via
@@ -716,7 +677,48 @@ pub fn format_app_list(apps: &[AppInfo]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{finder_folder_handoff, unix_secs_to_rfc3339};
+    use super::{finder_folder_handoff, read_app_plist, unix_secs_to_rfc3339};
+
+    #[test]
+    fn plist_reader_supports_xml_binary_fallbacks_and_invalid_metadata() {
+        use core_foundation::{
+            data::CFData,
+            propertylist::{
+                create_data, create_with_data, kCFPropertyListBinaryFormat_v1_0,
+                kCFPropertyListImmutable, CFPropertyList,
+            },
+        };
+        let root = std::env::temp_dir().join(format!("cua-plist-{}", uuid::Uuid::new_v4()));
+        let path = root.join("Fallback.app/Contents/Info.plist");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for (fields, expected) in [
+            ("<key>CFBundleDisplayName</key><string> 名称 </string><key>CFBundleName</key><string>Ignored</string>", Some("名称")),
+            ("<key>CFBundleDisplayName</key><string> </string><key>CFBundleName</key><string> Name </string>", Some("Name")),
+            ("", Some("Fallback")),
+        ] {
+            let xml = format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string> test.app </string>{fields}</dict></plist>");
+            let (raw, _) = create_with_data(CFData::from_buffer(xml.as_bytes()), kCFPropertyListImmutable).unwrap();
+            let plist = unsafe { CFPropertyList::wrap_under_create_rule(raw) };
+            let binary = create_data(plist.as_CFTypeRef(), kCFPropertyListBinaryFormat_v1_0).unwrap();
+            for bytes in [xml.as_bytes(), binary.bytes()] {
+                std::fs::write(&path, bytes).unwrap();
+                let app = read_app_plist(&path).unwrap();
+                assert_eq!(Some(app.name.as_str()), expected);
+                assert_eq!(app.bundle_id.as_deref(), Some("test.app"));
+                assert!(!app.running);
+            }
+        }
+        for invalid in [
+            "garbage",
+            "<plist><array/></plist>",
+            "<plist><dict/></plist>",
+            "<plist><dict><key>CFBundleIdentifier</key><integer>1</integer></dict></plist>",
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(read_app_plist(&path).is_none());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn finder_folder_handoff_is_narrowly_selected() {

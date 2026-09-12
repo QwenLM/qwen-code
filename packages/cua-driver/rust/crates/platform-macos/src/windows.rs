@@ -88,20 +88,68 @@ pub(crate) fn visible_windows_with_space_snapshot() -> WindowEnumeration {
 /// Enumerate windows on every CGWindow layer, including the accessory layers
 /// (`layer != 0`) that [`all_windows`] hides.
 ///
-/// Only used to answer "does this CGWindowID exist, and who owns it?" — the
-/// question `list_windows` must NOT answer, because surfacing tooltips,
-/// popovers, the Dock and every NSMenu window would swamp callers. Keeping the
-/// layer filter on enumeration and off identity lookup is what lets
+/// Identity lookup and watched-target lifetime checks must include every layer.
+/// Public discovery keeps its filter: surfacing tooltips, the Dock and every
+/// NSMenu window would swamp callers. Keeping the layer filter on discovery
+/// and off identity lookup is what lets
 /// `get_window_state` tell "no such window" apart from "exists, but is not a
 /// layer-0 window" (issue #2237).
-fn all_windows_any_layer() -> Vec<WindowInfo> {
+pub(crate) fn all_windows_any_layer() -> Vec<WindowInfo> {
     enumerate_windows(kCGWindowListExcludeDesktopElements, LayerFilter::AnyLayer).windows
+}
+
+/// Supplement an explicitly requested application's visible AX dialogs only.
+/// This is discovery evidence, not authorization for an input route.
+pub(crate) fn append_visible_dialogs(
+    windows: &mut Vec<WindowInfo>,
+    pid: i32,
+    on_screen_only: bool,
+) {
+    if !all_windows_any_layer()
+        .iter()
+        .any(|w| w.pid == pid && w.layer != 0 && w.is_on_screen)
+    {
+        return;
+    }
+    let ids = crate::ax::dialogs::dialog_window_ids(pid);
+    if ids.is_empty() {
+        return;
+    }
+    let query = crate::input::skylight::SpaceQuery::new();
+    // z_index is normalized using the total row count of one CG snapshot.
+    // Rebuild the whole PID list so old and new rows use the same scale.
+    *windows = discovered_pid_windows(all_windows_any_layer(), pid, on_screen_only, &ids);
+    for window in windows.iter_mut() {
+        if let Some(query) = &query {
+            let spaces = query.window_space_ids(window.window_id);
+            let current = spaces
+                .as_ref()
+                .and_then(|_| query.current_space_for_window(window.window_id));
+            apply_window_space_metadata(window, spaces, current);
+        }
+    }
+}
+
+fn discovered_pid_windows(
+    snapshot: Vec<WindowInfo>,
+    pid: i32,
+    on_screen_only: bool,
+    dialog_ids: &std::collections::HashSet<u32>,
+) -> Vec<WindowInfo> {
+    snapshot
+        .into_iter()
+        .filter(|w| {
+            w.pid == pid
+                && (!on_screen_only || w.is_on_screen)
+                && (w.layer == 0 || (w.is_on_screen && dialog_ids.contains(&w.window_id)))
+        })
+        .collect()
 }
 
 /// Which CGWindow layers an enumeration admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayerFilter {
-    /// Normal application windows only — what `list_windows` reports.
+    /// Normal application windows — the base discovery list.
     ZeroOnly,
     /// Every layer, accessory windows included.
     AnyLayer,
@@ -518,5 +566,33 @@ mod tests {
             WindowOwner::SamePid
         );
         assert_eq!(resolve_window_owner_in(&[], 900, 42), WindowOwner::Unknown);
+    }
+
+    #[test]
+    fn dialog_discovery_uses_one_snapshot_and_preserves_visibility_scope() {
+        let mut dialog = window(43, 800, "Example");
+        dialog.layer = 8;
+        dialog.z_index = 98;
+        let mut document = window(42, 800, "Example");
+        // It had z_index99 in an earlier snapshot with more global windows.
+        document.z_index = 97;
+        let mut hidden = window(44, 800, "Example");
+        hidden.is_on_screen = false;
+        let mut overlay = window(45, 800, "Example");
+        overlay.layer = 8;
+        let foreign = window(46, 900, "Other");
+        let snapshot = vec![dialog, document, hidden, overlay, foreign];
+        let ids = [43, 46].into_iter().collect();
+        let visible = discovered_pid_windows(snapshot.clone(), 800, true, &ids);
+        assert_eq!(
+            visible.iter().map(|w| w.window_id).collect::<Vec<_>>(),
+            vec![43, 42]
+        );
+        assert!(visible[0].z_index > visible[1].z_index);
+        let all = discovered_pid_windows(snapshot, 800, false, &ids);
+        assert_eq!(
+            all.iter().map(|w| w.window_id).collect::<Vec<_>>(),
+            vec![43, 42, 44]
+        );
     }
 }

@@ -24,6 +24,9 @@ client (Qwen Code via `mcpServers`, Claude, Codex, etc.) can run it.
   for images; `console.*` is captured. Plain expression results are not returned.
 - `nodeRepl.cwd` / `homeDir` / `tmpDir` and `nodeRepl.getHeapStatus()` are available.
 - Top-level static `import` is not allowed — use dynamic `await import()`.
+- Declared bindings stay live across cells: after replacing an observation,
+  helpers that captured its binding read the replacement. Helper assignments
+  and direct assignments share the same binding, including within one cell.
 - Bare packages resolve from the session `cwd` `node_modules` plus any directory
   registered via `node_repl_add_node_module_dir`; package entrypoints use Node
   singleton caching. Local `.js`/`.mjs` reload on each execution.
@@ -33,6 +36,9 @@ client (Qwen Code via `mcpServers`, Claude, Codex, etc.) can run it.
 - Timeout and cancellation stop only the active cell. Earlier bindings and the
   kernel process remain available, while new bindings from that cell are not
   committed. `node_repl_reset` or a real process crash discards all bindings.
+- Runtime errors retain completed statement/declarator checkpoints; cancellation
+  and timeout restore binding values from cell entry. Object mutations and
+  external side effects are not rolled back.
 
 > Isolation note: the VM context provides lifecycle/namespace isolation, **not** an
 > OS security sandbox. Imported packages and builtins run with ordinary Node.js

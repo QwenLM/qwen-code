@@ -87,6 +87,25 @@ afterEach(() => {
 
 describe('NodeReplKernelManager', () => {
   it(
+    'executes compact and nested await operands without merging tokens',
+    async () => {
+      createEsmPackage(
+        path.join(workDir, 'node_modules'),
+        'smoke-sdk',
+        'export class ComputerUse { static async create() { return 42; } }',
+      );
+      const result = await run(
+        'var computer=await(await import("smoke-sdk")).ComputerUse.create();' +
+          'nodeRepl.write(computer);' +
+          'nodeRepl.write(await(Promise.resolve(7)));',
+      );
+      expect(result.status).toBe('ok');
+      expect(texts(result)).toEqual(['42', '7']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
     'persists declarations without returning ordinary expressions',
     async () => {
       expect((await run('const answer = 41;')).status).toBe('ok');
@@ -115,12 +134,246 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'keeps an earlier closure when a later cell assigns its carried binding',
+    'keeps earlier closures on the same binding when later cells assign it',
     async () => {
       await run('let x = 1; const readX = () => x;');
       const result = await run('x = 2; nodeRepl.write(`${readX()}|${x}`);');
       expect(result.status).toBe('ok');
-      expect(texts(result)).toEqual(['1|2']);
+      expect(texts(result)).toEqual(['2|2']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'refreshes observation helpers and shares writes in both directions',
+    async () => {
+      await run(
+        'var state = {token:"old"}; let count=0; const read=()=>state.token; const next=()=>++count;',
+      );
+      expect(
+        texts(
+          await run(
+            'state={token:"fresh"}; nodeRepl.write([read(),state.token,next(),count]);',
+          ),
+        ),
+      ).toEqual(["[ 'fresh', 'fresh', 1, 1 ]"]);
+      expect(
+        texts(
+          await run(
+            'nodeRepl.write([state={token:"newer"},read(),++count,next(),count].slice(1));',
+          ),
+        ),
+      ).toEqual(["[ 'newer', 2, 3, 3 ]"]);
+      expect(
+        texts(
+          await run('var state={token:"redeclared"}; nodeRepl.write(read());'),
+        ),
+      ).toEqual(['redeclared']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'keeps carried assignments live in destructuring and loop declarations',
+    async () => {
+      await run('var value=1; const read=()=>value;');
+      expect(
+        texts(
+          await run(
+            'var {value, other=read()}={value:2}; nodeRepl.write([read(),other]);',
+          ),
+        ),
+      ).toEqual(['[ 2, 2 ]']);
+      expect(
+        texts(
+          await run(
+            'var [value, last=read()]=[3]; nodeRepl.write([read(),last]);',
+          ),
+        ),
+      ).toEqual(['[ 3, 3 ]']);
+      expect(
+        texts(
+          await run(
+            'for(var value=4;value<6;value++) { nodeRepl.write(read()); }',
+          ),
+        ),
+      ).toEqual(['4', '5']);
+      expect(
+        texts(
+          await run(
+            'for(var {value, inside=read()} of [{value:7}]) nodeRepl.write([read(),inside]);',
+          ),
+        ),
+      ).toEqual(['[ 7, 7 ]']);
+      expect(
+        texts(await run('for(var value in {key:0}) nodeRepl.write(read());')),
+      ).toEqual(['key']);
+      expect(
+        manager
+          .getBindingNames()
+          .some((name) => name.startsWith('__qwen_repl_')),
+      ).toBe(false);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'preserves inner scopes, parameter defaults and bare-call receivers',
+    async () => {
+      await run(
+        'let value=10; function plain(){return this===undefined;} const old=()=>value;',
+      );
+      const result = await run(
+        [
+          'value=11;',
+          'const local=(value)=>value+1;',
+          'function defaulted(v=value){var value=99; return v;}',
+          'const named=function value(){return typeof value;};',
+          'const object={value, [value](value){return value;}};',
+          'nodeRepl.write([local(2),defaulted(),named(),object.value,object[11](3),plain(),plain?.(),old()]);',
+          'nodeRepl.write([(plain)(),((plain))?.(),plain`tag`]);',
+          '{let value=88; nodeRepl.write(value);}',
+          'try{throw 77;}catch(value){nodeRepl.write(value);}',
+          'for(let value of [66]) nodeRepl.write(value);',
+          'nodeRepl.write(value);',
+        ].join('\n'),
+      );
+      expect(result.status).toBe('ok');
+      expect(texts(result)).toEqual([
+        "[ 3, 11, 'function', 11, 3, true, true, 11 ]",
+        '[ true, true, true ]',
+        '88',
+        '77',
+        '66',
+        '11',
+      ]);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'does not expose carried bindings as globals or to imported modules',
+    async () => {
+      fs.writeFileSync(
+        path.join(workDir, 'private-probe.mjs'),
+        'export const result=[typeof privateCell,typeof Buffer];',
+      );
+      await run(
+        'globalThis.privateCell="global"; let privateCell=1; let Buffer="shadow"; const read=()=>privateCell;',
+      );
+      const result = await run(
+        'privateCell=2; const probe=await import("./private-probe.mjs"); nodeRepl.write([read(),globalThis.privateCell,Buffer,...probe.result]);',
+      );
+      expect(texts(result)).toEqual([
+        "[ 2, 'global', 'shadow', 'string', 'function' ]",
+      ]);
+      await run('let __proto__=3; const protoRead=()=>__proto__;');
+      expect(
+        texts(await run('__proto__=4; nodeRepl.write(protoRead());')),
+      ).toEqual(['4']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'restores live closures to error checkpoints and cell-entry cancellation values',
+    async () => {
+      await run('let value=0; const read=()=>value;');
+      expect(
+        (await run('value=1; {value=2;throw Error("stop");}')).status,
+      ).toBe('error');
+      expect(texts(await run('nodeRepl.write([value,read()]);'))).toEqual([
+        '[ 1, 1 ]',
+      ]);
+      const controller = new AbortController();
+      const pending = manager.exec({
+        code: 'value=3; await new Promise(()=>{});',
+        timeoutMs: 15000,
+        signal: controller.signal,
+      });
+      setTimeout(() => controller.abort(), 200);
+      expect((await pending).status).toBe('cancelled');
+      expect(texts(await run('nodeRepl.write([value,read()]);'))).toEqual([
+        '[ 1, 1 ]',
+      ]);
+      expect((await run('value=4; while(true){}', 100)).status).toBe('timeout');
+      expect(texts(await run('nodeRepl.write([value,read()]);'))).toEqual([
+        '[ 1, 1 ]',
+      ]);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'retains identifier early errors and shorthand property semantics',
+    async () => {
+      await run('var x=1; const read=()=>x; var __proto__={marker:2};');
+      for (const code of [
+        'x=2; delete x;',
+        'x=3; delete (x);',
+        'x=9; delete (/*comment*/x);',
+      ]) {
+        const result = await run(code);
+        expect(result.status).toBe('error');
+        expect(result.error?.message).toContain(
+          'Delete of an unqualified identifier',
+        );
+        expect(texts(await run('nodeRepl.write([x,read()]);'))).toEqual([
+          '[ 1, 1 ]',
+        ]);
+      }
+      expect(
+        texts(
+          await run(
+            'const object={__proto__}; nodeRepl.write([Object.hasOwn(object,"__proto__"),object.__proto__.marker,Object.getPrototypeOf(object)===Object.prototype]);',
+          ),
+        ),
+      ).toEqual(['[ true, 2, true ]']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'preserves inferred names before class static initialization',
+    async () => {
+      await run('var fn; var C;');
+      expect(texts(await run('fn=()=>{}; nodeRepl.write(fn.name);'))).toEqual([
+        'fn',
+      ]);
+      expect(
+        texts(await run('var fn=function(){}; nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(await run('fn=null; fn ||= ()=>{}; nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(
+          await run(
+            'C=class{static n=this.name;}; nodeRepl.write([C.name,C.n]);',
+          ),
+        ),
+      ).toEqual(["[ 'C', 'C' ]"]);
+      expect(
+        texts(await run('({fn=()=>{}}={}); nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(await run('[fn=function*(){}]=[]; nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(await run('fn=(/*comment*/()=>{}); nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(
+          await run(
+            'C=(/*comment*/class{static n=this.name;}); nodeRepl.write([C.name,C.n]);',
+          ),
+        ),
+      ).toEqual(["[ 'C', 'C' ]"]);
+      expect(
+        texts(
+          await run('({fn=(/*comment*/()=>{})}={}); nodeRepl.write(fn.name);'),
+        ),
+      ).toEqual(['fn']);
     },
     TEST_TIMEOUT,
   );

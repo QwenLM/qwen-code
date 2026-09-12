@@ -811,7 +811,9 @@ impl ToolState {
                     .iter()
                     .copied()
                     .collect::<Vec<_>>();
-                let windows = crate::windows::all_windows();
+                // A live dialog can change compositor layers when activated.
+                // Discovery filters must not turn that into a closed target.
+                let windows = crate::windows::all_windows_any_layer();
                 for (pid, window_id) in targets {
                     let process_alive = unsafe { libc::kill(pid, 0) } == 0
                         || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);

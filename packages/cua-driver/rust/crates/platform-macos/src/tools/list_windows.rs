@@ -13,6 +13,7 @@ fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
         name: "list_windows".into(),
         description: "List all layer-0 top-level windows currently known to WindowServer. \
+            With an explicit pid, also includes visible nonzero-layer dialogs verified by AXWindows. \
             Includes off-screen windows (minimized, on another Space, hidden-launched). \
             Use this to find a window_id before calling get_window_state.\n\n\
             Per-record fields: window_id, pid, app_name, title, bounds \
@@ -66,6 +67,19 @@ impl Tool for ListWindowsTool {
 
         if let Some(pid) = pid_filter {
             windows.retain(|w| w.pid == pid);
+            windows = match tokio::task::spawn_blocking(move || {
+                crate::windows::append_visible_dialogs(&mut windows, pid, on_screen_only);
+                windows
+            })
+            .await
+            {
+                Ok(windows) => windows,
+                Err(error) => {
+                    return ToolResult::error(format!(
+                        "Could not enumerate application dialogs: {error}"
+                    ));
+                }
+            };
         }
 
         let windows_json: Vec<Value> = windows.iter().map(window_record_json).collect();

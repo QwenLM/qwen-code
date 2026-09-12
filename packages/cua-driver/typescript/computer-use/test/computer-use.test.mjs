@@ -402,6 +402,62 @@ test("an incomplete capture retries once without disabling diffs", async () => {
   assert.match(observation.text, /without `disableDiff`/);
 });
 
+test("native revision completeness takes precedence and retries only once", async () => {
+  const driver = fakeDriver({
+    results: {
+      getWindowState: () =>
+        toolResult({
+          structured: {
+            capture_complete: true,
+            elements: [{ element_token: "unsafe-token" }],
+            observation_revision: {
+              capture_complete: false,
+              mode: "full",
+              resync_reason: "capture_incomplete",
+              stable_element_ids: false,
+            },
+          },
+        }),
+    },
+  });
+  const observation = await new ComputerUse(driver, {
+    sdk: fakeSdk,
+  }).observeWindow({ pid: 42, windowId: 7 });
+  assert.equal(driver.calls.length, 2);
+  assert.equal(observation.diagnostics.captureComplete, false);
+  assert.deepEqual(observation.elements, []);
+  assert.match(observation.text, /capture is incomplete/i);
+});
+
+test("observations preserve input and screenshot context from the native payload", async () => {
+  const fields = {
+    background_input: { supported: false },
+    degraded: true,
+    degraded_reason: "ax_window_unresolved",
+    escalation: { recommended: "foreground" },
+    window_bounds: { x: 10, y: 20, width: 300, height: 200 },
+    screenshot_scale: 2,
+    screenshot_frame_valid: false,
+    screenshot_error: { code: "invalid_frame" },
+  };
+  const driver = fakeDriver({
+    results: { getWindowState: () => toolResult({ structured: fields }) },
+  });
+  const observation = await new ComputerUse(driver, {
+    sdk: fakeSdk,
+  }).observeWindow({ pid: 42, windowId: 7 });
+  assert.deepEqual(observation.context, {
+    backgroundInput: fields.background_input,
+    degraded: true,
+    degradedReason: fields.degraded_reason,
+    escalation: fields.escalation,
+    windowBounds: fields.window_bounds,
+    screenshotScale: 2,
+    screenshotFrameValid: false,
+    screenshotError: fields.screenshot_error,
+  });
+});
+
 test("the incomplete-capture retry restores the automatic cursor", async () => {
   const results = [
     toolResult({
@@ -788,6 +844,29 @@ test("typed discovery methods expose apps, windows, and exact-window lookup", as
   assert.equal((await computer.listApps())[0].name, "Harness");
   assert.equal((await computer.listWindows({ pid: 42 }))[0].window_id, 7);
   assert.equal((await computer.getWindow({ pid: 42, windowId: 7 })).title, "Harness");
+});
+
+test("structured actions retain native new-window notices alongside action evidence", async () => {
+  const text = 'Pressed cmd+n.\n\n🪟 Action opened new window(s): Harness ("Untitled").';
+  const structured = { effect: "unverifiable", route: "global_input" };
+  const action = { effect: 2, route: 2 };
+  const driver = fakeDriver({
+    results: {
+      windowHotkey: toolResult({ text, structured, action }),
+      windowPressKey: toolResult({ structured }),
+    },
+  });
+  const computer = new ComputerUse(driver, { sdk: fakeSdk });
+  const result = await computer.hotkey({ pid: 42, windowId: 7, keys: ["cmd", "n"] });
+  assert.equal(result.text, text);
+  assert.equal(result.effect, structured.effect);
+  assert.equal(result.route, structured.route);
+  assert.deepEqual(result.action, action);
+  assert.equal(result.operation.state, "completed");
+  assert.equal(result.operation.dispatched, true);
+  const silent = await computer.pressKey({ pid: 42, windowId: 7, key: "Enter" });
+  assert.equal(Object.hasOwn(silent, "text"), false);
+  await computer.close();
 });
 
 test("all core actions use named typed SDK methods", async () => {
