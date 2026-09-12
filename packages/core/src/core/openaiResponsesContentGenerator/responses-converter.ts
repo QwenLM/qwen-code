@@ -35,6 +35,7 @@ import {
   type ResponsesMessageMetadata,
   type ResponsesTextPart,
 } from '../../utils/responses-message.js';
+import { followingFunctionCallIds } from './responses-reasoning-rejection.js';
 
 const debugLogger = createDebugLogger('RESPONSES_CONVERTER');
 
@@ -796,6 +797,14 @@ export function convertGeminiContentsToResponsesInput(
  * the call while dropping the output, or vice versa. This safety net ensures
  * the wire request is always structurally valid regardless of upstream
  * trimming bugs.
+ *
+ * A reasoning item heads the function_call group that follows it, so the
+ * reasoning and that group are one unit (#11665): the reasoning stays iff at
+ * least one call in its group survives the pair cleanup, and goes with the
+ * group when none do. Dropping every orphaned call while keeping the group's
+ * reasoning would send reasoning without its required following item;
+ * keeping the reasoning while only some of its calls survive is what the
+ * surviving calls still need.
  */
 export function cleanOrphanedFunctionCalls(
   items: ResponsesApiInputItem[],
@@ -813,7 +822,8 @@ export function cleanOrphanedFunctionCalls(
     }
   }
   const kept: ResponsesApiInputItem[] = [];
-  for (const item of items) {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
     if (typeof item !== 'object' || item === null || !('type' in item)) {
       kept.push(item);
       continue;
@@ -821,18 +831,6 @@ export function cleanOrphanedFunctionCalls(
     if (item.type === 'function_call' && 'call_id' in item) {
       if (outputCallIds.has((item as ResponsesApiFunctionCallItem).call_id)) {
         kept.push(item);
-        continue;
-      }
-      // A reasoning item belongs to the call that follows it; dropping the
-      // orphaned call while keeping it sends reasoning with no required
-      // following item, and the endpoint rejects the whole request (#11665).
-      const previous = kept[kept.length - 1];
-      if (
-        typeof previous === 'object' &&
-        previous !== null &&
-        previous.type === 'reasoning'
-      ) {
-        kept.pop();
       }
       continue;
     }
@@ -840,6 +838,17 @@ export function cleanOrphanedFunctionCalls(
       if (callIds.has((item as ResponsesApiFunctionCallOutputItem).call_id)) {
         kept.push(item);
       }
+      continue;
+    }
+    if (item.type === 'reasoning') {
+      const unitCallIds = followingFunctionCallIds(items, i);
+      if (
+        unitCallIds.length > 0 &&
+        !unitCallIds.some((callId) => outputCallIds.has(callId))
+      ) {
+        continue;
+      }
+      kept.push(item);
       continue;
     }
     kept.push(item);

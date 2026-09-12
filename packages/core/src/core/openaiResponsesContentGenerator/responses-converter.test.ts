@@ -1854,6 +1854,31 @@ describe('cleanOrphanedFunctionCalls', () => {
     expect(items).toEqual([]);
   });
 
+  it('keeps the reasoning when a sibling call in its group survives', () => {
+    // One reasoning item heads a parallel call group; dropping the orphaned
+    // member must not take the reasoning the surviving member needs.
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      { type: 'function_call', call_id: 'a', name: 'f', arguments: '{}' },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'b', output: 'ok' },
+    ]);
+    expect(items).toEqual([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'b', output: 'ok' },
+    ]);
+  });
+
+  it('drops the reasoning when every call in its group is orphaned', () => {
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      { type: 'function_call', call_id: 'a', name: 'f', arguments: '{}' },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+    ]);
+    expect(items).toEqual([]);
+  });
+
   it('keeps reasoning paired with a call whose output survived', () => {
     const items = cleanOrphanedFunctionCalls([
       { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },

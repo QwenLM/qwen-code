@@ -517,29 +517,66 @@ describe('downgradeRejectedReasoningItems', () => {
     ).toEqual([keep, after]);
   });
 
-  it('keeps the call unit when the reasoning downgrades to a message', () => {
-    const call = Object.freeze({
-      type: 'function_call',
-      call_id: 'c1',
-      name: 'f',
-      arguments: '{}',
-    }) as ResponsesApiInputItem;
-    const output = Object.freeze({
-      type: 'function_call_output',
-      call_id: 'c1',
-      output: 'ok',
-    }) as ResponsesApiInputItem;
+  it('drops the whole call group whose signature-only reasoning is dropped', () => {
+    const keep = userItem('hi');
+    const after = userItem('bye');
     const items = Object.freeze([
-      reasoningItem(LONG, ['thought']),
-      call,
-      output,
+      keep,
+      reasoningItem(LONG, []),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'f',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c2',
+        name: 'g',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c1',
+        output: 'ok',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c2',
+        output: 'ok',
+      }),
+      after,
     ]) as ResponsesApiInputItem[];
     expect(
-      downgradeRejectedReasoningItems(items, { namedIndex: 0, maxLength: 64 }),
+      downgradeRejectedReasoningItems(items, { namedIndex: 1, maxLength: 64 }),
+    ).toEqual([keep, after]);
+  });
+
+  it('drops the call group when the reasoning downgrades to a message', () => {
+    // The endpoint's pairing error names the reasoning item specifically, so
+    // an assistant message in its place does not satisfy a following
+    // function_call; keeping the group would retry into the same 400 (#11665).
+    const keep = userItem('hi');
+    const items = Object.freeze([
+      keep,
+      reasoningItem(LONG, ['thought']),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'f',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c1',
+        output: 'ok',
+      }),
+    ]) as ResponsesApiInputItem[];
+    expect(
+      downgradeRejectedReasoningItems(items, { namedIndex: 1, maxLength: 64 }),
     ).toEqual([
+      keep,
       { type: 'message', role: 'assistant', content: 'thought' },
-      call,
-      output,
     ]);
   });
 
