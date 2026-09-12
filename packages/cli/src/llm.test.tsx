@@ -75,6 +75,7 @@ const mockStartOpenTuiUI = vi.hoisted(() => vi.fn());
 
 const sessionRegistryConfigStub = {
   getTargetDir: () => '/tmp/project',
+  isCrossSessionMessagingEnabled: () => false,
   trackSessionRegistration: (registration: Promise<boolean>) => {
     void registration.catch(() => undefined);
   },

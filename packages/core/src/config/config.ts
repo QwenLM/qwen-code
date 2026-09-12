@@ -921,6 +921,7 @@ export interface ConfigParameters {
    */
   provisionalWorkspace?: boolean;
   debugMode: boolean;
+  crossSessionMessagingEnabled?: boolean;
   includePartialMessages?: boolean;
   question?: string;
   systemPrompt?: string;
@@ -2913,6 +2914,7 @@ export class Config {
   // other instance updates it. Per-session publishing is not gated on it.
   private readonly ownsModelEnvSlot: boolean = false;
   private readonly settingsWatcher?: { stopWatching(): void };
+  private readonly crossSessionMessagingEnabled: boolean;
 
   constructor(params: ConfigParameters) {
     this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
@@ -2951,6 +2953,8 @@ export class Config {
       this.explicitIncludeDirectories,
     );
     this.debugMode = params.debugMode;
+    this.crossSessionMessagingEnabled =
+      params.crossSessionMessagingEnabled === true;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     const normalizedOutputFormat = normalizeConfigOutputFormat(
       params.outputFormat ?? params.output?.format,
@@ -5294,6 +5298,10 @@ export class Config {
       // A failed earlier write is reported by the flag, not by throwing.
     });
     return this.sessionRegistered;
+  }
+
+  isCrossSessionMessagingEnabled(): boolean {
+    return this.crossSessionMessagingEnabled;
   }
 
   /** Serialize the peer inbox address with every other registry patch. */
