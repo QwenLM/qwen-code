@@ -4024,6 +4024,17 @@ describe('createServeApp', () => {
       expect(res.headers['cache-control']).toContain('no-cache');
     });
 
+    it('adds the validated ?daemon= origin to the shell CSP connect-src', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170')
+        .set('Host', host);
+      expect(res.status).toBe(200);
+      expect(res.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
+    });
+
     it('rejects cross-origin requests for the pre-auth shell page (CORS wall runs first)', async () => {
       // Re-pins the contract the deleted `/demo` CORS test carried: the
       // pre-auth page surface sits behind the Origin wall, so a future

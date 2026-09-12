@@ -19,7 +19,9 @@ export { resolveWebShellDir } from './web-shell-resolver.js';
  * UI loads same-origin module scripts plus the inline performance.measure
  * patch baked into `index.html`, runs shiki/mermaid (eval + wasm + blob
  * workers), pulls katex fonts/images as `data:`, and streams SSE
- * (`connect-src 'self'`). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
+ * (`connect-src 'self'` plus the validated `?daemon=` origin from
+ * `remoteDaemonConnectOrigins`; the client asks before connecting to an origin
+ * it has not used). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
  * still block clickjacking. Tightening `script-src` (drop `'unsafe-inline'`
  * via a hash, externalise the inline patch) is a follow-up, not a blocker for
  * a loopback-default local tool.
@@ -31,7 +33,6 @@ const WEB_SHELL_CSP_DIRECTIVES = [
   "font-src 'self' data:",
   "img-src 'self' data: blob:",
   "media-src 'self' data:",
-  "connect-src 'self'",
   "worker-src 'self' blob:",
   // base-uri does NOT fall back to default-src; lock it so an injected <base>
   // (the SPA renders AI-generated markdown) cannot repoint relative URLs to an
@@ -59,13 +60,45 @@ export function buildWebShellPermissionsPolicy(): string {
  */
 export function buildWebShellCsp(
   frameAncestors: readonly string[] = [],
+  connectOrigins: readonly string[] = [],
 ): string {
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
   // PDF attachments use blob URLs; live previews pin their own child source.
   const frameSrc = 'frame-src http: https: blob:';
-  return [...WEB_SHELL_CSP_DIRECTIVES, frameSrc, fa].join('; ');
+  const connectSrc = `connect-src 'self' ${connectOrigins.join(' ')}`.trim();
+  return [...WEB_SHELL_CSP_DIRECTIVES, connectSrc, frameSrc, fa].join('; ');
+}
+
+export function remoteDaemonConnectOrigins(raw: unknown): string[] {
+  // A repeated `?daemon=` parses to an array under Express's qs parser, so it is
+  // not a string. The client reads the same parameter first-value-wins
+  // (`URLSearchParams.get`), so agree with it rather than failing the whole
+  // header closed on multiplicity — that would let the client try to connect to
+  // an origin this CSP does not allow, and the shell would loop on "cannot
+  // reach the daemon" with only a console CSP violation as evidence.
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof value !== 'string') return [];
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+      url.username ||
+      url.password ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash ||
+      !/^[a-z0-9._\-[\]:]+$/iu.test(url.hostname)
+    ) {
+      return [];
+    }
+    const websocket = new URL(url.origin);
+    websocket.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return [url.origin, websocket.origin];
+  } catch {
+    return [];
+  }
 }
 
 /** Default (no-framing) Web Shell CSP. */
@@ -92,8 +125,11 @@ function createSendIndex(
   frameAncestors: readonly string[] = [],
 ): (req: Request, res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
-  return (_req: Request, res: Response): void => {
-    const csp = buildWebShellCsp(frameAncestors);
+  return (req: Request, res: Response): void => {
+    const csp = buildWebShellCsp(
+      frameAncestors,
+      remoteDaemonConnectOrigins(req.query['daemon']),
+    );
     res
       .status(200)
       .set('Content-Security-Policy', csp)

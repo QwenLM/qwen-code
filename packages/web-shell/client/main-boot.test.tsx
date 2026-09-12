@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const testState = vi.hoisted(() => ({
   containers: [] as Array<Element | null>,
   resolveToken: undefined as ((token: string) => void) | undefined,
+  removeToken: vi.fn(),
 }));
 
 vi.mock('react-dom/client', async (importOriginal) => ({
@@ -30,11 +31,15 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 }));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
+  getAllowedDaemonOrigin: (value: string) => value,
+  confirmDaemonTarget: vi.fn(),
+  isKnownDaemonTarget: () => false,
   // No token in the URL, so boot blocks on the postMessage handshake — the
   // window in which the watchdog's grace period can expire.
   getDaemonToken: () => null,
+  navigateToDaemon: vi.fn(),
   persistDaemonToken: vi.fn(),
-  removeDaemonTokenFromUrl: vi.fn(),
+  removeDaemonTokenFromUrl: testState.removeToken,
   waitForDaemonTokenMessage: () =>
     new Promise<string>((resolve) => {
       testState.resolveToken = resolve;
@@ -45,11 +50,22 @@ describe('web shell boot', () => {
   beforeEach(() => {
     testState.containers = [];
     testState.resolveToken = undefined;
+    testState.removeToken.mockClear();
     vi.resetModules();
   });
 
   afterEach(() => {
     document.body.innerHTML = '';
+    window.history.replaceState(null, '', '/');
+  });
+
+  it('keeps an unconsumed URL token when the daemon target is invalid', async () => {
+    window.history.replaceState(null, '', '/?daemon=invalid#token=example');
+    document.body.innerHTML = '<div id="root"></div>';
+    await import('./main');
+    await vi.waitFor(() => expect(testState.containers).toHaveLength(1));
+    expect(testState.removeToken).not.toHaveBeenCalled();
+    expect(testState.resolveToken).toBeUndefined();
   });
 
   it('clears the boot fallback when the app mounts after the grace period', async () => {

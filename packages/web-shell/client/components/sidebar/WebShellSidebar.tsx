@@ -1,6 +1,7 @@
 import {
   Fragment,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -143,6 +144,7 @@ import {
 import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
+import { StandaloneContext } from '../../config/standalone';
 import { LocalFilesControl } from '../LocalFilesControl';
 import { workspaceLabelForCwd } from '../../utils/workspace';
 
@@ -975,6 +977,7 @@ export function WebShellSidebar({
   onLoadStandaloneSession,
   onStandaloneNotice,
 }: WebShellSidebarProps) {
+  const standalone = useContext(StandaloneContext);
   const { t } = useI18n();
   const brand = useBrand();
   const brandName = useBrandName();
@@ -6389,12 +6392,17 @@ export function WebShellSidebar({
                   <ActivityIcon size={16} strokeWidth={1.2} />
                 </button>
               )}
-              {footerItems.has('localFiles') && (
-                <LocalFilesControl
-                  triggerClassName={styles.collapseButton}
-                  workspaces={workspaces}
-                />
-              )}
+              {footerItems.has('localFiles') &&
+                (!standalone ||
+                  new URL(
+                    workspace.baseUrl || window.location.origin,
+                    window.location.origin,
+                  ).origin === window.location.origin) && (
+                  <LocalFilesControl
+                    triggerClassName={styles.collapseButton}
+                    workspaces={workspaces}
+                  />
+                )}
               {(mobileOpen || footerItems.has('collapse')) && (
                 <button
                   className={styles.collapseButton}

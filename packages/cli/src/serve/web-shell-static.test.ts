@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildWebShellCsp,
   buildWebShellPermissionsPolicy,
+  remoteDaemonConnectOrigins,
 } from './web-shell-static.js';
 
 describe('Web Shell sandbox framing', () => {
@@ -38,5 +39,78 @@ describe('Web Shell sandbox framing', () => {
     expect(policy).toContain('payment=()');
     expect(policy).toContain('clipboard-write=(self)');
     expect(policy).not.toContain('localhost');
+  });
+
+  it('adds only a validated remote daemon to connect-src', () => {
+    expect(
+      remoteDaemonConnectOrigins('https://daemon.example.com:4170'),
+    ).toEqual([
+      'https://daemon.example.com:4170',
+      'wss://daemon.example.com:4170',
+    ]);
+    expect(remoteDaemonConnectOrigins('http://127.0.0.1:4271')).toEqual([
+      'http://127.0.0.1:4271',
+      'ws://127.0.0.1:4271',
+    ]);
+    expect(remoteDaemonConnectOrigins('http://daemon.example.com')).toEqual([
+      'http://daemon.example.com',
+      'ws://daemon.example.com',
+    ]);
+    expect(
+      remoteDaemonConnectOrigins('https://daemon.example.com/path'),
+    ).toEqual([]);
+
+    // A repeated `?daemon=` arrives as an array (Express qs). The client reads
+    // the same parameter first-value-wins, so the header must allow that value
+    // instead of emitting a CSP with no remote origin at all.
+    expect(
+      remoteDaemonConnectOrigins([
+        'https://daemon.example.com:4170',
+        'https://other.example',
+      ]),
+    ).toEqual([
+      'https://daemon.example.com:4170',
+      'wss://daemon.example.com:4170',
+    ]);
+    expect(
+      remoteDaemonConnectOrigins([
+        'file:///tmp/daemon',
+        'https://daemon.example.com:4170',
+      ]),
+    ).toEqual([]);
+    expect(remoteDaemonConnectOrigins([])).toEqual([]);
+    expect(
+      buildWebShellCsp(
+        [],
+        remoteDaemonConnectOrigins([
+          'https://daemon.example.com:4170',
+          'https://other.example',
+        ]),
+      ),
+    ).toContain(
+      "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+    );
+
+    expect(remoteDaemonConnectOrigins('http://evil.example%3Bsandbox')).toEqual(
+      [],
+    );
+    expect(remoteDaemonConnectOrigins('https://[::1]:4170')).toEqual([
+      'https://[::1]:4170',
+      'wss://[::1]:4170',
+    ]);
+    expect(
+      buildWebShellCsp(
+        [],
+        remoteDaemonConnectOrigins('http://evil.example;sandbox'),
+      ),
+    ).toBe(buildWebShellCsp());
+
+    const csp = buildWebShellCsp(
+      [],
+      remoteDaemonConnectOrigins('https://daemon.example.com:4170'),
+    );
+    expect(csp).toContain(
+      "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+    );
   });
 });

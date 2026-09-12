@@ -1,20 +1,31 @@
 import {
   useCallback,
+  useContext,
   useEffect,
   useRef,
   useState,
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
+import { StandaloneContext } from '../../config/standalone';
 import {
   useStatusReport,
+  useWorkspace,
   type DaemonMetricsSeriesBucket,
   type DaemonStatusReport,
   type DaemonStatusReportLevel,
   type DaemonStatusReportSection,
 } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  getAllowedDaemonOrigin,
+  getDaemonToken,
+  navigateToDaemon,
+} from '../../config/daemon';
 import { useI18n } from '../../i18n';
 import { ErrorBoundary } from '../ErrorBoundary';
+import { Button } from '../ui/button';
+import { Input } from '../ui/input';
+import { Label } from '../ui/label';
 import { SvgLineChart, type ChartSeries } from './SvgLineChart';
 import { UsageDashboardTab } from './UsageDashboardTab';
 import styles from './DaemonStatusDialog.module.css';
@@ -39,6 +50,12 @@ const DAEMON_TABS: ReadonlyArray<{ id: DaemonTab; labelKey: string }> = [
   { id: 'metrics', labelKey: 'daemon.tab.metrics' },
   { id: 'diagnostics', labelKey: 'daemon.tab.diagnostics' },
 ];
+const CONNECTION_STATUS_KEYS = {
+  idle: 'daemon.connection.status.idle',
+  connecting: 'daemon.connection.status.connecting',
+  connected: 'daemon.connection.status.connected',
+  error: 'daemon.connection.status.error',
+} as const;
 
 function formatUptime(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -604,8 +621,19 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
   );
 }
 
-function DaemonStatusDialogInner() {
+function DaemonStatusDialogInner({
+  onChangeTarget,
+}: {
+  onChangeTarget: (daemonOrigin: string, token?: string) => void;
+}) {
   const { t } = useI18n();
+  const workspace = useWorkspace();
+  // Switching targets navigates the page, which only the standalone shell
+  // owns; embedders keep a read-only view of the connection.
+  const standalone = useContext(StandaloneContext);
+  const [connectionAddress, setConnectionAddress] = useState(workspace.baseUrl);
+  const [connectionToken, setConnectionToken] = useState('');
+  const [connectionError, setConnectionError] = useState('');
   const [activeTab, setActiveTab] = useState<DaemonTab>('overview');
   // WAI-ARIA tabs keyboard support: roving tabindex (only the active tab is in
   // the tab order) + Arrow/Home/End moving focus and selection across the
@@ -794,6 +822,80 @@ function DaemonStatusDialogInner() {
           tabIndex={0}
           className={styles.grid}
         >
+          <Card title={t('daemon.connection.title')}>
+            <Row
+              label={t('daemon.connection.target')}
+              value={workspace.baseUrl}
+            />
+            <Row
+              label={t('daemon.connection.state')}
+              value={t(CONNECTION_STATUS_KEYS[workspace.status])}
+            />
+            {standalone && (
+              <form
+                className="mt-3 flex flex-col gap-2"
+                noValidate
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const daemonOrigin = getAllowedDaemonOrigin(
+                    connectionAddress.trim(),
+                  );
+                  if (!daemonOrigin) {
+                    setConnectionError(t('daemon.connection.invalid'));
+                    return;
+                  }
+                  setConnectionError('');
+                  onChangeTarget(
+                    daemonOrigin,
+                    connectionToken.trim() || getDaemonToken(daemonOrigin),
+                  );
+                }}
+              >
+                <Label htmlFor="daemon-connection-address">
+                  {t('daemon.connection.address')}
+                </Label>
+                <Input
+                  id="daemon-connection-address"
+                  type="url"
+                  inputMode="url"
+                  autoComplete="url"
+                  aria-invalid={connectionError ? true : undefined}
+                  aria-describedby={
+                    connectionError
+                      ? 'daemon-connection-address-error'
+                      : undefined
+                  }
+                  value={connectionAddress}
+                  onChange={(event) => {
+                    setConnectionAddress(event.target.value);
+                    setConnectionToken('');
+                  }}
+                />
+                {connectionError && (
+                  <p
+                    id="daemon-connection-address-error"
+                    role="alert"
+                    className="text-xs text-destructive"
+                  >
+                    {connectionError}
+                  </p>
+                )}
+                <Label htmlFor="daemon-connection-token">
+                  {t('daemon.connection.token')}
+                </Label>
+                <Input
+                  id="daemon-connection-token"
+                  type="password"
+                  autoComplete="off"
+                  value={connectionToken}
+                  onChange={(event) => setConnectionToken(event.target.value)}
+                />
+                <Button type="submit" size="sm" className="mt-1 w-full">
+                  {t('daemon.connection.connect')}
+                </Button>
+              </form>
+            )}
+          </Card>
           <Card title={t('daemon.overview.title')}>
             {daemon.qwenCodeVersion && (
               <Row
@@ -1109,7 +1211,11 @@ function DaemonStatusDialogInner() {
 // surfaces the actual render error (distinct from a network failure). Because
 // the parent only mounts the dialog while open, closing and re-opening remounts
 // the boundary, so a transient bad payload recovers on the next open.
-export function DaemonStatusDialog() {
+export function DaemonStatusDialog({
+  onChangeTarget = navigateToDaemon,
+}: {
+  onChangeTarget?: (daemonOrigin: string, token?: string) => void;
+} = {}) {
   const { t } = useI18n();
   return (
     <ErrorBoundary
@@ -1122,7 +1228,7 @@ export function DaemonStatusDialog() {
         </div>
       )}
     >
-      <DaemonStatusDialogInner />
+      <DaemonStatusDialogInner onChangeTarget={onChangeTarget} />
     </ErrorBoundary>
   );
 }

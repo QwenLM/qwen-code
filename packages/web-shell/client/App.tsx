@@ -17441,7 +17441,10 @@ export function App({
               onAdd={handleAddWorkspace}
               onSuggest={workspaceActions.suggestWorkspacePaths}
               onPick={
-                nativeDirectoryPickerSupported
+                nativeDirectoryPickerSupported &&
+                (!workspace.baseUrl ||
+                  new URL(workspace.baseUrl, window.location.origin).origin ===
+                    window.location.origin)
                   ? async () => {
                       const result =
                         await workspaceActions.pickWorkspaceDirectory();

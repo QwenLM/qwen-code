@@ -4,7 +4,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { StandaloneAuth } from './StandaloneAuth';
 import AppStyles from '../App.module.css';
-import { getDaemonToken } from '../config/daemon';
+import { getDaemonToken, persistDaemonToken } from '../config/daemon';
+import { confirmDaemonTarget, isKnownDaemonTarget } from '../config/daemon';
 import type { WebShellLanguage } from '../i18n';
 import type { WebShellTheme } from '../themeContext';
 
@@ -21,11 +22,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   sessionStorage.clear();
+  localStorage.clear();
 });
 async function mount(
   initialToken?: string,
   language?: WebShellLanguage,
   theme?: WebShellTheme,
+  invalidTarget?: boolean,
+  initialAddress?: string,
+  onChangeTarget?: (daemonOrigin: string, token?: string) => void,
 ) {
   await act(async () =>
     root.render(
@@ -34,6 +39,9 @@ async function mount(
         initialToken={initialToken}
         language={language}
         theme={theme}
+        invalidTarget={invalidTarget}
+        initialAddress={initialAddress}
+        onChangeTarget={onChangeTarget}
       >
         {(token) => <p>Connected {token}</p>}
       </StandaloneAuth>,
@@ -73,6 +81,12 @@ function hangingFetch() {
 function submitButton() {
   return container.querySelector('button')!;
 }
+function addressInput() {
+  return container.querySelector<HTMLInputElement>('#daemon-address')!;
+}
+function tokenInput() {
+  return container.querySelector<HTMLInputElement>('#daemon-bearer-token')!;
+}
 async function submitForm() {
   container
     .querySelector('form')!
@@ -86,9 +100,9 @@ it('retries an invalid token and stores the accepted token per tab', async () =>
   vi.stubGlobal('fetch', fetch);
   await mount('wrong');
   expect(container.textContent).toContain('Invalid or expired');
-  expect(container.querySelector('input')?.type).toBe('password');
+  expect(tokenInput().type).toBe('password');
   act(() => {
-    const input = container.querySelector('input')!;
+    const input = tokenInput();
     Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       'value',
@@ -97,11 +111,93 @@ it('retries an invalid token and stores the accepted token per tab', async () =>
   });
   await act(submitForm);
   expect(container.textContent).toContain('Connected good');
-  expect(getDaemonToken()).toBe('good');
-  expect(sessionStorage.getItem('qwen-daemon-token')).toBe('good');
+  expect(getDaemonToken('http://daemon.test')).toBe('good');
+  expect(sessionStorage.getItem('qwen-daemon-token:http://daemon.test')).toBe(
+    'good',
+  );
   expect(fetch.mock.calls[1][1].headers).toEqual({
     Authorization: 'Bearer good',
   });
+});
+it('clears a rejected stored token after tokenless access succeeds', async () => {
+  persistDaemonToken('wrong', 'http://daemon.test');
+  vi.stubGlobal(
+    'fetch',
+    vi
+      .fn()
+      .mockResolvedValueOnce(stubResponse({ status: 401 }))
+      .mockResolvedValueOnce(stubResponse({ status: 200 })),
+  );
+  await mount('wrong');
+  await act(submitForm);
+  expect(container.textContent).toContain('Connected');
+  expect(getDaemonToken('http://daemon.test')).toBeUndefined();
+});
+it('reports an invalid daemon target without contacting another daemon', async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  await mount(undefined, undefined, undefined, true, 'not-a-url');
+  expect(container.textContent).toContain('Invalid daemon address');
+  expect(container.querySelector('form')).not.toBeNull();
+  // `type="url"` plus an un-opted-out form would let native constraint
+  // validation swallow the submit for a bare `IP:port`, so the copy above is
+  // unreachable in a real browser unless noValidate is set.
+  expect(container.querySelector('form')!.noValidate).toBe(true);
+  expect(addressInput().value).toBe('not-a-url');
+  expect(fetch).not.toHaveBeenCalled();
+});
+it('lets an invalid target be replaced from the connection form', async () => {
+  const fetch = vi.fn();
+  const onChangeTarget = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    true,
+    'not-a-url',
+    onChangeTarget,
+  );
+  act(() => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(addressInput(), 'http://remote.example:4170/');
+    addressInput().dispatchEvent(new Event('input', { bubbles: true }));
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(tokenInput(), 'remote-token');
+    tokenInput().dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+  expect(onChangeTarget).toHaveBeenCalledWith(
+    'http://remote.example:4170',
+    'remote-token',
+  );
+  expect(fetch).not.toHaveBeenCalled();
+});
+it('asks before probing a daemon this browser has not connected to', async () => {
+  const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(
+      <StandaloneAuth baseUrl="http://daemon.test" unconfirmedTarget>
+        {(token) => <p>Connected {token}</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).toContain('has not connected to before');
+  expect(container.textContent).toContain('http://daemon.test');
+  expect(container.textContent).toContain('sent to the address shown above');
+  expect(submitButton().textContent).toBe('Connect');
+  expect(submitButton().disabled).toBe(false);
+  expect(fetch).not.toHaveBeenCalled();
+
+  await act(submitForm);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0][0]).toBe('http://daemon.test/capabilities');
+  expect(container.textContent).toContain('Connected');
 });
 it('distinguishes policy rejection from authentication failure', async () => {
   vi.stubGlobal(
@@ -110,7 +206,7 @@ it('distinguishes policy rejection from authentication failure', async () => {
   );
   await mount();
   expect(container.textContent).toContain('Origin or Host policy');
-  expect(container.querySelector('input')).toBeNull();
+  expect(addressInput().value).toBe('http://daemon.test');
 });
 it('keeps tokenless loopback access working', async () => {
   vi.stubGlobal(
@@ -353,7 +449,7 @@ it('leaves the submit button enabled once the token form is up', async () => {
     vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
   );
   await mount();
-  expect(container.querySelector('input')).not.toBeNull();
+  expect(tokenInput()).not.toBeNull();
   expect(submitButton().disabled).toBe(false);
   expect(container.textContent).toContain('grants full access to the daemon');
 });
@@ -367,7 +463,7 @@ it('resets the live region when a retry probe starts', async () => {
   await mount('wrong');
   expect(container.textContent).toContain('Invalid or expired');
   act(() => {
-    const input = container.querySelector('input')!;
+    const input = tokenInput();
     Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       'value',
@@ -390,7 +486,7 @@ it('keeps a manually typed token after a rejected submit', async () => {
   vi.stubGlobal('fetch', fetch);
   await mount();
   act(() => {
-    const input = container.querySelector('input')!;
+    const input = tokenInput();
     Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       'value',
@@ -401,7 +497,7 @@ it('keeps a manually typed token after a rejected submit', async () => {
   expect(container.textContent).toContain('Invalid or expired');
   // Only a rejected initial credential is cleared; a typo the operator just
   // made must stay editable instead of vanishing behind the masked input.
-  expect(container.querySelector('input')!.value).toBe('typo-token');
+  expect(tokenInput().value).toBe('typo-token');
 });
 
 it('treats a bare 503 without the failure code as transient', async () => {
@@ -560,7 +656,7 @@ it('trims a whitespace-padded typed token before probing and persisting', async 
   vi.stubGlobal('fetch', fetch);
   await mount();
   act(() => {
-    const input = container.querySelector('input')!;
+    const input = tokenInput();
     Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       'value',
@@ -569,7 +665,9 @@ it('trims a whitespace-padded typed token before probing and persisting', async 
   });
   await act(submitForm);
   expect(container.textContent).toContain('Connected padded-token');
-  expect(sessionStorage.getItem('qwen-daemon-token')).toBe('padded-token');
+  expect(sessionStorage.getItem('qwen-daemon-token:http://daemon.test')).toBe(
+    'padded-token',
+  );
   expect(fetch.mock.calls[1][1].headers).toEqual({
     Authorization: 'Bearer padded-token',
   });
@@ -592,4 +690,64 @@ it('lets a manual retry supersede an armed auto-retry', async () => {
     vi.advanceTimersByTime(60_000);
   });
   expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('remembers the confirmed target for a reload without mounting the sidebar', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 200 })),
+  );
+  await mount();
+  expect(isKnownDaemonTarget('http://daemon.test')).toBe(true);
+});
+
+it('updates the token destination hint when a local address is edited', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await act(async () =>
+    root.render(
+      <StandaloneAuth baseUrl={window.location.origin}>
+        {() => <p>Connected</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).not.toContain(
+    'sent to the address shown above',
+  );
+  act(() => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(addressInput(), 'https://remote.example');
+    addressInput().dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  expect(container.textContent).toContain('sent to the address shown above');
+  expect(
+    container.querySelector('[data-slot="card-description"]')?.textContent,
+  ).toBe('https://remote.example');
+});
+
+it('offers cross-origin diagnostics without treating network failures as permanent policy errors', async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('--allow-origin');
+  expect(container.textContent).toContain('network');
+  await act(async () => vi.advanceTimersByTimeAsync(2_000));
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('remembers only the selected daemon in the current tab across reload checks', async () => {
+  sessionStorage.clear();
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(false);
+  confirmDaemonTarget('https://remote.example');
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(true);
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(true);
+  expect(isKnownDaemonTarget('https://other.example')).toBe(false);
+  confirmDaemonTarget('https://other.example');
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(false);
+  sessionStorage.clear();
 });

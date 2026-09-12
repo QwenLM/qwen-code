@@ -195,8 +195,13 @@ let fullState: HookState = {
   error: undefined,
 };
 const seenDetails: Array<string | undefined> = [];
+const workspaceState = {
+  baseUrl: 'http://localhost:4170',
+  status: 'connected' as const,
+};
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  useWorkspace: () => workspaceState,
   useStatusReport: (options: { detail?: string } = {}) => {
     seenDetails.push(options.detail);
     if (options.detail === 'full') {
@@ -211,19 +216,26 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 }));
 
 const { DaemonStatusDialog } = await import('./DaemonStatusDialog');
+const { StandaloneContext } = await import('../../config/standalone');
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
-function mount(language: 'en' | 'zh-CN' = 'en') {
+function mount(
+  language: 'en' | 'zh-CN' = 'en',
+  onChangeTarget?: (daemonOrigin: string, token?: string) => void,
+  standalone = true,
+) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
-      <I18nProvider language={language}>
-        <DaemonStatusDialog />
-      </I18nProvider>,
+      <StandaloneContext.Provider value={standalone}>
+        <I18nProvider language={language}>
+          <DaemonStatusDialog onChangeTarget={onChangeTarget} />
+        </I18nProvider>
+      </StandaloneContext.Provider>,
     );
   });
 }
@@ -270,6 +282,93 @@ afterEach(() => {
 });
 
 describe('DaemonStatusDialog', () => {
+  it('shows and switches the daemon connection target', () => {
+    const onChangeTarget = vi.fn();
+    mount('en', onChangeTarget);
+    expect(container!.textContent).toContain('http://localhost:4170');
+    expect(container!.textContent).toContain('Connected');
+    const address = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-address',
+    )!;
+    const token = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-token',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'https://remote.example:4170/');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(token, 'remote-token');
+      token.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      address
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+    expect(onChangeTarget).toHaveBeenCalledWith(
+      'https://remote.example:4170',
+      'remote-token',
+    );
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'https://another.example:4170/');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(token.value).toBe('');
+  });
+
+  it('shows the target but no switch form outside the standalone shell', () => {
+    mount('en', vi.fn(), false);
+    expect(container!.textContent).toContain('http://localhost:4170');
+    expect(container!.querySelector('#daemon-connection-address')).toBeNull();
+  });
+
+  it('keeps an invalid daemon address on the form', () => {
+    const onChangeTarget = vi.fn();
+    mount('en', onChangeTarget);
+    const address = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-address',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'file:///tmp/daemon');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+      address
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+    const alert = container!.querySelector('[role="alert"]')!;
+    expect(alert.textContent).toContain('valid HTTP or HTTPS');
+    expect(onChangeTarget).not.toHaveBeenCalled();
+    // The rejected string stays in the field so it can be corrected in place.
+    expect(address.value).toBe('file:///tmp/daemon');
+    // Native constraint validation must not preempt the localized copy.
+    expect(address.closest('form')!.noValidate).toBe(true);
+    // The alert describes the address field, not the token field below it.
+    const formChildren = Array.from(address.closest('form')!.children);
+    expect(alert.id).toBe('daemon-connection-address-error');
+    expect(address.getAttribute('aria-invalid')).toBe('true');
+    expect(address.getAttribute('aria-describedby')).toBe(alert.id);
+    expect(formChildren.indexOf(alert)).toBeLessThan(
+      formChildren.indexOf(
+        container!.querySelector('#daemon-connection-token')!,
+      ),
+    );
+  });
+
   it('renders live summary counters with the full-detail rollup badge', () => {
     mount();
     const text = container!.textContent ?? '';

@@ -6,7 +6,13 @@ import {
   type ReactNode,
 } from 'react';
 import AppStyles from '../App.module.css';
-import { persistDaemonToken } from '../config/daemon';
+import {
+  confirmDaemonTarget,
+  getAllowedDaemonOrigin,
+  getDaemonToken,
+  navigateToDaemon,
+  persistDaemonToken,
+} from '../config/daemon';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
@@ -41,10 +47,16 @@ interface AuthCopy {
   invalidToken: string;
   enterToken: string;
   policyBlocked: string;
+  invalidAddress: string;
+  confirmTarget: string;
+  remoteHint: string;
+  remoteUnreachable: string;
+  addressLabel: string;
   tokenLabel: string;
   connect: string;
   retry: string;
   hint: string;
+  local: string;
 }
 
 // This gate renders before the app (and therefore before its I18nProvider), so
@@ -55,6 +67,8 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     connecting: 'Connecting…',
     starting: 'Daemon is starting…',
     unreachable: 'Cannot reach the daemon. Retrying…',
+    remoteUnreachable:
+      'Cannot reach the daemon. Retrying… Check the address, network, HTTPS certificate, and --allow-origin for this page origin.',
     notReady: 'Daemon is not ready. Retrying…',
     startFailed: 'Daemon failed to start.',
     invalidToken:
@@ -62,8 +76,15 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     enterToken: 'Enter the bearer token from the daemon terminal.',
     policyBlocked:
       'Access blocked by the daemon Origin or Host policy. Open its direct address, or check --allow-origin for cross-origin access.',
-    tokenLabel: 'Bearer token',
+    invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
+    confirmTarget:
+      'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
+    remoteHint:
+      'The token is sent to the address shown above. Enter only a token issued by that daemon.',
+    addressLabel: 'Daemon address',
+    tokenLabel: 'Bearer token (optional)',
     connect: 'Connect',
+    local: 'Return to local workspaces',
     retry: 'Retry',
     hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
   },
@@ -72,14 +93,22 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     connecting: '正在连接…',
     starting: '守护进程正在启动…',
     unreachable: '无法访问守护进程，正在重试…',
+    remoteUnreachable:
+      '无法访问守护进程，正在重试… 请检查地址、网络、HTTPS 证书，以及 --allow-origin 是否允许当前页面来源。',
     notReady: '守护进程尚未就绪，正在重试…',
     startFailed: '守护进程启动失败。',
     invalidToken: '令牌无效或已过期，请输入守护进程终端中显示的令牌。',
     enterToken: '请输入守护进程终端中显示的 bearer token。',
     policyBlocked:
       '访问被守护进程的 Origin 或 Host 策略拦截。请直接打开守护进程地址，或检查 --allow-origin 以允许跨域访问。',
-    tokenLabel: 'Bearer token',
+    invalidAddress: 'Daemon 地址无效。请输入 HTTP 或 HTTPS origin。',
+    confirmTarget:
+      '此页面指向一个本浏览器从未连接过的守护进程。仅在你信任它时再连接。',
+    remoteHint: '令牌会发送到上方显示的地址。请只输入该守护进程签发的令牌。',
+    addressLabel: 'Daemon 地址',
+    tokenLabel: 'Bearer token（可选）',
     connect: '连接',
+    local: '返回本地工作区',
     retry: '重试',
     hint: '该令牌拥有守护进程的完整访问权限。请仅在从守护进程终端或其二维码打开的页面中输入。',
   },
@@ -100,23 +129,43 @@ function retryAfterMs(response: Response): number | undefined {
 export function StandaloneAuth({
   baseUrl,
   initialToken,
+  initialAddress = baseUrl,
   language = 'en',
   theme = WebShellThemeId.Dark,
+  invalidTarget = false,
+  unconfirmedTarget = false,
+  onChangeTarget = navigateToDaemon,
   children,
 }: {
   baseUrl: string;
   initialToken?: string;
+  initialAddress?: string;
   /** Selects the gate copy. Defaults to English when omitted. */
   language?: WebShellLanguage;
   /** Selects the theme palette the app root will apply after mount. */
   theme?: WebShellTheme;
+  invalidTarget?: boolean;
+  /** The daemon came from a link to an origin this browser has not used. */
+  unconfirmedTarget?: boolean;
+  onChangeTarget?: (daemonOrigin: string, token?: string) => void;
   children: (token: string | undefined) => ReactNode;
 }) {
   const copy = COPY[language] ?? COPY.en;
+  const [address, setAddress] = useState(initialAddress);
   const [token, setToken] = useState(initialToken ?? '');
   const [accepted, setAccepted] = useState<{ token?: string }>();
-  const [status, setStatus] = useState(copy.connecting);
-  const [busy, setBusy] = useState(true);
+  // Nothing is sent to an unconfirmed target until the user presses Connect.
+  const [confirming, setConfirming] = useState(
+    unconfirmedTarget && !invalidTarget,
+  );
+  const [status, setStatus] = useState(
+    invalidTarget
+      ? copy.invalidAddress
+      : confirming
+        ? copy.confirmTarget
+        : copy.connecting,
+  );
+  const [busy, setBusy] = useState(!invalidTarget && !confirming);
   const [needsToken, setNeedsToken] = useState(false);
   // Every probe — the first one, a manual retry, and each auto-retry — is one
   // bump of this counter, so exactly one effect run owns the in-flight request
@@ -170,7 +219,8 @@ export function StandaloneAuth({
         });
         if (controllerRef.current !== controller) return;
         if (response.ok) {
-          if (candidate) persistDaemonToken(candidate);
+          persistDaemonToken(candidate, baseUrl);
+          confirmDaemonTarget(baseUrl);
           setAccepted({ token: candidate || undefined });
         } else if (response.status === 401) {
           setBusy(false);
@@ -222,7 +272,12 @@ export function StandaloneAuth({
       } catch {
         // Network error, or our own timeout abort. An abort from a manual
         // retry or from unmount is caught by retryIn's ownership check.
-        retryIn(RETRY_DELAY_MS, copyRef.current.unreachable);
+        retryIn(
+          RETRY_DELAY_MS,
+          baseUrl === window.location.origin
+            ? copyRef.current.unreachable
+            : copyRef.current.remoteUnreachable,
+        );
       } finally {
         clearTimeout(timeout);
       }
@@ -231,6 +286,7 @@ export function StandaloneAuth({
   );
 
   useEffect(() => {
+    if (invalidTarget || confirming) return undefined;
     void connect(candidateRef.current);
     return () => {
       controllerRef.current?.abort();
@@ -238,9 +294,11 @@ export function StandaloneAuth({
       if (timerRef.current !== null) clearTimeout(timerRef.current);
       timerRef.current = null;
     };
-  }, [connect, attempt]);
+  }, [connect, attempt, invalidTarget, confirming]);
 
   if (accepted) return children(accepted.token);
+  const normalizedAddress = getAllowedDaemonOrigin(address.trim());
+  const changingTarget = invalidTarget || normalizedAddress !== baseUrl;
   return (
     <div
       // The generated Tailwind utilities and shadcn tokens are scoped to the
@@ -258,9 +316,11 @@ export function StandaloneAuth({
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <CardTitle className="text-2xl">{copy.heading}</CardTitle>
-          <CardDescription className="font-mono text-xs break-all">
-            {baseUrl}
-          </CardDescription>
+          {normalizedAddress && (
+            <CardDescription className="font-mono text-xs break-all">
+              {normalizedAddress}
+            </CardDescription>
+          )}
         </CardHeader>
         <CardContent className="flex flex-col gap-5">
           <p
@@ -269,45 +329,91 @@ export function StandaloneAuth({
           >
             {status}
           </p>
+          {/* The address field is `type="url"`, so native constraint validation
+              would block submit — and this handler's localized invalid-address
+              copy — for the likeliest malformed input, a bare `IP:port`. The
+              app-level check below is the stricter one: it also rejects
+              non-http(s) schemes, credentials, paths, queries and hashes. */}
           <form
             className="flex flex-col gap-3"
+            noValidate
             onSubmit={(event) => {
               event.preventDefault();
+              if (!normalizedAddress) {
+                setBusy(false);
+                setStatus(copy.invalidAddress);
+                return;
+              }
+              if (changingTarget) {
+                onChangeTarget(
+                  normalizedAddress,
+                  token.trim() || getDaemonToken(normalizedAddress),
+                );
+                return;
+              }
+              // Confirming an unfamiliar target starts its first probe.
+              if (confirming) setConfirming(false);
               operatorProbeRef.current = true;
               candidateRef.current = token.trim();
               setAttempt((n) => n + 1);
             }}
           >
-            {needsToken && (
-              <>
-                <Label htmlFor="daemon-bearer-token" className="sr-only">
-                  {copy.tokenLabel}
-                </Label>
-                <Input
-                  id="daemon-bearer-token"
-                  type="password"
-                  autoComplete="off"
-                  autoFocus
-                  placeholder={copy.tokenLabel}
-                  className="h-11 text-center font-mono text-base tracking-[0.18em]"
-                  value={token}
-                  onChange={(event) => setToken(event.target.value)}
-                />
-              </>
-            )}
+            <Label htmlFor="daemon-address">{copy.addressLabel}</Label>
+            <Input
+              id="daemon-address"
+              type="url"
+              inputMode="url"
+              autoComplete="url"
+              autoFocus={invalidTarget}
+              placeholder="https://daemon.example.com:4170"
+              className="h-11 font-mono"
+              value={address}
+              onChange={(event) => {
+                setAddress(event.target.value);
+                setToken('');
+              }}
+            />
+            <Label htmlFor="daemon-bearer-token">{copy.tokenLabel}</Label>
+            <Input
+              id="daemon-bearer-token"
+              type="password"
+              autoComplete="off"
+              autoFocus={needsToken}
+              placeholder={copy.tokenLabel}
+              className="h-11 font-mono text-base tracking-[0.18em]"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+            />
             <Button
               type="submit"
               size="lg"
               className="h-11 w-full text-base"
-              disabled={busy}
+              disabled={busy && !changingTarget}
             >
-              {busy ? copy.connecting : needsToken ? copy.connect : copy.retry}
+              {changingTarget || confirming
+                ? copy.connect
+                : busy
+                  ? copy.connecting
+                  : needsToken
+                    ? copy.connect
+                    : copy.retry}
             </Button>
           </form>
+          {(invalidTarget || baseUrl !== window.location.origin) && (
+            <Button
+              variant="outline"
+              onClick={() => onChangeTarget(window.location.origin)}
+            >
+              {copy.local}
+            </Button>
+          )}
         </CardContent>
         <CardFooter className="justify-center">
           <p className="text-center text-xs text-muted-foreground">
             {copy.hint}
+            {normalizedAddress &&
+              normalizedAddress !== window.location.origin &&
+              ` ${copy.remoteHint}`}
           </p>
         </CardFooter>
       </Card>
