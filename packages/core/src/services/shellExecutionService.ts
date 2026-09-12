@@ -163,6 +163,14 @@ export function isSignalTermination(
   return signal !== null && signal !== 0;
 }
 
+function isTimeoutAbortReason(reason: unknown): boolean {
+  try {
+    return (reason as { name?: unknown } | null)?.name === 'TimeoutError';
+  } catch {
+    return false;
+  }
+}
+
 /** A structured result from a shell command execution. */
 export interface ShellExecutionResult {
   /**
@@ -960,12 +968,11 @@ export class ShellExecutionService {
           signal: NodeJS.Signals | null,
         ) => {
           const { finalBuffer } = cleanup();
+          const normalizedSignal = signal ? os.constants.signals[signal] : null;
           // A timeout abort keeps merge-base semantics: shell.ts keys its
           // timeout copy off `aborted`, so a command that trap-exits 0 on
           // the timeout kill must not read as plain success.
-          const timeoutAbort =
-            (abortSignal.reason as { name?: unknown } | null)?.name ===
-            'TimeoutError';
+          const timeoutAbort = isTimeoutAbortReason(abortSignal.reason);
           // Ensure we don't add an extra newline if stdout already ends with one.
           const separator = stdout.endsWith('\n') ? '' : '\n';
           const combinedOutput =
@@ -993,7 +1000,7 @@ export class ShellExecutionService {
             rawOutput: finalBuffer,
             output: boundedOutput,
             exitCode: code,
-            signal: signal ? os.constants.signals[signal] : null,
+            signal: normalizedSignal,
             error,
             // A cancel that lands in the zombie window (kernel reaped the
             // child, Node has not delivered 'exit' yet) cannot be seen by
@@ -1011,8 +1018,10 @@ export class ShellExecutionService {
             // Closing either needs kernel-side pending-exit insight, not a
             // liveness probe (a zombie answers kill(pid, 0) successfully).
             aborted:
-              (cancelKillDispatched && (signal !== null || code !== 0)) ||
-              timeoutAbort,
+              cancelKillDispatched &&
+              (isSignalTermination(normalizedSignal) ||
+                code !== 0 ||
+                timeoutAbort),
             pid: undefined,
             executionMethod: 'child_process',
           });
@@ -1953,6 +1962,8 @@ export class ShellExecutionService {
 
         const exitDisposable = ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
+            const normalizedSignal = signal === 0 ? null : (signal ?? null);
+            const timeoutAbort = isTimeoutAbortReason(abortSignal.reason);
             // Normal exits may intentionally leave background children alive.
             const pendingCancel =
               cancelAfterLeaderExit && isSignalTermination(signal ?? null)
@@ -2013,9 +2024,13 @@ export class ShellExecutionService {
                   rawOutput: finalBuffer,
                   output: fullOutput,
                   exitCode,
-                  signal: signal === 0 ? null : (signal ?? null),
+                  signal: normalizedSignal,
                   error,
-                  aborted: cancelKillDispatched,
+                  aborted:
+                    cancelKillDispatched &&
+                    (isSignalTermination(normalizedSignal) ||
+                      exitCode !== 0 ||
+                      timeoutAbort),
                   pid: ptyProcess.pid,
                   executionMethod:
                     (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ??

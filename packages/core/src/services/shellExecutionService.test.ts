@@ -402,6 +402,88 @@ describe('ShellExecutionService', () => {
       expect(result.signal).toBeNull();
     });
 
+    it.each([
+      { exitCode: 0, signal: 0, timeout: false, aborted: false },
+      { exitCode: 0, signal: 15, timeout: false, aborted: true },
+      { exitCode: 1, signal: 0, timeout: false, aborted: true },
+      { exitCode: 0, signal: 0, timeout: true, aborted: true },
+    ])('classifies a dispatched PTY cancel: %j', async (expected) => {
+      mockPlatform.mockReturnValue('linux');
+      mockProcessKill.mockReturnValue(true);
+      const { result } = await simulateExecution(
+        'command',
+        (pty, controller) => {
+          pty.onData.mock.calls[0][0]('completed\n');
+          controller.abort(
+            expected.timeout
+              ? new DOMException('Timed out', 'TimeoutError')
+              : undefined,
+          );
+          pty.onExit.mock.calls[0][0](expected);
+        },
+      );
+
+      expect(mockProcessKill).toHaveBeenCalledWith(mockPtyProcess.pid, 0);
+      expect(mockProcessKill).toHaveBeenCalledWith(
+        -mockPtyProcess.pid,
+        'SIGTERM',
+      );
+      expect(result.aborted).toBe(expected.aborted);
+      expect(result.exitCode).toBe(expected.exitCode);
+      expect(result.signal).toBe(expected.signal || null);
+      expect(result.output).toContain('completed');
+    });
+
+    it('does not flag a PTY timeout when the exited pid prevents kill dispatch', async () => {
+      mockPlatform.mockReturnValue('linux');
+      mockProcessKill.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+      });
+      const { result } = await simulateExecution(
+        'command',
+        (pty, controller) => {
+          controller.abort(new DOMException('Timed out', 'TimeoutError'));
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 0 });
+        },
+      );
+
+      expect(result.aborted).toBe(false);
+      expect(
+        mockProcessKill.mock.calls.every(([, signal]) => signal === 0),
+      ).toBe(true);
+    });
+
+    it('settles PTY cancellation when the abort reason name getter throws', async () => {
+      const { result } = await simulateExecution(
+        'command',
+        (pty, controller) => {
+          controller.abort({
+            get name() {
+              throw new Error('unreadable name');
+            },
+          });
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 15 });
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(result.signal).toBe(15);
+    });
+
+    it('does not flag a late PTY timeout after exit without kill dispatch', async () => {
+      mockPlatform.mockReturnValue('linux');
+      const { result } = await simulateExecution(
+        'command',
+        (pty, controller) => {
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 0 });
+          controller.abort(new DOMException('Timed out', 'TimeoutError'));
+        },
+      );
+
+      expect(result.aborted).toBe(false);
+      expect(mockProcessKill).not.toHaveBeenCalled();
+    });
+
     it('disposes PTY terminal resources on natural exit', async () => {
       const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
       const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
@@ -3484,6 +3566,25 @@ describe('ShellExecutionService child_process fallback', () => {
       );
 
       expect(result.aborted).toBe(true);
+    });
+
+    it('does not flag a late child timeout after exit without kill dispatch', async () => {
+      const { result } = await simulateExecution(
+        'command',
+        (cp, controller) => {
+          Object.defineProperty(cp, 'exitCode', {
+            value: 0,
+            writable: true,
+            configurable: true,
+          });
+          controller.abort(new DOMException('Timed out', 'TimeoutError'));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+      );
+
+      expect(result.aborted).toBe(false);
+      expect(mockProcessKill).not.toHaveBeenCalled();
     });
 
     it('a timeout abort keeps aborted even when the command trap-exits 0', async () => {
