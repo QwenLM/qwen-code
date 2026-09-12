@@ -14,6 +14,7 @@ import {
   Storage,
   isSubpath,
   unescapePath,
+  unescapeShellSpecials,
   readManyFiles,
   shouldRunVisionBridge,
   emptyMcpResourceText,
@@ -144,7 +145,7 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
       pathEndIndex++;
     }
     const rawAtPath = query.substring(atIndex, pathEndIndex);
-    // unescapePath expects the @ symbol to be present, and will handle it.
+    // Preserve Windows separators until filesystem resolution can disambiguate them.
     const atPath = unescapePath(rawAtPath);
     parts.push({ type: 'atPath', content: atPath });
     currentIndex = pathEndIndex;
@@ -290,7 +291,7 @@ export async function resolveAtCommandQuery({
       continue;
     }
 
-    const pathName = originalAtPath.substring(1);
+    let pathName = originalAtPath.substring(1);
 
     // Extension reference (`@ext:<name>`): detected BEFORE MCP/filesystem
     // resolution. Only matches when the path starts with `ext:` and the name
@@ -376,19 +377,44 @@ export async function resolveAtCommandQuery({
       continue;
     }
 
-    // Check if path should be ignored based on filtering options
     const workspaceContext = config.getWorkspaceContext();
-
-    // Check if path is in project temp directory
-    const absolutePathName = path.isAbsolute(pathName)
-      ? pathName
-      : path.resolve(workspaceContext.getDirectories()[0] || '', pathName);
-
+    const isAllowedPath = (candidate: string) => {
+      const absolute = path.resolve(
+        workspaceContext.getDirectories()[0] || '',
+        candidate,
+      );
+      return (
+        isSubpath(configuredProjectTempDir, absolute) ||
+        isSubpath(projectTempDir, absolute) ||
+        workspaceContext.isPathWithinWorkspace(candidate)
+      );
+    };
+    const decodedPath = unescapeShellSpecials(pathName);
     if (
-      !isSubpath(configuredProjectTempDir, absolutePathName) &&
-      !isSubpath(projectTempDir, absolutePathName) &&
-      !workspaceContext.isPathWithinWorkspace(pathName)
+      process.platform === 'win32' &&
+      decodedPath !== pathName &&
+      (isAllowedPath(pathName) || isAllowedPath(decodedPath))
     ) {
+      // An escaped workspace name can put the raw spelling outside the root.
+      // Probe existence only (never contents) before applying policy, so an
+      // existing but ignored, inaccessible, or out-of-root path cannot select
+      // an unrelated decoded sibling. Dangling symlinks count as existing.
+      let missing = true;
+      for (const dir of workspaceContext.getDirectories()) {
+        try {
+          await fs.lstat(path.resolve(dir, pathName));
+          missing = false;
+          break;
+        } catch (error) {
+          if (!isNodeError(error) || error.code !== 'ENOENT') {
+            missing = false;
+            break;
+          }
+        }
+      }
+      if (missing) pathName = decodedPath;
+    }
+    if (!isAllowedPath(pathName)) {
       onDebugMessage(
         `Path ${pathName} is not in the workspace and will be skipped.`,
       );

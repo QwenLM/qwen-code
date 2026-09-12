@@ -9,12 +9,19 @@ import { constants as fsConstants } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, escapePath } from '@qwen-code/qwen-code-core';
 import { wrapForMultiplexer } from '../../utils/osc.js';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 
 const PROCESS_TIMEOUT_MS = 5000;
+
+export function formatClipboardFileReference(filePath: string): string {
+  const normalizedPath = /^(?:[A-Za-z]:\\|\\\\)/.test(filePath)
+    ? filePath.replaceAll('\\', '/')
+    : filePath;
+  return `@${escapePath(normalizedPath)}`;
+}
 
 /**
  * Write text to clipboard via OSC 52 escape sequence (works over SSH).
@@ -342,6 +349,34 @@ export async function clipboardHasImage(
   } catch (error) {
     debugLogger.error('Error checking clipboard for image:', error);
     return false;
+  }
+}
+
+/**
+ * Reads file paths copied from Windows Explorer.
+ * @param onUnavailable Called when the native clipboard module cannot load.
+ */
+export async function readClipboardFiles(
+  onUnavailable?: () => void,
+): Promise<string[]> {
+  if (process.platform !== 'win32') {
+    return [];
+  }
+
+  try {
+    const mod = await getClipboardModule();
+    if (!mod) {
+      onUnavailable?.();
+      return [];
+    }
+    const clipboard = new mod.ClipboardManager();
+    if (!clipboard.hasFormat('files')) {
+      return [];
+    }
+    return clipboard.getFiles();
+  } catch (error) {
+    debugLogger.error('Error reading clipboard files:', error);
+    return [];
   }
 }
 
