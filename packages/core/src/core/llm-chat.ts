@@ -137,6 +137,7 @@ import {
   getManualPlanExitSystemReminder,
 } from './prompts.js';
 import {
+  isFlushedToolCallPark,
   isRetryableStatuslessUpstreamError,
   isRetryableStreamTransportError,
 } from './stream-transport-retry.js';
@@ -3624,6 +3625,31 @@ export class LlmChat {
             lastFinishReason = undefined;
             self.lastObservedClosedFinishReason = undefined;
             for await (const chunk of stream) {
+              // A parked tool-call finish the pipeline released on its error
+              // path, reaching an attempt this loop counts nothing delivered
+              // for and with no continuation in flight. The release was decided
+              // from the pipeline's own view of what it yielded, which includes
+              // chunks the protocol-tag suppression in processStreamResponse
+              // withheld — a leading-JSON first chunk, for one. Counting it
+              // here would flip the delivered flags and shut the replay gate
+              // that is in fact still open, killing on one attempt a turn the
+              // replay arm could recover; forwarding it would dispatch a tool
+              // call over output the caller never saw. Drop it and let replay
+              // re-send. The two content terms mirror the replay gate's, so
+              // this fires only where replay is still the live option on
+              // content grounds; the error-path partial turn this attempt
+              // persisted is popped by that arm. Where replay does not end up
+              // firing — its budget spent, or a failure class it does not own
+              // — the turn fails as it would have anyway, and all the drop
+              // costs is that a tool call belonging to an attempt the caller
+              // never saw is not dispatched for it.
+              if (
+                isFlushedToolCallPark(chunk) &&
+                !streamYieldedContentChunk &&
+                transportContinuationText.trim().length === 0
+              ) {
+                continue;
+              }
               if (hasCandidateOutput(chunk)) {
                 streamYieldedChunk = true;
                 streamYieldedAnyChunk = true;

@@ -214,11 +214,19 @@ export function classifyRetryError(
   // a moderation rejection necessarily arrives after the 200, and a gateway can
   // relay a credential, billing or malformed-request rejection the same way.
   // Nothing above can fail fast on them, and re-sending the identical request
-  // can never succeed. `.type` is checked alongside `code` because that is
-  // where the SDK puts `invalid_request_error`, with `code` null.
+  // can never succeed.
+  //
+  // `.type` is read from both sources `code` is read from, because a body can
+  // carry a specific `code` beside a class-naming `type` and either may be the
+  // permanent one. On the object route `getProviderFields` reads the instance
+  // property — that is where the SDK puts `invalid_request_error`, with `code`
+  // null. On the message-scraped route the two arrive separately too:
+  // `details.providerCode` is the collapsed `code ?? type`, so a sibling `code`
+  // hides the `type` unless `details.providerType` is consulted as well.
   if (
     isPermanentProviderCode(providerCode) ||
-    isPermanentProviderCode(providerFields.providerType)
+    isPermanentProviderCode(providerFields.providerType) ||
+    isPermanentProviderCode(details.providerType)
   ) {
     return {
       kind: statuslessKind,

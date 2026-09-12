@@ -13889,6 +13889,129 @@ describe('LlmChat', async () => {
         }
       });
 
+      it('replays instead of counting a flushed tool call the caller never received', async () => {
+        // R16-2, end-to-end over the real pipeline. The release decision is the
+        // pipeline's, and it reads what the pipeline yielded — but LlmChat
+        // withholds a leading-JSON chunk whole while its protocol-tag detector
+        // is blocking, so the two delivered-content flags can disagree. When
+        // they do, the released functionCall is the first thing this loop has
+        // seen: counting it flips `streamYieldedContentChunk` and
+        // `streamYieldedFunctionCall`, which shuts the replay gate that was
+        // still open and the continuation gate beside it, so a cut the replay
+        // arm could have recovered kills the turn on one attempt and leaves a
+        // tool call in history that was never dispatched to a caller that saw
+        // nothing. The merge base had no flush at all and replayed cleanly.
+        vi.useFakeTimers();
+        try {
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+          const openaiChunk = (
+            id: string,
+            delta: Record<string, unknown>,
+            finishReason: string | null = null,
+          ) =>
+            ({
+              id,
+              created: 1,
+              model: 'test-model',
+              choices: [{ index: 0, delta, finish_reason: finishReason }],
+            }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+          const create = vi
+            .fn()
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                // Leading JSON: the detector blocks and LlmChat withholds the
+                // chunk, while the pipeline counts it as delivered.
+                yield openaiChunk('chunk-json', {
+                  content: '{"function_call": {"name": "read_file"}',
+                });
+                yield openaiChunk('chunk-tool-open', {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_1',
+                      type: 'function',
+                      function: {
+                        name: 'read_file',
+                        arguments: '{"file_path":"a.sql"}',
+                      },
+                    },
+                  ],
+                });
+                yield openaiChunk('chunk-finish', {}, 'tool_calls');
+                throw upstreamError;
+              })(),
+            )
+            // Consumed by the replay, which is the point: the turn recovers.
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                yield openaiChunk('chunk-retry-answer', {
+                  content: 'the answer after replay',
+                });
+                yield openaiChunk('chunk-retry-finish', {}, 'stop');
+              })(),
+            );
+          const provider = {
+            buildClient: () =>
+              ({ chat: { completions: { create } } }) as unknown as OpenAI,
+            buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+              request,
+            buildHeaders: () => ({}),
+            getDefaultGenerationConfig: () => ({}),
+          } as OpenAICompatibleProvider;
+          const generator = new OpenAIContentGenerator(
+            { model: 'test-model', authType: AuthType.USE_OPENAI },
+            mockConfig,
+            provider,
+          );
+          vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+          vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+            model: 'test-model',
+            authType: AuthType.USE_OPENAI,
+          });
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-flushed-toolcall-not-received',
+          );
+          const events: StreamEvent[] = [];
+          let caughtError: unknown;
+          const collecting = (async () => {
+            try {
+              for await (const event of stream) events.push(event);
+            } catch (error) {
+              caughtError = error;
+            }
+          })();
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(10_000);
+          await collecting;
+
+          expect(caughtError).toBeUndefined();
+          expect(create).toHaveBeenCalledTimes(2);
+          // A replay, not a continuation: nothing was delivered, so the
+          // original request is re-sent rather than resumed.
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(1);
+          expect(
+            retries[0]!.type === StreamEventType.RETRY &&
+              retries[0]!.isContinuation,
+          ).toBeFalsy();
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'the answer after replay' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('releases a parked tool-call finish on a continuation attempt instead of continuing again', async () => {
         // Sibling of the case above, one attempt later. Attempt 1 delivered
         // prose and was cut, so the turn is mid-continuation and the replay

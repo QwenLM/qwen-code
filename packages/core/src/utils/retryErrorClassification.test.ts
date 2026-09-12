@@ -712,6 +712,48 @@ describe('classifyRetryError', () => {
     });
   });
 
+  it('fails fast on a permanent provider type when the body also carries a code', () => {
+    // R16-1. On the message-embedded route the provider body is scraped, and
+    // `getRateLimitErrorDetails` collapses that body's `code` and `type` into a
+    // single `providerCode` (`String(payload.code ?? payload.type)`), so a
+    // permanent `type` was dropped whenever a sibling `code` survived. The
+    // object route never had the hole — `getProviderFields` reads `.type`
+    // separately. Moderation is the case the permanence list exists for: a
+    // gateway relaying `type: 'content_filter'` beside its own `code` is still
+    // a rejection that re-sending the identical request cannot change.
+    const moderation = new Error(
+      'event:error\ndata:{"error":{"message":"blocked","type":"content_filter","code":"moderation_blocked"},"request_id":"req-1"}',
+    );
+    expect(classifyRetryError(moderation)).toMatchObject({
+      diagnosis: 'fail-fast',
+      reason: 'permanent-provider-code',
+    });
+    expect(isRetryableUpstreamError(moderation)).toBe(false);
+
+    // The same collapse on OpenAI's malformed-request shape, which carries both
+    // fields: `.type` names the permanent class, `.code` the specific field.
+    const malformed = new Error(
+      'event:error\ndata:{"error":{"type":"invalid_request_error","code":"missing_required_field","message":"x is required"},"request_id":"req-2"}',
+    );
+    expect(classifyRetryError(malformed)).toMatchObject({
+      diagnosis: 'fail-fast',
+      reason: 'permanent-provider-code',
+    });
+    expect(isRetryableUpstreamError(malformed)).toBe(false);
+
+    // The other end of the same knob: reading `type` off the scraped body must
+    // not make every body-named class permanent. A transient one keeps the
+    // verdict the request-id branch gives it.
+    const transient = new Error(
+      'event:error\ndata:{"error":{"message":"upstream died","type":"api_error","code":"upstream_500"},"request_id":"req-3"}',
+    );
+    expect(classifyRetryError(transient)).toMatchObject({
+      diagnosis: 'retryable',
+      reason: 'upstream-error-without-status',
+    });
+    expect(isRetryableUpstreamError(transient)).toBe(true);
+  });
+
   it('fails fast on a permanent provider type from the real SDK error', () => {
     // The hand-built case above pins the guard's reaction to an assumed SDK
     // output; this drives the real constructor, so a dependency bump that

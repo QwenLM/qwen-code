@@ -46,6 +46,7 @@ import {
 } from '../stream-guards.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
+import { markFlushedToolCallPark } from '../stream-transport-retry.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
@@ -818,6 +819,15 @@ export class ContentGenerationPipeline {
           pendingFinishResponse,
           pendingFinishProtocolTagSanitized,
         );
+        // `contentYielded` is this pipeline's view of what was delivered, and
+        // the consumer can still withhold a chunk it was handed — LlmChat's
+        // protocol-tag suppression drops a leading-JSON chunk whole. Tag a
+        // released tool call so the send loop, which knows what actually
+        // reached the caller, can refuse to let it shut a replay gate that is
+        // in fact still open.
+        if (parkedHasToolCall) {
+          markFlushedToolCallPark(pendingFinishResponse);
+        }
         yield pendingFinishResponse;
         finishYielded = true;
       }
