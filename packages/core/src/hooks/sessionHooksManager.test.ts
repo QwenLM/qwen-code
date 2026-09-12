@@ -587,6 +587,92 @@ describe('SessionHooksManager', () => {
       ).toBe(0);
     });
 
+    it('matches an unanchored regex anywhere in the target, like settings hooks', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash.*',
+        callback,
+        'Test error',
+      );
+
+      expect(
+        manager.getMatchingHooks(
+          'session-1',
+          HookEventName.PreToolUse,
+          'RunBashCommand',
+        ).length,
+      ).toBe(1);
+    });
+
+    it('matches every target with an empty matcher, as skill hooks without one are stored', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        '',
+        callback,
+        'Test error',
+      );
+
+      for (const tool of ['write_file', 'run_shell_command']) {
+        expect(
+          manager.getMatchingHooks('session-1', HookEventName.PreToolUse, tool)
+            .length,
+        ).toBe(1);
+      }
+    });
+
+    it('matches a tool id inside a longer id, so edit also covers notebook_edit', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'edit',
+        callback,
+        'Test error',
+      );
+
+      expect(
+        manager.getMatchingHooks(
+          'session-1',
+          HookEventName.PreToolUse,
+          'notebook_edit',
+        ).length,
+      ).toBe(1);
+      expect(
+        manager.getMatchingHooks(
+          'session-1',
+          HookEventName.PreToolUse,
+          'write_file',
+        ).length,
+      ).toBe(0);
+    });
+
+    it('keeps a wildcard list entry matching every tool', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'write_file|*',
+        callback,
+        'Test error',
+      );
+
+      expect(
+        manager.getMatchingHooks(
+          'session-1',
+          HookEventName.PreToolUse,
+          'run_shell_command',
+        ).length,
+      ).toBe(1);
+    });
+
     it('should fallback to exact match for invalid regex', () => {
       const callback = vi.fn().mockResolvedValue({ continue: true });
 
