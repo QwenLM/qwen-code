@@ -877,11 +877,7 @@ describe('loggers', () => {
       ).not.toHaveBeenCalled();
     });
 
-    it('emits response_text as a present-but-empty key when logPrompts is off', () => {
-      const configWithPromptsOff = {
-        ...mockConfig,
-        getTelemetryLogPromptsEnabled: () => false,
-      } as unknown as Config;
+    it('emits response_text as a present-but-empty key when the event has no response text', () => {
       const event = new ApiResponseEvent(
         'test-response-id',
         'test-model',
@@ -889,7 +885,7 @@ describe('loggers', () => {
         'prompt-id-1',
       );
 
-      logApiResponse(configWithPromptsOff, event);
+      logApiResponse(mockConfig, event);
 
       const attributes = mockLogger.emit.mock.calls[0]![0].attributes;
       expect(
@@ -1121,14 +1117,10 @@ describe('loggers', () => {
       });
     });
 
-    it('emits request_text as a present-but-empty key when logPrompts is off', () => {
-      const configWithPromptsOff = {
-        ...mockConfig,
-        getTelemetryLogPromptsEnabled: () => false,
-      } as unknown as Config;
-      const event = new ApiRequestEvent('test-model', 'prompt-id-7', undefined);
+    it('emits request_text as a present-but-empty key when the event has no request text', () => {
+      const event = new ApiRequestEvent('test-model', 'prompt-id-7');
 
-      logApiRequest(configWithPromptsOff, event);
+      logApiRequest(mockConfig, event);
 
       const attributes = mockLogger.emit.mock.calls[0]![0].attributes;
       expect(
