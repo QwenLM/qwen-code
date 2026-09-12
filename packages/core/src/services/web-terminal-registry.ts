@@ -40,6 +40,7 @@ export interface WebTerminalSnapshot {
   exited: boolean;
   exitCode?: number;
   workspaceCwd: string;
+  handlesPrimaryDa?: boolean;
 }
 
 export interface CreateWebTerminalOptions {
@@ -61,80 +62,6 @@ const MAX_UNACKNOWLEDGED_INPUT_BYTES = 256 * 1024;
 export const MAX_CONCURRENT_WEB_TERMINALS = 8;
 /** Reclaim a PTY session after this long with no connected listener. */
 const IDLE_RECLAIM_MS = 15 * 60 * 1000;
-
-/**
- * Terminal queries a probing shell emits — requests, not display content —
- * reach this registry as ordinary PTY output because the bundled ConPTY
- * backend answers none of them itself (see shellExecutionService.ts). Recording
- * one in the scrollback lets a reconnect that replays `session.buffer` make the
- * client's xterm.js re-answer it and write the fresh reply back into the
- * still-live shell's stdin — and leaving one in the live stream lets the
- * browser answer it a second time, alongside the server-side responder.
- *
- * So only the families the pinned `@xterm/headless` 5.5.0 responder actually
- * answers are matched, giving every probe exactly one answerer: Device
- * Attributes (`c`, incl. the `>` intermediate), Device Status Report
- * (`n`/`?n`), DECRQM (`$ p`) and DECRQSS (the DCS request
- * `ESC P $ q ... ESC \`). `=`-DA3, XTVERSION (`> q`) and DECREQTPARM (`x`) are
- * matched as well although no build answers them: their finals/intermediates
- * are never display content, so removing them cannot drop rendered output, and
- * leaving them in the replay would only re-parse a request nobody answers.
- *
- * The OSC 10/11/12/4 colour queries are deliberately NOT matched. The pinned
- * responder answers none of them: `onData` carries DA/DSR/DECRQM/DECRQSS only,
- * while `_setOrReportSpecialColor` reports on the internal `_onColor` emitter,
- * which the headless `Terminal` does not expose (`term.onColor` is `undefined`
- * on 5.5.0) and which nothing in this file subscribes to. Scrubbing that
- * family therefore deleted it from the browser's stream too and left a probing
- * program unanswered — where the browser's own xterm.js 6.0.0
- * `_handleColorEvent` is the answerer and answered it at the merge base. The
- * colour queries a reconnect replay re-answers are part of the
- * replay-suppression redesign tracked in #11734.
- */
-// `no-control-regex` fires on the ESC/BEL bytes, which is the whole point here:
-// these are terminal query sequences, not stray controls.
-const TERMINAL_QUERY_SEQUENCE_RE =
-  // eslint-disable-next-line no-control-regex
-  /\x1b\[[0-9;>?=]*[cnx]|\x1b\[[0-9;?]*\$[pq]|\x1b\[>[0-9;]*q|\x1bP\$q(?:[^\x1b]|\x1b(?!\\))*\x1b\\/g;
-
-/**
- * An incomplete trailing escape sequence — a query node-pty split across two
- * chunks. It is carried to the next chunk and stripped as a whole rather than
- * left to leak the partial probe into the scrollback — or, on the live path,
- * to render the tail of a probe as text. Only viable query prefixes are held:
- * a CSI introducer with its parameter run (the complete sequence is filtered by
- * the regex above, so a non-query CSI still passes through), and DECRQSS, which
- * arrives as DCS (`ESC P $ q ... ESC \`) — both the introducer (`\x1bP`,
- * `\x1bP$`) and the full body are held back the same way. No OSC prefix is
- * held: no OSC family is stripped any more.
- */
-const PARTIAL_ESCAPE_SUFFIX_RE =
-  // eslint-disable-next-line no-control-regex
-  /(?:\x1b|\x1b\[[0-9;>?=$]*|\x1bP\$q(?:[^\x1b]|\x1b(?!\\))*|\x1bP\$?)$/;
-
-/**
- * Stateful per-session stripper: `node-pty` may deliver a probe split across
- * two chunks, so an incomplete trailing escape sequence is held back until the
- * next chunk completes (or never, if the stream simply ends — a trailing
- * partial probe is a few bytes of a query nobody answered, so dropping it is
- * harmless). The hold is capped at MAX_HELD_ESCAPE_CHARS: a real query is a
- * few dozen bytes, so anything longer is payload, not a split probe, and is
- * flushed whole rather than swallowed.
- */
-const MAX_HELD_ESCAPE_CHARS = 256;
-
-class TerminalQueryStripper {
-  private pending = '';
-
-  strip(data: string): string {
-    const combined = this.pending + data;
-    const partial = PARTIAL_ESCAPE_SUFFIX_RE.exec(combined);
-    const hold = partial !== null && partial[0].length <= MAX_HELD_ESCAPE_CHARS;
-    this.pending = hold ? partial![0] : '';
-    const complete = hold ? combined.slice(0, partial!.index) : combined;
-    return complete.replace(TERMINAL_QUERY_SEQUENCE_RE, '');
-  }
-}
 
 interface PtySession {
   pty: WebTerminalPty;
@@ -314,14 +241,8 @@ export class WebTerminalRegistry {
     delete env['FORCE_COLOR'];
     delete env['npm_config_prefix'];
     const useBundledConpty = os.platform() === 'win32';
-    // The bundled ConPTY backend answers no terminal queries itself (see
-    // shellExecutionService.ts), so a probing shell — PowerShell's startup DA
-    // probe under COMSPEC=powershell — would otherwise stall for its full
-    // timeout and leave its query bytes in the scrollback. Load a headless
-    // terminal up front (the import is cached, so only the first terminal pays
-    // it) to answer the probe server-side; handleData feeds it the PTY stream
-    // and strips the query bytes from the scrollback so a reconnect replay
-    // cannot make the client re-answer them into the still-live shell.
+    // PowerShell can probe primary DA before a browser attaches. The bundled
+    // backend needs a server answer; renderer-dependent queries stay client-owned.
     let queryTerminal: Terminal | undefined;
     if (useBundledConpty) {
       // `loadXtermHeadless` is a suspension point AFTER the getPty() re-checks
@@ -343,20 +264,12 @@ export class WebTerminalRegistry {
           allowProposedApi: true,
           cols: 80,
           rows: 24,
+          scrollback: 0,
           logLevel: 'off',
         });
       }
-      // No responder (headlessModule undefined): the query stays unanswered (a
-      // bounded ~2s stall), never injected.
+      // Without headless, the browser answers live DA; startup may time out.
     }
-    // Tie the stripper to the responder it complements. Without a responder
-    // the browser is the only terminal that can answer, so stripping here
-    // would delete a query nobody is left to answer — permanently, because
-    // loadXtermHeadless memoizes its rejection for the life of the process.
-    // Only strip when a responder is actually present to answer the queries.
-    const queryStripper = queryTerminal
-      ? new TerminalQueryStripper()
-      : undefined;
     let spawned: SpawnedWebTerminalPty;
     let proc: WebTerminalPty;
     let queryReplyDisposable: { dispose(): void } | undefined;
@@ -373,11 +286,6 @@ export class WebTerminalRegistry {
         0,
         session.unacknowledgedInputBytes - Buffer.byteLength(data),
       );
-      // Feed the headless responder so a bundled-backend query is answered
-      // server-side (the browser is not guaranteed to be attached when the
-      // startup probe fires). Strip the query from the scrollback AND from
-      // what reaches the live listeners: the browser's xterm.js would also
-      // answer it, and a reconnect replay of `buffer` would re-emit it.
       if (queryTerminal) {
         try {
           queryTerminal.write(data);
@@ -385,7 +293,7 @@ export class WebTerminalRegistry {
           // Terminal disposed mid-stream (release raced a trailing chunk).
         }
       }
-      let buffered = queryStripper ? queryStripper.strip(data) : data;
+      let buffered = data;
       if (Buffer.byteLength(buffered) > MAX_BUFFER_BYTES) {
         buffered = Buffer.from(buffered)
           .subarray(-MAX_BUFFER_BYTES)
@@ -519,6 +427,8 @@ export class WebTerminalRegistry {
       };
       if (queryTerminal) {
         queryReplyDisposable = queryTerminal.onData((reply) => {
+          // Only primary DA is independent of the browser's size, modes and theme.
+          if (reply !== '\x1b[?1;2c') return;
           try {
             proc.write(reply);
           } catch {
@@ -527,6 +437,8 @@ export class WebTerminalRegistry {
         });
       }
     } catch {
+      queryReplyDisposable?.dispose();
+      queryTerminal?.dispose();
       this.finishCreating(terminalId);
       return { error: 'Failed to spawn shell' };
     }
@@ -590,6 +502,7 @@ export class WebTerminalRegistry {
       output: session.buffer.join(''),
       exited: session.exited,
       workspaceCwd: session.workspaceCwd,
+      ...(session.queryTerminal ? { handlesPrimaryDa: true } : {}),
       ...(session.exitCode !== undefined ? { exitCode: session.exitCode } : {}),
     };
   }
@@ -621,11 +534,6 @@ export class WebTerminalRegistry {
     if (!session || session.exited) return false;
     try {
       session.pty.resize(cols, rows);
-      // Keep the headless query responder on the same grid the client renders:
-      // geometry-dependent replies (DSR cursor position, DECRQSS) must be
-      // computed against the browser's actual size, not the 80x24 it spawned
-      // with.
-      session.queryTerminal?.resize(cols, rows);
       return true;
     } catch {
       return false;
