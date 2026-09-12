@@ -1655,6 +1655,47 @@ describe('voice-transcriber', () => {
     expect(message).toMatch(/\.\.\.$/);
   });
 
+  it('reports the configured model id when the API rejects it for batch transcription', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      text: vi
+        .fn()
+        .mockResolvedValue('{"error":{"code":"model_not_supported"}}'),
+    });
+
+    let error: unknown;
+    try {
+      await transcribeVoiceAudio(
+        { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+        {
+          config: createConfig([
+            {
+              id: 'qwen-audio-1.5-asr-flash',
+              label: 'Qwen Audio',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://dashscope.example/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ]),
+          settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+          voiceModel: 'qwen-audio-1.5-asr-flash',
+          lookupHost: lookupPublicHost,
+          fetchFn,
+        },
+      );
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("'qwen-audio-1.5-asr-flash'");
+    expect(message).toContain('same family');
+    expect(message).toContain('qwen-audio-<version>-asr-flash');
+  });
+
   it('sends an inference timeout signal and reports timeout clearly', async () => {
     let signal: AbortSignal | undefined;
     const fetchFn = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
