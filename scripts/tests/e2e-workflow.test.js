@@ -449,6 +449,13 @@ describe('e2e workflow', () => {
         );
         expect(step.run, jobName).toContain('exit 1');
         expect(step.run, jobName).toContain('sleep $((attempt * 15))');
+        expect(step.run, jobName).toContain('break');
+        expect(step.run, jobName).toContain(
+          'if [[ "${attempt}" == "3" ]]; then',
+        );
+        expect(step.run, jobName).toContain(
+          'if [[ "${attempt}" != "1" ]]; then',
+        );
         // The ::warning:: keeps an absorbed install transient countable even
         // though the recovered job concludes green — the same rule the
         // upload-artifact retry's announce step follows. Deleting the echo
@@ -463,15 +470,16 @@ describe('e2e workflow', () => {
       // The name-keyed collection above misses an install hiding under any
       // other step name — repo-hygiene.yml and qwen-autofix.yml call theirs
       // 'Install dependencies and build' — so scan the command itself.
-      // Reading step.run keeps this blind to the `npm ci` mentions in YAML
-      // comments, and the loop marker is the same fragment pinned above.
+      // Command position, not a substring anywhere in the body: a `#`
+      // comment mentioning npm ci inside a run block must not red this, and
+      // the loop marker matches the retry's shape, not its attempt list.
       const bareInstalls = Object.entries(yml.jobs).flatMap(([jobName, job]) =>
         (job.steps ?? [])
           .filter(
             (step) =>
               typeof step.run === 'string' &&
-              step.run.includes('npm ci') &&
-              !step.run.includes('for attempt in 1 2 3; do'),
+              /^\s*npm ci\b/m.test(step.run) &&
+              !/for attempt in [0-9 ]+; do/.test(step.run),
           )
           .map((step) => `${jobName}/${step.name ?? '(unnamed)'}`),
       );
