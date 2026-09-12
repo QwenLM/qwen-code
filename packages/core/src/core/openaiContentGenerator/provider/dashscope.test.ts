@@ -2616,6 +2616,175 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     });
   });
 
+  describe('reattach boundary cache control (issue #11627)', () => {
+    const reattachImageBlock = {
+      type: 'image_url' as const,
+      image_url: { url: 'data:image/png;base64,AAAA' },
+    };
+
+    it('places the conversation breakpoint before reattached parts appended to the last user message', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Stable user text' },
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      expect(content).toHaveLength(3);
+      // Breakpoint lands on the stable text block, not the reattach marker/image.
+      expect(content?.[0]).toMatchObject({
+        type: 'text',
+        text: 'Stable user text',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(content?.[2]).not.toHaveProperty('cache_control');
+    });
+
+    it('walks back to the previous message when the whole last message is reattach', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          { role: 'user', content: 'Stable user text' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      // The last message is entirely reattach content: it must not be marked.
+      const lastContent = result.messages[2]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      expect(lastContent?.[0]).not.toHaveProperty('cache_control');
+      expect(lastContent?.[1]).not.toHaveProperty('cache_control');
+      // The breakpoint moves onto the previous stable message instead.
+      expect(result.messages[1]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'Stable user text',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
+    it('keeps the last-block anchor when no reattach boundary is supplied', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Stable user text' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      // Unchanged behavior: last block keeps the breakpoint.
+      expect(content?.[1]).toMatchObject({
+        type: 'image_url',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+    });
+
+    it('skips an empty-string tool result when walking back to a stable block', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          { role: 'tool', tool_call_id: 'call_1', content: '' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      // The empty tool result stays a bare string — not rewritten into a
+      // fabricated zero-length text part carrying cache_control.
+      expect(result.messages[1]?.content).toBe('');
+      // The breakpoint degrades to the system message (system-only caching).
+      expect(result.messages[0]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'System prompt',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
+    it('walks the anchor back past a current-turn inline image to stable text', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'look at this screenshot' },
+              reattachImageBlock,
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      // Breakpoint lands on the prompt text, not the inline image the next
+      // turn textualizes.
+      expect(content?.[0]).toMatchObject({
+        type: 'text',
+        text: 'look at this screenshot',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+    });
+  });
+
   describe('output token limits', () => {
     it('should limit max_tokens when it exceeds model limit', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {

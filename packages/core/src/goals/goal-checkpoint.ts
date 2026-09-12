@@ -71,9 +71,16 @@ export function isGoalCheckpointStalled(
 }
 
 /**
- * An unusable checkpoint verifier result. Nothing in production branches on
- * the class -- the stall breaker counts by window state, not error class --
- * so it is a diagnostic carrier: its name and message are what an
+ * An unusable checkpoint verifier result.
+ *
+ * Production branches on this class. The stall breaker still counts by window
+ * state, but `describeCheckpointFailure` (goal-runtime.ts) picks the stall
+ * stop's advice from it: this class reads as "the verifier answered, but not
+ * with usable claims", its claim-count, claim-budget and claim-length
+ * subclasses read as capacity failures, and anything outside the hierarchy reads as "no answer
+ * arrived". Keep provider-side failures -- transport errors, rate limits,
+ * rejected requests -- out of this hierarchy, or a provider outage would be
+ * reported as malformed output. Its name and message are also what an
  * investigation into a stalled Goal gets to see.
  */
 export class InvalidGoalCheckpointError extends Error {

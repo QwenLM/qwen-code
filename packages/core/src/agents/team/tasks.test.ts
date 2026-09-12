@@ -23,6 +23,7 @@ import {
   onTasksUpdated,
   notifyTasksUpdated,
   TaskOwnershipError,
+  TaskSnapshotChangedError,
   RECIPROCAL_CALLER,
   normalizeTaskId,
 } from './tasks.js';
@@ -391,6 +392,123 @@ describe('tasks', () => {
 
       const final = await getTask('team', task.id);
       expect(['alice', 'bob']).toContain(final?.owner);
+    });
+
+    it('rejects a stale leader assignment when the expected owner changed', async () => {
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+      });
+      const options = {
+        expectedOwner: null,
+      };
+
+      const results = await Promise.allSettled([
+        updateTask(
+          'team',
+          task.id,
+          { status: 'in_progress', owner: 'alice' },
+          options,
+        ),
+        updateTask(
+          'team',
+          task.id,
+          { status: 'in_progress', owner: 'bob' },
+          options,
+        ),
+      ]);
+
+      expect(
+        results.filter((result) => result.status === 'fulfilled'),
+      ).toHaveLength(1);
+      const rejected = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected',
+      );
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]!.reason).toBeInstanceOf(TaskSnapshotChangedError);
+      expect((rejected[0]!.reason as Error).message).toContain('owner changed');
+      const final = await getTask('team', task.id);
+      expect(['alice', 'bob']).toContain(final?.owner);
+    });
+
+    it('reports only the expected fields that changed', async () => {
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+        owner: 'alice',
+      });
+      await updateTask('team', task.id, { status: 'in_progress' });
+      await updateTask(
+        'team',
+        task.id,
+        { status: 'completed' },
+        { callerName: 'alice' },
+      );
+
+      const update = updateTask(
+        'team',
+        task.id,
+        { status: 'pending' },
+        { expectedStatus: 'in_progress' },
+      );
+
+      await expect(update).rejects.toMatchObject({
+        expectedStatus: 'in_progress',
+        actualStatus: 'completed',
+      });
+      await expect(update).rejects.toThrow('status changed');
+      await expect(update).rejects.not.toThrow('owner changed');
+    });
+
+    it('does not check an undefined expected status', async () => {
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+      });
+
+      await expect(
+        updateTask(
+          'team',
+          task.id,
+          { status: 'in_progress' },
+          { expectedStatus: undefined },
+        ),
+      ).resolves.toMatchObject({
+        status: 'in_progress',
+      });
+    });
+
+    it('rejects a stale leader assignment when status changed', async () => {
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+        owner: 'alice',
+      });
+      await updateTask('team', task.id, { status: 'in_progress' });
+      await updateTask(
+        'team',
+        task.id,
+        { status: 'completed' },
+        { callerName: 'alice' },
+      );
+
+      await expect(
+        updateTask(
+          'team',
+          task.id,
+          { status: 'in_progress', owner: 'bob' },
+          { expectedOwner: 'alice', expectedStatus: 'in_progress' },
+        ),
+      ).rejects.toMatchObject({
+        name: 'TaskSnapshotChangedError',
+        expectedStatus: 'in_progress',
+        actualStatus: 'completed',
+      });
+      expect(await getTask('team', task.id)).toMatchObject({
+        status: 'completed',
+        owner: 'alice',
+      });
     });
 
     it('lets the leader (no callerName) override an existing owner', async () => {
