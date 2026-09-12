@@ -357,7 +357,7 @@ interface Attachment {
 }
 ```
 
-The same `text` value drives start-anchored local controls and the agent prompt. Mention normalization is platform-specific: retaining a leading mention prevents slash and `!` controls from matching at the start of the message. Other classifiers may still inspect the full text.
+The same `text` value drives start-anchored local controls, deterministic channel-memory phrases, memory relevance scoring, and the agent prompt. Mention normalization is platform-specific, and ChannelBase does not create a hidden mention-stripped control or recall projection. Retaining a leading mention prevents slash commands, direct `!` execution, and fully anchored memory phrases from matching at the start. The group/shared safety gate still refuses a retained-mention-plus-`!` shape without extracting or executing it. Whole-text classifiers and relevance scorers inspect the retained mention and may produce different results than mention-free text.
 
 `handleInbound()` automatically resolves attachments: images with `data` are sent to the model as vision input, files with `filePath` get their path appended to the prompt text so the agent can read them with its tools.
 

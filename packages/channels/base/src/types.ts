@@ -90,10 +90,12 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   /**
-   * Adapter-normalized message text used for both start-anchored local controls
-   * and the agent prompt. A retained leading mention therefore prevents slash
-   * and `!` controls from matching at the start of the message; other
-   * classifiers may still inspect the full text.
+   * Adapter-normalized message text used for start-anchored local controls,
+   * deterministic channel-memory phrases, relevance scoring, and the agent
+   * prompt. A retained leading mention prevents slash commands and direct `!`
+   * execution from matching at the start; group/shared safety still refuses a
+   * mention-prefixed `!` shape without executing it. Whole-text classifiers and
+   * relevance scorers inspect the retained mention too.
    */
   text: string;
   /**

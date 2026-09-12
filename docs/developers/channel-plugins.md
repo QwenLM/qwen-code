@@ -118,7 +118,7 @@ The normalized message object you build from platform data. The boolean flags dr
 | `imageMimeType`  | string       | No       | e.g., `image/jpeg` (legacy — prefer `attachments`)                         |
 | `attachments`    | Attachment[] | No       | Structured media attachments (see below)                                   |
 
-Mention normalization is platform-specific. An adapter may remove a routing mention when the platform identifies it reliably, or preserve the platform-delivered text when removal would be heuristic. A retained leading mention prevents slash and `!` controls from matching at the start of the message. Other classifiers may still inspect the full text.
+Mention normalization is platform-specific. An adapter may remove a routing mention when the platform identifies it reliably, or preserve the platform-delivered text when removal would be heuristic. The same `text` value is used for start-anchored local controls, deterministic channel-memory phrases, memory relevance scoring, and the agent prompt; there is no hidden mention-stripped control or recall projection. A retained leading mention therefore prevents slash commands, direct `!` execution, and fully anchored memory phrases from matching at the start. The group/shared safety gate still refuses a retained-mention-plus-`!` shape without extracting or executing it. Whole-text classifiers and relevance scorers inspect the retained mention and may produce different results than mention-free text.
 
 ### Attachments
 

@@ -52,7 +52,7 @@
 - **内容**：`text`，可选 `imageBase64`/`imageMimeType`、`referencedText`
 - **上下文**：`isGroup`、`isMentioned`、`isReplyToBot`，可选 `threadId`
 
-插件职责：`senderId` 必须稳定且唯一；`chatId` 必须能区分私聊和群聊；布尔标志必须准确，以供门控逻辑使用；`text` 包含适配器规范化后的消息，同时用于行首锚定的本地控制和 agent prompt。mention 的规范化由平台决定；保留开头的 mention 会使斜杠与 `!` 控制无法在消息行首匹配，但其他分类器仍可能检查完整文本。
+插件职责：`senderId` 必须稳定且唯一；`chatId` 必须能区分私聊和群聊；布尔标志必须准确，以供门控逻辑使用；`text` 是唯一一份适配器规范化消息，同时用于行首锚定的本地控制、确定性 channel-memory 短语、memory 相关性评分和 agent prompt。mention 的规范化由平台决定；系统不会另建隐藏的去 mention 控制文本或召回投影。保留开头的 mention 会使斜杠命令、直接 `!` 执行和完全锚定的 memory 短语无法在消息行首匹配；但群聊 / 共享会话的安全门仍会拒绝“保留 mention 后紧跟 `!`”的形态，且不会提取或执行命令。全文分类器和相关性评分器也会看到该 mention，因此结果可能与不带 mention 的文本不同。
 
 ### 消息流
 

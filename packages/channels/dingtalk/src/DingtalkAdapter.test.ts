@@ -7002,6 +7002,75 @@ describe('DingtalkChannel sender attribution', () => {
     );
   });
 
+  it('preserves a leading bot mention when a plain callback supplies one', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'plain-retained-mention',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '@QwenBot /clear' },
+      }),
+      headers: { messageId: 'plain-retained-mention' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '@QwenBot /clear',
+        isGroup: true,
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it.each([
+    ['separated', '@QwenBot ', '/clear', '@QwenBot /clear'],
+    ['glued', '@QwenBot', '/clear', '@QwenBot/clear'],
+  ])(
+    'preserves a single %s rich-text mention before command-shaped text',
+    (_shape, mention, command, expected) => {
+      const channel = createChannel();
+      const downstream = {
+        data: JSON.stringify({
+          msgId: `rich-single-${_shape}`,
+          msgtype: 'richText',
+          conversationType: '2',
+          conversationId: 'cid123',
+          sessionWebhook:
+            'https://oapi.dingtalk.com/robot/send?access_token=token',
+          senderNick: 'Alice',
+          senderStaffId: 'staff-1',
+          senderId: 'sender-1',
+          isInAtList: true,
+          content: { richText: [{ text: mention }, { text: command }] },
+        }),
+        headers: { messageId: `rich-single-${_shape}` },
+      } as unknown as DWClientDownStream;
+
+      (
+        channel as unknown as { onMessage(d: DWClientDownStream): void }
+      ).onMessage(downstream);
+
+      expect(channel.handleInbound).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expected,
+          isGroup: true,
+          isMentioned: true,
+        }),
+      );
+    },
+  );
+
   it('preserves repeated mentions before a rich-text command', () => {
     const channel = createChannel();
     const downstream = {
@@ -7852,6 +7921,159 @@ describe('DingtalkChannel mention target lifecycle', () => {
     });
     expect(bridge.prompt).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
+  });
+
+  it('forwards a retained rich-text mention command shape through the real base as prose', async () => {
+    vi.doUnmock('@qwen-code/channel-base');
+    vi.resetModules();
+    const { DingtalkChannel: RealDingtalkChannel } = await import(
+      './DingtalkAdapter.js'
+    );
+    const bridge = Object.assign(new EventEmitter(), {
+      availableCommands: [],
+      newSession: vi.fn().mockResolvedValue('session-1'),
+      loadSession: vi.fn(),
+      prompt: vi.fn().mockResolvedValue('agent response'),
+      cancelSession: vi.fn().mockResolvedValue(undefined),
+    }) as never;
+    const channel = new RealDingtalkChannel(
+      'real-dingtalk',
+      {
+        type: 'dingtalk',
+        token: '',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        senderPolicy: 'open',
+        allowedUsers: [],
+        sessionScope: 'user',
+        cwd: '/tmp',
+        groupPolicy: 'open',
+        dmPolicy: 'open',
+        groups: {},
+      },
+      bridge,
+      { registerBridgeEvents: false },
+    );
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    (
+      channel as unknown as {
+        onMessage(downstream: DWClientDownStream): void;
+      }
+    ).onMessage({
+      data: JSON.stringify({
+        msgId: 'rich-command-prose',
+        msgtype: 'richText',
+        conversationType: '2',
+        conversationId: 'cid-123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderStaffId: 'staff-123',
+        senderId: 'sender-123',
+        senderNick: 'Alice',
+        isInAtList: true,
+        content: {
+          richText: [{ text: '@QwenBot ' }, { text: '/clear' }],
+        },
+      }),
+      headers: { messageId: 'rich-command-prose' },
+    } as unknown as DWClientDownStream);
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    expect(bridge.newSession).toHaveBeenCalledOnce();
+    const promptCall = vi.mocked(bridge.prompt).mock.calls[0]!;
+    expect(promptCall[0]).toBe('session-1');
+    expect(promptCall[1]).toMatch(/\[Alice\] @QwenBot \/clear$/u);
+    expect(promptCall[2]).toEqual(
+      expect.objectContaining({
+        displayText: expect.stringMatching(/\[Alice\] @QwenBot \/clear$/u),
+      }),
+    );
+    fetchSpy.mockRestore();
+  });
+
+  it('refuses a retained rich-text mention bang shape through the real base', async () => {
+    vi.doUnmock('@qwen-code/channel-base');
+    vi.resetModules();
+    const { DingtalkChannel: RealDingtalkChannel } = await import(
+      './DingtalkAdapter.js'
+    );
+    const shellCommand = vi.fn();
+    const bridge = Object.assign(new EventEmitter(), {
+      availableCommands: [],
+      newSession: vi.fn().mockResolvedValue('session-1'),
+      loadSession: vi.fn(),
+      prompt: vi.fn().mockResolvedValue('agent response'),
+      cancelSession: vi.fn().mockResolvedValue(undefined),
+      shellCommand,
+    }) as never;
+    const channel = new RealDingtalkChannel(
+      'real-dingtalk',
+      {
+        type: 'dingtalk',
+        token: '',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        senderPolicy: 'open',
+        allowedUsers: [],
+        sessionScope: 'user',
+        cwd: '/tmp',
+        groupPolicy: 'open',
+        dmPolicy: 'open',
+        groups: {},
+      },
+      bridge,
+      { registerBridgeEvents: false },
+    );
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      (
+        channel as unknown as {
+          onMessage(downstream: DWClientDownStream): void;
+        }
+      ).onMessage({
+        data: JSON.stringify({
+          msgId: 'rich-bang-refused',
+          msgtype: 'richText',
+          conversationType: '2',
+          conversationId: 'cid-123',
+          sessionWebhook:
+            'https://oapi.dingtalk.com/robot/send?access_token=token',
+          senderStaffId: 'staff-123',
+          senderId: 'sender-123',
+          senderNick: 'Alice',
+          isInAtList: true,
+          content: {
+            richText: [{ text: '@QwenBot ' }, { text: '!whoami' }],
+          },
+        }),
+        headers: { messageId: 'rich-bang-refused' },
+      } as unknown as DWClientDownStream);
+
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(shellCommand).not.toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('blocked ! shell command'),
+      );
+      const responseBody = JSON.parse(
+        String((fetchSpy.mock.calls[0]?.[1] as RequestInit | undefined)?.body),
+      );
+      expect(responseBody.markdown.text).toContain(
+        'Shell commands (`!`) are disabled in group chats.',
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
   });
 
   it('clears the final buffered command target after synthetic collect re-entry', async () => {
