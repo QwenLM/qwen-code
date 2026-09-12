@@ -27,7 +27,7 @@ supervisor 的优雅退出和受处理的终止信号会移除暂存输入并终
 
 Windows 不暴露 POSIX 进程组信号。HookRunner 改为异步调用 System32 下的绝对路径 `taskkill.exe`，参数为 `/f /t /pid`，并限定执行时间；当根子进程已经退出时跳过该调用。taskkill 失败会回退为强制杀死直接子进程，并发出诊断警告。
 
-对于父进程退出后仍存活的 `MessageDisplay`、`StopFailure` 和 `SessionDelete` hook，supervisor 会通过 fd 3 上报 hook shell 的 pid，因此即使 supervisor 已经退出、其旧有进程树已无法重建，该 shell 仍能被回收。在 Qwen 存活期间，hook 终止会先探测该 pid，绝不会对已经退出的 pid 执行 taskkill；探测被拒绝（EPERM 或 EACCES）视为存活，而意外的探测错误视为已死并记录警告，而非静默跳过。当 taskkill 失败或超时时，第二次探测会决定是否执行直接的 pid 级 SIGKILL 回退；被拒绝的回退会记录日志而不是被静默吞掉。两次探测共同构成 pid 复用防护：taskkill 没有进程组等价物，因此绝不能对一个可能已被回收并复用到无关应用上的 pid 发起。探测确立的是「存在」而非「身份」——Windows 没有廉价的进程启动令牌，因此在探测与杀死之间被复用的 pid 仍是一个残余风险，需要 Windows Job Object 才能弥合。
+对于父进程退出后仍存活的 `MessageDisplay`、`StopFailure` 和 `SessionDelete` hook，supervisor 会通过 fd 3 上报 hook shell 的 pid，因此即使 supervisor 已经退出、其旧有进程树已无法重建，该 shell 仍能被回收。在 Qwen 存活期间，hook 终止会先探测该 pid，绝不会对已经退出的 pid 执行 taskkill；探测被拒绝（EPERM 或 EACCES）视为存活，而意外的探测错误视为已死，并在调试日志中留下警告（需以 `--debug` 运行 Qwen），而非静默跳过。已退出的存活 pid 会被跳过，因此已退出的 hook shell 的后代进程仍在本次改动的覆盖范围之外；该场景仍需 Windows Job Object 或后代进程跟踪。当 taskkill 失败或超时时，第二次探测会决定是否执行直接的 pid 级 SIGKILL 回退；意外的再探测错误会跳过回退并留下同样的调试日志警告，而被拒绝的回退会记录日志而不是被静默吞掉。两次探测共同构成 pid 复用防护：taskkill 没有进程组等价物，因此绝不能对一个可能已被回收并复用到无关应用上的 pid 发起。探测确立的是「存在」而非「身份」——Windows 没有廉价的进程启动令牌，因此在探测与杀死之间被复用的 pid 仍是一个残余风险，需要 Windows Job Object 才能弥合。
 
 超时与 AbortSignal 竞争共享同一个终止 promise。Abort 保留其既有的结果优先级，hook 的正常成功、输出解析、退出码处理以及超时默认值均保持不变。
 

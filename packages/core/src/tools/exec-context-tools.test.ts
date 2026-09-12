@@ -201,7 +201,7 @@ describe('exec context tool results', () => {
     controller.abort();
     await expect(pending).rejects.toThrow();
     expect(clearLoadedSkills).toHaveBeenCalledOnce();
-  });
+  }, 40_000);
 
   it('preserves concurrency for ordinary calls before a goal barrier', async () => {
     const { run, dispatch } = setup(

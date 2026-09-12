@@ -37,7 +37,6 @@ import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
-import { isPidAlive } from '../utils/process-liveness.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -485,6 +484,36 @@ async function terminateHookProcessTree(
   await terminatePosixHookProcessTree(child, graceMs);
 }
 
+/**
+ * Tri-state `process.kill(pid, 0)` liveness probe for the surviving-hook
+ * branch: alive on success or EPERM/EACCES (the process exists but cannot be
+ * opened), gone on ESRCH, and unknown on any other errno, which establishes
+ * nothing about the pid and must not be silently folded into either answer.
+ * File-local on purpose: the shared `isPidAlive` deliberately exposes only
+ * the binary answer, and this branch is the only caller that needs the
+ * unknown case told apart.
+ */
+function probePidLiveness(
+  pid: number,
+): { state: 'alive' | 'gone' } | { state: 'unknown'; detail: string } {
+  try {
+    process.kill(pid, 0);
+    return { state: 'alive' };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ESRCH') {
+      return { state: 'gone' };
+    }
+    if (code === 'EPERM' || code === 'EACCES') {
+      return { state: 'alive' };
+    }
+    return {
+      state: 'unknown',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 async function terminateSurvivingHookProcessGroup(
   pid: number,
   graceMs = HOOK_TERMINATE_GRACE_MS,
@@ -498,31 +527,21 @@ async function terminateSurvivingHookProcessGroup(
     //
     // The liveness probe is the #6067 guard: taskkill has no process-group
     // equivalent, so it must not be fired at a pid that has already exited and
-    // may have been recycled onto an unrelated application. It is classified
-    // here rather than via `isPidAlive` so an unexpected errno (host memory
-    // or handle pressure, libuv's UV_UNKNOWN catch-all) is told apart from a
+    // may have been recycled onto an unrelated application. The tri-state
+    // classification (`probePidLiveness`) tells an unexpected errno (host
+    // memory or handle pressure, libuv's UV_UNKNOWN catch-all) apart from a
     // provably gone pid: both skip the reap, but the unknown case leaves the
-    // hook's cmd.exe tree running and must not vanish silently. The decision
-    // is unchanged from the shared helper — alive is exactly success or
-    // EPERM/EACCES, anything else still skips.
-    let probe: 'alive' | 'gone' | 'unknown' = 'alive';
-    try {
-      process.kill(pid, 0);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException)?.code;
-      probe =
-        code === 'ESRCH'
-          ? 'gone'
-          : code === 'EPERM' || code === 'EACCES'
-            ? 'alive'
-            : 'unknown';
-    }
-    if (probe === 'unknown') {
+    // hook's cmd.exe tree running, so it warns in the debug log (requires
+    // --debug) rather than vanishing without a trace. The alive/gone decision
+    // is unchanged from the shared `isPidAlive` helper — alive is exactly
+    // success or EPERM/EACCES, anything else still skips.
+    const probe = probePidLiveness(pid);
+    if (probe.state === 'unknown') {
       debugLogger.warn(
-        `Skipping reap of surviving hook ${pid}: liveness probe failed for an unknown reason`,
+        `Skipping reap of surviving hook ${pid}: liveness probe failed: ${probe.detail}`,
       );
     }
-    if (probe !== 'alive') {
+    if (probe.state !== 'alive') {
       return;
     }
     // `taskkillProcessTree` resolves false when execFile errors or when
@@ -535,21 +554,33 @@ async function terminateSurvivingHookProcessGroup(
     // But taskkill also resolves false when the pid was ALREADY dead, and a
     // pid-based kill against a recycled pid is a collateral kill (the #6067
     // failure mode). Re-probe liveness before falling back so a dead pid is
-    // never signalled directly.
-    if (!(await taskkillProcessTree(pid)) && isPidAlive(pid)) {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch (error) {
-        // ESRCH means the pid is already gone; anything else (EPERM from an
-        // elevated or AV-protected hook) is a refused kill that must not
-        // vanish silently while the tree keeps running.
-        if (!isNoSuchProcessError(error)) {
-          debugLogger.warn(
-            `SIGKILL fallback failed for surviving hook ${pid}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
+    // never signalled directly. The re-probe shares the first probe's
+    // tri-state classification: an unexpected errno still skips the fallback,
+    // but warns in the debug log instead of vanishing silently.
+    if (await taskkillProcessTree(pid)) {
+      return;
+    }
+    const reprobe = probePidLiveness(pid);
+    if (reprobe.state === 'unknown') {
+      debugLogger.warn(
+        `Skipping SIGKILL fallback for surviving hook ${pid}: liveness re-probe failed: ${reprobe.detail}`,
+      );
+    }
+    if (reprobe.state !== 'alive') {
+      return;
+    }
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch (error) {
+      // ESRCH means the pid is already gone; anything else (EPERM from an
+      // elevated or AV-protected hook) is a refused kill that must not
+      // vanish silently while the tree keeps running.
+      if (!isNoSuchProcessError(error)) {
+        debugLogger.warn(
+          `SIGKILL fallback failed for surviving hook ${pid}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
     }
     return;

@@ -1702,6 +1702,60 @@ describe('HookRunner', () => {
       expect(killSpy).not.toHaveBeenCalledWith(survivingPid, 'SIGKILL');
     });
 
+    it('warns and skips the SIGKILL fallback when the liveness re-probe fails unexpectedly', async () => {
+      // The re-probe shares the first probe's tri-state classification: an
+      // unexpected errno establishes nothing about the pid, so the fallback
+      // must be skipped (a pid-based kill against unknown state risks the
+      // #6067 recycled-pid collateral kill) — but the skip must warn, or a
+      // host-level probe failure leaves the hook's cmd.exe tree running with
+      // no trace at all.
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const survivingPid = 9919;
+      let probes = 0;
+      const killSpy = vi
+        .spyOn(process, 'kill')
+        .mockImplementation((target, signal) => {
+          if (target === survivingPid && signal === 0) {
+            probes += 1;
+            if (probes === 1) {
+              // The initial liveness probe passes: taskkill is attempted.
+              return true;
+            }
+            // The re-probe after taskkill fails unexpectedly: neither gone
+            // (ESRCH) nor alive-but-denied (EPERM/EACCES).
+            throw Object.assign(new Error('EINVAL: invalid argument, kill'), {
+              code: 'EINVAL',
+            });
+          }
+          return true;
+        });
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: object,
+          callback: (error: Error | null) => void,
+        ) => {
+          callback(new Error('ERROR_ACCESS_DENIED'));
+        },
+      );
+      const { mockProcess, controller, resultPromise } =
+        startWindowsSurvivingHook(HookEventName.StopFailure, survivingPid);
+
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+
+      expect(probes).toBe(2);
+      expect(killSpy).not.toHaveBeenCalledWith(survivingPid, 'SIGKILL');
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(`surviving hook ${survivingPid}`),
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('EINVAL'),
+      );
+    });
+
     it('still reaps a surviving Windows hook whose liveness probe is denied', async () => {
       // An elevated or protected hook makes process.kill(pid, 0) fail with
       // EPERM on Windows, not ESRCH: the process exists but cannot be opened.
@@ -1753,7 +1807,7 @@ describe('HookRunner', () => {
       const survivingPid = 9916;
       vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
         if (target === survivingPid && signal === 0) {
-          throw Object.assign(new Error('invalid argument'), {
+          throw Object.assign(new Error('EINVAL: invalid argument, kill'), {
             code: 'EINVAL',
           });
         }
@@ -1784,6 +1838,11 @@ describe('HookRunner', () => {
       );
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
         expect.stringContaining(`surviving hook ${survivingPid}`),
+      );
+      // The errno is the datum that tells EMFILE (our handle budget) apart
+      // from ENOMEM (the host) or libuv's UV_UNKNOWN; the warn must carry it.
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('EINVAL'),
       );
     });
 

@@ -171,7 +171,9 @@ export async function executeCodeMode(
   };
   const onWallTimeout = () => {
     protocolError = new Error(
-      `JavaScript execution timed out after ${timeoutMs}ms.`,
+      `JavaScript execution timed out after ${
+        timeoutMs + CODE_MODE_HOST_STARTUP_GRACE_MS
+      }ms (guest budget ${timeoutMs}ms; the code-mode host may not have finished starting).`,
     );
     cancelNested(protocolError);
     terminate(child);
