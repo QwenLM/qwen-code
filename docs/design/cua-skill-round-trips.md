@@ -17,8 +17,13 @@ task prompt or authorization policy.
 Initialize the connection, query its platform and read exactly one local skill
 reference in the same REPL call. The skill's actual directory is supplied from
 the loader or the file just read. A filesystem-import failure retains the
-existing `read_file` fallback. Platform-specific UI work begins only after the
-selected reference has been returned and read; unknown platforms still fail.
+existing `read_file` fallback. When the returned platform is macOS and the task
+already identifies an unambiguous app, append its initial App observation after
+printing the selected reference in the same call. The shared skill documents
+that small observation API and that getState may launch a stopped app. Reuse
+the returned handle and state in the platform workflow. Unknown apps retain
+discovery through that workflow; unknown platforms still fail. Editing and
+input begin only after the returned reference and initial state have been read.
 
 For macOS, batch known actions that retain their target, including saving, until
 a new decision is needed. New dialogs, menus, target changes and uncertain

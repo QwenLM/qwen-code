@@ -44,7 +44,9 @@ describe('bundled computer-use skill', () => {
     expect(body).toContain('Skill base directory');
     expect(body).toContain('not the CLI or Node host operating system');
     expect(body).not.toContain('process.platform');
-    expect(body).not.toContain('computer.getApp(');
+    expect(body).toContain("if (platform === 'macos') {");
+    expect(body).toContain("computer.getApp('App named by the task')");
+    expect(body).toContain('before any editing or input');
     expect(body).not.toContain('computer.observeWindow(');
     expect(config.allowedTools).toBeUndefined();
   });

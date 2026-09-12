@@ -42,10 +42,29 @@ var reference = {
 if (!reference) throw new Error('Unsupported connected platform');
 var skillBase = '/absolute/path/to/computer-use';
 nodeRepl.write(`Connected platform: ${platform}`);
-nodeRepl.write(await (await import('node:fs/promises')).readFile(
-  `${skillBase}/references/${reference}`, 'utf8',
-));
+nodeRepl.write(
+  await (
+    await import('node:fs/promises')
+  ).readFile(`${skillBase}/references/${reference}`, 'utf8'),
+);
 ```
+
+If the returned platform is `macos` and the task already identifies an
+unambiguous app, append its initial observation to that same initialization
+call, after printing the resource:
+
+```js
+if (platform === 'macos') {
+  var app = await computer.getApp('App named by the task');
+  nodeRepl.write((await app.getState()).text);
+}
+```
+
+Replace the example app name with the task's app. This only binds the app and
+reads its current state; `getState()` can open that app if stopped. Read both
+the returned platform workflow and initial state before any editing or input.
+If the app is unknown or ambiguous, omit this block and follow the selected
+resource's discovery steps. Do not guess an app or use the host platform.
 
 ## Select the target platform workflow
 
@@ -61,7 +80,7 @@ Skill base directory shown above:
 - `macos`: read `references/macos.md` for the App workflow and text operations.
 - `windows` or `linux`: read `references/windows-linux.md` for the exact-window workflow.
 
-Read the selected resource before continuing. Once it has been printed in the
+Read the selected resource before taking actions. Once it has been printed in the
 initialization result, do not read it again. After changing the connected desktop,
 query its platform again and read the matching resource. Resource files remain on
 the machine hosting this Skill; do not look for them on the controlled desktop.

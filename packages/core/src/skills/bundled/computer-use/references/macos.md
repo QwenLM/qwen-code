@@ -75,7 +75,8 @@ type State = {
 
 ### 1. Initialize
 
-On macOS, bind the app named by the task, then read its state.
+If initialization already bound the task's app and returned its state, reuse
+that `app` and observation. Otherwise, bind the app named by the task, then read its state.
 `getApp()` binds identity; `getState()` can open a discovered stopped app. Combine these
 steps in one Node REPL call:
 
