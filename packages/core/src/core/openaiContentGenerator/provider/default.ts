@@ -223,7 +223,7 @@ export class DefaultOpenAICompatibleProvider
     const requestWithTokenLimits = this.clampConfiguredReasoningEffort(
       this.applyOutputTokenLimit(request),
     );
-    const messages = isQwen3Model(request.model)
+    const messages = this.shouldMirrorReasoningContent(request.model)
       ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
       : requestWithTokenLimits.messages;
 
@@ -234,6 +234,16 @@ export class DefaultOpenAICompatibleProvider
     };
     this.flattenGptReasoningEffort(result);
     return result;
+  }
+
+  /**
+   * Whether outbound assistant messages get `reasoning_content` mirrored
+   * into the additional `reasoning` field. qwen3-class models on generic
+   * OpenAI-compatible endpoints read that field; endpoints that reject
+   * unknown message fields (e.g. Fireworks) override this to opt out.
+   */
+  protected shouldMirrorReasoningContent(model: string): boolean {
+    return isQwen3Model(model);
   }
 
   protected flattenGptReasoningEffort(body: Record<string, unknown>): void {
