@@ -126,7 +126,11 @@ export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   }
   const sortDeep = (val: unknown): unknown => {
     if (typeof val === 'function') return undefined;
-    if (Array.isArray(val)) return val.map(sortDeep);
+    if (Array.isArray(val)) {
+      const out: unknown[] = [];
+      for (let i = 0; i < val.length; i++) out[i] = sortDeep(val[i]);
+      return out;
+    }
     if (val && typeof val === 'object') {
       const out: Record<string, unknown> = {};
       for (const key of Object.keys(val as Record<string, unknown>).sort()) {

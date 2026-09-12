@@ -46,7 +46,7 @@ import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
 } from './workflow-prompts.js';
-import { AgentTerminateMode } from './agent-types.js';
+import { AgentTerminateMode, type ToolConfig } from './agent-types.js';
 import type { ContextState } from './agent-headless.js';
 import {
   attachJsonlTranscriptWriter,
@@ -57,7 +57,7 @@ import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
 } from './agent-events.js';
-import { ToolNames } from '../../tools/tool-names.js';
+import { ToolDisplayNames, ToolNames } from '../../tools/tool-names.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { SubagentConfig } from '../../subagents/types.js';
@@ -74,6 +74,10 @@ import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
 import { runWithAgentContext } from './agent-context.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import { formatContextFileDisplayPath } from '../../memory/memoryDiscovery.js';
+import {
+  isToolHiddenBehindToolSearch,
+  toolSearchRevealSentence,
+} from '../../skills/workflow-authoring-skill.js';
 
 /**
  * Default ceiling on total `agent()` calls per workflow run (matches upstream
@@ -292,6 +296,15 @@ export const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
   // closes the same loop for plain `agent` calls (review #6189).
   ToolNames.AGENT,
 ];
+
+function workflowDisallowedTools(baseConfig: SubagentConfig): string[] {
+  return Array.from(
+    new Set([
+      ...(baseConfig.disallowedTools ?? []),
+      ...WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
+    ]),
+  );
+}
 
 /**
  * `WorkflowExecutionError` preserves the phases and logs the script
@@ -598,16 +611,9 @@ export function createProductionDispatch(
         contexts.push(context.text);
         loaded.add(extension.name);
       }
-      const allowedTools = agentIdentity.resolvedAgentType?.tools;
-      const skillToolAllowed =
-        !allowedTools ||
-        allowedTools.length === 0 ||
-        allowedTools.includes('*') ||
-        allowedTools.includes(ToolNames.SKILL);
-      const skillInstruction =
-        selectedExtensionHasSkills && skillToolAllowed
-          ? ' Invoke listed Skills through the Skill tool using the exact skill name;'
-          : '';
+      const skillInstruction = selectedExtensionHasSkills
+        ? await resolveWorkflowSkillInstruction(config, agentIdentity)
+        : '';
       prompt +=
         `\n\nSelected extension context follows.${skillInstruction} context does not grant additional permissions.\n` +
         contexts.join('\n\n');
@@ -690,6 +696,46 @@ interface WorkflowAgentIdentity {
   name: string;
   /** The resolved agentType definition, when `opts.agentType` matched one. */
   resolvedAgentType?: SubagentConfig;
+}
+
+async function resolveWorkflowSkillInstruction(
+  config: Config,
+  agentIdentity: WorkflowAgentIdentity,
+): Promise<string> {
+  let tools: ToolConfig['tools'] | undefined;
+  let disallowedTools: ToolConfig['disallowedTools'];
+  if (agentIdentity.resolvedAgentType) {
+    const baseConfig = agentIdentity.resolvedAgentType;
+    const runtimeConfig = await config
+      .getSubagentManager()
+      .convertToRuntimeConfig(
+        {
+          ...baseConfig,
+          disallowedTools: workflowDisallowedTools(baseConfig),
+        },
+        config,
+      );
+    tools = runtimeConfig.toolConfig?.tools;
+    disallowedTools = runtimeConfig.toolConfig?.disallowedTools;
+  } else {
+    tools = ['*'];
+    disallowedTools = WORKFLOW_SUBAGENT_DISALLOWED_TOOLS;
+  }
+
+  const allowed =
+    !tools ||
+    tools.length === 0 ||
+    tools.includes('*') ||
+    tools.includes(ToolNames.SKILL);
+  if (!allowed || disallowedTools?.includes(ToolNames.SKILL)) return '';
+
+  if (isToolHiddenBehindToolSearch(config, ToolNames.SKILL)) {
+    return (
+      ` ${toolSearchRevealSentence(ToolDisplayNames.SKILL)}` +
+      ' After revealing it, invoke the listed skills through that tool using the exact skill name;'
+    );
+  }
+  return ' Invoke listed Skills through the Skill tool using the exact skill name;';
 }
 
 /**
@@ -1098,12 +1144,7 @@ async function runOverridePath(
       ? { systemPrompt: schemaSystemPrompt }
       : {}),
     ...(schemaTools !== undefined ? { tools: schemaTools } : {}),
-    disallowedTools: Array.from(
-      new Set([
-        ...(baseConfig.disallowedTools ?? []),
-        ...WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
-      ]),
-    ),
+    disallowedTools: workflowDisallowedTools(baseConfig),
   };
 
   // Provision worktree BEFORE createAgentHeadless so the derived Config

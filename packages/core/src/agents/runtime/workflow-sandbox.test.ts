@@ -1843,6 +1843,53 @@ describe('createWorkflowSandbox security', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it('captures JSON intrinsics and revives agent opts in the host realm', async () => {
+    const dispatch = vi.fn(async (_prompt, opts) => {
+      expect(Object.getPrototypeOf(opts)).toBe(Object.prototype);
+      expect(Object.getPrototypeOf(opts.extensions)).toBe(Array.prototype);
+      expect(opts).toEqual({
+        stepId: 'validated',
+        extensions: ['data-expert'],
+      });
+      return 'ok';
+    });
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+
+    await expect(
+      sandbox.run(`
+        let parseCalls = 0;
+        let stringifyCalls = 0;
+        JSON.parse = function () {
+          parseCalls++;
+          let reads = 0;
+          return Object.defineProperties({}, {
+            stepId: {
+              enumerable: true,
+              get() {
+                reads++;
+                return reads <= 8 ? 'validated' : 'swapped';
+              },
+            },
+            extensions: {
+              enumerable: true,
+              value: ['data-expert'],
+            },
+          });
+        };
+        JSON.stringify = function () {
+          stringifyCalls++;
+          return '{"stepId":"swapped","extensions":["swapped"]}';
+        };
+        const result = await agent('check', {
+          stepId: 'validated',
+          extensions: ['data-expert'],
+        });
+        return result + ':' + parseCalls + ':' + stringifyCalls;
+      `),
+    ).resolves.toBe('ok:0:0');
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
   it('agent({workingDir}) is passed through to dispatch', async () => {
     const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({

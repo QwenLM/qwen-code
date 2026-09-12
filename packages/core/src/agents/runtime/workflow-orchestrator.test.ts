@@ -3780,6 +3780,28 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       getWorktreeSymlinkDirectories: () => [],
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
+        convertToRuntimeConfig: async (subagentConfig: {
+          tools?: string[];
+          disallowedTools?: string[];
+        }) => {
+          const normalize = (name: string) =>
+            name === 'Skill' ? 'skill' : name;
+          const hasToolPolicy =
+            (subagentConfig.tools?.length ?? 0) > 0 ||
+            (subagentConfig.disallowedTools?.length ?? 0) > 0;
+          return {
+            promptConfig: {},
+            modelConfig: {},
+            runConfig: {},
+            toolConfig: hasToolPolicy
+              ? {
+                  tools: (subagentConfig.tools ?? ['*']).map(normalize),
+                  disallowedTools:
+                    subagentConfig.disallowedTools?.map(normalize),
+                }
+              : undefined,
+          };
+        },
         createAgentHeadless: async (
           subagentConfig: {
             name?: string;
@@ -3882,32 +3904,73 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     };
   }
 
-  it('does not advertise the Skill tool to a restricted agent type', async () => {
-    const extension = {
-      id: 'data-expert',
-      name: 'data-expert',
-      version: '1',
-      isActive: true,
-      path: '/data-expert',
-      config: { name: 'data-expert', version: '1' },
-      contextFiles: [],
-      skills: [
-        {
-          name: 'schema-audit',
-          description: 'Audit a schema',
-          level: 'extension',
-          filePath: '/data-expert/skills/schema-audit/SKILL.md',
-          body: 'Audit the schema.',
-        },
-      ],
-    } as Extension;
+  const extensionWithSkill = {
+    id: 'data-expert',
+    name: 'data-expert',
+    version: '1',
+    isActive: true,
+    path: '/data-expert',
+    config: { name: 'data-expert', version: '1' },
+    contextFiles: [],
+    skills: [
+      {
+        name: 'schema-audit',
+        description: 'Audit a schema',
+        level: 'extension',
+        filePath: '/data-expert/skills/schema-audit/SKILL.md',
+        body: 'Audit the schema.',
+      },
+    ],
+  } as Extension;
+
+  it.each([
+    { tools: ['read_file'], advertised: false },
+    { tools: ['skill'], advertised: true },
+    { tools: ['Skill'], advertised: true },
+    { tools: ['*'], advertised: true },
+    { tools: [], advertised: true },
+  ])(
+    'matches the normalized Skill tool policy for tools=$tools',
+    async ({ tools, advertised }) => {
+      const { config, calls } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'restricted',
+          description: 'restricted',
+          systemPrompt: 'restricted',
+          level: 'project',
+          tools,
+        }),
+        onCreate: async () => ({
+          finalText: 'done',
+          terminateMode: 'GOAL',
+        }),
+      });
+      Object.assign(config, {
+        getActiveExtensions: () => [extensionWithSkill],
+        getContextFilePaths: () => [],
+      });
+      await createProductionDispatch(config)('check', {
+        agentType: 'restricted',
+        extensions: ['data-expert'],
+      });
+      expect(calls[0].prompt).toContain('- Skills: data-expert:schema-audit');
+      const instruction =
+        'Invoke listed Skills through the Skill tool using the exact skill name';
+      if (advertised) expect(calls[0].prompt).toContain(instruction);
+      else expect(calls[0].prompt).not.toContain(instruction);
+      expect(calls[0].options?.taskName).toBe('check');
+    },
+  );
+
+  it('does not advertise the Skill tool when the agent disallows it', async () => {
     const { config, calls } = fakeConfigWithMgr({
       findSubagentByName: async () => ({
         name: 'restricted',
         description: 'restricted',
         systemPrompt: 'restricted',
         level: 'project',
-        tools: ['read_file'],
+        tools: ['*'],
+        disallowedTools: ['skill'],
       }),
       onCreate: async () => ({
         finalText: 'done',
@@ -3915,7 +3978,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       }),
     });
     Object.assign(config, {
-      getActiveExtensions: () => [extension],
+      getActiveExtensions: () => [extensionWithSkill],
       getContextFilePaths: () => [],
     });
     await createProductionDispatch(config)('check', {
@@ -3926,7 +3989,39 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls[0].prompt).not.toContain(
       'Invoke listed Skills through the Skill tool',
     );
-    expect(calls[0].options?.taskName).toBe('check');
+  });
+
+  it('tells the agent to reveal a deferred Skill tool before invoking it', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'restricted',
+        description: 'restricted',
+        systemPrompt: 'restricted',
+        level: 'project',
+        tools: ['*'],
+      }),
+      onCreate: async () => ({
+        finalText: 'done',
+        terminateMode: 'GOAL',
+      }),
+    });
+    Object.assign(config, {
+      getActiveExtensions: () => [extensionWithSkill],
+      getContextFilePaths: () => [],
+      getVisibleTools: () => new Set<string>(),
+      getToolRegistry: () => ({
+        isPermissionDeferred: (name: string) => name === 'skill',
+        isDeferredToolRevealed: () => false,
+      }),
+    });
+    await createProductionDispatch(config)('check', {
+      agentType: 'restricted',
+      extensions: ['data-expert'],
+    });
+    expect(calls[0].prompt).not.toContain(
+      'Invoke listed Skills through the Skill tool using the exact skill name',
+    );
+    expect(calls[0].prompt).toContain('reveal it with ToolSearch first');
   });
 
   it.each([

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -96,6 +96,20 @@ describe('canonicalizeAgentOpts', () => {
     expect(deriveAgentKey('', 'check', {})).toBe(
       deriveAgentKey('', 'check', { extensions: undefined }),
     );
+  });
+
+  it('canonicalizes arrays without invoking caller-owned map methods', () => {
+    const extensions = ['a', 'b'];
+    const map = vi.fn(() => ['tampered']);
+    Object.defineProperty(extensions, 'map', {
+      configurable: true,
+      value: map,
+    });
+
+    expect(canonicalizeAgentOpts({ extensions })).toBe(
+      '{"extensions":["a","b"]}',
+    );
+    expect(map).not.toHaveBeenCalled();
   });
 
   it('sorts object keys deeply so reordered schemas hash the same', () => {
