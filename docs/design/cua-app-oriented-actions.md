@@ -35,9 +35,11 @@ Confirmed principles are canonical installation identity, per-app serialization,
 focused/main/last AX window selection, separate open-menu context, structural
 projection before revision rendering, and native semantic or synthesized input
 without a general foreground retry. Qwen implements these principles using its
-existing driver. This is not a reproduction of every private Codex transform or
-its three-field synthetic focus controller. Application-specific calendar and
-attributed-text transforms remain unverified and are not inferred from names.
+existing driver. The follow-up implements the verified three-field focus preparation branches,
+process notification tracking, independent AX menu notifications, and attributed
+text capture. It does not claim every private transform or the complete
+SystemFocusStealPreventer state machine; unknown application-specific rules are
+not inferred from names.
 
 ## Implementation after native reverse engineering
 
@@ -112,19 +114,36 @@ semantics. The native app-tree-v1 lineage renders short IDs without opaque token
 per-node frames or default attributes. Full/diff/no-change selection still uses
 native identity and replay validation. Legacy full-tree-v1 cursors are separate.
 
-App clicks and keyboard input use the native background path. A supported semantic action is
-selected before dispatch; writable text focus or an exact pointer target handles
-controls without Press. An error after dispatch never triggers another actuator.
-AX text writes with unknown or unchanged readback stop without a Unicode resend.
-Only a proven complete insertion confirms text; substring matches and length-only
-partial suffix retries are removed. Unicode CGEvent delivery is retained.
+App clicks choose an advertised Pick, then Press, for an unmodified single
+left click; other gestures and controls without those actions use native window
+pointer events. A click never substitutes an AXFocused write. All pointer events
+are built before posting and use the existing post-action observation interval,
+so asynchronous menu-close notifications can arrive before getState.
 
-Before background PID keys, native code checks the exact window, sends an AppKit
-synthetic activation notification (type 13, subtype 1), waits for it to be consumed,
-and checks the target again. Already-frontmost targets skip the notification.
-The notification does not call real app activation or a global HID queue. This
-implements the confirmed activation-before-input principle without introducing
-Codex's private event-tap belief cache; that state machine is not claimed identical.
+App typeText selects PID key-event synthesis at the current insertion point
+before dispatch. In LibreOffice, AXSelectedText can return success without
+inserting text, so app typing must not enter that legacy AX ladder. The existing
+exact-window typeText API keeps its current contract. Neither path replays an
+uncertain write; app typing still uses the existing exact-target checks, Unicode
+synthesis and bounded input budget.
+
+Native focus state separates application-believes-active, application-believes-
+focus and actual-active. It selects no notification, key-focus-returned, or
+synthetic activation with an optional activation-point click. Process-scoped
+notification taps invalidate those beliefs after focus loss. A listen-only user
+click tap restores real activation only when the user clicks the synthetically
+active background app; it does not retry a failed SDK action. Per-app focus/menu
+monitors are owned by ToolState and stop after their last owner is dropped or the
+process lifetime changes. The fixed NSWorkspace activation observer remains
+process-global. No external process or permission owner is added.
+
+AXMenuOpened retains an independent popup root; AXMenuClosed and app deactivation
+clear it. A selected menu-bar context takes precedence. Menu actions must prove
+membership in the current menu, and closed-menu IDs are invalidated by the next
+observation. AX projection follows explicit title relations, consolidates safe
+selectable text, filters redundant actions/default fields, and preserves live
+AXAttributedStringForRange formatting. Style-only changes enter the same revision
+lineage as text changes, with stable actionable IDs.
 
 App drags carry the internal app-context flag. Before dispatch the native driver
 chooses its supported foreground HID route, raises only the exact AX window, and
@@ -153,3 +172,14 @@ package verification and `.qwen/e2e-tests/cua-native-alignment.md`. GUI checks u
 owned fixtures with independent AX/file verification. The final smoke uses
 MRKey GPT-6; record actual request parameters and all inference usage. Character
 counts and a smoke do not establish aggregate 20-task benchmark savings.
+
+## Approved follow-up acceptance
+
+The four approved gaps are validated locally in owned LibreOffice and TextEdit
+documents while mini's formal benchmark continues separately. The baseline
+TextArea click fails; a pointer-only candidate obtains real focus but still
+inserts nothing through AXSelectedText. The revised app typing path inserts an
+exact mixed Unicode marker once with Preview remaining foreground. TextEdit
+checks cover popup actions/closure, stale IDs, rich text, style-only diff and
+no-change. The local report keeps failed candidates and official comparisons
+separate. No new model inference is required for these deterministic checks.

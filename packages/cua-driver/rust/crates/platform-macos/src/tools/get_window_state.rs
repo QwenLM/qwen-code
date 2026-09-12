@@ -277,11 +277,17 @@ impl Tool for GetWindowStateTool {
         // Always walk the AX tree (perception returns both tree + screenshot).
         let tree_result = {
             let q = query.clone();
+            let state = Arc::clone(&self.state);
             // Keep the product deadline below the public client's 25-second
             // deadline so callers receive a structured driver error. The AX
             // walker also applies a native per-element messaging timeout because
             // dropping a spawn_blocking JoinHandle cannot cancel a blocked AX call.
             let walk_future = tokio::task::spawn_blocking(move || {
+                if app_context {
+                    if let Err(error) = state.watch_app(pid) {
+                        tracing::debug!(pid, %error, "app focus monitor unavailable");
+                    }
+                }
                 crate::ax::tree::walk_tree_with_context(
                     pid,
                     Some(window_id),
@@ -1215,6 +1221,11 @@ mod tests {
             value: None,
             description: None,
             identifier: None,
+            rich_text: None,
+            url: None,
+            title_ui_element: None,
+            selectable: false,
+            table_row: false,
             help: None,
             actions: vec![],
             element_ptr: 0,

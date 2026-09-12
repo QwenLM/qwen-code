@@ -62,6 +62,15 @@ test("app aliases bind the same handle and hide OS addressing from state", async
   assert.equal(calls.at(-1).input.elementToken, "rv1:window_7:25");
   assert.equal(calls.at(-1).input.windowId, 7n);
   assert.equal(calls.at(-1).input.elementIndex, undefined);
+  assert.equal(calls.at(-1).input.appContext, true);
+  await app.typeText("owned text");
+  assert.equal(calls.at(-1).input.appContext, true);
+  assert.equal(calls.at(-1).input.text, "owned text");
+  for (const method of ["doubleClick", "rightClick"]) {
+    await app[method](37);
+    assert.equal(calls.at(-1).input.appContext, true);
+    assert.equal(calls.at(-1).input.elementToken, "rv1:window_7:25");
+  }
 });
 
 test("app resolution rejects ambiguous names instead of selecting the first process", async () => {

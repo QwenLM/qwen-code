@@ -113,6 +113,7 @@ fn def() -> &'static ToolDef {
                     "maximum": 200,
                     "description": "Milliseconds between characters in the CGEvent fallback path. Default 30. Ignored when the AX path succeeds."
                 },
+                "app_context": { "type": "boolean", "description": "App-bound input uses key events at the current insertion point." },
                 "scope": { "type": "string", "enum": ["window", "desktop"], "default": "window", "description": "Use desktop with no pid/window_id to type into the frontmost application." },
                 "delivery_mode": {
                     "type": "string",
@@ -379,7 +380,8 @@ impl Tool for TypeTextTool {
         // AX value-set is silently dropped — see crate::terminal docs.
         // Skip the AX path entirely so the caller never sees the
         // "success but nothing typed" symptom.
-        let is_terminal_target = crate::terminal::is_terminal_pid(pid);
+        let synthesize_only = crate::terminal::is_terminal_pid(pid)
+            || args.get("app_context").and_then(Value::as_bool) == Some(true);
 
         let blocking_policy = keyboard_policy.clone();
         let result = focus_guard::with_focus_suppressed(
@@ -393,7 +395,7 @@ impl Tool for TypeTextTool {
                         &text_clone,
                         element_ptr,
                         delay_ms,
-                        is_terminal_target,
+                        synthesize_only,
                         delivery_mode,
                         window_id,
                         blocking_policy,
@@ -1108,7 +1110,7 @@ fn type_text_blocking(
     text: &str,
     element_ptr_and_idx: Option<(usize, Option<usize>)>,
     delay_ms: u64,
-    is_terminal_target: bool,
+    synthesize_only: bool,
     delivery_mode: super::DeliveryMode,
     window_id: Option<u32>,
     keyboard_policy: BackgroundKeyboardPolicy,
@@ -1216,8 +1218,10 @@ fn type_text_blocking(
         }));
     }
 
-    // --- Background rung 0: terminal emulator → CGEvent only (AX is dropped). ---
-    if is_terminal_target {
+    // App-bound typing targets the insertion point through key events, as does
+    // terminal input. An AXSelectedText write is a different actuator and can
+    // report success without inserting anything in LibreOffice.
+    if synthesize_only {
         // A terminal insert has no semantic AX rung: when the exact-target
         // decision restricted this request to semantic-only, there is nothing
         // safe to run — refuse before posting anything.
@@ -1235,10 +1239,7 @@ fn type_text_blocking(
                 ax_attempt: AxAttempt::NotAttempted,
             });
         }
-        tracing::debug!(
-            "type_text: pid {pid} is a terminal emulator; skipping AX value-set, \
-             using CGEvent key-event synthesis"
-        );
+        tracing::debug!("type_text: pid {pid} uses insertion-point key-event synthesis");
         let (verified, delivered_chars) = cgevent_type_verified(
             pid,
             text,
@@ -1250,7 +1251,7 @@ fn type_text_blocking(
             false,
         )?;
         return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
-            detail: format!(" via CGEvent (terminal emulator, {delay_ms}ms delay)"),
+            detail: format!(" via CGEvent ({delay_ms}ms delay)"),
             path: PATH_KEY_EVENTS,
             verified,
             delivered_chars,

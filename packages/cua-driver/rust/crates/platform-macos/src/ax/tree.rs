@@ -132,6 +132,11 @@ pub struct AXNode {
     /// Calculator buttons where AXTitle="" but AXDescription="2".
     pub description: Option<String>,
     pub identifier: Option<String>,
+    pub rich_text: Option<super::app_text::RichText>,
+    pub url: Option<String>,
+    pub title_ui_element: Option<AXIdentity>,
+    pub selectable: bool,
+    pub table_row: bool,
     pub help: Option<String>,
     pub actions: Vec<String>,
     /// The raw AXUIElementRef pointer value, for caching.
@@ -275,6 +280,15 @@ enum WalkMode {
     Legacy,
     AppWindow,
     AppMenu,
+}
+
+fn observation_text(value: Option<&str>, mode: WalkMode) -> String {
+    let value = value.unwrap_or_default();
+    if mode == WalkMode::Legacy {
+        value.trim().to_owned()
+    } else {
+        value.to_owned()
+    }
 }
 
 pub(crate) fn walk_tree_with_context(
@@ -648,7 +662,14 @@ unsafe fn walk_element_contents(
     // (parens), breaking _find_calc_button which searches for "(2)".
     let title_read = copy_string_attr_with_status(element, "AXTitle");
     *complete &= title_read.complete;
-    let title = title_read.value;
+    let title_relation = (mode != WalkMode::Legacy)
+        .then(|| super::app_text::associated_title(element, complete))
+        .flatten();
+    let title = title_read
+        .value
+        .filter(|value| mode == WalkMode::Legacy || !value.is_empty())
+        .or_else(|| title_relation.as_ref().and_then(|(_, title)| title.clone()));
+    let title_ui_element = title_relation.map(|(identity, _)| identity);
     // Read AXValue once with enough type information to preserve the existing
     // string-only markdown while also exposing numeric/boolean control state.
     let copied_value_read = copy_stringish_attr_with_status(element, "AXValue");
@@ -660,7 +681,7 @@ unsafe fn walk_element_contents(
     // AXPlaceholderValue as fallback for empty text fields.
     let value = if value
         .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
+        .is_some_and(|value| mode != WalkMode::Legacy || !value.trim().is_empty())
     {
         value
     } else {
@@ -679,11 +700,15 @@ unsafe fn walk_element_contents(
     let help = help_read.value.filter(|h| !h.trim().is_empty());
     let actions_read = copy_action_names_with_status(element);
     *complete &= actions_read.complete;
-    let actions = actions_read.actions;
+    let native_actions = actions_read.actions;
+    let has_actionable_action = native_actions.iter().any(|action| {
+        mode == WalkMode::Legacy
+            || !matches!(action.as_str(), "AXShowAlternateUI" | "AXShowDefaultUI")
+    });
 
-    let visible_title = title.as_deref().unwrap_or("").trim().to_owned();
-    let visible_description = description.as_deref().unwrap_or("").trim().to_owned();
-    let visible_value = value.as_deref().unwrap_or("").trim().to_owned();
+    let visible_title = observation_text(title.as_deref(), mode);
+    let visible_description = observation_text(description.as_deref(), mode);
+    let visible_value = observation_text(value.as_deref(), mode);
 
     let has_content =
         !visible_title.is_empty() || !visible_description.is_empty() || !visible_value.is_empty();
@@ -693,13 +718,39 @@ unsafe fn walk_element_contents(
     // field but unable to call set_value on it. Probe writability only for the
     // small family of value controls so arbitrary display nodes do not pay an
     // extra AX round trip.
-    let value_settable = if actions.is_empty() && role_supports_value_addressing(&role) {
+    let value_settable = if (!has_actionable_action && role_supports_value_addressing(&role))
+        || (mode != WalkMode::Legacy
+            && native_actions
+                .iter()
+                .any(|action| matches!(action.as_str(), "AXIncrement" | "AXDecrement")))
+    {
         let settable = is_attribute_settable_with_status(element, "AXValue");
         *complete &= settable.complete;
         settable.value.unwrap_or(false)
     } else {
         false
     };
+    let actions = native_actions
+        .into_iter()
+        .filter(|action| {
+            mode == WalkMode::Legacy
+                || super::projection::app_action_is_interesting(
+                    action,
+                    &role,
+                    value_settable,
+                    |attribute| {
+                        let scrollbar = copy_element_attr_with_status(element, attribute);
+                        *complete &= scrollbar.complete;
+                        if let Some(scrollbar) = scrollbar.value {
+                            CFRelease(scrollbar as CFTypeRef);
+                            true
+                        } else {
+                            !scrollbar.complete
+                        }
+                    },
+                )
+        })
+        .collect::<Vec<_>>();
     // A closed submenu can keep its descendants in AXChildren while reporting
     // those controls disabled. Never assign such a row a live element index:
     // the same native state also causes dispatch to refuse it, and exposing an
@@ -718,16 +769,29 @@ unsafe fn walk_element_contents(
     } else {
         None
     };
-    let focusable_or_selectable = if mode != WalkMode::Legacy && actions.is_empty() {
-        let focus = is_attribute_settable_with_status(element, "AXFocused");
+    let selectable = if mode != WalkMode::Legacy {
         let selection = is_attribute_settable_with_status(element, "AXSelected");
-        *complete &= focus.complete && selection.complete;
-        focus.value == Some(true) || selection.value == Some(true)
+        *complete &= selection.complete;
+        selection.value == Some(true)
     } else {
         false
     };
+    let table_row = if selectable && role != "AXTable" {
+        let subrole = copy_string_attr_with_status(element, "AXSubrole");
+        *complete &= subrole.complete;
+        subrole.value.as_deref() == Some("AXTableRow")
+    } else {
+        false
+    };
+    let focusable_or_selectable = if mode != WalkMode::Legacy && actions.is_empty() {
+        let focus = is_attribute_settable_with_status(element, "AXFocused");
+        *complete &= focus.complete;
+        focus.value == Some(true) || selectable
+    } else {
+        selectable
+    };
     let is_actionable = is_addressable(
-        !actions.is_empty(),
+        has_actionable_action,
         value_settable || focusable_or_selectable,
         enabled,
     );
@@ -781,9 +845,9 @@ unsafe fn walk_element_contents(
             ControlState {
                 value_state: copied_value
                     .map(|copied| copied.state_value)
-                    .filter(|v| !v.trim().is_empty())
+                    .filter(|value| mode != WalkMode::Legacy || !value.trim().is_empty())
                     .or_else(|| value.clone())
-                    .map(|v| v.trim().to_owned())
+                    .map(|v| observation_text(Some(&v), mode))
                     .filter(|v| !v.is_empty()),
                 value_description: value_description
                     .value
@@ -795,6 +859,12 @@ unsafe fn walk_element_contents(
                 selected: selected.value,
             }
         });
+    let rich_text = (mode != WalkMode::Legacy)
+        .then(|| super::app_text::read_rich_text(element, &role, value.as_deref()))
+        .flatten();
+    let url = (mode != WalkMode::Legacy && role == "AXLink")
+        .then(|| super::app_text::element_url(element))
+        .flatten();
     let node = if is_actionable {
         let idx = *counter;
         *counter += 1;
@@ -820,6 +890,11 @@ unsafe fn walk_element_contents(
                 Some(visible_description.clone())
             },
             identifier: identifier.clone(),
+            rich_text,
+            url,
+            title_ui_element,
+            selectable,
+            table_row,
             help: help.clone(),
             actions: actions.clone(),
             element_ptr,
@@ -857,6 +932,11 @@ unsafe fn walk_element_contents(
                 Some(visible_description.clone())
             },
             identifier: identifier.clone(),
+            rich_text,
+            url,
+            title_ui_element,
+            selectable,
+            table_row,
             help: help.clone(),
             actions: if mode == WalkMode::Legacy {
                 vec![]
@@ -1207,6 +1287,11 @@ mod tests {
             value: None,
             description: None,
             identifier: None,
+            rich_text: None,
+            url: None,
+            title_ui_element: None,
+            selectable: false,
+            table_row: false,
             help: None,
             actions: vec!["AXPress".to_owned(), "AXShowMenu".to_owned()],
             element_ptr: 0,
@@ -1234,5 +1319,53 @@ mod tests {
                 "in_web_content=true",
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod app_text_tests {
+    use super::{observation_text, WalkMode};
+    use crate::ax::projection::format_app_body;
+    use crate::ax::tree::AXNode;
+    use cua_driver_core::observation_revision::{
+        CapturedNode, ObservationLineage, ObservationMode,
+    };
+
+    #[test]
+    fn app_capture_preserves_literal_whitespace_and_legacy_stays_trimmed() {
+        for value in ["  indented\n", "\n", " \t", "中文_é_🙂\n"] {
+            for mode in [WalkMode::AppWindow, WalkMode::AppMenu] {
+                assert_eq!(observation_text(Some(value), mode), value);
+            }
+            assert_eq!(
+                observation_text(Some(value), WalkMode::Legacy),
+                value.trim()
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_newline_changes_are_observable_revision_changes() {
+        let capture = |value| {
+            vec![CapturedNode {
+                identity: "editor",
+                depth: 0,
+                actionable_index: Some(0),
+                body: format_app_body(&AXNode {
+                    role: "AXTextArea".into(),
+                    value: Some(observation_text(Some(value), WalkMode::AppWindow)),
+                    ..Default::default()
+                }),
+            }]
+        };
+        let mut lineage = ObservationLineage::new("literal-text", 8)
+            .unwrap()
+            .for_app();
+        let before = lineage.observe(capture("saved"), None, false).unwrap();
+        let after = lineage
+            .observe(capture("saved\n"), Some(&before.revision_id), false)
+            .unwrap();
+        assert_ne!(after.mode, ObservationMode::NoChange);
+        assert!(after.text.contains("saved\\n"));
     }
 }

@@ -1389,6 +1389,7 @@ const FfiConverterTypeDeliveryMode = (() => {
 })();
 
 export type DoubleClickInput = {
+    appContext?: boolean,
     pid: number,
     windowId?: bigint,
     elementToken?: string,
@@ -1418,6 +1419,7 @@ const FfiConverterTypeDoubleClickInput = (() => {
     class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
         read(from: RustBuffer): TypeName {
             return {
+                appContext: FfiConverterOptionalBoolean.read(from),
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
@@ -1427,6 +1429,7 @@ const FfiConverterTypeDoubleClickInput = (() => {
             };
         }
         write(value: TypeName, into: RustBuffer): void {
+            FfiConverterOptionalBoolean.write(value.appContext, into);
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
@@ -1435,7 +1438,8 @@ const FfiConverterTypeDoubleClickInput = (() => {
             FfiConverterOptionalFloat64.write(value.y, into);
         }
         allocationSize(value: TypeName): number {
-            return FfiConverterUInt32.allocationSize(value.pid) +
+            return FfiConverterOptionalBoolean.allocationSize(value.appContext) +
+             FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
              FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
@@ -3155,6 +3159,7 @@ const FfiConverterTypePressKeyInput = (() => {
 })();
 
 export type RightClickInput = {
+    appContext?: boolean,
     pid: number,
     windowId?: bigint,
     elementToken?: string,
@@ -3185,6 +3190,7 @@ const FfiConverterTypeRightClickInput = (() => {
     class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
         read(from: RustBuffer): TypeName {
             return {
+                appContext: FfiConverterOptionalBoolean.read(from),
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
@@ -3195,6 +3201,7 @@ const FfiConverterTypeRightClickInput = (() => {
             };
         }
         write(value: TypeName, into: RustBuffer): void {
+            FfiConverterOptionalBoolean.write(value.appContext, into);
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
@@ -3204,7 +3211,8 @@ const FfiConverterTypeRightClickInput = (() => {
             FfiConverterOptionalSequenceString.write(value.modifier, into);
         }
         allocationSize(value: TypeName): number {
-            return FfiConverterUInt32.allocationSize(value.pid) +
+            return FfiConverterOptionalBoolean.allocationSize(value.appContext) +
+             FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
              FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
@@ -4291,6 +4299,7 @@ const FfiConverterTypeVerifyStateOutput = (() => {
  * remains the portable desktop-coordinate form.
  */
 export type WindowClickInput = {
+    appContext?: boolean,
     pid: number,
     windowId?: bigint,
     elementToken?: string,
@@ -4322,6 +4331,7 @@ const FfiConverterTypeWindowClickInput = (() => {
     class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
         read(from: RustBuffer): TypeName {
             return {
+                appContext: FfiConverterOptionalBoolean.read(from),
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
@@ -4333,6 +4343,7 @@ const FfiConverterTypeWindowClickInput = (() => {
             };
         }
         write(value: TypeName, into: RustBuffer): void {
+            FfiConverterOptionalBoolean.write(value.appContext, into);
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
@@ -4343,7 +4354,8 @@ const FfiConverterTypeWindowClickInput = (() => {
             FfiConverterOptionalUInt32.write(value.count, into);
         }
         allocationSize(value: TypeName): number {
-            return FfiConverterUInt32.allocationSize(value.pid) +
+            return FfiConverterOptionalBoolean.allocationSize(value.appContext) +
+             FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
              FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
@@ -4638,6 +4650,7 @@ export type WindowTypeTextInput = {
     windowId?: bigint,
     elementToken?: string,
     deliveryMode?: DeliveryMode,
+    appContext?: boolean,
     text: string,
     delayMs?: bigint
 }
@@ -4667,6 +4680,7 @@ const FfiConverterTypeWindowTypeTextInput = (() => {
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
                 deliveryMode: FfiConverterOptionalTypeDeliveryMode.read(from),
+                appContext: FfiConverterOptionalBoolean.read(from),
                 text: FfiConverterString.read(from),
                 delayMs: FfiConverterOptionalUInt64.read(from)
             };
@@ -4676,6 +4690,7 @@ const FfiConverterTypeWindowTypeTextInput = (() => {
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
             FfiConverterOptionalTypeDeliveryMode.write(value.deliveryMode, into);
+            FfiConverterOptionalBoolean.write(value.appContext, into);
             FfiConverterString.write(value.text, into);
             FfiConverterOptionalUInt64.write(value.delayMs, into);
         }
@@ -4684,6 +4699,7 @@ const FfiConverterTypeWindowTypeTextInput = (() => {
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
              FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
+             FfiConverterOptionalBoolean.allocationSize(value.appContext) +
              FfiConverterString.allocationSize(value.text) +
              FfiConverterOptionalUInt64.allocationSize(value.delayMs);
 
@@ -4757,6 +4773,9 @@ const FfiConverterOptionalTypeClickButton = new FfiConverterOptional(FfiConverte
 // FfiConverter for Array<string>
 const FfiConverterSequenceString = new FfiConverterArray(FfiConverterString);
 
+// FfiConverter for boolean | undefined
+const FfiConverterOptionalBoolean = new FfiConverterOptional(FfiConverterBool);
+
 // FfiConverter for bigint | undefined
 const FfiConverterOptionalUInt64 = new FfiConverterOptional(FfiConverterUInt64);
 
@@ -4765,9 +4784,6 @@ const FfiConverterOptionalTypeDeliveryMode = new FfiConverterOptional(FfiConvert
 
 // FfiConverter for Array<string> | undefined
 const FfiConverterOptionalSequenceString = new FfiConverterOptional(FfiConverterSequenceString);
-
-// FfiConverter for boolean | undefined
-const FfiConverterOptionalBoolean = new FfiConverterOptional(FfiConverterBool);
 
 // FfiConverter for CursorPointOutput | undefined
 const FfiConverterOptionalTypeCursorPointOutput = new FfiConverterOptional(FfiConverterTypeCursorPointOutput);
