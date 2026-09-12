@@ -43,6 +43,7 @@ import {
   MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import { gzipJsonResponses } from './gzip-response.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import {
   CredentialStore,
@@ -2155,6 +2156,14 @@ export function createServeApp(
   }
 
   installJsonBodyParser(app);
+
+  // Gzip JSON API responses for clients that negotiate it (#6181). Mounted
+  // after authenticate + rate limiter on purpose: auth/rate-limit rejections
+  // are tiny bodies from (possibly unauthenticated) callers and must not pay
+  // a compression tax. Web Shell session loads stream multi-megabyte
+  // transcript JSON — the wrapper compresses those while leaving SSE, static
+  // assets, and attachment downloads untouched (see gzip-response.ts).
+  app.use(gzipJsonResponses());
 
   // Mutation-route gate factory. Trusted primary loopback requests have
   // operator authority; strict routes otherwise require verified credentials.
