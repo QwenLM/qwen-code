@@ -275,9 +275,17 @@ export function setGeneratorReasoningEffort(
  * The tiers `/effort` offers for a model with this parsed reasoning
  * capability: none for a toggle-only model, the declared list otherwise, and
  * the whole ladder when the model declares nothing (the provider clamps then).
+ * The one tier rule shared by `/effort` (the CLI's picker and command) and a
+ * workflow agent's per-call effort; each site keeps its own capability lookup.
  */
 export function reasoningEffortsForCapability(
-  reasoning: ModelReasoningCapabilities | undefined,
+  reasoning:
+    | { readonly toggleOnly: true }
+    | {
+        readonly toggleOnly?: false;
+        readonly efforts: readonly ReasoningEffort[];
+      }
+    | undefined,
 ): readonly ReasoningEffort[] {
   if (!reasoning) return REASONING_EFFORT_TIERS;
   return reasoning.toggleOnly ? [] : reasoning.efforts;

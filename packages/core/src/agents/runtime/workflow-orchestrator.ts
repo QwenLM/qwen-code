@@ -34,7 +34,11 @@ import {
   WorkflowAgentFailedError,
 } from './workflow-agent-failure.js';
 import { resolveStallMs, runStallResilient } from './workflow-stall.js';
-import { deriveAgentKey, deriveArgsSeed } from './workflow-journal.js';
+import {
+  DISPATCH_AFFECTING_AGENT_OPTS,
+  deriveAgentKey,
+  deriveArgsSeed,
+} from './workflow-journal.js';
 import type { WorkflowJournal, JournalReplay } from './workflow-journal.js';
 import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
@@ -51,7 +55,7 @@ import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
 } from './agent-events.js';
-import { ToolNames } from '../../tools/tool-names.js';
+import { resolveBuiltinToolName, ToolNames } from '../../tools/tool-names.js';
 import {
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
@@ -753,18 +757,12 @@ async function runSingleDispatch(
   // The fast path hands `config` to AgentHeadless untouched, so it has no
   // way to honour a directory rebind — `workingDir` MUST route through the
   // override path or it would be silently dropped and the agent would run in
-  // the parent working tree. The same holds for `effort`, which needs the
-  // agent's own content-generator config, and for `disallowedTools`, whose
-  // display names are resolved only on the override path.
-  if (
-    opts.agentType === undefined &&
-    opts.model === undefined &&
-    opts.isolation === undefined &&
-    opts.schema === undefined &&
-    opts.workingDir === undefined &&
-    opts.effort === undefined &&
-    opts.disallowedTools === undefined
-  ) {
+  // the parent working tree. The same holds for every option that changes
+  // what a dispatch does (`effort` needs the agent's own content-generator
+  // config, `disallowedTools` the override path's deny union), so the guard is
+  // driven by the one list the resume key also projects: an option added there
+  // cannot silently take this path.
+  if (DISPATCH_AFFECTING_AGENT_OPTS.every((key) => opts[key] === undefined)) {
     const subagent = await AgentHeadless.create(
       agentIdentity.name,
       config,
@@ -883,8 +881,9 @@ function resolveDispatchEffort(raw: unknown): ReasoningEffort | undefined {
 }
 
 /**
- * `opts.disallowedTools` as a list (`[]` when omitted). Same host-side
- * re-check as {@link resolveDispatchEffort}.
+ * `opts.disallowedTools` as a list (`[]` when omitted), with built-in display
+ * names mapped to tool names as the sandbox maps them. Same host-side re-check
+ * as {@link resolveDispatchEffort}.
  */
 function resolveDispatchDenies(raw: unknown): string[] {
   if (raw === undefined) return [];
@@ -899,7 +898,7 @@ function resolveDispatchDenies(raw: unknown): string[] {
       "agent({disallowedTools}): must be an array of non-empty tool-name strings without surrounding whitespace, e.g. ['run_shell_command', 'write_file'].",
     );
   }
-  return raw as string[];
+  return (raw as string[]).map((name) => resolveBuiltinToolName(name) ?? name);
 }
 
 /**
@@ -1072,18 +1071,37 @@ async function runOverridePath(
     ),
   };
 
-  // A schema agent answers only through structured_output. Denying that tool
-  // leaves it no way to deliver the one result the script accepts, and the
-  // run would spend the agent's turns before failing as if it had ignored the
-  // contract. Refuse before anything is provisioned. Names are resolved by the
-  // normalizer the spawn itself applies, so the display name is caught too.
-  if (opts.schema !== undefined && requestedDenies.length > 0) {
-    const resolvedDenies = await subagentMgr.resolveToolNames(requestedDenies);
-    if (resolvedDenies.includes(ToolNames.STRUCTURED_OUTPUT)) {
+  // A deny that matches no tool denies nothing: the agent would keep the tool
+  // the script meant to take away while the script believes it narrowed it.
+  // Refuse such entries before anything is provisioned. MCP patterns, built-in
+  // tools not registered in this session and registered tools all pass.
+  if (requestedDenies.length > 0) {
+    const unmatched = await subagentMgr.findUnmatchedToolNames(requestedDenies);
+    if (unmatched.length > 0) {
       throw new Error(
-        'agent({schema, disallowedTools}): schema mode needs the structured_output tool, but disallowedTools deny it.',
+        `agent({disallowedTools}): ${sanitizeForErrorMessage(
+          unmatched.map((name) => JSON.stringify(name)).join(', '),
+        )} ${unmatched.length === 1 ? 'matches' : 'match'} no tool. Use a tool name (run_shell_command, write_file, edit), a display name (Shell, WriteFile, Edit), or an MCP pattern (mcp__<server>, mcp__<server>__*, mcp__<server>__<tool>).`,
       );
     }
+  }
+
+  // A schema agent answers only through structured_output. Denying that tool,
+  // from this call or from the agent type's own definition, leaves it no way
+  // to deliver the one result the script accepts, and the run would spend the
+  // dispatch before failing as if the agent had ignored the contract. Refuse
+  // before anything is provisioned. Built-in names resolve statically, so the
+  // display name is caught whether or not the tool is registered here.
+  if (
+    opts.schema !== undefined &&
+    [...(baseConfig.disallowedTools ?? []), ...requestedDenies].some(
+      (name) =>
+        (resolveBuiltinToolName(name) ?? name) === ToolNames.STRUCTURED_OUTPUT,
+    )
+  ) {
+    throw new Error(
+      'agent({schema, disallowedTools}): schema mode needs the structured_output tool, but disallowedTools deny it (from this call or from the agent type).',
+    );
   }
 
   // Provision worktree BEFORE createAgentHeadless so the derived Config

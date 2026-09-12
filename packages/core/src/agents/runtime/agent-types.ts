@@ -55,9 +55,12 @@ export interface ModelConfig {
   model?: string;
 
   /**
-   * Reasoning effort for this agent alone. Written onto the agent's own
+   * Reasoning effort for this agent alone, honored by
+   * `SubagentManager.createAgentHeadless`: written onto the agent's own
    * content-generator config — never the session's — and limited to the tiers
-   * `/effort` offers for the agent's model.
+   * `/effort` offers for the agent's model. Spawn paths that build their own
+   * generator view (the in-process backend behind teammates and arena agents)
+   * do not read it.
    */
   reasoningEffort?: ReasoningEffort;
 }

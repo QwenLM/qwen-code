@@ -782,6 +782,55 @@ describe('createWorkflowSandbox security', () => {
     ).rejects.toThrow(/Known options are: .*effort.*disallowedTools/);
   });
 
+  // A rejected call must leave no phase behind: the phase is recorded only
+  // after every option gate has passed.
+  it.each([
+    ['effort: "turbo"', /unknown effort tier/],
+    ['disallowedTools: "edit"', /must be an array/],
+  ])(
+    'records no phase for a call rejected over %s',
+    async (option, message) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("x", { phase: "Verify", ${option} });`),
+      ).rejects.toThrow(message);
+      expect(sandbox.getPhases()).toEqual([]);
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  // The rejected value is script-controlled, and JSON.stringify leaves DEL and
+  // C1 (incl. NEL) in place, so the echo is sanitized before the message.
+  it('strips control characters from an echoed effort value', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const error = (await sandbox
+      .run(`return agent("x", { effort: "turbo\u0085inject\u007f" });`)
+      .catch((e: unknown) => e)) as Error;
+    expect(error.message).toMatch(/unknown effort tier "turboinject"/);
+    expect(error.message).not.toMatch(/[\u007f-\u009f]/);
+  });
+
+  // Built-in display names become tool names before the resume key is
+  // derived, so renaming Edit to edit keeps the cache; MCP patterns pass as is.
+  it('hands the host built-in deny names as tool names', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.disallowedTools);
+        return 'ok';
+      },
+    });
+    await sandbox.run(
+      `return agent("a", { disallowedTools: ["Edit", "edit", "WriteFile", "mcp__github"] });`,
+    );
+    expect(seen).toEqual([['edit', 'mcp__github', 'write_file']]);
+  });
+
   // SEC-I2: log() must cap at MAX_LOG_LINES and add a truncation marker.
   it('log() caps at MAX_LOG_LINES with a truncation marker', async () => {
     const emitted: string[] = [];

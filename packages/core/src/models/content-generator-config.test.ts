@@ -301,7 +301,9 @@ describe('buildAgentContentGeneratorConfig', () => {
   // to land on the agent's copy by the rule `/effort` uses, and never on the
   // session config that copy was spread from.
   describe('per-agent reasoning effort', () => {
-    it('writes the tier onto an inherited copy without touching the parent', () => {
+    // An explicit tier is authoritative on the copy: an inherited budget would
+    // outrank it on the wire, so the copy drops it. The parent keeps both.
+    it('writes the tier onto an inherited copy, drops the inherited budget, and leaves the parent alone', () => {
       const parent: ContentGeneratorConfig = {
         ...parentConfig,
         reasoning: { effort: 'high', budget_tokens: 4096 },
@@ -317,7 +319,7 @@ describe('buildAgentContentGeneratorConfig', () => {
 
       expect(result.model).toBe('parent-model');
       expect(result.apiKey).toBe('parent-key');
-      expect(result.reasoning).toEqual({ effort: 'low', budget_tokens: 4096 });
+      expect(result.reasoning).toEqual({ effort: 'low' });
       expect(parent.reasoning).toEqual({ effort: 'high', budget_tokens: 4096 });
     });
 
@@ -411,6 +413,147 @@ describe('buildAgentContentGeneratorConfig', () => {
       );
 
       expect(result.reasoning).toEqual({ effort: 'high' });
+    });
+
+    it('drops a thinking budget the agent model registry provides', () => {
+      const registryModel = {
+        id: 'registry-model',
+        authType: 'openai',
+        name: 'registry-model',
+        baseUrl: 'https://registry.example.com',
+        generationConfig: { reasoning: { budget_tokens: 32000 } },
+        capabilities: {},
+      } as unknown as ResolvedModelConfig;
+      const config = createMockConfig(parentConfig, registryModel);
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model',
+        { authType: 'openai' },
+        { reasoningEffort: 'low' },
+      );
+
+      expect(result.model).toBe('registry-model');
+      expect(result.reasoning).toEqual({ effort: 'low' });
+    });
+
+    // A provider switch clears the session's `reasoning: false` from the copy;
+    // the tier must still not switch thinking back on.
+    it('never re-enables thinking the session turned off, even across providers', () => {
+      const config = createMockConfig({ ...parentConfig, reasoning: false });
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'claude-sonnet',
+        { authType: 'anthropic' },
+        { reasoningEffort: 'max' },
+      );
+
+      expect(result.reasoning).toBeUndefined();
+    });
+
+    // Registry stubs that answer only for the arguments they are given, so a
+    // lookup keyed on the wrong model or an exact-only base URL shows up.
+    const DECLARED_TIERS = {
+      thinking: true,
+      disableField: 'reasoning_effort',
+      efforts: ['low', 'medium', 'high'],
+    };
+    function configWithRegistry(
+      parent: ContentGeneratorConfig,
+      entry: { authType: string; model: string; baseUrl: string },
+    ): Config {
+      const getResolvedModel = vi.fn(
+        (authType: string, model: string, baseUrl?: string) =>
+          authType === entry.authType &&
+          model === entry.model &&
+          (baseUrl === undefined || baseUrl === entry.baseUrl)
+            ? ({
+                id: entry.model,
+                authType: entry.authType,
+                name: entry.model,
+                baseUrl: entry.baseUrl,
+                generationConfig: {},
+                capabilities: { reasoning: DECLARED_TIERS },
+              } as unknown as ResolvedModelConfig)
+            : undefined,
+      );
+      return {
+        getContentGeneratorConfig: () => parent,
+        getModelsConfig: () => ({ getResolvedModel }),
+      } as unknown as Config;
+    }
+
+    it("clamps against the agent's own model, not the session's", () => {
+      const config = configWithRegistry(parentConfig, {
+        authType: 'openai',
+        model: 'agent-model',
+        baseUrl: 'https://agent.example.com',
+      });
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'agent-model',
+        { authType: 'openai' },
+        { reasoningEffort: 'max' },
+      );
+
+      expect(result.model).toBe('agent-model');
+      expect(result.reasoning).toEqual({ effort: 'high' });
+    });
+
+    it('finds the declared tiers behind a gateway base URL', () => {
+      const config = configWithRegistry(
+        { ...parentConfig, baseUrl: 'https://gw.internal/v1' },
+        {
+          authType: 'openai',
+          model: 'parent-model',
+          baseUrl: 'https://api.openai.com/v1',
+        },
+      );
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        undefined,
+        { authType: 'openai' },
+        { reasoningEffort: 'max' },
+      );
+
+      expect(result.reasoning).toEqual({ effort: 'high' });
+    });
+
+    it("falls back to the provider's built-in tiers when the registry declares none", () => {
+      const config = createMockConfig({ ...parentConfig, model: 'gpt-5' });
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        undefined,
+        { authType: 'openai' },
+        { reasoningEffort: 'max' },
+      );
+
+      expect(result.reasoning).toEqual({ effort: 'high' });
+    });
+
+    it('refuses an interactive login when asked to', async () => {
+      const config = createMockConfig(parentConfig);
+      vi.mocked(createContentGenerator).mockResolvedValue(
+        {} as Awaited<ReturnType<typeof createContentGenerator>>,
+      );
+
+      await createRuntimeContentGeneratorView(
+        config,
+        config,
+        undefined,
+        { authType: 'openai' },
+        { reasoningEffort: 'low', requireCachedCredentials: true },
+      );
+
+      expect(createContentGenerator).toHaveBeenCalledWith(
+        expect.objectContaining({ reasoning: { effort: 'low' } }),
+        config,
+        true,
+      );
     });
 
     it('carries the effort through createRuntimeContentGeneratorView', async () => {

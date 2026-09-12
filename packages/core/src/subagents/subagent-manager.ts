@@ -46,6 +46,7 @@ import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-contex
 import type { ReasoningEffort } from '../core/reasoning-effort.js';
 import {
   createRuntimeContentGeneratorView,
+  resolveAgentReasoningTier,
   type AuthOverrides,
 } from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -67,7 +68,11 @@ import {
   parseMaxTurns,
   claudePermissionModeToApprovalMode,
 } from './agent-frontmatter-schema.js';
-import { ToolDisplayNamesMigration, ToolNames } from '../tools/tool-names.js';
+import {
+  resolveBuiltinToolName,
+  ToolDisplayNamesMigration,
+  ToolNames,
+} from '../tools/tool-names.js';
 import { QWEN_DIR, Storage } from '../config/storage.js';
 import {
   hasRebuiltToolRegistry,
@@ -1336,6 +1341,21 @@ export class SubagentManager {
     if (!modelId && reasoningEffort === undefined) {
       return undefined;
     }
+    // An effort-only request would otherwise share the session's generator.
+    // Give the agent its own only when the tier can land on the session's
+    // model: a tier it cannot take (toggle-only, thinking off) changes nothing,
+    // and a generator per dispatch would be pure cost.
+    if (
+      !modelId &&
+      reasoningEffort !== undefined &&
+      resolveAgentReasoningTier(
+        base,
+        base.getContentGeneratorConfig(),
+        reasoningEffort,
+      ) === undefined
+    ) {
+      return undefined;
+    }
 
     const authType =
       route?.authType ??
@@ -1348,18 +1368,35 @@ export class SubagentManager {
           authType: authType as string,
         };
 
-    const view = await createRuntimeContentGeneratorView(
-      base,
-      base,
-      modelId,
-      authOverrides,
-      { reasoningEffort },
-    );
+    let view: RuntimeContentGeneratorView;
+    try {
+      view = await createRuntimeContentGeneratorView(
+        base,
+        base,
+        modelId,
+        authOverrides,
+        {
+          reasoningEffort,
+          // A tier alone is no reason to log in: a headless dispatch must
+          // never open an interactive device flow for it.
+          ...(modelId ? {} : { requireCachedCredentials: true }),
+        },
+      );
+    } catch (error) {
+      if (modelId) throw error;
+      // Effort-only: the agent still runs, on the session's generator and
+      // effort, rather than failing the dispatch over a cosmetic option.
+      debugLogger.warn(
+        `Subagent "${config.name}" could not get its own ContentGenerator for reasoningEffort=${reasoningEffort} (${error instanceof Error ? error.message : String(error)}); it runs on the session's generator and effort.`,
+      );
+      return undefined;
+    }
 
+    const landed = view.contentGeneratorConfig.reasoning;
     debugLogger.info(
       `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${view.contentGeneratorConfig.model}` +
         (reasoningEffort !== undefined
-          ? `, reasoningEffort=${reasoningEffort}`
+          ? `, reasoningEffort=${landed ? (landed.effort ?? 'none') : 'none'} (requested ${reasoningEffort})`
           : ''),
     );
 
@@ -1511,13 +1548,28 @@ export class SubagentManager {
   }
 
   /**
-   * Resolve tool names or display names to tool names with the rules a spawn
-   * applies to `tools` / `disallowedTools`. A name that matches no registered
-   * tool is kept as given. Lets a caller reason about a deny list before the
-   * spawn without keeping a second copy of the matching rules.
+   * The entries of a deny list that can deny nothing: not an `mcp__` pattern
+   * (those match by pattern at run time), not a built-in tool by tool name,
+   * display name or legacy alias (registered in this session or not), and not
+   * the name or display name of any registered tool. A deny that matches
+   * nothing silently leaves the agent the tool the caller meant to take away,
+   * so callers refuse these instead of forwarding them.
    */
-  async resolveToolNames(tools: string[]): Promise<string[]> {
-    return this.transformToToolNames(tools);
+  async findUnmatchedToolNames(tools: string[]): Promise<string[]> {
+    const candidates = tools.filter(
+      (name) =>
+        !name.startsWith('mcp__') && resolveBuiltinToolName(name) === undefined,
+    );
+    if (candidates.length === 0) return [];
+    const toolRegistry = this.config.getToolRegistry();
+    if (!toolRegistry) return candidates;
+    await toolRegistry.warmAll();
+    const registered = new Set<string>();
+    for (const tool of toolRegistry.getAllTools()) {
+      registered.add(tool.name);
+      if (tool.displayName) registered.add(tool.displayName);
+    }
+    return candidates.filter((name) => !registered.has(name));
   }
 
   /**
