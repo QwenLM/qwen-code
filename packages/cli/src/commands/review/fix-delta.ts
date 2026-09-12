@@ -197,10 +197,25 @@ const FLOW_BOOKKEEPING_NAMES = new Set([
   'qwen-review-script-lint.json',
 ]);
 
+/**
+ * A role-keyed prompt record — the shape `agent-prompt` writes into a
+ * plan's `-prompts` directory, under either family:
+ * `<encodeURIComponent(key)>.brief.md|.findings.md|.txt`, where every key
+ * ends in a 12-hex content digest (an invariant agent's key embeds a
+ * path, so the prefix is not name-shaped).
+ */
+const FLOW_RECORD_RE = /.*--[0-9a-f]{12}\.(?:brief\.md|findings\.md|txt)$/;
+
 /** True when a family-matched path (bytes, `/`-joined) names the flow's own bookkeeping. */
 function isFlowBookkeeping(path: Buffer): boolean {
   const base = path.subarray(path.lastIndexOf(0x2f) + 1).toString('latin1');
   if (FLOW_BOOKKEEPING_NAMES.has(base)) return true;
+  // The file-target plan family's own plan report — Step 1's, but flow
+  // bookkeeping by the same contract.
+  if (base.startsWith('file-review-') && base.endsWith('-plan.json')) {
+    return true;
+  }
+  if (FLOW_RECORD_RE.test(base)) return true;
   return (
     base.startsWith('qwen-review-') &&
     FLOW_BOOKKEEPING_SUFFIXES.some((suffix) => base.endsWith(suffix))

@@ -5264,11 +5264,31 @@ describe('fix-delta', () => {
       'qwen-review-local-findings.json',
     );
     writeFileSync(artifact, '{"round":1}\n');
+    // The file-target family's own shapes ride the same contract: the
+    // plan report, and a role-keyed record in its `-prompts` directory.
+    const plan = join(
+      repo,
+      '.qwen',
+      'tmp',
+      'file-review-depth.ts-212237-plan.json',
+    );
+    writeFileSync(plan, '{"files":[]}\n');
+    const prompts = join(
+      repo,
+      '.qwen',
+      'tmp',
+      'file-review-depth.ts-212237-plan-prompts',
+    );
+    mkdirSync(prompts, { recursive: true });
+    const record = join(prompts, 'fix-audit--9dace1f6b360.brief.md');
+    writeFileSync(record, '# brief v1\n');
     git('add', '-A'); // staged, never committed — the user's own add
 
     runSnapshot();
-    // The ledger rebuild between the moments rewrites it…
+    // The ledger rebuild between the moments rewrites them…
     writeFileSync(artifact, '{"round":2,"rebuilt":true}\n');
+    writeFileSync(plan, '{"files":["src/depth.ts"]}\n');
+    writeFileSync(record, '# brief v2\n');
     // …and the fix edits a real source file.
     writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
     runSince();
@@ -5276,6 +5296,8 @@ describe('fix-delta', () => {
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).toContain('+export const x = 2;');
     expect(hunks).not.toContain('qwen-review-local-findings.json');
+    expect(hunks).not.toContain('file-review-depth.ts-212237-plan.json');
+    expect(hunks).not.toContain('fix-audit--9dace1f6b360.brief.md');
     expect(
       stderr().some((l) => /1 file\(s\) changed since the snapshot/.test(l)),
     ).toBe(true);
