@@ -16,6 +16,7 @@ import {
   type ExtensionStoreSnapshot,
 } from '@qwen-code/qwen-code-core';
 import { createServeApp } from '../server.js';
+import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
 import { ClientMcpSenderRegistry } from '../acp-http/client-mcp-sender-registry.js';
 import {
   canonicalizeWorkspace,
@@ -89,6 +90,13 @@ function makeWorkspaceService(): DaemonWorkspaceService {
     refreshExtensionsForAllSessions: vi.fn(async () => ({
       refreshed: 1,
       failed: 0,
+    })),
+    getWorkspaceExtensionsStatus: vi.fn(async () => ({
+      v: 1,
+      workspaceCwd: '/work/fixture',
+      initialized: true,
+      runtimeEpoch: 1,
+      extensions: [],
     })),
   } as unknown as DaemonWorkspaceService;
 }
@@ -375,6 +383,49 @@ async function pollOperation(
   throw new Error(`operation ${operationId} did not settle`);
 }
 
+async function answerSettingInteraction(
+  app: ReturnType<typeof createServeApp>,
+  operationId: string,
+): Promise<void> {
+  let interactionId = '';
+  await vi.waitFor(async () => {
+    const operation = await auth(
+      request(app).get(`/extensions/operations/${operationId}`),
+    );
+    expect(operation.body).toMatchObject({
+      status: 'waiting_for_input',
+      interaction: { kind: 'setting', setting: { name: 'API key' } },
+    });
+    interactionId = operation.body.interaction.id as string;
+  });
+  const answer = await auth(
+    request(app)
+      .post(
+        `/workspace/extensions/operations/${operationId}/interactions/${interactionId}`,
+      )
+      .send({ value: 'configured' }),
+  );
+  expect(answer.status).toBe(200);
+}
+
+function requestApiKey(manager: ExtensionManager): Promise<string> {
+  return (
+    manager as unknown as {
+      requestSetting(setting: {
+        name: string;
+        description: string;
+        envVar: string;
+        sensitive: boolean;
+      }): Promise<string>;
+    }
+  ).requestSetting({
+    name: 'API key',
+    description: 'API key used by this extension',
+    envVar: 'API_KEY',
+    sensitive: true,
+  });
+}
+
 describe('extension management v2 REST', () => {
   afterEach(() => {
     for (const app of activeApps) {
@@ -420,13 +471,14 @@ describe('extension management v2 REST', () => {
     try {
       const response = await auth(request(h.app).get('/extensions'));
       expect(response.status).toBe(200);
-      expect(response.body).toMatchObject({
+      expect(response.body).toEqual({
         v: 1,
         generation: 7,
         extensions: [
           {
             id: extensionId,
             name: 'demo',
+            version: '1.0.0',
             installType: 'archive-url',
             defaultActivation: 'disabled',
             workspaceOverrideCount: 0,
@@ -438,6 +490,123 @@ describe('extension management v2 REST', () => {
       ).toHaveBeenCalledOnce();
       expect(
         ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns the selected live runtime extension catalog', async () => {
+    const h = await makeHarness();
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 9,
+      extensions: [
+        {
+          kind: 'extension',
+          id: extensionId,
+          name: 'demo',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/demo',
+          source:
+            'https://user:secret@example.com/demo.git?token=secret#fragment',
+          capabilities: {
+            mcpServerCount: 0,
+            skillCount: 0,
+            agentCount: 0,
+            hookCount: 0,
+            commandCount: 0,
+            contextFileCount: 0,
+            channelCount: 0,
+            hasSettings: false,
+          },
+        },
+      ],
+    });
+    try {
+      const response = await auth(
+        request(h.app).get(
+          `/workspaces/${h.secondary.workspaceId}/runtime/extensions`,
+        ),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        runtimeEpoch: 9,
+        extensions: [
+          {
+            name: 'demo',
+            isActive: true,
+            source: 'https://***REDACTED***@example.com/demo.git',
+          },
+        ],
+      });
+      expect(
+        h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+      ).toHaveBeenCalledWith({
+        route: 'GET /workspaces/:workspace/runtime/extensions',
+        workspaceCwd: h.secondary.workspaceCwd,
+      });
+      expect(
+        h.primary.workspaceService.getWorkspaceExtensionsStatus,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns an uninitialized catalog without starting a cold runtime', async () => {
+    const h = await makeHarness();
+    const preheat = vi.fn();
+    Object.assign(h.secondary.bridge, { preheat });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: false,
+      extensions: [],
+    });
+    try {
+      const response = await auth(
+        request(h.app).get(
+          `/workspaces/${h.secondary.workspaceId}/runtime/extensions`,
+        ),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        initialized: false,
+        extensions: [],
+      });
+      expect(response.body.runtimeEpoch).toBeUndefined();
+      expect(preheat).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps projection reads available while trust-gating runtime catalogs', async () => {
+    const h = await makeHarness({ secondaryTrusted: false });
+    mockExtensionManager();
+    try {
+      const projection = await auth(
+        request(h.app).get(`/workspaces/${h.secondary.workspaceId}/extensions`),
+      );
+      expect(projection.status).toBe(200);
+
+      const runtime = await auth(
+        request(h.app).get(
+          `/workspaces/${h.secondary.workspaceId}/runtime/extensions`,
+        ),
+      );
+      expect(runtime.status).toBe(403);
+      expect(runtime.body.code).toBe('untrusted_workspace');
+      expect(
+        h.secondary.workspaceService.getWorkspaceExtensionsStatus,
       ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
@@ -1564,6 +1733,471 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('broadcasts background generation reconciliation from coordinator runtimes', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand: vi.fn(async (method: string) =>
+        method === 'qwen/control/workspace/extensions/reconcile'
+          ? {
+              sessionsRefreshed: 2,
+              sessionsFailed: 0,
+              configsRefreshed: 1,
+              configsFailed: 0,
+            }
+          : {
+              sessionsRefreshed: 0,
+              sessionsFailed: 0,
+              configsRefreshed: 1,
+              configsFailed: 0,
+            },
+      ),
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.broadcastExtensionsChanged,
+      ).toHaveBeenCalledWith({ refreshed: 2, failed: 0 });
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('converges once after the store recovers a lower generation', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand: vi.fn(async () => ({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+      })),
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    const invalidateCount = () =>
+      vi.mocked(h.secondary.workspaceService.invalidateWorkspaceSkillsStatus)
+        .mock.calls.length;
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      const settled = invalidateCount();
+      expect(settled).toBeGreaterThan(0);
+
+      const rolledBackSnapshot: ExtensionStoreSnapshot = {
+        version: 2,
+        generation: 6,
+        legacyProjectionHash: 'rolled-back-hash',
+        extensions: {
+          [extensionId]: {
+            name: 'demo',
+            defaultActivation: 'disabled',
+            workspaceOverrides: {},
+          },
+        },
+      };
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 6,
+        appliedGeneration: 6,
+      });
+      // The projection must serve the coordinator-certified generation on a
+      // coordinator-armed runtime, not the legacy per-workspace map.
+      const projection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 6,
+        appliedGeneration: 6,
+      });
+      const recovered = invalidateCount();
+      expect(recovered).toBeGreaterThan(settled);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(invalidateCount()).toBe(recovered);
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reconciles again when the store reuses a generation for different content', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    const invokeWorkspaceCommand = vi.fn(async () => ({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 1,
+      configsFailed: 0,
+    }));
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand,
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    const extensionReconcileCalls = () =>
+      (invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ).length;
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      const settled = extensionReconcileCalls();
+      expect(settled).toBeGreaterThan(0);
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({ state: 'ready', appliedGeneration: 7 });
+
+      // Automatic backup recovery plus a recommit both landed between two
+      // ticks: generation 7 is back but describes different content.
+      const reusedSnapshot: ExtensionStoreSnapshot = {
+        version: 2,
+        generation: 7,
+        legacyProjectionHash: 'hash',
+        extensions: {
+          [extensionId]: {
+            name: 'demo',
+            defaultActivation: 'disabled',
+            workspaceOverrides: {},
+            artifactGeneration: 7,
+          },
+        },
+      };
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue(reusedSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).mockResolvedValue(reusedSnapshot);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(extensionReconcileCalls()).toBeGreaterThan(settled);
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+
+      // With the content identity recorded again the next tick is a no-op.
+      const converged = extensionReconcileCalls();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(extensionReconcileCalls()).toBe(converged);
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('broadcasts a failed coordinator reconciliation like the legacy path', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand: vi.fn(async () => ({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 0,
+        configsFailed: 1,
+        configErrors: ['broken extension'],
+      })),
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.broadcastExtensionsChanged,
+      ).toHaveBeenCalledWith({ refreshed: 0, failed: 1 });
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an errored coordinator capability pending at the initial store generation', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const initialSnapshot: ExtensionStoreSnapshot = {
+      version: 2,
+      generation: 0,
+      legacyProjectionHash: 'hash',
+      extensions: {},
+    };
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionStoreSnapshot,
+    ).mockResolvedValue(initialSnapshot);
+    vi.mocked(
+      ExtensionManager.prototype.refreshCacheWithSnapshot,
+    ).mockResolvedValue(initialSnapshot);
+    const invokeWorkspaceCommand = vi.fn(async () => ({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    }));
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand,
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    try {
+      const coordinator = getWorkspaceRuntimeCoordinator(h.secondary);
+      // Two failed preparations at store generation 0 close the failed-
+      // revision latch; no observed generation move can clear it.
+      await coordinator.ensure();
+      await coordinator.ensure();
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'error',
+        desiredGeneration: 0,
+        appliedGeneration: 0,
+      });
+
+      // The store heals without a write: the errored capability must stay
+      // pending so a poller tick past the failure cooldown re-drives the
+      // reconcile instead of certifying the failure until restart.
+      invokeWorkspaceCommand.mockResolvedValue({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+        configErrors: [],
+      });
+      await vi.advanceTimersByTimeAsync(150_000);
+
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 0,
+        appliedGeneration: 0,
+      });
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('suppresses the broadcast for a no-op coordinator reconciliation', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand: vi.fn(async () => ({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+      })),
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    vi.spyOn(
+      getWorkspaceRuntimeCoordinator(h.secondary),
+      'reconcileExtensionGeneration',
+    ).mockResolvedValue({ state: 'reconciled', refreshed: 0, failed: 0 });
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.broadcastExtensionsChanged,
+      ).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('retries generation reconciliation after a runtime refresh fails', async () => {
     vi.useFakeTimers();
     const h = await makeHarness();
@@ -2126,6 +2760,187 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('keeps interactive settings available on the global V2 install route', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    let submittedSetting: string | undefined;
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockImplementation(async function (this: ExtensionManager) {
+      submittedSetting = await requestApiKey(this);
+      return {} as never;
+    });
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'demo' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    try {
+      const started = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/demo',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+      expect(started.status).toBe(202);
+      await answerSettingInteraction(h.app, started.body.operationId);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(submittedSetting).toBe('configured');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('answers an interaction from a client id known only to a secondary runtime bridge', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(h.primary.bridge, 'knownClientIds').mockReturnValue(
+      new Set(['primary-client']),
+    );
+    vi.spyOn(h.secondary.bridge, 'knownClientIds').mockReturnValue(
+      new Set(['secondary-client']),
+    );
+    let submittedSetting: string | undefined;
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockImplementation(async function (this: ExtensionManager) {
+      submittedSetting = await requestApiKey(this);
+      return {} as never;
+    });
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'demo' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    const secondaryAuth = (pending: request.Test) =>
+      pending
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'secondary-client');
+    try {
+      const started = await secondaryAuth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/demo',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+      expect(started.status).toBe(202);
+
+      let interactionId = '';
+      await vi.waitFor(async () => {
+        const operation = await secondaryAuth(
+          request(h.app).get(
+            `/extensions/operations/${started.body.operationId}`,
+          ),
+        );
+        expect(operation.body).toMatchObject({
+          status: 'waiting_for_input',
+          interaction: { kind: 'setting', setting: { name: 'API key' } },
+        });
+        interactionId = operation.body.interaction.id as string;
+      });
+      // The install validated this client id against every registered
+      // runtime's bridge; the answer route must accept the same set.
+      const answer = await secondaryAuth(
+        request(h.app)
+          .post(
+            `/workspace/extensions/operations/${started.body.operationId}/interactions/${interactionId}`,
+          )
+          .send({ value: 'configured' }),
+      );
+      expect(answer.status).toBe(200);
+      expect(answer.body).toMatchObject({ accepted: true });
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(submittedSetting).toBe('configured');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('cancels a pending setting when the overall preparation deadline expires', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.useFakeTimers();
+    const prepare = vi
+      .spyOn(ExtensionManager.prototype, 'prepareExtensionInstall')
+      .mockImplementation(async function (this: ExtensionManager) {
+        await new Promise((resolve) => setTimeout(resolve, 19 * 60_000));
+        await requestApiKey(this);
+        return {} as never;
+      });
+    const commit = vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    );
+    try {
+      const started = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/demo',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(19 * 60_000);
+      const waiting = await auth(
+        request(h.app).get(
+          `/extensions/operations/${started.body.operationId}`,
+        ),
+      );
+      expect(waiting.body.status).toBe('waiting_for_input');
+      await vi.advanceTimersByTimeAsync(60_000 + 1);
+      const finished = await auth(
+        request(h.app).get(
+          `/extensions/operations/${started.body.operationId}`,
+        ),
+      );
+      expect(finished.body).toMatchObject({
+        status: 'failed',
+        code: 'extension_prepare_timeout',
+      });
+      expect(commit).not.toHaveBeenCalled();
+      const lateAnswer = await auth(
+        request(h.app)
+          .post(
+            `/workspace/extensions/operations/${started.body.operationId}/interactions/${waiting.body.interaction.id}`,
+          )
+          .send({ value: 'late' }),
+      );
+      expect(lateAnswer.status).toBe(404);
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('installs a daemon-local path through the global V2 route', async () => {
     const h = await makeHarness();
     mockExtensionManager();
@@ -2539,52 +3354,422 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('updates archive URL extensions through the global V2 route', async () => {
+  it.each([
+    `/extensions/${extensionId}/update`,
+    '/workspace/extensions/demo/update',
+    `/workspace/extensions/${encodeURIComponent('https://example.com/demo.zip')}/update`,
+  ])(
+    'supersedes a pending interactive update and completes the next archive URL update at %s',
+    async (updateRoute) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      const prepared = {} as never;
+      let submittedSetting: string | undefined;
+      const prepareUpdate = vi
+        .spyOn(ExtensionManager.prototype, 'prepareExtensionUpdate')
+        .mockImplementation(async function (this: ExtensionManager) {
+          submittedSetting = await requestApiKey(this);
+          return { upToDate: false, prepared };
+        });
+      const commitPrepared = vi
+        .spyOn(ExtensionManager.prototype, 'commitPreparedExtension')
+        .mockResolvedValue({
+          identity: { id: extensionId, name: 'demo' },
+          version: '2.0.0',
+          generation: 8,
+        } as never);
+      const disposePrepared = vi
+        .spyOn(ExtensionManager.prototype, 'disposePreparedExtension')
+        .mockResolvedValue();
+      try {
+        const previous = await auth(request(h.app).post(updateRoute));
+        expect(previous.status).toBe(202);
+        expect(previous.body.operationId).toEqual(expect.any(String));
+        await vi.waitFor(async () => {
+          const waiting = await auth(
+            request(h.app).get(
+              `/extensions/operations/${previous.body.operationId}`,
+            ),
+          );
+          expect(waiting.body.status).toBe('waiting_for_input');
+        });
+        const started = await auth(request(h.app).post(updateRoute));
+
+        expect(started.status).toBe(202);
+        await expect(
+          pollOperation(h.app, previous.body.operationId),
+        ).resolves.toMatchObject({ status: 'failed' });
+        await answerSettingInteraction(h.app, started.body.operationId);
+        await expect(
+          pollOperation(h.app, started.body.operationId),
+        ).resolves.toMatchObject({
+          status: 'succeeded',
+          name: 'demo',
+          result: {
+            status: 'updated',
+            name: 'demo',
+            ...(updateRoute.startsWith('/extensions/')
+              ? { updated: true }
+              : {}),
+            version: '2.0.0',
+          },
+        });
+        expect(prepareUpdate).toHaveBeenCalledWith({
+          extension: expect.objectContaining({
+            id: extensionId,
+            installMetadata: expect.objectContaining({ type: 'archive-url' }),
+          }),
+          signal: expect.any(AbortSignal),
+        });
+        expect(commitPrepared).toHaveBeenCalledWith(
+          prepared,
+          expect.any(Function),
+        );
+        expect(disposePrepared).toHaveBeenCalledWith(prepared);
+        expect(submittedSetting).toBe('configured');
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('keeps an unrelated interactive install waiting when another extension updates', async () => {
     const h = await makeHarness();
-    mockExtensionManager();
-    const prepared = {} as never;
-    const prepareUpdate = vi
-      .spyOn(ExtensionManager.prototype, 'prepareExtensionUpdate')
-      .mockResolvedValue({ upToDate: false, prepared });
+    const extension = mockExtensionManager();
+    const other = {
+      ...extension,
+      id: secondExtensionId,
+      name: 'other',
+      installMetadata: { type: 'git', source: 'https://example.com/other.git' },
+    } as Extension;
+    vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue([
+      extension,
+      other,
+    ]);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockImplementation(async function (this: ExtensionManager) {
+      await requestApiKey(this);
+      return {} as never;
+    });
     const commitPrepared = vi
       .spyOn(ExtensionManager.prototype, 'commitPreparedExtension')
       .mockResolvedValue({
         identity: { id: extensionId, name: 'demo' },
-        version: '2.0.0',
-        generation: 8,
+        version: '1.0.0',
+        generation: 7,
       } as never);
-    const disposePrepared = vi
-      .spyOn(ExtensionManager.prototype, 'disposePreparedExtension')
-      .mockResolvedValue();
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionUpdate',
+    ).mockResolvedValue({ upToDate: true, extension: other } as never);
     try {
-      const started = await auth(
-        request(h.app).post(`/extensions/${extensionId}/update`),
+      const install = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/demo',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
       );
+      expect(install.status).toBe(202);
+      await vi.waitFor(async () => {
+        const waiting = await auth(
+          request(h.app).get(
+            `/extensions/operations/${install.body.operationId}`,
+          ),
+        );
+        expect(waiting.body.status).toBe('waiting_for_input');
+      });
 
-      expect(started.status).toBe(202);
-      await expect(
-        pollOperation(h.app, started.body.operationId),
-      ).resolves.toMatchObject({
-        status: 'succeeded',
-        result: {
-          status: 'updated',
-          name: 'demo',
-          updated: true,
-          version: '2.0.0',
-        },
-      });
-      expect(prepareUpdate).toHaveBeenCalledWith({
-        extension: expect.objectContaining({
-          id: extensionId,
-          installMetadata: expect.objectContaining({ type: 'archive-url' }),
-        }),
-        signal: expect.any(AbortSignal),
-      });
-      expect(commitPrepared).toHaveBeenCalledWith(
-        prepared,
-        expect.any(Function),
+      const update = await auth(
+        request(h.app).post(`/extensions/${secondExtensionId}/update`),
       );
-      expect(disposePrepared).toHaveBeenCalledWith(prepared);
+      expect(update.status).toBe(202);
+      await expect(
+        pollOperation(h.app, update.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      // The update of another extension must not cancel the parked install.
+      const parked = await auth(
+        request(h.app).get(
+          `/extensions/operations/${install.body.operationId}`,
+        ),
+      );
+      expect(parked.body.status).toBe('waiting_for_input');
+      await answerSettingInteraction(h.app, install.body.operationId);
+      await expect(
+        pollOperation(h.app, install.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(commitPrepared).toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('re-drives the runtime when a mutation receipt observes a reused generation', async () => {
+    const h = await makeHarness();
+    const extension = mockExtensionManager();
+    extension.config.skillStates = { alpha: true };
+    extension.skills = [
+      {
+        name: 'alpha',
+        description: 'alpha',
+        body: 'alpha',
+        level: 'extension',
+        filePath: '/extensions/demo/alpha/SKILL.md',
+        extensionName: 'demo',
+      },
+    ];
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+    ).mockReturnValue({
+      default: 'enabled',
+      workspace: 'inherit',
+      effective: 'enabled',
+      source: 'default',
+    });
+    vi.spyOn(settingsModule, 'loadSettings').mockReturnValue({
+      merged: { skills: { disabled: [], enabled: [] } },
+      forScope: () => ({ settings: {} }),
+    } as unknown as settingsModule.LoadedSettings);
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand: vi.fn(async () => ({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+      })),
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    const extensionReconcileCalls = () =>
+      (
+        vi.mocked(h.secondary.bridge.invokeWorkspaceCommand!).mock
+          .calls as unknown[][]
+      ).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ).length;
+    try {
+      // A full receipt settles the coordinator at generation 7 with the
+      // committed store's content identity recorded.
+      const uninstall = await auth(
+        request(h.app).delete(`/extensions/${extensionId}`),
+      );
+      expect(uninstall.status).toBe(202);
+      await expect(
+        pollOperation(h.app, uninstall.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+      const settled = extensionReconcileCalls();
+      expect(settled).toBeGreaterThan(0);
+
+      // Automatic backup recovery plus a recommit both landed before the
+      // next receipt: generation 7 is reused for different content, which
+      // the receipt's content hash must catch without waiting for a poll.
+      const reusedSnapshot: ExtensionStoreSnapshot = {
+        version: 2,
+        generation: 7,
+        legacyProjectionHash: 'hash',
+        extensions: {
+          [extensionId]: {
+            name: 'demo',
+            defaultActivation: 'disabled',
+            workspaceOverrides: {},
+            skillWorkspaceOverrides: {
+              [h.secondary.workspaceCwd]: { alpha: true },
+            },
+          },
+        },
+      };
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue(reusedSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).mockResolvedValue(reusedSnapshot);
+      vi.spyOn(
+        ExtensionManager.prototype,
+        'setExtensionSkillStates',
+      ).mockResolvedValue(reusedSnapshot);
+
+      const update = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${h.secondary.workspaceId}/extensions/${extensionId}/state`,
+          )
+          .send({ skills: [{ name: 'alpha', state: 'enabled' }] }),
+      );
+      expect(update.status).toBe(202);
+      await expect(
+        pollOperation(h.app, update.body.operationId),
+      ).resolves.toMatchObject({
+        operation: 'set_extension_state',
+        status: expect.stringMatching(/^succeeded/),
+      });
+      expect(extensionReconcileCalls()).toBeGreaterThan(settled);
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'stale',
+        desiredGeneration: 7,
+        appliedGeneration: 0,
+      });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('adopts a recovered lower generation on the projection read', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand: vi.fn(async () => ({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+      })),
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    try {
+      // A full receipt settles the coordinator at generation 7.
+      const uninstall = await auth(
+        request(h.app).delete(`/extensions/${extensionId}`),
+      );
+      expect(uninstall.status).toBe(202);
+      await expect(
+        pollOperation(h.app, uninstall.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+
+      // The store recovers to generation 6 from its previous-state backup;
+      // the fresh projection read must adopt the rollback instead of
+      // reporting the impossible desired-6/applied-7 pairing until the 30s
+      // poller repairs it.
+      const rolledBackSnapshot: ExtensionStoreSnapshot = {
+        version: 2,
+        generation: 6,
+        legacyProjectionHash: 'rolled-back-hash',
+        extensions: {
+          [extensionId]: {
+            name: 'demo',
+            defaultActivation: 'disabled',
+            workspaceOverrides: {},
+          },
+        },
+      };
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+
+      const projection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(projection.status).toBe(200);
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 6,
+        appliedGeneration: 0,
+      });
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'stale',
+        desiredGeneration: 6,
+        appliedGeneration: 0,
+      });
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

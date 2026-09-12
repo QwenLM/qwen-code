@@ -7,6 +7,7 @@
 import * as crypto from 'node:crypto';
 import {
   ExtensionManager,
+  getExtensionStoreContentHash,
   redactUrlCredentials,
   stripAnsiAndControl,
   type ClaudeMarketplaceConfig,
@@ -31,6 +32,7 @@ import {
 } from '@qwen-code/acp-bridge/status';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
 import {
   createFifoTaskQueue,
   type FifoTaskQueue,
@@ -225,7 +227,9 @@ export interface ExtensionsController {
     isWorkspaceTrusted?: boolean,
     interactions?: ExtensionInteractionHandlers,
   ): ExtensionManager;
-  buildLocalExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
+  buildLocalExtensionsStatus(
+    extensionManager?: ExtensionManager,
+  ): Promise<ServeWorkspaceExtensionsStatus>;
   refreshExtensionsForAllSessions(): Promise<{
     refreshed: number;
     failed: number;
@@ -258,7 +262,10 @@ export interface ExtensionsController {
     ) => Promise<ExtensionMutationEvent>,
     options?: {
       manager?: ExtensionManager;
-      createManager?: (operationId: string) => ExtensionManager;
+      createManager?: (
+        operationId: string,
+        signal: AbortSignal,
+      ) => ExtensionManager;
       onSettled?: (operationId: string) => void;
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
@@ -474,7 +481,10 @@ export function createExtensionsController(
     ) => Promise<ExtensionMutationEvent>,
     options: {
       manager?: ExtensionManager;
-      createManager?: (operationId: string) => ExtensionManager;
+      createManager?: (
+        operationId: string,
+        signal: AbortSignal,
+      ) => ExtensionManager;
       onSettled?: (operationId: string) => void;
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
@@ -545,11 +555,11 @@ export function createExtensionsController(
           status: 'running',
           phase: 'preparing',
         });
+        const deadlineController = new AbortController();
         const extensionManager =
           options.manager ??
-          options.createManager?.(operationId) ??
+          options.createManager?.(operationId, deadlineController.signal) ??
           createExtensionManager();
-        const deadlineController = new AbortController();
         let deadlineStarted = false;
         const startDeadline = () => {
           if (deadlineStarted) return;
@@ -609,7 +619,6 @@ export function createExtensionsController(
                   },
                 },
               );
-              deadlineController.signal.throwIfAborted();
               return prepared;
             } catch (error) {
               if (!started) {
@@ -630,6 +639,7 @@ export function createExtensionsController(
           >(
             task: (onCommitted: (generation: number) => void) => Promise<T>,
           ): Promise<T> => {
+            deadlineController.signal.throwIfAborted();
             assertGenerationOpen?.();
             updateExtensionOperation(operationId, {
               status: 'running',
@@ -637,6 +647,7 @@ export function createExtensionsController(
             });
             const result = await commitQueue.runUntilReleased(
               async (release) => {
+                deadlineController.signal.throwIfAborted();
                 assertGenerationOpen?.();
                 return await task((generation) => {
                   // sendOperation passes reserveRuntimeReconciliation even on
@@ -675,6 +686,9 @@ export function createExtensionsController(
           context,
           operationId,
         );
+        if (committedGeneration === undefined) {
+          deadlineController.signal.throwIfAborted();
+        }
         mutationEvent = event;
         if (deadline) clearTimeout(deadline);
         extensionsStatusCache = undefined;
@@ -692,12 +706,39 @@ export function createExtensionsController(
           });
           return;
         }
+        // The receipt pairs the committed generation with the store content
+        // identity it just committed, so a recovery plus recommit that reuses
+        // the generation number is diffed against what the runtime applied
+        // instead of being re-recorded as the baseline. A store that already
+        // moved past the committed generation belongs to a newer mutation's
+        // own receipt, and a read failure must not fail an operation whose
+        // commit already landed.
+        let committedStoreContentHash: string | undefined;
+        let committedStoreRecoveryId: string | undefined;
+        // null is reserved for a genuine identity read failure, which the
+        // coordinator reads as "identity unknown" and drops the applied
+        // certification; a store that already moved past this receipt's
+        // generation sends undefined, which leaves the certification intact.
+        let storeIdentityUnreadable = false;
         if (committedGeneration === undefined) {
-          committedGeneration = (
-            await extensionManager.getExtensionStoreSnapshot()
-          ).generation;
+          const snapshot = await extensionManager.getExtensionStoreSnapshot();
+          committedGeneration = snapshot.generation;
+          committedStoreContentHash = getExtensionStoreContentHash(snapshot);
+          committedStoreRecoveryId = snapshot.recoveryId;
           reconciliationReservation ??=
             options.reserveRuntimeReconciliation?.();
+        } else {
+          try {
+            const committedSnapshot =
+              await extensionManager.getExtensionStoreSnapshot();
+            if (committedSnapshot.generation === committedGeneration) {
+              committedStoreContentHash =
+                getExtensionStoreContentHash(committedSnapshot);
+              committedStoreRecoveryId = committedSnapshot.recoveryId;
+            }
+          } catch {
+            storeIdentityUnreadable = true;
+          }
         }
         updateExtensionOperation(operationId, {
           status: 'running',
@@ -716,15 +757,68 @@ export function createExtensionsController(
                   try {
                     runtime.workspaceService.invalidateWorkspaceSkillsStatus();
                     try {
+                      const coordinator =
+                        getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+                      if (coordinator) {
+                        const reconciliation =
+                          await coordinator.reconcileExtensionGeneration(
+                            committedGeneration!,
+                            {
+                              ...(options.skillsOnly
+                                ? { skillsOnly: true }
+                                : {}),
+                              storeContentHash: storeIdentityUnreadable
+                                ? null
+                                : committedStoreContentHash,
+                              storeRecoveryId: committedStoreRecoveryId,
+                            },
+                          );
+                        const result = {
+                          refreshed: reconciliation.refreshed,
+                          failed: reconciliation.failed,
+                        };
+                        // Liveness is sampled after the await: a runtime that
+                        // died mid-reconcile must not be told to retry, and a
+                        // drain-queued deferral must not ask for an action
+                        // the daemon already took.
+                        const runtimeLive = coordinator.status().runtimeLive;
+                        const reconciliationError =
+                          reconciliation.error ??
+                          (reconciliation.state !== 'reconciled' &&
+                          reconciliation.state !== 'superseded'
+                            ? reconciliation.drainDeferred
+                              ? 'Extension runtime is draining; the committed generation is queued and will be applied when the runtime resumes.'
+                              : runtimeLive || operation === 'refresh'
+                                ? runtimeLive
+                                  ? 'Extension runtime has not applied the committed generation. Retry the runtime refresh.'
+                                  : 'Workspace runtime is not live; the committed extension generation will be applied when the runtime next starts.'
+                                : undefined
+                            : undefined);
+                        runtime.bridge.broadcastExtensionsChanged({
+                          ...bridgeMutationEvent(event),
+                          ...result,
+                          ...(reconciliationError
+                            ? { error: reconciliationError }
+                            : {}),
+                        });
+                        return {
+                          status: 'fulfilled' as const,
+                          result,
+                          reconciled: reconciliation.state === 'reconciled',
+                          reconciliationError,
+                          elapsedMs: Date.now() - startedAt,
+                        };
+                      }
+                      const result =
+                        await runtime.bridge.refreshExtensionsForAllSessions(
+                          bridgeMutationEvent(event),
+                          ...(options.skillsOnly ? [{ skillsOnly: true }] : []),
+                        );
                       return {
                         status: 'fulfilled' as const,
-                        result:
-                          await runtime.bridge.refreshExtensionsForAllSessions(
-                            bridgeMutationEvent(event),
-                            ...(options.skillsOnly
-                              ? [{ skillsOnly: true }]
-                              : []),
-                          ),
+                        result,
+                        reconciled: result.failed === 0,
+                        reconciliationError: undefined,
                         elapsedMs: Date.now() - startedAt,
                       };
                     } finally {
@@ -751,13 +845,22 @@ export function createExtensionsController(
             if (settled.status === 'fulfilled') {
               refreshed += settled.result.refreshed;
               failed += settled.result.failed;
-              if (settled.result.failed > 0) {
+              if (settled.reconciliationError) {
+                warnings.push({
+                  workspaceId: runtime.workspaceId,
+                  workspaceCwd: runtime.workspaceCwd,
+                  error: sanitizeDaemonMessage(
+                    settled.reconciliationError,
+                  ).slice(0, 500),
+                });
+              } else if (settled.result.failed > 0) {
                 warnings.push({
                   workspaceId: runtime.workspaceId,
                   workspaceCwd: runtime.workspaceCwd,
                   error: `${settled.result.failed} session refresh(es) failed`,
                 });
-              } else {
+              }
+              if (settled.reconciled) {
                 options.onRuntimeReconciled?.(runtime, committedGeneration);
               }
             } else {
@@ -1014,105 +1117,107 @@ export function createExtensionsController(
     })();
   };
 
-  const buildLocalExtensionsStatus =
-    async (): Promise<ServeWorkspaceExtensionsStatus> => {
-      const locale = resolveExtensionLocale(boundWorkspace);
-      const now = Date.now();
-      if (
-        extensionsStatusCache?.locale === locale &&
-        extensionsStatusCache.expiresAt > now
-      ) {
-        return extensionsStatusCache.value;
-      }
-      const extensionManager = createExtensionManager();
-      await extensionManager.refreshCache();
-      const entries: ServeExtensionEntry[] = extensionManager
-        .getLoadedExtensions()
-        .map((ext): ServeExtensionEntry => {
-          const capabilities: ServeExtensionCapabilities = {
-            mcpServerCount: ext.mcpServers
-              ? Object.keys(ext.mcpServers).length
-              : 0,
-            skillCount: ext.skills?.length ?? 0,
-            agentCount: ext.agents?.length ?? 0,
-            hookCount: ext.hooks
-              ? Object.values(ext.hooks).reduce(
-                  (sum, defs) => sum + (defs?.length ?? 0),
-                  0,
-                )
-              : 0,
-            commandCount: ext.commands?.length ?? 0,
-            contextFileCount: ext.contextFiles.length,
-            channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
-            hasSettings: (ext.settings?.length ?? 0) > 0,
-          };
-          return {
-            kind: 'extension',
-            id: ext.id,
-            name: ext.name,
-            ...(ext.displayName ? { displayName: ext.displayName } : {}),
-            ...(ext.config.description
-              ? { description: ext.config.description }
+  const buildLocalExtensionsStatus = async (
+    currentManager?: ExtensionManager,
+  ): Promise<ServeWorkspaceExtensionsStatus> => {
+    const locale = resolveExtensionLocale(boundWorkspace);
+    const now = Date.now();
+    if (
+      !currentManager &&
+      extensionsStatusCache?.locale === locale &&
+      extensionsStatusCache.expiresAt > now
+    ) {
+      return extensionsStatusCache.value;
+    }
+    const extensionManager = currentManager ?? createExtensionManager();
+    if (!currentManager) await extensionManager.refreshCache();
+    const entries: ServeExtensionEntry[] = extensionManager
+      .getLoadedExtensions()
+      .map((ext): ServeExtensionEntry => {
+        const capabilities: ServeExtensionCapabilities = {
+          mcpServerCount: ext.mcpServers
+            ? Object.keys(ext.mcpServers).length
+            : 0,
+          skillCount: ext.skills?.length ?? 0,
+          agentCount: ext.agents?.length ?? 0,
+          hookCount: ext.hooks
+            ? Object.values(ext.hooks).reduce(
+                (sum, defs) => sum + (defs?.length ?? 0),
+                0,
+              )
+            : 0,
+          commandCount: ext.commands?.length ?? 0,
+          contextFileCount: ext.contextFiles.length,
+          channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
+          hasSettings: (ext.settings?.length ?? 0) > 0,
+        };
+        return {
+          kind: 'extension',
+          id: ext.id,
+          name: ext.name,
+          ...(ext.displayName ? { displayName: ext.displayName } : {}),
+          ...(ext.config.description
+            ? { description: ext.config.description }
+            : {}),
+          version: ext.version,
+          isActive: ext.isActive,
+          path: ext.path,
+          ...(ext.installMetadata?.source &&
+          ext.installMetadata.type !== 'snapshot'
+            ? {
+                source: redactExtensionDisplaySource(
+                  ext.installMetadata.source,
+                ),
+              }
+            : {}),
+          ...(ext.installMetadata?.type
+            ? { installType: ext.installMetadata.type }
+            : {}),
+          ...(ext.installMetadata?.originSource
+            ? { originSource: ext.installMetadata.originSource }
+            : {}),
+          ...(ext.installMetadata?.ref ? { ref: ext.installMetadata.ref } : {}),
+          ...(ext.installMetadata?.autoUpdate !== undefined
+            ? { autoUpdate: ext.installMetadata.autoUpdate }
+            : {}),
+          ...(ext.installMetadata?.type === 'snapshot'
+            ? { credentialPersistence: 'one_time' as const }
+            : ext.installMetadata?.credentialPersistence === 'stored'
+              ? { credentialPersistence: 'stored' as const }
               : {}),
-            version: ext.version,
-            isActive: ext.isActive,
-            path: ext.path,
-            ...(ext.installMetadata?.source &&
-            ext.installMetadata.type !== 'snapshot'
-              ? {
-                  source: redactExtensionDisplaySource(
-                    ext.installMetadata.source,
-                  ),
-                }
-              : {}),
-            ...(ext.installMetadata?.type
-              ? { installType: ext.installMetadata.type }
-              : {}),
-            ...(ext.installMetadata?.originSource
-              ? { originSource: ext.installMetadata.originSource }
-              : {}),
-            ...(ext.installMetadata?.ref
-              ? { ref: ext.installMetadata.ref }
-              : {}),
-            ...(ext.installMetadata?.autoUpdate !== undefined
-              ? { autoUpdate: ext.installMetadata.autoUpdate }
-              : {}),
-            ...(ext.installMetadata?.type === 'snapshot'
-              ? { credentialPersistence: 'one_time' as const }
-              : ext.installMetadata?.credentialPersistence === 'stored'
-                ? { credentialPersistence: 'stored' as const }
-                : {}),
-            updateState:
-              ext.installMetadata?.type === 'snapshot'
-                ? 'not updatable'
-                : ext.installMetadata
-                  ? 'unknown'
-                  : 'not updatable',
-            capabilities,
-            details: {
-              mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
-              commands: ext.commands ?? [],
-              skills: ext.skills?.map((skill) => skill.name) ?? [],
-              agents: ext.agents?.map((agent) => agent.name) ?? [],
-              contextFiles: ext.contextFiles,
-              settings:
-                ext.resolvedSettings?.map((setting) => setting.name) ?? [],
-            },
-          };
-        });
-      const status = {
-        v: STATUS_SCHEMA_VERSION,
-        workspaceCwd: boundWorkspace,
-        initialized: true,
-        extensions: entries,
-      };
+          updateState:
+            ext.installMetadata?.type === 'snapshot'
+              ? 'not updatable'
+              : ext.installMetadata
+                ? 'unknown'
+                : 'not updatable',
+          capabilities,
+          details: {
+            mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
+            commands: ext.commands ?? [],
+            skills: ext.skills?.map((skill) => skill.name) ?? [],
+            agents: ext.agents?.map((agent) => agent.name) ?? [],
+            contextFiles: ext.contextFiles,
+            settings:
+              ext.resolvedSettings?.map((setting) => setting.name) ?? [],
+          },
+        };
+      });
+    const status = {
+      v: STATUS_SCHEMA_VERSION,
+      workspaceCwd: boundWorkspace,
+      initialized: true,
+      extensions: entries,
+    };
+    if (!currentManager) {
       extensionsStatusCache = {
         locale,
         expiresAt: Date.now() + 2_000,
         value: status,
       };
-      return status;
-    };
+    }
+    return status;
+  };
 
   return {
     boundWorkspace,

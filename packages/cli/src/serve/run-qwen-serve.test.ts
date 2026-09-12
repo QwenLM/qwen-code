@@ -11406,6 +11406,8 @@ describe('runQwenServe runtime startup failures', () => {
           'persistent_workspace_registration',
           'workspace_runtime_removal',
           'workspace_runtime',
+          'workspace_extensions_config_runtime',
+          'workspace_extension_mentions',
         ]),
         modelServices: [],
         workspaceCwd: boundWorkspace,

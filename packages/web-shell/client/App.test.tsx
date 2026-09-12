@@ -31489,6 +31489,8 @@ describe('App session callbacks', () => {
       mockUseDaemonSessionActivityBridge.mockClear();
       rerender();
       expect(testState.latestSplitViewProps!.onPendingPanesChange).toBe(report);
+      // App calls useDaemonSessionActivityBridge on every render, so its call
+      // count witnesses whether reporting foreign pending panes re-renders App.
       expect(mockUseDaemonSessionActivityBridge).toHaveBeenCalled();
       mockUseDaemonSessionActivityBridge.mockClear();
       for (const ids of [['foreign-session'], ['another-session'], []]) {

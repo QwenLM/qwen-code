@@ -1,19 +1,46 @@
+// @vitest-environment jsdom
 /**
  * @license
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// @vitest-environment jsdom
-
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
+}
+if (!globalThis.PointerEvent) {
+  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
+}
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false;
+}
+if (!Element.prototype.setPointerCapture) {
+  Element.prototype.setPointerCapture = () => {};
+}
+if (!Element.prototype.releasePointerCapture) {
+  Element.prototype.releasePointerCapture = () => {};
+}
+
+function click(element: Element): void {
+  element.dispatchEvent(
+    new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+  );
+  element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+  element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
 const state = vi.hoisted(() => {
-  const activationHandle = { accepted: true as const, operationId: 'activate' };
+  const activationHandle = {
+    accepted: true as const,
+    operationId: 'activate',
+  };
   const refreshHandle = { accepted: true as const, operationId: 'refresh' };
   const workspaceHandle = {
     workspaceExtensions: vi.fn(),
@@ -22,9 +49,13 @@ const state = vi.hoisted(() => {
     refreshExtensionRuntime: vi.fn(),
   };
   const client = {
-    workspaceByCwd: vi.fn(() => workspaceHandle),
+    workspaceByCwd: vi.fn(),
     setExtensionDefaultActivation: vi.fn(),
     waitForExtensionOperation: vi.fn(),
+    extensionCatalog: vi.fn(),
+    updateUserExtension: vi.fn(),
+    uninstallUserExtension: vi.fn(),
+    checkUserExtensionUpdates: vi.fn(),
   };
   return {
     activationHandle,
@@ -40,18 +71,34 @@ const state = vi.hoisted(() => {
       workspaceCwd: '/work/primary',
       client,
       capabilities: {
-        features: ['extension_activation_explicit_refresh'],
+        features: [] as string[],
+        workspaces: undefined as
+          | Array<{
+              id: string;
+              cwd: string;
+              primary: boolean;
+              trusted: boolean;
+            }>
+          | undefined,
       },
     },
+    signals: null as { extensionsVersion: number } | null,
   };
 });
 
-vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useConnection: () => ({ clientId: 'client-1' }),
-  useWorkspace: () => state.workspace,
-  useWorkspaceActions: () => state.actions,
-  useWorkspaceEventSignals: () => undefined,
-}));
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
+  return {
+    ...actual,
+    useConnection: () => ({ clientId: 'client-1' }),
+    useWorkspace: () => state.workspace,
+    useWorkspaceActions: () => state.actions,
+    useWorkspaceEventSignals: () => state.signals,
+  };
+});
 
 const { ExtensionsManagerPage } = await import('./ExtensionsManagerPage');
 const { I18nProvider } = await import('../../i18n');
@@ -59,13 +106,31 @@ const { I18nProvider } = await import('../../i18n');
 let container: HTMLDivElement;
 let root: Root;
 
+function render(): void {
+  root.render(
+    <I18nProvider language="en">
+      <ExtensionsManagerPage onClose={vi.fn()} />
+    </I18nProvider>,
+  );
+}
+
+async function flush() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+async function mountPage() {
+  await act(async () => {
+    render();
+  });
+  await flush();
+}
+
 async function renderPage(): Promise<void> {
   await act(async () => {
-    root.render(
-      <I18nProvider language="en">
-        <ExtensionsManagerPage onClose={vi.fn()} />
-      </I18nProvider>,
-    );
+    render();
   });
   await vi.waitFor(() => {
     expect(container.querySelector('[aria-label="Demo"]')).not.toBeNull();
@@ -83,9 +148,12 @@ function findButton(label: string): HTMLButtonElement {
 async function chooseActivation(
   scope: 'user' | 'workspace',
   label: string,
+  cardLabel = 'Demo',
 ): Promise<void> {
   // The detail panel replaces the card list once an extension is selected.
-  const card = container.querySelector<HTMLElement>('[aria-label="Demo"]');
+  const card = container.querySelector<HTMLElement>(
+    `[aria-label="${cardLabel}"]`,
+  );
   if (card) {
     await act(async () => {
       card.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -105,91 +173,676 @@ async function chooseActivation(
   });
 }
 
+function makeSplitWorkspaceMocks(trusted: boolean) {
+  const ensureRuntime = vi.fn(async () => ({}));
+  const workspaceRuntimeExtensions = vi.fn(async () => ({
+    v: 1,
+    workspaceCwd: '/repo/main',
+    initialized: true,
+    runtimeEpoch: 1,
+    extensions: [],
+  }));
+  const workspaceExtensions = vi.fn(async () => null);
+  state.client.workspaceByCwd.mockImplementation(() => ({
+    workspaceExtensions,
+    ensureRuntime,
+    workspaceRuntimeExtensions,
+  }));
+  state.client.extensionCatalog.mockResolvedValue({
+    v: 1,
+    generation: 0,
+    extensions: [],
+  });
+  state.workspace.workspaceCwd = '/repo/main';
+  state.workspace.capabilities = {
+    features: ['workspace_extensions_config_runtime'],
+    workspaces: [{ id: 'id-main', cwd: '/repo/main', primary: true, trusted }],
+  };
+  return {
+    ensureRuntime,
+    workspaceRuntimeExtensions,
+    workspaceExtensions,
+    workspaceByCwd: state.client.workspaceByCwd,
+    extensionCatalog: state.client.extensionCatalog,
+  };
+}
+
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  state.workspace.capabilities.features = [
-    'extension_activation_explicit_refresh',
-  ];
-  state.workspaceHandle.workspaceExtensions.mockReset().mockResolvedValue({
-    v: 1,
-    workspaceId: 'primary',
-    workspaceCwd: '/work/primary',
-    trusted: true,
-    desiredGeneration: 1,
-    appliedGeneration: 1,
-    extensions: [
-      {
-        extensionId: 'a'.repeat(64),
-        name: 'demo',
-        version: '1.0.0',
-        defaultActivation: 'enabled',
-        workspaceActivation: null,
-        effectiveActivation: 'enabled',
-        activationSource: 'default',
-      },
-    ],
-  });
-  state.workspaceHandle.setExtensionActivation
-    .mockReset()
-    .mockResolvedValue(state.activationHandle);
-  state.workspaceHandle.clearExtensionActivation.mockReset();
-  state.workspaceHandle.refreshExtensionRuntime
-    .mockReset()
-    .mockResolvedValue(state.refreshHandle);
-  state.client.workspaceByCwd.mockClear();
-  state.client.setExtensionDefaultActivation
-    .mockReset()
-    .mockResolvedValue(state.activationHandle);
-  state.client.waitForExtensionOperation.mockReset().mockResolvedValue({
-    v: 1,
-    operationId: 'activate',
-    operation: 'activation',
-    status: 'succeeded',
-    createdAt: 1,
-    updatedAt: 2,
-    result: { status: 'disabled', name: 'demo' },
-  });
-  state.actions.loadExtensionsStatus.mockReset().mockResolvedValue({
-    v: 1,
-    workspaceCwd: '/work/primary',
-    initialized: true,
-    extensions: [
-      {
-        kind: 'extension',
-        id: 'a'.repeat(64),
-        name: 'demo',
-        displayName: 'Demo',
-        version: '1.0.0',
-        isActive: true,
-        path: '/extensions/demo',
-        capabilities: {
-          mcpServerCount: 0,
-          skillCount: 0,
-          agentCount: 0,
-          hookCount: 0,
-          commandCount: 0,
-          contextFileCount: 0,
-          channelCount: 0,
-          hasSettings: false,
-        },
-      },
-    ],
-  });
-  state.actions.activeExtensionOperations.mockReset().mockResolvedValue({
-    v: 1,
-    operations: [],
-  });
-  state.actions.extensionOperationStatus.mockReset();
 });
 
-afterEach(async () => {
-  await act(async () => root.unmount());
-  container.remove();
+afterEach(() => {
+  act(() => root?.unmount());
+  container?.remove();
+  state.workspace.workspaceCwd = '/work/primary';
+  state.workspace.capabilities = { features: [], workspaces: undefined };
+  state.signals = null;
+  vi.clearAllMocks();
+  vi.useRealTimers();
+});
+
+describe('ExtensionsManagerPage split-runtime trust gating', () => {
+  beforeEach(() => {
+    state.actions.loadExtensionsStatus.mockResolvedValue({ extensions: [] });
+    state.actions.activeExtensionOperations.mockResolvedValue({
+      operations: [],
+    });
+  });
+
+  it('keeps the legacy loader when the resolved primary workspace is untrusted', async () => {
+    const mocks = makeSplitWorkspaceMocks(false);
+
+    await mountPage();
+
+    // The untrusted primary's runtime routes answer 403, so the page must
+    // stay on the trust-free legacy catalog read.
+    expect(state.actions.loadExtensionsStatus).toHaveBeenCalledOnce();
+    expect(mocks.extensionCatalog).not.toHaveBeenCalled();
+    expect(mocks.ensureRuntime).not.toHaveBeenCalled();
+    expect(mocks.workspaceRuntimeExtensions).not.toHaveBeenCalled();
+  });
+
+  it('uses the split runtime loader for a trusted primary workspace', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+
+    await mountPage();
+
+    await vi.waitFor(() => expect(mocks.ensureRuntime).toHaveBeenCalledOnce());
+    expect(mocks.extensionCatalog).toHaveBeenCalled();
+    expect(mocks.workspaceRuntimeExtensions).toHaveBeenCalled();
+    expect(state.actions.loadExtensionsStatus).not.toHaveBeenCalled();
+  });
+
+  it('re-arms the runtime retry when the initial ensure answers a retryable 503', async () => {
+    vi.useFakeTimers();
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          503,
+          { code: 'runtime_still_starting' },
+          'Workspace runtime is still starting',
+        ),
+      )
+      .mockResolvedValue({});
+
+    await mountPage();
+
+    expect(mocks.ensureRuntime).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    await flush();
+
+    expect(mocks.ensureRuntime).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears the load-failure notice once the retried load succeeds', async () => {
+    vi.useFakeTimers();
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          503,
+          { code: 'runtime_still_starting' },
+          'Workspace runtime is still starting',
+        ),
+      )
+      .mockResolvedValue({});
+
+    await mountPage();
+
+    expect(container.textContent).toContain(
+      'Workspace runtime is still starting',
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    await flush();
+
+    expect(mocks.ensureRuntime).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain(
+      'Workspace runtime is still starting',
+    );
+  });
+
+  it('does not re-arm the runtime retry when the runtime is unavailable', async () => {
+    vi.useFakeTimers();
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime.mockRejectedValue(
+      new DaemonHttpError(
+        503,
+        { code: 'workspace_runtime_unavailable' },
+        'Workspace runtime is not active.',
+      ),
+    );
+
+    await mountPage();
+
+    expect(mocks.ensureRuntime).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    await flush();
+
+    expect(mocks.ensureRuntime).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Workspace runtime is not active.');
+  });
+
+  it('does not re-arm the runtime retry when the catalog answers 403', async () => {
+    vi.useFakeTimers();
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime.mockRejectedValueOnce(
+      new DaemonHttpError(
+        403,
+        { code: 'untrusted_workspace' },
+        'Workspace is not trusted.',
+      ),
+    );
+
+    await mountPage();
+
+    expect(mocks.ensureRuntime).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    await flush();
+
+    expect(mocks.ensureRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders an unowned runtime Extension error in the detail view', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime.mockResolvedValue({
+      runtimeEpoch: 1,
+      capabilities: {
+        extensions: {
+          state: 'error',
+          runtimeEpoch: 1,
+          desiredGeneration: 0,
+          appliedGeneration: 0,
+          error: { message: 'runtime prep exploded' },
+        },
+      },
+    });
+    mocks.extensionCatalog.mockResolvedValue({
+      v: 1,
+      generation: 0,
+      extensions: [
+        {
+          id: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceOverrideCount: 0,
+          isActive: true,
+        },
+      ],
+    });
+
+    await mountPage();
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('runtime prep exploded'),
+    );
+
+    // A load-driven runtime error owns no extension; it must stay visible
+    // after navigating into the detail view, not render only in the list.
+    const row = container.querySelector('[role="button"][aria-label="demo"]');
+    expect(row).not.toBeNull();
+    await act(async () => {
+      click(row!);
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('runtime prep exploded');
+  });
+
+  it('keeps an owned notice visible when a reload reports a runtime Extension error', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime.mockResolvedValue({
+      runtimeEpoch: 1,
+      capabilities: {
+        extensions: {
+          state: 'error',
+          runtimeEpoch: 1,
+          desiredGeneration: 0,
+          appliedGeneration: 0,
+          error: { message: 'runtime prep exploded' },
+        },
+      },
+    });
+    mocks.extensionCatalog.mockResolvedValue({
+      v: 1,
+      generation: 0,
+      extensions: [
+        {
+          id: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceOverrideCount: 0,
+          updateState: 'update available',
+          isActive: true,
+        },
+      ],
+    });
+    const updateUserExtension = vi.fn(async () => ({}));
+    state.client.updateUserExtension = updateUserExtension;
+
+    await mountPage();
+
+    // The initial unowned runtime error reaches the list view.
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('runtime prep exploded'),
+    );
+
+    // Open the extension detail view.
+    const row = container.querySelector('[role="button"][aria-label="demo"]');
+    expect(row).not.toBeNull();
+    await act(async () => {
+      click(row!);
+      await Promise.resolve();
+    });
+
+    // Start the update action so the notice becomes owned by the selected
+    // extension while the reload reports the same capability error.
+    const trigger = container.querySelector(
+      'button[aria-label="Extension actions"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+    const updateItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Update Extension');
+    expect(updateItem).toBeDefined();
+    const catalogReads = mocks.extensionCatalog.mock.calls.length;
+    await act(async () => {
+      click(updateItem!);
+      await Promise.resolve();
+    });
+
+    // The reload that follows the mutation re-reads the catalog; once it
+    // settles, the runtime error must not have replaced the owned result —
+    // the detail view renders only notices it owns.
+    await vi.waitFor(() =>
+      expect(mocks.extensionCatalog.mock.calls.length).toBeGreaterThan(
+        catalogReads,
+      ),
+    );
+    await flush();
+    expect(updateUserExtension).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain(
+      'Extension action queued for "demo".',
+    );
+    expect(container.textContent).not.toContain('runtime prep exploded');
+  });
+
+  it('surfaces a runtime Extension error that arrives after an owned update settles', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime.mockResolvedValue({});
+    mocks.extensionCatalog.mockResolvedValue({
+      v: 1,
+      generation: 0,
+      extensions: [
+        {
+          id: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceOverrideCount: 0,
+          updateState: 'update available',
+          isActive: true,
+        },
+        {
+          id: 'ext-other',
+          name: 'other',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceOverrideCount: 0,
+        },
+      ],
+    });
+    // No operationId: runMutation settles without polling, through its
+    // .finally branch.
+    const updateUserExtension = vi.fn(async () => ({}));
+    state.client.updateUserExtension = updateUserExtension;
+
+    await mountPage();
+
+    const row = container.querySelector('[role="button"][aria-label="demo"]');
+    expect(row).not.toBeNull();
+    await act(async () => {
+      click(row!);
+      await Promise.resolve();
+    });
+    const trigger = container.querySelector(
+      'button[aria-label="Extension actions"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+    const updateItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Update Extension');
+    expect(updateItem).toBeDefined();
+    await act(async () => {
+      click(updateItem!);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain(
+        'Extension action queued for "demo".',
+      ),
+    );
+    await flush();
+
+    await act(async () => {
+      click(findButton('Manage Extensions'));
+    });
+    await act(async () => {
+      click(container.querySelector('[role="button"][aria-label="other"]')!);
+    });
+    expect(container.textContent).not.toContain(
+      'Extension action queued for "demo".',
+    );
+
+    // The runtime capability latches to error after the mutation settled;
+    // the next signal-driven load must record it in both views.
+    mocks.ensureRuntime.mockResolvedValue({
+      runtimeEpoch: 1,
+      capabilities: {
+        extensions: {
+          state: 'error',
+          runtimeEpoch: 1,
+          desiredGeneration: 0,
+          appliedGeneration: 0,
+          error: { message: 'runtime prep exploded' },
+        },
+      },
+    });
+    await act(async () => {
+      state.signals = { extensionsVersion: 1 };
+      render();
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('runtime prep exploded'),
+    );
+    expect(container.textContent).not.toContain(
+      'Extension action queued for "demo".',
+    );
+
+    // The list view renders the same unowned notice after navigating back.
+    await act(async () => {
+      click(findButton('Manage Extensions'));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('runtime prep exploded'),
+    );
+  });
+
+  it('surfaces a runtime Extension error that arrives after a polled update settles', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime.mockResolvedValue({});
+    mocks.extensionCatalog.mockResolvedValue({
+      v: 1,
+      generation: 0,
+      extensions: [
+        {
+          id: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceOverrideCount: 0,
+          updateState: 'update available',
+          isActive: true,
+        },
+      ],
+    });
+    const updateUserExtension = vi.fn(async () => ({ operationId: 'op-1' }));
+    state.client.updateUserExtension = updateUserExtension;
+    state.actions.extensionOperationStatus.mockResolvedValue({
+      v: 1,
+      operationId: 'op-1',
+      operation: 'update',
+      status: 'succeeded',
+      createdAt: 1,
+      updatedAt: 2,
+    });
+
+    await mountPage();
+
+    const row = container.querySelector('[role="button"][aria-label="demo"]');
+    expect(row).not.toBeNull();
+    await act(async () => {
+      click(row!);
+      await Promise.resolve();
+    });
+    const trigger = container.querySelector(
+      'button[aria-label="Extension actions"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+    const updateItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Update Extension');
+    expect(updateItem).toBeDefined();
+    await act(async () => {
+      click(updateItem!);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Extension "demo" updated.'),
+    );
+    await flush();
+
+    mocks.ensureRuntime.mockResolvedValue({
+      runtimeEpoch: 1,
+      capabilities: {
+        extensions: {
+          state: 'error',
+          runtimeEpoch: 1,
+          desiredGeneration: 0,
+          appliedGeneration: 0,
+          error: { message: 'runtime prep exploded' },
+        },
+      },
+    });
+    await act(async () => {
+      state.signals = { extensionsVersion: 1 };
+      render();
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('runtime prep exploded'),
+    );
+    expect(container.textContent).not.toContain('Extension "demo" updated.');
+  });
+
+  it('keeps a failed update notice after the next signal-driven load', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+    let capabilityState: 'error' | 'ready' = 'error';
+    mocks.ensureRuntime.mockImplementation(async () => ({
+      runtimeEpoch: 1,
+      capabilities: {
+        extensions: {
+          state: capabilityState,
+          runtimeEpoch: 1,
+          desiredGeneration: 0,
+          appliedGeneration: 0,
+          ...(capabilityState === 'error'
+            ? { error: { message: 'runtime prep exploded' } }
+            : {}),
+        },
+      },
+    }));
+    mocks.extensionCatalog.mockResolvedValue({
+      v: 1,
+      generation: 0,
+      extensions: [
+        {
+          id: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceOverrideCount: 0,
+          updateState: 'update available',
+          isActive: true,
+        },
+      ],
+    });
+    const updateUserExtension = vi.fn(async () => ({ operationId: 'op-1' }));
+    state.client.updateUserExtension = updateUserExtension;
+    state.actions.extensionOperationStatus.mockResolvedValue({
+      v: 1,
+      operationId: 'op-1',
+      operation: 'update',
+      name: 'demo',
+      status: 'failed',
+      createdAt: 1,
+      updatedAt: 2,
+      error: 'probe update failed: disk full',
+    });
+
+    await mountPage();
+    // The load-latched runtime error is on screen when the mutation starts.
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('runtime prep exploded'),
+    );
+
+    // Drive the update from the detail view; it fails while polled.
+    const row = container.querySelector('[role="button"][aria-label="demo"]');
+    expect(row).not.toBeNull();
+    await act(async () => {
+      click(row!);
+      await Promise.resolve();
+    });
+    const trigger = container.querySelector(
+      'button[aria-label="Extension actions"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+    const updateItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Update Extension');
+    expect(updateItem).toBeDefined();
+    await act(async () => {
+      click(updateItem!);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('probe update failed: disk full'),
+    );
+
+    // The runtime recovers; the next signal-driven load succeeds and must
+    // clear only a notice the load path itself wrote, not the mutation's.
+    capabilityState = 'ready';
+    await act(async () => {
+      state.signals = { extensionsVersion: 1 };
+      render();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.textContent).toContain('probe update failed: disk full');
+  });
 });
 
 describe('ExtensionsManagerPage activation refresh', () => {
+  beforeEach(() => {
+    state.workspace.capabilities.features = [
+      'extension_activation_explicit_refresh',
+    ];
+    state.workspaceHandle.workspaceExtensions.mockReset().mockResolvedValue({
+      v: 1,
+      workspaceId: 'primary',
+      workspaceCwd: '/work/primary',
+      trusted: true,
+      desiredGeneration: 1,
+      appliedGeneration: 1,
+      extensions: [
+        {
+          extensionId: 'a'.repeat(64),
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceActivation: null,
+          effectiveActivation: 'enabled',
+          activationSource: 'default',
+        },
+      ],
+    });
+    state.workspaceHandle.setExtensionActivation
+      .mockReset()
+      .mockResolvedValue(state.activationHandle);
+    state.workspaceHandle.clearExtensionActivation.mockReset();
+    state.workspaceHandle.refreshExtensionRuntime
+      .mockReset()
+      .mockResolvedValue(state.refreshHandle);
+    state.client.workspaceByCwd
+      .mockReset()
+      .mockImplementation(() => state.workspaceHandle);
+    state.client.setExtensionDefaultActivation
+      .mockReset()
+      .mockResolvedValue(state.activationHandle);
+    state.client.waitForExtensionOperation.mockReset().mockResolvedValue({
+      v: 1,
+      operationId: 'activate',
+      operation: 'activation',
+      status: 'succeeded',
+      createdAt: 1,
+      updatedAt: 2,
+      result: { status: 'disabled', name: 'demo' },
+    });
+    state.actions.loadExtensionsStatus.mockReset().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/work/primary',
+      initialized: true,
+      extensions: [
+        {
+          kind: 'extension',
+          id: 'a'.repeat(64),
+          name: 'demo',
+          displayName: 'Demo',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/demo',
+          capabilities: {
+            mcpServerCount: 0,
+            skillCount: 0,
+            agentCount: 0,
+            hookCount: 0,
+            commandCount: 0,
+            contextFileCount: 0,
+            channelCount: 0,
+            hasSettings: false,
+          },
+        },
+      ],
+    });
+    state.actions.activeExtensionOperations.mockReset().mockResolvedValue({
+      v: 1,
+      operations: [],
+    });
+    state.actions.extensionOperationStatus.mockReset();
+  });
+
   it('submits a workspace refresh without polling or blocking the page', async () => {
     // A refresh that never settles keeps the page busy if it is awaited.
     state.workspaceHandle.refreshExtensionRuntime.mockReturnValue(
@@ -278,29 +931,80 @@ describe('ExtensionsManagerPage activation refresh', () => {
     expect(container.textContent).toContain('session refresh failed');
   });
 
-  it('does not adopt an in-flight refresh as a pending mutation', async () => {
-    const running = {
-      v: 1 as const,
-      operationId: 'refresh-1',
-      operation: 'refresh',
-      status: 'running' as const,
-      phase: 'reconciling' as const,
-      createdAt: 1,
-      updatedAt: 2,
-    };
-    state.actions.activeExtensionOperations.mockResolvedValue({
-      v: 1,
-      operations: [running],
-    });
-    state.actions.extensionOperationStatus.mockResolvedValue(running);
-    await renderPage();
+  it.each(['refresh', 'check-updates'])(
+    'does not adopt an in-flight %s as a pending mutation',
+    async (operation) => {
+      const running = {
+        v: 1 as const,
+        operationId: 'refresh-1',
+        operation,
+        status: 'running' as const,
+        phase: 'reconciling' as const,
+        createdAt: 1,
+        updatedAt: 2,
+      };
+      state.actions.activeExtensionOperations.mockResolvedValue({
+        v: 1,
+        operations: [running],
+      });
+      state.actions.extensionOperationStatus.mockResolvedValue(running);
+      await renderPage();
 
-    expect(container.textContent).not.toContain('Extension action queued');
-    expect(findButton('Add').disabled).toBe(false);
+      expect(container.textContent).not.toContain('Extension action queued');
+      expect(findButton('Add').disabled).toBe(false);
+      expect(state.actions.extensionOperationStatus).not.toHaveBeenCalled();
 
-    await chooseActivation('workspace', 'Disabled');
-    expect(state.workspaceHandle.setExtensionActivation).toHaveBeenCalledOnce();
-  });
+      await chooseActivation('workspace', 'Disabled');
+      expect(
+        state.workspaceHandle.setExtensionActivation,
+      ).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([undefined, 'a'.repeat(64), 'demo'])(
+    'shows recovered operation notices with owner %s',
+    async (name) => {
+      const running = {
+        v: 1 as const,
+        operationId: 'recovered',
+        operation: 'activation',
+        name,
+        status: 'running' as const,
+        createdAt: 1,
+        updatedAt: 2,
+      };
+      // Recovery that settles only after the initial catalog load: the
+      // load's own setMessageOwner(null) must not mask the owner claim.
+      let releaseOperations!: (value: {
+        v: 1;
+        operations: Array<typeof running>;
+      }) => void;
+      state.actions.activeExtensionOperations.mockReturnValue(
+        new Promise((resolve) => {
+          releaseOperations = resolve;
+        }),
+      );
+      state.actions.extensionOperationStatus.mockResolvedValue(running);
+      await renderPage();
+      await act(async () => {
+        releaseOperations({ v: 1, operations: [running] });
+        await Promise.resolve();
+      });
+      await vi.waitFor(() => expect(findButton('Add').disabled).toBe(true));
+      expect(container.textContent).toContain('Extension action queued');
+      state.actions.extensionOperationStatus.mockResolvedValue({
+        ...running,
+        status: 'failed',
+        error: 'recovered operation failed',
+      });
+      await vi.waitFor(
+        () =>
+          expect(container.textContent).toContain('recovered operation failed'),
+        { timeout: 3000 },
+      );
+      expect(findButton('Add').disabled).toBe(false);
+    },
+  );
 
   it('keeps the catalog load error when a stale refresh rejects', async () => {
     let rejectRefresh: ((error: Error) => void) | undefined;
@@ -741,5 +1445,862 @@ describe('ExtensionsManagerPage activation refresh', () => {
       'session refresh failed: boom-newer-refresh',
     );
     expect(container.textContent).not.toContain('boom-superseded-refresh');
+  });
+});
+
+describe('ExtensionsManagerPage runtime-error gate and degraded reads', () => {
+  const catalogWithDemo = {
+    v: 1 as const,
+    generation: 1,
+    extensions: [
+      {
+        id: 'ext-demo',
+        name: 'demo',
+        version: '1.0.0',
+        defaultActivation: 'enabled' as const,
+        workspaceOverrideCount: 0,
+        updateState: 'update available' as const,
+        isActive: true,
+      },
+    ],
+  };
+  const projectionWithDemo = {
+    v: 1 as const,
+    workspaceId: 'id-main',
+    workspaceCwd: '/repo/main',
+    trusted: true,
+    desiredGeneration: 1,
+    appliedGeneration: 1,
+    extensions: [
+      {
+        extensionId: 'ext-demo',
+        name: 'demo',
+        version: '1.0.0',
+        defaultActivation: 'enabled' as const,
+        workspaceActivation: null,
+        effectiveActivation: 'enabled' as const,
+        activationSource: 'default' as const,
+      },
+    ],
+  };
+  const runtimeError = {
+    runtimeEpoch: 1,
+    capabilities: {
+      extensions: {
+        state: 'error' as const,
+        runtimeEpoch: 1,
+        desiredGeneration: 0,
+        appliedGeneration: 0,
+        error: { message: 'runtime prep exploded' },
+      },
+    },
+  };
+
+  beforeEach(() => {
+    state.actions.loadExtensionsStatus.mockResolvedValue({ extensions: [] });
+    state.actions.activeExtensionOperations.mockResolvedValue({
+      operations: [],
+    });
+    state.actions.extensionOperationStatus.mockReset();
+    state.client.setExtensionDefaultActivation.mockReset();
+    state.client.waitForExtensionOperation.mockReset();
+    state.client.updateUserExtension.mockReset();
+    state.client.uninstallUserExtension.mockReset();
+    state.client.checkUserExtensionUpdates.mockReset();
+  });
+
+  async function mountSplitDemo() {
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime.mockResolvedValue({});
+    mocks.extensionCatalog.mockResolvedValue(catalogWithDemo);
+    mocks.workspaceExtensions.mockResolvedValue(projectionWithDemo);
+    await mountPage();
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector('[role="button"][aria-label="demo"]'),
+      ).not.toBeNull(),
+    );
+    return mocks;
+  }
+
+  async function openDemoDetail() {
+    const row = container.querySelector<HTMLElement>(
+      '[role="button"][aria-label="demo"]',
+    );
+    expect(row).not.toBeNull();
+    await act(async () => {
+      click(row!);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(container.querySelectorAll('[role="combobox"]')).toHaveLength(2),
+    );
+  }
+
+  async function openActionsMenu() {
+    const trigger = container.querySelector(
+      'button[aria-label="Extension actions"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+  }
+
+  async function clickMenuItem(text: string) {
+    const item = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((candidate) => candidate.textContent === text);
+    expect(item).toBeDefined();
+    await act(async () => {
+      click(item!);
+      await Promise.resolve();
+    });
+  }
+
+  async function flipRuntimeToError(
+    mocks: ReturnType<typeof makeSplitWorkspaceMocks>,
+  ) {
+    mocks.ensureRuntime.mockResolvedValue(runtimeError);
+    await act(async () => {
+      state.signals = { extensionsVersion: 1 };
+      render();
+      await Promise.resolve();
+    });
+  }
+
+  async function expectRuntimeErrorVisible() {
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('runtime prep exploded'),
+    );
+  }
+
+  it('surfaces a runtime error that arrives after an activation settles', async () => {
+    const mocks = await mountSplitDemo();
+    state.client.setExtensionDefaultActivation.mockResolvedValue(
+      state.activationHandle,
+    );
+    state.client.waitForExtensionOperation.mockResolvedValue({
+      v: 1,
+      operationId: 'activate',
+      operation: 'activation',
+      status: 'succeeded',
+      createdAt: 1,
+      updatedAt: 2,
+      result: { status: 'disabled', name: 'demo' },
+    });
+
+    await chooseActivation('user', 'Disabled', 'demo');
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Extension "demo" disabled.'),
+    );
+
+    // The activation released its notice owner on settle, so a runtime
+    // error surfacing now must reach the gate.
+    await flipRuntimeToError(mocks);
+    await expectRuntimeErrorVisible();
+    expect(container.textContent).not.toContain('Extension "demo" disabled.');
+
+    // The unowned notice renders in the list view as well.
+    await act(async () => {
+      click(findButton('Manage Extensions'));
+      await Promise.resolve();
+    });
+    await expectRuntimeErrorVisible();
+  });
+
+  it('surfaces a runtime error that arrives after a check for updates settles', async () => {
+    const mocks = await mountSplitDemo();
+    state.client.checkUserExtensionUpdates.mockResolvedValue({
+      accepted: true,
+      operationId: 'check',
+    });
+    state.client.waitForExtensionOperation.mockResolvedValue({
+      v: 1,
+      operationId: 'check',
+      operation: 'update-check',
+      status: 'succeeded',
+      createdAt: 1,
+      updatedAt: 2,
+      result: { states: { demo: 'up to date' } },
+    });
+    await openDemoDetail();
+
+    await openActionsMenu();
+    await clickMenuItem('Check for updates');
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('up to date'),
+    );
+
+    await flipRuntimeToError(mocks);
+    await expectRuntimeErrorVisible();
+    expect(container.textContent).not.toContain('up to date');
+  });
+
+  it.each([
+    {
+      outcome: 'waiting_for_input without an interaction',
+      operation: {
+        v: 1 as const,
+        operationId: 'op-1',
+        operation: 'update',
+        status: 'waiting_for_input' as const,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      failureText: 'Extension operation failed.',
+    },
+    {
+      outcome: 'failed',
+      operation: {
+        v: 1 as const,
+        operationId: 'op-1',
+        operation: 'update',
+        status: 'failed' as const,
+        error: 'update exploded',
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      failureText: 'update exploded',
+    },
+    {
+      outcome: 'a 404 poll',
+      operation: null,
+      failureText: 'operation gone',
+    },
+  ])(
+    'surfaces a runtime error that arrives after a polled mutation ends with $outcome',
+    async ({ operation, failureText }) => {
+      const mocks = await mountSplitDemo();
+      state.client.updateUserExtension.mockResolvedValue({
+        operationId: 'op-1',
+      });
+      if (operation) {
+        state.actions.extensionOperationStatus.mockResolvedValue(operation);
+      } else {
+        state.actions.extensionOperationStatus.mockRejectedValue(
+          new DaemonHttpError(404, {}, 'operation gone'),
+        );
+      }
+      await openDemoDetail();
+
+      await openActionsMenu();
+      await clickMenuItem('Update Extension');
+      await vi.waitFor(() =>
+        expect(container.textContent).toContain(failureText),
+      );
+
+      await flipRuntimeToError(mocks);
+      await expectRuntimeErrorVisible();
+    },
+  );
+
+  it('surfaces a runtime error that arrives after a polled uninstall fails', async () => {
+    const mocks = await mountSplitDemo();
+    state.client.uninstallUserExtension.mockResolvedValue({
+      operationId: 'op-u',
+    });
+    state.actions.extensionOperationStatus.mockResolvedValue({
+      v: 1,
+      operationId: 'op-u',
+      operation: 'uninstall',
+      status: 'failed',
+      error: 'uninstall exploded',
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    await openDemoDetail();
+
+    await openActionsMenu();
+    await clickMenuItem('Uninstall Extension');
+    const confirm = await vi.waitFor(() => {
+      const dialog = document.body.querySelector('[role="alertdialog"]');
+      expect(dialog).not.toBeNull();
+      const button = Array.from(
+        dialog!.querySelectorAll<HTMLButtonElement>('button'),
+      ).find(
+        (candidate) => candidate.textContent?.trim() === 'Uninstall Extension',
+      );
+      expect(button).toBeDefined();
+      return button!;
+    });
+    await act(async () => {
+      click(confirm);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('uninstall exploded'),
+    );
+
+    await flipRuntimeToError(mocks);
+    await expectRuntimeErrorVisible();
+  });
+
+  it.each(['enabled', 'disabled'] as const)(
+    'shows unknown activation without workspace data, regardless of the %s default',
+    async (defaultActivation) => {
+      const mocks = makeSplitWorkspaceMocks(true);
+      mocks.workspaceExtensions.mockRejectedValue(new Error('unavailable'));
+      mocks.ensureRuntime.mockResolvedValue({});
+      mocks.workspaceRuntimeExtensions.mockResolvedValue({
+        initialized: false,
+        extensions: [],
+      });
+      mocks.extensionCatalog.mockResolvedValue({
+        v: 1,
+        generation: 1,
+        extensions: [
+          {
+            id: 'ext-demo',
+            name: 'demo',
+            version: '1.0.0',
+            defaultActivation,
+            workspaceOverrideCount: 0,
+          },
+        ],
+      });
+
+      await mountPage();
+      const card = container.querySelector<HTMLElement>(
+        '[role="button"][aria-label="demo"]',
+      );
+      expect(card?.textContent).toContain('unknown');
+      expect(card?.textContent).not.toContain(defaultActivation);
+      expect(card?.querySelector('[class*="success-bg"]')).toBeNull();
+
+      await openDemoDetail();
+      expect(
+        container.querySelector('h1')?.parentElement?.textContent,
+      ).toContain('unknown');
+      expect(container.querySelector('[class*="success-bg"]')).toBeNull();
+      for (const control of container.querySelectorAll('[role="combobox"]')) {
+        expect(control.hasAttribute('disabled')).toBe(true);
+      }
+    },
+  );
+
+  it('keeps the live runtime rows when the projection read fails', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.workspaceExtensions.mockResolvedValue(null);
+    mocks.extensionCatalog.mockResolvedValue({
+      v: 1,
+      generation: 1,
+      extensions: [
+        {
+          id: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceOverrideCount: 0,
+        },
+      ],
+    });
+    mocks.ensureRuntime.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo/main',
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 7,
+      capabilities: {
+        extensions: {
+          state: 'ready',
+          revision: 1,
+          runtimeEpoch: 7,
+          desiredGeneration: 1,
+          appliedGeneration: 1,
+        },
+      },
+    });
+    mocks.workspaceRuntimeExtensions.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo/main',
+      initialized: true,
+      runtimeEpoch: 7,
+      extensions: [
+        {
+          kind: 'extension',
+          id: 'ext-demo',
+          name: 'demo',
+          displayName: 'Demo Display Name',
+          description: 'live runtime description',
+          version: '1.0.0',
+          isActive: false,
+          path: '/ext/demo',
+          updateState: 'update available',
+          capabilities: {
+            mcpServerCount: 0,
+            skillCount: 0,
+            agentCount: 0,
+            hookCount: 0,
+            commandCount: 0,
+            contextFileCount: 0,
+            channelCount: 0,
+            hasSettings: false,
+          },
+          details: {
+            mcpServers: [],
+            commands: [],
+            skills: ['runtime-skill'],
+            agents: [],
+            contextFiles: [],
+            settings: [],
+          },
+        },
+      ],
+    });
+
+    await mountPage();
+
+    // The projection never answered, but the runtime agrees with the
+    // coordinator on the epoch: the card must show the live row, not the
+    // bare catalog entry with its user-scope default.
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector(
+          '[role="button"][aria-label="Demo Display Name"]',
+        ),
+      ).not.toBeNull(),
+    );
+    const card = container.querySelector<HTMLElement>(
+      '[role="button"][aria-label="Demo Display Name"]',
+    );
+    expect(card?.textContent).toContain('live runtime description');
+    expect(card?.textContent).toContain('disabled');
+    expect(card?.textContent).toContain('update available');
+    expect(card?.textContent).not.toContain('No description');
+  });
+
+  it('keeps the overlaid rows while a refresh re-reads the runtime legs', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.workspaceExtensions.mockResolvedValue({
+      v: 1,
+      workspaceId: 'id-main',
+      workspaceCwd: '/repo/main',
+      trusted: true,
+      desiredGeneration: 1,
+      appliedGeneration: 1,
+      extensions: [
+        {
+          extensionId: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled' as const,
+          workspaceActivation: null,
+          effectiveActivation: 'enabled' as const,
+          activationSource: 'default' as const,
+        },
+      ],
+    });
+    mocks.extensionCatalog.mockResolvedValue({
+      v: 1,
+      generation: 1,
+      extensions: [
+        {
+          id: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled' as const,
+          workspaceOverrideCount: 0,
+        },
+      ],
+    });
+    mocks.ensureRuntime.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo/main',
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 7,
+      capabilities: {
+        extensions: {
+          state: 'ready' as const,
+          revision: 1,
+          runtimeEpoch: 7,
+          desiredGeneration: 1,
+          appliedGeneration: 1,
+        },
+      },
+    });
+    const liveCatalog = {
+      v: 1 as const,
+      workspaceCwd: '/repo/main',
+      initialized: true,
+      runtimeEpoch: 7,
+      extensions: [
+        {
+          kind: 'extension' as const,
+          id: 'ext-demo',
+          name: 'demo',
+          displayName: 'Demo Display Name',
+          description: 'live runtime description',
+          version: '1.0.0',
+          isActive: true,
+          path: '/ext/demo',
+          capabilities: {
+            mcpServerCount: 0,
+            skillCount: 0,
+            agentCount: 0,
+            hookCount: 0,
+            commandCount: 0,
+            contextFileCount: 0,
+            channelCount: 0,
+            hasSettings: false,
+          },
+          details: {
+            mcpServers: [],
+            commands: [],
+            skills: [],
+            agents: [],
+            contextFiles: [],
+            settings: [],
+          },
+        },
+      ],
+    };
+    mocks.workspaceRuntimeExtensions.mockResolvedValue(liveCatalog);
+
+    await mountPage();
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector(
+          '[role="button"][aria-label="Demo Display Name"]',
+        ),
+      ).not.toBeNull(),
+    );
+
+    // Gate the refresh's runtime-catalog leg: while it is in flight the
+    // overlaid rows must stay on screen, not fall back to the bare catalog.
+    let releaseRuntime!: () => void;
+    mocks.workspaceRuntimeExtensions.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseRuntime = () => resolve(liveCatalog);
+        }),
+    );
+    await act(async () => {
+      click(findButton('Refresh'));
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mocks.workspaceRuntimeExtensions).toHaveBeenCalledTimes(2);
+
+    const pending = container.querySelector<HTMLElement>(
+      '[role="button"][aria-label="Demo Display Name"]',
+    );
+    expect(pending).not.toBeNull();
+    expect(pending?.textContent).toContain('live runtime description');
+    expect(pending?.textContent).not.toContain('No description');
+
+    await act(async () => {
+      releaseRuntime();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector(
+          '[role="button"][aria-label="Demo Display Name"]',
+        ),
+      ).not.toBeNull(),
+    );
+  });
+
+  it('does not refresh the runtime after a user-scope toggle on an untrusted secondary', async () => {
+    let defaultActivation: 'enabled' | 'disabled' = 'enabled';
+    const workspaceExtensions = vi.fn(async () => ({
+      v: 1 as const,
+      workspaceId: 'id-other',
+      workspaceCwd: '/repo/other',
+      trusted: false,
+      desiredGeneration: 1,
+      appliedGeneration: 1,
+      extensions: [
+        {
+          extensionId: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation,
+          workspaceActivation: null,
+          effectiveActivation: defaultActivation,
+          activationSource: 'default' as const,
+        },
+      ],
+    }));
+    // Both trust-gated legs answer 403: the ensure leg is awaited first in
+    // production, so the load must tolerate it exactly like the catalog leg.
+    const ensureRuntime = vi.fn(async () => {
+      throw new DaemonHttpError(
+        403,
+        { code: 'untrusted_workspace' },
+        'Workspace is not trusted.',
+      );
+    });
+    const workspaceRuntimeExtensions = vi.fn(async () => {
+      throw new DaemonHttpError(
+        403,
+        { code: 'untrusted_workspace' },
+        'Workspace is not trusted.',
+      );
+    });
+    const refreshExtensionRuntime = vi.fn(async () => state.refreshHandle);
+    state.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceExtensions,
+      ensureRuntime,
+      workspaceRuntimeExtensions,
+      refreshExtensionRuntime,
+    }));
+    state.client.extensionCatalog.mockResolvedValue(catalogWithDemo);
+    state.client.setExtensionDefaultActivation.mockResolvedValue(
+      state.activationHandle,
+    );
+    // The projection observes the policy commit: the toggle's own reload
+    // reads the flipped default activation.
+    state.client.waitForExtensionOperation.mockImplementation(async () => {
+      defaultActivation = 'disabled';
+      return {
+        v: 1 as const,
+        operationId: 'activate',
+        operation: 'activation',
+        status: 'succeeded' as const,
+        createdAt: 1,
+        updatedAt: 2,
+        result: { status: 'disabled', name: 'demo' },
+      };
+    });
+    state.workspace.capabilities = {
+      features: [
+        'workspace_extensions_config_runtime',
+        'extension_activation_explicit_refresh',
+      ],
+      workspaces: [
+        { id: 'id-main', cwd: '/work/primary', primary: true, trusted: true },
+        { id: 'id-other', cwd: '/repo/other', primary: false, trusted: false },
+      ],
+    };
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ExtensionsManagerPage onClose={vi.fn()} workspaceCwd="/repo/other" />
+        </I18nProvider>,
+      );
+    });
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector('[role="button"][aria-label="demo"]'),
+      ).not.toBeNull(),
+    );
+
+    await chooseActivation('user', 'Disabled', 'demo');
+
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Extension "demo" disabled.'),
+    );
+    expect(state.client.setExtensionDefaultActivation).toHaveBeenCalledWith(
+      'ext-demo',
+      'disabled',
+    );
+    // Both trust-gated runtime legs answered 403, but the projection had
+    // already reported trusted:false — the refresh must stay suppressed.
+    expect(refreshExtensionRuntime).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('session refresh failed');
+    // The tolerated runtime 403s must not freeze the row: the flipped
+    // projection the toggle's reload fetched still reaches the badge.
+    expect(container.querySelector('h1')?.parentElement?.textContent).toContain(
+      'disabled',
+    );
+  });
+
+  it('decides the refresh on the trust the activation reload observes, even when the runtime leg fails', async () => {
+    let trusted = true;
+    let rejectCatalog = false;
+    const workspaceExtensions = vi.fn(async () => ({
+      v: 1 as const,
+      workspaceId: 'id-main',
+      workspaceCwd: '/repo/main',
+      trusted,
+      desiredGeneration: 1,
+      appliedGeneration: 1,
+      extensions: [
+        {
+          extensionId: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled' as const,
+          workspaceActivation: null,
+          effectiveActivation: 'enabled' as const,
+          activationSource: 'default' as const,
+        },
+      ],
+    }));
+    const ensureRuntime = vi.fn(async () => ({}));
+    const workspaceRuntimeExtensions = vi.fn(async () => {
+      if (rejectCatalog) {
+        throw new DaemonHttpError(
+          403,
+          { code: 'untrusted_workspace' },
+          'Workspace is not trusted.',
+        );
+      }
+      return {
+        v: 1 as const,
+        workspaceCwd: '/repo/main',
+        initialized: true,
+        runtimeEpoch: 1,
+        extensions: [],
+      };
+    });
+    const refreshExtensionRuntime = vi.fn(async () => state.refreshHandle);
+    state.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceExtensions,
+      ensureRuntime,
+      workspaceRuntimeExtensions,
+      refreshExtensionRuntime,
+    }));
+    state.client.extensionCatalog.mockResolvedValue(catalogWithDemo);
+    state.client.setExtensionDefaultActivation.mockResolvedValue(
+      state.activationHandle,
+    );
+    state.client.waitForExtensionOperation.mockResolvedValue({
+      v: 1,
+      operationId: 'activate',
+      operation: 'activation',
+      status: 'succeeded',
+      createdAt: 1,
+      updatedAt: 2,
+      result: { status: 'disabled', name: 'demo' },
+    });
+    state.workspace.capabilities = {
+      features: [
+        'workspace_extensions_config_runtime',
+        'extension_activation_explicit_refresh',
+      ],
+      workspaces: [
+        { id: 'id-main', cwd: '/repo/main', primary: true, trusted: true },
+      ],
+    };
+
+    await mountPage();
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector('[role="button"][aria-label="demo"]'),
+      ).not.toBeNull(),
+    );
+
+    // Trust is revoked out of band after the mount; the activation's own
+    // reload observes trusted:false from the projection, then the
+    // trust-gated runtime leg 403s. The refresh decision must use the
+    // freshly observed distrust, not the render-time trusted state.
+    trusted = false;
+    rejectCatalog = true;
+    await chooseActivation('user', 'Disabled', 'demo');
+
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Extension "demo" disabled.'),
+    );
+    expect(refreshExtensionRuntime).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('session refresh failed');
+  });
+
+  it('decides the refresh on the trust a superseded activation reload observed', async () => {
+    let trusted = true;
+    let releaseProjection: (() => void) | undefined;
+    const workspaceExtensions = vi.fn(async () => {
+      // Gate only the activation reload's first projection read (the mount
+      // load reads twice, so the reload's read is the third call).
+      if (workspaceExtensions.mock.calls.length === 3) {
+        await new Promise<void>((resolve) => {
+          releaseProjection = resolve;
+        });
+      }
+      return {
+        v: 1 as const,
+        workspaceId: 'id-main',
+        workspaceCwd: '/repo/main',
+        trusted,
+        desiredGeneration: 1,
+        appliedGeneration: 1,
+        extensions: [
+          {
+            extensionId: 'ext-demo',
+            name: 'demo',
+            version: '1.0.0',
+            defaultActivation: 'enabled' as const,
+            workspaceActivation: null,
+            effectiveActivation: 'enabled' as const,
+            activationSource: 'default' as const,
+          },
+        ],
+      };
+    });
+    const ensureRuntime = vi.fn(async () => ({}));
+    const workspaceRuntimeExtensions = vi.fn(async () => ({
+      v: 1 as const,
+      workspaceCwd: '/repo/main',
+      initialized: true,
+      runtimeEpoch: 1,
+      extensions: [],
+    }));
+    const refreshExtensionRuntime = vi.fn(async () => state.refreshHandle);
+    state.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceExtensions,
+      ensureRuntime,
+      workspaceRuntimeExtensions,
+      refreshExtensionRuntime,
+    }));
+    state.client.extensionCatalog.mockResolvedValue(catalogWithDemo);
+    state.client.setExtensionDefaultActivation.mockResolvedValue(
+      state.activationHandle,
+    );
+    state.client.waitForExtensionOperation.mockResolvedValue({
+      v: 1,
+      operationId: 'activate',
+      operation: 'activation',
+      status: 'succeeded',
+      createdAt: 1,
+      updatedAt: 2,
+      result: { status: 'disabled', name: 'demo' },
+    });
+    state.workspace.capabilities = {
+      features: [
+        'workspace_extensions_config_runtime',
+        'extension_activation_explicit_refresh',
+      ],
+      workspaces: [
+        { id: 'id-main', cwd: '/repo/main', primary: true, trusted: true },
+      ],
+    };
+
+    await mountPage();
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector('[role="button"][aria-label="demo"]'),
+      ).not.toBeNull(),
+    );
+
+    // The activation's reload parks inside its projection read; the daemon's
+    // own generation broadcast lands meanwhile, superseding that load.
+    await chooseActivation('user', 'Disabled', 'demo');
+    await vi.waitFor(() => expect(releaseProjection).toBeDefined());
+    trusted = false;
+    await act(async () => {
+      state.signals = { extensionsVersion: 1 };
+      render();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(workspaceExtensions.mock.calls.length).toBeGreaterThan(3),
+    );
+    await act(async () => {
+      releaseProjection!();
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Extension "demo" disabled.'),
+    );
+    // The superseded reload observed trusted:false from its own projection
+    // read; the refresh decision must use it, not the render-time snapshot.
+    expect(refreshExtensionRuntime).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('session refresh failed');
   });
 });

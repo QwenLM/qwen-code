@@ -5194,6 +5194,29 @@ describe('MessageList — turn collapse (DOM)', () => {
     scrollIntoView.mockRestore();
   });
 
+  it('cancels the pending scroll-settle release on unmount', () => {
+    vi.useFakeTimers();
+    const ref = createRef<MessageListHandle>();
+    mount([userMsg('u1'), asstMsg('a1')], ref);
+
+    act(() => {
+      ref.current!.scrollToMessage('u1');
+    });
+
+    // The 150ms settle timer must not fire after unmount: its callback
+    // schedules requestAnimationFrame, which is gone once jsdom is torn
+    // down — vitest fails the whole run on that unhandled error.
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame');
+    const entry = mounted[mounted.length - 1]!;
+    mounted.splice(mounted.length - 1, 1);
+    act(() => entry.root.unmount());
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    expect(rafSpy).not.toHaveBeenCalled();
+    entry.container.remove();
+  });
+
   it('hides the session timeline below the default content width', async () => {
     const rectSpy = mockMessageListWidth(999);
 

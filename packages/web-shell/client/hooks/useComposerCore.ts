@@ -97,6 +97,7 @@ export {
   getComposerTagLabel,
   getComposerTagValue,
 } from '../utils/composerTag';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from '../components/messages/Markdown';
 import type {
@@ -1185,6 +1186,11 @@ export interface UseComposerCoreOptions {
 const SESSION_DRAFT_STORAGE_PREFIX = 'qwen-web-shell-session-draft:';
 const PENDING_TASK_DRAFT_STORAGE_PREFIX = 'qwen-web-shell-pending-task-draft:';
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 2000;
+// The provider caches the settled extensions promise for the whole menu
+// session, so a cold secondary's retryable startup 503 gets a bounded second
+// chance inside the loader; anything else is terminal for that open.
+const COMPOSER_EXTENSIONS_RETRY_DELAY_MS = 2000;
+const COMPOSER_EXTENSIONS_MAX_ATTEMPTS = 3;
 
 function getComposerDraftStorageKey(
   sessionId: string | undefined,
@@ -1601,8 +1607,82 @@ export function useComposerCore(
     workspaceActionsRef.current = undefined;
   } else if (workspace && atWorkspaceCwd) {
     const client = workspace.client.workspaceByCwd(atWorkspaceCwd);
+    // The qualified runtime routes are trust-gated per target. An untrusted
+    // primary keeps the trust-free legacy extension loader; a non-primary
+    // target that is not confirmed trusted omits the loader so the composer
+    // fails closed instead of serving another workspace's catalog.
+    const atEntry = workspace.capabilities?.workspaces?.find(
+      (entry) => entry.kind !== 'live' && entry.cwd === atWorkspaceCwd,
+    );
+    const loadExtensionsStatus: AtMentionWorkspaceActions['loadExtensionsStatus'] =
+      workspace.capabilities?.features.includes(
+        'workspace_extension_mentions',
+      ) !== true
+        ? workspace.actions.loadExtensionsStatus
+        : atEntry === undefined || atEntry.trusted
+          ? async () => {
+              for (let attempt = 1; ; attempt += 1) {
+                try {
+                  const coordinator = await client.ensureRuntime();
+                  const capability = coordinator.capabilities?.extensions;
+                  if (
+                    capability &&
+                    (capability.state !== 'ready' ||
+                      capability.runtimeEpoch !== coordinator.runtimeEpoch)
+                  ) {
+                    throw new Error(
+                      capability.error?.message ??
+                        'Extension runtime catalog is not initialized.',
+                    );
+                  }
+                  const status = await client.workspaceRuntimeExtensions();
+                  if (
+                    status.initialized === false ||
+                    (status.errors?.length ?? 0) > 0 ||
+                    (coordinator.runtimeEpoch !== undefined &&
+                      status.runtimeEpoch !== coordinator.runtimeEpoch)
+                  ) {
+                    throw new Error(
+                      status.errors?.[0]?.error ??
+                        'Extension runtime catalog is not initialized.',
+                    );
+                  }
+                  return status;
+                } catch (error) {
+                  // Only the daemon's own retryable startup 503 re-arms, and
+                  // only inside the loader: a 503 workspace_runtime_unavailable
+                  // (a draining or otherwise non-active target) is terminal,
+                  // matching the Extensions page.
+                  const retryable =
+                    error instanceof DaemonHttpError &&
+                    error.status === 503 &&
+                    typeof error.body === 'object' &&
+                    error.body !== null &&
+                    (error.body as { code?: unknown }).code ===
+                      'runtime_still_starting';
+                  if (
+                    !retryable ||
+                    attempt >= COMPOSER_EXTENSIONS_MAX_ATTEMPTS
+                  ) {
+                    throw error;
+                  }
+                  await new Promise<void>((resolve) => {
+                    setTimeout(resolve, COMPOSER_EXTENSIONS_RETRY_DELAY_MS);
+                  });
+                }
+              }
+            }
+          : atEntry.primary
+            ? workspace.actions.loadExtensionsStatus
+            : undefined;
+    const baseActions: AtMentionWorkspaceActions = { ...workspace.actions };
+    if (loadExtensionsStatus === undefined) {
+      delete baseActions.loadExtensionsStatus;
+    } else {
+      baseActions.loadExtensionsStatus = loadExtensionsStatus;
+    }
     workspaceActionsRef.current = {
-      ...workspace.actions,
+      ...baseActions,
       async globWorkspace(pattern, options) {
         options?.signal?.throwIfAborted();
         const result = (await client.glob(pattern, {

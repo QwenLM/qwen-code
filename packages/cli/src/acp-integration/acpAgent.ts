@@ -14054,6 +14054,117 @@ class QwenAgent implements Agent {
           reason,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile: {
+        const rawSkillsOnly = params['skillsOnly'];
+        if (rawSkillsOnly !== undefined && typeof rawSkillsOnly !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'skillsOnly must be a boolean',
+          );
+        }
+        const skillsOnly = rawSkillsOnly === true;
+        const sessions = this.getActiveSessions();
+        const configs = new Set([
+          this.config,
+          ...(!skillsOnly && this.workspaceMcpDiscoveryConfig
+            ? [this.workspaceMcpDiscoveryConfig]
+            : []),
+          ...sessions.map((session) => session.getConfig()),
+        ]);
+        const configList = [...configs];
+        const configResults = await Promise.allSettled(
+          configList.map(async (config) => {
+            if (skillsOnly) {
+              await Promise.all(
+                sessions
+                  .filter((session) => session.getConfig() === config)
+                  .map((session) => session.reloadSkillSettings()),
+              );
+            }
+            const extensionManager = config.getExtensionManager();
+            await extensionManager.refreshCache();
+            if (skillsOnly) {
+              await config
+                .getSkillManager()
+                ?.refreshCache({ throwOnError: true });
+            } else {
+              // The bootstrap config is initialized with skipMcpDiscovery and
+              // never joins the shared MCP transport pool, so refreshTools
+              // would spawn un-pooled subprocesses (W119); its refreshCache
+              // leg above is all the daemon's catalog read needs.
+              if (config !== this.config) {
+                await extensionManager.refreshTools();
+              }
+              // refreshTools already retried the Skill refresh best-effort;
+              // surfacing a second, unrelated Skill failure here would fail
+              // a refresh whose extension change is already applied.
+              try {
+                await config
+                  .getSkillManager()
+                  ?.refreshCache({ throwOnError: true });
+              } catch (error) {
+                debugLogger.warn(
+                  `Extension Skill refresh failed: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+              }
+            }
+            await config.getLlmClient()?.refreshSystemInstruction();
+          }),
+        );
+        const failedConfigs = new Set<Config>();
+        const configErrors: string[] = [];
+        configResults.forEach((result, index) => {
+          if (result.status !== 'rejected') return;
+          failedConfigs.add(configList[index]!);
+          const error =
+            result.reason instanceof Error
+              ? result.reason.message
+              : String(result.reason);
+          configErrors.push(error);
+          debugLogger.warn(`Extension config refresh failed: ${error}`);
+        });
+        const attemptedSessions = sessions.filter(
+          (session) => !failedConfigs.has(session.getConfig()),
+        );
+        const sessionResults = await Promise.allSettled(
+          attemptedSessions.map(async (session) => {
+            if (skillsOnly) {
+              await session.refreshSkillsFromSettings({
+                reloadSettings: false,
+                notifyConfigChanged: false,
+              });
+              return;
+            }
+            await session.sendAvailableCommandsUpdateOrThrow();
+          }),
+        );
+        const sessionErrors: Array<{ sessionId: string; error: string }> = [];
+        sessionResults.forEach((result, index) => {
+          if (result.status !== 'rejected') return;
+          const sessionId = attemptedSessions[index]!.getId();
+          const error =
+            result.reason instanceof Error
+              ? result.reason.message
+              : String(result.reason);
+          sessionErrors.push({ sessionId, error });
+          debugLogger.warn(
+            `Session ${sessionId} Extension command refresh failed: ${error}`,
+          );
+        });
+        return {
+          configsRefreshed: configResults.length - failedConfigs.size,
+          configsFailed: failedConfigs.size,
+          ...(configErrors.length > 0 ? { configErrors } : {}),
+          sessionsRefreshed: sessionResults.filter(
+            (result) => result.status === 'fulfilled',
+          ).length,
+          sessionsFailed: sessionErrors.length,
+          sessionsSkipped: sessions.length - attemptedSessions.length,
+          ...(sessionErrors.length > 0 ? { sessionErrors } : {}),
+        };
+      }
       default:
         throw RequestError.methodNotFound(method);
     }

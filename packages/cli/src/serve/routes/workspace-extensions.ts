@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   parseInstallSource,
+  getExtensionStoreContentHash,
   redactUrlCredentials,
   getErrorMessage,
   SettingScope,
@@ -57,6 +58,7 @@ import type {
 } from '../workspace-registry.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
+import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
 import {
   createExtensionsController,
   redactExtensionDisplaySource,
@@ -581,7 +583,7 @@ export function registerWorkspaceExtensionRoutes(
       timeout: ReturnType<typeof setTimeout>;
     }
   >();
-  const supersededInstallOperations = new Set<string>();
+  const supersededInstallOperations = new Map<string, string>();
   const cancelPendingExtensionInteraction = (
     operationId: string,
     reason: string,
@@ -592,33 +594,48 @@ export function registerWorkspaceExtensionRoutes(
     pendingExtensionInteractions.delete(operationId);
     pending.reject(new Error(reason));
   };
+  // A new install supersedes any parked install regardless of target: the
+  // install's name is only known once preparation resolves, and the sweep is
+  // what breaks the two-interactive-installs deadlock. An update knows its
+  // target up front, so it supersedes only the same extension's parked
+  // update that is still waiting for input — a parked install carries no
+  // resolved name to compare, and cancelling an unrelated extension's
+  // operation would discard work and credentials the user already supplied.
   const supersedeActiveInstallOperations = (
     controller: ExtensionsController,
     currentOperationId: string,
+    targetName?: string,
   ): void => {
+    const reason =
+      targetName === undefined
+        ? 'Extension installation cancelled by a new install request'
+        : 'Extension operation cancelled by a new update request';
     for (const operation of controller.getActiveOperations()) {
-      if (
-        operation.operation !== 'install' ||
-        operation.operationId === currentOperationId
+      if (operation.operationId === currentOperationId) continue;
+      if (targetName === undefined) {
+        if (operation.operation !== 'install') continue;
+      } else if (
+        operation.name?.toLowerCase() !== targetName.toLowerCase() ||
+        operation.operation !== 'update' ||
+        operation.status !== 'waiting_for_input'
       ) {
         continue;
       }
-      supersededInstallOperations.add(operation.operationId);
-      cancelPendingExtensionInteraction(
-        operation.operationId,
-        'Extension installation cancelled by a new install request',
-      );
+      supersededInstallOperations.set(operation.operationId, reason);
+      cancelPendingExtensionInteraction(operation.operationId, reason);
     }
   };
   const waitForExtensionInteraction = (
     controller: ExtensionsController,
     operationId: string,
     interaction: ExtensionInteractionRequest,
+    signal?: AbortSignal,
   ): Promise<string> => {
-    if (supersededInstallOperations.delete(operationId)) {
-      return Promise.reject(
-        new Error('Extension installation superseded by a new install request'),
-      );
+    signal?.throwIfAborted();
+    const supersedeReason = supersededInstallOperations.get(operationId);
+    if (supersedeReason !== undefined) {
+      supersededInstallOperations.delete(operationId);
+      return Promise.reject(new Error(supersedeReason));
     }
     const operation = controller.getOperation(operationId);
     if (
@@ -633,6 +650,11 @@ export function registerWorkspaceExtensionRoutes(
       ...interaction,
       id: crypto.randomUUID(),
     } as ExtensionPendingInteraction;
+    const abort = () =>
+      cancelPendingExtensionInteraction(
+        operationId,
+        'Extension preparation cancelled',
+      );
     return new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => {
         pendingExtensionInteractions.delete(operationId);
@@ -651,49 +673,61 @@ export function registerWorkspaceExtensionRoutes(
         reject,
         timeout,
       });
+      signal?.addEventListener('abort', abort, { once: true });
       controller.updateOperation(operationId, {
         status: 'waiting_for_input',
         phase: undefined,
         interaction: pendingInteraction,
       });
-    });
+    }).finally(() => signal?.removeEventListener('abort', abort));
   };
   const extensionInteractionHandlers = (
     controller: ExtensionsController,
     operationId: string,
+    signal?: AbortSignal,
   ) => ({
     requestSetting: (setting: ExtensionSetting) =>
-      waitForExtensionInteraction(controller, operationId, {
-        kind: 'setting',
-        setting: {
-          name: setting.name,
-          description: setting.description,
-          sensitive: setting.sensitive === true,
+      waitForExtensionInteraction(
+        controller,
+        operationId,
+        {
+          kind: 'setting',
+          setting: {
+            name: setting.name,
+            description: setting.description,
+            sensitive: setting.sensitive === true,
+          },
         },
-      }),
+        signal,
+      ),
     requestChoicePlugin: (marketplace: ClaudeMarketplaceConfig) => {
       if (marketplace.plugins.length === 0) {
         return Promise.reject(
           new Error(`Marketplace "${marketplace.name}" has no plugins`),
         );
       }
-      return waitForExtensionInteraction(controller, operationId, {
-        kind: 'marketplace_plugin',
-        marketplace: { name: marketplace.name },
-        plugins: marketplace.plugins.map((plugin) => ({
-          name: plugin.name,
-          ...(plugin.description ? { description: plugin.description } : {}),
-          source: redactExtensionDisplaySource(
-            typeof plugin.source === 'string'
-              ? plugin.source
-              : plugin.source.source === 'github'
-                ? plugin.source.repo
-                : plugin.source.url,
-          ),
-          ...(plugin.category ? { category: plugin.category } : {}),
-          ...(plugin.tags ? { tags: plugin.tags } : {}),
-        })),
-      });
+      return waitForExtensionInteraction(
+        controller,
+        operationId,
+        {
+          kind: 'marketplace_plugin',
+          marketplace: { name: marketplace.name },
+          plugins: marketplace.plugins.map((plugin) => ({
+            name: plugin.name,
+            ...(plugin.description ? { description: plugin.description } : {}),
+            source: redactExtensionDisplaySource(
+              typeof plugin.source === 'string'
+                ? plugin.source
+                : plugin.source.source === 'github'
+                  ? plugin.source.repo
+                  : plugin.source.url,
+            ),
+            ...(plugin.category ? { category: plugin.category } : {}),
+            ...(plugin.tags ? { tags: plugin.tags } : {}),
+          })),
+        },
+        signal,
+      );
     },
   });
   const runtimeReconciliationQueue = createFifoTaskQueue(1);
@@ -727,12 +761,14 @@ export function registerWorkspaceExtensionRoutes(
       },
     };
   };
-  const appliedGenerationByWorkspaceId = new Map<string, number>();
+  const legacyAppliedGenerationByWorkspaceId = new Map<string, number>();
   const onRuntimeReconciled = (
     runtime: WorkspaceRuntime,
     generation: number,
   ): void => {
-    appliedGenerationByWorkspaceId.set(runtime.workspaceId, generation);
+    if (!getWorkspaceRuntimeCoordinatorIfSupported(runtime)) {
+      legacyAppliedGenerationByWorkspaceId.set(runtime.workspaceId, generation);
+    }
   };
   const globalReconciliationOptions = () =>
     workspaceRegistry
@@ -763,15 +799,48 @@ export function registerWorkspaceExtensionRoutes(
           boundWorkspace,
           true,
         );
-        const generation = (await manager.getExtensionStoreSnapshot())
-          .generation;
+        const observations = workspaceRegistry.listAll().map((runtime) => {
+          const coordinator =
+            getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+          return {
+            coordinator,
+            revision: coordinator?.status().capabilities?.extensions?.revision,
+          };
+        });
+        const snapshot = await manager.getExtensionStoreSnapshot();
+        const generation = snapshot.generation;
+        for (const { coordinator, revision } of observations) {
+          coordinator?.observeExtensionGeneration(
+            generation,
+            revision,
+            getExtensionStoreContentHash(snapshot),
+            snapshot.recoveryId,
+          );
+        }
         const pendingRuntimes = workspaceRegistry
           .listAll()
-          .filter(
-            (runtime) =>
-              (appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0) !==
-              generation,
-          );
+          .filter((runtime) => {
+            const coordinator =
+              getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+            if (!coordinator) {
+              return (
+                (legacyAppliedGenerationByWorkspaceId.get(
+                  runtime.workspaceId,
+                ) ?? 0) !== generation
+              );
+            }
+            const status = coordinator.status();
+            if (status.runtimeLive !== true || status.state === 'stopping') {
+              return false;
+            }
+            const extensions = status.capabilities?.extensions;
+            if (!extensions) return true;
+            return (
+              generation >= extensions.desiredGeneration &&
+              (extensions.appliedGeneration !== generation ||
+                extensions.state !== 'ready')
+            );
+          });
         if (generation === observedGeneration && pendingRuntimes.length === 0)
           return;
         const runtimes = pendingRuntimes;
@@ -783,6 +852,34 @@ export function registerWorkspaceExtensionRoutes(
                 runtimes.map(async (runtime) => {
                   runtime.workspaceService.invalidateWorkspaceSkillsStatus();
                   try {
+                    const coordinator =
+                      getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+                    if (coordinator) {
+                      const result =
+                        await coordinator.reconcileExtensionGeneration(
+                          generation,
+                        );
+                      if (result.state === 'failed') {
+                        runtime.bridge.broadcastExtensionsChanged({
+                          refreshed: result.refreshed,
+                          failed: result.failed,
+                        });
+                        throw new Error(
+                          result.error ??
+                            'Extension generation reconciliation failed',
+                        );
+                      }
+                      if (
+                        result.state === 'reconciled' &&
+                        (result.refreshed > 0 || result.failed > 0)
+                      ) {
+                        runtime.bridge.broadcastExtensionsChanged({
+                          refreshed: result.refreshed,
+                          failed: result.failed,
+                        });
+                      }
+                      return;
+                    }
                     const result =
                       await runtime.bridge.refreshExtensionsForAllSessions();
                     if (result.failed > 0) {
@@ -802,7 +899,9 @@ export function registerWorkspaceExtensionRoutes(
         results.forEach((result, index) => {
           if (result.status === 'fulfilled') {
             const workspaceId = runtimes[index]!.workspaceId;
-            appliedGenerationByWorkspaceId.set(workspaceId, generation);
+            if (!getWorkspaceRuntimeCoordinatorIfSupported(runtimes[index]!)) {
+              legacyAppliedGenerationByWorkspaceId.set(workspaceId, generation);
+            }
           } else {
             writeStderrLine(
               `qwen serve: extension generation reconciliation failed for workspace ${runtimes[index]!.workspaceId}: ${redactUrlCredentials(
@@ -920,6 +1019,11 @@ export function registerWorkspaceExtensionRoutes(
           if (
             !ctrl.validateExtensionMutationClient(req, res, {
               requireClientId: false,
+              // The interactive V2 install/update routes validate the client
+              // id against every registered runtime's bridge; the answer must
+              // accept the same set, or a client known only to a secondary
+              // runtime can park an operation it is then refused to answer.
+              bridges: mutationClientBridges(),
             })
           ) {
             return;
@@ -1112,11 +1216,11 @@ export function registerWorkspaceExtensionRoutes(
               return result!;
             },
             {
-              createManager: (operationId) =>
+              createManager: (operationId, signal) =>
                 ctrl.createExtensionManager(
                   undefined,
                   undefined,
-                  extensionInteractionHandlers(ctrl, operationId),
+                  extensionInteractionHandlers(ctrl, operationId, signal),
                 ),
               onSettled: (operationId) => {
                 supersededInstallOperations.delete(operationId);
@@ -1360,11 +1464,11 @@ export function registerWorkspaceExtensionRoutes(
             }
           },
           {
-            createManager: (operationId) =>
+            createManager: (operationId, signal) =>
               ctrl.createExtensionManager(
                 undefined,
                 undefined,
-                extensionInteractionHandlers(ctrl, operationId),
+                extensionInteractionHandlers(ctrl, operationId, signal),
               ),
             onSettled: (operationId) => {
               supersededInstallOperations.delete(operationId);
@@ -1602,22 +1706,27 @@ export function registerWorkspaceExtensionRoutes(
             'update',
             { name },
             res,
-            async (extensionManager, _signal, context) => {
+            async (extensionManager, _signal, context, operationId) => {
               const extension = findLoadedExtension(extensionManager, name);
               if (!extension) {
                 throw new Error(`Extension "${name}" not found`);
               }
+              ctrl.updateOperation(operationId!, { name: extension.name });
               let preparedResult: Awaited<
                 ReturnType<ExtensionManager['prepareExtensionUpdate']>
               >;
               try {
-                preparedResult = await context!.prepare(
-                  async (signal) =>
-                    await extensionManager.prepareExtensionUpdate({
-                      extension,
-                      signal,
-                    }),
-                );
+                preparedResult = await context!.prepare(async (signal) => {
+                  supersedeActiveInstallOperations(
+                    ctrl,
+                    operationId!,
+                    extension.name,
+                  );
+                  return await extensionManager.prepareExtensionUpdate({
+                    extension,
+                    signal,
+                  });
+                });
               } catch (error) {
                 const wrapped = new Error(
                   `Update check failed for extension "${extension.name}": ${
@@ -1657,13 +1766,14 @@ export function registerWorkspaceExtensionRoutes(
               }
             },
             {
-              createManager: (operationId) =>
+              createManager: (operationId, signal) =>
                 ctrl.createExtensionManager(
                   undefined,
                   undefined,
-                  extensionInteractionHandlers(ctrl, operationId),
+                  extensionInteractionHandlers(ctrl, operationId, signal),
                 ),
               onSettled: (operationId) => {
+                supersededInstallOperations.delete(operationId);
                 cancelPendingExtensionInteraction(
                   operationId,
                   'Extension operation ended',
@@ -1794,13 +1904,14 @@ export function registerWorkspaceExtensionRoutes(
     req: Request,
     res: Response,
     route: string,
-    manager: ExtensionManager,
+    manager: ExtensionManager | undefined,
     operation: string,
     failureContext: { source?: string; name?: string },
     run: (
       extensionManager: ExtensionManager,
       signal?: AbortSignal,
       context?: ExtensionOperationContext,
+      operationId?: string,
     ) => Promise<ExtensionMutationEvent>,
     options: {
       // Also selects the bridges the mutation client id is validated against,
@@ -1812,6 +1923,11 @@ export function registerWorkspaceExtensionRoutes(
       skillsOnly?: boolean;
       deadlineMs?: number;
       assertGenerationOpen?: () => void;
+      createManager?: (
+        operationId: string,
+        signal: AbortSignal,
+      ) => ExtensionManager;
+      onSettled?: (operationId: string) => void;
     } = {},
   ): void => {
     if (
@@ -1831,7 +1947,7 @@ export function registerWorkspaceExtensionRoutes(
         manager,
         operationBasePath: '/extensions/operations',
         onRuntimeReconciled: (runtime, generation) => {
-          const applied = appliedGenerationByWorkspaceId.get(
+          const applied = legacyAppliedGenerationByWorkspaceId.get(
             runtime.workspaceId,
           );
           // A skill refresh cannot certify an earlier failed full refresh.
@@ -1856,23 +1972,24 @@ export function registerWorkspaceExtensionRoutes(
         true,
       );
       const snapshot = await manager.refreshCacheWithSnapshot();
+      const local = await primaryController.buildLocalExtensionsStatus(manager);
       res.status(200).json({
         v: 1,
         generation: snapshot.generation,
-        extensions: manager.getLoadedExtensions().map((extension) => {
+        extensions: local.extensions.map((extension) => {
           const policy = snapshot.extensions[extension.id];
           return {
             id: extension.id,
             name: extension.name,
             version: extension.version,
-            ...(extension.installMetadata?.type
-              ? { installType: extension.installMetadata.type }
+            ...(extension.installType
+              ? { installType: extension.installType }
               : {}),
-            ...(extension.installMetadata?.type === 'snapshot'
-              ? { credentialPersistence: 'one_time' as const }
-              : extension.installMetadata?.credentialPersistence === 'stored'
-                ? { credentialPersistence: 'stored' as const }
-                : {}),
+            ...(extension.credentialPersistence
+              ? {
+                  credentialPersistence: extension.credentialPersistence,
+                }
+              : {}),
             defaultActivation: policy?.defaultActivation ?? 'enabled',
             workspaceOverrideCount: Object.values(
               policy?.workspaceOverrides ?? {},
@@ -2089,18 +2206,14 @@ export function registerWorkspaceExtensionRoutes(
       res.status(400).json({ error: 'Invalid initial activation' });
       return;
     }
-    const manager = primaryController.createExtensionManager(
-      boundWorkspace,
-      true,
-    );
     sendOperation(
       req,
       res,
       'POST /extensions/install',
-      manager,
+      undefined,
       'install',
       gitCredential?.persistence === 'one_time' ? {} : { source: sourceValue },
-      async (extensionManager, _signal, context) => {
+      async (extensionManager, _signal, context, operationId) => {
         const prepared = await context!.prepare(async (signal) => {
           const metadata = await parseInstallSource(sourceValue);
           assertDaemonExtensionInstallSource(
@@ -2132,6 +2245,7 @@ export function registerWorkspaceExtensionRoutes(
           if (metadata.type === 'npm' && registryUrl) {
             metadata.registryUrl = registryUrl;
           }
+          supersedeActiveInstallOperations(primaryController, operationId!);
           return await extensionManager.prepareExtensionInstall({
             installMetadata: {
               ...metadata,
@@ -2177,7 +2291,24 @@ export function registerWorkspaceExtensionRoutes(
         }
       },
       {
-        deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
+        createManager: (operationId, signal) =>
+          primaryController.createExtensionManager(
+            boundWorkspace,
+            true,
+            extensionInteractionHandlers(
+              primaryController,
+              operationId,
+              signal,
+            ),
+          ),
+        onSettled: (operationId) => {
+          supersededInstallOperations.delete(operationId);
+          cancelPendingExtensionInteraction(
+            operationId,
+            'Extension operation ended',
+          );
+        },
+        deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
         ...(workspaceRegistry
           ? { refreshRuntimes: () => workspaceRegistry.listAll() }
           : {}),
@@ -2225,21 +2356,20 @@ export function registerWorkspaceExtensionRoutes(
     (req, res) => {
       const extensionId = parseExtensionId(req, res);
       if (!extensionId) return;
-      const manager = primaryController.createExtensionManager(
-        boundWorkspace,
-        true,
-      );
       sendOperation(
         req,
         res,
         'POST /extensions/:extensionId/update',
-        manager,
+        undefined,
         'update',
         { name: extensionId },
-        async (extensionManager, _signal, context) => {
+        async (extensionManager, _signal, context, operationId) => {
           const extension = extensionById(extensionManager, extensionId);
           if (!extension)
             throw new Error(`Extension "${extensionId}" not found`);
+          primaryController.updateOperation(operationId!, {
+            name: extension.name,
+          });
           if (
             extension.installMetadata?.type !== 'git' &&
             extension.installMetadata?.type !== 'archive-url' &&
@@ -2248,13 +2378,17 @@ export function registerWorkspaceExtensionRoutes(
           ) {
             throw new ExtensionNotUpdatableError(extension.name);
           }
-          const preparedResult = await context!.prepare(
-            async (signal) =>
-              await extensionManager.prepareExtensionUpdate({
-                extension,
-                signal,
-              }),
-          );
+          const preparedResult = await context!.prepare(async (signal) => {
+            supersedeActiveInstallOperations(
+              primaryController,
+              operationId!,
+              extension.name,
+            );
+            return await extensionManager.prepareExtensionUpdate({
+              extension,
+              signal,
+            });
+          });
           if (preparedResult.upToDate) {
             return {
               status: 'checked',
@@ -2284,7 +2418,24 @@ export function registerWorkspaceExtensionRoutes(
           }
         },
         {
-          deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
+          createManager: (operationId, signal) =>
+            primaryController.createExtensionManager(
+              boundWorkspace,
+              true,
+              extensionInteractionHandlers(
+                primaryController,
+                operationId,
+                signal,
+              ),
+            ),
+          onSettled: (operationId) => {
+            supersededInstallOperations.delete(operationId);
+            cancelPendingExtensionInteraction(
+              operationId,
+              'Extension operation ended',
+            );
+          },
+          deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
           ...(workspaceRegistry
             ? { refreshRuntimes: () => workspaceRegistry.listAll() }
             : {}),
@@ -2352,6 +2503,47 @@ export function registerWorkspaceExtensionRoutes(
 
   if (workspaceRegistry) {
     const registry = workspaceRegistry;
+    const sendRuntimeCatalog = async (
+      runtime: WorkspaceRuntime,
+      res: Response,
+      route: string,
+    ) => {
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+      try {
+        const status =
+          await runtime.workspaceService.getWorkspaceExtensionsStatus({
+            route,
+            workspaceCwd: runtime.workspaceCwd,
+          });
+        res.status(200).json({
+          ...status,
+          extensions: status.extensions.map((extension) => ({
+            ...extension,
+            ...(extension.source
+              ? { source: redactExtensionDisplaySource(extension.source) }
+              : {}),
+          })),
+        });
+      } catch (error) {
+        sendBridgeError(res, error, { route });
+      }
+    };
+    app.get('/workspace/runtime/extensions', async (_req, res) => {
+      await sendRuntimeCatalog(
+        registry.primary,
+        res,
+        'GET /workspace/runtime/extensions',
+      );
+    });
+    app.get('/workspaces/:workspace/runtime/extensions', async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
+      if (!runtime) return;
+      await sendRuntimeCatalog(
+        runtime,
+        res,
+        'GET /workspaces/:workspace/runtime/extensions',
+      );
+    });
     app.get('/workspaces/:workspace/extensions', async (req, res) => {
       const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
       if (!runtime) return;
@@ -2360,8 +2552,20 @@ export function registerWorkspaceExtensionRoutes(
           runtime.workspaceCwd,
           runtime.trusted,
         );
+        const coordinator = getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+        // Sampled before the store read so a recovery rollback this read
+        // observes can be adopted; a receipt that lands between the sample
+        // and the observe bumps the revision and conservatively refuses it.
+        const storeReadRevision =
+          coordinator?.status().capabilities?.extensions?.revision;
         const snapshot = await manager.refreshCacheWithSnapshot();
         runtime.generationGuard?.assertOpen();
+        coordinator?.observeExtensionGeneration(
+          snapshot.generation,
+          storeReadRevision,
+          getExtensionStoreContentHash(snapshot),
+          snapshot.recoveryId,
+        );
         const extensions = manager.getLoadedExtensions().map((extension) => {
           const activation = manager.getExtensionActivationFromSnapshot(
             extension.id,
@@ -2386,7 +2590,9 @@ export function registerWorkspaceExtensionRoutes(
           trusted: runtime.trusted,
           desiredGeneration: snapshot.generation,
           appliedGeneration:
-            appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0,
+            coordinator?.status().capabilities?.extensions?.appliedGeneration ??
+            legacyAppliedGenerationByWorkspaceId.get(runtime.workspaceId) ??
+            0,
           extensions,
         });
       } catch (error) {

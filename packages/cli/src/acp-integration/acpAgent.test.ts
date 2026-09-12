@@ -31545,6 +31545,7 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     const bootstrapExtensionManager = {
       refreshCache: vi.fn().mockReturnValue(bootstrapRefreshGate),
+      refreshTools: vi.fn().mockResolvedValue(undefined),
     };
     const bootstrapSkillRefresh = vi.fn().mockResolvedValue(undefined);
     const bootstrapConfig = makeConfig({
@@ -31564,6 +31565,11 @@ describe('sessionLanguage multi-session propagation', () => {
       cfg.getLlmClient().refreshSystemInstruction,
     );
     const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
+    const sendAvailableCommandsUpdateOrThrow = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const reloadSkillSettings = vi.fn().mockResolvedValue(undefined);
+    const refreshSkillsFromSettings = vi.fn().mockResolvedValue(undefined);
 
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
@@ -31579,6 +31585,9 @@ describe('sessionLanguage multi-session propagation', () => {
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
+          sendAvailableCommandsUpdateOrThrow,
+          reloadSkillSettings,
+          refreshSkillsFromSettings,
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
@@ -31649,6 +31658,129 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(refreshSystemInstruction.mock.invocationCallOrder[0]).toBeLessThan(
       sendAvailableCommandsUpdate.mock.invocationCallOrder[0]!,
     );
+
+    skillManager.refreshCache.mockResolvedValue(undefined);
+    sendAvailableCommandsUpdate.mockClear();
+    sendAvailableCommandsUpdateOrThrow.mockClear();
+    extensionManager.refreshTools.mockClear();
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+        {},
+      ),
+    ).resolves.toEqual({
+      configsRefreshed: 2,
+      configsFailed: 0,
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+      sessionsSkipped: 0,
+    });
+    expect(skillManager.refreshCache).toHaveBeenCalledWith({
+      throwOnError: true,
+    });
+    expect(sendAvailableCommandsUpdateOrThrow).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
+    // The full reconcile's most consequential leg: refreshTools reinitializes
+    // MCP servers, LSP, subagents, hooks, and hierarchical memory.
+    expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    // ...but never on the bootstrap config: it is initialized with
+    // skipMcpDiscovery and never joins the MCP transport pool, so
+    // refreshTools would spawn un-pooled subprocesses (W119). Its
+    // refreshCache leg still feeds the daemon's catalog read.
+    expect(bootstrapExtensionManager.refreshTools).not.toHaveBeenCalled();
+    expect(bootstrapExtensionManager.refreshCache).toHaveBeenCalledTimes(2);
+
+    extensionManager.refreshTools.mockClear();
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile, {
+        skillsOnly: true,
+      }),
+    ).resolves.toMatchObject({ configsFailed: 0, sessionsFailed: 0 });
+    expect(extensionManager.refreshTools).not.toHaveBeenCalled();
+    expect(reloadSkillSettings).toHaveBeenCalledOnce();
+    expect(refreshSkillsFromSettings).toHaveBeenCalledWith({
+      reloadSettings: false,
+      notifyConfigChanged: false,
+    });
+
+    // An unrelated Skill cache failure must not fail a full reconcile whose
+    // extension change is already applied: the counters stay clean and the
+    // session command update still goes out.
+    sendAvailableCommandsUpdateOrThrow.mockClear();
+    skillManager.refreshCache.mockRejectedValueOnce(
+      new Error('broken skill cache'),
+    );
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+        {},
+      ),
+    ).resolves.toMatchObject({
+      configsRefreshed: 2,
+      configsFailed: 0,
+      sessionsRefreshed: 1,
+      sessionsSkipped: 0,
+    });
+    expect(sendAvailableCommandsUpdateOrThrow).toHaveBeenCalledOnce();
+
+    // A refreshTools failure (e.g. an LSP reload rejecting) is attributed to
+    // its config instead of being swallowed.
+    sendAvailableCommandsUpdateOrThrow.mockClear();
+    extensionManager.refreshTools.mockRejectedValueOnce(
+      new Error('extension LSP reload failed'),
+    );
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+        {},
+      ),
+    ).resolves.toMatchObject({
+      configsRefreshed: 1,
+      configsFailed: 1,
+      configErrors: ['extension LSP reload failed'],
+      sessionsRefreshed: 0,
+      sessionsSkipped: 1,
+    });
+    expect(sendAvailableCommandsUpdateOrThrow).not.toHaveBeenCalled();
+
+    extensionManager.refreshCache.mockRejectedValueOnce(
+      new Error('broken session config'),
+    );
+    sendAvailableCommandsUpdateOrThrow.mockClear();
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+        {},
+      ),
+    ).resolves.toEqual({
+      configsRefreshed: 1,
+      configsFailed: 1,
+      configErrors: ['broken session config'],
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      sessionsSkipped: 1,
+    });
+    expect(sendAvailableCommandsUpdateOrThrow).not.toHaveBeenCalled();
+
+    // A session whose command update rejects must be surfaced, not swallowed:
+    // the daemon promotes sessionsFailed > 0 into a reconcile failure instead
+    // of certifying the generation against a stale command set.
+    sendAvailableCommandsUpdateOrThrow.mockRejectedValueOnce(
+      new Error('commands update broke'),
+    );
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+        {},
+      ),
+    ).resolves.toEqual({
+      configsRefreshed: 2,
+      configsFailed: 0,
+      sessionsRefreshed: 0,
+      sessionsFailed: 1,
+      sessionsSkipped: 0,
+      sessionErrors: [{ sessionId: 's-ext', error: 'commands update broke' }],
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

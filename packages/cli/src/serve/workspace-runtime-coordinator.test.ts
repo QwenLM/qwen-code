@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
+import type {
+  ServeWorkspaceExtensionsRefreshResult,
+  ServeWorkspaceExtensionsStatus,
+  ServeWorkspaceSkillsStatus,
+} from '@qwen-code/acp-bridge/status';
 import {
   WorkspaceDrainingError,
   type AcpSessionBridge,
@@ -37,12 +41,14 @@ function makeRuntime() {
       activeWork: false,
     };
   });
-  const invokeWorkspaceCommand = vi.fn(async () => ({
-    sessionsRefreshed: 0,
-    sessionsFailed: 0,
-    configsRefreshed: 1,
-    configsFailed: 0,
-  }));
+  const invokeWorkspaceCommand = vi.fn(
+    async (): Promise<ServeWorkspaceExtensionsRefreshResult> => ({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 1,
+      configsFailed: 0,
+    }),
+  );
   const initializeWorkspaceMcp = vi.fn(async () => ({ accepted: true }));
   const reloadWorkspaceMcp = vi.fn(async () => ({ accepted: true }));
   const getWorkspaceSkillsRuntimeStatus = vi.fn(
@@ -52,6 +58,15 @@ function makeRuntime() {
       initialized: true,
       runtimeEpoch: snapshot.runtimeEpoch,
       skills: [],
+    }),
+  );
+  const getWorkspaceExtensionsStatus = vi.fn(
+    async (): Promise<ServeWorkspaceExtensionsStatus> => ({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: true,
+      runtimeEpoch: snapshot.runtimeEpoch,
+      extensions: [],
     }),
   );
   const getWorkspaceMcpStatus = vi.fn(
@@ -87,6 +102,7 @@ function makeRuntime() {
     bridge,
     workspaceService: {
       getWorkspaceSkillsRuntimeStatus,
+      getWorkspaceExtensionsStatus,
       invalidateWorkspaceSkillsStatus,
       getWorkspaceMcpStatus,
     },
@@ -97,6 +113,7 @@ function makeRuntime() {
     preheat,
     invokeWorkspaceCommand,
     getWorkspaceSkillsRuntimeStatus,
+    getWorkspaceExtensionsStatus,
     invalidateWorkspaceSkillsStatus,
     getWorkspaceMcpStatus,
     initializeWorkspaceMcp,
@@ -126,6 +143,13 @@ describe('WorkspaceRuntimeCoordinator', () => {
       runtimeLive: true,
       runtimeEpoch: 1,
       capabilities: {
+        extensions: {
+          state: 'ready',
+          revision: 0,
+          runtimeEpoch: 1,
+          desiredGeneration: 0,
+          appliedGeneration: 0,
+        },
         skills: { state: 'ready', revision: 0, runtimeEpoch: 1 },
         mcp: { state: 'ready', revision: 0, runtimeEpoch: 1 },
       },
@@ -134,7 +158,1221 @@ describe('WorkspaceRuntimeCoordinator', () => {
       keepAliveMs: 600_000,
     });
     expect(harness.bridge.sessionCount).toBe(0);
+    expect(harness.getWorkspaceExtensionsStatus).toHaveBeenCalledOnce();
     expect(harness.invalidateWorkspaceSkillsStatus).toHaveBeenCalledOnce();
+  });
+
+  it('certifies a slow Extension refresh after the ensure observation expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+      harness.invokeWorkspaceCommand.mockImplementationOnce(
+        (
+          _method?: string,
+          _params?: Record<string, unknown>,
+          options?: { timeoutMs?: number },
+        ) =>
+          new Promise((resolve, reject) => {
+            const timeout = setTimeout(
+              () => reject(new Error('command timeout')),
+              options?.timeoutMs,
+            );
+            setTimeout(() => {
+              clearTimeout(timeout);
+              resolve({
+                configsRefreshed: 1,
+                configsFailed: 0,
+                sessionsRefreshed: 0,
+                sessionsFailed: 0,
+              });
+            }, 61_000);
+          }),
+      );
+
+      const reconciliation = coordinator.reconcileExtensionGeneration(1);
+      const ensured = coordinator.ensure();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect((await ensured).capabilities?.extensions).toMatchObject({
+        state: 'starting',
+        desiredGeneration: 1,
+        appliedGeneration: 0,
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(reconciliation).resolves.toMatchObject({
+        state: 'reconciled',
+      });
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        runtimeEpoch: 3,
+        appliedGeneration: 1,
+      });
+      expect(
+        harness.invokeWorkspaceCommand.mock.calls.filter(
+          (call) =>
+            (call as unknown[])[0] ===
+            'qwen/control/workspace/extensions/reconcile',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reconciles an Extension generation without a session', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(coordinator.reconcileExtensionGeneration(7)).resolves.toEqual({
+      state: 'reconciled',
+      refreshed: 0,
+      failed: 0,
+    });
+
+    expect(coordinator.status().capabilities?.extensions).toEqual({
+      state: 'ready',
+      revision: 1,
+      runtimeEpoch: 3,
+      desiredGeneration: 7,
+      appliedGeneration: 7,
+    });
+    expect(harness.invokeWorkspaceCommand).toHaveBeenCalledWith(
+      'qwen/control/workspace/extensions/reconcile',
+      { cwd: '/workspace' },
+      { timeoutMs: 300_000 },
+    );
+
+    await coordinator.reconcileExtensionGeneration(7);
+    await expect(
+      coordinator.reconcileExtensionGeneration(6),
+    ).resolves.toMatchObject({ state: 'superseded' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      desiredGeneration: 7,
+      appliedGeneration: 7,
+    });
+    expect(harness.getWorkspaceExtensionsStatus).toHaveBeenCalledOnce();
+    expect(
+      harness.invokeWorkspaceCommand.mock.calls.filter(
+        (call) =>
+          (call as unknown[])[0] ===
+          'qwen/control/workspace/extensions/reconcile',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it.each([6, 0])(
+    'adopts fresh backup recovery to generation %i',
+    async (generation) => {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+      await coordinator.reconcileExtensionGeneration(7);
+      await coordinator.ensure();
+      const skillsRevision =
+        coordinator.status().capabilities!.skills!.revision;
+      const mcpRevision = coordinator.status().capabilities!.mcp!.revision;
+      const readRevision =
+        coordinator.status().capabilities!.extensions!.revision;
+      coordinator.observeExtensionGeneration(8);
+      coordinator.observeExtensionGeneration(generation, readRevision);
+      expect(
+        coordinator.status().capabilities?.extensions?.desiredGeneration,
+      ).toBe(8);
+
+      coordinator.observeExtensionGeneration(
+        generation,
+        coordinator.status().capabilities!.extensions!.revision,
+      );
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'stale',
+        desiredGeneration: generation,
+        appliedGeneration: 0,
+      });
+      if (generation === 0) {
+        await coordinator.ensure();
+      } else {
+        await expect(
+          coordinator.reconcileExtensionGeneration(generation),
+        ).resolves.toMatchObject({ state: 'reconciled' });
+      }
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: generation,
+        appliedGeneration: generation,
+      });
+      expect(coordinator.status().capabilities!.skills!.revision).toBe(
+        skillsRevision + 1,
+      );
+      expect(coordinator.status().capabilities!.mcp!.revision).toBe(
+        mcpRevision + 1,
+      );
+    },
+  );
+
+  it('re-drives a generation whose store content changed at the same number', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await coordinator.reconcileExtensionGeneration(2);
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 2,
+      appliedGeneration: 2,
+    });
+
+    // A hashless receipt cannot certify the first observed content identity.
+    coordinator.observeExtensionGeneration(
+      2,
+      coordinator.status().capabilities!.extensions!.revision,
+      'store-hash-a',
+    );
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'stale',
+      appliedGeneration: 0,
+    });
+    await coordinator.reconcileExtensionGeneration(2);
+    const staleReadRevision =
+      coordinator.status().capabilities!.extensions!.revision;
+
+    // Automatic backup recovery to generation 1 and a recommit both landed
+    // between two reads: generation 2 is back but describes different
+    // content, which the generation number alone cannot see.
+    harness.invokeWorkspaceCommand.mockClear();
+    coordinator.observeExtensionGeneration(
+      2,
+      coordinator.status().capabilities!.extensions!.revision,
+      'store-hash-b',
+    );
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'stale',
+      desiredGeneration: 2,
+      appliedGeneration: 0,
+    });
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(2),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+    expect(
+      (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ),
+    ).toHaveLength(1);
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 2,
+      appliedGeneration: 2,
+    });
+
+    // A delayed read of the old content must not undo the newer observation.
+    coordinator.observeExtensionGeneration(
+      2,
+      staleReadRevision,
+      'store-hash-a',
+    );
+    expect(coordinator.status().capabilities?.extensions?.state).toBe('ready');
+
+    // The same content at the same generation stays a no-op.
+    harness.invokeWorkspaceCommand.mockClear();
+    coordinator.observeExtensionGeneration(
+      2,
+      coordinator.status().capabilities!.extensions!.revision,
+      'store-hash-b',
+    );
+    await expect(
+      coordinator.reconcileExtensionGeneration(2),
+    ).resolves.toMatchObject({ state: 'reconciled', refreshed: 0 });
+    expect(
+      (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it.each(['store-hash-6-recommitted', null])(
+    're-drives a reused generation with receipt identity %s',
+    async (storeContentHash) => {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+      // The mutation receipt carries the committed store's content identity,
+      // which becomes the baseline later hash-carrying reads diff against.
+      await expect(
+        coordinator.reconcileExtensionGeneration(6, {
+          storeContentHash: 'store-hash-6',
+        }),
+      ).resolves.toMatchObject({ state: 'reconciled' });
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 6,
+        appliedGeneration: 6,
+      });
+
+      // A backup recovery plus recommit reuses generation 6 for different
+      // content before the next hash-carrying read.
+      harness.invokeWorkspaceCommand.mockClear();
+      const reconciliation = coordinator.reconcileExtensionGeneration(6, {
+        storeContentHash,
+      });
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'stale',
+        desiredGeneration: 6,
+        appliedGeneration: 0,
+      });
+
+      await expect(reconciliation).resolves.toMatchObject({
+        state: 'reconciled',
+      });
+      expect(
+        (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+          (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+        ),
+      ).toHaveLength(1);
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 6,
+        appliedGeneration: 6,
+      });
+    },
+  );
+
+  it('requires a full apply after recovery even when the generation advances', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await coordinator.reconcileExtensionGeneration(2, {
+      storeContentHash: 'original',
+    });
+    // Recovery to 1, an artifact update to 2, then a Skill change to 3 all
+    // happened between observations. A narrow apply must not certify MCP.
+    await expect(
+      coordinator.reconcileExtensionGeneration(3, {
+        skillsOnly: true,
+        storeContentHash: 'recommitted',
+        storeRecoveryId: 'recovery-1',
+      }),
+    ).resolves.toMatchObject({ state: 'deferred' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'stale',
+      appliedGeneration: 0,
+    });
+    await expect(
+      coordinator.reconcileExtensionGeneration(3),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+    await expect(
+      coordinator.reconcileExtensionGeneration(4, {
+        skillsOnly: true,
+        storeContentHash: 'next-skill-change',
+        storeRecoveryId: 'recovery-1',
+      }),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      appliedGeneration: 4,
+    });
+  });
+
+  it('marks a drain-queued deferral and replays it on cancelDrain', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    coordinator.beginDrain();
+    await expect(coordinator.reconcileExtensionGeneration(7)).resolves.toEqual({
+      state: 'deferred',
+      refreshed: 0,
+      failed: 0,
+      drainDeferred: true,
+    });
+
+    coordinator.cancelDrain();
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      }),
+    );
+  });
+
+  it('re-certifies Skills/MCP when the initial Extension apply settles past the ensure budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+      harness.invokeWorkspaceCommand.mockImplementation(
+        (
+          method?: string,
+          _params?: Record<string, unknown>,
+          options?: { timeoutMs?: number },
+        ) => {
+          if (method !== 'qwen/control/workspace/extensions/reconcile') {
+            return Promise.resolve({
+              sessionsRefreshed: 0,
+              sessionsFailed: 0,
+              configsRefreshed: 1,
+              configsFailed: 0,
+            });
+          }
+          return new Promise((resolve, reject) => {
+            const timeout = setTimeout(
+              () => reject(new Error('command timeout')),
+              options?.timeoutMs,
+            );
+            setTimeout(() => {
+              clearTimeout(timeout);
+              resolve({
+                sessionsRefreshed: 0,
+                sessionsFailed: 0,
+                configsRefreshed: 1,
+                configsFailed: 0,
+              });
+            }, 61_000);
+          });
+        },
+      );
+
+      const ensured = coordinator.ensure();
+      // ensure() abandons the Extensions wait at its 60s budget on this
+      // generation-0 store, and Skills/MCP prepare from a runtime read that
+      // predates the applied catalog.
+      await vi.advanceTimersByTimeAsync(60_000);
+      const ensuredStatus = await ensured;
+      expect(ensuredStatus).toMatchObject({ runtimeLive: true });
+      // The budget was abandoned before the queued Skills/MCP bodies first
+      // ran, but the resolved envelope must already report both as starting
+      // so polling clients (which only poll 'starting') keep converging.
+      expect(ensuredStatus.capabilities?.skills?.state).toBe('starting');
+      expect(ensuredStatus.capabilities?.mcp?.state).toBe('starting');
+      expect(coordinator.status().capabilities).toMatchObject({
+        extensions: { state: 'starting', appliedGeneration: 0 },
+        skills: { state: 'ready', revision: 0 },
+        mcp: { state: 'ready', revision: 0 },
+      });
+
+      // When the initial apply settles at 61s, the pre-catalog Skills/MCP
+      // certification is invalidated and re-driven against the applied
+      // catalog.
+      harness.getWorkspaceSkillsRuntimeStatus.mockClear();
+      await vi.advanceTimersByTimeAsync(2_000);
+      const status = coordinator.status();
+      expect(status.capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        appliedGeneration: 0,
+      });
+      expect(status.capabilities?.skills).toMatchObject({
+        state: 'ready',
+        revision: 1,
+      });
+      expect(status.capabilities?.mcp).toMatchObject({
+        state: 'ready',
+        revision: 1,
+      });
+      expect(harness.getWorkspaceSkillsRuntimeStatus).toHaveBeenCalled();
+      expect(harness.invalidateWorkspaceSkillsStatus).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves the narrow refresh for Extension Skill-state changes', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await coordinator.ensure();
+    // Certify the previous generation so the skills-only reconcile reaches
+    // the success exit (applied === generation - 1).
+    await coordinator.reconcileExtensionGeneration(6);
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.mcp?.state).toBe('ready'),
+    );
+    harness.reloadWorkspaceMcp.mockClear();
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(7, { skillsOnly: true }),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+
+    expect(harness.invokeWorkspaceCommand).toHaveBeenCalledWith(
+      'qwen/control/workspace/extensions/reconcile',
+      { cwd: '/workspace', skillsOnly: true },
+      { timeoutMs: 300_000 },
+    );
+    // A skills-only reconcile cannot change MCP config: the ready MCP
+    // capability must not be invalidated or reloaded for it.
+    expect(coordinator.status().capabilities?.mcp).toMatchObject({
+      state: 'ready',
+      runtimeEpoch: 3,
+    });
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.skills?.state).toBe('ready'),
+    );
+    expect(harness.reloadWorkspaceMcp).not.toHaveBeenCalled();
+  });
+
+  it('does not let a skills-only reconcile certify an unapplied generation', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(8),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+    expect(
+      coordinator.status().capabilities?.extensions?.appliedGeneration,
+    ).toBe(8);
+
+    harness.invokeWorkspaceCommand.mockResolvedValueOnce({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    });
+    await expect(
+      coordinator.reconcileExtensionGeneration(9),
+    ).resolves.toMatchObject({ state: 'failed' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+      appliedGeneration: 8,
+    });
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(10, { skillsOnly: true }),
+    ).resolves.toMatchObject({ state: 'deferred' });
+
+    // The generation-10 skill refresh succeeded, but the generation-9 full
+    // refresh never applied: the capability must stay non-ready so the next
+    // ensure runs the full refresh.
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      desiredGeneration: 10,
+      appliedGeneration: 8,
+    });
+    expect(coordinator.status().capabilities?.extensions?.state).not.toBe(
+      'ready',
+    );
+
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 10,
+      appliedGeneration: 10,
+    });
+  });
+
+  it('does not let a skills-only reconcile certify the generation whose full reconcile just failed', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(8),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+    expect(
+      coordinator.status().capabilities?.extensions?.appliedGeneration,
+    ).toBe(8);
+
+    harness.invokeWorkspaceCommand.mockResolvedValueOnce({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    });
+    await expect(
+      coordinator.reconcileExtensionGeneration(9),
+    ).resolves.toMatchObject({ state: 'failed' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+      appliedGeneration: 8,
+    });
+
+    // appliedGeneration 8 satisfies generation - 1, but generation 9's full
+    // apply just failed: the narrow skill refresh must not certify it.
+    await expect(
+      coordinator.reconcileExtensionGeneration(9, { skillsOnly: true }),
+    ).resolves.toMatchObject({ state: 'deferred' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      desiredGeneration: 9,
+      appliedGeneration: 8,
+    });
+    expect(coordinator.status().capabilities?.extensions?.state).not.toBe(
+      'ready',
+    );
+
+    // The next ensure() re-issues the full reconcile for generation 9.
+    harness.invokeWorkspaceCommand.mockClear();
+    await coordinator.ensure();
+    expect(
+      (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ),
+    ).not.toHaveLength(0);
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 9,
+      appliedGeneration: 9,
+    });
+  });
+
+  it('defers an Extension generation until the runtime is ensured', async () => {
+    const harness = makeRuntime();
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(coordinator.reconcileExtensionGeneration(4)).resolves.toEqual({
+      state: 'deferred',
+      refreshed: 0,
+      failed: 0,
+    });
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: {
+        extensions: {
+          state: 'ready',
+          desiredGeneration: 4,
+          appliedGeneration: 4,
+          runtimeEpoch: 1,
+        },
+      },
+    });
+  });
+
+  it('does not certify a skills-only apply across runtime epochs', async () => {
+    const h = makeRuntime();
+    h.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+    await coordinator.reconcileExtensionGeneration(6);
+    h.setSnapshot({ runtimeEpoch: 4 });
+    await expect(
+      coordinator.reconcileExtensionGeneration(7, { skillsOnly: true }),
+    ).resolves.toMatchObject({ state: 'deferred' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'stale',
+      appliedGeneration: 0,
+    });
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      runtimeEpoch: 4,
+      appliedGeneration: 7,
+    });
+  });
+
+  it('does not certify generation zero when the runtime changes during apply', async () => {
+    const h = makeRuntime();
+    h.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+    h.getWorkspaceExtensionsStatus.mockImplementationOnce(async () => {
+      h.setSnapshot({ runtimeEpoch: 4 });
+      return {
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        runtimeEpoch: 3,
+        extensions: [],
+      };
+    });
+    await expect(
+      coordinator.reconcileExtensionGeneration(0),
+    ).resolves.toMatchObject({ state: 'deferred' });
+    expect(coordinator.status().capabilities?.extensions?.state).toBe('stale');
+    expect(h.reloadWorkspaceMcp).not.toHaveBeenCalled();
+  });
+
+  it('does not start a runtime that goes cold before queued reconciliation', async () => {
+    const h = makeRuntime();
+    h.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+    const result = coordinator.reconcileExtensionGeneration(7);
+    h.setSnapshot({ state: 'cold', runtimeLive: false });
+    await expect(result).resolves.toMatchObject({ state: 'deferred' });
+    expect(h.preheat).not.toHaveBeenCalled();
+    expect(h.invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+
+  it('invalidates retained Skills when a cold runtime observes a new generation', () => {
+    const h = makeRuntime();
+    const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+    coordinator.observeExtensionGeneration(7);
+    coordinator.observeExtensionGeneration(7);
+    expect(h.invalidateWorkspaceSkillsStatus).toHaveBeenCalledOnce();
+    expect(h.preheat).not.toHaveBeenCalled();
+  });
+
+  it('defers an Extension generation when the runtime epoch changes', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.getWorkspaceExtensionsStatus.mockImplementationOnce(async () => {
+      harness.setSnapshot({
+        state: 'cold',
+        runtimeLive: false,
+        runtimeEpoch: 4,
+      });
+      return {
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        runtimeEpoch: 3,
+        extensions: [],
+      };
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(coordinator.reconcileExtensionGeneration(7)).resolves.toEqual({
+      state: 'deferred',
+      refreshed: 0,
+      failed: 0,
+    });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'stale',
+      desiredGeneration: 7,
+      appliedGeneration: 0,
+    });
+  });
+
+  it('fails reconciliation when the live Extension catalog is uninitialized', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.getWorkspaceExtensionsStatus.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: false,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(coordinator.reconcileExtensionGeneration(7)).resolves.toEqual({
+      state: 'failed',
+      refreshed: 0,
+      failed: 1,
+      error: 'Extension runtime returned a stale or uninitialized catalog',
+    });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+      desiredGeneration: 7,
+      appliedGeneration: 0,
+    });
+  });
+
+  it('surfaces the runtime Extension diagnostic over the uninitialized gate', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.getWorkspaceExtensionsStatus.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: false,
+      runtimeEpoch: 3,
+      extensions: [],
+      errors: [
+        {
+          kind: 'extensions',
+          status: 'error',
+          error: 'extension manifest parse failed',
+        },
+      ],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(7),
+    ).resolves.toMatchObject({
+      state: 'failed',
+      error: 'extension manifest parse failed',
+    });
+    expect(coordinator.status().capabilities?.extensions?.error?.message).toBe(
+      'extension manifest parse failed',
+    );
+  });
+
+  it('sanitizes Extension reconcile failures before broadcasting and persisting them', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.invokeWorkspaceCommand.mockResolvedValueOnce({
+      sessionsRefreshed: 2,
+      sessionsFailed: 1,
+      sessionsSkipped: 1,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: [
+        `fatal: unable to access 'https://user:tok3n@github.com/org/ext.git/'${'x'.repeat(600)}\x1b[31m`,
+      ],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    const reconciliation = await coordinator.reconcileExtensionGeneration(7);
+
+    // The ExtensionRuntimeRefreshError result payload must survive into the
+    // returned counters, not just the error message.
+    expect(reconciliation).toMatchObject({
+      state: 'failed',
+      refreshed: 2,
+      failed: 3,
+    });
+    // The extensions_changed broadcast reads reconciliation.error verbatim.
+    expect(reconciliation.error).not.toContain('tok3n');
+    expect(reconciliation.error).not.toContain('\x1b');
+    expect(reconciliation.error!.length).toBeLessThanOrEqual(500);
+    // The persisted capabilities status is the second sink.
+    const extensions = coordinator.status().capabilities?.extensions;
+    expect(extensions?.state).toBe('error');
+    expect(extensions?.error?.message).not.toContain('tok3n');
+    expect(extensions?.error?.message).not.toContain('\x1b');
+    expect(extensions?.error?.message!.length).toBeLessThanOrEqual(500);
+  });
+
+  it('sanitizes the drain rethrow cause of an in-flight Extension prepare', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    let release!: () => void;
+    harness.invokeWorkspaceCommand.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              sessionsRefreshed: 0,
+              sessionsFailed: 0,
+              configsRefreshed: 0,
+              configsFailed: 1,
+              configErrors: [
+                `fatal: unable to access 'https://user:tok3n@github.com/org/ext.git/'${'x'.repeat(600)}\x1b[31m`,
+              ],
+            });
+        }),
+    );
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    const ensured = coordinator.ensure();
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+
+    coordinator.beginDrain();
+    release();
+
+    const failure = await ensured.catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(WorkspaceDrainingError);
+    // The drain cause escapes to the error-response logger, so it must carry
+    // the same sanitized text as the status/broadcast sinks.
+    const cause = (failure as WorkspaceDrainingError).cause;
+    expect(typeof cause).toBe('string');
+    expect(cause as string).not.toContain('tok3n');
+    expect(cause as string).not.toContain('\x1b');
+    expect((cause as string).length).toBeLessThanOrEqual(500);
+  });
+
+  it.each([false, true])(
+    'replays interrupted Extension reconciliation with skillsOnly=%s',
+    async (skillsOnly) => {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+      await coordinator.reconcileExtensionGeneration(6);
+      harness.getWorkspaceExtensionsStatus.mockClear();
+      let release!: () => void;
+      harness.invokeWorkspaceCommand.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () =>
+              resolve({
+                sessionsRefreshed: 0,
+                sessionsFailed: 0,
+                configsRefreshed: 1,
+                configsFailed: 0,
+              });
+          }),
+      );
+      const reconciliation = coordinator.reconcileExtensionGeneration(7, {
+        skillsOnly,
+      });
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+
+      coordinator.beginDrain();
+      release();
+      await expect(reconciliation).resolves.toMatchObject({
+        state: 'deferred',
+      });
+      harness.invokeWorkspaceCommand.mockClear();
+      coordinator.cancelDrain();
+
+      await vi.waitFor(() =>
+        expect(coordinator.status().capabilities?.extensions).toMatchObject({
+          state: 'ready',
+          desiredGeneration: 7,
+          appliedGeneration: 7,
+        }),
+      );
+      expect(harness.getWorkspaceExtensionsStatus).toHaveBeenCalledTimes(2);
+      expect(harness.invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/extensions/reconcile',
+        { cwd: '/workspace', ...(skillsOnly ? { skillsOnly: true } : {}) },
+        { timeoutMs: 300_000 },
+      );
+    },
+  );
+
+  it('continues preparing Skills and MCP after an Extension refresh fails', async () => {
+    const harness = makeRuntime();
+    harness.invokeWorkspaceCommand.mockResolvedValueOnce({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      sessionsSkipped: 1,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    coordinator.observeExtensionGeneration(2);
+
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: {
+        extensions: {
+          state: 'error',
+          desiredGeneration: 2,
+          appliedGeneration: 0,
+          error: { message: expect.stringContaining('broken extension') },
+        },
+        skills: { state: 'ready' },
+        mcp: { state: 'ready' },
+      },
+    });
+    expect(harness.getWorkspaceSkillsRuntimeStatus).toHaveBeenCalled();
+    expect(harness.getWorkspaceMcpStatus).toHaveBeenCalled();
+  });
+
+  it('restores derived capabilities after an explicit Extension reconcile fails', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await coordinator.ensure();
+    harness.invokeWorkspaceCommand.mockResolvedValueOnce({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    });
+
+    await expect(coordinator.reconcileExtensionGeneration(7)).resolves.toEqual({
+      state: 'failed',
+      refreshed: 0,
+      failed: 1,
+      error: 'Extension runtime refresh failed: broken extension',
+    });
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities).toMatchObject({
+        extensions: { state: 'error' },
+        skills: { state: 'ready', runtimeEpoch: 3 },
+        mcp: { state: 'ready', runtimeEpoch: 3 },
+      }),
+    );
+  });
+
+  it('does not re-run a failed Extension revision from the ensure path', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.invokeWorkspaceCommand.mockResolvedValue({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    coordinator.observeExtensionGeneration(2);
+    const reconcileCalls = () =>
+      (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ).length;
+
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+    });
+    expect(reconcileCalls()).toBe(1);
+
+    // The failure arms one retry, consumed by the next ensure; the retry
+    // fails too, and only then is the revision terminal for the ensure path.
+    await coordinator.ensure();
+    expect(reconcileCalls()).toBe(2);
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+    });
+    await coordinator.ensure();
+    expect(reconcileCalls()).toBe(2);
+
+    // A newly observed generation (or an explicit reconcile) retries.
+    coordinator.observeExtensionGeneration(3);
+    await coordinator.ensure();
+    expect(reconcileCalls()).toBe(3);
+  });
+
+  it.each(['success', 'partial failure', 'uninitialized catalog'])(
+    'invalidates derived capabilities after ensure Extension apply: %s',
+    async (outcome) => {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+      await coordinator.ensure();
+      expect(coordinator.status().capabilities).toMatchObject({
+        extensions: { state: 'ready' },
+        skills: { state: 'ready', revision: 0 },
+        mcp: { state: 'ready', revision: 0 },
+      });
+      const skillsReads =
+        harness.getWorkspaceSkillsRuntimeStatus.mock.calls.length;
+
+      coordinator.observeExtensionGeneration(5);
+      if (outcome === 'partial failure') {
+        harness.invokeWorkspaceCommand.mockResolvedValue({
+          sessionsRefreshed: 0,
+          sessionsFailed: 1,
+          configsRefreshed: 1,
+          configsFailed: 0,
+        });
+      } else if (outcome === 'uninitialized catalog') {
+        harness.getWorkspaceExtensionsStatus.mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/workspace',
+          runtimeEpoch: 3,
+          initialized: false,
+          extensions: [],
+        });
+      }
+      await coordinator.ensure();
+
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: outcome === 'success' ? 'ready' : 'error',
+        desiredGeneration: 5,
+        appliedGeneration: outcome === 'success' ? 5 : 0,
+      });
+      // Applying the generation on the ensure path must re-verify the derived
+      // capabilities: a ready status that predates the applied generation must
+      // not be certified for it.
+      expect(harness.reloadWorkspaceMcp).toHaveBeenCalled();
+      expect(
+        harness.getWorkspaceSkillsRuntimeStatus.mock.calls.length,
+      ).toBeGreaterThan(skillsReads);
+      expect(coordinator.status().capabilities).toMatchObject({
+        skills: { state: 'ready', runtimeEpoch: 3 },
+        mcp: { state: 'ready', runtimeEpoch: 3 },
+      });
+    },
+  );
+
+  it('recovers a latched Extension failure at the initial generation after the cooldown', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.invokeWorkspaceCommand.mockResolvedValue({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    // The store was never mutated: the desired generation stays 0, so no
+    // observed generation move can clear the failed-revision latch.
+    await coordinator.ensure();
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+      desiredGeneration: 0,
+      appliedGeneration: 0,
+    });
+
+    // Within the cooldown the latch stays terminal for the ensure path.
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions?.state).toBe('error');
+    const callsBefore = harness.invokeWorkspaceCommand.mock.calls.length;
+    await expect(
+      coordinator.reconcileExtensionGeneration(0),
+    ).resolves.toMatchObject({
+      state: 'deferred',
+      error: 'Extension runtime refresh failed: broken extension',
+    });
+    expect(harness.invokeWorkspaceCommand).toHaveBeenCalledTimes(callsBefore);
+
+    // The underlying fault heals without any store write; once the cooldown
+    // elapses the ensure path must retry instead of certifying the failure
+    // until the runtime restarts.
+    const nowSpy = vi
+      .spyOn(Date, 'now')
+      .mockReturnValue(Date.now() + 2 * 60_000 + 1_000);
+    try {
+      await coordinator.ensure();
+      const retryCalls = harness.invokeWorkspaceCommand.mock.calls.length;
+      await coordinator.ensure();
+      expect(harness.invokeWorkspaceCommand).toHaveBeenCalledTimes(retryCalls);
+      harness.invokeWorkspaceCommand.mockResolvedValue({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+      });
+      nowSpy.mockReturnValue(Date.now() + 2 * 60_000 + 1_000);
+      await coordinator.ensure();
+    } finally {
+      nowSpy.mockRestore();
+    }
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 0,
+      appliedGeneration: 0,
+    });
+  });
+
+  it('re-verifies derived capabilities when a same-generation failure recovers', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    // Only the Extension reconcile fails; the derived Skills/MCP paths stay
+    // healthy so they certify against a runtime that never loaded extensions.
+    harness.invokeWorkspaceCommand.mockImplementation(
+      async (
+        ...args: unknown[]
+      ): Promise<ServeWorkspaceExtensionsRefreshResult> =>
+        args[0] === 'qwen/control/workspace/extensions/reconcile'
+          ? {
+              sessionsRefreshed: 0,
+              sessionsFailed: 0,
+              configsRefreshed: 0,
+              configsFailed: 1,
+              configErrors: ['broken extension'],
+            }
+          : {
+              sessionsRefreshed: 0,
+              sessionsFailed: 0,
+              configsRefreshed: 1,
+              configsFailed: 0,
+            },
+    );
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await coordinator.ensure();
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+      desiredGeneration: 0,
+      appliedGeneration: 0,
+    });
+    expect(coordinator.status().capabilities).toMatchObject({
+      skills: { state: 'ready', runtimeEpoch: 3 },
+      mcp: { state: 'ready', runtimeEpoch: 3 },
+    });
+
+    // The fault heals without a store write, so the recovery apply cannot be
+    // seen through a generation advance: the generation stays 0.
+    harness.invokeWorkspaceCommand.mockImplementation(async () => ({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 1,
+      configsFailed: 0,
+    }));
+    harness.reloadWorkspaceMcp.mockClear();
+    harness.getWorkspaceSkillsRuntimeStatus.mockClear();
+    const nowSpy = vi
+      .spyOn(Date, 'now')
+      .mockReturnValue(Date.now() + 2 * 60_000 + 1_000);
+    try {
+      await coordinator.ensure();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 0,
+      appliedGeneration: 0,
+    });
+    expect(harness.reloadWorkspaceMcp).toHaveBeenCalled();
+    expect(harness.getWorkspaceSkillsRuntimeStatus).toHaveBeenCalled();
+    expect(coordinator.status().capabilities).toMatchObject({
+      skills: { state: 'ready', runtimeEpoch: 3 },
+      mcp: { state: 'ready', runtimeEpoch: 3 },
+    });
+  });
+
+  it('retries a failed Extension refresh once and reaches ready', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.getWorkspaceExtensionsStatus.mockRejectedValueOnce(
+      new Error('catalog read failed'),
+    );
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    coordinator.observeExtensionGeneration(2);
+    const reconcileCalls = () =>
+      (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ).length;
+
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+      error: { message: 'catalog read failed' },
+    });
+
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 2,
+      appliedGeneration: 2,
+    });
+    expect(reconcileCalls()).toBe(2);
+  });
+
+  it('keeps a queued MCP reload alive across a read-side Extension observation', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    // Hold the MCP queue so the configuration reconcile stays queued behind
+    // an in-flight mutation, the same way a committed config change waits.
+    let releaseMutation!: () => void;
+    const mutation = coordinator.runMcpRuntimeMutation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseMutation = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(releaseMutation).toBeTypeOf('function'));
+    expect(coordinator.reconcileMcpConfiguration()).toBe('reconciling');
+
+    // A read-only observation (GET routes, poller pre-pass) must not discard
+    // the queued reload: observation is not mutation.
+    coordinator.observeExtensionGeneration(5);
+    releaseMutation();
+    await mutation;
+
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.mcp).toMatchObject({
+        state: 'ready',
+        runtimeEpoch: 3,
+      }),
+    );
+    expect(harness.reloadWorkspaceMcp).toHaveBeenCalledTimes(1);
   });
 
   it('reconciles a live Skills runtime in revision order', async () => {
@@ -220,7 +1458,10 @@ describe('WorkspaceRuntimeCoordinator', () => {
         skills: { state: 'ready', revision: 1, runtimeEpoch: 1 },
       },
     });
-    expect(harness.invokeWorkspaceCommand).not.toHaveBeenCalled();
+    expect(harness.invokeWorkspaceCommand).not.toHaveBeenCalledWith(
+      'qwen/control/workspace/skills/refresh',
+      expect.anything(),
+    );
   });
 
   it('surfaces a live Skills preparation error', async () => {
@@ -246,16 +1487,68 @@ describe('WorkspaceRuntimeCoordinator', () => {
     });
   });
 
+  it('sanitizes Skills preparation errors before persisting them', async () => {
+    const harness = makeRuntime();
+    harness.getWorkspaceSkillsRuntimeStatus.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: false,
+      runtimeEpoch: 1,
+      skills: [],
+      errors: [
+        {
+          kind: 'skills',
+          status: 'error',
+          error: `fatal: unable to access 'https://user:tok3n@github.com/org/ext.git/'${'x'.repeat(600)}\x1b[31m`,
+        },
+      ],
+    });
+
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: { skills: { state: 'error' } },
+    });
+    const message = coordinator.status().capabilities?.skills?.error?.message;
+    expect(message).toBeDefined();
+    expect(message).not.toContain('tok3n');
+    expect(message).not.toContain('\x1b');
+    expect(message!.length).toBeLessThanOrEqual(500);
+  });
+
+  it('sanitizes MCP preparation errors before persisting them', async () => {
+    const harness = makeRuntime();
+    harness.getWorkspaceMcpStatus.mockRejectedValue(
+      new Error(
+        `MCP discovery failed: https://user:tok3n@github.com/org/ext.git ${'x'.repeat(600)}\x1b[31m`,
+      ),
+    );
+
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: { mcp: { state: 'error' } },
+    });
+    const message = coordinator.status().capabilities?.mcp?.error?.message;
+    expect(message).toBeDefined();
+    expect(message).not.toContain('tok3n');
+    expect(message).not.toContain('\x1b');
+    expect(message!.length).toBeLessThanOrEqual(500);
+  });
+
   it('reports a hard retry failure without failing runtime ensure', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 1 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await coordinator.reconcileExtensionGeneration(0);
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.skills?.state).toBe('ready'),
+    );
+    harness.invokeWorkspaceCommand.mockClear();
     harness.invokeWorkspaceCommand.mockResolvedValueOnce({
       sessionsRefreshed: 0,
       sessionsFailed: 0,
       configsRefreshed: 0,
       configsFailed: 1,
     });
-    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
     coordinator.reconcileSkillsConfiguration();
     await vi.waitFor(() => {
       expect(coordinator.status().capabilities?.skills?.state).toBe('error');
@@ -276,7 +1569,12 @@ describe('WorkspaceRuntimeCoordinator', () => {
     await expect(coordinator.ensure()).resolves.toMatchObject({
       capabilities: { skills: { state: 'error' } },
     });
-    expect(harness.invokeWorkspaceCommand).toHaveBeenCalledTimes(2);
+    expect(
+      harness.invokeWorkspaceCommand.mock.calls.filter(
+        (call) =>
+          (call as unknown[])[0] === 'qwen/control/workspace/skills/refresh',
+      ),
+    ).toHaveLength(2);
   });
 
   it('applies a Skills mutation deferred while the runtime is starting', async () => {
@@ -288,7 +1586,12 @@ describe('WorkspaceRuntimeCoordinator', () => {
     await expect(coordinator.ensure()).resolves.toMatchObject({
       capabilities: { skills: { state: 'ready', revision: 1 } },
     });
-    expect(harness.invokeWorkspaceCommand).toHaveBeenCalledOnce();
+    expect(
+      harness.invokeWorkspaceCommand.mock.calls.filter(
+        (call) =>
+          (call as unknown[])[0] === 'qwen/control/workspace/skills/refresh',
+      ),
+    ).toHaveLength(1);
   });
 
   it('retries a failed Skills refresh before certifying its revision', async () => {
@@ -310,12 +1613,23 @@ describe('WorkspaceRuntimeCoordinator', () => {
     await expect(coordinator.ensure()).resolves.toMatchObject({
       capabilities: { skills: { state: 'ready', revision: 1 } },
     });
-    expect(harness.invokeWorkspaceCommand).toHaveBeenCalledTimes(2);
+    expect(
+      harness.invokeWorkspaceCommand.mock.calls.filter(
+        (call) =>
+          (call as unknown[])[0] === 'qwen/control/workspace/skills/refresh',
+      ),
+    ).toHaveLength(2);
   });
 
   it('does not certify a revision that changed while preparation was queued', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 1 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await coordinator.reconcileExtensionGeneration(0);
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.skills?.state).toBe('ready'),
+    );
+    harness.invokeWorkspaceCommand.mockClear();
     let releaseFirst!: () => void;
     let releaseSecond!: () => void;
     harness.invokeWorkspaceCommand
@@ -343,8 +1657,6 @@ describe('WorkspaceRuntimeCoordinator', () => {
               });
           }),
       );
-    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
-
     coordinator.reconcileSkillsConfiguration();
     await vi.waitFor(() =>
       expect(harness.invokeWorkspaceCommand).toHaveBeenCalledOnce(),
@@ -355,7 +1667,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
     releaseFirst();
 
     await expect(ensure).resolves.toMatchObject({
-      capabilities: { skills: { state: 'starting', revision: 2 } },
+      capabilities: { skills: { state: 'starting', revision: 3 } },
     });
     releaseSecond();
     await vi.waitFor(() =>

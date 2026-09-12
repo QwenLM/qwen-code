@@ -752,7 +752,12 @@ const EXPECTED_REGISTERED_FEATURES = [
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.flatMap((feature) => {
     if (feature === 'workspace_skills') {
-      return [feature, 'workspace_skills_config_runtime'];
+      return [
+        feature,
+        'workspace_skills_config_runtime',
+        'workspace_extensions_config_runtime',
+        'workspace_extension_mentions',
+      ];
     }
     if (feature === 'session_artifacts') {
       return [feature, 'session_artifacts_persistence', 'session_sources'];
@@ -3660,7 +3665,9 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'workspace_runtime' ||
-          feature === 'workspace_skills_config_runtime'
+          feature === 'workspace_skills_config_runtime' ||
+          feature === 'workspace_extensions_config_runtime' ||
+          feature === 'workspace_extension_mentions'
         ) {
           expect(predicate({ workspaceRuntimeAvailable: true })).toBe(true);
           expect(predicate({ workspaceRuntimeAvailable: false })).toBe(false);
@@ -5094,6 +5101,32 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(unsupported.body.features).not.toContain('workspace_generation');
+    });
+
+    it('advertises Extension runtime routes independently of workspace trust', async () => {
+      const untrusted = await request(
+        createServeApp(baseOpts, undefined, { primaryWorkspaceTrusted: false }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(untrusted.status).toBe(200);
+      expect(untrusted.body.features).toContain(
+        'workspace_extensions_config_runtime',
+      );
+      expect(untrusted.body.features).toContain('workspace_extension_mentions');
+      expect(untrusted.body.features).toContain(
+        'workspace_skills_config_runtime',
+      );
+
+      const trusted = await request(
+        createServeApp(baseOpts, undefined, { primaryWorkspaceTrusted: true }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(trusted.body.features).toContain(
+        'workspace_extensions_config_runtime',
+      );
+      expect(trusted.body.features).toContain('workspace_extension_mentions');
     });
 
     it('returns the v1 envelope', async () => {

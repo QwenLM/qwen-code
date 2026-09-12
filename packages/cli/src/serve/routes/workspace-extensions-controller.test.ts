@@ -13,6 +13,8 @@ import type { Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { resolveLanguageSetting } from '../../i18n/index.js';
+import * as runtimeCoordinator from '../workspace-runtime-coordinator.js';
+import type { WorkspaceRuntime } from '../workspace-registry.js';
 import {
   createExtensionsController,
   redactExtensionDisplaySource,
@@ -416,6 +418,331 @@ describe('createExtensionsController', () => {
     );
   });
 
+  it.each([
+    {
+      operation: 'install',
+      runtimeLive: true,
+      state: 'superseded',
+      error: undefined,
+      warns: false,
+    },
+    {
+      operation: 'install',
+      runtimeLive: false,
+      error: undefined,
+      warns: false,
+    },
+    { operation: 'install', runtimeLive: true, error: undefined, warns: true },
+    {
+      operation: 'refresh',
+      runtimeLive: false,
+      error: undefined,
+      warns: true,
+      warningText:
+        'Workspace runtime is not live; the committed extension generation will be applied when the runtime next starts.',
+    },
+    {
+      operation: 'refresh',
+      runtimeLive: true,
+      error: undefined,
+      warns: true,
+    },
+    {
+      operation: 'refresh',
+      runtimeLive: true,
+      error: 'latched refresh failure',
+      warns: true,
+    },
+    {
+      operation: 'install',
+      runtimeLive: false,
+      error: 'refresh failed',
+      warns: true,
+    },
+  ])(
+    'reports deferred $operation with runtimeLive=$runtimeLive and error=$error',
+    async ({
+      operation,
+      runtimeLive,
+      state = 'deferred',
+      error,
+      warns,
+      warningText,
+    }) => {
+      const reconcileExtensionGeneration = vi.fn(async () => ({
+        state,
+        refreshed: 0,
+        failed: 0,
+        error,
+      }));
+      vi.spyOn(
+        runtimeCoordinator,
+        'getWorkspaceRuntimeCoordinatorIfSupported',
+      ).mockReturnValue({
+        reconcileExtensionGeneration,
+        status: () => ({ runtimeLive }),
+      } as unknown as runtimeCoordinator.WorkspaceRuntimeCoordinator);
+      const runtime = {
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        workspaceService: { invalidateWorkspaceSkillsStatus: vi.fn() },
+        bridge: { broadcastExtensionsChanged: vi.fn() },
+      } as unknown as WorkspaceRuntime;
+      const controller = createExtensionsController({
+        boundWorkspace: '/work/bound',
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+      });
+      const manager = {
+        refreshCache: vi.fn(async () => undefined),
+        getExtensionStoreSnapshot: vi.fn(async () => ({ generation: 2 })),
+      } as unknown as ExtensionManager;
+      const json = vi.fn();
+      const response = {
+        status: vi.fn().mockReturnThis(),
+        location: vi.fn().mockReturnThis(),
+        set: vi.fn().mockReturnThis(),
+        json,
+      } as unknown as Response;
+      controller.runQueuedExtensionMutation(
+        operation,
+        {},
+        response,
+        async () => ({ status: 'refreshed', refreshed: 0, failed: 0 }),
+        { manager, refreshRuntimes: [runtime] },
+      );
+      const operationId = json.mock.calls[0]![0].operationId as string;
+      await vi.waitFor(() =>
+        expect(controller.getOperation(operationId)).toMatchObject({
+          status: warns ? 'succeeded_with_warnings' : 'succeeded',
+          ...(warns
+            ? {
+                warnings: [
+                  {
+                    workspaceId: 'secondary',
+                    error:
+                      error ??
+                      warningText ??
+                      'Extension runtime has not applied the committed generation. Retry the runtime refresh.',
+                  },
+                ],
+              }
+            : {}),
+        }),
+      );
+      expect(reconcileExtensionGeneration).toHaveBeenCalled();
+      if (!warns)
+        expect(controller.getOperation(operationId)?.warnings).toBeUndefined();
+    },
+  );
+
+  it('does not ask the user to retry a drain-queued reconciliation', async () => {
+    const reconcileExtensionGeneration = vi.fn(async () => ({
+      state: 'deferred' as const,
+      refreshed: 0,
+      failed: 0,
+      drainDeferred: true,
+    }));
+    vi.spyOn(
+      runtimeCoordinator,
+      'getWorkspaceRuntimeCoordinatorIfSupported',
+    ).mockReturnValue({
+      reconcileExtensionGeneration,
+      status: () => ({ runtimeLive: true }),
+    } as unknown as runtimeCoordinator.WorkspaceRuntimeCoordinator);
+    const runtime = {
+      workspaceId: 'secondary',
+      workspaceCwd: '/work/secondary',
+      workspaceService: { invalidateWorkspaceSkillsStatus: vi.fn() },
+      bridge: { broadcastExtensionsChanged: vi.fn() },
+    } as unknown as WorkspaceRuntime;
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+    const manager = {
+      refreshCache: vi.fn(async () => undefined),
+      getExtensionStoreSnapshot: vi.fn(async () => ({ generation: 2 })),
+    } as unknown as ExtensionManager;
+    const json = vi.fn();
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      location: vi.fn().mockReturnThis(),
+      set: vi.fn().mockReturnThis(),
+      json,
+    } as unknown as Response;
+    controller.runQueuedExtensionMutation(
+      'install',
+      {},
+      response,
+      async () => ({ status: 'refreshed', refreshed: 0, failed: 0 }),
+      { manager, refreshRuntimes: [runtime] },
+    );
+    const operationId = json.mock.calls[0]![0].operationId as string;
+    await vi.waitFor(() =>
+      expect(controller.getOperation(operationId)).toMatchObject({
+        status: 'succeeded_with_warnings',
+        warnings: [
+          {
+            workspaceId: 'secondary',
+            error:
+              'Extension runtime is draining; the committed generation is queued and will be applied when the runtime resumes.',
+          },
+        ],
+      }),
+    );
+    const broadcast = vi.mocked(runtime.bridge.broadcastExtensionsChanged);
+    expect(broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error:
+          'Extension runtime is draining; the committed generation is queued and will be applied when the runtime resumes.',
+      }),
+    );
+  });
+
+  it('samples runtime liveness after the reconciliation settles', async () => {
+    // The runtime dies while the refresh reconcile is in flight: the warning
+    // must describe the post-await state, not the pre-await sample.
+    let runtimeLive = true;
+    const reconcileExtensionGeneration = vi.fn(async () => {
+      runtimeLive = false;
+      return {
+        state: 'deferred' as const,
+        refreshed: 0,
+        failed: 0,
+      };
+    });
+    vi.spyOn(
+      runtimeCoordinator,
+      'getWorkspaceRuntimeCoordinatorIfSupported',
+    ).mockReturnValue({
+      reconcileExtensionGeneration,
+      status: () => ({ runtimeLive }),
+    } as unknown as runtimeCoordinator.WorkspaceRuntimeCoordinator);
+    const runtime = {
+      workspaceId: 'secondary',
+      workspaceCwd: '/work/secondary',
+      workspaceService: { invalidateWorkspaceSkillsStatus: vi.fn() },
+      bridge: { broadcastExtensionsChanged: vi.fn() },
+    } as unknown as WorkspaceRuntime;
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+    const manager = {
+      refreshCache: vi.fn(async () => undefined),
+      getExtensionStoreSnapshot: vi.fn(async () => ({ generation: 2 })),
+    } as unknown as ExtensionManager;
+    const json = vi.fn();
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      location: vi.fn().mockReturnThis(),
+      set: vi.fn().mockReturnThis(),
+      json,
+    } as unknown as Response;
+    controller.runQueuedExtensionMutation(
+      'refresh',
+      {},
+      response,
+      async () => ({ status: 'refreshed', refreshed: 0, failed: 0 }),
+      { manager, refreshRuntimes: [runtime] },
+    );
+    const operationId = json.mock.calls[0]![0].operationId as string;
+    await vi.waitFor(() =>
+      expect(controller.getOperation(operationId)).toMatchObject({
+        status: 'succeeded_with_warnings',
+        warnings: [
+          {
+            workspaceId: 'secondary',
+            error:
+              'Workspace runtime is not live; the committed extension generation will be applied when the runtime next starts.',
+          },
+        ],
+      }),
+    );
+  });
+
+  it.each([
+    {
+      name: 'the store already moved past the committed generation',
+      snapshot: async () => ({ generation: 6 }),
+      expectedHash: undefined,
+    },
+    {
+      name: 'the store identity read fails',
+      snapshot: async () => {
+        throw new Error('store read failed');
+      },
+      expectedHash: null,
+    },
+  ])(
+    'sends storeContentHash=$expectedHash to the reconcile when $name',
+    async ({ snapshot, expectedHash }) => {
+      const reconcileExtensionGeneration = vi.fn(async () => ({
+        state: 'reconciled' as const,
+        refreshed: 0,
+        failed: 0,
+      }));
+      vi.spyOn(
+        runtimeCoordinator,
+        'getWorkspaceRuntimeCoordinatorIfSupported',
+      ).mockReturnValue({
+        reconcileExtensionGeneration,
+        status: () => ({ runtimeLive: true }),
+      } as unknown as runtimeCoordinator.WorkspaceRuntimeCoordinator);
+      const runtime = {
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        workspaceService: { invalidateWorkspaceSkillsStatus: vi.fn() },
+        bridge: { broadcastExtensionsChanged: vi.fn() },
+      } as unknown as WorkspaceRuntime;
+      const controller = createExtensionsController({
+        boundWorkspace: '/work/bound',
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+      });
+      const manager = {
+        refreshCache: vi.fn(async () => undefined),
+        getExtensionStoreSnapshot: vi.fn(snapshot),
+      } as unknown as ExtensionManager;
+      const json = vi.fn();
+      const response = {
+        status: vi.fn().mockReturnThis(),
+        location: vi.fn().mockReturnThis(),
+        set: vi.fn().mockReturnThis(),
+        json,
+      } as unknown as Response;
+      controller.runQueuedExtensionMutation(
+        'install',
+        {},
+        response,
+        async (_manager, _signal, context) => {
+          await context!.commit(async (onCommitted) => {
+            onCommitted(5);
+            return { generation: 5 };
+          });
+          return { status: 'refreshed', refreshed: 0, failed: 0 };
+        },
+        { manager, refreshRuntimes: [runtime] },
+      );
+      const operationId = json.mock.calls[0]![0].operationId as string;
+      await vi.waitFor(() =>
+        expect(controller.getOperation(operationId)).toMatchObject({
+          status: 'succeeded',
+        }),
+      );
+      // undefined: a store that moved past belongs to a newer mutation's own
+      // receipt; null: a genuine identity read failure drops the runtime's
+      // applied-generation certification.
+      expect(reconcileExtensionGeneration).toHaveBeenCalledWith(
+        5,
+        expect.objectContaining({ storeContentHash: expectedHash }),
+      );
+    },
+  );
+
   it('clears phase from every terminal operation state', async () => {
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     const controller = createExtensionsController({
@@ -554,57 +881,66 @@ describe('createExtensionsController', () => {
     await held;
   });
 
-  it('does not commit preparation that settles after its deadline', async () => {
-    vi.useFakeTimers();
-    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-    let finishPreparation!: () => void;
-    const preparation = new Promise<void>((resolve) => {
-      finishPreparation = resolve;
-    });
-    const controller = createExtensionsController({
-      boundWorkspace: '/work/bound',
-      bridge: {
-        broadcastExtensionsChanged: vi.fn(),
-      } as unknown as AcpSessionBridge,
-      workspace: {} as DaemonWorkspaceService,
-    });
-    const manager = {
-      refreshCache: vi.fn(async () => undefined),
-    } as unknown as ExtensionManager;
-    const responseBody = vi.fn();
-    const response = {
-      status: vi.fn().mockReturnThis(),
-      location: vi.fn().mockReturnThis(),
-      set: vi.fn().mockReturnThis(),
-      json: responseBody,
-    } as unknown as Response;
-    const commit = vi.fn(async () => ({ generation: 1 }));
+  it.each([true, false])(
+    'rejects expired preparation with commit=%s',
+    async (willCommit) => {
+      const dispose = vi.fn();
+      vi.useFakeTimers();
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let finishPreparation!: () => void;
+      const preparation = new Promise<void>((resolve) => {
+        finishPreparation = resolve;
+      });
+      const controller = createExtensionsController({
+        boundWorkspace: '/work/bound',
+        bridge: {
+          broadcastExtensionsChanged: vi.fn(),
+        } as unknown as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+      });
+      const manager = {
+        refreshCache: vi.fn(async () => undefined),
+      } as unknown as ExtensionManager;
+      const responseBody = vi.fn();
+      const response = {
+        status: vi.fn().mockReturnThis(),
+        location: vi.fn().mockReturnThis(),
+        set: vi.fn().mockReturnThis(),
+        json: responseBody,
+      } as unknown as Response;
+      const commit = vi.fn(async () => ({ generation: 1 }));
 
-    controller.runQueuedExtensionMutation(
-      'install',
-      { name: 'demo' },
-      response,
-      async (_extensionManager, _signal, context) => {
-        await context!.prepare(async () => await preparation);
-        await context!.commit(commit);
-        return { status: 'installed', name: 'demo' };
-      },
-      { manager, deadlineMs: 100 },
-    );
-    await vi.advanceTimersByTimeAsync(0);
-    const operationId = responseBody.mock.calls[0]?.[0].operationId as string;
+      controller.runQueuedExtensionMutation(
+        'install',
+        { name: 'demo' },
+        response,
+        async (_extensionManager, _signal, context) => {
+          await context!.prepare(async () => await preparation);
+          try {
+            if (willCommit) await context!.commit(commit);
+            return { status: 'checked', name: 'demo', updated: false };
+          } finally {
+            dispose();
+          }
+        },
+        { manager, deadlineMs: 100 },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const operationId = responseBody.mock.calls[0]?.[0].operationId as string;
 
-    await vi.advanceTimersByTimeAsync(100);
-    finishPreparation();
-    await vi.advanceTimersByTimeAsync(0);
-    await vi.waitFor(() =>
-      expect(controller.getOperation(operationId)).toMatchObject({
-        status: 'failed',
-        code: 'extension_prepare_timeout',
-      }),
-    );
-    expect(commit).not.toHaveBeenCalled();
-  });
+      await vi.advanceTimersByTimeAsync(100);
+      finishPreparation();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.waitFor(() =>
+        expect(controller.getOperation(operationId)).toMatchObject({
+          status: 'failed',
+          code: 'extension_prepare_timeout',
+        }),
+      );
+      expect(commit).not.toHaveBeenCalled();
+      expect(dispose).toHaveBeenCalledOnce();
+    },
+  );
 
   it('releases the operation slot when the acceptance response throws', () => {
     let operationId: string | undefined;

@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type Ref,
+  type ReactNode,
 } from 'react';
 import {
   AlertCircleIcon,
@@ -23,7 +24,6 @@ import {
 } from 'lucide-react';
 import {
   DaemonHttpError,
-  type DaemonExtensionEntry,
   type DaemonExtensionUpdateState,
   type ExtensionActivationState,
   type ExtensionInteractionResponse,
@@ -39,8 +39,12 @@ import { useI18n } from '../../i18n';
 import { trimDialogLabel } from '../../utils/dialogLabels';
 import styles from './ExtensionsManagerPage.module.css';
 import {
+  extensionSnapshotsCurrent,
   filterExtensions,
+  isUninstallNoOpResult,
+  mergeExtensionCatalog,
   preserveSelectedExtensionName,
+  type ManagedExtensionEntry,
 } from './extensions-manager-logic';
 import { Alert, AlertDescription } from '../ui/alert';
 import {
@@ -129,10 +133,6 @@ function isValidExtensionArchiveFilename(filename: string): boolean {
   });
 }
 
-type ManagedExtensionEntry = DaemonExtensionEntry & {
-  defaultActivation?: ExtensionActivationState;
-  workspaceActivation?: 'inherit' | ExtensionActivationState;
-};
 type T = ReturnType<typeof useI18n>['t'];
 type PendingInteractionState = {
   operationId: string;
@@ -146,26 +146,38 @@ interface ExtensionsManagerPageProps {
   onClose: () => void;
   initialFocusRef?: Ref<HTMLHeadingElement>;
   embedded?: EmbeddedManagerPage;
+  workspaceCwd?: string;
+  workspaceControl?: ReactNode;
 }
 
-function extensionTitle(extension: DaemonExtensionEntry): string {
+function extensionTitle(extension: ManagedExtensionEntry): string {
   return extension.displayName || extension.name;
 }
 
-function extensionIsActive(extension: ManagedExtensionEntry): boolean {
+function extensionIsActive(
+  extension: ManagedExtensionEntry,
+): boolean | undefined {
   if (
     extension.workspaceActivation &&
     extension.workspaceActivation !== 'inherit'
   ) {
     return extension.workspaceActivation === 'enabled';
   }
+  // An unknown workspace override (the projection is unavailable or stale)
+  // leaves the live row's state as the only workspace-scoped truth; prefer
+  // it over the user-scope default.
+  if (extension.workspaceActivation === undefined) {
+    return extension.isActive;
+  }
   return extension.defaultActivation
     ? extension.defaultActivation === 'enabled'
-    : extension.isActive;
+    : (extension.isActive ?? false);
 }
 
 function statusLabel(extension: ManagedExtensionEntry, t: T): string {
-  return extensionIsActive(extension)
+  const active = extensionIsActive(extension);
+  if (active === undefined) return t('extensions.manage.status.unknown');
+  return active
     ? t('extensions.manage.status.enabled')
     : t('extensions.manage.status.disabled');
 }
@@ -433,6 +445,8 @@ export function ExtensionsManagerPage({
   onClose,
   initialFocusRef,
   embedded,
+  workspaceCwd,
+  workspaceControl,
 }: ExtensionsManagerPageProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -443,6 +457,42 @@ export function ExtensionsManagerPage({
     workspace.capabilities?.features.includes(
       'extension_activation_explicit_refresh',
     ) === true;
+  const targetWorkspaceCwd = workspaceCwd ?? workspace.workspaceCwd;
+  // The split runtime routes are trust-gated per target. An untrusted
+  // primary keeps the trust-free legacy read; an untrusted secondary stays
+  // on the qualified route's 403 as its declared failure semantics.
+  const targetWorkspaceUntrustedPrimary = (
+    workspace.capabilities?.workspaces ?? []
+  ).some(
+    (entry) =>
+      entry.kind !== 'live' &&
+      entry.cwd === targetWorkspaceCwd &&
+      entry.primary &&
+      !entry.trusted,
+  );
+  const splitRuntimeAvailable =
+    workspace.capabilities?.features?.includes(
+      'workspace_extensions_config_runtime',
+    ) === true && !targetWorkspaceUntrustedPrimary;
+  const workspaceClient = useMemo(
+    () =>
+      targetWorkspaceCwd
+        ? workspace.client.workspaceByCwd(targetWorkspaceCwd)
+        : undefined,
+    [targetWorkspaceCwd, workspace.client],
+  );
+  const loadRequestRef = useRef(0);
+  const loadRef = useRef<
+    ((preserveMessage?: boolean) => Promise<unknown>) | null
+  >(null);
+  const runtimeRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  // Tracks that the current global notice was set by the load path itself,
+  // so a successful (re)load can clear it without touching notices owned by
+  // an in-flight mutation.
+  const loadNoticeRef = useRef(false);
+  const messageOwnerRef = useRef<string | null>(null);
   const [extensions, setExtensions] = useState<ManagedExtensionEntry[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -454,7 +504,18 @@ export function ExtensionsManagerPage({
   const [busyName, setBusyName] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [messageTone, setMessageTone] = useState<ManagementNoticeTone>('info');
-  const [messageOwner, setMessageOwner] = useState<string | null>(null);
+  const [messageOwner, setMessageOwnerState] = useState<string | null>(null);
+  const noticeIsGlobal =
+    messageOwner === null ||
+    !extensions.some((extension) => extension.name === messageOwner);
+  const setMessageOwner = useCallback((owner: string | null) => {
+    messageOwnerRef.current = owner;
+    setMessageOwnerState(owner);
+  }, []);
+  const releaseMessageOwner = useCallback((owner: string) => {
+    // Release the in-flight lock without losing the displayed notice's attribution.
+    if (messageOwnerRef.current === owner) messageOwnerRef.current = null;
+  }, []);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [workspaceTrusted, setWorkspaceTrusted] = useState(true);
   const [refreshError, setRefreshError] = useState<{
@@ -521,82 +582,240 @@ export function ExtensionsManagerPage({
   );
 
   const load = useCallback(
-    (preserveMessage = false) => {
+    async (preserveMessage = false) => {
+      const requestId = ++loadRequestRef.current;
+      if (runtimeRetryTimerRef.current) {
+        clearTimeout(runtimeRetryTimerRef.current);
+        runtimeRetryTimerRef.current = null;
+      }
       setLoading(true);
-      const projection = workspace.workspaceCwd
-        ? workspace.client
-            .workspaceByCwd(workspace.workspaceCwd)
-            .workspaceExtensions()
-            .catch(() => null)
-        : Promise.resolve(null);
-      return Promise.all([actions.loadExtensionsStatus(), projection])
-        .then(([status, activation]) => {
-          // Keep the last known trust when the projection fails: defaulting
-          // to trusted would re-arm a refresh the runtime must reject.
-          if (activation) {
-            setWorkspaceTrusted(activation.trusted);
+      const apply = (nextExtensions: ManagedExtensionEntry[]) => {
+        if (requestId !== loadRequestRef.current) return;
+        setExtensions((current) => {
+          const uninstallName = uninstallInFlightNameRef.current;
+          if (
+            !uninstallName ||
+            nextExtensions.some((extension) => extension.name === uninstallName)
+          ) {
+            return nextExtensions;
           }
-          const activations = new Map(
-            (activation?.extensions ?? []).map((entry) => [
-              entry.extensionId,
-              entry,
-            ]),
+          const uninstallingExtension = current.find(
+            (extension) => extension.name === uninstallName,
           );
-          const nextExtensions = (status.extensions ?? []).map((extension) => {
-            const entry = activations.get(extension.id);
-            return entry
-              ? {
-                  ...extension,
-                  defaultActivation: entry.defaultActivation,
-                  workspaceActivation: entry.workspaceActivation ?? 'inherit',
-                }
-              : extension;
-          });
-          setExtensions((current) => {
-            const uninstallName = uninstallInFlightNameRef.current;
-            if (
-              !uninstallName ||
-              nextExtensions.some(
-                (extension) => extension.name === uninstallName,
-              )
-            ) {
-              return nextExtensions;
+          return uninstallingExtension
+            ? [...nextExtensions, uninstallingExtension]
+            : nextExtensions;
+        });
+        setSelectedName((name) =>
+          name && uninstallInFlightNameRef.current === name
+            ? name
+            : preserveSelectedExtensionName(name, nextExtensions),
+        );
+      };
+      // The overlay-less durable merge carries no live display metadata
+      // (raw name, no description, no badges): paint it only as a first
+      // load's placeholder, never over rows a previous load already
+      // overlaid; the runtime legs below re-merge with the live catalog.
+      const applyFirstPaint = (nextExtensions: ManagedExtensionEntry[]) => {
+        if (requestId !== loadRequestRef.current) return;
+        setExtensions((current) =>
+          current.length > 0 ? current : nextExtensions,
+        );
+      };
+      // The trust this load observed, resolved per branch so awaiting
+      // callers decide on the fresh value, not the render-time state
+      // snapshot.
+      let observedTrusted: boolean | null = null;
+      try {
+        if (splitRuntimeAvailable) {
+          if (!workspaceClient) throw new Error('Workspace is unavailable.');
+          let [catalog, activation] = await Promise.all([
+            workspace.client.extensionCatalog(),
+            workspaceClient.workspaceExtensions().catch(() => null),
+          ]);
+          // Resolve the trust as soon as the projection answers, ahead of the
+          // supersede check: the runtime leg below is trust-gated, so its 403
+          // must not discard a trust value this load already holds, and a
+          // superseded load must still hand its caller the fresh value. Only
+          // the state write stays behind the guard.
+          observedTrusted = activation ? activation.trusted : null;
+          if (requestId !== loadRequestRef.current) return observedTrusted;
+          if (observedTrusted !== null) {
+            setWorkspaceTrusted(observedTrusted);
+          }
+          applyFirstPaint(
+            mergeExtensionCatalog(
+              catalog.extensions,
+              activation,
+              undefined,
+              undefined,
+              catalog.generation,
+            ),
+          );
+          if (!preserveMessage) {
+            setMessageOwner(null);
+            setMessageTone('info');
+            setMessage(null);
+          }
+          // The ensure leg is trust-gated like the runtime leg below: its
+          // 403 is tolerated so the catalog and projection this load already
+          // fetched still render, and it never reaches the catch classifier
+          // that would re-arm the retry timer. Every other ensure failure
+          // (a retryable 503, an unavailable runtime) still propagates.
+          const coordinator = await workspaceClient
+            .ensureRuntime()
+            .catch((error: unknown) => {
+              if (error instanceof DaemonHttpError && error.status === 403) {
+                return undefined;
+              }
+              throw error;
+            });
+          // Tolerated like the projection leg above: a trust-gated 403 or a
+          // transient failure must not discard the catalog and projection
+          // this load already fetched; the merge renders without the live
+          // runtime overlay instead.
+          const runtime = await workspaceClient
+            .workspaceRuntimeExtensions()
+            .catch(() => undefined);
+          if (requestId !== loadRequestRef.current) return observedTrusted;
+          if (
+            !extensionSnapshotsCurrent(
+              catalog.generation,
+              activation,
+              runtime,
+              coordinator,
+            )
+          ) {
+            [catalog, activation] = await Promise.all([
+              workspace.client.extensionCatalog(),
+              workspaceClient.workspaceExtensions().catch(() => null),
+            ]);
+            observedTrusted = activation ? activation.trusted : observedTrusted;
+            if (requestId !== loadRequestRef.current) return observedTrusted;
+            if (observedTrusted !== null) {
+              setWorkspaceTrusted(observedTrusted);
             }
-            const uninstallingExtension = current.find(
-              (extension) => extension.name === uninstallName,
-            );
-            return uninstallingExtension
-              ? [...nextExtensions, uninstallingExtension]
-              : nextExtensions;
-          });
+          }
+          apply(
+            mergeExtensionCatalog(
+              catalog.extensions,
+              activation,
+              runtime,
+              coordinator,
+              catalog.generation,
+            ),
+          );
+          const capability = coordinator?.capabilities?.extensions;
+          if (capability?.state === 'error') {
+            if (messageOwnerRef.current === null) {
+              loadNoticeRef.current = true;
+              setMessageOwner(null);
+              setMessageTone('error');
+              setMessage(
+                capability.error?.message ??
+                  'Extension runtime preparation failed.',
+              );
+            }
+          } else {
+            if (loadNoticeRef.current && messageOwnerRef.current === null) {
+              loadNoticeRef.current = false;
+              setMessageOwner(null);
+              setMessageTone('info');
+              setMessage(null);
+            }
+            if (
+              capability?.state === 'starting' ||
+              capability?.state === 'stale'
+            ) {
+              runtimeRetryTimerRef.current = setTimeout(
+                () => void loadRef.current?.(true),
+                2000,
+              );
+            }
+          }
+        } else {
+          const projection = workspace.workspaceCwd
+            ? workspace.client
+                .workspaceByCwd(workspace.workspaceCwd)
+                .workspaceExtensions()
+                .catch(() => null)
+            : Promise.resolve(null);
+          const [status, activation] = await Promise.all([
+            actions.loadExtensionsStatus(),
+            projection,
+          ]);
+          apply(
+            mergeExtensionCatalog(
+              status.extensions ?? [],
+              activation,
+              undefined,
+              undefined,
+            ),
+          );
           if (!preserveMessage) {
             setMessageOwner(null);
             setMessageTone(status.errors?.[0] ? 'error' : 'info');
             setMessage(status.errors?.[0]?.error ?? null);
           }
-          setSelectedName((name) =>
-            name && uninstallInFlightNameRef.current === name
-              ? name
-              : preserveSelectedExtensionName(name, nextExtensions),
-          );
-          // Resolve the trust this load observed so awaiting callers decide
-          // on the fresh value, not the render-time state snapshot.
-          return activation ? activation.trusted : null;
-        })
-        .catch((error: unknown) => {
+          observedTrusted = activation ? activation.trusted : null;
+        }
+        // Keep the last known trust when the projection fails: defaulting to
+        // trusted would re-arm a refresh the runtime must reject.
+        if (observedTrusted !== null) {
+          setWorkspaceTrusted(observedTrusted);
+        }
+        return observedTrusted;
+      } catch (error) {
+        if (requestId === loadRequestRef.current) {
           if (!preserveMessage) {
+            loadNoticeRef.current = true;
             setMessageOwner(null);
             setMessageTone('error');
             setMessage(error instanceof Error ? error.message : String(error));
           }
-        })
-        .finally(() => setLoading(false));
+          // Only the daemon's own retryable codes re-arm: a 503
+          // workspace_runtime_unavailable (a draining or otherwise
+          // non-active target) is terminal here, not a poll loop.
+          const retryable =
+            error instanceof DaemonHttpError &&
+            (error.status === 429 ||
+              (typeof error.body === 'object' &&
+                error.body !== null &&
+                (error.body as { code?: unknown }).code ===
+                  'runtime_still_starting'));
+          if (splitRuntimeAvailable && retryable) {
+            runtimeRetryTimerRef.current = setTimeout(
+              () => void loadRef.current?.(true),
+              2000,
+            );
+          }
+        }
+        return observedTrusted;
+      } finally {
+        if (requestId === loadRequestRef.current) setLoading(false);
+      }
     },
-    [actions, workspace.client, workspace.workspaceCwd],
+    [
+      actions,
+      splitRuntimeAvailable,
+      setMessageOwner,
+      workspace.client,
+      workspace.workspaceCwd,
+      workspaceClient,
+    ],
   );
 
   useEffect(() => {
+    loadRef.current = load;
     void load();
+    return () => {
+      loadRef.current = null;
+      loadRequestRef.current += 1;
+      if (runtimeRetryTimerRef.current) {
+        clearTimeout(runtimeRetryTimerRef.current);
+        runtimeRetryTimerRef.current = null;
+      }
+    };
   }, [load]);
 
   useEffect(() => {
@@ -620,12 +839,12 @@ export function ExtensionsManagerPage({
               },
           );
         }
-        // `refresh` reconciles the runtime; adopting it would lock the page
-        // behind an action the user never started.
+        // Background refreshes and update checks must not lock management actions.
         const activeMutation = operations.find(
           (operation) =>
             operation.operation !== 'install' &&
-            operation.operation !== 'refresh',
+            operation.operation !== 'refresh' &&
+            operation.operation !== 'check-updates',
         );
         if (activeMutation) {
           mutationInFlightRef.current = true;
@@ -804,6 +1023,24 @@ export function ExtensionsManagerPage({
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let retryDelay = 1000;
+    // A failure exit must release the notice owner runMutation latched, or
+    // the runtime-error gate stays shut for the rest of the mount. For an
+    // uninstall the release runs after the exit's own reload, mirroring the
+    // success settle below.
+    const settleFailedMutation = () => {
+      loadNoticeRef.current = false;
+      clearInteraction(pendingMutation.operationId);
+      setPendingMutation(null);
+      setBusyName(null);
+      mutationInFlightRef.current = false;
+      const releaseOwner = () => releaseMessageOwner(pendingMutation.name);
+      if (pendingMutation.operation === 'uninstall') {
+        uninstallInFlightNameRef.current = null;
+        void load(true).finally(releaseOwner);
+      } else {
+        releaseOwner();
+      }
+    };
     const poll = async () => {
       try {
         const operation = await actions.extensionOperationStatus(
@@ -822,28 +1059,14 @@ export function ExtensionsManagerPage({
           } else {
             setMessageTone('error');
             setMessage(t('extensions.manage.operationFailed'));
-            clearInteraction(pendingMutation.operationId);
-            setPendingMutation(null);
-            setBusyName(null);
-            mutationInFlightRef.current = false;
-            if (pendingMutation.operation === 'uninstall') {
-              uninstallInFlightNameRef.current = null;
-              void load(true);
-            }
+            settleFailedMutation();
           }
           return;
         }
         if (operation.status === 'failed') {
           setMessageTone('error');
           setMessage(operation.error ?? t('extensions.manage.operationFailed'));
-          clearInteraction(pendingMutation.operationId);
-          setPendingMutation(null);
-          setBusyName(null);
-          mutationInFlightRef.current = false;
-          if (operation.operation === 'uninstall') {
-            uninstallInFlightNameRef.current = null;
-            void load(true);
-          }
+          settleFailedMutation();
           return;
         }
         if (
@@ -875,6 +1098,7 @@ export function ExtensionsManagerPage({
           mutationInFlightRef.current = false;
           if (operation.operation === 'uninstall') {
             uninstallInFlightNameRef.current = null;
+            loadNoticeRef.current = false;
             setMessageOwner(null);
             setSelectedName(null);
           }
@@ -885,7 +1109,10 @@ export function ExtensionsManagerPage({
               return next;
             });
           }
-          void load(true);
+          // Same owner release as the non-polling settle: after the reload.
+          void load(true).finally(() => {
+            releaseMessageOwner(pendingMutation.name);
+          });
           return;
         }
         setMessageTone('progress');
@@ -898,14 +1125,7 @@ export function ExtensionsManagerPage({
         setMessageTone('error');
         setMessage(error instanceof Error ? error.message : String(error));
         if (error instanceof DaemonHttpError && error.status === 404) {
-          clearInteraction(pendingMutation.operationId);
-          setPendingMutation(null);
-          setBusyName(null);
-          mutationInFlightRef.current = false;
-          if (pendingMutation.operation === 'uninstall') {
-            uninstallInFlightNameRef.current = null;
-            void load(true);
-          }
+          settleFailedMutation();
           return;
         }
         timer = setTimeout(() => void poll(), retryDelay);
@@ -918,15 +1138,25 @@ export function ExtensionsManagerPage({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [actions, clearInteraction, load, pendingMutation, showInteraction, t]);
+  }, [
+    actions,
+    clearInteraction,
+    load,
+    pendingMutation,
+    showInteraction,
+    t,
+    setMessageOwner,
+    releaseMessageOwner,
+  ]);
 
   const refreshList = useCallback(() => {
+    loadNoticeRef.current = false;
     setRefreshError(null);
     setMessageOwner(null);
     setMessageTone('info');
     setMessage(null);
     void load();
-  }, [load]);
+  }, [load, setMessageOwner]);
 
   const checkUpdates = useCallback(
     (name: string) => {
@@ -939,8 +1169,22 @@ export function ExtensionsManagerPage({
         ...current,
         [name]: 'checking for updates',
       }));
-      actions
-        .checkExtensionUpdates(connection.clientId)
+      const check = splitRuntimeAvailable
+        ? workspace.client
+            .checkUserExtensionUpdates(connection.clientId)
+            .then((handle) =>
+              workspace.client.waitForExtensionOperation(handle),
+            )
+            .then((operation) => {
+              if (operation.status === 'failed') {
+                throw new Error(
+                  operation.error ?? t('extensions.manage.operationFailed'),
+                );
+              }
+              return { states: operation.result?.states ?? {} };
+            })
+        : actions.checkExtensionUpdates(connection.clientId);
+      check
         .then((result) => {
           setUpdateStates(result.states);
           setMessage(updateLabel(result.states[name], t));
@@ -950,9 +1194,23 @@ export function ExtensionsManagerPage({
           setMessageTone('error');
           setMessage(error instanceof Error ? error.message : String(error));
         })
-        .finally(() => setCheckingName(null));
+        .finally(() => {
+          setCheckingName(null);
+          // Release the notice owner latched above or the runtime-error gate
+          // stays shut for the rest of the mount (mirrors runMutation).
+          releaseMessageOwner(name);
+        });
     },
-    [actions, connection.clientId, selectedName, t],
+    [
+      actions,
+      connection.clientId,
+      selectedName,
+      splitRuntimeAvailable,
+      setMessageOwner,
+      releaseMessageOwner,
+      t,
+      workspace.client,
+    ],
   );
 
   const installExtension = useCallback(() => {
@@ -977,6 +1235,7 @@ export function ExtensionsManagerPage({
     )
       return;
     setInstalling(true);
+    loadNoticeRef.current = false;
     setRefreshError(null);
     setMessageOwner(null);
     setMessageTone('progress');
@@ -991,7 +1250,12 @@ export function ExtensionsManagerPage({
             },
             clientId,
           )
-        : actions.installExtension({ source, consent: true }, clientId);
+        : splitRuntimeAvailable
+          ? workspace.client.installUserExtension(
+              { source, consent: true, activation: { scope: 'user' } },
+              clientId,
+            )
+          : actions.installExtension({ source, consent: true }, clientId);
     installingOperation
       .then((result) => {
         setPendingInstall({ operationId: result.operationId, source });
@@ -1013,8 +1277,11 @@ export function ExtensionsManagerPage({
     installMethod,
     installSource,
     operationsRecovered,
+    setMessageOwner,
     pendingInstall,
     pendingMutation,
+    splitRuntimeAvailable,
+    workspace.client,
   ]);
 
   const runMutation = useCallback(
@@ -1039,6 +1306,7 @@ export function ExtensionsManagerPage({
       }
       setBusyName(name);
       setRefreshError(null);
+      loadNoticeRef.current = false;
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('progress');
       setMessage(options.startMessage ?? null);
@@ -1061,6 +1329,13 @@ export function ExtensionsManagerPage({
             });
             return;
           }
+          if (isUninstallNoOpResult(result, options.operation)) {
+            setMessageTone('success');
+            setMessage(
+              t('extensions.manage.uninstallNothingToRemove', { name }),
+            );
+            return;
+          }
           setMessage(t('extensions.manage.queued', { name }));
         })
         .catch((error: unknown) => {
@@ -1074,7 +1349,12 @@ export function ExtensionsManagerPage({
             if (options.operation === 'uninstall') {
               uninstallInFlightNameRef.current = null;
             }
-            void load(true);
+            // Hold the notice owner across the mutation's own reload so a
+            // runtime error surfacing mid-flight cannot replace the result;
+            // release it afterwards or the error gate stays shut for good.
+            void load(true).finally(() => {
+              releaseMessageOwner(name);
+            });
           }
         });
       return true;
@@ -1088,6 +1368,8 @@ export function ExtensionsManagerPage({
       pendingMutation,
       selectedName,
       t,
+      setMessageOwner,
+      releaseMessageOwner,
     ],
   );
 
@@ -1102,7 +1384,7 @@ export function ExtensionsManagerPage({
         pendingInstall ||
         pendingMutation ||
         checkingName ||
-        !workspace.workspaceCwd
+        !targetWorkspaceCwd
       ) {
         return;
       }
@@ -1114,6 +1396,7 @@ export function ExtensionsManagerPage({
             : 'inherit';
       setRefreshError(null);
       setBusyName(extension.name);
+      loadNoticeRef.current = false;
       setMessageOwner(extension.name);
       setMessageTone('progress');
       setMessage(
@@ -1130,10 +1413,10 @@ export function ExtensionsManagerPage({
               )
             : activation === 'inherit'
               ? await workspace.client
-                  .workspaceByCwd(workspace.workspaceCwd)
+                  .workspaceByCwd(targetWorkspaceCwd)
                   .clearExtensionActivation(extension.id)
               : await workspace.client
-                  .workspaceByCwd(workspace.workspaceCwd)
+                  .workspaceByCwd(targetWorkspaceCwd)
                   .setExtensionActivation(extension.id, activation);
         const completed =
           await workspace.client.waitForExtensionOperation(result);
@@ -1156,7 +1439,7 @@ export function ExtensionsManagerPage({
           // of the refresh that is still current.
           const refreshToken = ++refreshTokenRef.current;
           void workspace.client
-            .workspaceByCwd(workspace.workspaceCwd)
+            .workspaceByCwd(targetWorkspaceCwd)
             .refreshExtensionRuntime()
             .catch((error: unknown) => {
               if (refreshToken !== refreshTokenRef.current) {
@@ -1175,18 +1458,24 @@ export function ExtensionsManagerPage({
         setMessage(error instanceof Error ? error.message : String(error));
       } finally {
         setBusyName(null);
+        // The action's own reload has already settled (or never ran), so
+        // release the notice owner — holding it would keep the
+        // runtime-error gate shut for the rest of the mount.
+        releaseMessageOwner(extension.name);
       }
     },
     [
       activationRequiresExplicitRefresh,
+      setMessageOwner,
+      releaseMessageOwner,
       busyName,
       checkingName,
       load,
       pendingInstall,
       pendingMutation,
       t,
+      targetWorkspaceCwd,
       workspace.client,
-      workspace.workspaceCwd,
       workspaceTrusted,
     ],
   );
@@ -1266,21 +1555,26 @@ export function ExtensionsManagerPage({
   );
   const navigation = embedded ? (
     selectedExtension ? (
-      <Breadcrumb className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
-        <BreadcrumbList className="h-8 text-sm">
-          <BreadcrumbItem>
-            <BreadcrumbLink asChild>
-              <button type="button" onClick={embedded.onRoot}>
-                {t('extensions.manage.title')}
-              </button>
-            </BreadcrumbLink>
-          </BreadcrumbItem>
-          <BreadcrumbSeparator />
-          <BreadcrumbItem>
-            <BreadcrumbPage>{extensionTitle(selectedExtension)}</BreadcrumbPage>
-          </BreadcrumbItem>
-        </BreadcrumbList>
-      </Breadcrumb>
+      <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex items-center justify-between gap-3 border-b bg-background px-5 py-3">
+        <Breadcrumb className="min-w-0 flex-1">
+          <BreadcrumbList className="h-8 text-sm">
+            <BreadcrumbItem>
+              <BreadcrumbLink asChild>
+                <button type="button" onClick={embedded.onRoot}>
+                  {t('extensions.manage.title')}
+                </button>
+              </BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbPage>
+                {extensionTitle(selectedExtension)}
+              </BreadcrumbPage>
+            </BreadcrumbItem>
+          </BreadcrumbList>
+        </Breadcrumb>
+        {workspaceControl}
+      </div>
     ) : null
   ) : (
     standaloneNavigation
@@ -1372,10 +1666,15 @@ export function ExtensionsManagerPage({
                       runMutation(
                         selectedExtension.name,
                         (clientId) =>
-                          actions.updateExtension(
-                            selectedExtension.name,
-                            clientId,
-                          ),
+                          splitRuntimeAvailable
+                            ? workspace.client.updateUserExtension(
+                                selectedExtension.id,
+                                clientId,
+                              )
+                            : actions.updateExtension(
+                                selectedExtension.name,
+                                clientId,
+                              ),
                         {
                           operation: 'update',
                           startMessage: mutationMessage(
@@ -1408,7 +1707,8 @@ export function ExtensionsManagerPage({
             </DropdownMenu>
           </div>
 
-          {messageOwner === selectedExtension.name && message ? (
+          {(noticeIsGlobal || messageOwner === selectedExtension.name) &&
+          message ? (
             <ManagementNotice
               tone={messageTone}
               noticeKey={message}
@@ -1563,7 +1863,7 @@ export function ExtensionsManagerPage({
                   />
                   <DetailField
                     label={t('extensions.manage.path')}
-                    value={selectedExtension.path}
+                    value={selectedExtension.path ?? '-'}
                   />
                   <DetailField
                     label={t('extensions.manage.updateStatus')}
@@ -1649,7 +1949,12 @@ export function ExtensionsManagerPage({
                     runMutation(
                       uninstallName,
                       (clientId) =>
-                        actions.uninstallExtension(uninstallName, clientId),
+                        splitRuntimeAvailable
+                          ? workspace.client.uninstallUserExtension(
+                              selectedExtension.id,
+                              clientId,
+                            )
+                          : actions.uninstallExtension(uninstallName, clientId),
                       {
                         operation: 'uninstall',
                         startMessage: mutationMessage(
@@ -1722,12 +2027,10 @@ export function ExtensionsManagerPage({
           </div>
         </div>
 
-        {(messageOwner === null && message) || recoveryError ? (
+        {(noticeIsGlobal && message) || recoveryError ? (
           <ManagementNotice
             tone={recoveryError ? 'error' : messageTone}
-            noticeKey={
-              (messageOwner === null ? message : null) ?? recoveryError ?? ''
-            }
+            noticeKey={(noticeIsGlobal ? message : null) ?? recoveryError ?? ''}
             closeLabel={t('common.close')}
             onDismiss={() => {
               setMessage(null);
@@ -1735,7 +2038,7 @@ export function ExtensionsManagerPage({
             }}
             className="break-words"
           >
-            {(messageOwner === null ? message : null) ?? recoveryError}
+            {(noticeIsGlobal ? message : null) ?? recoveryError}
           </ManagementNotice>
         ) : null}
 

@@ -1,8 +1,114 @@
-import type { DaemonExtensionEntry } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonExtensionEntry,
+  DaemonWorkspaceExtensionsStatus,
+  DaemonWorkspaceRuntimeStatus,
+  ExtensionActivationState,
+  ExtensionCatalogEntry,
+  WorkspaceExtensionProjection,
+} from '@qwen-code/sdk/daemon';
+
+export type ManagedExtensionEntry = Pick<
+  DaemonExtensionEntry,
+  'id' | 'name' | 'version'
+> &
+  Partial<Omit<DaemonExtensionEntry, 'id' | 'name' | 'version'>> & {
+    defaultActivation?: ExtensionActivationState;
+    workspaceActivation?: 'inherit' | ExtensionActivationState;
+  };
+
+export function extensionSnapshotsCurrent(
+  catalogGeneration: number,
+  activation: WorkspaceExtensionProjection | null,
+  runtime: DaemonWorkspaceExtensionsStatus | undefined,
+  coordinator: DaemonWorkspaceRuntimeStatus | undefined,
+): boolean {
+  const extensionCapability = coordinator?.capabilities?.extensions;
+  return (
+    activation?.desiredGeneration === catalogGeneration &&
+    activation.appliedGeneration === catalogGeneration &&
+    extensionCapability?.state === 'ready' &&
+    extensionCapability.runtimeEpoch === coordinator?.runtimeEpoch &&
+    extensionCapability.desiredGeneration === catalogGeneration &&
+    extensionCapability.appliedGeneration === catalogGeneration &&
+    runtime?.initialized === true &&
+    runtime.runtimeEpoch === coordinator?.runtimeEpoch
+  );
+}
+
+export function mergeExtensionCatalog(
+  configured: readonly (DaemonExtensionEntry | ExtensionCatalogEntry)[],
+  activation: WorkspaceExtensionProjection | null,
+  runtime: DaemonWorkspaceExtensionsStatus | undefined,
+  coordinator: DaemonWorkspaceRuntimeStatus | undefined,
+  catalogGeneration?: number,
+): ManagedExtensionEntry[] {
+  const activationCurrent =
+    catalogGeneration === undefined ||
+    activation?.desiredGeneration === catalogGeneration;
+  const activations = new Map(
+    (activationCurrent ? (activation?.extensions ?? []) : []).map((entry) => [
+      entry.extensionId,
+      entry,
+    ]),
+  );
+  // The runtime overlay is gated on the runtime agreeing with the
+  // coordinator on epoch and initialization — not on the projection. The
+  // projection is a separate read that can fail outright or lag the catalog
+  // by a generation; neither makes the live rows any less true, and dropping
+  // them would reduce the merge to the bare durable catalog.
+  const runtimeCurrent =
+    catalogGeneration !== undefined &&
+    coordinator !== undefined &&
+    runtime?.initialized === true &&
+    runtime.runtimeEpoch === coordinator.runtimeEpoch &&
+    coordinator.capabilities?.extensions?.runtimeEpoch ===
+      coordinator.runtimeEpoch;
+  const runtimeById = new Map(
+    (runtimeCurrent ? (runtime?.extensions ?? []) : []).map((entry) => [
+      entry.id,
+      entry,
+    ]),
+  );
+  return configured.map((extension) => {
+    const configuredEntry: ManagedExtensionEntry = extension;
+    const projection = activations.get(extension.id);
+    const live = runtimeById.get(extension.id);
+    return {
+      ...configuredEntry,
+      ...live,
+      updateState: configuredEntry.updateState ?? live?.updateState,
+      isActive:
+        live?.isActive ??
+        (projection
+          ? projection.effectiveActivation === 'enabled'
+          : configuredEntry.isActive),
+      ...(projection
+        ? {
+            defaultActivation: projection.defaultActivation,
+            workspaceActivation:
+              projection.workspaceActivation ?? ('inherit' as const),
+          }
+        : {}),
+    };
+  });
+}
+
+/**
+ * The split-mode `DELETE /extensions/:extensionId` answers 204 (surfaced by
+ * the SDK as `undefined`) when the listed extension has no removable
+ * user-store policy. That is a completed no-op, not a queued mutation, and
+ * must not be announced as one — no operation will ever be polled.
+ */
+export function isUninstallNoOpResult(
+  result: unknown,
+  operation: string | undefined,
+): boolean {
+  return result === undefined && operation === 'uninstall';
+}
 
 export function preserveSelectedExtensionName(
   name: string | null,
-  extensions: readonly DaemonExtensionEntry[],
+  extensions: readonly ManagedExtensionEntry[],
 ): string | null {
   return name && extensions.some((extension) => extension.name === name)
     ? name
@@ -10,9 +116,9 @@ export function preserveSelectedExtensionName(
 }
 
 export function filterExtensions(
-  extensions: readonly DaemonExtensionEntry[],
+  extensions: readonly ManagedExtensionEntry[],
   query: string,
-): DaemonExtensionEntry[] {
+): ManagedExtensionEntry[] {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return [...extensions];
   return extensions.filter((extension) =>
