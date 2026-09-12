@@ -208,9 +208,12 @@ export async function syncTeamMemory(
   // 2. Commit local team-memory changes (only the team path) on top of upstream.
   // `--no-optional-locks` keeps this read from refreshing and writing the
   // index, so a tree-shipped `.git/hooks/post-index-change` never runs. It
-  // matters precisely when the team path is clean: then this probe is the
-  // flow's only index-writing call (`add`/`commit`/`reset` are all gated on
-  // this returning a non-empty result). The flag must precede `status` — after
+  // matters on the no-upstream path, where this probe is the flow's only
+  // index-writing call (`add`/`commit`/`reset` are all gated on this returning
+  // a non-empty result). When an upstream exists the preceding `pull --ff-only`
+  // also writes the index, so a tree-shipped `post-index-change` can still run
+  // there — deliberately out of scope, as mutating commands are. The flag must
+  // precede `status` — after
   // the subcommand git answers `rc=129`, which `tryGit` swallows into `null`
   // and this flow misreads as "no changes to sync".
   const status = await tryGit(gitRoot, [

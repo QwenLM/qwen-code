@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { syncTeamMemory } from './team-memory-sync.js';
 import { clearAutoMemoryRootCache, getTeamAutoMemoryRoot } from './paths.js';
 
@@ -39,9 +39,14 @@ describe('syncTeamMemory', () => {
 
   beforeEach(() => {
     clearAutoMemoryRootCache();
+    // Scrub ambient git config: a system/global `core.hooksPath` would make
+    // the planted post-index-change canary resolve elsewhere and fail silently.
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+    vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     clearAutoMemoryRootCache();
     for (const dir of cleanup.splice(0)) {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -288,8 +293,9 @@ describe('syncTeamMemory', () => {
     async () => {
       // A repo with no upstream. Seed a committed team-memory file so the team
       // path EXISTS and is clean: then the status probe is the flow's only
-      // index-writing call, and a shipped `.git/hooks/post-index-change` would
-      // run on it without the flag.
+      // index-writing call (no upstream, so `pull --ff-only` never runs), and
+      // a shipped `.git/hooks/post-index-change` would run on it without the
+      // flag.
       const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sync-pic-'));
       cleanup.push(parent);
       const repo = path.join(parent, 'repo');
@@ -331,10 +337,18 @@ describe('syncTeamMemory', () => {
     // The rejected push must not strand our commit on the branch.
     expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(preHead);
 
+    // The rollback must leave the working tree and index as they were.
+    expect(git(repo, 'diff', '--cached', '--name-only').trim()).toBe('');
+    expect(
+      fs.existsSync(path.join(repo, '.qwen/team-memory/feedback/x.md')),
+    ).toBe(true);
+
     // A second sync must not read a stale ahead state (which would wedge
-    // pushing permanently): it tries again rather than returning 'local-ahead'.
+    // pushing permanently): it commits the new note and tries again.
+    writeTeamMemory(repo, 'feedback/y.md', 'second note');
     const second = await syncTeamMemory(repo, { message: 'sync' });
-    expect(second.skippedReason).not.toBe('local-ahead');
+    expect(second.committed).toBe(true);
+    expect(second.skippedReason).toBe('push-failed');
     expect(second.pushed).toBe(false);
   }, 30_000);
 

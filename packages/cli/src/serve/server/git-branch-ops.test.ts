@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   branchExists,
   checkoutRef,
@@ -39,6 +39,10 @@ function git(cwd: string, ...args: string[]): string {
 let repo: string;
 
 beforeEach(() => {
+  // Scrub ambient git config so the production-spawned git (which inherits
+  // process.env) never resolves a system/global `core.hooksPath`.
+  vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+  vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
   repo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-git-branch-ops-test-'));
   git(repo, 'init', '-q', '-b', 'main');
   git(repo, 'config', 'user.email', 'test@example.com');
@@ -50,6 +54,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   fs.rmSync(repo, { recursive: true, force: true });
 });
 
