@@ -245,6 +245,8 @@ export type {
   WebShellMarkdownChartCustomization,
   WebShellMarkdownCustomization,
   WebShellAssistantMessageInfo,
+  WebShellAssistantTurnOutcome,
+  WebShellAssistantTurnSettledEvent,
   WebShellAssistantTurnFooterRenderInfo,
   ArtifactImageRenderer,
   WebShellArtifactCustomization,

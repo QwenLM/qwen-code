@@ -45,6 +45,8 @@ import {
   workspaceLabelForCwd,
 } from '../utils/workspace';
 import { isEditableTarget } from '../utils/dom';
+import { AssistantTurnSettlementObserver } from '../assistant-turn-settlement';
+import type { WebShellAssistantTurnSettledEvent } from '../customization';
 import styles from './SplitView.module.css';
 
 const MAX_PANES = MAX_SPLIT_PANES;
@@ -62,6 +64,7 @@ export interface SplitViewProps {
    * each render would re-fire the reporting effect and loop.
    */
   onPanesChange?: (sessionIds: string[]) => void;
+  onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Report panes surfacing approvals, including hidden panes. Keep stable while
    * consumer inputs are unchanged; a new callback receives the current list.
@@ -115,6 +118,7 @@ export function SplitView({
   sessionIds,
   showSessionDetails = true,
   onPanesChange,
+  onAssistantTurnSettled,
   onPendingPanesChange,
   onExit,
   onError,
@@ -621,6 +625,11 @@ export function SplitView({
                     suppressOwnUserEcho
                     restartEventStreamOnPrompt={restartSseOnPrompt}
                   >
+                    {onAssistantTurnSettled ? (
+                      <AssistantTurnSettlementObserver
+                        onAssistantTurnSettled={onAssistantTurnSettled}
+                      />
+                    ) : null}
                     <ChatPane
                       title={titleById.get(sessionId)}
                       sessionSummary={

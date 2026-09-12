@@ -39,6 +39,7 @@ import {
   useDaemonConnection,
   useDaemonSessionNotices,
   useDaemonPendingPermissions,
+  useDaemonPromptSettled,
   useDaemonPromptStatus,
   useDaemonStreamingState,
   useDaemonTranscriptBlocks,
@@ -51,6 +52,7 @@ import {
   useDaemonWorkspaceEventSignals,
   type DaemonSessionProviderProps,
   type DaemonConnectionState,
+  type DaemonPromptSettledEvent,
   type DaemonSessionActions,
   type DaemonSessionNotice,
   type DaemonTurnNavigationSnapshot,
@@ -5325,6 +5327,58 @@ describe('DaemonSessionProvider', () => {
       'session-old',
       'pending-old',
     );
+  });
+
+  it('does not record a stale-session removal in the current session turn navigation', async () => {
+    // A stale-session removal resolves against a foreign session, so its
+    // prompt id must never be written into the current session's
+    // turn-navigation store: recording it there would drop the current
+    // session's own turn from turn navigation. Deleting the
+    // `sessionId === undefined` guard on the `recordPromptRemoved` call makes
+    // this assertion fail.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    const session = createMockSession({
+      sessionId: 'session-current',
+      clientId: 'client-current',
+      removePendingPrompt: vi.fn(async () => ({ removed: true })),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let navigationStore:
+      | ReturnType<typeof useDaemonTurnNavigationStore>
+      | undefined;
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      navigationStore = useDaemonTurnNavigationStore();
+      navigation = useDaemonTurnNavigationState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+    });
+
+    const recordPromptRemoved = vi.spyOn(
+      navigationStore!,
+      'recordPromptRemoved',
+    );
+
+    await expect(
+      requireActions(actions).removePendingPrompt('pending-old', {
+        sessionId: 'session-old',
+      }),
+    ).resolves.toEqual({ removed: true });
+
+    expect(recordPromptRemoved).not.toHaveBeenCalled();
   });
 
   it('routes mid-turn message removal through the matching session owner', async () => {
@@ -10668,6 +10722,362 @@ describe('DaemonSessionProvider', () => {
       { text: 'first done', streaming: false },
       { text: 'second done', streaming: false },
       { text: 'still running', streaming: true },
+    ]);
+  });
+
+  it('publishes a settlement when a replayed terminal settles a bound prompt', async () => {
+    // A ring eviction mid-turn reloads the session; the turn's terminal then
+    // arrives through the replay snapshot instead of the live stream. The
+    // snapshot is released after injection and SSE resumes from `lastEventId`,
+    // so the replay branch is the only place this settlement can be published.
+    const { sessions, resyncGate, reloaded } = createResyncReplayFixture({
+      sessionId: 'session-settle-replay',
+      reason: 'ring_evicted',
+      terminalStopReason: 'end_turn',
+    });
+    sdkMocks.sessions.push(...sessions);
+    const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+
+    let prompt: Promise<unknown> | undefined;
+    await act(async () => {
+      prompt = requireActions(actions).sendPrompt('hello');
+      await flushPromises();
+    });
+    expect(settlements).toEqual([]);
+
+    await act(async () => {
+      resyncGate.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    const pending = prompt;
+    if (!pending) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-replay',
+        promptId: 'prompt-1',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
+  });
+
+  it('publishes the replayed terminal when an epoch reset discards the binding', async () => {
+    // `requestEpochResetReload` deletes the ActivePrompt before the reload, so
+    // `settleActivePromptFromTurnEvent` returns false for the replayed
+    // terminal; the admission-key gate must still publish it.
+    const { sessions, resyncGate, reloaded } = createResyncReplayFixture({
+      sessionId: 'session-settle-epoch',
+      reason: 'epoch_reset',
+      terminalStopReason: 'end_turn',
+    });
+    sdkMocks.sessions.push(...sessions);
+    const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+
+    let prompt: Promise<unknown> | undefined;
+    await act(async () => {
+      prompt = requireActions(actions).sendPrompt('hello');
+      await flushPromises();
+    });
+    expect(settlements).toEqual([]);
+
+    await act(async () => {
+      resyncGate.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    // The epoch reset aborts the local binding, so the submitter's promise
+    // resolves as `cancelled` while the replayed terminal publishes a
+    // `completed` settlement. Pin the cancelled resolution so the
+    // contradiction is observable instead of silently discarded.
+    const pending = prompt;
+    if (!pending) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pending).resolves.toEqual({ stopReason: 'cancelled' });
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-epoch',
+        promptId: 'prompt-1',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
+  });
+
+  it('publishes a replayed cancelled terminal after the prompt was cancelled', async () => {
+    // `cancel()` removes the ActivePrompt (deletes it in `finally`) but the
+    // admission key survives; a `turn_complete{stopReason:'cancelled'}` that
+    // only reaches the client through replay must still be published.
+    const resyncGate = createDeferred<void>();
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-settle-cancel',
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 9,
+      })),
+      events: async function* cancelThenResync(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          resyncGate.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          id: 10,
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'ring_evicted' },
+        } satisfies DaemonEvent;
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'session-settle-cancel',
+      events: createPendingEvents(reloaded),
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 11,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'replayed answer' },
+              },
+            },
+          },
+          {
+            id: 12,
+            v: 1,
+            type: 'turn_complete',
+            data: { promptId: 'prompt-1', stopReason: 'cancelled' },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+    const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+
+    let prompt: Promise<unknown> | undefined;
+    await act(async () => {
+      prompt = requireActions(actions).sendPrompt('hello');
+      await flushPromises();
+    });
+    await act(async () => {
+      await requireActions(actions).cancel();
+      await flushPromises();
+    });
+    expect(settlements).toEqual([]);
+
+    await act(async () => {
+      resyncGate.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    // `cancel()` aborts the local binding, so the submitter's promise resolves
+    // `cancelled` — matching the replayed `cancelled` settlement below. Observe
+    // the promise to keep this consistent with the resync siblings above.
+    const pending = prompt;
+    if (!pending) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pending).resolves.toEqual({ stopReason: 'cancelled' });
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-cancel',
+        promptId: 'prompt-1',
+        outcome: 'cancelled',
+        stopReason: 'cancelled',
+      },
+    ]);
+  });
+
+  it('does not publish settlements when a first attach replays a finished turn', async () => {
+    // Ordinary history loading stays silent: with no locally bound prompt the
+    // replay branch settles nothing, so it must not publish either.
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'already finished' },
+              },
+            },
+          },
+          {
+            id: 2,
+            v: 1,
+            type: 'turn_complete',
+            data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    const settlements: DaemonPromptSettledEvent[] = [];
+
+    function Harness() {
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([]);
+  });
+
+  it('defaults the settlement error code when a turn_error frame omits it', async () => {
+    // `matchTurnEvent` rejects the submitter's promise with
+    // `DaemonHttpError(500, data.code ?? 'turn_error', …)`. The published
+    // settlement reports the same failure, so it must apply the same default
+    // rather than dropping the field.
+    const turnError = createDeferred<void>();
+    const session = createMockSession({
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 10,
+      })),
+      events: async function* codelessTurnError(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          turnError.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          v: 1,
+          id: 11,
+          type: 'turn_error',
+          timestamp: '2025-01-01T00:00:00.000Z',
+          sessionId: 'session-1',
+          data: { promptId: 'prompt-1', message: 'Loop detected' },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+
+    let rejection: unknown;
+    await act(async () => {
+      // Attach the handler up front: the terminal below rejects this promise
+      // inside the provider's own flush, before any assertion can await it.
+      const prompt = requireActions(actions).sendPrompt('hello');
+      void prompt.catch((error: unknown) => {
+        rejection = error;
+      });
+      await flushPromises();
+    });
+
+    await act(async () => {
+      turnError.resolve();
+      await flushPromises();
+    });
+
+    // One failure, two reports: the submitter's `DaemonHttpError` exposes the
+    // code as `body`, the host's settlement as `error.code`. Both default to
+    // `turn_error` when the frame carries no code.
+    expect(rejection).toBeInstanceOf(DaemonHttpError);
+    expect((rejection as DaemonHttpError).message).toBe('Loop detected');
+    expect((rejection as DaemonHttpError).body).toBe('turn_error');
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        outcome: 'failed',
+        error: { message: 'Loop detected', code: 'turn_error' },
+      },
     ]);
   });
 
@@ -22183,6 +22593,76 @@ function createPendingEvents(
     });
     yield* [];
   };
+}
+
+// Shared fixture for the resync-then-replay settlement tests: one submit
+// bound to `prompt-1`, a live stream that reports `state_resync_required`
+// once `resyncGate` resolves, and a reload whose snapshot carries the replayed
+// terminal. Returning the sessions and gates together keeps the two settlement
+// tests from re-inlining the snapshot literal; the submitter promise stays in
+// the caller where it must be awaited.
+function createResyncReplayFixture(opts: {
+  sessionId: string;
+  reason: string;
+  terminalStopReason: 'end_turn' | 'cancelled';
+}): {
+  sessions: MockSession[];
+  resyncGate: ReturnType<typeof createDeferred<void>>;
+  reloaded: ReturnType<typeof createDeferred<void>>;
+} {
+  const resyncGate = createDeferred<void>();
+  const reloaded = createDeferred<void>();
+  const firstSession = createMockSession({
+    sessionId: opts.sessionId,
+    submitPrompt: vi.fn(async () => ({
+      promptId: 'prompt-1',
+      lastEventId: 9,
+    })),
+    events: async function* resyncRequiredAfterGate(
+      eventOpts: { signal?: AbortSignal } = {},
+    ) {
+      await Promise.race([
+        resyncGate.promise,
+        new Promise<void>((resolve) =>
+          eventOpts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        ),
+      ]);
+      if (eventOpts.signal?.aborted) return;
+      yield {
+        id: 10,
+        v: 1,
+        type: 'state_resync_required',
+        data: { reason: opts.reason },
+      } satisfies DaemonEvent;
+    },
+  });
+  const compactedReplay: DaemonEvent[] = [
+    {
+      id: 11,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'replayed answer' },
+        },
+      },
+    },
+  ];
+  compactedReplay.push({
+    id: 12,
+    v: 1,
+    type: 'turn_complete',
+    data: { promptId: 'prompt-1', stopReason: opts.terminalStopReason },
+  });
+  const reloadedSession = createMockSession({
+    sessionId: opts.sessionId,
+    events: createPendingEvents(reloaded),
+    replaySnapshot: { compactedReplay, liveJournal: [] },
+  });
+  return { sessions: [firstSession, reloadedSession], resyncGate, reloaded };
 }
 
 function createTurnCompleteEvents(

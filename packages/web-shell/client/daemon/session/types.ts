@@ -239,6 +239,31 @@ export interface DaemonSessionProviderProps {
 
 export type DaemonPromptStatus = 'idle' | 'waiting' | 'streaming';
 
+export type DaemonPromptSettlementOutcome =
+  | 'completed'
+  | 'cancelled'
+  | 'failed';
+
+export interface DaemonPromptSettledEvent {
+  sessionId: string;
+  promptId: string;
+  outcome: DaemonPromptSettlementOutcome;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
+export type DaemonPromptSettledListener = (
+  event: DaemonPromptSettledEvent,
+) => void;
+
+export type DaemonPromptSettlementSubscribe = (
+  listener: DaemonPromptSettledListener,
+) => () => void;
+
 export type DaemonNoticeSeverity = 'info' | 'warning' | 'error';
 
 export type DaemonNoticeCategory =

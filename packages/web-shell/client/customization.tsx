@@ -233,6 +233,23 @@ export interface WebShellAssistantMessageInfo {
   timestamp?: number;
 }
 
+export type WebShellAssistantTurnOutcome = 'completed' | 'cancelled' | 'failed';
+
+export interface WebShellAssistantTurnSettledEvent {
+  sessionId: string;
+  /** Daemon terminal prompt identifier and stable host idempotency key. */
+  promptId: string;
+  outcome: WebShellAssistantTurnOutcome;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  /** Final visible assistant message when retained in the mounted transcript. */
+  message?: WebShellAssistantMessageInfo;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
 export interface WebShellAssistantTurnFooterRenderInfo {
   /** User-message id for the head of the completed turn. */
   turnId: string;
