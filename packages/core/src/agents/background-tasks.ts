@@ -917,9 +917,24 @@ export class BackgroundTaskRegistry {
     this.drainWaitQueue();
   }
 
+  // Deliberately NOT gated on `entry.notified`. The cancel-grace timer
+  // (`CANCEL_GRACE_MS`) can finalize the cancellation — and emit the terminal
+  // "was cancelled" notification, setting `notified` — *before* this
+  // escalation lands: the escalation timer is drift-guarded and re-arms
+  // instead of firing when the event loop runs more than a second past its
+  // due time, while the cancel grace timer is a bare `setTimeout`, so a single
+  // stall is enough for the cancel side to win. Reaching this method at all
+  // proves the execution is still alive (the watchdog is detached once it
+  // settles), so the physical slot must still be retained and the entry
+  // settled — otherwise `getRunningBackgroundCount` and `hasRunningTasks()`
+  // free a concurrency slot that is still occupied, and `/clear`, `/resume`,
+  // `/branch` and session switches all proceed over live work. Only the
+  // notification is suppressed, and `emitNotification` is itself idempotent
+  // (`if (entry.notified) return`), so the already-delivered terminal
+  // notification is never re-fired.
   failUnresponsive(agentId: string, error: string): void {
     const entry = this.agents.get(agentId);
-    if (!entry || entry.notified) return;
+    if (!entry) return;
     if (entry.status !== 'running' && entry.status !== 'cancelled') return;
 
     entry.status = 'failed';

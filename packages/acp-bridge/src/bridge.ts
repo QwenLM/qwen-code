@@ -8821,7 +8821,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         restoreEvents.close();
         throw new Error('AcpSessionBridge is shutting down');
       }
-      if (ci.isDying || !aliveChannels.has(ci)) {
+      // Same three-state test as the post-`newSession` twin above, NOT
+      // `ci.isDying`: a recycle landing inside the restore round-trip leaves
+      // the channel `draining` with `isDying === false` — retirement is
+      // deferred while this very restore is in flight (`hasNoSessionWork`
+      // counts `pendingRestoreCount`), so nothing kills it. Installing the
+      // restored session would route fresh work back to the generation the
+      // daemon just judged unsafe for fresh work, and would pin it open until
+      // that session closed, because `retireWhenSessionsDrain` can no longer
+      // fire while `sessionIds.size > 0`.
+      if (ci.state !== 'active' || !aliveChannels.has(ci)) {
         restoreEvents.close();
         throw new Error(
           `Session ${req.sessionId} restored on a closed agent channel`,

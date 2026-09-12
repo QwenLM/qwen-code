@@ -32744,6 +32744,66 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('rejects a resumeSession that resolves after its channel was condemned to drain', async () => {
+      // Restore twin of the `newSession` case above. gen1 is condemned
+      // mid-`session/load`, but retirement is DEFERRED (the in-flight restore
+      // counts as work, so `isDying` stays false). The post-await re-check
+      // must reject the restored session instead of installing it on the
+      // generation the daemon just judged unsafe for fresh work — which would
+      // also pin that generation open until the session closed.
+      const restoreStarted = deferred<void>();
+      const releaseRestore = deferred<void>();
+      const gen1 = makeChannel({
+        newSessionImpl: async () => ({ sessionId: 'sess-drain-a' }),
+        loadSessionImpl: async () => {
+          restoreStarted.resolve();
+          await releaseRestore.promise;
+          return {};
+        },
+      });
+      const gen2 = makeChannel({});
+      let channelSpawns = 0;
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          channelSpawns++ === 0 ? gen1.channel : gen2.channel,
+        sessionScope: 'thread',
+      });
+
+      const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(first.sessionId).toBe('sess-drain-a');
+
+      const restoring = bridge.loadSession({
+        sessionId: 'sess-drain-b',
+        workspaceCwd: WS_A,
+      });
+      await restoreStarted.promise;
+
+      await bridge.requestRuntimeRecycle!(first.sessionId);
+      // gen1 is condemned but must NOT be killed: `first` is still live on it
+      // and the in-flight restore defers retirement.
+      expect(gen1.killed).toBe(false);
+      expect(channelSpawns).toBe(2);
+
+      releaseRestore.resolve();
+      await expect(restoring).rejects.toThrow(
+        /Session sess-drain-b restored on a closed agent channel/,
+      );
+
+      // The restored session was never installed on the draining generation.
+      expect(bridge.sessionCount).toBe(1);
+      expect(() => bridge.getSessionSummary('sess-drain-b')).toThrow(
+        SessionNotFoundError,
+      );
+
+      // The surviving session keeps its own (draining) generation.
+      expect(bridge.getSessionSummary(first.sessionId).sessionId).toBe(
+        'sess-drain-a',
+      );
+      expect(gen1.killed).toBe(false);
+
+      await bridge.shutdown();
+    });
+
     it('rolls a recycle target back to active when the generation cap refuses the replacement', async () => {
       const gen1 = makeChannel({
         newSessionImpl: async () => ({ sessionId: 'sess-gen1' }),

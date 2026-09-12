@@ -332,6 +332,46 @@ describe('BackgroundTaskRegistry', () => {
     expect(meta.recordOnly).toBe(true);
   });
 
+  it('retains the physical slot when the cancel grace timer finalizes before the escalation', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'test-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+    });
+
+    // The cancel grace timer wins the race this time instead of the user's
+    // `task_stop`: the escalation timer is drift-guarded and re-arms when the
+    // event loop runs more than a second past its due time, while
+    // `CANCEL_GRACE_MS` is a bare setTimeout — so the cancellation is already
+    // finalized (terminal notification delivered, `notified` set) by the time
+    // the escalation callback lands. `onUnresponsive` can only fire while the
+    // execution is provably still alive, so the slot must still be retained.
+    registry.cancel('test-1');
+    registry.finalizeCancellationIfPending('test-1');
+    expect(registry.get('test-1')!.status).toBe('cancelled');
+    expect(registry.get('test-1')!.notified).toBe(true);
+    expect(registry.get('test-1')!.retainsPhysicalSlot).toBeUndefined();
+
+    registry.failUnresponsive(
+      'test-1',
+      'Background agent made no model/control progress for 900000ms.',
+    );
+
+    const entry = registry.get('test-1')!;
+    expect(entry.retainsPhysicalSlot).toBe(true);
+    // The occupied slot stays visible to the reset / session-switch guards.
+    expect(registry.hasRunningTasks()).toBe(true);
+    // ...and the already-delivered terminal notification is not re-fired.
+    expect(callback).toHaveBeenCalledOnce();
+  });
+
   describe('resident background agents', () => {
     function makeResident(
       overrides: Partial<ResidentBackgroundAgent> = {},
