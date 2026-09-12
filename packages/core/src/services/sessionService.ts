@@ -53,6 +53,8 @@ import {
 } from '../utils/sessionStorageUtils.js';
 import {
   isSessionArtifactRecord,
+  getWebPreviewSnapshotId,
+  type PersistedSessionArtifact,
   rebuildSessionArtifactSnapshot,
   remapSessionArtifactPayloadForFork,
   selectActiveSideArtifactRecordUuids,
@@ -60,6 +62,10 @@ import {
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
+import {
+  deleteArtifactSnapshot,
+  retainArtifactSnapshot,
+} from '../tools/artifact/artifact-snapshots.js';
 import {
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
@@ -3233,6 +3239,46 @@ export class SessionService {
     }
   }
 
+  private async collectSessionArtifactSnapshots(
+    filePath: string,
+    sessionId: string,
+  ): Promise<PersistedSessionArtifact[]> {
+    const artifacts = new Map<string, PersistedSessionArtifact>();
+    const stream = fs.createReadStream(filePath);
+    const lines = readline.createInterface({
+      input: stream,
+      crlfDelay: Infinity,
+    });
+    try {
+      for await (const line of lines) {
+        for (const record of jsonl.parseLineTolerant<ChatRecord>(
+          line,
+          filePath,
+        )) {
+          if (
+            record.sessionId !== sessionId ||
+            !isSessionArtifactRecord(record)
+          )
+            continue;
+          for (const artifact of rebuildSessionArtifactSnapshot(
+            [record],
+            sessionId,
+          )?.artifacts ?? []) {
+            const id = getWebPreviewSnapshotId(artifact);
+            if (id) artifacts.set(id, artifact);
+          }
+        }
+      }
+    } catch {
+      // Unreadable history must not prevent deleting the session. Keep files
+      // whose ownership cannot be established instead of scanning other projects.
+    } finally {
+      lines.close();
+      stream.destroy();
+    }
+    return [...artifacts.values()];
+  }
+
   private async removeSessionTranscripts(
     sessionId: string,
     options: RemoveSessionOptions = {},
@@ -3261,7 +3307,14 @@ export class SessionService {
         PreparedUsageBeforeTranscriptDeletion
       >();
       const preparedSessionIds = new Set<string>();
+      const artifactSnapshots: PersistedSessionArtifact[] = [];
       for (const identity of physicalSnapshot.identities) {
+        artifactSnapshots.push(
+          ...(await this.collectSessionArtifactSnapshots(
+            identity.filePath,
+            sessionId,
+          )),
+        );
         const prepared = await this.prepareUsageSalvageBestEffort(
           identity.filePath,
         );
@@ -3301,6 +3354,16 @@ export class SessionService {
       }
       if (durableParent) {
         await syncDurableDirectory(durableParent);
+      }
+      for (const artifact of artifactSnapshots) {
+        (options.assertCleanupOwned ?? options.assertCanMutate)?.();
+        await deleteArtifactSnapshot(
+          artifact,
+          this.storage.getRuntimeBaseDir(),
+          sessionId,
+          undefined,
+          options.assertCleanupOwned ?? options.assertCanMutate,
+        );
       }
       return true;
     } catch (error) {
@@ -4044,6 +4107,8 @@ export class SessionService {
 
     const body = forked.map((r) => JSON.stringify(r)).join('\n') + '\n';
     const operationId = randomUUID();
+    const artifactSnapshots =
+      rebuildSessionArtifactSnapshot(forked, newSessionId)?.artifacts ?? [];
     const stagedTranscriptPath = path.join(
       chatsDir,
       `.${newSessionId}.${operationId}.tmp`,
@@ -4103,6 +4168,21 @@ export class SessionService {
         }
       }
 
+      for (const artifact of artifactSnapshots) {
+        try {
+          await retainArtifactSnapshot(
+            artifact,
+            this.storage.getRuntimeBaseDir(),
+            newSessionId,
+            operationId,
+          );
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          this.warn(
+            `branch ${newSessionId} retained saved webpage record ${artifact.id} with missing snapshot storage; its content may be unavailable`,
+          );
+        }
+      }
       try {
         await fs.promises.link(stagedTranscriptPath, targetPath);
       } catch (error) {
@@ -4125,6 +4205,16 @@ export class SessionService {
       }
     } finally {
       const cleanupFailures: string[] = [];
+      if (!committed) {
+        for (const artifact of artifactSnapshots) {
+          await deleteArtifactSnapshot(
+            artifact,
+            this.storage.getRuntimeBaseDir(),
+            newSessionId,
+            operationId,
+          );
+        }
+      }
       await fs.promises.unlink(stagedTranscriptPath).catch((error) => {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
           cleanupFailures.push(`transcript staging: ${String(error)}`);

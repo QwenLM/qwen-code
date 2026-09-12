@@ -53,6 +53,10 @@ allowBuilds:
   '@qwen-code/qwen-code-core@file:packages/core': true
   '@vscode/vsce-sign': true
   esbuild: true
+  # Darwin-only optional dependency whose install script is only
+  # `node-gyp rebuild`; the macOS smoke install reports no ignored build for
+  # it, so false records the behaviour pnpm already has.
+  fsevents: false
   keytar: true
   msw: true
   protobufjs: true

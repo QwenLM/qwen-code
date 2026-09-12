@@ -96,6 +96,7 @@ describe('Session.pendingWorktreeNotice', () => {
     } as unknown as LlmChat;
 
     const mockLlmClient = {
+      isInitialized: vi.fn().mockReturnValue(true),
       getChat: vi.fn().mockReturnValue(mockChat),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,

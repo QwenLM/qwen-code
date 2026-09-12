@@ -53,6 +53,7 @@
 // rest, and it is now in the prompt, in code.
 
 import { readFileSync, statSync } from 'node:fs';
+import { DOCS_NAV_PROFILE } from './docs-nav-profile.js';
 import {
   readRunTranscripts,
   wasGivenTheDiff,
@@ -245,6 +246,7 @@ export interface CoverageFromTranscripts {
 
 /** The plan, as far as coverage needs it. The roster reads more of it — see RosterPlan. */
 interface Plan {
+  reviewProfile?: unknown;
   diffPathAbsolute: string;
   chunks: Array<{
     id: number;
@@ -1549,6 +1551,7 @@ export function verificationGaps(
   // full high pipeline and escalate every medium review back to high. Verify
   // (Step 4) still runs at medium, so its floor below is untouched.
   const balancedMedium = (plan as { effort?: unknown }).effort === 'medium';
+  const focusedNavigation = plan.reviewProfile === DOCS_NAV_PROFILE;
 
   // How a step's agents actually got their prompt. The floor needs the shapes
   // apart, not one boolean, because the fix for each is different — and a refusal
@@ -1714,7 +1717,11 @@ export function verificationGaps(
   const budgetStopped = stop !== null && stop.cause !== 'round-cap';
   const reverseByDesign = budgetStopped && reverse === 'not-built';
   // A repairable reverse-audit gap only at high: medium is complete without it.
-  const reverseGap = !balancedMedium && !reverseByDesign && reverse !== 'ok';
+  const reverseGap =
+    !balancedMedium &&
+    !focusedNavigation &&
+    !reverseByDesign &&
+    reverse !== 'ok';
   if (reverseGap) {
     // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
     // POSIX shell parses as input redirection, so the one repair round Step 6
@@ -1805,6 +1812,19 @@ export function verificationGaps(
     });
   }
 
+  if (focusedNavigation) {
+    // Name what did NOT run: the renderer prefixes "Not reviewed: " to the
+    // subject, so naming the profile here would publish the inverted claim
+    // "Not reviewed: focused navigation review" — the review that ran.
+    gaps.push({
+      subject: 'the full review and reverse audit',
+      reason:
+        'this pass was limited to the static navigation change; findings required independent verification, so it cannot certify Approve',
+      subjectZh: '完整审查与反向审计',
+      reasonZh:
+        '本次仅覆盖静态导航改动，发现仍需独立验证，因此无法认证 Approve',
+    });
+  }
   return { ok: gaps.length === 0, gaps, remediation, unverifiedFindings };
 }
 

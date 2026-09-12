@@ -402,7 +402,6 @@ export const legacyFilenames = [
   'truncatedDiffPreview',
   'trustCommand',
   'trustedFolders',
-  'trustedHooks',
   'TurnBuffer',
   'uiTelemetry',
   'updateCheck',

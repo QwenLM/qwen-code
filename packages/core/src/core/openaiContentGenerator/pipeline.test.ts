@@ -5639,6 +5639,7 @@ describe('ContentGenerationPipeline', () => {
           response_format: { type: 'json_object' },
         }),
         userPromptId,
+        0,
       );
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -5695,6 +5696,7 @@ describe('ContentGenerationPipeline', () => {
           },
         }),
         userPromptId,
+        0,
       );
     });
 
@@ -5744,6 +5746,7 @@ describe('ContentGenerationPipeline', () => {
           },
         }),
         'test-prompt-id',
+        0,
       );
     });
 
@@ -5792,6 +5795,7 @@ describe('ContentGenerationPipeline', () => {
           },
         }),
         'test-prompt-id',
+        0,
       );
     });
 

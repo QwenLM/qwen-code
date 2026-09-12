@@ -922,6 +922,10 @@ describe('ChatEditor context usage ring', () => {
     const button = ring(container)!;
     expect(button).not.toBeNull();
     expect(button.getAttribute('aria-label')).toBe('34.3% context used');
+    expect(button.textContent).toBe('34.3%');
+    expect(
+      button.querySelector('[data-level]')?.getAttribute('data-level'),
+    ).toBe('normal');
     const liveVoice = container.querySelector(
       '[data-testid="live-voice-button"]',
     )!;
@@ -984,7 +988,22 @@ describe('ChatEditor context usage ring', () => {
       ring(container)!.focus();
     });
 
-    expect(document.body.textContent).toContain('53.6k / 1.0M tokens (5.4%)');
+    const tooltip = document.querySelector('[data-slot="tooltip-content"]')!;
+    expect(tooltip.textContent).toContain('Context Usage');
+    expect(tooltip.textContent).toContain('5.4%');
+    expect(tooltip.textContent).toContain('53,600 tokens');
+    expect(tooltip.textContent).toContain('1,000,000 tokens');
+    expect(tooltip.textContent).toContain(
+      'Click to view the breakdown in the conversation.',
+    );
+    expect(
+      tooltip.querySelector<HTMLElement>('[data-level]')?.style.width,
+    ).toBe('5.36%');
+    expect(
+      document.getElementById(
+        ring(container)!.getAttribute('aria-describedby')!,
+      )?.textContent,
+    ).toBe('53,600 of 1,000,000 tokens used');
     const arrow = document.querySelector<SVGElement>(
       '[data-slot="tooltip-arrow"]',
     );
@@ -996,6 +1015,35 @@ describe('ChatEditor context usage ring', () => {
       arrow?.closest('[data-slot="tooltip-content"]')?.getAttribute('class'),
     ).toContain('[--floating-arrow-offset:-1px]');
   });
+
+  it.each([
+    [60, 'normal'],
+    [61, 'warning'],
+    [80, 'warning'],
+    [81, 'error'],
+  ] as const)(
+    'uses %s percent severity in the visible label and focused tooltip',
+    async (tokenCount, level) => {
+      const container = renderChatEditor({
+        tokenCount,
+        contextWindow: 100,
+        onShowContextUsage: vi.fn(),
+      });
+      await act(async () => {
+        ring(container)!.focus();
+      });
+      expect(
+        ring(container)!
+          .querySelector('[data-level]')
+          ?.getAttribute('data-level'),
+      ).toBe(level);
+      expect(
+        document
+          .querySelector('[data-slot="tooltip-content"] [data-level]')
+          ?.getAttribute('data-level'),
+      ).toBe(level);
+    },
+  );
 
   it('escalates the arc color at the /context panel thresholds', () => {
     const arcClass = (container: HTMLElement) =>
@@ -1025,6 +1073,10 @@ describe('ChatEditor context usage ring', () => {
 
     const button = ring(container)!;
     expect(button.getAttribute('aria-label')).toBe('150.0% context used');
+    expect(button.textContent).toBe('150.0%');
+    expect(
+      button.querySelector('[data-level]')?.getAttribute('data-level'),
+    ).toBe('error');
     const arc = button.querySelectorAll('circle')[1];
     expect(arc.getAttribute('stroke-dashoffset')).toBe('0');
   });

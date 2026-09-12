@@ -338,18 +338,23 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    *
    * This method applies DashScope-specific configurations including:
    * - Cache control for the system message, last tool message (when tools are configured),
-   *   and the latest history message
+   *   and the latest history message — or, when a reattach region trails the
+   *   conversation, the last stable block before it
    * - Output token limits based on model capabilities
    * - Vision model specific parameters (vl_high_resolution_images)
    * - Request metadata for session tracking
    *
    * @param request - The original chat completion request parameters
    * @param userPromptId - Unique identifier for the user prompt for session tracking
+   * @param reattachBlockCount - Number of trailing blocks in the last message that
+   *   belong to the regenerated reattach region; the conversation cache breakpoint
+   *   is placed before them. Defaults to 0 (last block of the last message).
    * @returns Configured request with DashScope-specific parameters applied
    */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
+    reattachBlockCount = 0,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     let messages = request.messages;
     let tools = request.tools;
@@ -376,6 +381,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         this.addDashScopeCacheControl(
           request,
           request.stream ? 'all' : 'system_only',
+          reattachBlockCount,
         );
       messages = updatedMessages;
       tools = updatedTools;
@@ -728,6 +734,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private addDashScopeCacheControl(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     cacheControl: 'system_only' | 'all',
+    reattachBlockCount = 0,
   ): {
     messages: OpenAI.Chat.ChatCompletionMessageParam[];
     tools?: ChatCompletionToolWithCache[];
@@ -737,13 +744,24 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const systemIndex = messages.findIndex((msg) => msg.role === 'system');
     const lastIndex = messages.length - 1;
 
+    // With a volatile reattach region trailing the conversation, the breakpoint
+    // must sit on the last STABLE block — before the reattached images — or the
+    // cached prefix shifts every turn (issue #11627). Otherwise keep the
+    // historical "last block of the last message" anchor.
+    const stableBlock =
+      reattachBlockCount > 0 && lastIndex >= 0
+        ? this.lastStableBlock(messages, reattachBlockCount)
+        : { messageIndex: lastIndex, excludeTail: 0 };
+
     const updatedMessages =
       messages.length === 0
         ? messages
         : messages.map((message, index) => {
+            const isConversationAnchor =
+              stableBlock?.messageIndex === index && cacheControl === 'all';
             const shouldAddCacheControl = Boolean(
               (index === systemIndex && systemIndex !== -1) ||
-                (index === lastIndex && cacheControl === 'all'),
+                isConversationAnchor,
             );
 
             if (
@@ -757,7 +775,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
             return {
               ...message,
-              content: this.addCacheControlToContent(message.content),
+              content: this.addCacheControlToContent(
+                message.content,
+                isConversationAnchor && stableBlock
+                  ? stableBlock.excludeTail
+                  : 0,
+              ),
             } as OpenAI.Chat.ChatCompletionMessageParam;
           });
 
@@ -770,6 +793,40 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       messages: updatedMessages,
       tools: updatedTools,
     };
+  }
+
+  /**
+   * Locate the last block that is not part of the trailing reattach region,
+   * walking back through messages as needed. Returns the owning message index
+   * plus how many trailing blocks of that message to skip when stamping the
+   * conversation `cache_control` breakpoint.
+   */
+  private lastStableBlock(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+    reattachBlockCount: number,
+  ): { messageIndex: number; excludeTail: number } | undefined {
+    let remaining = reattachBlockCount;
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const content = (messages[index] as { content?: unknown }).content;
+      // An empty string (an empty tool result, or a reasoning-only assistant
+      // turn) carries no stable block; score it zero so the walk continues to
+      // a message with real content instead of anchoring on a fabricated
+      // zero-length text block.
+      const blockCount =
+        typeof content === 'string'
+          ? content.length > 0
+            ? 1
+            : 0
+          : Array.isArray(content)
+            ? content.length
+            : 0;
+      if (blockCount === 0) continue;
+      if (blockCount > remaining) {
+        return { messageIndex: index, excludeTail: remaining };
+      }
+      remaining -= blockCount;
+    }
+    return undefined;
   }
 
   private addCacheControlToTools(
@@ -794,12 +851,13 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    */
   private addCacheControlToContent(
     content: NonNullable<OpenAI.Chat.ChatCompletionMessageParam['content']>,
+    excludeTail = 0,
   ): ChatCompletionContentPartWithCache[] {
     // Convert content to array format if it's a string
     const contentArray = this.normalizeContentToArray(content);
 
     // Add cache control to the last text item or create one if needed
-    return this.addCacheControlToContentArray(contentArray);
+    return this.addCacheControlToContentArray(contentArray, excludeTail);
   }
 
   /**
@@ -820,18 +878,35 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Add cache control to the content array
+   * Add cache control to the content array, skipping `excludeTail` trailing
+   * blocks (the reattach region) so the breakpoint lands on the last stable
+   * block instead of a regenerated trailing image.
    */
   private addCacheControlToContentArray(
     contentArray: ChatCompletionContentPartWithCache[],
+    excludeTail = 0,
   ): ChatCompletionContentPartWithCache[] {
     if (contentArray.length === 0) {
       return contentArray;
     }
 
-    // Add cache_control to the last text item
-    const lastItem = contentArray[contentArray.length - 1];
-    contentArray[contentArray.length - 1] = {
+    let targetIndex = contentArray.length - 1 - excludeTail;
+    if (targetIndex < 0) {
+      return contentArray;
+    }
+
+    // When a reattach region is being skipped, keep walking the anchor back
+    // past non-text blocks (e.g. a current-turn inline image the next turn
+    // textualizes) so the breakpoint lands on stable text instead of an image.
+    if (excludeTail > 0) {
+      while (targetIndex > 0 && contentArray[targetIndex].type !== 'text') {
+        targetIndex -= 1;
+      }
+    }
+
+    // Add cache_control to the last stable content item.
+    const lastItem = contentArray[targetIndex];
+    contentArray[targetIndex] = {
       ...lastItem,
       cache_control: { type: 'ephemeral' },
     } as ChatCompletionContentPartTextWithCache;

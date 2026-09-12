@@ -18,6 +18,13 @@ import styles from './EnvironmentPanel.module.css';
 
 export type SourcesState = ReturnType<typeof useSessionSources>;
 
+// Escape hatch: the add-source affordance is hidden by default; append
+// ?addSource=1 to the URL to bring it back.
+function isAddSourceEnabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  return new URLSearchParams(window.location.search).get('addSource') === '1';
+}
+
 interface SourcesSectionProps {
   hidden?: boolean;
   state?: SourcesState;
@@ -97,7 +104,7 @@ export function SourcesSection({
           {t('sources.title')}{' '}
           <span className="text-muted-foreground">{entries.length}</span>
         </h3>
-        {state?.supported && (
+        {state?.supported && isAddSourceEnabled() && (
           <button
             type="button"
             className={styles.sectionAction}

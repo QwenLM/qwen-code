@@ -25,6 +25,7 @@ import {
   readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
+import * as environment from '../../config/environment.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { DEADLINE_ENV, hasReviewDeadline } from './lib/deadline.js';
 import { PREBUILD_BUDGET_S, PREBUILD_ENV } from './lib/prebuild.js';
@@ -477,6 +478,7 @@ describe('fetch-pr report assembly', () => {
   const savedEnv: {
     sessionId?: string;
     promptId?: string;
+    automatic?: string;
   } = {};
 
   beforeEach(() => {
@@ -533,11 +535,16 @@ describe('fetch-pr report assembly', () => {
     // sessions), so every path this suite drives starts registered.
     savedEnv.sessionId = process.env['QWEN_CODE_SESSION_ID'];
     savedEnv.promptId = process.env['QWEN_CODE_PROMPT_ID'];
+    savedEnv.automatic = process.env['QWEN_REVIEW_AUTOMATIC'];
+    delete process.env['QWEN_REVIEW_AUTOMATIC'];
     process.env['QWEN_CODE_SESSION_ID'] = 'session-self';
     process.env['QWEN_CODE_PROMPT_ID'] = 'prompt-now';
   });
 
   afterEach(() => {
+    if (savedEnv.automatic === undefined)
+      delete process.env['QWEN_REVIEW_AUTOMATIC'];
+    else process.env['QWEN_REVIEW_AUTOMATIC'] = savedEnv.automatic;
     if (savedEnv.sessionId === undefined) {
       delete process.env['QWEN_CODE_SESSION_ID'];
     } else {
@@ -3019,6 +3026,99 @@ describe('fetch-pr report assembly', () => {
       .map((c) => String(c[0]))
       .some((l) => l.includes('could not read the previous fetch report'));
     expect(warned).toBe(true);
+  });
+
+  describe('automatic navigation profile', () => {
+    const navDiff = [
+      'diff --git a/docs/developers/_meta.ts b/docs/developers/_meta.ts',
+      'index 1234567..2345678 100644',
+      '--- a/docs/developers/_meta.ts',
+      '+++ b/docs/developers/_meta.ts',
+      '@@ -1 +1 @@',
+      "-export default { examples: { title: 'Examples', display: 'hidden' } };",
+      "+export default { examples: 'Examples' };",
+      '',
+    ].join('\n');
+
+    beforeEach(() => {
+      process.env['QWEN_REVIEW_AUTOMATIC'] = 'true';
+      producerMocks.resolveMergeBase.mockReturnValue({
+        sha: BASE,
+        baseFetchFailed: false,
+      });
+      producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+        Buffer.from(
+          args[0] === 'show'
+            ? args[1].startsWith(`${BASE}:`)
+              ? "export default { examples: { title: 'Examples', display: 'hidden' } };"
+              : "export default { examples: 'Examples' };"
+            : navDiff,
+        ),
+      );
+    });
+
+    it('classifies the full immutable base/head capture and skips prebuild', async () => {
+      process.env[PREBUILD_ENV] = '1';
+      const report = await reportFor({ effort: 'high' });
+      expect(report.reviewProfile).toBe('docs-nav');
+      expect(report.effort).toBe('high');
+      expect(producerMocks.gitRaw).toHaveBeenCalledWith(
+        'show',
+        `${BASE}:docs/developers/_meta.ts`,
+      );
+      expect(producerMocks.gitRaw).toHaveBeenCalledWith(
+        'show',
+        'f00df00df00d:docs/developers/_meta.ts',
+      );
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, 'false'])(
+      'keeps manual captures on the normal path (%s)',
+      async (automatic) => {
+        if (automatic === undefined)
+          delete process.env['QWEN_REVIEW_AUTOMATIC'];
+        else process.env['QWEN_REVIEW_AUTOMATIC'] = automatic;
+        expect(await reportFor({})).not.toHaveProperty('reviewProfile');
+      },
+    );
+
+    it('ignores the marker when its value came from a file', async () => {
+      // The beforeEach above sets the variable directly; the read must
+      // distinguish provenance — a value the environment loader sourced
+      // from a FILE (a repository's `.env` / `.qwen/.env`) is not the
+      // operator's, and the reviewed checkout must not choose its own
+      // review depth.
+      const spy = vi
+        .spyOn(environment, 'isFileSourcedEnvKey')
+        .mockImplementation((key) => key === 'QWEN_REVIEW_AUTOMATIC');
+      try {
+        expect(await reportFor({})).not.toHaveProperty('reviewProfile');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('does not classify a degraded base', async () => {
+      producerMocks.resolveMergeBase.mockReturnValue({
+        sha: BASE,
+        baseFetchFailed: true,
+      });
+      expect(await reportFor({})).not.toHaveProperty('reviewProfile');
+    });
+
+    it('does not classify a requested resume', async () => {
+      expect(await reportFor({ resume: true })).not.toHaveProperty(
+        'reviewProfile',
+      );
+    });
+
+    it('does not classify an effective incremental capture', async () => {
+      anchorIsValid();
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental.effective).toBe(true);
+      expect(report).not.toHaveProperty('reviewProfile');
+    });
   });
 
   describe('effort threading', () => {

@@ -622,6 +622,14 @@ export interface ServeSessionContextStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  recovery?: {
+    kind:
+      | 'clean'
+      | 'interrupted_prompt'
+      | 'interrupted_turn'
+      | 'degraded_history';
+    canContinue: boolean;
+  };
   state: {
     models?: unknown;
     modes?: unknown;

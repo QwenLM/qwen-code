@@ -125,11 +125,7 @@ export function ContextUsagePanel({
           {t('common.loading')}
         </div>
       ) : status ? (
-        <ContextUsageMessage
-          status={status}
-          compact
-          detailNameMaxLen={Infinity}
-        />
+        <ContextUsageMessage status={status} compact />
       ) : (
         <div className={styles.state}>{t('contextUsage.unavailable')}</div>
       )}

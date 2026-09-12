@@ -7,7 +7,10 @@
 import { describe, expect, it } from 'vitest';
 import type { Content } from '@google/genai';
 import type { ConversationRecord } from '../services/sessionService.js';
-import { buildSessionRecoveryPlan } from './session-recovery.js';
+import {
+  buildSessionRecoveryPlan,
+  buildSessionRecoveryPlanFromApiHistory,
+} from './session-recovery.js';
 
 function conversation(messages: Content[]): ConversationRecord {
   return {
@@ -103,6 +106,37 @@ describe('buildSessionRecoveryPlan', () => {
     expect(plan.apiHistory.at(-1)?.parts?.[0]?.functionResponse?.id).toBe(
       'call-1',
     );
+  });
+
+  it('leaves a caller-supplied history unmutated while repairing its own copy', () => {
+    const apiHistory: Content[] = [
+      { role: 'user', parts: [{ text: 'read file' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'read_file',
+              args: { path: 'a.txt' },
+            },
+          },
+        ],
+      },
+    ];
+    const supplied = structuredClone(apiHistory);
+
+    const plan = buildSessionRecoveryPlanFromApiHistory({
+      sessionId: 'session-1',
+      apiHistory,
+    });
+
+    expect(plan.kind).toBe('interrupted_turn');
+    // The repair must land on the plan's own copy: a builder that mutated the
+    // argument would corrupt the live chat history the caller passed in.
+    expect(apiHistory).toEqual(supplied);
+    expect(plan.originalApiHistory.at(-1)?.role).toBe('model');
+    expect(plan.apiHistory.at(-1)?.role).toBe('user');
   });
 
   it('marks sessions with history gaps as degraded and disables continuation', () => {

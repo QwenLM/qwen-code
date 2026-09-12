@@ -386,6 +386,7 @@ export const TranscriptViewport = forwardRef<
                   onReloadTranscript: undefined,
                   transcriptReloadPaused: true,
                   onEditUserMessage: undefined,
+                  onSubmitUserMessageEdit: undefined,
                   onShowContextDetail: undefined,
                   onBranchSession: undefined,
                   onRetryClick: undefined,

@@ -70,6 +70,11 @@ import {
 } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import {
+  automaticReviewRequested,
+  DOCS_NAV_PROFILE,
+  isStaticDocsNavDiff,
+} from './lib/docs-nav-profile.js';
+import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
   READ_FILE_CHAR_CAP,
@@ -1820,6 +1825,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         hasDeadline: hasReviewDeadline(process.env),
       }),
       ...planEffortField(args.effort),
+      ...(automaticReviewRequested() &&
+      !args.resume &&
+      !anchor?.incremental.effective &&
+      !baseFetchFailed &&
+      mergeBaseSha !== null &&
+      fullText !== null &&
+      isStaticDocsNavDiff(fullText, (side, path) =>
+        gitRaw(
+          'show',
+          `${side === 'base' ? mergeBaseSha : fetchedSha}:${path}`,
+        ).toString('utf8'),
+      )
+        ? { reviewProfile: DOCS_NAV_PROFILE }
+        : {}),
     };
 
     writeFileSync(out, stringifyPlanReport(result), 'utf8');
@@ -1835,7 +1854,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    Best-effort by contract — the prebuild records a reason instead of
     //    throwing — and absent from the report entirely when not asked for,
     //    so every local review reads the plan it always did.
-    if (prebuildRequested() && !emptyDiff) {
+    if (
+      prebuildRequested() &&
+      !emptyDiff &&
+      result.reviewProfile !== DOCS_NAV_PROFILE
+    ) {
       if (!prebuildCovered()) {
         // CI welds the opt-in together with a session-shell default that
         // carries the budget; a local opt-in has only the built-in 120s

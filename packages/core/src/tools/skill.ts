@@ -58,14 +58,16 @@ When users ask you to perform tasks, check if any of the available skills can he
 
 How to invoke:
 - Use this tool with the skill name only (no arguments)
+- Name the skill exactly as it appears in the available-skills listing; do not shorten or guess a spelling.
 - Examples:
   - \`skill: "pdf"\` - invoke the pdf skill
   - \`skill: "xlsx"\` - invoke the xlsx skill
-  - \`skill: "ms-office-suite:pdf"\` - invoke using fully qualified name
+  - \`skill: "ms-office-suite:pdf"\` - invoke the pdf skill owned by the ms-office-suite extension
   - \`skill: "mcp-prompt", args: "topic"\` - invoke a model-invocable command with arguments
 
 Important:
 - Available skills are listed in <system-reminder> messages in the conversation; only use skills listed there.
+- A skill provided by an extension is registered as \`<extensionName>:<skillName>\` (e.g. \`ms-office-suite:pdf\`), so two extensions offering the same authored name are two different skills. Personal, project, and bundled skills keep the single name their author wrote and are never prefixed.
 - When a skill is relevant, you must invoke this tool IMMEDIATELY as your first action
 - NEVER just announce or mention a skill in your text response without actually calling this tool
 - This is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
@@ -353,19 +355,48 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   restoreLoadedSkillsFromHistory(history: Content[]): void {
     this.clearLoadedSkills();
 
+    const cachedSkills = this.skillManager.getCachedSkills() ?? [];
     const skillByName = new Map<string, { name: string; output: string }>();
-    for (const skill of this.skillManager.getCachedSkills() ?? []) {
+    for (const skill of cachedSkills) {
       const output = buildSkillLlmContent(
         path.dirname(skill.filePath),
         skill.body,
       );
       skillByName.set(skill.name.toLowerCase(), { name: skill.name, output });
     }
+    // Pre-rename transcripts request the authored spelling; fall back to it
+    // only where no skill owns that name outright, or a resumed session
+    // misses the restore and re-injects a body on the next invocation.
+    for (const skill of cachedSkills) {
+      const authored = (skill.authoredName ?? '').trim().toLowerCase();
+      const registryName = skill.name.toLowerCase();
+      if (authored && authored !== registryName && !skillByName.has(authored)) {
+        skillByName.set(authored, skillByName.get(registryName)!);
+      }
+    }
+
+    const restoreSkill = (requestedName: unknown, output: unknown) => {
+      if (typeof requestedName !== 'string' || typeof output !== 'string')
+        return;
+      const skill = skillByName.get(requestedName.toLowerCase());
+      if (
+        !skill ||
+        (output !== skill.output && !output.startsWith(`${skill.output}\n`))
+      ) {
+        return;
+      }
+      this.loadedSkillContents.add(skill.output);
+      this.loadedSkillNames.add(skill.name);
+    };
 
     const pendingSkillCalls = new Map<string, string>();
+    const pendingExecCalls = new Set<string>();
     for (const content of history) {
       for (const part of content.parts ?? []) {
         const call = part.functionCall;
+        if (call?.name === ToolNames.EXEC && typeof call.id === 'string') {
+          pendingExecCalls.add(call.id);
+        }
         const requestedSkill = call?.args?.['skill'];
         if (
           call?.name === ToolNames.SKILL &&
@@ -379,6 +410,44 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         const response = part.functionResponse;
         const output = response?.response?.['output'];
         if (
+          response?.name === ToolNames.EXEC &&
+          typeof response.id === 'string' &&
+          pendingExecCalls.delete(response.id) &&
+          typeof output === 'string'
+        ) {
+          let payload: unknown;
+          try {
+            payload = JSON.parse(output.split('\n', 1)[0]);
+          } catch {
+            continue;
+          }
+          if (
+            !payload ||
+            typeof payload !== 'object' ||
+            !('toolResults' in payload) ||
+            !Array.isArray(payload.toolResults)
+          ) {
+            continue;
+          }
+          const results: unknown[] = payload.toolResults;
+          for (const result of results) {
+            if (
+              result &&
+              typeof result === 'object' &&
+              'name' in result &&
+              result.name === ToolNames.SKILL &&
+              'args' in result &&
+              result.args &&
+              typeof result.args === 'object' &&
+              'skill' in result.args &&
+              'output' in result
+            ) {
+              restoreSkill(result.args.skill, result.output);
+            }
+          }
+          continue;
+        }
+        if (
           response?.name !== ToolNames.SKILL ||
           typeof response.id !== 'string' ||
           typeof output !== 'string'
@@ -389,16 +458,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         const requestedName = pendingSkillCalls.get(response.id);
         pendingSkillCalls.delete(response.id);
         if (requestedName === undefined) continue;
-        const skill = skillByName.get(requestedName.toLowerCase());
-        if (
-          !skill ||
-          (output !== skill.output && !output.startsWith(`${skill.output}\n`))
-        ) {
-          continue;
-        }
-
-        this.loadedSkillContents.add(skill.output);
-        this.loadedSkillNames.add(skill.name);
+        restoreSkill(requestedName, output);
       }
     }
   }

@@ -90,8 +90,6 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   text: string;
-  /** User-authored text to display when `text` contains model-only context. */
-  displayText?: string;
   /**
    * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
    * message)`, `(file: …)`) rather than something the user typed.

@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import {
   MAX_IDENTITY_BYTES,
   type RepositoryContextProvider,
@@ -165,6 +166,52 @@ function run(
 }
 
 describe('repo-context providers and trust boundary', () => {
+  it.each([
+    { requiredAgents: [], effort: 'high', revoke: false },
+    { requiredAgents: ['6c'] as const, effort: 'high', revoke: true },
+    { requiredAgents: ['test-matrix'] as const, effort: 'high', revoke: false },
+    { requiredAgents: ['6c'] as const, effort: 'medium', revoke: false },
+  ])(
+    'applies roster policy before revoking the profile: %j',
+    ({ requiredAgents, effort, revoke }) => {
+      const root = temp();
+      const worktree = join(root, 'worktree');
+      mkdirSync(worktree);
+      const { planPath } = run(
+        root,
+        worktree,
+        {
+          files: [{ path: 'docs/_meta.ts' }],
+          reviewProfile: DOCS_NAV_PROFILE,
+          prNumber: '11426',
+          ownerRepo: 'QwenLM/qwen-code',
+          worktreePath: worktree,
+          effort,
+          srcDiffLines: 0,
+          diffLines: 13,
+        },
+        [
+          {
+            provide: () => ({
+              ...context(),
+              requiredAgents: [...requiredAgents],
+            }),
+          },
+        ],
+      );
+      expect(readJson(planPath)).toMatchObject({
+        repositoryContext: { provider: 'fake-provider' },
+      });
+      if (revoke)
+        expect(readJson(planPath)).not.toHaveProperty('reviewProfile');
+      else
+        expect(readJson(planPath)).toHaveProperty(
+          'reviewProfile',
+          DOCS_NAV_PROFILE,
+        );
+    },
+  );
+
   it('writes null and clears stale context when no provider matches', () => {
     const root = temp();
     const worktree = join(root, 'worktree');

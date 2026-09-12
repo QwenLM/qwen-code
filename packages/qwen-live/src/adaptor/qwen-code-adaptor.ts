@@ -28,11 +28,13 @@
  */
 
 import { DaemonClient } from '@qwen-code/sdk';
+import { publicActivity } from './public-activity.js';
 import type {
   BackendAdaptor,
   BackendCapabilities,
   BackendEvent,
   BackendHandle,
+  CancelJobResult,
   ContentBlock,
   PermissionDecision,
   PermissionOption,
@@ -102,6 +104,11 @@ export interface DaemonClientLike {
     opts?: Record<string, unknown>,
   ): Promise<{ accepted: boolean; messageId?: string }>;
   cancel(sessionId: string, clientId?: string): Promise<void>;
+  removePendingPrompt(
+    sessionId: string,
+    promptId: string,
+    opts?: { clientId?: string },
+  ): Promise<{ removed: boolean }>;
   respondToSessionPermission(
     sessionId: string,
     requestId: string,
@@ -506,7 +513,10 @@ export class QwenCodeAdaptor implements BackendAdaptor {
           return {
             status: 'accepted',
             joinedActiveTurn: true,
-            ...(state.activeJobRef !== undefined
+            ...(steered.messageId
+              ? { joinedMessageId: steered.messageId }
+              : {}),
+            ...(!steered.messageId && state.activeJobRef !== undefined
               ? { jobRef: state.activeJobRef }
               : {}),
             note: 'joined the currently running task',
@@ -587,6 +597,19 @@ export class QwenCodeAdaptor implements BackendAdaptor {
 
   async cancel(handle: BackendHandle): Promise<void> {
     await this.client.cancel(handle.id, this.sessions.get(handle.id)?.clientId);
+  }
+
+  async cancelJob(
+    handle: BackendHandle,
+    jobRef: string,
+  ): Promise<CancelJobResult> {
+    const state = this.sessions.get(handle.id);
+    if (handle.adaptor !== this.name || !state || state.closed)
+      return 'not_found';
+    const result = await this.client.removePendingPrompt(handle.id, jobRef, {
+      ...(state.clientId ? { clientId: state.clientId } : {}),
+    });
+    return result.removed ? 'stopping' : 'not_found';
   }
 
   async respondPermission(
@@ -694,6 +717,26 @@ export class QwenCodeAdaptor implements BackendAdaptor {
   ): BackendEvent[] {
     const data = isRecord(envelope.data) ? envelope.data : {};
     switch (envelope.type) {
+      case 'mid_turn_message_injected': {
+        const jobRef = envelope.promptId;
+        if (!jobRef || !Array.isArray(data['messageIds'])) return [];
+        if (state.activeJobRef === undefined) {
+          state.activeJobRef = jobRef;
+          state.busy = true;
+          state.turnBuffer = '';
+        }
+        return data['messageIds'].flatMap((messageId) =>
+          typeof messageId === 'string' && messageId
+            ? [
+                {
+                  type: 'turn_joined' as const,
+                  messageId,
+                  jobRef,
+                },
+              ]
+            : [],
+        );
+      }
       case 'pending_prompt_started': {
         state.busy = true;
         state.turnBuffer = '';
@@ -706,19 +749,35 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       case 'session_update': {
         const update = isRecord(data['update']) ? data['update'] : undefined;
         if (!update) return [];
+        if (
+          state.activeJobRef === undefined &&
+          envelope.promptId !== undefined
+        ) {
+          state.activeJobRef = envelope.promptId;
+          state.busy = true;
+          state.turnBuffer = '';
+        }
         const kind = update['sessionUpdate'];
+        const activity = publicActivity(
+          update,
+          envelope.promptId ?? state.activeJobRef,
+        );
         if (kind === 'agent_message_chunk') {
           const content = isRecord(update['content'])
             ? update['content']
             : undefined;
           const text = content?.['text'];
-          if (typeof text === 'string') {
+          if (
+            typeof text === 'string' &&
+            (envelope.promptId === undefined ||
+              envelope.promptId === state.activeJobRef)
+          ) {
             state.turnBuffer = `${state.turnBuffer}${text}`;
             if (state.turnBuffer.length > MAX_DETAIL_CHARS) {
               state.turnBuffer = tailSlice(state.turnBuffer, MAX_DETAIL_CHARS);
             }
           }
-          return [];
+          return activity ? [activity] : [];
         }
         if (kind === 'tool_call') {
           const title = update['title'];
@@ -734,14 +793,21 @@ export class QwenCodeAdaptor implements BackendAdaptor {
             },
           ];
         }
-        return [];
+        return activity ? [activity] : [];
       }
       case 'turn_complete': {
-        state.busy = false;
         const jobRef = envelope.promptId ?? state.activeJobRef;
-        state.activeJobRef = undefined;
-        const detail = state.turnBuffer.trim();
-        state.turnBuffer = '';
+        const active =
+          envelope.promptId === undefined || jobRef === state.activeJobRef;
+        const detail = active ? state.turnBuffer.trim() : '';
+        if (active) {
+          state.busy = false;
+          state.activeJobRef = undefined;
+          state.turnBuffer = '';
+        }
+        if (data['stopReason'] === 'cancelled') {
+          return [{ type: 'turn_error', jobRef, error: 'cancelled' }];
+        }
         return [
           {
             type: 'turn_complete',
@@ -753,10 +819,12 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       }
       case 'turn_error':
       case 'prompt_cancelled': {
-        state.busy = false;
         const jobRef = envelope.promptId ?? state.activeJobRef;
-        state.activeJobRef = undefined;
-        state.turnBuffer = '';
+        if (envelope.promptId === undefined || jobRef === state.activeJobRef) {
+          state.busy = false;
+          state.activeJobRef = undefined;
+          state.turnBuffer = '';
+        }
         const message = data['message'] ?? data['error'];
         return [
           {

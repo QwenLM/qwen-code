@@ -38,6 +38,7 @@ import type {
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
   DaemonSessionContextStatus,
+  DaemonContinueSessionResult,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
@@ -3343,6 +3344,24 @@ export class DaemonClient {
     );
   }
 
+  /** Admit an interrupted turn without adding a user message. */
+  async continueSession(
+    sessionId: string,
+    opts: { clientId?: string; signal?: AbortSignal } = {},
+  ): Promise<DaemonContinueSessionResult> {
+    opts.signal?.throwIfAborted();
+    return await this.jsonRequest<DaemonContinueSessionResult>(
+      `/session/${urlEncode(sessionId)}/continue`,
+      'POST /session/:id/continue',
+      {
+        method: 'POST',
+        clientId: opts.clientId,
+        signal: opts.signal,
+        mode: 'rest',
+      },
+    );
+  }
+
   async resumeSession(
     sessionId: string,
     req: RestoreSessionRequest = {},
@@ -4078,6 +4097,30 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/attachments');
         }
         return (await res.json()) as DaemonSessionAttachmentReference;
+      },
+    );
+  }
+
+  async readSessionArtifactContent(
+    sessionId: string,
+    artifactId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<string> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/artifacts/${urlEncode(artifactId)}/content`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/artifacts/:artifactId/content',
+          );
+        }
+        return await res.text();
       },
     );
   }

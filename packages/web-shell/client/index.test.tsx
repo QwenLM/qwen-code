@@ -1,14 +1,25 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, useContext } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { webcrypto } from 'node:crypto';
+import {
+  TurnNotificationContext,
+  type TurnNotificationObserver,
+} from './daemon/session/turn-notification-context';
+import { useBrowserNotificationSettings } from './browser-turn-notifications';
 
 // Drive a render throw from inside DaemonWorkspaceProvider so we can prove the
 // top-level boundary sits *outside* the daemon providers (a boundary nested
 // under them couldn't catch their own throw).
 let workspaceShouldThrow = false;
+const sessionUnmounted = vi.fn();
 const sessionProviderProps: Array<Record<string, unknown>> = [];
 const appProps: Array<Record<string, unknown>> = [];
+const notificationObservers: Array<TurnNotificationObserver | undefined> = [];
+const notificationSettings: Array<
+  ReturnType<typeof useBrowserNotificationSettings>
+> = [];
 let workspaceCapabilities: {
   workspaceCwd?: string;
   workspaces?: Array<{
@@ -36,7 +47,10 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
     }: {
       children: React.ReactNode;
     }) => {
+      React.useEffect(() => () => sessionUnmounted(), []);
       sessionProviderProps.push(props);
+      notificationObservers.push(useContext(TurnNotificationContext));
+      notificationSettings.push(useBrowserNotificationSettings());
       return React.createElement(React.Fragment, null, children);
     },
     useWorkspace: () => ({
@@ -89,8 +103,11 @@ afterEach(() => {
     container.remove();
   }
   workspaceShouldThrow = false;
+  sessionUnmounted.mockClear();
   sessionProviderProps.length = 0;
   appProps.length = 0;
+  notificationObservers.length = 0;
+  notificationSettings.length = 0;
   workspaceCapabilities = {
     workspaceCwd: '/workspace',
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
@@ -98,6 +115,7 @@ afterEach(() => {
   addWorkspace.mockReset();
   refreshCapabilities.mockReset();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('WebShellWithProviders top-level boundary', () => {
@@ -112,6 +130,86 @@ describe('WebShellWithProviders top-level boundary', () => {
     const container = render(<WebShellWithProviders />);
     expect(container.querySelector('[data-testid="app-ok"]')).not.toBeNull();
     expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(notificationObservers[0]).toBeUndefined();
+    expect(notificationSettings[0]).toBeUndefined();
+  });
+
+  it('connects default notifications above the session provider without enabling them', () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockReturnValue(null);
+    render(<WebShellWithProviders browserNotifications={{}} />);
+    expect(notificationObservers[0]).toBeDefined();
+    expect(notificationSettings[0]?.enabled).toBe(false);
+    expect(appProps[0]).not.toHaveProperty('browserNotifications');
+  });
+
+  it('delivers configured branding through the public entry and preserves its observer on updates', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockReturnValue(null);
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    vi.stubGlobal('isSecureContext', true);
+    vi.stubGlobal('crypto', webcrypto);
+    const notification = vi.fn();
+    vi.stubGlobal(
+      'Notification',
+      Object.assign(notification, { permission: 'granted' }),
+    );
+    render(
+      <WebShellWithProviders
+        browserNotifications={{
+          defaultEnabled: true,
+          appName: 'DataAgent',
+          iconUrl: 'https://cdn.example.com/icon.png',
+        }}
+      />,
+    );
+    const observer = notificationObservers[0]!;
+    observer.retain('public-entry');
+    await act(async () => {
+      observer.observe(
+        'public-entry',
+        'session',
+        {
+          type: 'turn_complete',
+          data: {
+            sessionId: 'session',
+            promptId: 'first',
+            stopReason: 'end_turn',
+          },
+        },
+        false,
+        { sessionTitle: 'Task', promptText: 'Request', responseText: 'Done' },
+      );
+      await vi.waitFor(() => expect(notification).toHaveBeenCalledOnce());
+    });
+    expect(notification).toHaveBeenCalledWith(
+      'DataAgent · Task',
+      expect.objectContaining({
+        icon: 'https://cdn.example.com/icon.png',
+        body: 'This turn has completed.\nPrompt: Request\nReply: Done',
+      }),
+    );
+    act(() =>
+      mounted
+        .at(-1)!
+        .root.render(
+          <WebShellWithProviders
+            browserNotifications={{ appName: 'Next App' }}
+          />,
+        ),
+    );
+    expect(notificationObservers.at(-1)).toBe(observer);
+    expect(notificationSettings.at(-1)?.enabled).toBe(true);
+  });
+
+  it('toggles notification integration without remounting the session', () => {
+    render(<WebShellWithProviders browserNotifications={{}} />);
+    const observer = notificationObservers.at(-1);
+    const root = mounted.at(-1)!.root;
+    act(() => root.render(<WebShellWithProviders />));
+    expect(notificationObservers.at(-1)).toBeUndefined();
+    expect(notificationSettings.at(-1)).toBeUndefined();
+    act(() => root.render(<WebShellWithProviders browserNotifications={{}} />));
+    expect(notificationObservers.at(-1)).toBe(observer);
+    expect(sessionUnmounted).not.toHaveBeenCalled();
   });
 
   it('starts on an empty session by default', () => {

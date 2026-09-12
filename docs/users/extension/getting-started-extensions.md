@@ -281,6 +281,8 @@ see [Hooks](../features/hooks).
 After restarting Qwen Code, your custom skills, subagents, and hooks will be
 available via `/skills`, `/agents manage`, and `/hooks`.
 
+An extension skill is registered under its owner's name: the skill above becomes `my-first-extension:code-analyzer`, so you run it as `/my-first-extension:code-analyzer`. `skills.disabled` can block it under either that name or the plain `code-analyzer` you authored; `skills.enabled` opts it back in under the prefixed name only. See [Extension Skills](../features/skills.md#extension-skills).
+
 ## Step 6: Add a Custom `QWEN.md`
 
 You can provide persistent context to the model by adding a `QWEN.md` file to your extension. This is useful for giving the model instructions on how to behave or information about your extension's tools. Note that you may not always need this for extensions built to expose commands and prompts.

@@ -27,8 +27,6 @@ import {
   PollingChannelBase,
   sanitizeDisplayText,
   sanitizeLogText,
-  sanitizePromptText,
-  truncateCodePoints,
 } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
 
@@ -1419,7 +1417,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ? await this.fetchPrMeta(ctx)
         : await this.fetchIssueMeta(ctx);
     const title = meta.title || ctx.subjectTitle;
-    const displayTitle = truncateCodePoints(sanitizePromptText(title), 500);
     const details =
       reason === 'review_requested'
         ? `Author: ${meta.user?.login || 'unknown'} | State: ${meta.state || 'unknown'} | Draft: ${meta.draft ? 'true' : 'false'} | Branch: ${meta.head?.ref || 'unknown'} → ${meta.base?.ref || 'unknown'}`
@@ -1437,10 +1434,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         reason === 'review_requested'
           ? 'Return a formal review summary with verified actionable findings, or a concise no-blocker result.'
           : 'Triage this issue and respond with the next action.',
-      displayText:
-        reason === 'review_requested'
-          ? `Review requested: ${displayTitle}`
-          : `Issue assigned: ${displayTitle}`,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1491,7 +1484,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       threadId: ctx.threadId,
       messageId: String(first.id),
       text: `Review these new comments and output exactly ${NO_REPLY_SENTINEL} if no public reply is needed:\n${summary}`,
-      displayText: summary,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
