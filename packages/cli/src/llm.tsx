@@ -42,6 +42,10 @@ import * as cliConfig from './config/config.js';
 import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
 import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
+  disableKittyProtocol,
+  popKittyProtocolFlags,
+} from './ui/utils/kittyProtocolDetector.js';
+import {
   buildDisabledSkillNamesProvider,
   buildEnabledSkillNamesProvider,
   loadCliConfig,
@@ -236,10 +240,16 @@ export function setupUncaughtExceptionHandler(config: Config) {
     // buffer which is discarded on teardown. Leave the alternate screen
     // *before* writing the error so the user actually sees it. Guard on
     // isTTY: with stdout redirected to a file the escapes would corrupt it.
+    // The Kitty keyboard flags are popped around the buffer switch through
+    // the detector — a pop must land on the buffer it balanced, or the
+    // user's shell inherits a dangling push (#7779). (The detector's stdout
+    // hook would self-heal the ordering even if these calls were missed.)
     if (process.stdout.isTTY) {
       try {
+        popKittyProtocolFlags(); // pop the alternate screen's push first
         process.stdout.write('\x1b[?1049l'); // leave alternate screen
         process.stdout.write('\x1b[?25h'); // show cursor
+        disableKittyProtocol(); // pop the main screen's push
       } catch {
         // stdout may be broken; the debug log above is the primary record.
       }
