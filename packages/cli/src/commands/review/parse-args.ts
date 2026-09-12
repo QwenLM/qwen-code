@@ -292,6 +292,12 @@ function isFlag(token: string): boolean {
   return token.length > 1 && token.startsWith('-');
 }
 
+/** What `--deadline` accepts: whole minutes or `none`, whitespace trimmed. */
+function isDeadlineValue(token: string): boolean {
+  const t = token.trim();
+  return /^\d+$/.test(t) || t.toLowerCase() === 'none';
+}
+
 function isPureInteger(token: string): boolean {
   return /^\d+$/.test(token);
 }
@@ -639,14 +645,21 @@ export function parseReviewArgs(
     // which wall the run gets instead.
     if (token === '--deadline' || token.startsWith('--deadline=')) {
       unknownFlags.push('--deadline');
+      // Consume the next token only when it can BE a deadline (minutes, or
+      // `none`): a pure number after `--deadline` is minutes far more often
+      // than a PR, so it is swallowed rather than reviewed; anything else —
+      // a PR URL, a path — stays on the line for the ordinary target rules.
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      const consumed =
+        !token.includes('=') && next !== undefined && isDeadlineValue(next);
       warnings.push(
         '`--deadline` is an option of the capture commands, not of ' +
-          "/review; ignored — the run records the plan's default wall.",
+          '/review; ignored' +
+          (consumed ? ` together with its value ${JSON.stringify(next)}` : '') +
+          ' — pass it to `fetch-pr`, `capture-local` or `plan-diff` to set ' +
+          'the wall.',
       );
-      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
-      if (!token.includes('=') && next !== undefined && !isFlag(next)) {
-        i++;
-      }
+      if (consumed) i++;
       continue;
     }
 

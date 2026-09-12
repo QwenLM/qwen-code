@@ -1898,10 +1898,14 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(r.remediation.join(' ')).toContain('reverse audit:');
   });
 
-  it('a round-cap stop DOES suppress the not-built gap once the plan’s wall has closed — the rebuild it names would be refused', () => {
-    // Same shape, but the plan carries a wall that ran out: the remediation
-    // `--round 1` would meet the budget gate's refusal as deterministically
-    // as a time-budget stop's, so naming it is a FIX that cannot run.
+  it('a round-cap stop DOES suppress the not-built gap once the plan’s wall can no longer admit the rebuild it names', () => {
+    // Same shape, but the plan carries a wall the gate can no longer admit
+    // a round under (the trigger is `remaining < reserve + round`, which
+    // opens before the wall itself closes): the remediation `--round 1`
+    // would meet the budget gate's refusal as deterministically as a
+    // time-budget stop's, so naming it is a FIX that cannot run. A 3600s
+    // wall is below what `--deadline` records — a hand-written or pre-rule
+    // plan — which is fine for the arithmetic under test.
     const plan = coveredPlan([]);
     const parsed = JSON.parse(readFileSync(plan, 'utf8'));
     writeFileSync(
@@ -1921,6 +1925,33 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(r.event).toBe('COMMENT');
     expect(r.body).toContain('reverse-audit round cap of 3');
     expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+  });
+
+  it('a round-cap stop beside an OPEN plan wall still owes the not-built gap — the rebuild it names would be admitted', () => {
+    // The wall every real capture records (here a `--deadline 120`-shaped
+    // 7200s flag wall, captured now): the gate would admit `--round 1`, so
+    // the round-cap marker exempts nothing and the remediation stands. The
+    // wall-less sibling above never reaches the arithmetic; this one does.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 7200,
+        deadlineSource: 'flag',
+      }),
+    );
+    // Rewriting the plan moved its mtime past the records coveredPlan()
+    // wrote; date it a few seconds back so they stay this run's, and the
+    // wall stays open with hours to spare.
+    const captured = new Date(Date.now() - 5000);
+    utimesSync(plan, captured, captured);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    expect(r.remediation.join(' ')).toContain('reverse audit:');
   });
 
   it('renders the budget stop bilingually on a Han-description PR', () => {

@@ -291,6 +291,26 @@ const CASES: Case[] = [
     },
   },
   {
+    name: '--deadline none (space form) is consumed with its value',
+    raw: '--deadline none',
+    expect: {
+      targetType: 'local',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline followed by a PR URL: the URL is not a deadline, so it stays the target',
+    raw: '--deadline https://github.com/QwenLM/qwen-code/pull/6711',
+    expect: {
+      targetType: 'pr-url',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
     name: '--deadline=none is consumed whole; a following flag is not its value',
     raw: '--deadline=none --deadline --comment 6711',
     expect: {

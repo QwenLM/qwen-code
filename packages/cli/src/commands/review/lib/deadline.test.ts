@@ -51,9 +51,11 @@ import {
   budgetStopEntry,
   captureDeadline,
   hasReviewDeadline,
+  effectiveMinimumDeadlineSeconds,
   minimumDeadlineSeconds,
   parseDeadlineOption,
   planReserveSeconds,
+  shortestDeadlineMinutes,
   resolveReviewDeadline,
   budgetStopEntryZh,
   claimRetirementDegradeNote,
@@ -1119,8 +1121,15 @@ describe('parseDeadlineOption — the flag grammar', () => {
     // so equality never admits — while 91 minutes clears it. Priced from the
     // default reserve rule: the shell's overrides do not move the ruling.
     expect(minimumDeadlineSeconds(5400)).toBe(5400);
+    expect(shortestDeadlineMinutes()).toBe(91);
+    // The message carries two true numbers: what THIS wall would need (its
+    // own reserve, which grows with it — so not an instruction) and the
+    // shortest wall the rule admits, which is the number to reach for.
     expect(() => parseDeadlineOption('90')).toThrow(
-      /--deadline 90 cannot hold a convergence: .*MORE than 90 minutes/,
+      /--deadline 90 cannot hold a convergence: two rounds at the 30-minute estimate plus the 30-minute reserve this wall would keep need more than 90 minutes; the shortest wall that can hold one is 91 minutes/,
+    );
+    expect(() => parseDeadlineOption('60')).toThrow(
+      /plus the 20-minute reserve this wall would keep need more than 80 minutes; the shortest wall that can hold one is 91 minutes/,
     );
     expect(parseDeadlineOption('91')).toEqual({ seconds: 5460 });
     expect(() => parseDeadlineOption('50')).toThrow(TypeError);
@@ -1201,8 +1210,11 @@ describe('captureDeadline — what a capture records, and whether the clock is e
     ).toEqual({
       // The default wall is STILL written under an env clock: the env wins
       // at read time, but a plan that outlives its environment (a resume in
-      // a shell that no longer exports it) needs a bound to fall back on —
-      // and it is the default, so it never flips the huge tier.
+      // a shell that no longer exports it) needs a bound to fall back on.
+      // The ENV clock is what flips the huge tier here (`explicit: true`),
+      // and the capture stamps that 3 into the plan, where it survives the
+      // environment's disappearance; the recorded wall is the default, so a
+      // later env-less reader sees a default wall beside a recorded cap.
       fields: {
         deadlineSeconds: DEFAULT_DEADLINE_SECONDS.huge,
         deadlineSource: 'default',
@@ -1223,6 +1235,46 @@ describe('captureDeadline — what a capture records, and whether the clock is e
     expect(() => captureDeadline({}, '10', HUGE)).toThrow(
       /cannot hold a convergence/,
     );
+  });
+
+  it("prices the flag a second time with THIS shell's overrides — what the gate will read — unless an env epoch makes it inert", () => {
+    // `parseDeadlineOption` rules under the default pricing (the same in
+    // every shell); the capture then asks whether the shell's reserve or
+    // compose-floor override would refuse the wall at zero elapsed, which
+    // is the expression the gate evaluates, and refuses it now instead.
+    const reserve = { [RESERVE_ENV]: '4800' };
+    expect(effectiveMinimumDeadlineSeconds(reserve, 6000)).toBe(8400);
+    expect(shortestDeadlineMinutes(reserve)).toBe(141);
+    for (const minutes of ['91', '100', '109', '140']) {
+      expect(() => captureDeadline(reserve, minutes, HUGE)).toThrow(
+        /cannot hold a convergence.*shortest wall that can hold one is 141 minutes.*priced with this shell/,
+      );
+    }
+    expect(captureDeadline(reserve, '141', HUGE).fields).toEqual({
+      deadlineSeconds: 141 * 60,
+      deadlineSource: 'flag',
+    });
+    // The compose-floor twin: a raised floor lifts the reserve the same way.
+    const floor = { [COMPOSE_FLOOR_ENV]: '3600' };
+    expect(effectiveMinimumDeadlineSeconds(floor, 6000)).toBe(7200);
+    expect(() => captureDeadline(floor, '120', HUGE)).toThrow(
+      /cannot hold a convergence/,
+    );
+    expect(captureDeadline(floor, '121', HUGE).fields.deadlineSeconds).toBe(
+      7260,
+    );
+    // A lowered reserve does NOT admit below the env-free floor: the
+    // default ruling stands first, so 90 is refused in every shell.
+    expect(() => captureDeadline({ [RESERVE_ENV]: '0' }, '90', HUGE)).toThrow(
+      /cannot hold a convergence/,
+    );
+    // Under an env epoch the flag is inert at every gate, so the shell's
+    // overrides are not consulted — the env-free ruling alone applies.
+    const clocked = { ...reserve, [DEADLINE_ENV]: String(NOW_S + 7200) };
+    expect(captureDeadline(clocked, '100', HUGE).fields.deadlineSeconds).toBe(
+      6000,
+    );
+    expect(() => captureDeadline(clocked, '90', HUGE)).toThrow(TypeError);
   });
 });
 
@@ -1432,9 +1484,9 @@ describe('the gates read a plan-recorded wall, with the reserve the wall implies
   });
 
   it('reverse-audit: a short `--deadline` scales its reserve down instead of spending the wall on it', () => {
-    // A real `--deadline 120` (7200s, the shortest band above the floor)
-    // captured an hour ago: its reserve is a third of the wall, 2400 — not
-    // the flat 4800 the CI path assumes for a six-hour attempt.
+    // A real `--deadline 120` (7200s, comfortably above the 91-minute parse
+    // floor) captured an hour ago: its reserve is a third of the wall, 2400
+    // — not the flat 4800 the CI path assumes for a six-hour attempt.
     const dir = mkdtempSync(join(tmpdir(), 'deadline-gate-'));
     dirs.push(dir);
     const path = join(dir, 'plan.json');
@@ -1533,7 +1585,10 @@ describe('the gates read a plan-recorded wall, with the reserve the wall implies
     // verifier's gate rests on survives because the round gate prices the
     // round on top: with remaining just above the floor, round admission is
     // refused while a verify build is still admitted.
-    // A 50-minute wall (the shortest a flag may record) captured so that
+    // A 50-minute wall — below what `--deadline` will record (its floor is
+    // just over 90 minutes, and even the shortest admissible flag wall
+    // implies a reserve above the compose floor), so the floor regime is
+    // reachable only via a hand-written or pre-rule plan — captured so that
     // floor + 1 seconds remain.
     const dir = mkdtempSync(join(tmpdir(), 'deadline-gate-'));
     dirs.push(dir);

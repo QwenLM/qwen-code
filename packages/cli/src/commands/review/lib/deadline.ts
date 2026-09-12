@@ -95,9 +95,11 @@ export const DEADLINE_ENV = 'QWEN_REVIEW_DEADLINE_EPOCH';
  *         explicit clock the cap is 5 and a round is ~90 min, so a healthy
  *         run is ~10h or more. 16h.
  *
- * — 1.5–2× the longest healthy run each tier measured (3A has no single
- * CI budget: its PRs straddle the 300-line band), in whole hours a reader
- * can hold in their head. Calibrated against the wall, not the round: the gate prices
+ * — 1.5–2× the longest healthy run: measured for 3A (293 min), PROJECTED
+ * for 3B and huge from runs the CI wall itself cut (5.5–8h and ~10h are
+ * inferences from where the gate stopped them, not observed finishes), in
+ * whole hours a reader can hold in their head. 3A has no single CI budget:
+ * its PRs straddle the 300-line band. Calibrated against the wall, not the round: the gate prices
  * rounds itself (#9243 is the size-aware first-round estimate that is still
  * open). An operator who knows better passes `--deadline`.
  */
@@ -530,15 +532,67 @@ export function parseDeadlineOption(raw: unknown): DeadlineOption {
   // ruling is the same in every environment.
   const floor = minimumDeadlineSeconds(seconds);
   if (seconds <= floor) {
-    throw new TypeError(
-      `--deadline ${minutes} cannot hold a convergence: the two rounds it ` +
-        `needs (2 × ${DEFAULT_ROUND_SECONDS / 60} min at the round estimate) ` +
-        `plus the tail reserve it would keep need MORE than ` +
-        `${Math.floor(floor / 60)} minutes — and the fan-out before round 1 ` +
-        `spends the wall too`,
-    );
+    throw new TypeError(deadlineTooShort(minutes, floor, {}));
   }
   return { seconds };
+}
+
+/**
+ * The refusal for a wall that cannot hold a convergence. Two numbers, both
+ * true: what THIS wall would need (its own reserve grows with it, so that
+ * figure is not an instruction) and the shortest wall the rule admits under
+ * the pricing in `env` — the number to reach for.
+ */
+function deadlineTooShort(
+  minutes: number,
+  floor: number,
+  env: NodeJS.ProcessEnv,
+): string {
+  const reserve = floor - 2 * DEFAULT_ROUND_SECONDS;
+  return (
+    `--deadline ${minutes} cannot hold a convergence: two rounds at the ` +
+    `${DEFAULT_ROUND_SECONDS / 60}-minute estimate plus the ` +
+    `${Math.ceil(reserve / 60)}-minute reserve this wall would keep need ` +
+    `more than ${Math.floor(floor / 60)} minutes; the shortest wall that ` +
+    `can hold one is ${shortestDeadlineMinutes(env)} minutes` +
+    ` — and the fan-out before round 1 spends any wall too`
+  );
+}
+
+/**
+ * The shortest `--deadline` the rule admits, in whole minutes: the reserve
+ * a wall implies grows with the wall, so this is a fixed point, found by
+ * scanning rather than solved, so it follows the pricing (`env` overrides
+ * included) instead of a constant that can drift. 91 under the default
+ * rule.
+ */
+export function shortestDeadlineMinutes(env: NodeJS.ProcessEnv = {}): number {
+  for (let m = 1; m < 24 * 60; m++) {
+    const s = m * 60;
+    if (s > effectiveMinimumDeadlineSeconds(env, s)) return m;
+  }
+  return 24 * 60;
+}
+
+/**
+ * `minimumDeadlineSeconds` priced the way the GATE will price this wall in
+ * the shell at hand: the `RESERVE_ENV` override when set, else the plan's
+ * reserve floored at the effective compose floor — the same expression
+ * `reverseAuditBudgetExhausted` evaluates. What `captureDeadline` refuses
+ * on, so a wall this shell would refuse at zero elapsed is not recorded.
+ */
+export function effectiveMinimumDeadlineSeconds(
+  env: NodeJS.ProcessEnv,
+  wallSeconds: number,
+): number {
+  return (
+    readNonNegativeSeconds(
+      env,
+      RESERVE_ENV,
+      planReserveSeconds(wallSeconds, env),
+    ) +
+    2 * DEFAULT_ROUND_SECONDS
+  );
 }
 
 /**
@@ -587,6 +641,22 @@ export function captureDeadline(
       },
       explicit: envExplicit,
     };
+  }
+  // The env-priced leg: `parseDeadlineOption` ruled under the default
+  // pricing so its answer is the same in every shell; THIS shell's reserve
+  // and compose-floor overrides are what the gate will read, so a wall they
+  // would refuse at zero elapsed is refused here too. Skipped when the
+  // environment exports an epoch: the flag is inert at every gate while
+  // that epoch stands, and the shell a later env-less continuation runs in
+  // is not this one.
+  if (!envExplicit) {
+    const floor = effectiveMinimumDeadlineSeconds(env, option.seconds);
+    if (option.seconds <= floor) {
+      throw new TypeError(
+        deadlineTooShort(option.seconds / 60, floor, env) +
+          " (priced with this shell's reserve / compose-floor overrides)",
+      );
+    }
   }
   return {
     fields: { deadlineSeconds: option.seconds, deadlineSource: 'flag' },
@@ -784,6 +854,13 @@ function readNonNegativeSeconds(
  * deadline resolves at all: no epoch in the environment and no wall in the
  * plan (a capture told `--deadline none`, or a plan older than the field).
  */
+// The round price handed in is `expectedAdmissionSeconds`', whose last
+// span is open-ended (measured admission-to-now): a round genuinely in flight
+// for that long costs that long, and so does an idle gap inside a live
+// attempt — a paused session, a provider stall — which is charged as work.
+// Deliberate worst-case pricing (see `costliestSpanSeconds`); now that every
+// local run has a wall it is the local run's exposure too, and the refusal
+// message names the priced round so a reader can see when that is the cause.
 export function reverseAuditBudgetExhausted(
   env: NodeJS.ProcessEnv,
   roundCostSeconds: number,

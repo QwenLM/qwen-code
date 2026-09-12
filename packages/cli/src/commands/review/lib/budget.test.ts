@@ -1219,13 +1219,15 @@ describe('the huge reduction applies only under an explicit clock — a ceiling 
   const LARGE = { srcDiffLines: 900, diffLines: 900 };
   const SMALL = { srcDiffLines: 100, diffLines: 100 };
 
-  it('a huge diff with no deadline is just a large 3B diff', () => {
+  it('a huge diff without an explicit clock is just a large 3B diff', () => {
     // Three is not a claim that a huge diff converges sooner — it has more
     // defects and more territory, and on recall it deserves MORE rounds. It is
-    // a claim that five ~90-minute rounds do not fit a six-hour ceiling. With
-    // no ceiling the premise is absent, and trading recall away to fit a wall
-    // that is not there is a pure loss on exactly the tier where recall
-    // matters most.
+    // a claim that five ~90-minute rounds do not fit a six-hour ceiling. The
+    // premise is an EXPLICIT clock — CI's epoch or `--deadline` — not the
+    // presence of a wall: the plan's default wall is sized above the run,
+    // so under it the premise is absent, and trading recall away to fit a
+    // ceiling that is not there is a pure loss on exactly the tier where
+    // recall matters most.
     expect(reverseAuditRoundTier(HUGE, false)).toBe(5);
     expect(reverseAuditRoundTier(HUGE, true)).toBe(3);
     expect(reviewBudget(HUGE, { hasDeadline: false }).reverseAuditRounds).toBe(
