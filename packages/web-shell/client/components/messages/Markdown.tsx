@@ -16,6 +16,7 @@ import {
   writeClipboardText,
 } from '../../utils/clipboard';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
+import { useInView } from '../../hooks/useInView';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import type { Components, Options } from 'react-markdown';
 import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
@@ -477,6 +478,15 @@ function CodeBlock({
   const documentMode = useTranscriptRenderMode() === 'document';
   const [html, setHtml] = useState<string | null>(null);
   const [copied, flashCopied] = useCopiedFlash();
+  // Viewport gating for the settled highlight: switching back into a long
+  // session mounts every fence at once, and tokenizing all of them in the same
+  // commit is the jank #6181 describes. Blocks outside the (padded) viewport
+  // stay plain; scrolling near one re-runs the effect below and takes the
+  // normal cache → warm → cold path — for an already-highlighted block that is
+  // a synchronous cache hit.
+  const { ref: inViewRef, inView } = useInView<HTMLDivElement>({
+    rootMargin: '200px 0px',
+  });
 
   const { label, lang, resolvedLang } = resolveFenceLanguage(
     extractRawFenceLanguage(className),
@@ -486,6 +496,16 @@ function CodeBlock({
     appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
 
   useEffect(() => {
+    // Offscreen blocks stay plain text: no size scan, no cache probe, no
+    // tokenization. The effect re-runs when the block crosses the padded
+    // viewport boundary (inView flips), so the highlight lands just before the
+    // block becomes visible. Setting null also drops any stale highlight from
+    // a previous incarnation of a reused CodeBlock instance.
+    if (!inView) {
+      setHtml(null);
+      return;
+    }
+
     // Stream code as plain text. Highlighting a growing fence on every chunk
     // repeatedly tokenizes its entire contents and can dominate rendering for
     // long responses; the settled render below highlights the final text once.
@@ -541,7 +561,7 @@ function CodeBlock({
     return () => {
       cancelled = true;
     };
-  }, [code, documentMode, lang, resolvedLang, shikiTheme, isStreaming]);
+  }, [code, documentMode, inView, lang, resolvedLang, shikiTheme, isStreaming]);
 
   const handleCopy = () => {
     void writeClipboardText(code)
@@ -560,7 +580,7 @@ function CodeBlock({
   }
 
   return (
-    <div className={styles.codeBlock}>
+    <div className={styles.codeBlock} ref={inViewRef}>
       <div className={styles.codeBlockHeader}>
         <span className={styles.codeBlockLang}>{label}</span>
         <button className={styles.codeBlockCopy} onClick={handleCopy}>

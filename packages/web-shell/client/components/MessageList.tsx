@@ -5754,7 +5754,15 @@ export const MessageList = memo(
               <div
                 key={key}
                 data-index={index}
-                className={getRowClassName(item)}
+                // Offscreen rows keep their markup but skip layout/paint via
+                // CSS (see .nonVirtualRow) — the whole point of leaving the
+                // virtualizer off below the threshold is cheaper mounting,
+                // and this keeps long-but-not-virtual transcripts cheap to
+                // scroll on mobile (#6181).
+                className={joinClassNames(
+                  getRowClassName(item),
+                  styles.nonVirtualRow,
+                )}
                 data-message-row-key={String(key)}
                 data-source-block-ids={displayItemSourceBlockIds(
                   item,
