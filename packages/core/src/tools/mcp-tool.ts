@@ -476,6 +476,29 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       const toolRegistry = this.cliConfig.getToolRegistry();
       await toolRegistry.discoverToolsForServer(this.serverName);
 
+      // Registry presence is NOT liveness (R3-6): the failure-restore in
+      // `discoverToolsForServer` re-registers the pre-failure snapshot
+      // under the identical key, so `ensureTool` resolving merely means
+      // the old tool object is back — bound to the client that just
+      // failed. Treating that as "reconnected" replays the call onto a
+      // dead transport for all MAX_RECONNECT_RETRIES cycles. The
+      // manager's own client-scoped status is the liveness signal, the
+      // same read `/mcp reconnect` trusts. Fall back to presence only
+      // when there is no client-scoped source at all (test fixtures
+      // stubbing the registry without a manager).
+      const manager = (
+        toolRegistry as { getMcpClientManager?: () => McpClientManagerLike }
+      ).getMcpClientManager?.();
+      if (
+        manager &&
+        manager.getServerStatus(this.serverName) !== MCPServerStatus.CONNECTED
+      ) {
+        debugLogger.error(
+          `MCP server '${this.serverName}' did not come back (status: ${manager.getServerStatus(this.serverName)})`,
+        );
+        return null;
+      }
+
       const newTool = await toolRegistry.ensureTool(this.registeredToolName);
       if (newTool instanceof DiscoveredMCPTool) {
         debugLogger.info(
@@ -558,9 +581,13 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     // background MCP discovery use (`discoverToolsForServer` then
     // `setTools()`). Non-interactive surfaces (ACP/Channel) have no
     // `mcp-client-update` subscriber, so without the trailing `setTools()`
-    // the re-registered tools would never reach the model (#11272).
-    // `skipHistoryReveal` matches a background refresh: there is no user
-    // turn to reveal history into.
+    // the re-registered tools would never reach the model (#11272). Default
+    // options (history reveal ON): the rediscovery above dropped the
+    // `revealedDeferred` state that makes deferred MCP tools declared at
+    // all, and a mid-session cancel leaves the chat history (with its
+    // `functionCall` parts naming those tools) alive — the reveal pass is
+    // what puts them back in front of the model, matching
+    // `reconcileMcpServerAcrossLiveConfigs`.
     void this.reconnectAndRefreshDeclarations();
   }
 
@@ -631,7 +658,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       try {
         const llmClient = this.cliConfig?.getLlmClient();
         if (llmClient?.isInitialized()) {
-          await llmClient.setTools({ skipHistoryReveal: true });
+          await llmClient.setTools();
         }
       } catch (error) {
         debugLogger.error(

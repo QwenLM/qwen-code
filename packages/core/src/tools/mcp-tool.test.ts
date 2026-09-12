@@ -2388,9 +2388,13 @@ describe('DiscoveredMCPTool', () => {
       expect(retryClient.callTool).not.toHaveBeenCalled();
       // The model's tool declarations are refreshed too — non-interactive
       // surfaces (ACP/Channel) have no `mcp-client-update` subscriber, so a
-      // registry-only re-registration would never reach the model.
+      // registry-only re-registration would never reach the model. Default
+      // options (no skipHistoryReveal): the rediscovery dropped the
+      // deferred-reveal state, and the history reveal pass is what puts
+      // the live history's `functionCall`-referenced tools back in the
+      // model's declaration list (R3-4).
       await vi.waitFor(() => expect(setTools).toHaveBeenCalledTimes(1));
-      expect(setTools).toHaveBeenCalledWith({ skipHistoryReveal: true });
+      expect(setTools).toHaveBeenCalledWith();
 
       // A second cancel inside the cooldown window must not fire another
       // purge + spawn cycle: recovery is bounded per server. Without the
@@ -2405,6 +2409,77 @@ describe('DiscoveredMCPTool', () => {
       );
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+    });
+
+    it('propagates the original error when the server never came back despite the restored snapshot (R3-6)', async () => {
+      // The failure-restore re-registers the pre-failure snapshot under
+      // the identical key, so `ensureTool` resolving is no longer
+      // evidence of a live connection — treating it as such reports
+      // "Successfully reconnected" for a dead server and replays the
+      // call onto the dead transport for all retry cycles. The
+      // manager's client-scoped status is the liveness signal.
+      const params = { param: 'test' };
+      const connectionError = new Error(
+        'Connection closed unexpectedly by the server',
+      );
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(connectionError),
+      };
+      // The restored snapshot: the SAME tool object comes back from
+      // ensureTool, still holding the dead client.
+      const restoredTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mockMcpClient,
+      );
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(restoredTool);
+      const getServerStatus = vi
+        .fn()
+        .mockReturnValue(MCPServerStatus.DISCONNECTED);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+          getMcpClientManager: () => ({ getServerStatus }),
+        }),
+      };
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true, // trust
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+        undefined,
+        undefined,
+        { readOnlyHint: true },
+      );
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      await expect(
+        tool.build(params).execute(new AbortController().signal),
+      ).rejects.toThrow('Connection closed unexpectedly');
+
+      // The original call was made exactly once — no replay onto the
+      // dead transport, no retry cycle burned on a server that never
+      // came back. The liveness gate fires after the rediscovery pass
+      // but BEFORE ensureTool: presence would have resolved the stale
+      // snapshot and burned the retry cycles.
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(ensureTool).toHaveBeenCalledTimes(0);
     });
 
     it('should not retry a callTool AbortError when the signal was never aborted', async () => {

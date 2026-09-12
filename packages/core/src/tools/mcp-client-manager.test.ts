@@ -3650,6 +3650,94 @@ describe('McpClientManager — PR 14 guardrails', () => {
     expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
   });
 
+  it('disconnectServer evicts a replacement whose connect failed and frees its slot (R1-15 liveness)', async () => {
+    // R1-15 follow-up: map PRESENCE is not liveness. A rediscovery that
+    // installed a replacement during the operator's `await
+    // client.disconnect()` but whose own `connect()` rejected leaves a
+    // DISCONNECTED client in the map ('already_held' meant no fresh
+    // reservation; the discovery catch deliberately keeps it). Treating
+    // presence as "keep everything" strands the budget slot forever and
+    // re-arms the health monitor against the operator's intent. The
+    // finally must key on a LIVE (CONNECTED) replacement instead.
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    let releaseOperatorDisconnect: (() => void) | undefined;
+    let disconnectCalls = 0;
+    let call = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      call += 1;
+      if (call === 1) {
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockImplementation(() => {
+            disconnectCalls += 1;
+            if (disconnectCalls === 1) {
+              return new Promise<void>((resolve) => {
+                releaseOperatorDisconnect = resolve;
+              });
+            }
+            return Promise.resolve(undefined);
+          }),
+          getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
+        } as unknown as McpClient;
+      }
+      // The replacement: connect rejects, and its recorded status is
+      // DISCONNECTED (the shape `getServerStatus` reports for it). Every
+      // client past #1 is the connect-failing shape EXCEPT the one that
+      // connects for 'b' at the end of this test — mock #3 flips back to
+      // the connected shape so the post-fix admission of 'b' is observable.
+      const failing = () => ({
+        connect: vi.fn().mockRejectedValue(new Error('connect refused')),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(() => MCPServerStatus.DISCONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      });
+      const healthy = () => ({
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      });
+      if (call === 3) {
+        return healthy() as unknown as McpClient;
+      }
+      return failing() as unknown as McpClient;
+    });
+    const budgeted = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = mkManager({
+      config: budgeted,
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
+    await manager.discoverAllMcpTools(budgeted);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+
+    const operatorDisconnect = manager.disconnectServer('a');
+    await vi.waitFor(() => expect(releaseOperatorDisconnect).toBeDefined());
+    // Rediscovery during the window: installs the replacement, its
+    // connect() rejects, the discovery catch keeps the (dead) client in
+    // the map with the still-held slot.
+    await manager.discoverMcpToolsForServer('a', budgeted);
+    releaseOperatorDisconnect?.();
+    await operatorDisconnect;
+
+    // The operator's disconnect must undo the dead replacement: slot
+    // released (so 'b' is admissible under the cap of 1), no client
+    // tracked. Keying on presence instead of liveness leaves
+    // reservedSlots=['a'] and refuses 'b' forever.
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual([]);
+    // 'b' is admitted under the freed slot and its client (mock #3,
+    // connect-resolved) reaches CONNECTED.
+    await manager.discoverMcpToolsForServer('b', budgeted);
+    expect(manager.getServerStatus('b')).toBe(MCPServerStatus.CONNECTED);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['b']);
+  });
+
   it('discoverMcpToolsForServerInternal rejects disabled servers (wenshao R7 #2 line 528)', async () => {
     // Reachable from /mcp reconnect, OAuth re-discovery, and health
     // monitor reconnect. Pre-fix none of these paths checked the

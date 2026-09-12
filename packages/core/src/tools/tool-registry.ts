@@ -232,6 +232,18 @@ export class ToolRegistry {
   // observes the in-flight outcome instead of purging again.
   private serverDiscoveryInFlight = new Map<string, Promise<void>>();
 
+  // Monotonic per-server generation, bumped by every teardown-intent path
+  // (`removeMcpToolsByServer`, reached from `disconnectServer` /
+  // `disableMcpServer` / direct removal). A discovery pass captures the
+  // generation before awaiting the manager; if it moved by the time the
+  // pass settles, the server was deliberately torn down mid-pass and the
+  // snapshot restore must NOT run — it would re-expose a server the
+  // operator just removed, bound to a client that no longer exists
+  // (R3-7). The teardown paths also drop the in-flight dedup entry so a
+  // post-teardown reconnect starts a fresh pass instead of inheriting
+  // the pre-teardown promise (R2-1 round 4).
+  private serverTeardownGeneration = new Map<string, number>();
+
   constructor(
     config: Config,
     eventEmitter?: EventEmitter,
@@ -503,6 +515,17 @@ export class ToolRegistry {
    * @param serverName The name of the server to remove tools from.
    */
   removeMcpToolsByServer(serverName: string): void {
+    // Teardown intent: bump the generation and drop the dedup entry so
+    // (a) a discovery pass pending across this teardown skips its
+    // restore, and (b) a reconnect issued AFTER this teardown starts a
+    // fresh manager pass rather than observing the pre-teardown pass's
+    // outcome.
+    this.serverTeardownGeneration.set(
+      serverName,
+      (this.serverTeardownGeneration.get(serverName) ?? 0) + 1,
+    );
+    this.serverDiscoveryInFlight.delete(serverName);
+
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
         this.tools.delete(name);
@@ -644,14 +667,24 @@ export class ToolRegistry {
     if (inFlight) {
       return inFlight;
     }
-    const run = this.discoverToolsForServerInner(serverName).finally(() => {
+    // Capture the teardown generation before the await; the resolve-path
+    // restore is suppressed if a teardown path bumped it mid-pass (R3-7).
+    const discoveryGeneration =
+      this.serverTeardownGeneration.get(serverName) ?? 0;
+    const run = this.discoverToolsForServerInner(
+      serverName,
+      discoveryGeneration,
+    ).finally(() => {
       this.serverDiscoveryInFlight.delete(serverName);
     });
     this.serverDiscoveryInFlight.set(serverName, run);
     return run;
   }
 
-  private async discoverToolsForServerInner(serverName: string): Promise<void> {
+  private async discoverToolsForServerInner(
+    serverName: string,
+    discoveryGeneration: number,
+  ): Promise<void> {
     // Snapshot the server's current registrations so a FAILED rediscovery
     // can put them back. The purge below runs before the await, so without
     // restoration a failed rediscovery leaves the server with no tools for
@@ -692,20 +725,59 @@ export class ToolRegistry {
       // rethrow; five policy early-returns also resolve without
       // registering). The restore must therefore fire on the observed
       // OUTCOME — a server that had registrations and came back with
-      // none — not only on a rejection. `previousTools.length > 0` (not
-      // getServerStatus, which reports DISCONNECTED for names it never
-      // saw) is the "was live before" fact; a server whose rediscovery
-      // legitimately produced nothing new still gets its old
-      // registrations back, which is the best available state.
-      if (
+      // none — not only on a rejection.
+      //
+      // R3-3/R3-5/R1-3 (round 4): each registry is gated on ITS OWN
+      // emptiness, and only a deliberate teardown (R3-7 generation bump
+      // below) or an operator filter/policy removal (R1-3 round 4)
+      // suppresses the restore.
+      // - gating prompts on `previousTools.length` dropped a prompt-only
+      //   server's registrations forever (R3-3);
+      // - restoring prompts into a non-empty prompt registry hits
+      //   `registerPrompt`'s rename-on-collision and leaves a
+      //   `<server>_<prompt>` ghost bound to the dead client (R3-5);
+      // - restoring tools the operator's CURRENT includeTools/excludeTools
+      //   just filtered out re-exposes excluded tools (R1-3 entrance 1);
+      // - restoring after the server was torn down mid-pass undoes the
+      //   teardown (R3-7).
+      const generationNow = this.serverTeardownGeneration.get(serverName) ?? 0;
+      const tornDownWhilePending = generationNow !== discoveryGeneration;
+      const serverConfig =
+        this.config.getMcpServers()?.[serverName] ??
+        this.config.getRuntimeMcpServers?.()[serverName];
+      const policyRemoved =
+        !serverConfig ||
+        this.config.isMcpServerDisabled?.(serverName) === true ||
+        this.config.isMcpServerPendingApproval?.(serverName) === true;
+      const toolsEmpty = this.countMcpToolsForServer(serverName) === 0;
+      const promptsEmpty =
+        this.config.getPromptRegistry().getPromptsByServer(serverName)
+          .length === 0;
+      const resourcesEmpty =
+        this.config.getResourceRegistry().getResourcesByServer(serverName)
+          .length === 0;
+      const restoreTools =
+        !tornDownWhilePending &&
+        !policyRemoved &&
         previousTools.length > 0 &&
-        this.countMcpToolsForServer(serverName) === 0
-      ) {
+        toolsEmpty &&
+        this.snapshotPassesOperatorFilter(serverName, previousTools);
+      const restorePrompts =
+        !tornDownWhilePending &&
+        !policyRemoved &&
+        previousPrompts.length > 0 &&
+        promptsEmpty;
+      const restoreResources =
+        !tornDownWhilePending &&
+        !policyRemoved &&
+        previousResources.length > 0 &&
+        resourcesEmpty;
+      if (restoreTools || restorePrompts || restoreResources) {
         this.restoreServerRegistrations(
           serverName,
-          previousTools,
-          previousPrompts,
-          previousResources,
+          restoreTools ? previousTools : [],
+          restorePrompts ? previousPrompts : [],
+          restoreResources ? previousResources : [],
           previousRevealed,
         );
       }
@@ -737,6 +809,39 @@ export class ToolRegistry {
       }
     }
     return count;
+  }
+
+  /**
+   * Whether every snapshotted tool passes the operator's CURRENT
+   * includeTools/excludeTools filter. The filters are applied only at
+   * discovery (`McpClient`'s `isEnabled`); `registerTool` never consults
+   * them — so a snapshot taken before the operator excluded a tool must
+   * not be blindly restored after a reconnect that (correctly) registered
+   * nothing. Matching uses `serverToolName`, the raw declaration name the
+   * discovery path feeds `isEnabled`, not the normalized schema name.
+   */
+  private snapshotPassesOperatorFilter(
+    serverName: string,
+    tools: DiscoveredMCPTool[],
+  ): boolean {
+    const serverConfig =
+      this.config.getMcpServers()?.[serverName] ??
+      this.config.getRuntimeMcpServers?.()[serverName];
+    const include = serverConfig?.includeTools;
+    const exclude = serverConfig?.excludeTools;
+    if (!include?.length && !exclude?.length) {
+      return true;
+    }
+    return tools.every((tool) => {
+      const raw = tool.serverToolName;
+      if (exclude?.length && matchesAnyServerPattern(raw, exclude)) {
+        return false;
+      }
+      if (include?.length && !matchesAnyServerPattern(raw, include)) {
+        return false;
+      }
+      return true;
+    });
   }
 
   private restoreServerRegistrations(

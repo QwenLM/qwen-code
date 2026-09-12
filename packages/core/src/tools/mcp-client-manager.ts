@@ -1985,9 +1985,27 @@ export class McpClientManager {
         // in that window. Deleting by name would evict that replacement —
         // a connected client with a live child that no one holds a
         // reference to (`stop()` snapshots `this.clients`, so it is never
-        // reaped). Only drop the entry if it is still the client we
-        // actually disconnected.
-        if (this.clients.get(serverName) === client) {
+        // reaped). Only a LIVE replacement earns that protection: one
+        // whose own `connect()` failed is tracked here as DISCONNECTED —
+        // keeping it would strand its budget slot and leave the health
+        // monitor armed against operator intent.
+        const replacement = this.clients.get(serverName);
+        const liveReplacement =
+          replacement !== undefined &&
+          replacement !== client &&
+          replacement.getStatus() === MCPServerStatus.CONNECTED;
+        if (!liveReplacement) {
+          if (replacement !== undefined && replacement !== client) {
+            try {
+              await replacement.disconnect();
+            } catch {
+              // Best-effort: the replacement never came up or is already
+              // dead; its records are dropped below regardless.
+            }
+            // The replacement's discovery path may have armed a health
+            // check after this method's own top-of-call stopHealthCheck.
+            this.stopHealthCheck(serverName);
+          }
           this.clients.delete(serverName);
           this.connectedConfigKeys.delete(serverName);
           this.consecutiveFailures.delete(serverName);
@@ -1999,9 +2017,9 @@ export class McpClientManager {
     }
     // explicit operator-driven disconnect releases the budget
     // slot AND drops the entry from the per-pass refusal log — but only
-    // when no live client remains for the name. A rediscovery that
-    // installed a replacement client during the `await
-    // client.disconnect()` above re-used the still-held reservation
+    // when no live client remains for the name. After the finally above,
+    // a tracked entry survives ONLY as a live (CONNECTED) replacement,
+    // whose rediscovery re-used the still-held reservation
     // (`tryReserveSlot` returns 'already_held' and does not re-add the
     // name), so releasing here would drop that replacement's slot:
     // `reservedSlots` under-counts live clients and the enforce branch
