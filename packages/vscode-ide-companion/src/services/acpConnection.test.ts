@@ -79,6 +79,14 @@ function createMockChild(overrides?: Record<string, unknown>) {
 }
 
 describe('AcpConnection process spawning', () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('runs the managed ACP child in Electron Node mode', async () => {
     vi.stubEnv('ELECTRON_RUN_AS_NODE', '');
     vi.stubEnv('QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE', '');
@@ -103,6 +111,7 @@ describe('AcpConnection process spawning', () => {
   });
 
   it('creates a POSIX process group for shutdown escalation', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     spawnMock.mockReturnValue(createMockChild());
     const conn = new AcpConnection() as unknown as {
       connect: (cliEntryPath: string) => Promise<void>;
@@ -112,11 +121,23 @@ describe('AcpConnection process spawning', () => {
 
     await conn.connect(process.execPath);
 
-    expect(spawnMock).toHaveBeenCalledWith(
-      process.execPath,
-      expect.any(Array),
-      expect.objectContaining({ detached: process.platform !== 'win32' }),
-    );
+    const options = spawnMock.mock.calls.at(-1)?.[2] as { detached?: boolean };
+    expect(options.detached).toBe(true);
+  });
+
+  it('does not detach the ACP child on Windows', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    spawnMock.mockReturnValue(createMockChild());
+    const conn = new AcpConnection() as unknown as {
+      connect: (cliEntryPath: string) => Promise<void>;
+      setupChildProcessHandlers: () => Promise<void>;
+    };
+    conn.setupChildProcessHandlers = vi.fn().mockResolvedValue(undefined);
+
+    await conn.connect(process.execPath);
+
+    const options = spawnMock.mock.calls.at(-1)?.[2] as { detached?: boolean };
+    expect(options.detached).toBe(false);
   });
 });
 
@@ -278,6 +299,7 @@ describe('AcpConnection child exit cleanup', () => {
   it('disconnect closes stdin before escalating', () => {
     const mockKill = vi.fn();
     const end = vi.fn();
+    const stdinOnce = vi.fn();
     const conn = createConnection({
       child: createMockChild({
         kill: mockKill,
@@ -285,7 +307,7 @@ describe('AcpConnection child exit cleanup', () => {
           destroyed: false,
           writableEnded: false,
           end,
-          once: vi.fn(),
+          once: stdinOnce,
         },
       }),
       sdkConnection: {},
@@ -294,6 +316,7 @@ describe('AcpConnection child exit cleanup', () => {
 
     (conn as unknown as AcpConnection).disconnect();
     expect(end).toHaveBeenCalledOnce();
+    expect(stdinOnce).toHaveBeenCalledWith('error', expect.any(Function));
     expect(mockKill).not.toHaveBeenCalled();
   });
 
@@ -365,6 +388,30 @@ describe('AcpConnection child exit cleanup', () => {
     expect(childKill).not.toHaveBeenCalled();
   });
 
+  it('degrades to child.kill() when taskkill fails', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const childKill = vi.fn().mockReturnValue(true);
+    const conn = createConnection({
+      child: createMockChild({ kill: childKill }),
+    });
+    execFileMock.mockImplementation(
+      (
+        _file: unknown,
+        _args: unknown,
+        _options: unknown,
+        callback: (error: Error) => void,
+      ) => {
+        callback(new Error('spawn taskkill.exe ENOENT'));
+      },
+    );
+
+    (conn as unknown as AcpConnection).disconnect();
+    vi.advanceTimersByTime(75_000);
+
+    expect(execFileMock).toHaveBeenCalled();
+    expect(childKill).toHaveBeenCalled();
+  });
+
   it('cancels escalation when the child exits normally', () => {
     let onExit: (() => void) | undefined;
     const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
@@ -395,7 +442,9 @@ describe('AcpConnection child exit cleanup', () => {
         }
       }),
     });
+    const onDisconnected = vi.fn();
     const conn = createConnection({ child: oldChild });
+    (conn as unknown as AcpConnection).onDisconnected = onDisconnected;
     const setup = (
       conn as unknown as { setupChildProcessHandlers: () => Promise<void> }
     ).setupChildProcessHandlers();
@@ -405,13 +454,45 @@ describe('AcpConnection child exit cleanup', () => {
     conn.sdkConnection = {};
     conn.sessionId = 'replacement';
 
-    exitHandler?.(0, null);
+    exitHandler?.(3, 'SIGTERM');
     await vi.advanceTimersByTimeAsync(1_000);
-    await expect(setup).rejects.toThrow(/failed to start/i);
+    await expect(setup).rejects.toThrow(
+      'Qwen ACP process failed to start (exit code: 3, signal: SIGTERM)',
+    );
 
     expect(conn.child).toBe(replacement);
     expect(conn.sdkConnection).toEqual({});
     expect(conn.sessionId).toBe('replacement');
+    expect(onDisconnected).not.toHaveBeenCalled();
+  });
+
+  it('invokes onDisconnected with the exit info when the current child exits', async () => {
+    let exitHandler:
+      | ((code: number | null, signal: string | null) => void)
+      | undefined;
+    const child = createMockChild({
+      stderr: { on: vi.fn() },
+      on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+        if (event === 'exit') {
+          exitHandler = listener as typeof exitHandler;
+        }
+      }),
+    });
+    const onDisconnected = vi.fn();
+    const conn = createConnection({ child });
+    (conn as unknown as AcpConnection).onDisconnected = onDisconnected;
+    const setup = (
+      conn as unknown as { setupChildProcessHandlers: () => Promise<void> }
+    ).setupChildProcessHandlers();
+    void setup.catch(() => {});
+
+    exitHandler?.(1, 'SIGTERM');
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(onDisconnected).toHaveBeenCalledWith(1, 'SIGTERM');
+    expect(conn.child).toBeNull();
+    expect(conn.sdkConnection).toBeNull();
+    expect(conn.sessionId).toBeNull();
   });
 });
 
