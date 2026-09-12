@@ -659,7 +659,7 @@ describe('AppContainer State Management', () => {
       handleFolderTrustSelect: vi.fn(),
       isRestarting: false,
     });
-    mockedUseGeminiStream.mockReturnValue({
+    mockedUseLlmStream.mockReturnValue({
       streamingState: StreamingState.Idle,
       submitQuery: vi.fn(),
       initError: null,
