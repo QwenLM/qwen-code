@@ -898,6 +898,58 @@ describe('runNonInteractiveStreamJson', () => {
     expect(mockOutputAdapter.emitResult).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])(
+    'emits one monitor failure result (already emitted=%s)',
+    async (alreadyEmitted) => {
+      let notify: (() => void) | undefined;
+      mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+        notify = () =>
+          cb?.(
+            'Monitor ready',
+            '<task-notification>ready</task-notification>',
+            { monitorId: 'mon_1', status: 'running' },
+          );
+      });
+      runNonInteractiveMock
+        .mockImplementationOnce(async () => {
+          notify?.();
+        })
+        .mockImplementationOnce(
+          async (
+            _config,
+            _settings,
+            _input,
+            _promptId,
+            options: { onResultEmitted?: () => void },
+          ) => {
+            if (alreadyEmitted) {
+              mockOutputAdapter.emitResult({
+                isError: true,
+                errorMessage: 'provider failed',
+              });
+              options.onResultEmitted?.();
+            }
+            throw new Error('provider failed');
+          },
+        );
+      mockInputReader.read = async function* () {
+        yield createControlRequest('initialize');
+        yield createUserMessage('Start monitor');
+        await vi.waitFor(() =>
+          expect(runNonInteractiveMock).toHaveBeenCalledTimes(2),
+        );
+      };
+      await runNonInteractiveStreamJson(config, '');
+      expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(1);
+      expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isError: true,
+          errorMessage: 'provider failed',
+        }),
+      );
+    },
+  );
+
   it('routes monitor notifications through the session queue', async () => {
     const initRequest = createControlRequest('initialize');
     const userMessage = createUserMessage('Start a monitor');
@@ -1377,18 +1429,39 @@ describe('runNonInteractiveStreamJson', () => {
   });
 
   it('handles error from processUserMessage', async () => {
-    const userMessage = createUserMessage('Test message');
+    const initRequest = createControlRequest('initialize');
+    const failedMessage = createUserMessage('First message');
+    const nextMessage = createUserMessage('Second message');
 
     const error = new Error('Processing error');
-    runNonInteractiveMock.mockRejectedValue(error);
+    runNonInteractiveMock
+      .mockImplementationOnce((...args: unknown[]) => {
+        const options = args[4] as {
+          adapter: { emitResult: (result: { isError: boolean }) => void };
+        };
+        options.adapter.emitResult({ isError: true });
+        return Promise.reject(error);
+      })
+      .mockResolvedValueOnce(undefined);
 
     mockInputReader.read = async function* () {
-      yield userMessage;
+      yield initRequest;
+      yield failedMessage;
+      yield nextMessage;
     };
 
     await runNonInteractiveStreamJson(config, '');
 
-    // Error should be caught and handled gracefully
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    expect(runNonInteractiveMock).toHaveBeenNthCalledWith(
+      2,
+      config,
+      expect.any(Object),
+      'Second message',
+      expect.stringContaining('test-session'),
+      expect.objectContaining({ adapter: mockOutputAdapter }),
+    );
   });
 
   it('handles stream error gracefully', async () => {
