@@ -195,7 +195,12 @@ describe('exec context tool results', () => {
       "await tools.skill({skill: 'test'}); await new Promise(() => {});",
       controller.signal,
     );
-    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    // The default 1s waitFor timeout races the isolated host's first
+    // dispatch on slower runners (the sibling host tests each take 1-2s
+    // there) — give the dispatch room; the assertions below are unchanged.
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce(), {
+      timeout: 5000,
+    });
     controller.abort();
     await expect(pending).rejects.toThrow();
     expect(clearLoadedSkills).toHaveBeenCalledOnce();
