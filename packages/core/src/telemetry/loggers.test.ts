@@ -1126,11 +1126,7 @@ describe('loggers', () => {
         ...mockConfig,
         getTelemetryLogPromptsEnabled: () => false,
       } as unknown as Config;
-      const event = new ApiRequestEvent(
-        'test-model',
-        'prompt-id-7',
-        undefined,
-      );
+      const event = new ApiRequestEvent('test-model', 'prompt-id-7', undefined);
 
       logApiRequest(configWithPromptsOff, event);
 
