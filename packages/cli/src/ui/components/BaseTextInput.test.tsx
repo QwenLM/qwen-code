@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import type { DOMElement } from 'ink';
 import stringWidth from 'string-width';
@@ -101,6 +101,7 @@ function captureKeypressHandler(): (key: Key) => void {
 describe('BaseTextInput', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv('QWEN_CODE_DISABLE_PHYSICAL_CURSOR', '');
     mockUseBoxMetrics.mockReturnValue({
       width: 0,
       height: 0,
@@ -108,6 +109,10 @@ describe('BaseTextInput', () => {
       left: 0,
       hasMeasured: true,
     });
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it('does not type the render-mode shortcut into the buffer', () => {
@@ -183,6 +188,68 @@ describe('BaseTextInput', () => {
         prefixWidth: 2,
       }),
     ).toEqual({ x: 29, y: 20 });
+  });
+
+  it('keeps physical cursor positioning enabled by default', () => {
+    const buffer = createBuffer();
+    const view = render(<BaseTextInput buffer={buffer} onSubmit={vi.fn()} />);
+
+    mockSetCursorPosition.mockClear();
+    view.rerender(<BaseTextInput buffer={buffer} onSubmit={vi.fn()} />);
+
+    expect(mockSetCursorPosition).toHaveBeenLastCalledWith(
+      expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }),
+    );
+  });
+
+  it('disables physical cursor positioning through the compatibility flag', () => {
+    vi.stubEnv('QWEN_CODE_DISABLE_PHYSICAL_CURSOR', '1');
+    const buffer = createBuffer();
+    const view = render(<BaseTextInput buffer={buffer} onSubmit={vi.fn()} />);
+
+    mockSetCursorPosition.mockClear();
+    view.rerender(<BaseTextInput buffer={buffer} onSubmit={vi.fn()} />);
+
+    expect(mockSetCursorPosition).toHaveBeenCalled();
+    expect(mockSetCursorPosition).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it('overwrites the placeholder when physical cursor positioning is disabled', () => {
+    vi.stubEnv('QWEN_CODE_DISABLE_PHYSICAL_CURSOR', '1');
+    const placeholder = '  Type your message or @path/to/file';
+    const buffer = createBuffer();
+    const view = render(
+      <BaseTextInput
+        buffer={buffer}
+        onSubmit={vi.fn()}
+        placeholder={placeholder}
+      />,
+    );
+
+    expect(view.lastFrame()).toContain(placeholder);
+
+    Object.assign(buffer, {
+      text: 'a',
+      viewportVisualLines: ['a'],
+      visualCursor: [0, 1],
+    });
+    view.rerender(
+      <BaseTextInput
+        buffer={buffer}
+        onSubmit={vi.fn()}
+        placeholder={placeholder}
+      />,
+    );
+
+    const inputLine = view
+      .lastFrame()
+      ?.split('\n')
+      .find((line) => line.includes('a'));
+    expect(inputLine).toBeDefined();
+    expect(inputLine).not.toContain('Type');
+    expect(inputLine).not.toContain('file');
+    expect(inputLine).toContain('\u200B');
+    expect(stringWidth(inputLine!)).toBe(2 + stringWidth(placeholder));
   });
 
   it.each([
