@@ -244,26 +244,17 @@ export function tailWindowPhysical(
 export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 
 /**
- * Rows reserved below a pending tool card so the confirmation dialog's
- * COLLAPSED body (frame + title/question + 20-row body + outcome list +
- * footer ≈ 36 rows) still ends inside the viewport. Excludes any payload
- * the dialog only reveals on ctrl-s expansion — that bound lives in
- * pendingCardMaxRows.
- */
-export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
-
-/**
- * Rows a pending card's expanded confirmation dialog does not own. Above the
- * card's description rows: the banner (6), the startup notices a fresh
- * session shows (≈ 3), the prompt echo with its turn margin (2), and the
- * card's own hidden-tail and awaiting rows (2). In the dialog itself, around
- * the body: the frame's border and padding (4), title (1), body margins (2),
- * question row (1), outcome list (2), footer hint (1) ≈ 11. The sum (≈ 24,
- * padded to 26 against notice timing) is what an 80-row viewport measured:
- * at 14 the expanded tail and the outcome list ran off the bottom of the
- * screen (mem0 e2e regression). dialogs-confirm's EXPANDED_BODY_RESERVE_ROWS
- * prices the same region from the dialog's side; keep the two consistent
- * when the dialog chrome changes.
+ * Rows a pending card's confirmation dialog does not own. Above the card's
+ * description rows: the banner (6), the startup notices a fresh session
+ * shows (≈ 3), the prompt echo with its turn margin (2), and the card's own
+ * hidden-tail and awaiting rows (2). In the dialog itself, around the body:
+ * the frame's border and padding (4), title (1), body margins (2), question
+ * row (1), outcome list (2), footer hint (1) ≈ 11. The sum (≈ 24, padded to
+ * 26 against notice timing) is what an 80-row viewport measured: at 14 the
+ * expanded tail and the outcome list ran off the bottom of the screen (mem0
+ * e2e regression). dialogs-confirm's EXPANDED_BODY_RESERVE_ROWS prices the
+ * same region from the dialog's side; keep the two consistent when the
+ * dialog chrome changes.
  */
 export const DIALOG_EXPANDED_RESERVE_ROWS = 26;
 
@@ -275,13 +266,24 @@ export const DIALOG_EXPANDED_RESERVE_ROWS = 26;
 export const CONFIRM_BODY_COLLAPSED_ROWS = 20;
 
 /**
- * The non-body rows of PENDING_CARD_VIEWPORT_RESERVE_ROWS: the transcript
- * region above the card plus the collapsed dialog's frame, title/question,
- * outcome list and footer. The collapsed-dialog bound prices the body
- * separately because its height is known per confirmation type.
+ * Rows reserved below a pending tool card so the confirmation dialog's
+ * COLLAPSED body still ends inside the viewport: the non-body region plus
+ * the collapsed body window. Excludes any payload the dialog only reveals
+ * on ctrl-s expansion — that bound lives in pendingCardMaxRows.
  */
-const COLLAPSED_DIALOG_CHROME_ROWS =
-  PENDING_CARD_VIEWPORT_RESERVE_ROWS - CONFIRM_BODY_COLLAPSED_ROWS;
+export const PENDING_CARD_VIEWPORT_RESERVE_ROWS =
+  DIALOG_EXPANDED_RESERVE_ROWS + CONFIRM_BODY_COLLAPSED_ROWS;
+
+/**
+ * The collapsed-dialog bound's non-body rows: the transcript region above
+ * the card plus the dialog's frame, title/question, outcome list and
+ * footer. This IS the expanded reserve — both bounds price the same region
+ * and differ only in the body height charged, and making that one quantity
+ * by construction is why a body fitting the collapsed window always makes
+ * the two bounds coincide (the expanded bound only binds past the window),
+ * so dialogBodyMeasure needs no collapsed/expanded gate.
+ */
+const COLLAPSED_DIALOG_CHROME_ROWS = DIALOG_EXPANDED_RESERVE_ROWS;
 
 /**
  * Collapsed body rows of an mcp confirmation dialog — the server and tool
@@ -302,9 +304,9 @@ const CARD_DESC_WRAP_RATIO = 0.7;
 
 /**
  * What the transcript knows about the pending call's confirmation dialog.
- * `type` is confirmationDetails.type; `body` is the text the dialog's
- * expandable TextBody renders for the types that have one (info's prompt,
- * plan's plan — see event-adapter's expandableConfirmationBody, which
+ * `type` is confirmationDetails.type; `body` is the text the dialog renders
+ * for the types whose body is a plain text block (info's prompt, plan's
+ * plan, exec's command — see event-adapter's confirmationDialogBody, which
  * mirrors dialogs-confirm's ConfirmationBody switch).
  */
 export interface PendingDialogBody {
@@ -314,22 +316,27 @@ export interface PendingDialogBody {
 
 /**
  * The pending confirmation dialog's body in physical rows: `expanded` is
- * the body's full height when the dialog can ctrl-s expand past its
- * collapsed footprint — the quantity the card must yield rows for — or null
- * when it cannot; `collapsed` is the body height the collapsed dialog
- * occupies either way, which the collapsed-dialog bound charges.
+ * the body's full height, charged by the expanded-dialog bound — or null
+ * for the fixed-body types whose dialogs render no measurable text;
+ * `collapsed` is the body height the collapsed-dialog bound charges. A body
+ * that fits the collapsed window makes the two bounds coincide (the two
+ * reserves are one quantity by construction), so no collapsed/expanded gate
+ * decides between them — the expanded bound only binds past the window.
  *
- * Only info and plan render an expandable TextBody, so for them the body's
- * OWN rows decide (measured like TextBody: sanitized, split on newlines,
- * each logical row charged its wrapped height): a many-short-line plan
- * folds to one card row but fills the dialog. The named fixed-body types
- * return a null expansion: mcp's dialog body is two fixed lines and the
- * card is the only surface carrying the call's arguments (R5-9); edit's
- * dialog is a tail-windowed diff below an UNBOUNDED warnings list, but
- * edit-kind cards carry a one-row description (the edit tools return just
- * the path), so there is nothing to yield; ask_user_question's
- * question/options list is fixed at ask time. Everything else — exec, whose
- * dialog renders the command uncapped, a typed confirmation whose body text
+ * info and plan render an expandable TextBody and exec renders its command
+ * in full (no window at all), so for them the body's OWN rows decide
+ * (measured like TextBody: sanitized, split on newlines, each logical row
+ * charged its wrapped height): a many-short-line plan folds to one card row
+ * but fills the dialog, and a multi-line command folds to one card row but
+ * renders every line. exec therefore charges its full body to BOTH bounds —
+ * its dialog has no collapsed window — while info/plan charge the collapsed
+ * bound only the windowed footprint. The named fixed-body types return a
+ * null expansion: mcp's dialog body is two fixed lines and the card is the
+ * only surface carrying the call's arguments (R5-9); edit's dialog is a
+ * tail-windowed diff below an UNBOUNDED warnings list, but edit-kind cards
+ * carry a one-row description (the edit tools return just the path), so
+ * there is nothing to yield; ask_user_question's question/options list is
+ * fixed at ask time. Everything else — a typed confirmation whose body text
  * never arrived, and any type this module does not know (a future
  * ToolCallConfirmationDetails variant, a version-skewed wire event) —
  * keeps the folded card-payload proxy: there the yield is what brings the
@@ -342,15 +349,21 @@ function dialogBodyMeasure(
   measureCap: number,
 ): { expanded: number | null; collapsed: number } {
   const type = dialog?.type;
-  if ((type === 'info' || type === 'plan') && dialog?.body !== undefined) {
+  if (
+    (type === 'info' || type === 'plan' || type === 'exec') &&
+    dialog?.body !== undefined
+  ) {
     const rows = physicalRowsTotal(
       sanitizeTerminalText(dialog.body).split('\n'),
       Math.max(dialogWidth - 2, 10),
       measureCap,
     );
     return {
-      expanded: rows > CONFIRM_BODY_COLLAPSED_ROWS ? rows : null,
-      collapsed: Math.min(rows, CONFIRM_BODY_COLLAPSED_ROWS),
+      expanded: rows,
+      // The exec dialog has no collapsed window — it renders the command in
+      // full — so the collapsed bound charges the whole body too.
+      collapsed:
+        type === 'exec' ? rows : Math.min(rows, CONFIRM_BODY_COLLAPSED_ROWS),
     };
   }
   if (type === 'mcp' || type === 'edit' || type === 'ask_user_question') {
@@ -360,10 +373,7 @@ function dialogBodyMeasure(
         type === 'mcp' ? MCP_CONFIRM_BODY_ROWS : CONFIRM_BODY_COLLAPSED_ROWS,
     };
   }
-  return {
-    expanded: payloadRows > CONFIRM_BODY_COLLAPSED_ROWS ? payloadRows : null,
-    collapsed: CONFIRM_BODY_COLLAPSED_ROWS,
-  };
+  return { expanded: payloadRows, collapsed: CONFIRM_BODY_COLLAPSED_ROWS };
 }
 
 /**
@@ -378,11 +388,11 @@ function dialogBodyMeasure(
  * region above the card and the dialog occupy are converted by
  * CARD_DESC_WRAP_RATIO — spending them unconverted over-budgets the card
  * ~1.37x and the dialog's question row and outcome list leave the screen —
- * and the collapsed bound is shared between the `pendingCount` cards
- * awaiting approval, since N parked calls each painting the full region
- * push the first call's dialog off the alt screen. `descriptionWidth` is
- * the display width of the text the card would print; short terminals fall
- * back to the settled cap.
+ * and both bounds are shared between the `pendingCount` cards awaiting
+ * approval, since N parked calls each painting the full region push the
+ * first call's dialog off the alt screen. `descriptionWidth` is the display
+ * width of the text the card would print; short terminals fall back to the
+ * settled cap.
  */
 export function pendingCardMaxRows(
   terminalHeight: number,
@@ -413,8 +423,9 @@ export function pendingCardMaxRows(
     body.expanded === null
       ? Number.POSITIVE_INFINITY
       : Math.floor(
-          (h - DIALOG_EXPANDED_RESERVE_ROWS - body.expanded) *
-            CARD_DESC_WRAP_RATIO,
+          ((h - DIALOG_EXPANDED_RESERVE_ROWS - body.expanded) *
+            CARD_DESC_WRAP_RATIO) /
+            Math.max(pendingCount, 1),
         );
   const collapsedDialogBound = Math.floor(
     ((h - COLLAPSED_DIALOG_CHROME_ROWS - body.collapsed) *

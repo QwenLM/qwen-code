@@ -110,9 +110,19 @@ export function OpenTuiTranscriptView({
   // Pending tool cards share the transcript region with the confirmation
   // dialog: each budgets its description against the sibling count so N
   // parked calls cannot each claim the whole viewport.
-  const pendingCount = items.filter(
-    (item) => item.kind === 'tool' && item.confirm === 'pending' && !item.done,
-  ).length;
+  const pendingItems = items.filter(
+    (item): item is LiveToolItem =>
+      item.kind === 'tool' && item.confirm === 'pending' && !item.done,
+  );
+  const pendingCount = pendingItems.length;
+  // Exactly one confirmation dialog is ever mounted — the shell renders the
+  // earliest parked call (waitingToolCalls[0], fed by the same confirm
+  // events in the same order) — so every parked card budgets against THAT
+  // dialog's body rather than a hypothetical one of its own: a parked mcp
+  // sibling of an exec call must yield for the command the mounted dialog
+  // renders in full.
+  const pendingDialogType = pendingItems[0]?.confirmType;
+  const pendingDialogBody = pendingItems[0]?.confirmBody;
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
@@ -127,6 +137,8 @@ export function OpenTuiTranscriptView({
             terminalHeight={availableTerminalHeight}
             width={availableWidth}
             pendingCount={pendingCount}
+            pendingDialogType={pendingDialogType}
+            pendingDialogBody={pendingDialogBody}
             thoughtsExpanded={thoughtsExpanded}
           />
         </box>
@@ -141,6 +153,8 @@ function TranscriptItem({
   terminalHeight,
   width,
   pendingCount,
+  pendingDialogType,
+  pendingDialogBody,
   thoughtsExpanded,
 }: {
   item: LiveHistoryItem;
@@ -148,6 +162,8 @@ function TranscriptItem({
   terminalHeight: number;
   width: number;
   pendingCount: number;
+  pendingDialogType?: string;
+  pendingDialogBody?: string;
   thoughtsExpanded: boolean;
 }) {
   switch (item.kind) {
@@ -165,6 +181,8 @@ function TranscriptItem({
           terminalHeight={terminalHeight}
           width={width}
           pendingCount={pendingCount}
+          pendingDialogType={pendingDialogType}
+          pendingDialogBody={pendingDialogBody}
         />
       );
     case 'task':
@@ -307,12 +325,16 @@ function ToolCard({
   terminalHeight,
   width,
   pendingCount,
+  pendingDialogType,
+  pendingDialogBody,
 }: {
   item: LiveToolItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
   pendingCount: number;
+  pendingDialogType?: string;
+  pendingDialogBody?: string;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
@@ -347,7 +369,7 @@ function ToolCard({
               terminalHeight,
               getCachedStringWidth(text),
               width,
-              { type: item.confirmType, body: item.confirmBody },
+              { type: pendingDialogType, body: pendingDialogBody },
               pendingCount,
             )
           : TOOL_CARD_DESCRIPTION_ROWS,
@@ -358,10 +380,10 @@ function ToolCard({
       width,
       terminalHeight,
       pendingCount,
+      pendingDialogType,
+      pendingDialogBody,
       item.confirm,
       item.done,
-      item.confirmType,
-      item.confirmBody,
     ],
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);

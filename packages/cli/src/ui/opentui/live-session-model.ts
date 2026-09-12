@@ -33,7 +33,8 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
    * card prices itself against the dialog's body (pendingCardMaxRows), and
    * only the type says whether that body can expand. */
   confirmType?: string;
-  /** The dialog's expandable body text for info/plan confirmations. */
+  /** The dialog's body text for the plain-text-body confirmations
+   * (info's prompt, plan's plan, exec's command). */
   confirmBody?: string;
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */

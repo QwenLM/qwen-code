@@ -65,10 +65,11 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
     ).toEqual([{ type: 'tool-end', id: 'c1', success: true, summary: 'ok' }]);
   });
 
-  it('carries the confirmation type and expandable body on confirm events', () => {
-    // pendingCardMaxRows keys its expanded-dialog bound on the dialog's own
-    // body: only info/plan confirmations can expand, so the confirm event
-    // must carry the type and (for them) the body text.
+  it('carries the confirmation type and dialog body on confirm events', () => {
+    // pendingCardMaxRows prices the card against the dialog's own body:
+    // info/plan render an expandable TextBody and exec renders its command
+    // in full, so the confirm event must carry the type and (for them) the
+    // body text.
     const map = createEventMapper();
     expect(
       map({
@@ -140,6 +141,31 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         title: 'Hook requested confirmation to run mcp__fs__write_file',
         confirmType: 'info',
         confirmBody: 'line one\nline two',
+      },
+    ]);
+    // An exec confirmation carries its command: the dialog renders it in
+    // full with no collapsed window, so the card prices the real body
+    // newline-aware instead of the folded card-payload proxy.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c4', name: 'run_shell_command' },
+          details: {
+            title: 'Run this command?',
+            type: 'exec',
+            command: 'echo hi\necho bye',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c4',
+        tool: 'run_shell_command',
+        title: 'Run this command?',
+        confirmType: 'exec',
+        confirmBody: 'echo hi\necho bye',
       },
     ]);
   });

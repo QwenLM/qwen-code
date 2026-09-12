@@ -35,26 +35,30 @@ import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 
 /**
- * The text a confirmation dialog's expandable body renders — an info
- * confirmation's prompt, a plan confirmation's plan. Every other type's body
- * has no ctrl-s expansion (mcp shows two fixed lines, edit a tail-windowed
- * diff below an unbounded warnings list, exec an uncapped command), so it
- * has no expandable body. This mirrors dialogs-confirm's ConfirmationBody
- * render switch and feeds the pending card's expanded-dialog bound
- * (pendingCardMaxRows); it lives here, not in dialogs-confirm, so this
- * module stays free of UI-runtime imports.
+ * The text a confirmation dialog's body renders — an info confirmation's
+ * prompt, a plan confirmation's plan, an exec confirmation's command (whose
+ * dialog renders it in full, with no collapsed window). Every other type's
+ * body renders no measurable text: mcp shows two fixed lines, edit a
+ * tail-windowed diff below an unbounded warnings list, ask_user_question a
+ * fixed question/options list. This mirrors dialogs-confirm's
+ * ConfirmationBody render switch and feeds the pending card's dialog-body
+ * measure (pendingCardMaxRows); it lives here, not in dialogs-confirm, so
+ * this module stays free of UI-runtime imports.
  */
-export function expandableConfirmationBody(details: {
+export function confirmationDialogBody(details: {
   type?: string;
   prompt?: unknown;
   plan?: unknown;
+  command?: unknown;
 }): string | undefined {
   const body =
     details.type === 'info'
       ? details.prompt
       : details.type === 'plan'
         ? details.plan
-        : undefined;
+        : details.type === 'exec'
+          ? details.command
+          : undefined;
   return typeof body === 'string' ? body : undefined;
 }
 
@@ -104,7 +108,8 @@ export type OpenTuiStreamEvent =
       /** confirmationDetails.type — the card prices itself against the
        * dialog's body (LiveToolItem.confirmType). */
       confirmType?: string;
-      /** The dialog's expandable body text (info's prompt, plan's plan). */
+      /** The dialog's body text (info's prompt, plan's plan, exec's
+       * command). */
       confirmBody?: string;
     }
   /** The call left awaiting_approval (approved, declined, or bounced):
@@ -554,6 +559,7 @@ export function createEventMapper(
             type?: string;
             prompt?: unknown;
             plan?: unknown;
+            command?: unknown;
           };
         };
         const id = v.request.callId ?? `tool-${++toolSeq}`;
@@ -563,7 +569,7 @@ export function createEventMapper(
           tool: v.request.name,
           title: v.details.title ?? v.request.name,
           confirmType: v.details.type,
-          confirmBody: expandableConfirmationBody(v.details),
+          confirmBody: confirmationDialogBody(v.details),
         });
         const args = formatToolArgs(v.request.args);
         if (args) out.push({ type: 'tool-args', id, args });

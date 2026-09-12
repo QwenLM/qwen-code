@@ -136,6 +136,35 @@ describe('foldLiveEvent confirm (pending card dialog measure)', () => {
       confirmBody: 'step one\nstep two',
     });
   });
+
+  it('replaces the stored type and body when the call re-parks (hook bounce)', () => {
+    // A PreToolUse 'ask' bounce rebuilds a non-edit call's details as
+    // { type: 'info', prompt: hookReason } (coreToolScheduler), so the
+    // second confirm for the same callId must REPLACE the stored pair —
+    // keeping the stale exec type would price the card against a dialog
+    // that no longer exists.
+    const parked = foldLiveEvent([runningTool()], {
+      type: 'confirm',
+      id: 'tool1',
+      tool: 'run_shell_command',
+      title: 'Run?',
+      confirmType: 'exec',
+      confirmBody: 'echo hi',
+    });
+    const items = foldLiveEvent(parked, {
+      type: 'confirm',
+      id: 'tool1',
+      tool: 'run_shell_command',
+      title: 'Hook requested confirmation to run',
+      confirmType: 'info',
+      confirmBody: 'hook said no',
+    });
+    expect(items[0]).toMatchObject({
+      confirm: 'pending',
+      confirmType: 'info',
+      confirmBody: 'hook said no',
+    });
+  });
 });
 
 describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {

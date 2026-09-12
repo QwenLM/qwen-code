@@ -76,25 +76,34 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         if (bounce) {
           // PreToolUse 'ask' bounce shape: awaiting → executing → back to
           // awaiting_approval under the same callId with fresh details.
-          const waiting = (title: string) =>
+          // The first confirmation is the tool's own (a shell call asks
+          // with type 'exec'); the bounce rebuilds a non-edit call's
+          // details as { type: 'info', prompt: hookReason }
+          // (coreToolScheduler), so the re-parked confirm carries a
+          // REPLACED type and body.
+          const waiting = (title: string, details: Record<string, unknown>) =>
             calls.map((c) => ({
               status: 'awaiting_approval',
               request: c,
               confirmationDetails: {
-                type: 'ask_user_question',
                 title,
-                questions: [],
                 onConfirm: async () => {},
+                ...details,
               },
             }));
           const executing = calls.map((c) => ({
             status: 'executing',
             request: c,
           }));
-          await this.opts.onToolCallsUpdate?.(waiting('original'));
+          await this.opts.onToolCallsUpdate?.(
+            waiting('original', { type: 'exec', command: 'echo hi' }),
+          );
           await this.opts.onToolCallsUpdate?.(executing);
           await this.opts.onToolCallsUpdate?.(
-            waiting('Hook requested confirmation to run'),
+            waiting('Hook requested confirmation to run', {
+              type: 'info',
+              prompt: 'hook said no',
+            }),
           );
         } else if (
           calls.some(
@@ -1871,7 +1880,8 @@ describe('livePromptEvents', () => {
         id: 'b2',
         tool: 'run_shell_command',
         title: 'original',
-        confirmType: 'ask_user_question',
+        confirmType: 'exec',
+        confirmBody: 'echo hi',
       },
       { type: 'confirm-resolved', id: 'b2', outcome: 'approved' },
       {
@@ -1879,7 +1889,8 @@ describe('livePromptEvents', () => {
         id: 'b2',
         tool: 'run_shell_command',
         title: 'Hook requested confirmation to run',
-        confirmType: 'ask_user_question',
+        confirmType: 'info',
+        confirmBody: 'hook said no',
       },
     ]);
   });
