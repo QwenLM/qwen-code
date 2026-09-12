@@ -5392,8 +5392,11 @@ async function runQwenServeImpl(
     ) =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
-        const { skillSettingStrings, updateWorkspaceSkillSettingLists } =
-          await import('../config/skill-settings.js');
+        const {
+          skillSettingStrings,
+          skillToggleBlockForName,
+          updateWorkspaceSkillSettingLists,
+        } = await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
         const workspaceDisabled = skillSettingStrings(
           fresh,
@@ -5405,6 +5408,15 @@ async function runQwenServeImpl(
           WORKSPACE_SETTING_SCOPE,
           'enabled',
         );
+        // A grant a standing entry still forbids is not a write: the picker
+        // locks such rows, and a route that persists anyway reports an
+        // enable the merged config still denies.
+        if (enabled) {
+          const block = skillToggleBlockForName(fresh, skillName);
+          if (block) {
+            return { changed: false, disabled: workspaceDisabled, block };
+          }
+        }
         const next = updateWorkspaceSkillSettingLists(
           { disabled: workspaceDisabled, enabled: workspaceEnabled },
           skillName,
@@ -5455,8 +5467,11 @@ async function runQwenServeImpl(
     ): Promise<PersistDisabledSkillsBatchResult> =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
-        const { skillSettingStrings, updateWorkspaceSkillSettingLists } =
-          await import('../config/skill-settings.js');
+        const {
+          skillSettingStrings,
+          skillToggleBlockForName,
+          updateWorkspaceSkillSettingLists,
+        } = await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
         const initialDisabled = skillSettingStrings(
           fresh,
@@ -5472,6 +5487,25 @@ async function runQwenServeImpl(
         const outcomes: PersistDisabledSkillsBatchResult['outcomes'] = [];
 
         for (const skillName of skillNames) {
+          // Same refusal as the single toggle. The block is read off the
+          // file, so an earlier grant in this batch that already lifted a
+          // workspace entry off the lists about to be written clears it.
+          if (enabled) {
+            const block = skillToggleBlockForName(fresh, skillName);
+            if (
+              block &&
+              !(
+                block.scope === 'Workspace' &&
+                block.list === 'disabled' &&
+                !next.disabled.some(
+                  (name) => name.trim().toLowerCase() === block.entry,
+                )
+              )
+            ) {
+              outcomes.push({ skillName, changed: false });
+              continue;
+            }
+          }
           const updated = updateWorkspaceSkillSettingLists(
             next,
             skillName,
@@ -5647,6 +5681,7 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        artifactSnapshotRuntimeBaseDir: primarySessionRuntimeBaseDir,
         sessionAttachmentsRoot: attachmentsRoots.root,
         sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
@@ -6221,6 +6256,7 @@ async function runQwenServeImpl(
         secondaryEnv.sessionRuntimeBaseDir,
       );
       const secondaryBridge = runtime.createAcpSessionBridge({
+        artifactSnapshotRuntimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         sessionAttachmentsRoot: secondaryAttachmentsRoots.root,
         sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
@@ -6898,6 +6934,7 @@ async function runQwenServeImpl(
           wsEnv.sessionRuntimeBaseDir,
         );
         wsBridge = runtime.createAcpSessionBridge({
+          artifactSnapshotRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
           sessionAttachmentsRoot: wsAttachmentsRoots.root,
           sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
           clientMcpSender: wsClientMcpRegistry.lookup,
