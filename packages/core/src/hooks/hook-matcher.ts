@@ -18,6 +18,43 @@ export interface HookPatternOptions {
 }
 
 /**
+ * Splits a matcher at the pipes that separate list entries. A pipe escaped by
+ * a backslash, or inside `[...]` or a group, is part of the regular expression,
+ * so it does not split and the spaces around it stay. Backslashes are read in
+ * pairs: in `C:\\temp\\|D:\\data` the pipe follows an escaped backslash, so it
+ * does separate entries.
+ */
+function splitListEntries(pattern: string): string[] {
+  const entries: string[] = [];
+  let current = '';
+  let escaped = false;
+  let inCharacterClass = false;
+  let groupDepth = 0;
+  for (const char of pattern) {
+    if (escaped) {
+      escaped = false;
+    } else if (char === '\\') {
+      escaped = true;
+    } else if (inCharacterClass) {
+      inCharacterClass = char !== ']';
+    } else if (char === '[') {
+      inCharacterClass = true;
+    } else if (char === '(') {
+      groupDepth++;
+    } else if (char === ')') {
+      groupDepth = Math.max(0, groupDepth - 1);
+    } else if (char === '|' && groupDepth === 0) {
+      entries.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  entries.push(current);
+  return entries;
+}
+
+/**
  * Tests a hook `matcher` against the value an event is matched on, using the
  * same rules for every event and for both settings and session hooks:
  *
@@ -25,9 +62,10 @@ export interface HookPatternOptions {
  * - The matcher matches the subject or an alias exactly.
  * - Unless the whole matcher starts with `^` or `(`, a `|`-separated list
  *   matches when any entry, with surrounding spaces removed, is `*`, `.*`, or
- *   exactly the subject or an alias. Only an unescaped `|` separates entries:
- *   a `|` preceded by a backslash, as in `notes\|todo\.md`, stays part of its
- *   entry. Entries are never compiled on their own.
+ *   exactly the subject or an alias. Only a `|` outside `[...]` and groups
+ *   and not escaped by a backslash separates entries: the pipes in
+ *   `notes\|todo\.md`, `foo[ |]bar` and `a(b | c)` belong to the expression,
+ *   spaces around them included. Entries are never compiled on their own.
  * - Otherwise the matcher is an unanchored regular expression tested against
  *   the subject only; aliases are never matched through a regex. For a list
  *   that does not start with `^` or `(`, the expression is rebuilt from the
@@ -57,10 +95,10 @@ export function matchesHookPattern(
     !pattern.startsWith('^') &&
     !pattern.startsWith('(')
   ) {
-    // Split only on unescaped pipes, and compare and rebuild from the same
-    // trimmed entries, so `read_.* | edit` reads as `read_.*|edit`.
-    const alternatives = pattern
-      .split(/(?<!\\)\|/)
+    // Split only where a pipe separates list entries, and compare and rebuild
+    // from the same trimmed entries, so `read_.* | edit` reads as
+    // `read_.*|edit` while `foo[ |]bar` keeps its space.
+    const alternatives = splitListEntries(pattern)
       .map((entry) => entry.trim())
       .filter((entry) => entry !== '');
     if (
@@ -74,8 +112,8 @@ export function matchesHookPattern(
     if (alternatives.length === 0) {
       return false;
     }
-    // A group that spans the pipe, such as `a(b|c)`, still reads as one
-    // expression once the empty alternatives are gone.
+    // Only empty entries are dropped; a pipe inside a group or class was never
+    // split, so `a(b|c)|` rebuilds as `a(b|c)`.
     expression = alternatives.join('|');
   }
 

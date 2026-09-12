@@ -97,6 +97,25 @@ describe('matchesHookPattern', () => {
     expect(matchesHookPattern('foo\\|bar', 'bar')).toBe(false);
   });
 
+  it('keeps a pipe inside a character class or group, with its spaces', () => {
+    expect(matchesHookPattern('foo[ |]bar', 'foo bar')).toBe(true);
+    expect(matchesHookPattern('foo[ |]bar', 'foo|bar')).toBe(true);
+    expect(matchesHookPattern('a(b | c)', 'a c')).toBe(true);
+    expect(matchesHookPattern('a(b | c)', 'ac')).toBe(false);
+  });
+
+  it('splits on a pipe that follows an escaped backslash', () => {
+    const paths = 'C:\\\\temp\\\\|D:\\\\data\\\\|';
+    expect(matchesHookPattern(paths, 'ANYTHING_AT_ALL')).toBe(false);
+    expect(matchesHookPattern(paths, 'D:\\data\\notes.md')).toBe(true);
+    expect(matchesHookPattern('a\\\\|', 'ANYTHING_AT_ALL')).toBe(false);
+  });
+
+  it('compiles a matcher that starts with ^ or ( exactly as written', () => {
+    expect(matchesHookPattern('^write_file|', 'run_shell_command')).toBe(true);
+    expect(matchesHookPattern('(write_file)|', 'run_shell_command')).toBe(true);
+  });
+
   it('warns only about a matcher that does not compile as a whole', () => {
     expect(matchesHookPattern('a(b|c)', 'ab')).toBe(true);
     expect(matchesHookPattern('read_(file|edit)', 'read_file')).toBe(true);
