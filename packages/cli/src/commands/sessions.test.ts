@@ -18,8 +18,14 @@ vi.mock('./sessions/list.js', () => ({
 vi.mock('./sessions/ps.js', () => ({
   psCommand: {
     command: 'ps',
-    describe: 'List interactive Qwen Code sessions running right now',
+    describe: 'List the Qwen Code sessions running right now',
   },
+}));
+
+vi.mock('./sessions/control-commands.js', () => ({
+  peekCommand: { command: 'peek <session>', describe: 'Peek' },
+  answerCommand: { command: 'answer <session> <text>', describe: 'Answer' },
+  stopCommand: { command: 'stop <session>', describe: 'Stop' },
 }));
 
 vi.mock('./sessions/controllers.js', () => ({
@@ -58,7 +64,7 @@ describe('sessions command', () => {
     expect(options.key).toHaveProperty('help');
   });
 
-  it('should register the list, ps and controllers subcommands', () => {
+  it('should register every session subcommand', () => {
     const mockYargs = {
       command: vi.fn().mockReturnThis(),
       demandCommand: vi.fn().mockReturnThis(),
@@ -71,14 +77,22 @@ describe('sessions command', () => {
     }
     builder(mockYargs as unknown as Argv);
 
-    expect(mockYargs.command).toHaveBeenCalledTimes(3);
+    expect(mockYargs.command).toHaveBeenCalledTimes(6);
 
     const commandCalls = mockYargs.command.mock.calls;
     const commandNames = commandCalls.map((call) => call[0].command);
 
-    expect(commandNames).toContain('list');
-    expect(commandNames).toContain('ps');
-    expect(commandNames).toContain('controllers');
+    // Reading a background session's question, answering it and stopping
+    // it are what make the `needs input` state `ps` reports actionable;
+    // losing one of them silently would strand the user there.
+    expect(commandNames).toEqual([
+      'list',
+      'ps',
+      'peek <session>',
+      'answer <session> <text>',
+      'stop <session>',
+      'controllers',
+    ]);
 
     expect(mockYargs.demandCommand).toHaveBeenCalledWith(
       1,

@@ -819,7 +819,7 @@ function normalizeLaunch(
   }) as AgentViewLaunchFile;
 }
 
-function redactAgentViewLaunch(
+export function redactAgentViewLaunch(
   launch: AgentViewLaunchFile | undefined,
 ): AgentViewLaunchFile | undefined {
   if (!launch) return undefined;
