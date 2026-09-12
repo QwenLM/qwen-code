@@ -14350,6 +14350,64 @@ describe('Session', () => {
       );
     });
 
+    it.each([
+      {
+        label: 'Chinese filename',
+        uri: 'https://example.com/objects/7f9a2c',
+        name: '季度报告.csv',
+        expected:
+          '@https://example.com/objects/7f9a2c (original filename: "季度报告.csv")',
+      },
+      {
+        label: 'ordinary filename with a custom URI scheme',
+        uri: 'resource://objects/7f9a2c',
+        name: 'report.csv',
+        expected:
+          '@resource://objects/7f9a2c (original filename: "report.csv")',
+      },
+      {
+        label: 'quotes and newlines in the filename',
+        uri: 'https://example.com/objects/7f9a2c',
+        name: 'report "final"\n2026.csv',
+        expected:
+          '@https://example.com/objects/7f9a2c (original filename: "report \\"final\\"\\n2026.csv")',
+      },
+      {
+        label: 'missing legacy filename',
+        uri: 'https://example.com/objects/7f9a2c',
+        name: undefined,
+        expected: '@https://example.com/objects/7f9a2c',
+      },
+      {
+        label: 'empty filename',
+        uri: 'https://example.com/objects/7f9a2c',
+        name: '',
+        expected: '@https://example.com/objects/7f9a2c',
+      },
+    ])(
+      'preserves non-file resource links: $label',
+      async ({ uri, name, expected }) => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        const link = {
+          type: 'resource_link',
+          uri,
+          ...(name === undefined ? {} : { name }),
+        } as PromptRequest['prompt'][number];
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Summarize the attached resource.' },
+            link,
+          ],
+        });
+
+        expect(textParts(firstSentMessage())).toContain(expected);
+      },
+    );
+
     it('preserves unsupported image @ files for the vision bridge', async () => {
       const tempDir = await fs.realpath(
         await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-resource-')),

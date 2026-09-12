@@ -199,12 +199,12 @@ describe('exec context tool results', () => {
     // dispatch on slower runners (the sibling host tests each take 1-2s
     // there) — give the dispatch room; the assertions below are unchanged.
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce(), {
-      timeout: 5000,
+      timeout: 30_000,
     });
     controller.abort();
     await expect(pending).rejects.toThrow();
     expect(clearLoadedSkills).toHaveBeenCalledOnce();
-  });
+  }, 40_000);
 
   it('preserves concurrency for ordinary calls before a goal barrier', async () => {
     const { run, dispatch } = setup(
