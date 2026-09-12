@@ -633,11 +633,13 @@ export function ExtensionsManagerPage({
             workspace.client.extensionCatalog(),
             workspaceClient.workspaceExtensions().catch(() => null),
           ]);
-          if (requestId !== loadRequestRef.current) return observedTrusted;
-          // Resolve the trust as soon as the projection answers: the runtime
-          // leg below is trust-gated, so its 403 must not discard a trust
-          // value this load already holds.
+          // Resolve the trust as soon as the projection answers, ahead of the
+          // supersede check: the runtime leg below is trust-gated, so its 403
+          // must not discard a trust value this load already holds, and a
+          // superseded load must still hand its caller the fresh value. Only
+          // the state write stays behind the guard.
           observedTrusted = activation ? activation.trusted : null;
+          if (requestId !== loadRequestRef.current) return observedTrusted;
           if (observedTrusted !== null) {
             setWorkspaceTrusted(observedTrusted);
           }
@@ -655,7 +657,19 @@ export function ExtensionsManagerPage({
             setMessageTone('info');
             setMessage(null);
           }
-          const coordinator = await workspaceClient.ensureRuntime();
+          // The ensure leg is trust-gated like the runtime leg below: its
+          // 403 is tolerated so the catalog and projection this load already
+          // fetched still render, and it never reaches the catch classifier
+          // that would re-arm the retry timer. Every other ensure failure
+          // (a retryable 503, an unavailable runtime) still propagates.
+          const coordinator = await workspaceClient
+            .ensureRuntime()
+            .catch((error: unknown) => {
+              if (error instanceof DaemonHttpError && error.status === 403) {
+                return undefined;
+              }
+              throw error;
+            });
           // Tolerated like the projection leg above: a trust-gated 403 or a
           // transient failure must not discard the catalog and projection
           // this load already fetched; the merge renders without the live
@@ -676,8 +690,8 @@ export function ExtensionsManagerPage({
               workspace.client.extensionCatalog(),
               workspaceClient.workspaceExtensions().catch(() => null),
             ]);
-            if (requestId !== loadRequestRef.current) return observedTrusted;
             observedTrusted = activation ? activation.trusted : observedTrusted;
+            if (requestId !== loadRequestRef.current) return observedTrusted;
             if (observedTrusted !== null) {
               setWorkspaceTrusted(observedTrusted);
             }
@@ -691,7 +705,7 @@ export function ExtensionsManagerPage({
               catalog.generation,
             ),
           );
-          const capability = coordinator.capabilities?.extensions;
+          const capability = coordinator?.capabilities?.extensions;
           if (capability?.state === 'error') {
             if (messageOwnerRef.current === null) {
               loadNoticeRef.current = true;

@@ -664,6 +664,85 @@ describe('createExtensionsController', () => {
     );
   });
 
+  it.each([
+    {
+      name: 'the store already moved past the committed generation',
+      snapshot: async () => ({ generation: 6 }),
+      expectedHash: undefined,
+    },
+    {
+      name: 'the store identity read fails',
+      snapshot: async () => {
+        throw new Error('store read failed');
+      },
+      expectedHash: null,
+    },
+  ])(
+    'sends storeContentHash=$expectedHash to the reconcile when $name',
+    async ({ snapshot, expectedHash }) => {
+      const reconcileExtensionGeneration = vi.fn(async () => ({
+        state: 'reconciled' as const,
+        refreshed: 0,
+        failed: 0,
+      }));
+      vi.spyOn(
+        runtimeCoordinator,
+        'getWorkspaceRuntimeCoordinatorIfSupported',
+      ).mockReturnValue({
+        reconcileExtensionGeneration,
+        status: () => ({ runtimeLive: true }),
+      } as unknown as runtimeCoordinator.WorkspaceRuntimeCoordinator);
+      const runtime = {
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        workspaceService: { invalidateWorkspaceSkillsStatus: vi.fn() },
+        bridge: { broadcastExtensionsChanged: vi.fn() },
+      } as unknown as WorkspaceRuntime;
+      const controller = createExtensionsController({
+        boundWorkspace: '/work/bound',
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+      });
+      const manager = {
+        refreshCache: vi.fn(async () => undefined),
+        getExtensionStoreSnapshot: vi.fn(snapshot),
+      } as unknown as ExtensionManager;
+      const json = vi.fn();
+      const response = {
+        status: vi.fn().mockReturnThis(),
+        location: vi.fn().mockReturnThis(),
+        set: vi.fn().mockReturnThis(),
+        json,
+      } as unknown as Response;
+      controller.runQueuedExtensionMutation(
+        'install',
+        {},
+        response,
+        async (_manager, _signal, context) => {
+          await context!.commit(async (onCommitted) => {
+            onCommitted(5);
+            return { generation: 5 };
+          });
+          return { status: 'refreshed', refreshed: 0, failed: 0 };
+        },
+        { manager, refreshRuntimes: [runtime] },
+      );
+      const operationId = json.mock.calls[0]![0].operationId as string;
+      await vi.waitFor(() =>
+        expect(controller.getOperation(operationId)).toMatchObject({
+          status: 'succeeded',
+        }),
+      );
+      // undefined: a store that moved past belongs to a newer mutation's own
+      // receipt; null: a genuine identity read failure drops the runtime's
+      // applied-generation certification.
+      expect(reconcileExtensionGeneration).toHaveBeenCalledWith(
+        5,
+        expect.objectContaining({ storeContentHash: expectedHash }),
+      );
+    },
+  );
+
   it('clears phase from every terminal operation state', async () => {
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     const controller = createExtensionsController({

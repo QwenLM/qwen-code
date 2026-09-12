@@ -556,7 +556,13 @@ describe('WorkspaceRuntimeCoordinator', () => {
       // generation-0 store, and Skills/MCP prepare from a runtime read that
       // predates the applied catalog.
       await vi.advanceTimersByTimeAsync(60_000);
-      await expect(ensured).resolves.toMatchObject({ runtimeLive: true });
+      const ensuredStatus = await ensured;
+      expect(ensuredStatus).toMatchObject({ runtimeLive: true });
+      // The budget was abandoned before the queued Skills/MCP bodies first
+      // ran, but the resolved envelope must already report both as starting
+      // so polling clients (which only poll 'starting') keep converging.
+      expect(ensuredStatus.capabilities?.skills?.state).toBe('starting');
+      expect(ensuredStatus.capabilities?.mcp?.state).toBe('starting');
       expect(coordinator.status().capabilities).toMatchObject({
         extensions: { state: 'starting', appliedGeneration: 0 },
         skills: { state: 'ready', revision: 0 },
@@ -669,6 +675,61 @@ describe('WorkspaceRuntimeCoordinator', () => {
       state: 'ready',
       desiredGeneration: 10,
       appliedGeneration: 10,
+    });
+  });
+
+  it('does not let a skills-only reconcile certify the generation whose full reconcile just failed', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(8),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+    expect(
+      coordinator.status().capabilities?.extensions?.appliedGeneration,
+    ).toBe(8);
+
+    harness.invokeWorkspaceCommand.mockResolvedValueOnce({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    });
+    await expect(
+      coordinator.reconcileExtensionGeneration(9),
+    ).resolves.toMatchObject({ state: 'failed' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+      appliedGeneration: 8,
+    });
+
+    // appliedGeneration 8 satisfies generation - 1, but generation 9's full
+    // apply just failed: the narrow skill refresh must not certify it.
+    await expect(
+      coordinator.reconcileExtensionGeneration(9, { skillsOnly: true }),
+    ).resolves.toMatchObject({ state: 'deferred' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      desiredGeneration: 9,
+      appliedGeneration: 8,
+    });
+    expect(coordinator.status().capabilities?.extensions?.state).not.toBe(
+      'ready',
+    );
+
+    // The next ensure() re-issues the full reconcile for generation 9.
+    harness.invokeWorkspaceCommand.mockClear();
+    await coordinator.ensure();
+    expect(
+      (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ),
+    ).not.toHaveLength(0);
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 9,
+      appliedGeneration: 9,
     });
   });
 

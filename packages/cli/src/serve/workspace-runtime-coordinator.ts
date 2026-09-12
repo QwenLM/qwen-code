@@ -719,6 +719,28 @@ export class WorkspaceRuntimeCoordinator {
 
   private prepareSkills(): Promise<void> {
     const revision = this.skillsRevision;
+    const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    const skills = this.status().capabilities?.skills;
+    const readyAtEpoch =
+      skills?.state === 'ready' &&
+      skills.runtimeEpoch === snapshot.runtimeEpoch;
+    const latchedFailure =
+      skills?.state === 'error' &&
+      skills.revision === revision &&
+      skills.runtimeEpoch === snapshot.runtimeEpoch &&
+      this.skillsRefreshFailedRevision === revision;
+    // Report the preparation as queued synchronously: when ensure() abandons
+    // its observation budget right after this call, the status it returns
+    // must already read 'starting' so polling clients converge. The two
+    // guards mirror the queued body's early returns so a latched failure or
+    // a ready certification is never demoted.
+    if (!readyAtEpoch && !latchedFailure) {
+      this.skillsStatus = {
+        state: 'starting',
+        revision,
+        runtimeEpoch: snapshot.runtimeEpoch,
+      };
+    }
     return this.queueSkillsWork(async () => {
       const status = this.status();
       if (
@@ -896,10 +918,14 @@ export class WorkspaceRuntimeCoordinator {
       }
       // A skill refresh cannot certify an earlier failed full refresh: the
       // narrow reconcile skipped refreshTools, MCP discovery, and the command
-      // update for generations the runtime never fully applied.
+      // update for generations the runtime never fully applied. Nor can it
+      // certify the same generation whose full reconcile just failed at this
+      // epoch: applied === generation - 1 cannot tell a fresh skill delta
+      // apart from the failed apply's leftover.
       const certifiesGeneration =
         !options.skillsOnly ||
-        (this.appliedExtensionRuntimeEpoch === runtimeEpoch &&
+        (!recoveringFromError &&
+          this.appliedExtensionRuntimeEpoch === runtimeEpoch &&
           (this.appliedExtensionGeneration === generation - 1 ||
             this.appliedExtensionGeneration === generation));
       const refreshesDerivedCapabilities =
@@ -1044,6 +1070,15 @@ export class WorkspaceRuntimeCoordinator {
 
   private prepareMcp(): Promise<void> {
     const revision = this.mcpRevision;
+    // Mirror of the Skills leg: the queued body's 'starting' write lands a
+    // microtask too late for an ensure() that just exhausted its observation
+    // budget, so publish it before queueing.
+    this.mcpStatus = {
+      state: 'starting',
+      revision,
+      runtimeEpoch:
+        this.bridge.getWorkspaceRuntimeLifecycleSnapshot().runtimeEpoch,
+    };
     return this.queueMcpWork(() => this.prepareMcpRevision(revision));
   }
 

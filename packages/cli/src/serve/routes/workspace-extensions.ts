@@ -1019,6 +1019,11 @@ export function registerWorkspaceExtensionRoutes(
           if (
             !ctrl.validateExtensionMutationClient(req, res, {
               requireClientId: false,
+              // The interactive V2 install/update routes validate the client
+              // id against every registered runtime's bridge; the answer must
+              // accept the same set, or a client known only to a secondary
+              // runtime can park an operation it is then refused to answer.
+              bridges: mutationClientBridges(),
             })
           ) {
             return;

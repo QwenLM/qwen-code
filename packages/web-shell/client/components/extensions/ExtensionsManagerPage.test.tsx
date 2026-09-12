@@ -2025,7 +2025,15 @@ describe('ExtensionsManagerPage runtime-error gate and degraded reads', () => {
         },
       ],
     }));
-    const ensureRuntime = vi.fn(async () => ({}));
+    // Both trust-gated legs answer 403: the ensure leg is awaited first in
+    // production, so the load must tolerate it exactly like the catalog leg.
+    const ensureRuntime = vi.fn(async () => {
+      throw new DaemonHttpError(
+        403,
+        { code: 'untrusted_workspace' },
+        'Workspace is not trusted.',
+      );
+    });
     const workspaceRuntimeExtensions = vi.fn(async () => {
       throw new DaemonHttpError(
         403,
@@ -2091,11 +2099,11 @@ describe('ExtensionsManagerPage runtime-error gate and degraded reads', () => {
       'ext-demo',
       'disabled',
     );
-    // The trust-gated runtime catalog answered 403, but the projection had
+    // Both trust-gated runtime legs answered 403, but the projection had
     // already reported trusted:false — the refresh must stay suppressed.
     expect(refreshExtensionRuntime).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain('session refresh failed');
-    // The tolerated runtime-catalog 403 must not freeze the row: the flipped
+    // The tolerated runtime 403s must not freeze the row: the flipped
     // projection the toggle's reload fetched still reaches the badge.
     expect(container.querySelector('h1')?.parentElement?.textContent).toContain(
       'disabled',
@@ -2189,6 +2197,109 @@ describe('ExtensionsManagerPage runtime-error gate and degraded reads', () => {
     await vi.waitFor(() =>
       expect(container.textContent).toContain('Extension "demo" disabled.'),
     );
+    expect(refreshExtensionRuntime).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('session refresh failed');
+  });
+
+  it('decides the refresh on the trust a superseded activation reload observed', async () => {
+    let trusted = true;
+    let releaseProjection: (() => void) | undefined;
+    const workspaceExtensions = vi.fn(async () => {
+      // Gate only the activation reload's first projection read (the mount
+      // load reads twice, so the reload's read is the third call).
+      if (workspaceExtensions.mock.calls.length === 3) {
+        await new Promise<void>((resolve) => {
+          releaseProjection = resolve;
+        });
+      }
+      return {
+        v: 1 as const,
+        workspaceId: 'id-main',
+        workspaceCwd: '/repo/main',
+        trusted,
+        desiredGeneration: 1,
+        appliedGeneration: 1,
+        extensions: [
+          {
+            extensionId: 'ext-demo',
+            name: 'demo',
+            version: '1.0.0',
+            defaultActivation: 'enabled' as const,
+            workspaceActivation: null,
+            effectiveActivation: 'enabled' as const,
+            activationSource: 'default' as const,
+          },
+        ],
+      };
+    });
+    const ensureRuntime = vi.fn(async () => ({}));
+    const workspaceRuntimeExtensions = vi.fn(async () => ({
+      v: 1 as const,
+      workspaceCwd: '/repo/main',
+      initialized: true,
+      runtimeEpoch: 1,
+      extensions: [],
+    }));
+    const refreshExtensionRuntime = vi.fn(async () => state.refreshHandle);
+    state.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceExtensions,
+      ensureRuntime,
+      workspaceRuntimeExtensions,
+      refreshExtensionRuntime,
+    }));
+    state.client.extensionCatalog.mockResolvedValue(catalogWithDemo);
+    state.client.setExtensionDefaultActivation.mockResolvedValue(
+      state.activationHandle,
+    );
+    state.client.waitForExtensionOperation.mockResolvedValue({
+      v: 1,
+      operationId: 'activate',
+      operation: 'activation',
+      status: 'succeeded',
+      createdAt: 1,
+      updatedAt: 2,
+      result: { status: 'disabled', name: 'demo' },
+    });
+    state.workspace.capabilities = {
+      features: [
+        'workspace_extensions_config_runtime',
+        'extension_activation_explicit_refresh',
+      ],
+      workspaces: [
+        { id: 'id-main', cwd: '/repo/main', primary: true, trusted: true },
+      ],
+    };
+
+    await mountPage();
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector('[role="button"][aria-label="demo"]'),
+      ).not.toBeNull(),
+    );
+
+    // The activation's reload parks inside its projection read; the daemon's
+    // own generation broadcast lands meanwhile, superseding that load.
+    await chooseActivation('user', 'Disabled', 'demo');
+    await vi.waitFor(() => expect(releaseProjection).toBeDefined());
+    trusted = false;
+    await act(async () => {
+      state.signals = { extensionsVersion: 1 };
+      render();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(workspaceExtensions.mock.calls.length).toBeGreaterThan(3),
+    );
+    await act(async () => {
+      releaseProjection!();
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Extension "demo" disabled.'),
+    );
+    // The superseded reload observed trusted:false from its own projection
+    // read; the refresh decision must use it, not the render-time snapshot.
     expect(refreshExtensionRuntime).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain('session refresh failed');
   });

@@ -715,6 +715,11 @@ export function createExtensionsController(
         // commit already landed.
         let committedStoreContentHash: string | undefined;
         let committedStoreRecoveryId: string | undefined;
+        // null is reserved for a genuine identity read failure, which the
+        // coordinator reads as "identity unknown" and drops the applied
+        // certification; a store that already moved past this receipt's
+        // generation sends undefined, which leaves the certification intact.
+        let storeIdentityUnreadable = false;
         if (committedGeneration === undefined) {
           const snapshot = await extensionManager.getExtensionStoreSnapshot();
           committedGeneration = snapshot.generation;
@@ -732,7 +737,7 @@ export function createExtensionsController(
               committedStoreRecoveryId = committedSnapshot.recoveryId;
             }
           } catch {
-            committedStoreContentHash = undefined;
+            storeIdentityUnreadable = true;
           }
         }
         updateExtensionOperation(operationId, {
@@ -762,8 +767,9 @@ export function createExtensionsController(
                               ...(options.skillsOnly
                                 ? { skillsOnly: true }
                                 : {}),
-                              storeContentHash:
-                                committedStoreContentHash ?? null,
+                              storeContentHash: storeIdentityUnreadable
+                                ? null
+                                : committedStoreContentHash,
                               storeRecoveryId: committedStoreRecoveryId,
                             },
                           );

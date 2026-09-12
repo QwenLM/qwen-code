@@ -2804,6 +2804,85 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('answers an interaction from a client id known only to a secondary runtime bridge', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(h.primary.bridge, 'knownClientIds').mockReturnValue(
+      new Set(['primary-client']),
+    );
+    vi.spyOn(h.secondary.bridge, 'knownClientIds').mockReturnValue(
+      new Set(['secondary-client']),
+    );
+    let submittedSetting: string | undefined;
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockImplementation(async function (this: ExtensionManager) {
+      submittedSetting = await requestApiKey(this);
+      return {} as never;
+    });
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'demo' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    const secondaryAuth = (pending: request.Test) =>
+      pending
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'secondary-client');
+    try {
+      const started = await secondaryAuth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/demo',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+      expect(started.status).toBe(202);
+
+      let interactionId = '';
+      await vi.waitFor(async () => {
+        const operation = await secondaryAuth(
+          request(h.app).get(
+            `/extensions/operations/${started.body.operationId}`,
+          ),
+        );
+        expect(operation.body).toMatchObject({
+          status: 'waiting_for_input',
+          interaction: { kind: 'setting', setting: { name: 'API key' } },
+        });
+        interactionId = operation.body.interaction.id as string;
+      });
+      // The install validated this client id against every registered
+      // runtime's bridge; the answer route must accept the same set.
+      const answer = await secondaryAuth(
+        request(h.app)
+          .post(
+            `/workspace/extensions/operations/${started.body.operationId}/interactions/${interactionId}`,
+          )
+          .send({ value: 'configured' }),
+      );
+      expect(answer.status).toBe(200);
+      expect(answer.body).toMatchObject({ accepted: true });
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(submittedSetting).toBe('configured');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('cancels a pending setting when the overall preparation deadline expires', async () => {
     const h = await makeHarness();
     mockExtensionManager();
