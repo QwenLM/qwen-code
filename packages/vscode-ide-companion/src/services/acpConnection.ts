@@ -59,8 +59,6 @@ export class AcpConnection {
   private sessionId: string | null = null;
   private workingDir: string = process.cwd();
   private fileHandler = new AcpFileHandler();
-  private lastExitCode: number | null = null;
-  private lastExitSignal: string | null = null;
 
   onSessionUpdate: (data: SessionNotification) => void = () => {};
   onPermissionRequest: (data: RequestPermissionRequest) => Promise<{
@@ -92,8 +90,6 @@ export class AcpConnection {
       this.disconnect();
     }
 
-    this.lastExitCode = null;
-    this.lastExitSignal = null;
     this.workingDir = workingDir;
 
     const env = { ...process.env };
@@ -189,8 +185,6 @@ export class AcpConnection {
       );
 
       if (this.child === ownChild) {
-        this.lastExitCode = code;
-        this.lastExitSignal = signal;
         this.sdkConnection = null;
         this.sessionId = null;
         this.child = null;
@@ -533,7 +527,13 @@ export class AcpConnection {
       sessionId: promptSessionId,
       prompt: promptBlocks,
     });
-    if (this.sdkConnection !== conn || this.sessionId !== promptSessionId) {
+    // Only a truly superseded connection (or a prompt rejected/cancelled by
+    // the SDK) should error. Switching to another session on the SAME live
+    // connection reassigns `this.sessionId` (see `newSession`) without
+    // replacing `sdkConnection`, so folding `this.sessionId !==
+    // promptSessionId` into this guard would misreport a successfully
+    // completed turn as "connection superseded".
+    if (this.sdkConnection !== conn) {
       throw RequestError.internalError(
         { details: 'connection superseded' },
         'connection superseded',

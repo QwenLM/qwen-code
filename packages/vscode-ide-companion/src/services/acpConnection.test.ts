@@ -48,8 +48,6 @@ type AcpConnectionInternal = {
   child: MockChild | null;
   sdkConnection: unknown;
   sessionId: string | null;
-  lastExitCode: number | null;
-  lastExitSignal: string | null;
   mapReadTextFileError: (error: unknown, filePath: string) => unknown;
   ensureConnection: () => unknown;
 };
@@ -406,8 +404,6 @@ describe('AcpConnection child exit cleanup', () => {
     conn.child = replacement;
     conn.sdkConnection = {};
     conn.sessionId = 'replacement';
-    conn.lastExitCode = 7;
-    conn.lastExitSignal = 'SIGTERM';
 
     exitHandler?.(0, null);
     await vi.advanceTimersByTimeAsync(1_000);
@@ -416,8 +412,6 @@ describe('AcpConnection child exit cleanup', () => {
     expect(conn.child).toBe(replacement);
     expect(conn.sdkConnection).toEqual({});
     expect(conn.sessionId).toBe('replacement');
-    expect(conn.lastExitCode).toBe(7);
-    expect(conn.lastExitSignal).toBe('SIGTERM');
   });
 });
 
@@ -469,6 +463,35 @@ describe('AcpConnection stale responses', () => {
     expect(conn.sessionId).toBe('old-session');
     expect(onEndTurn).not.toHaveBeenCalled();
   });
+
+  it('delivers a prompt that completes after a session switch on the same connection', async () => {
+    let resolvePrompt!: (value: PromptResponse) => void;
+    const sdk = {
+      prompt: vi.fn(
+        () =>
+          new Promise<PromptResponse>((resolve) => (resolvePrompt = resolve)),
+      ),
+    };
+    const onEndTurn = vi.fn();
+    const conn = createConnection({
+      child: createMockChild(),
+      sdkConnection: sdk,
+      sessionId: 'session-a',
+    });
+    (conn as unknown as AcpConnection).onEndTurn = onEndTurn;
+    const acp = conn as unknown as AcpConnection;
+
+    const prompt = acp.sendPrompt('hello');
+    void prompt.catch(() => {});
+    // The user switches to another session on the SAME live connection while
+    // the prompt is in flight. This must not be reported as a superseded
+    // connection: the turn completed, so it resolves and emits end-of-turn.
+    conn.sessionId = 'session-b';
+    resolvePrompt({ stopReason: 'end_turn' });
+
+    await expect(prompt).resolves.toMatchObject({ stopReason: 'end_turn' });
+    expect(onEndTurn).toHaveBeenCalledWith('end_turn');
+  });
 });
 
 describe('AcpConnection onDisconnected callback', () => {
@@ -485,14 +508,6 @@ describe('AcpConnection onDisconnected callback', () => {
 
     acpConn.onDisconnected(1, null);
     expect(spy).toHaveBeenCalledWith(1, null);
-  });
-});
-
-describe('AcpConnection lastExitCode/lastExitSignal', () => {
-  it('initializes exit info as null', () => {
-    const conn = createConnection();
-    expect(conn.lastExitCode).toBeNull();
-    expect(conn.lastExitSignal).toBeNull();
   });
 });
 
