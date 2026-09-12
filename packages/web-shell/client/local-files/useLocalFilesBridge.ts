@@ -100,10 +100,10 @@ export interface UseLocalFilesBridgeOptions {
   withheldBlocker?: LocalFilesBlocker;
 }
 
-function defaultStore(): DirectoryHandleStore | null {
-  return typeof indexedDB === 'undefined'
+function defaultStore(baseUrl: string): DirectoryHandleStore | null {
+  return typeof indexedDB === 'undefined' || typeof window === 'undefined'
     ? null
-    : createDirectoryHandleStore(indexedDB);
+    : createDirectoryHandleStore(indexedDB, baseUrl, window.location.origin);
 }
 
 function defaultWindow(): LocalFilesWindowLike {
@@ -157,7 +157,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   const { sessionId } = options;
   const win = options.win ?? defaultWindow();
   const store = useMemo(
-    () => (options.store === undefined ? defaultStore() : options.store),
+    () =>
+      options.store === undefined
+        ? defaultStore(options.baseUrl)
+        : options.store,
     // Resolved once per mount: the injected store is a stable test seam, and
     // re-creating the real one per render would reopen IndexedDB constantly.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- per-mount seam, not a stale copy

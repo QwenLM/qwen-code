@@ -5,6 +5,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { StandaloneAuth } from './StandaloneAuth';
 import AppStyles from '../App.module.css';
 import { getDaemonToken, persistDaemonToken } from '../config/daemon';
+import {
+  isKnownDaemonTarget,
+  readWorkspaceHosts,
+} from '../config/workspace-hosts';
 import type { WebShellLanguage } from '../i18n';
 import type { WebShellTheme } from '../themeContext';
 
@@ -21,6 +25,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   sessionStorage.clear();
+  localStorage.clear();
 });
 async function mount(
   initialToken?: string,
@@ -683,5 +688,54 @@ it('lets a manual retry supersede an armed auto-retry', async () => {
   await act(async () => {
     vi.advanceTimersByTime(60_000);
   });
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('remembers a successfully connected host without mounting the sidebar', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 200 })),
+  );
+  await mount();
+  expect(readWorkspaceHosts()).toContainEqual({
+    origin: 'http://daemon.test',
+    workspaces: [],
+  });
+  expect(isKnownDaemonTarget('http://daemon.test')).toBe(true);
+});
+
+it('updates the token destination hint when a local address is edited', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await act(async () =>
+    root.render(
+      <StandaloneAuth baseUrl={window.location.origin}>
+        {() => <p>Connected</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).not.toContain(
+    'sent to the address shown above',
+  );
+  act(() => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(addressInput(), 'https://remote.example');
+    addressInput().dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  expect(container.textContent).toContain('sent to the address shown above');
+});
+
+it('offers cross-origin diagnostics without treating network failures as permanent policy errors', async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('--allow-origin');
+  expect(container.textContent).toContain('network');
+  await act(async () => vi.advanceTimersByTimeAsync(2_000));
   expect(fetch).toHaveBeenCalledTimes(2);
 });

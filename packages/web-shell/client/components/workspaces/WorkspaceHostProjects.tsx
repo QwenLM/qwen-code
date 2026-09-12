@@ -84,18 +84,9 @@ export function OtherHostProjects() {
 }
 
 function OtherHosts() {
-  const workspace = useWorkspace();
   const { t } = useI18n();
   const origin = useCurrentHostOrigin();
   const others = useOtherHosts(origin);
-  useEffect(() => {
-    if (workspace.capabilities?.workspaces) {
-      rememberWorkspaceHost(
-        origin,
-        workspace.capabilities.workspaces.filter((ws) => ws.kind !== 'live'),
-      );
-    }
-  }, [origin, workspace.capabilities?.workspaces]);
   useEffect(() => {
     if (origin === window.location.origin) return;
     let cancelled = false;

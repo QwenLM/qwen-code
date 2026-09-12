@@ -164,6 +164,54 @@ describe('AddHostedWorkspaceDialog', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('opens an existing temporary folder only after persistence succeeds', async () => {
+    setLocation(`${PAGE}/`);
+    const workspace = {
+      id: 'ws-1',
+      cwd: '/repo/app',
+      displayName: 'Old',
+      persisted: false,
+      primary: false,
+    };
+    sdk.client.capabilities.mockResolvedValue({
+      features: [
+        'dynamic_workspace_registration',
+        'persistent_workspace_registration',
+        'workspace_display_name',
+      ],
+      workspaceCwd: '/repo/app',
+      workspaces: [workspace],
+    });
+    sdk.client.addWorkspace
+      .mockResolvedValueOnce(workspace)
+      .mockResolvedValueOnce({ ...workspace, persisted: true });
+    sdk.client.updateWorkspace.mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    await mount(<AddHostedWorkspaceDialog onClose={onClose} />);
+    act(() => buttonNamed('Next: choose folder').click());
+    await flush();
+
+    typeInto('#add-workspace-path', '/repo/app');
+    typeInto('#add-workspace-display-name', 'Renamed');
+    act(() => submitButton().click());
+    await flush();
+
+    expect(sdk.client.addWorkspace).toHaveBeenCalledWith('/repo/app', {
+      persist: true,
+    });
+    expect(assign).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    act(() => submitButton().click());
+    await flush();
+
+    expect(sdk.client.addWorkspace).toHaveBeenCalledTimes(2);
+    expect(sdk.client.updateWorkspace).toHaveBeenCalledWith('ws-1', {
+      displayName: 'Renamed',
+    });
+    expect(assign).toHaveBeenCalledWith(`${PAGE}/?workspace=ws-1`);
+  });
+
   it('renames an already registered folder instead of registering it again', async () => {
     setLocation(`${PAGE}/`);
     sdk.client.capabilities.mockResolvedValue({

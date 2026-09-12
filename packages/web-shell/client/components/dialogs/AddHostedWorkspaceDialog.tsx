@@ -193,6 +193,13 @@ export function AddHostedWorkspaceDialog({
             (ws) => comparable(ws.cwd) === comparable(cwd),
           );
           if (existing) {
+            if (persist) {
+              const promoted = await target.client.addWorkspace(cwd, {
+                persist: true,
+              });
+              if (promoted.persisted !== true)
+                throw new Error(t('sidebar.addWorkspacePersistenceError'));
+            }
             if (displayName && displayName !== existing.displayName) {
               await target.client.updateWorkspace(existing.id, { displayName });
             }

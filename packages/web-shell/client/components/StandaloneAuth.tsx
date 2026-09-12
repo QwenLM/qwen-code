@@ -16,6 +16,7 @@ import {
   getWorkspaceReturnUrl,
   openHostedWorkspace,
   readWorkspaceHosts,
+  rememberWorkspaceHost,
 } from '../config/workspace-hosts';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
@@ -54,6 +55,7 @@ interface AuthCopy {
   invalidAddress: string;
   confirmTarget: string;
   remoteHint: string;
+  remoteUnreachable: string;
   addressLabel: string;
   tokenLabel: string;
   connect: string;
@@ -71,6 +73,8 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     connecting: 'Connecting…',
     starting: 'Daemon is starting…',
     unreachable: 'Cannot reach the daemon. Retrying…',
+    remoteUnreachable:
+      'Cannot reach the daemon. Retrying… Check the address, network, HTTPS certificate, and --allow-origin for this page origin.',
     notReady: 'Daemon is not ready. Retrying…',
     startFailed: 'Daemon failed to start.',
     invalidToken:
@@ -96,6 +100,8 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     connecting: '正在连接…',
     starting: '守护进程正在启动…',
     unreachable: '无法访问守护进程，正在重试…',
+    remoteUnreachable:
+      '无法访问守护进程，正在重试… 请检查地址、网络、HTTPS 证书，以及 --allow-origin 是否允许当前页面来源。',
     notReady: '守护进程尚未就绪，正在重试…',
     startFailed: '守护进程启动失败。',
     invalidToken: '令牌无效或已过期，请输入守护进程终端中显示的令牌。',
@@ -224,6 +230,9 @@ export function StandaloneAuth({
         if (controllerRef.current !== controller) return;
         if (response.ok) {
           persistDaemonToken(candidate, baseUrl);
+          if (!readWorkspaceHosts().some((host) => host.origin === baseUrl)) {
+            rememberWorkspaceHost(baseUrl, []);
+          }
           setAccepted({ token: candidate || undefined });
         } else if (response.status === 401) {
           setBusy(false);
@@ -275,7 +284,12 @@ export function StandaloneAuth({
       } catch {
         // Network error, or our own timeout abort. An abort from a manual
         // retry or from unmount is caught by retryIn's ownership check.
-        retryIn(RETRY_DELAY_MS, copyRef.current.unreachable);
+        retryIn(
+          RETRY_DELAY_MS,
+          baseUrl === window.location.origin
+            ? copyRef.current.unreachable
+            : copyRef.current.remoteUnreachable,
+        );
       } finally {
         clearTimeout(timeout);
       }
@@ -425,7 +439,9 @@ export function StandaloneAuth({
         <CardFooter className="justify-center">
           <p className="text-center text-xs text-muted-foreground">
             {copy.hint}
-            {baseUrl !== window.location.origin && ` ${copy.remoteHint}`}
+            {normalizedAddress &&
+              normalizedAddress !== window.location.origin &&
+              ` ${copy.remoteHint}`}
           </p>
         </CardFooter>
       </Card>

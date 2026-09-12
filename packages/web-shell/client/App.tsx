@@ -1,5 +1,8 @@
 import './styles/globals.css';
-import { WorkspaceHostsEnabled } from './config/workspace-hosts';
+import {
+  WorkspaceHostsEnabled,
+  rememberWorkspaceHost,
+} from './config/workspace-hosts';
 import { WorkspaceLocation } from './components/workspaces/WorkspaceLocation';
 import { AddHostedWorkspaceDialog } from './components/dialogs/AddHostedWorkspaceDialog';
 import { isSessionWriterBlockedCode } from './daemon/session/session-context';
@@ -3521,6 +3524,20 @@ export function App({
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
   const workspaceHostsEnabled = useContext(WorkspaceHostsEnabled);
+  useEffect(() => {
+    if (!workspaceHostsEnabled || !workspace.capabilities?.workspaces) return;
+    rememberWorkspaceHost(
+      new URL(
+        workspace.baseUrl || window.location.origin,
+        window.location.origin,
+      ).origin,
+      workspace.capabilities.workspaces.filter((ws) => ws.kind !== 'live'),
+    );
+  }, [
+    workspaceHostsEnabled,
+    workspace.baseUrl,
+    workspace.capabilities?.workspaces,
+  ]);
   const artifactWorkspaceTarget = useArtifactWorkspaceTarget(
     connection.workspaceCwd,
   );

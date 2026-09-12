@@ -211,7 +211,8 @@ export function getAllowedDaemonOrigin(raw: string): string {
       parsed.password ||
       parsed.pathname !== '/' ||
       parsed.search ||
-      parsed.hash
+      parsed.hash ||
+      !/^[a-z0-9._\-[\]:]+$/iu.test(parsed.hostname)
     ) {
       return '';
     }

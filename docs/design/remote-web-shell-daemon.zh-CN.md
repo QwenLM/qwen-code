@@ -32,7 +32,7 @@ Web Shell 已经通过同一个 daemon `baseUrl` 发送 workspace、session、�
 
 独立页面的侧边栏保留浏览器本地的本地与远程项目目录，以 daemon origin 和 workspace ID 区分身份。localStorage 只保存项目身份和显示名称，不保存 token。选择项目时导航到对应 daemon 和 workspace；只有当前 daemon 提供实时会话。主机不可达不会删除已保存的项目，连接页提供返回本地或其他已保存主机的入口。嵌入式消费者保留原来的单 provider 界面。
 
-添加工作区先选择本地或远程。本地指提供页面服务的 daemon（开发时为本地 Vite 代理），不是浏览器文件系统权限。远程填写 HTTP(S) origin 和可选的按 origin 隔离的 token。更换主机时先导航，使新文档获得所选 daemon 的 CSP；认证后通过 `addWorkspace` 续接标记重新打开目录步骤，然后移除标记。在页面当前已连接的 daemon 上添加目录时，通过应用已有的工作区流程原地注册。目录建议与注册均请求该 daemon。已注册的目录直接选中，不再重复注册。只有本地目标且 capability 支持时提供原生目录选择器。会话、文件、终端与执行继续通过所选 SDK client。
+添加工作区先选择本地或远程。本地指提供页面服务的 daemon（开发时为本地 Vite 代理），不是浏览器文件系统权限。远程填写 HTTP(S) origin 和可选的按 origin 隔离的 token。更换主机时先导航，使新文档获得所选 daemon 的 CSP；认证后通过 `addWorkspace` 续接标记重新打开目录步骤，然后移除标记。在页面当前已连接的 daemon 上添加目录时，通过应用已有的工作区流程原地注册。目录建议与注册均请求该 daemon。已注册目录不会重复创建；如果要求持久保存，则先提升临时注册并确认保存成功，再打开工作区。只有本地目标且 capability 支持时提供原生目录选择器。会话、文件、终端与执行继续通过所选 SDK client。
 
 Bearer token 仍保存在当前标签页的 `sessionStorage` 中，但存储键按 daemon origin 区分。旧的无限定存储键只用于同源连接。选择远程 daemon 时绝不会复用页面自身 daemon 或另一个远程 daemon 的 token。
 
@@ -42,6 +42,8 @@ Bearer token 仍保存在当前标签页的 `sessionStorage` 中，但存储键�
 
 ## 失败与安全边界
 
+- 浏览器本地目录授权按 daemon origin 存储。远程 daemon 不会恢复当前页面所属 daemon 或其他远程主机的授权；用户必须为该 daemon 明确选择目录。
+- 成功连接的确认记录不依赖侧栏是否显示，项目元信息由应用生命周期同步。
 - 无效的远程地址会由连接页明确报告，并且不会被访问。
 - 认证、Origin、Host 和网络失败继续在现有连接页中明确展示；一个有效的远程目标失败时，不会回退到本地 runtime。
 - 即使 URL 指向攻击者控制的 daemon，也不会把其他 daemon 的 token 发送给它。

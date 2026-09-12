@@ -60,6 +60,20 @@ describe('Web Shell sandbox framing', () => {
       remoteDaemonConnectOrigins('https://daemon.example.com/path'),
     ).toEqual([]);
 
+    expect(remoteDaemonConnectOrigins('http://evil.example%3Bsandbox')).toEqual(
+      [],
+    );
+    expect(remoteDaemonConnectOrigins('https://[::1]:4170')).toEqual([
+      'https://[::1]:4170',
+      'wss://[::1]:4170',
+    ]);
+    expect(
+      buildWebShellCsp(
+        [],
+        remoteDaemonConnectOrigins('http://evil.example;sandbox'),
+      ),
+    ).toBe(buildWebShellCsp());
+
     const csp = buildWebShellCsp(
       [],
       remoteDaemonConnectOrigins('https://daemon.example.com:4170'),

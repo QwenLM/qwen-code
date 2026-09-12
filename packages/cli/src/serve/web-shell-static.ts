@@ -81,7 +81,8 @@ export function remoteDaemonConnectOrigins(raw: unknown): string[] {
       url.password ||
       url.pathname !== '/' ||
       url.search ||
-      url.hash
+      url.hash ||
+      !/^[a-z0-9._\-[\]:]+$/iu.test(url.hostname)
     ) {
       return [];
     }

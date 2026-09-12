@@ -32,7 +32,7 @@ The pre-connection gate always exposes a daemon address and optional token form,
 
 The standalone sidebar keeps a browser-local catalog of local and remote projects, keyed by daemon origin and workspace ID. Only project identity and display names are stored in localStorage, never tokens. Choosing a project navigates to its daemon and workspace; only the active daemon supplies live sessions. Unreachable hosts do not remove the saved projects, and the connection gate offers a return to local or another saved host. Embedded consumers retain their existing single-provider interface.
 
-Adding a workspace starts with a local/remote choice. Local means the daemon serving the page (the local Vite proxy in development), not browser filesystem access. Remote accepts an HTTP(S) origin and an optional origin-scoped token. Changing hosts navigates first, so the new document receives the selected daemon's CSP; an `addWorkspace` continuation flag reopens the directory step after authentication and is then removed. Adding a folder on the daemon the page is already connected to registers it in place through the app's existing workspace flow. Directory suggestions and registration use that daemon. Already-registered directories are selected instead of registered again. Native folder selection is available only for the local target when advertised by its capabilities. Sessions, files, terminals and execution continue through the selected SDK client.
+Adding a workspace starts with a local/remote choice. Local means the daemon serving the page (the local Vite proxy in development), not browser filesystem access. Remote accepts an HTTP(S) origin and an optional origin-scoped token. Changing hosts navigates first, so the new document receives the selected daemon's CSP; an `addWorkspace` continuation flag reopens the directory step after authentication and is then removed. Adding a folder on the daemon the page is already connected to registers it in place through the app's existing workspace flow. Directory suggestions and registration use that daemon. Already-registered directories are selected without duplication; requesting persistence first promotes a temporary registration and verifies that it was saved. Native folder selection is available only for the local target when advertised by its capabilities. Sessions, files, terminals and execution continue through the selected SDK client.
 
 Bearer tokens remain in per-tab `sessionStorage`, but are keyed by daemon origin. The legacy unqualified key is used only for same-origin connections. Selecting a remote daemon never reuses a token stored for the page's own daemon or another remote daemon.
 
@@ -42,6 +42,8 @@ Disconnecting or closing the browser only disposes the client connection. It doe
 
 ## Failure and Security Boundaries
 
+- Browser-local directory grants are stored per daemon origin. A remote daemon never restores a grant saved for the page’s own daemon or another remote host; users must select a directory for that daemon explicitly.
+- Successful connection confirmation is recorded independently of sidebar visibility; project metadata is synchronized by the app lifecycle.
 - Invalid remote addresses are reported by the connection gate and are not contacted.
 - Authentication, Origin, Host, and network failures stay explicit in the existing connection gate; there is no fallback from a valid selected remote daemon to a local runtime.
 - A URL selecting an attacker-controlled daemon cannot cause a token for another daemon to be sent to it.

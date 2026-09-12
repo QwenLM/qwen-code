@@ -90,6 +90,14 @@ describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
   });
 
   it('rejects credentials, paths, queries, and fragments', async () => {
+    for (const raw of [
+      'http://evil.example;sandbox',
+      'http://evil.example%3Bsandbox',
+    ]) {
+      await expect(
+        getDaemonBaseUrlWith('http://localhost:5173', raw),
+      ).resolves.toBe('');
+    }
     await expect(
       getDaemonBaseUrlWith(
         'http://localhost:5173',
