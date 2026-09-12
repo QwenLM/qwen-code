@@ -88,14 +88,19 @@ export function SessionWorkflowCockpit({
             {t('workflow.chatTitle')}
           </button>
           <div>
-            <span>{t('workflow.inspector.graphCanvas')}</span>
             <h1 title={sessionName}>
               {sessionName || t('workflow.session.defaultTitle')}
             </h1>
             <small>
-              {sessionId.slice(0, 8)} ·{' '}
-              {workspaceCwd?.split('/').at(-1) ||
-                t('workflow.session.workspace')}
+              <span>{t('workflow.inspector.graphCanvas')}</span>
+              <span
+                className={styles.workspaceName}
+                title={workspaceCwd || undefined}
+              >
+                {workspaceCwd?.split('/').at(-1) ||
+                  t('workflow.session.workspace')}
+              </span>
+              <span className={styles.sessionRef}>{sessionId.slice(0, 8)}</span>
             </small>
           </div>
         </div>
