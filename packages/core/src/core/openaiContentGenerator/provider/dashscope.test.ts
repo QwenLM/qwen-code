@@ -815,6 +815,42 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['metadata']).toBeUndefined();
     });
 
+    // buildRequest has a second, separate return for vision models, and until now no
+    // test reached it. A regression there would leave `metadata` on the wire for a
+    // non-qwen vision model while the non-vision path stayed correct, which is exactly
+    // the failure the gate exists to prevent.
+    it('ships metadata on the vision path for a qwen-family vision model', () => {
+      const result = provider.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    it('omits metadata on the vision path when enableRequestMetadata is false', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: false }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      // Still the vision branch, so the gate is what changed and not the route.
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toBeUndefined();
+    });
+
     it('still ships metadata for a qwen model reached through an alicloudapi gateway', () => {
       // #9103 widened which *origins* count as DashScope-compatible. Gating on the
       // wire model is orthogonal to that and must not walk it back.
