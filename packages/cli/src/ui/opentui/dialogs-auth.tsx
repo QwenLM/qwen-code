@@ -816,7 +816,13 @@ function AuthDialogFlow({
     async (providerConfig: ProviderConfig, inputs: ProviderSetupInputs) => {
       const protocol = inputs.protocol ?? providerConfig.protocol;
       try {
-        const plan = buildInstallPlan(providerConfig, inputs);
+        const plan = buildInstallPlan(
+          providerConfig,
+          inputs,
+          settings.merged.modelProviders?.[
+            inputs.protocol ?? providerConfig.protocol
+          ],
+        );
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
@@ -826,15 +832,26 @@ function AuthDialogFlow({
               .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => config.refreshAuth(authType),
         });
+        if (!plan.modelSelection && !config.getAuthType()) {
+          setErrorMessage(
+            t(
+              'Service models saved. Configure a conversation model to start chatting.',
+            ),
+          );
+          return;
+        }
         notify?.(
-          t(
-            'Successfully configured {{provider}}. Use /model to switch models.',
-            {
-              provider: providerConfig.label,
-            },
-          ),
+          !plan.modelSelection
+            ? t('Service models saved.')
+            : t(
+                'Successfully configured {{provider}}. Use /model to switch models.',
+                {
+                  provider: providerConfig.label,
+                },
+              ),
         );
-        logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
+        if (plan.modelSelection)
+          logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
         onClose();
       } catch (error) {
         const msg = t('Failed to authenticate. Message: {{message}}', {

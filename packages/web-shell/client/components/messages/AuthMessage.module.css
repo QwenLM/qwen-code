@@ -132,17 +132,6 @@
   outline: none;
 }
 
-.preview {
-  max-height: 260px;
-  overflow: auto;
-  margin-top: 8px;
-  padding: 8px;
-  border-radius: 6px;
-  color: var(--muted-foreground);
-  background: var(--background);
-  white-space: pre-wrap;
-}
-
 .error {
   color: var(--error-color, #ef4444);
 }
