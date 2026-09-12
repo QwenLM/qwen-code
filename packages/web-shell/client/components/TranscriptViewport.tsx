@@ -231,6 +231,14 @@ export const TranscriptViewport = forwardRef<
     const loadWhenVisible = () => {
       loadFrame.current = undefined;
       if (intent !== scrollIntent.current) return;
+      const scroll = scroller();
+      if (
+        !scroll ||
+        (direction === 'older'
+          ? scroll.scrollTop >= 200
+          : scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop >= 200)
+      )
+        return;
       const saved = capture();
       // A scroll event can arrive before the virtualized rows mount. Loading
       // without an anchor would leave no reading position to restore.

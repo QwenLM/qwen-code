@@ -235,6 +235,8 @@ import type {
   DaemonWorkspaceSettingsStatus,
   DaemonWorkspacePermissionsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelConfiguration,
+  DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
   DaemonVoiceAudioInput,
@@ -4597,6 +4599,32 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSettingUpdateResult;
       },
+    );
+  }
+
+  async modelConfigurations(): Promise<{ models: DaemonModelConfiguration[] }> {
+    return this.jsonRequest('/workspace/models', 'GET /workspace/models');
+  }
+
+  async updateModelContextWindow(
+    key: string,
+    contextWindowSize: number | null,
+  ): Promise<DaemonModelConfigurationUpdateResult> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/models`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ key, contextWindowSize }),
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'PATCH /workspace/models');
+        return (await res.json()) as DaemonModelConfigurationUpdateResult;
+      },
+      this.hasExplicitFetchTimeout
+        ? undefined
+        : DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS,
     );
   }
 
