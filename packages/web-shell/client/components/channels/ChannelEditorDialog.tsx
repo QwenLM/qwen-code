@@ -65,6 +65,9 @@ import {
 import { PLATFORM_MARKS } from './channel-platform';
 
 const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
+  dws: {
+    senderPolicy: 'channels.editor.field.dws.senderPolicy',
+  },
   dingtalk: {
     clientId: 'channels.editor.field.dingtalk.clientId',
     clientSecret: 'channels.editor.field.dingtalk.clientSecret',
@@ -102,6 +105,7 @@ const SHARED_ACCESS_FIELD_KEYS = new Set([
   'senderPolicy',
   'allowedUsers',
   'groupPolicy',
+  'dmPolicy',
 ]);
 const SHARED_SESSION_FIELD_KEYS = new Set([
   'sessionScope',
@@ -113,6 +117,7 @@ const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
   senderPolicy: 'channels.editor.field.shared.senderPolicy',
   allowedUsers: 'channels.editor.field.shared.allowedUsers',
   groupPolicy: 'channels.editor.field.shared.groupPolicy',
+  dmPolicy: 'channels.editor.field.shared.dmPolicy',
   sessionScope: 'channels.editor.field.shared.sessionScope',
   multiSession: 'channels.editor.field.shared.multiSession',
   instructions: 'channels.editor.field.shared.instructions',

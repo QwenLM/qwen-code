@@ -16,6 +16,7 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.fields.map((field) => field.key)).toEqual([
       'profile',
       'groupPolicy',
+      'dmPolicy',
       'senderPolicy',
       'allowedUsers',
       'watchTodos',
@@ -28,7 +29,7 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.validateConfig?.({})).toBeUndefined();
   });
 
-  it('defaults sender and group access to pairing', () => {
+  it('defaults sender and group access to pairing and direct messages to open', () => {
     const groupPolicy = plugin.management?.fields.find(
       (field) => field.key === 'groupPolicy',
     );
@@ -39,6 +40,15 @@ describe('DWS channel plugin', () => {
       'open',
       'disabled',
     ]);
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'dmPolicy')
+        ?.default,
+    ).toBe('open');
+    expect(
+      plugin.management?.fields
+        .find((field) => field.key === 'dmPolicy')
+        ?.options?.map((option) => option.value),
+    ).toEqual(['open', 'disabled']);
     expect(
       plugin.management?.fields.find((field) => field.key === 'senderPolicy')
         ?.default,

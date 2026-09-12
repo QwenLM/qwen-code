@@ -3491,6 +3491,14 @@ const EN: Messages = {
   'channels.editor.field.shared.groupPolicy.option.pairing': 'Pairing',
   'channels.editor.field.shared.groupPolicy.option.allowlist': 'Allowlist',
   'channels.editor.field.shared.groupPolicy.option.open': 'Open',
+  'channels.editor.field.shared.dmPolicy': 'Direct message access',
+  'channels.editor.field.shared.dmPolicy.description':
+    'Enable or disable direct messages and document notifications for this Channel.',
+  'channels.editor.field.shared.dmPolicy.option.open': 'Open',
+  'channels.editor.field.shared.dmPolicy.option.disabled': 'Disabled',
+  'channels.editor.field.dws.senderPolicy': 'Sender policy',
+  'channels.editor.field.dws.senderPolicy.description':
+    'Choose which users may start direct-message, document-notification, native-todo, and non-paired group tasks.',
   'channels.editor.field.shared.allowedGroupIds': 'Allowed group IDs',
   'channels.editor.field.shared.allowedGroupIds.description':
     'Comma-separated stable chat or repository IDs allowed to use this Channel.',
@@ -6987,6 +6995,14 @@ const ZH: Messages = {
   'channels.editor.field.shared.groupPolicy.option.pairing': '配对',
   'channels.editor.field.shared.groupPolicy.option.allowlist': '白名单',
   'channels.editor.field.shared.groupPolicy.option.open': '开放',
+  'channels.editor.field.shared.dmPolicy': '私聊访问',
+  'channels.editor.field.shared.dmPolicy.description':
+    '启用或禁用此频道的私聊消息和文档通知。',
+  'channels.editor.field.shared.dmPolicy.option.open': '开放',
+  'channels.editor.field.shared.dmPolicy.option.disabled': '禁用',
+  'channels.editor.field.dws.senderPolicy': '发送者策略',
+  'channels.editor.field.dws.senderPolicy.description':
+    '选择哪些用户可以发起私聊、文档通知、原生待办及未配对群聊任务。',
   'channels.editor.field.shared.allowedGroupIds': '允许的群聊 ID',
   'channels.editor.field.shared.allowedGroupIds.description':
     '用英文逗号分隔允许使用此频道的稳定群聊或代码仓库 ID。',

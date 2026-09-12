@@ -287,6 +287,38 @@ describe('Channel editor state', () => {
     );
   });
 
+  it('uses the effective direct-message default for a legacy instance', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK_WITH_ACCESS,
+      type: 'dws',
+      fields: [
+        ...DINGTALK_WITH_ACCESS.fields,
+        {
+          key: 'dmPolicy',
+          label: 'Direct Message Access',
+          kind: 'enum',
+          required: true,
+          default: 'open',
+          options: [
+            { value: 'open', label: 'Open' },
+            { value: 'disabled', label: 'Disabled' },
+          ],
+        },
+      ],
+    };
+    const instance = configuredInstance();
+    instance.config.type = 'dws';
+
+    const draft = createChannelEditorDraft(descriptor, instance);
+
+    expect(draft.values.dmPolicy).toBe('open');
+    expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+    expect(
+      buildChannelUpsertRequest(descriptor, draft, 'revision-dm', instance)
+        .config.dmPolicy,
+    ).toBe('open');
+  });
+
   it('changes group allowlist membership without losing wildcard or retained group settings', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       ...configuredInstance(),

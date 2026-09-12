@@ -34,6 +34,7 @@ Add a channel to `~/.qwen/settings.json`:
       "profile": "profile-name-or-corp-id",
       "senderPolicy": "pairing",
       "groupPolicy": "pairing",
+      "dmPolicy": "open",
       "watchTodos": true,
       "startReaction": "🤔",
       "endReaction": "赞",
@@ -57,6 +58,7 @@ without interactive confirmations:
       "type": "dws",
       "senderPolicy": "pairing",
       "groupPolicy": "pairing",
+      "dmPolicy": "open",
       "approvalMode": "yolo",
       "cwd": "/path/to/answer-bot"
     }
@@ -67,13 +69,17 @@ without interactive confirmations:
 YOLO mode auto-approves every tool call. Use it only for a trusted bot account
 and workspace.
 
-`senderPolicy` and `groupPolicy` default to `pairing` for a newly managed DWS channel. Approve a user or group with the code returned by the channel:
+`senderPolicy` and `groupPolicy` default to `pairing` for a newly managed DWS channel. `dmPolicy` defaults to `open`. Approve a user or group with the code returned by the channel:
 
 ```bash
 qwen channel pairing approve dws-work CODE
 ```
 
-`senderPolicy` controls direct-message senders, document-notification authors, native-todo creators, and senders in `open` or `allowlist` groups. `groupPolicy` controls group conversations. An approved pairing group follows the shared channel behavior and authorizes its members; open and allowlist groups must also pass `senderPolicy`.
+`senderPolicy` controls direct-message senders, document-notification authors, native-todo creators, and senders in `open` or `allowlist` groups. `dmPolicy` controls whether direct messages and document notifications are received at all. `groupPolicy` controls group conversations. An approved pairing group follows the shared channel behavior and authorizes its members; open and allowlist groups must also pass `senderPolicy`. Native todo polling is independent of both chat source policies and remains controlled by `watchTodos`.
+
+For a group-only channel, set `dmPolicy` to `disabled` and choose an enabled `groupPolicy`. For a direct-message-only channel, set `groupPolicy` to `disabled` and keep `dmPolicy` as `open`.
+
+Disabling a chat source takes effect at the next connect or poll and is destructive for work already accepted from it: parked pending messages and pending document notifications belonging to that source are discarded and recorded as processed (the channel logs `discarded N pending DWS message(s) because their chat sources are disabled`), so re-enabling does not replay them. Re-enabling either chat source starts its history recovery at the re-enable time. This fail-closed boundary prevents messages from the disabled interval from being replayed, but it also discards any older messages that arrived while the source was enabled and the channel was not polling.
 
 `groups` controls mention behavior. A concrete group ID overrides `"*"`. With `requireMention: true`, only an @ message wakes the channel. With `requireMention: false`, ordinary messages are also received after the group and sender policies pass.
 
@@ -101,7 +107,7 @@ There is no document or knowledge-base watch list. To start a document task:
 
 The channel extracts the document ID, comment key, and request from that notification. It reads the referenced document for context, adds the configured start reaction while the task runs, and replies to the original document comment. The real-time DWS event stream is used when it contains the card; a five-second incremental history check covers cards omitted by the current event stream.
 
-Comments that do not generate a notification are ignored by design. Duplicate notification messages for the same document comment execute only once. Document tasks follow `senderPolicy` and support `approvalMode` `default`, `plan`, or `yolo`; `default` is used when omitted.
+Comments that do not generate a notification are ignored by design. Duplicate notification messages for the same document comment execute only once. Document tasks require `dmPolicy: "open"`, follow `senderPolicy`, and support `approvalMode` `default`, `plan`, or `yolo`; `default` is used when omitted.
 
 ## Native Todo Changes
 

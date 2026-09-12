@@ -62,6 +62,19 @@ export const plugin: ChannelPlugin = {
         ],
       },
       {
+        key: 'dmPolicy',
+        label: 'Direct Message Access',
+        kind: 'enum',
+        required: true,
+        default: 'open',
+        description:
+          'Controls whether direct messages and document notifications may start tasks',
+        options: [
+          { value: 'open', label: 'Open' },
+          { value: 'disabled', label: 'Disabled' },
+        ],
+      },
+      {
         key: 'senderPolicy',
         label: 'Sender Policy',
         kind: 'enum',
