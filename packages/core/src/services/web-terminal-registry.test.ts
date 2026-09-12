@@ -290,7 +290,7 @@ describe('WebTerminalRegistry', () => {
 
   it('strips every query family the browser client answers, not just DA/DSR', async () => {
     // The client's xterm.js answers more than the DA / DSR probes: tertiary
-    // DA (`=`), DECRQM (`$ p`), DECRQSS (`$ q`), XTVERSION (`> q`),
+    // DA (`=`), DECRQM (`$ p`), DECRQSS (DCS `ESC P $ q`), XTVERSION (`> q`),
     // DECREQTPARM (`x`) and the OSC colour queries all fire a reply too, so a
     // regex over just the `c`/`n` finals would leave them in the scrollback to
     // be re-answered into the live shell. Every one of these must come out.
@@ -309,7 +309,7 @@ describe('WebTerminalRegistry', () => {
     onData('\x1b[?6n'); // DEC DSR cursor position
     onData('\x1b[?1$p'); // DECRQM
     onData('\x1b[>0q'); // XTVERSION
-    onData('\x1b[1$q'); // DECRQSS
+    onData('\x1bP$qm\x1b\\'); // DECRQSS (DCS)
     onData('\x1b[3x'); // DECREQTPARM
     onData('\x1b]10;?\x07'); // OSC foreground-colour query
     onData('\x1b]11;?\x07'); // OSC background-colour query
@@ -342,6 +342,39 @@ describe('WebTerminalRegistry', () => {
     const output = registry.readSnapshot('terminal:split')?.output ?? '';
     expect(output).toContain('before ');
     expect(output).toContain(' after');
+    expect(output).not.toContain('\x1b');
+  });
+
+  it('answers a DCS DECRQSS query once and keeps it out of the scrollback', async () => {
+    // Real DECRQSS is a DCS request (ESC P $ q <setting> ESC \), not the CSI
+    // `$q` form. xterm.js answers the DCS server-side; leaving the DCS bytes
+    // in the scrollback would let a reconnect replay re-answer them into the
+    // still-live shell, doubling the reply. The scrub must remove the DCS in
+    // both the complete and the chunk-split form, with the reply written back
+    // exactly once.
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:decrqss',
+      workspaceCwd: '/workspace',
+    });
+
+    const reply = '\x1bP1$r0m\x1b\\';
+
+    // Complete form.
+    onData('\x1bP$qm\x1b\\');
+    await vi.waitFor(() => expect(write).toHaveBeenCalledWith(reply));
+    expect(write).toHaveBeenCalledTimes(1);
+
+    // Split form, split before the ST terminator: the DCS halves must be
+    // carried across chunks and stripped whole, answering once more.
+    write.mockClear();
+    onData('\x1bP$q');
+    onData('m\x1b\\');
+    await vi.waitFor(() => expect(write).toHaveBeenCalledWith(reply));
+    expect(write).toHaveBeenCalledTimes(1);
+
+    const output = registry.readSnapshot('terminal:decrqss')?.output ?? '';
     expect(output).not.toContain('\x1b');
   });
 

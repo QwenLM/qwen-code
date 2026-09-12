@@ -71,24 +71,26 @@ const IDLE_RECLAIM_MS = 15 * 60 * 1000;
  * still-live shell's stdin. The sequences matched below are exactly the query
  * families xterm.js answers — Device Attributes (`c`, incl. the `>`/`=`
  * intermediates), Device Status Report (`n`), DECREQTPARM (`x`), DECRQM
- * (`$ p`), DECRQSS (`$ q`), XTVERSION (`> q`) and the OSC 10/11/4 colour
- * queries — and none of those finals/intermediates is display content, so
- * stripping them cannot drop rendered output.
+ * (`$ p`), DECRQSS (the DCS request `ESC P $ q ... ESC \`), XTVERSION
+ * (`> q`) and the OSC 10/11/4 colour queries — and none of those
+ * finals/intermediates is display content, so stripping them cannot drop
+ * rendered output.
  */
 // `no-control-regex` fires on the ESC/BEL bytes, which is the whole point here:
 // these are terminal query sequences, not stray controls.
 const TERMINAL_QUERY_SEQUENCE_RE =
   // eslint-disable-next-line no-control-regex
-  /\x1b\[[0-9;>?=]*[cnx]|\x1b\[[0-9;?]*\$[pq]|\x1b\[>[0-9;]*q|\x1b\](?:10|11|4;[0-9]+);\?(?:\x07|\x1b\\)/g;
+  /\x1b\[[0-9;>?=]*[cnx]|\x1b\[[0-9;?]*\$[pq]|\x1b\[>[0-9;]*q|\x1b\](?:10|11|4;[0-9]+);\?(?:\x07|\x1b\\)|\x1bP\$q(?:[^\x1b]|\x1b(?!\\))*\x1b\\/g;
 
 /**
  * An incomplete trailing escape sequence — a query node-pty split across two
  * chunks. It is carried to the next chunk and stripped as a whole rather than
- * left to leak the partial probe into the scrollback.
+ * left to leak the partial probe into the scrollback. DECRQSS arrives as DCS
+ * (`ESC P $ q ... ESC \`), so its partial form is held back the same way.
  */
 const PARTIAL_ESCAPE_SUFFIX_RE =
   // eslint-disable-next-line no-control-regex
-  /(?:\x1b|\x1b\[[0-9;>?=$]*|\x1b\](?:[^\x07\x1b]|\x1b(?!\\))*)$/;
+  /(?:\x1b|\x1b\[[0-9;>?=$]*|\x1b\](?:[^\x07\x1b]|\x1b(?!\\))*|\x1bP\$q(?:[^\x1b]|\x1b(?!\\))*)$/;
 
 /**
  * Stateful per-session stripper: `node-pty` may deliver a probe split across
