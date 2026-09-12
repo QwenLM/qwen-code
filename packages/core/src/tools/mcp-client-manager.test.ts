@@ -3451,6 +3451,293 @@ describe('McpClientManager — PR 14 guardrails', () => {
     expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['b']);
   });
 
+  it('discoverMcpToolsForServer after stop() drops the late client instead of registering it (R1-6)', async () => {
+    // R1-6: the orphan window is the `await existingClient.disconnect()`
+    // that precedes `this.clients.set(...)` — a rediscovery parked there
+    // while `stop()` snapshots and clears the map would afterwards install
+    // a fresh connected client (plus health timer) that no teardown path
+    // ever sees. The stopped-flag gate must disconnect the just-built
+    // client and release its slot instead. Without the gate this is red:
+    // the replacement client stays in the map and its disconnect is
+    // never called.
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const pendingDisconnects: Array<() => void> = [];
+    const lateDisconnect = vi.fn().mockResolvedValue(undefined);
+    let call = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      call += 1;
+      if (call === 1) {
+        // The initially-connected client: its disconnect parks on a
+        // deferred so the rediscovery is stranded inside the pre-set
+        // await when stop() runs.
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockImplementation(
+            () =>
+              new Promise<void>((resolve) => {
+                pendingDisconnects.push(resolve);
+              }),
+          ),
+          getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
+        } as unknown as McpClient;
+      }
+      return {
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: lateDisconnect,
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      } as unknown as McpClient;
+    });
+    const config = configWithServers({ a: { command: 'node' } });
+    const manager = mkManager({ config });
+    await manager.discoverAllMcpTools(config);
+    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
+
+    const rediscovery = manager.discoverMcpToolsForServer('a', config);
+    await vi.waitFor(() =>
+      expect(pendingDisconnects.length).toBeGreaterThan(0),
+    );
+    const stopPromise = manager.stop();
+    // Release every parked disconnect (the rediscovery's and stop()'s own
+    // call both park on the mock) so both continuations run.
+    for (const resolve of pendingDisconnects.splice(0)) resolve();
+    await Promise.all([rediscovery, stopPromise]);
+
+    const accounting = manager.getMcpClientAccounting();
+    expect(accounting.reservedSlots).toEqual([]);
+    expect(manager.getServerStatus('a')).not.toBe(MCPServerStatus.CONNECTED);
+    expect(lateDisconnect).toHaveBeenCalled();
+  });
+
+  it('disconnectServer must not evict a replacement client installed while its disconnect was in flight (R1-15)', async () => {
+    // R1-15: disconnectServer captures the client, awaits its disconnect
+    // (~2s for stdio with a request in flight), then deletes the map
+    // entry by NAME. A rediscovery for the same server can install a
+    // replacement client during that await; deleting by name would evict
+    // the replacement — a connected client with a live child no one ever
+    // disconnects. The identity check must keep the replacement in the
+    // map. Removing the identity check turns this red: the map loses the
+    // replacement while it reports CONNECTED.
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    // The operator's disconnect parks on a deferred (first call on the
+    // original client); the rediscovery's teardown of the SAME original
+    // client resolves immediately so the replacement is fully installed
+    // before the operator's finally runs.
+    let releaseOperatorDisconnect: (() => void) | undefined;
+    let originalDisconnectCalls = 0;
+    let call = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      call += 1;
+      if (call === 1) {
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockImplementation(() => {
+            originalDisconnectCalls += 1;
+            if (originalDisconnectCalls === 1) {
+              return new Promise<void>((resolve) => {
+                releaseOperatorDisconnect = resolve;
+              });
+            }
+            return Promise.resolve(undefined);
+          }),
+          getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
+        } as unknown as McpClient;
+      }
+      return {
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      } as unknown as McpClient;
+    });
+    const config = configWithServers({ a: { command: 'node' } });
+    const manager = mkManager({ config });
+    await manager.discoverAllMcpTools(config);
+    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
+
+    const operatorDisconnect = manager.disconnectServer('a');
+    await vi.waitFor(() => expect(releaseOperatorDisconnect).toBeDefined());
+    // Replacement discovery while the operator disconnect is still parked:
+    // the discovery tears the old client down (immediate mock), installs
+    // the replacement and finishes connecting.
+    await manager.discoverMcpToolsForServer('a', config);
+    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
+
+    // Now the operator's long disconnect settles. Its finally must not
+    // evict the replacement that was installed during the await.
+    releaseOperatorDisconnect?.();
+    await operatorDisconnect;
+    // Without the identity check the by-name delete drops the entry and
+    // getServerStatus falls back to DISCONNECTED.
+    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
+    expect(manager.getMcpClientAccounting().total).toBe(1);
+
+    // --- R1-15 follow-up: the trailing release must not fire while the
+    // replacement still holds the reservation. Same interleaving, but
+    // under a real enforce-mode budget so `reservedSlots` is populated:
+    // the rediscovery inside the disconnect window re-uses the held slot
+    // ('already_held'), and an unconditional releaseSlotName would drop
+    // it, letting the enforce branch admit one server past the cap.
+    let releaseOperatorDisconnect2: (() => void) | undefined;
+    let originalDisconnectCalls2 = 0;
+    let call2 = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      call2 += 1;
+      if (call2 === 1) {
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockImplementation(() => {
+            originalDisconnectCalls2 += 1;
+            if (originalDisconnectCalls2 === 1) {
+              return new Promise<void>((resolve) => {
+                releaseOperatorDisconnect2 = resolve;
+              });
+            }
+            return Promise.resolve(undefined);
+          }),
+          getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
+        } as unknown as McpClient;
+      }
+      return {
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      } as unknown as McpClient;
+    });
+    const budgeted = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const budgetManager = mkManager({
+      config: budgeted,
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
+    await budgetManager.discoverAllMcpTools(budgeted);
+    // Budget of 1: 'b' was refused during the bulk pass.
+    expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+
+    const operatorDisconnect2 = budgetManager.disconnectServer('a');
+    await vi.waitFor(() => expect(releaseOperatorDisconnect2).toBeDefined());
+    // Replacement discovery re-uses the still-held slot.
+    await budgetManager.discoverMcpToolsForServer('a', budgeted);
+    releaseOperatorDisconnect2?.();
+    await operatorDisconnect2;
+
+    // The replacement survives AND keeps its reservation; the cap of 1
+    // still refuses 'b'. Without the `!clients.has` condition on the
+    // trailing release both assertions go red: the slot is dropped and
+    // 'b' is admitted.
+    expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+    await budgetManager.discoverMcpToolsForServer('b', budgeted);
+    expect(budgetManager.getServerStatus('b')).not.toBe(
+      MCPServerStatus.CONNECTED,
+    );
+    // 'b' records a fresh refusal; the surviving replacement 'a' keeps
+    // the one slot.
+    expect(budgetManager.getMcpClientAccounting().refusedServerNames).toEqual([
+      'b',
+    ]);
+    expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+  });
+
+  it('disconnectServer evicts a replacement whose connect failed and frees its slot (R1-15 liveness)', async () => {
+    // R1-15 follow-up: map PRESENCE is not liveness. A rediscovery that
+    // installed a replacement during the operator's `await
+    // client.disconnect()` but whose own `connect()` rejected leaves a
+    // DISCONNECTED client in the map ('already_held' meant no fresh
+    // reservation; the discovery catch deliberately keeps it). Treating
+    // presence as "keep everything" strands the budget slot forever and
+    // re-arms the health monitor against the operator's intent. The
+    // finally must key on a LIVE (CONNECTED) replacement instead.
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    let releaseOperatorDisconnect: (() => void) | undefined;
+    let disconnectCalls = 0;
+    let call = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      call += 1;
+      if (call === 1) {
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockImplementation(() => {
+            disconnectCalls += 1;
+            if (disconnectCalls === 1) {
+              return new Promise<void>((resolve) => {
+                releaseOperatorDisconnect = resolve;
+              });
+            }
+            return Promise.resolve(undefined);
+          }),
+          getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
+        } as unknown as McpClient;
+      }
+      // The replacement: connect rejects, and its recorded status is
+      // DISCONNECTED (the shape `getServerStatus` reports for it). Every
+      // client past #1 is the connect-failing shape EXCEPT the one that
+      // connects for 'b' at the end of this test — mock #3 flips back to
+      // the connected shape so the post-fix admission of 'b' is observable.
+      const failing = () => ({
+        connect: vi.fn().mockRejectedValue(new Error('connect refused')),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(() => MCPServerStatus.DISCONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      });
+      const healthy = () => ({
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      });
+      if (call === 3) {
+        return healthy() as unknown as McpClient;
+      }
+      return failing() as unknown as McpClient;
+    });
+    const budgeted = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = mkManager({
+      config: budgeted,
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
+    await manager.discoverAllMcpTools(budgeted);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+
+    const operatorDisconnect = manager.disconnectServer('a');
+    await vi.waitFor(() => expect(releaseOperatorDisconnect).toBeDefined());
+    // Rediscovery during the window: installs the replacement, its
+    // connect() rejects, the discovery catch keeps the (dead) client in
+    // the map with the still-held slot.
+    await manager.discoverMcpToolsForServer('a', budgeted);
+    releaseOperatorDisconnect?.();
+    await operatorDisconnect;
+
+    // The operator's disconnect must undo the dead replacement: slot
+    // released (so 'b' is admissible under the cap of 1), no client
+    // tracked. Keying on presence instead of liveness leaves
+    // reservedSlots=['a'] and refuses 'b' forever.
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual([]);
+    // 'b' is admitted under the freed slot and its client (mock #3,
+    // connect-resolved) reaches CONNECTED.
+    await manager.discoverMcpToolsForServer('b', budgeted);
+    expect(manager.getServerStatus('b')).toBe(MCPServerStatus.CONNECTED);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['b']);
+  });
+
   it('discoverMcpToolsForServerInternal rejects disabled servers (wenshao R7 #2 line 528)', async () => {
     // Reachable from /mcp reconnect, OAuth re-discovery, and health
     // monitor reconnect. Pre-fix none of these paths checked the

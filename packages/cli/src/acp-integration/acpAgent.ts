@@ -4870,6 +4870,12 @@ class QwenAgent implements Agent {
         ),
         budget: this.workspaceMcpBudget,
       });
+      // Tools spawned by the pool are discovered against this bootstrap
+      // Config (the pool's `cliConfig`), so the abort-recovery pool guard
+      // in core reads this accessor ON this exact instance. The per-call
+      // sites below (workspace-discovery config, per-session configs) are
+      // not enough: a pool-baked tool's `cliConfig` is the bootstrap one.
+      this.config.setMcpTransportPool(this.mcpPool);
     }
   }
 

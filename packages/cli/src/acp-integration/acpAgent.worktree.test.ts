@@ -388,6 +388,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       setArtifactSnapshotsEnabled: vi.fn(),
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
@@ -450,6 +451,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),

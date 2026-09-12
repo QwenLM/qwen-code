@@ -11,6 +11,7 @@ import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
   DiscoveredMCPTool,
   generateValidName,
+  resetAbortRecoveryCooldownForTests,
   type McpDirectClient,
   type McpToolAnnotations,
 } from './mcp-tool.js';
@@ -264,6 +265,7 @@ describe('DiscoveredMCPTool', () => {
 
   afterEach(() => {
     removeMCPServerStatus(serverName);
+    resetAbortRecoveryCooldownForTests(serverName);
     vi.restoreAllMocks();
   });
 
@@ -2342,7 +2344,183 @@ describe('DiscoveredMCPTool', () => {
       expect(retryClient.callTool).not.toHaveBeenCalled();
     });
 
-    it('should not retry aborted calls even when the server is disconnected', async () => {
+    it('should not retry aborted calls even when the server is disconnected, but should re-arm the dead connection in the background', async () => {
+      const params = { param: 'test' };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(),
+      };
+
+      const retryClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        retryClient,
+      );
+
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(retryTool);
+      const setTools = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+        getLlmClient: () => ({
+          isInitialized: () => true,
+          setTools,
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      (mockMcpClient.callTool as any).mockRejectedValue(abortError);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = reconnectTool.build(params);
+      const execution = invocation.execute(controller.signal);
+      // Abort before the rejected call settles so the error is observed as a
+      // cancellation, not a bare transport failure. The reason matches
+      // Session.ts's USER_CANCEL_ABORT_REASON — the only abort kind that
+      // arms background recovery.
+      controller.abort('qwen:user-cancel');
+      await expect(execution).rejects.toThrow('The operation was aborted');
+
+      // The cancelled call itself must never be replayed...
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() =>
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1),
+      );
+      // ...but the dead connection is re-armed for the NEXT call. Discovery
+      // only reloads the registry; without it, a server whose transport died
+      // together with the cancel stays dead until a manual reconnect that
+      // Channel/daemon operators cannot run (#11272).
+      expect(retryClient.callTool).not.toHaveBeenCalled();
+      // The model's tool declarations are refreshed too — non-interactive
+      // surfaces (ACP/Channel) have no `mcp-client-update` subscriber, so a
+      // registry-only re-registration would never reach the model. Default
+      // options (no skipHistoryReveal): the rediscovery dropped the
+      // deferred-reveal state, and the history reveal pass is what puts
+      // the live history's `functionCall`-referenced tools back in the
+      // model's declaration list (R3-4).
+      await vi.waitFor(() => expect(setTools).toHaveBeenCalledTimes(1));
+      expect(setTools).toHaveBeenCalledWith();
+
+      // A second cancel inside the cooldown window must not fire another
+      // purge + spawn cycle: recovery is bounded per server. Without the
+      // cooldown guard the count grows to 2.
+      const secondCancel = new AbortController();
+      const secondExecution = reconnectTool
+        .build(params)
+        .execute(secondCancel.signal);
+      secondCancel.abort('qwen:user-cancel');
+      await expect(secondExecution).rejects.toThrow(
+        'The operation was aborted',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+    });
+
+    it('propagates the original error when the server never came back despite the restored snapshot (R3-6)', async () => {
+      // The failure-restore re-registers the pre-failure snapshot under
+      // the identical key, so `ensureTool` resolving is no longer
+      // evidence of a live connection — treating it as such reports
+      // "Successfully reconnected" for a dead server and replays the
+      // call onto the dead transport for all retry cycles. The
+      // manager's client-scoped status is the liveness signal.
+      const params = { param: 'test' };
+      const connectionError = new Error(
+        'Connection closed unexpectedly by the server',
+      );
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(connectionError),
+      };
+      // The restored snapshot: the SAME tool object comes back from
+      // ensureTool, still holding the dead client.
+      const restoredTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mockMcpClient,
+      );
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(restoredTool);
+      const getServerStatus = vi
+        .fn()
+        .mockReturnValue(MCPServerStatus.DISCONNECTED);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+          getMcpClientManager: () => ({ getServerStatus }),
+        }),
+      };
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true, // trust
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+        undefined,
+        undefined,
+        { readOnlyHint: true },
+      );
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      await expect(
+        tool.build(params).execute(new AbortController().signal),
+      ).rejects.toThrow('Connection closed unexpectedly');
+
+      // The original call was made exactly once — no replay onto the
+      // dead transport, no retry cycle burned on a server that never
+      // came back. The liveness gate fires after the rediscovery pass
+      // but BEFORE ensureTool: presence would have resolved the stale
+      // snapshot and burned the retry cycles.
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(ensureTool).toHaveBeenCalledTimes(0);
+    });
+
+    it('should not retry a callTool AbortError when the signal was never aborted', async () => {
+      // Pins the non-abort classifier path the re-arm tests replaced: a
+      // bare AbortError rejection from `callTool` against a DISCONNECTED
+      // server, with a live (never-aborted) parent signal, must be a
+      // plain cancel-shaped failure — no retry, no reconnect, no
+      // recovery side effects.
       const params = { param: 'test' };
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn(),
@@ -2401,6 +2579,235 @@ describe('DiscoveredMCPTool', () => {
       expect(discoverToolsForServer).not.toHaveBeenCalled();
       expect(ensureTool).not.toHaveBeenCalled();
       expect(retryClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('should not trigger background recovery on abort while the server is connected', async () => {
+      const params = { param: 'test' };
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(abortError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = tool.build(params);
+      const execution = invocation.execute(controller.signal);
+      controller.abort();
+      await expect(execution).rejects.toThrow('The operation was aborted');
+
+      // A cancel against a healthy server must stay a pure cancel: no retry,
+      // no reconnect churn.
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
+
+    it('should not trigger background recovery on a timeout-kind abort against a disconnected server', async () => {
+      // The scheduler aborts timed-out tools with a `TimeoutError`
+      // DOMException — an abort, but not a user cancel. Recovery must
+      // read the kind from `signal.reason` and stay dark for it, even
+      // with a recorded DISCONNECTED and a dead-session rejection.
+      const params = { param: 'test' };
+      const deadSession = Object.assign(
+        new Error('HTTP 404: session not found'),
+        { code: -32001 },
+      );
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(deadSession),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = tool.build(params);
+      const execution = invocation.execute(controller.signal);
+      controller.abort(new DOMException('Timeout', 'TimeoutError'));
+      await expect(execution).rejects.toBeTruthy();
+
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
+
+    it('should not trigger background recovery on a user cancel when the invocation is guarded', async () => {
+      // Mirrors 'does not reconnect a guarded invocation after an ambiguous
+      // connection error' on the abort path: a guarded session cancelling a
+      // call whose transport died (dead-session rejection + recorded
+      // DISCONNECTED + user-cancel abort) must fail closed exactly like the
+      // error path — no purge, no respawn, no reconnect.
+      const params = { param: 'test' };
+      const deadSession = Object.assign(
+        new Error('HTTP 404: session not found'),
+        { code: -32001 },
+      );
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(deadSession),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolInvocationGuard: () => vi.fn(),
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = tool.build(params);
+      const execution = invocation.execute(controller.signal);
+      controller.abort('qwen:user-cancel');
+      await expect(execution).rejects.toBeTruthy();
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledOnce();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+    });
+
+    it('should not trigger background recovery on abort when no status was ever recorded', async () => {
+      // `getMCPServerStatus` defaults unknown names to DISCONNECTED; the
+      // recovery gate must require a *recorded* DISCONNECTED so a server
+      // whose status was never registered cannot have its tools wiped by
+      // a cancel (same trap `isExecutionTimeoutFailure` guards against).
+      const params = { param: 'test' };
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(abortError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+
+      // No updateMCPServerStatus call: the name is absent from the map.
+      removeMCPServerStatus(serverName);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = tool.build(params);
+      const execution = invocation.execute(controller.signal);
+      controller.abort();
+      await expect(execution).rejects.toThrow('The operation was aborted');
+
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
+
+    it('should not trigger background recovery when the registry manager is pooled', async () => {
+      // Pool-baked tools carry the daemon's bootstrap Config. The pool
+      // skip must detect them even when that Config instance was never
+      // handed `setMcpTransportPool` — the manager behind the registry
+      // the recovery would purge is the authoritative fact (R1-5).
+      const params = { param: 'test' };
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(abortError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      // Bootstrap-shaped config: NO getMcpTransportPool accessor at all —
+      // only the manager reveals pool mode.
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+          getMcpClientManager: () => ({
+            getServerStatus: () => MCPServerStatus.DISCONNECTED,
+            isPooled: () => true,
+          }),
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = tool.build(params);
+      const execution = invocation.execute(controller.signal);
+      controller.abort('qwen:user-cancel');
+      await expect(execution).rejects.toThrow('The operation was aborted');
+
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
 
     it('should not reconnect for an MCP isError result', async () => {
@@ -2855,14 +3262,21 @@ describe('DiscoveredMCPTool', () => {
         .execute(abortController.signal);
 
       updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
-      abortController.abort();
+      // User-cancel reason (Session.ts's USER_CANCEL_ABORT_REASON): the
+      // abort kind that legitimately arms background recovery.
+      abortController.abort('qwen:user-cancel');
 
       const rejection = await executePromise.catch((error) => error);
       expect(rejection).toMatchObject({ name: 'AbortError' });
-      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      // The DISCONNECTED status here probes classification only; the abort
+      // fires after execution started, so background recovery may legitimately
+      // run. This test asserts the abort is not misread as a timeout.
       expect(rejection).not.toMatchObject({
         errorType: ToolErrorType.EXECUTION_TIMEOUT,
       });
+      await vi.waitFor(() =>
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1),
+      );
     });
 
     it('does not classify a direct -32001 that races with a parent abort as a timeout', async () => {

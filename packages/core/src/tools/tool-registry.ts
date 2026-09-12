@@ -23,6 +23,8 @@ import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames } from './tool-names.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import type { PromptRegistry } from '../prompts/prompt-registry.js';
+import type { ResourceRegistry } from '../resources/resource-registry.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
@@ -229,6 +231,27 @@ export class ToolRegistry {
   private permissionDeferred: Set<string> = new Set();
   private config: Config;
   private mcpClientManager: McpClientManager;
+  // In-flight `discoverToolsForServer` passes keyed by server name. The
+  // purge runs synchronously before the await, so an unguarded second
+  // caller snapshots-and-deletes the first caller's FRESHLY registered
+  // tools while the manager dedups it onto the first pass's promise —
+  // which resolves, so no restore runs and the server is left with a
+  // live client but zero registrations. Mirrors the manager's own
+  // `serverDiscoveryPromises` contract: a concurrent caller awaits and
+  // observes the in-flight outcome instead of purging again.
+  private serverDiscoveryInFlight = new Map<string, Promise<void>>();
+
+  // Monotonic per-server generation, bumped by every teardown-intent path
+  // (`removeMcpToolsByServer`, reached from `disconnectServer` /
+  // `disableMcpServer` / direct removal). A discovery pass captures the
+  // generation before awaiting the manager; if it moved by the time the
+  // pass settles, the server was deliberately torn down mid-pass and the
+  // snapshot restore must NOT run — it would re-expose a server the
+  // operator just removed, bound to a client that no longer exists
+  // (R3-7). The teardown paths also drop the in-flight dedup entry so a
+  // post-teardown reconnect starts a fresh pass instead of inheriting
+  // the pre-teardown promise (R2-1 round 4).
+  private serverTeardownGeneration = new Map<string, number>();
 
   constructor(
     config: Config,
@@ -522,6 +545,17 @@ export class ToolRegistry {
    * @param serverName The name of the server to remove tools from.
    */
   removeMcpToolsByServer(serverName: string): void {
+    // Teardown intent: bump the generation and drop the dedup entry so
+    // (a) a discovery pass pending across this teardown skips its
+    // restore, and (b) a reconnect issued AFTER this teardown starts a
+    // fresh manager pass rather than observing the pre-teardown pass's
+    // outcome.
+    this.serverTeardownGeneration.set(
+      serverName,
+      (this.serverTeardownGeneration.get(serverName) ?? 0) + 1,
+    );
+    this.serverDiscoveryInFlight.delete(serverName);
+
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
         this.tools.delete(name);
@@ -652,25 +686,221 @@ export class ToolRegistry {
    * @param serverName - The name of the server to discover tools from.
    */
   async discoverToolsForServer(serverName: string): Promise<void> {
-    // Remove any previously discovered tools from this server
+    // R2-1: dedup concurrent passes per server. The second caller awaits
+    // the first pass's outcome (it must still observe it — one layer down
+    // the manager's `serverDiscoveryPromises` established that contract)
+    // but never runs its own snapshot+purge: purging here while the first
+    // pass is mid-rediscovery deletes that pass's freshly registered
+    // tools, and because the deduped discovery RESOLVES, no restore would
+    // put them back — a CONNECTED server left with zero registrations.
+    const inFlight = this.serverDiscoveryInFlight.get(serverName);
+    if (inFlight) {
+      return inFlight;
+    }
+    // Capture the teardown generation before the await; the resolve-path
+    // restore is suppressed if a teardown path bumped it mid-pass (R3-7).
+    const discoveryGeneration =
+      this.serverTeardownGeneration.get(serverName) ?? 0;
+    const run = this.discoverToolsForServerInner(
+      serverName,
+      discoveryGeneration,
+    ).finally(() => {
+      this.serverDiscoveryInFlight.delete(serverName);
+    });
+    this.serverDiscoveryInFlight.set(serverName, run);
+    return run;
+  }
+
+  private async discoverToolsForServerInner(
+    serverName: string,
+    discoveryGeneration: number,
+  ): Promise<void> {
+    // Snapshot the server's current registrations so a FAILED rediscovery
+    // can put them back. The purge below runs before the await, so without
+    // restoration a failed rediscovery leaves the server with no tools for
+    // the rest of the session — nothing else re-registers them (the
+    // manager's internal catch only logs). Cancel-triggered recovery is
+    // exactly the caller that must not widen that window.
+    const previousTools: DiscoveredMCPTool[] = [];
+    const previousRevealed: Array<[string, boolean]> = [];
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
-        this.tools.delete(name);
+        previousTools.push(tool);
+        previousRevealed.push([name, this.revealedDeferred.has(name)]);
         // Drop reveal state too so a re-discovered tool of the same
         // name doesn't inherit a `revealed: true` from before the
         // disconnect (would surface in declarations before any
         // ToolSearch call this session).
         this.revealedDeferred.delete(name);
+        this.tools.delete(name);
       }
     }
+    const previousPrompts = this.config
+      .getPromptRegistry()
+      .getPromptsByServer(serverName);
+    const previousResources = this.config
+      .getResourceRegistry()
+      .getResourcesByServer(serverName);
 
     this.config.getPromptRegistry().removePromptsByServer(serverName);
     this.config.getResourceRegistry().removeResourcesByServer(serverName);
 
-    await this.mcpClientManager.discoverMcpToolsForServer(
-      serverName,
-      this.config,
-    );
+    try {
+      await this.mcpClientManager.discoverMcpToolsForServer(
+        serverName,
+        this.config,
+      );
+      // R1-3: on the legacy path the manager RESOLVES even for a failed
+      // rediscovery (the internal catch logs and deliberately does not
+      // rethrow; five policy early-returns also resolve without
+      // registering). The restore must therefore fire on the observed
+      // OUTCOME — a server that had registrations and came back with
+      // none — not only on a rejection.
+      //
+      // R3-3/R3-5/R1-3 (round 4): each registry is gated on ITS OWN
+      // emptiness, and only a deliberate teardown (R3-7 generation bump
+      // below) or an operator filter/policy removal (R1-3 round 4)
+      // suppresses the restore.
+      // - gating prompts on `previousTools.length` dropped a prompt-only
+      //   server's registrations forever (R3-3);
+      // - restoring prompts into a non-empty prompt registry hits
+      //   `registerPrompt`'s rename-on-collision and leaves a
+      //   `<server>_<prompt>` ghost bound to the dead client (R3-5);
+      // - restoring tools the operator's CURRENT includeTools/excludeTools
+      //   just filtered out re-exposes excluded tools (R1-3 entrance 1);
+      // - restoring after the server was torn down mid-pass undoes the
+      //   teardown (R3-7).
+      const generationNow = this.serverTeardownGeneration.get(serverName) ?? 0;
+      const tornDownWhilePending = generationNow !== discoveryGeneration;
+      const serverConfig =
+        this.config.getMcpServers()?.[serverName] ??
+        this.config.getRuntimeMcpServers?.()[serverName];
+      const policyRemoved =
+        !serverConfig ||
+        this.config.isMcpServerDisabled?.(serverName) === true ||
+        this.config.isMcpServerPendingApproval?.(serverName) === true;
+      const toolsEmpty = this.countMcpToolsForServer(serverName) === 0;
+      const promptsEmpty =
+        this.config.getPromptRegistry().getPromptsByServer(serverName)
+          .length === 0;
+      const resourcesEmpty =
+        this.config.getResourceRegistry().getResourcesByServer(serverName)
+          .length === 0;
+      const restoreTools =
+        !tornDownWhilePending &&
+        !policyRemoved &&
+        previousTools.length > 0 &&
+        toolsEmpty &&
+        this.snapshotPassesOperatorFilter(serverName, previousTools);
+      const restorePrompts =
+        !tornDownWhilePending &&
+        !policyRemoved &&
+        previousPrompts.length > 0 &&
+        promptsEmpty;
+      const restoreResources =
+        !tornDownWhilePending &&
+        !policyRemoved &&
+        previousResources.length > 0 &&
+        resourcesEmpty;
+      if (restoreTools || restorePrompts || restoreResources) {
+        this.restoreServerRegistrations(
+          serverName,
+          restoreTools ? previousTools : [],
+          restorePrompts ? previousPrompts : [],
+          restoreResources ? previousResources : [],
+          previousRevealed,
+        );
+      }
+    } catch (error) {
+      // Rediscovery failed: the old registrations point at a client the
+      // manager has already disconnected, but they are still the best
+      // available state — `ensureTool` keeps resolving them and the
+      // connection-error paths (`shouldAttemptReconnect`) can repair on
+      // the next call. An empty registry would leave the server's tools
+      // uncallable instead, with no path back short of a full restart.
+      // Best-effort and deliberately silent about re-registration errors:
+      // the original discovery error is the one callers should see.
+      this.restoreServerRegistrations(
+        serverName,
+        previousTools,
+        previousPrompts,
+        previousResources,
+        previousRevealed,
+      );
+      throw error;
+    }
+  }
+
+  private countMcpToolsForServer(serverName: string): number {
+    let count = 0;
+    for (const tool of this.tools.values()) {
+      if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Whether every snapshotted tool passes the operator's CURRENT
+   * includeTools/excludeTools filter. The filters are applied only at
+   * discovery (`McpClient`'s `isEnabled`); `registerTool` never consults
+   * them — so a snapshot taken before the operator excluded a tool must
+   * not be blindly restored after a reconnect that (correctly) registered
+   * nothing. Matching uses `serverToolName`, the raw declaration name the
+   * discovery path feeds `isEnabled`, not the normalized schema name.
+   */
+  private snapshotPassesOperatorFilter(
+    serverName: string,
+    tools: DiscoveredMCPTool[],
+  ): boolean {
+    const serverConfig =
+      this.config.getMcpServers()?.[serverName] ??
+      this.config.getRuntimeMcpServers?.()[serverName];
+    const include = serverConfig?.includeTools;
+    const exclude = serverConfig?.excludeTools;
+    if (!include?.length && !exclude?.length) {
+      return true;
+    }
+    return tools.every((tool) => {
+      const raw = tool.serverToolName;
+      if (exclude?.length && matchesAnyServerPattern(raw, exclude)) {
+        return false;
+      }
+      if (include?.length && !matchesAnyServerPattern(raw, include)) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  private restoreServerRegistrations(
+    _serverName: string,
+    previousTools: DiscoveredMCPTool[],
+    previousPrompts: ReturnType<PromptRegistry['getPromptsByServer']>,
+    previousResources: ReturnType<ResourceRegistry['getResourcesByServer']>,
+    previousRevealed: Array<[string, boolean]>,
+  ): void {
+    try {
+      for (const tool of previousTools) {
+        this.registerTool(tool);
+      }
+      for (const [name, revealed] of previousRevealed) {
+        if (revealed) {
+          this.revealedDeferred.add(name);
+        }
+      }
+      for (const prompt of previousPrompts) {
+        this.config.getPromptRegistry().registerPrompt(prompt);
+      }
+      for (const resource of previousResources) {
+        this.config.getResourceRegistry().registerResource(resource);
+      }
+    } catch (restoreError) {
+      debugLogger.error(
+        `Failed to restore registrations for MCP server '${_serverName}' after rediscovery failure: ${restoreError}`,
+      );
+    }
   }
 
   private async discoverAndRegisterToolsFromCommand(): Promise<void> {
