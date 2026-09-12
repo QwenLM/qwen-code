@@ -258,6 +258,34 @@ describe('EmbeddedApp host wiring', () => {
     });
   });
 
+  it('closes stale history when the host bootstraps again', async () => {
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    await act(async () => {
+      (
+        container.querySelector(
+          'button[aria-haspopup="dialog"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(container.querySelector('#qwen-session-history')).not.toBeNull();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              workspaceCwd: '/workspace',
+              hostKind: 'view',
+            },
+          },
+        }),
+      );
+    });
+    expect(container.querySelector('#qwen-session-history')).toBeNull();
+  });
+
   it('attributes an internal new session to VS Code after a foreign clear', async () => {
     await renderApp();
     await act(async () => {
@@ -983,6 +1011,11 @@ describe('EmbeddedApp host wiring', () => {
         { sessionId: 'legacy-1', displayName: 'Pre-upgrade chat' },
         { sessionId: 'child-1', parentSessionId: 'cli-1' },
         { sessionId: 'scheduled-1', sourceType: 'scheduled_task' },
+        {
+          sessionId: 'live-1',
+          sourceType: 'default',
+          sourceId: 'realtime_voice:call-1',
+        },
       ].map((session) => ({ ...session, workspaceCwd: '/workspace' })),
     });
     await renderApp();
@@ -1010,6 +1043,7 @@ describe('EmbeddedApp host wiring', () => {
       ).toHaveLength(2);
     }
     expect(container.querySelector('[data-session-id="child-1"]')).toBeNull();
+    expect(container.querySelector('[data-session-id="live-1"]')).toBeNull();
     expect(
       container.querySelector('[data-session-id="scheduled-1"]'),
     ).toBeNull();

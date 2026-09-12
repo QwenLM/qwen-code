@@ -440,6 +440,10 @@ export function EmbeddedApp() {
         ).filter(
           (session) =>
             !session.parentSessionId &&
+            !(
+              session.sourceType === 'default' &&
+              session.sourceId?.startsWith('realtime_voice:')
+            ) &&
             !['scheduled_task', 'side_task', 'channel', 'qwen-live'].includes(
               session.sourceType ?? '',
             ),
@@ -713,9 +717,11 @@ export function EmbeddedApp() {
           ReturnType<typeof readRuntimeConfig>
         >;
         sessionHistoryRequestRef.current++;
+        setSessionHistoryOpen(false);
         setSessions([]);
         setSessionCursor(undefined);
         setSessionListLoading(false);
+        setSessionListError(undefined);
         setRuntime(nextRuntime);
       } else if (message.type === 'webShellBootstrapError') {
         const errorMessage = (message.data as { message?: unknown } | null)
