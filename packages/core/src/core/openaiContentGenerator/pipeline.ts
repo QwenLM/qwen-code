@@ -30,6 +30,10 @@ import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
 import {
+  getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder,
+} from '../reasoning-effort.js';
+import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../modalityDefaults.js';
@@ -55,6 +59,9 @@ import {
 } from '../../telemetry/gen-ai-request.js';
 import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
+import { trailingReattachPartCount } from '../../services/image-payload-references.js';
+import type { ModelReasoningCapabilities } from '../../models/types.js';
+import { parseModelReasoningCapabilities } from '../reasoning-effort.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 const OPENAI_STRICT_SCHEMA_KEYS = new Set([
@@ -79,6 +86,37 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
     return undefined;
   }
   return value as Record<string, unknown>;
+}
+
+function applyConfiguredReasoningEffort(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+  capabilities: ModelReasoningCapabilities | undefined,
+): OpenAI.Chat.ChatCompletionCreateParams {
+  if (
+    !capabilities ||
+    capabilities.toggleOnly ||
+    !Array.isArray(capabilities.efforts)
+  ) {
+    return request;
+  }
+  const loose = request as unknown as Record<string, unknown>;
+  const reasoning = asObject(loose['reasoning']);
+  if (!reasoning || !('effort' in reasoning)) return request;
+
+  const effort = capabilities.efforts.find(
+    (candidate) => candidate === reasoning['effort'],
+  );
+  // GPT flattens after raw overrides merge in the provider.
+  if (effort && getGptReasoningCapabilities(loose['model'] as string))
+    return request;
+  const { effort: _drop, ...rest } = reasoning;
+  const next = { ...loose };
+  if (Object.keys(rest).length > 0) next['reasoning'] = rest;
+  else delete next['reasoning'];
+  if (effort && next['reasoning_effort'] === undefined) {
+    next['reasoning_effort'] = effort;
+  }
+  return next as unknown as OpenAI.Chat.ChatCompletionCreateParams;
 }
 
 function normalizeSchemaType(value: unknown): string | undefined {
@@ -834,7 +872,7 @@ export class ContentGenerationPipeline {
     );
 
     // Apply provider-specific enhancements
-    const baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+    let baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
       model: context.model,
       messages,
       ...this.buildGenerateContentConfig(request),
@@ -851,6 +889,39 @@ export class ContentGenerationPipeline {
       (
         baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming
       ).stream = false;
+    }
+
+    const authType = this.contentGeneratorConfig.authType;
+    const reasoningCapabilities = authType
+      ? parseModelReasoningCapabilities(
+          this.config.cliConfig.getResolvedModelConfig?.(
+            authType,
+            context.model,
+            this.contentGeneratorConfig.baseUrl,
+          )?.capabilities.reasoning,
+        )
+      : undefined;
+    if (
+      reasoningCapabilities &&
+      !('reasoning' in baseRequest) &&
+      this.contentGeneratorConfig.reasoning
+    ) {
+      baseRequest = {
+        ...baseRequest,
+        reasoning: this.contentGeneratorConfig.reasoning,
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+    }
+    // A `reasoning` object the user put in `samplingParams` ships verbatim (the
+    // contract `clampConfiguredReasoningEffort` keeps), so the capability
+    // mapping must leave it for the provider hook to translate.
+    if (
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
+      !isOpenRouterHostname(this.contentGeneratorConfig)
+    ) {
+      baseRequest = applyConfiguredReasoningEffort(
+        baseRequest,
+        reasoningCapabilities,
+      );
     }
 
     // Add tools if present and non-empty.
@@ -880,6 +951,7 @@ export class ContentGenerationPipeline {
     let providerRequest = this.config.provider.buildRequest(
       baseRequest,
       userPromptId,
+      trailingReattachPartCount(request.contents),
     );
     if (
       this.contentGeneratorConfig.enableCacheControl !== false &&
@@ -911,7 +983,12 @@ export class ContentGenerationPipeline {
     const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
       this.contentGeneratorConfig,
     );
-    const thinkingMandatory = this.requiresThinking(model);
+    const explicitThinkingMandatory =
+      reasoningCapabilities?.canDisable === false ||
+      this.requiresThinking(model);
+    const thinkingMandatory =
+      explicitThinkingMandatory ||
+      getGptReasoningCapabilities(model)?.thinkingMandatory === true;
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -973,6 +1050,15 @@ export class ContentGenerationPipeline {
           };
         }
       }
+      if (!thinkingMandatory) {
+        if (reasoningCapabilities?.disableField === 'reasoning_effort') {
+          delete typed['enable_thinking'];
+          delete typed['thinking_budget'];
+          typed['reasoning_effort'] = 'none';
+        } else if (reasoningCapabilities?.disableField === 'enable_thinking') {
+          typed['enable_thinking'] = false;
+        }
+      }
       // Strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.
       // The provider hook (e.g. DeepSeekOpenAICompatibleProvider.buildRequest
@@ -985,13 +1071,26 @@ export class ContentGenerationPipeline {
       if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
+      const gptReasoning = getGptReasoningCapabilities(model);
+      if (
+        gptReasoning &&
+        !reasoningCapabilities &&
+        !gptReasoning.thinkingMandatory &&
+        !thinkingMandatory &&
+        !isOpenRouterHostname(this.contentGeneratorConfig)
+      ) {
+        typed['reasoning_effort'] = 'none';
+      }
       // DeepSeek V4+ defaults `thinking.type` to `'enabled'`, so removing
       // the effort knob alone leaves thinking on. Emit the explicit
       // `thinking: { type: 'disabled' }` shape from DeepSeek's API spec.
       // Hostname-gated: self-hosted DeepSeek (sglang/vllm) or older
       // DeepSeek versions may not accept the V4 thinking parameter, so
       // we don't push it there. See https://api-docs.deepseek.com/.
-      if (isDeepSeekHostname(this.contentGeneratorConfig)) {
+      if (
+        isDeepSeekHostname(this.contentGeneratorConfig) ||
+        reasoningCapabilities?.disableField === 'thinking'
+      ) {
         typed['thinking'] = { type: 'disabled' };
       }
       // OpenRouter's thinking switch is the provider-level `reasoning`
@@ -1031,6 +1130,13 @@ export class ContentGenerationPipeline {
       if (typed['reasoning_effort'] === 'none') {
         delete typed['reasoning_effort'];
       }
+      const thinking = asObject(typed['thinking']);
+      if (thinking?.['type'] === 'disabled') {
+        const remaining = { ...thinking };
+        delete remaining['type'];
+        if (Object.keys(remaining).length > 0) typed['thinking'] = remaining;
+        else delete typed['thinking'];
+      }
       const chatTemplateKwargs = typed['chat_template_kwargs'] as
         | Record<string, unknown>
         | undefined;
@@ -1056,12 +1162,12 @@ export class ContentGenerationPipeline {
     // they are opaque parameters that do not put the request in thinking
     // mode (GLM reads `thinking.enabled`, DeepSeek `thinking.type`), and
     // dropping `required` there only degrades their forced-tool side
-    // queries. `thinkingMandatory` stays ungated: it is explicit
+    // queries. `explicitThinkingMandatory` stays ungated: it is explicit
     // "thinking is on" knowledge, model-agnostic by design.
     if (
       isDashScope &&
       typed['tool_choice'] === 'required' &&
-      (thinkingMandatory ||
+      (explicitThinkingMandatory ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
             (thinkingBudget != null && typed['enable_thinking'] !== false) ||
@@ -1070,7 +1176,7 @@ export class ContentGenerationPipeline {
     ) {
       debugLogger.debug(
         'DashScope: dropping tool_choice=required while thinking is enabled',
-        { model, reasoningEffort, thinkingBudget, thinkingMandatory },
+        { model, reasoningEffort, thinkingBudget, explicitThinkingMandatory },
       );
       delete typed['tool_choice'];
     }
@@ -1169,6 +1275,21 @@ export class ContentGenerationPipeline {
     // So `prompt + max_tokens ≤ window` holds for samplingParams users too,
     // matching the Anthropic path.
     if (configSamplingParams !== undefined) {
+      const rawEffort = {
+        ...configSamplingParams,
+        ...this.contentGeneratorConfig.extra_body,
+      }['reasoning_effort'];
+      const samplingParams =
+        getGptReasoningCapabilities(
+          request.model || this.contentGeneratorConfig.model,
+        ) &&
+        configSamplingParams['reasoning'] === undefined &&
+        (isReasoningEffortPlaceholder(
+          configSamplingParams['reasoning_effort'],
+        ) ||
+          isReasoningEffortPlaceholder(rawEffort))
+          ? { ...this.buildReasoningConfig(request), ...configSamplingParams }
+          : configSamplingParams;
       const requestMaxTokens = request.config?.maxOutputTokens;
       const maxTokens =
         reconcileMaxTokens(configSamplingParams.max_tokens, requestMaxTokens) ??
@@ -1182,8 +1303,8 @@ export class ContentGenerationPipeline {
       // max_completion_tokens must not leak the provider key unclamped.
       return clampProviderOutputBudgetKeys(
         maxTokens !== undefined
-          ? { ...configSamplingParams, max_tokens: maxTokens }
-          : { ...configSamplingParams },
+          ? { ...samplingParams, max_tokens: maxTokens }
+          : { ...samplingParams },
         requestMaxTokens,
       );
     }
@@ -1224,7 +1345,7 @@ export class ContentGenerationPipeline {
     //   - deepseek-reasoner — thinking is enabled by default and cannot be disabled
     //   - glm-4.7 — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
     //   - kimi-k2-thinking — thinking is enabled by default and cannot be disabled
-    //   - gpt-5.x series — thinking is enabled by default; can be disabled via `reasoning.effort`
+    //   - gpt-5.x / gpt-6-astra — defaults and disable support depend on the model
     //   - qwen3 series — model-dependent; emitted as `enable_thinking: false`
     //                           on DashScope endpoints when reasoning is disabled
     //

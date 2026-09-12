@@ -58,12 +58,37 @@ import type {
   CronJobInfo,
 } from './types.js';
 import { HookPhase, PermissionMode } from './types.js';
+import { approvalModeToPermissionMode } from './permission-mode.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';
 import { HookCallEvent } from '../telemetry/types.js';
 import type { CronJob } from '../services/cronScheduler.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
+
+function normalizeQuestionHookResponse(
+  toolName: string,
+  response: Record<string, unknown>,
+  displayKey: 'returnDisplay' | 'result_display',
+): Record<string, unknown> {
+  const display = response[displayKey];
+  if (
+    toolName === ToolNames.ASK_USER_QUESTION &&
+    display !== null &&
+    typeof display === 'object' &&
+    'type' in display &&
+    display.type === 'ask_user_question_answers' &&
+    'text' in display &&
+    typeof display.text === 'string'
+  ) {
+    // Preserve the existing hook contract without changing the stored UI result.
+    return { ...response, [displayKey]: display.text };
+  }
+  return response;
+}
 
 /**
  * Hook event bus that coordinates hook execution across the system
@@ -403,15 +428,21 @@ export class HookEventHandler {
     permissionMode: PermissionMode,
     signal?: AbortSignal,
     tool_call_id?: string,
+    durationMs?: number,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseInput = {
       ...this.createBaseInput(HookEventName.PostToolUse),
       permission_mode: permissionMode,
       tool_name: toolName,
       tool_input: toolInput,
-      tool_response: toolResponse,
+      tool_response: normalizeQuestionHookResponse(
+        toolName,
+        toolResponse,
+        'returnDisplay',
+      ),
       tool_use_id: toolUseId,
       ...(tool_call_id && { tool_call_id }),
+      ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
     };
 
     // Pass tool name as context for matcher filtering
@@ -438,6 +469,7 @@ export class HookEventHandler {
     permissionMode?: PermissionMode,
     signal?: AbortSignal,
     tool_call_id?: string,
+    durationMs?: number,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseFailureInput = {
       ...this.createBaseInput(HookEventName.PostToolUseFailure),
@@ -448,6 +480,7 @@ export class HookEventHandler {
       tool_input: toolInput,
       error: errorMessage,
       is_interrupt: isInterrupt,
+      ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
     };
 
     // Pass tool name as context for matcher filtering
@@ -499,7 +532,18 @@ export class HookEventHandler {
     const input: PostToolBatchInput = {
       ...this.createBaseInput(HookEventName.PostToolBatch),
       permission_mode: permissionMode,
-      tool_calls: toolCalls,
+      tool_calls: toolCalls.map((call) =>
+        call.tool_response
+          ? {
+              ...call,
+              tool_response: normalizeQuestionHookResponse(
+                call.tool_name,
+                call.tool_response,
+                'result_display',
+              ),
+            }
+          : call,
+      ),
     };
 
     return this.executeHooks(
@@ -935,6 +979,9 @@ export class HookEventHandler {
     const sourceType = this.config.getSessionSourceType();
     const sourceId = this.config.getSessionSourceId();
 
+    const agentId = getCurrentAgentId();
+    const promptId = promptIdContext.getStore();
+
     return {
       session_id: this.config.getSessionId(),
       ...(sourceType !== undefined ? { source_type: sourceType } : {}),
@@ -943,6 +990,12 @@ export class HookEventHandler {
       cwd: this.config.getWorkingDir(),
       hook_event_name: eventName,
       timestamp: new Date().toISOString(),
+      // Tool and subagent events spread this first and set their own mode.
+      permission_mode: approvalModeToPermissionMode(
+        this.config.getApprovalMode(),
+      ),
+      ...(agentId ? { agent_id: agentId } : {}),
+      ...(promptId ? { prompt_id: promptId } : {}),
     };
   }
 

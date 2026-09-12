@@ -99,7 +99,7 @@ describe('ServeAppLifecycle', () => {
     expect(boot).not.toHaveBeenCalled();
   });
 
-  it('waits for listener, app, and host drain before releasing ownership', async () => {
+  it('waits for listener, app, and host drain before completing close', async () => {
     const app = express();
     const lifecycle = installServeAppLifecycle(app);
     const server = createServer(app);
@@ -112,25 +112,21 @@ describe('ServeAppLifecycle', () => {
     const hostDrain = new Promise<void>((resolve) => {
       releaseHost = resolve;
     });
-    const release = vi.fn(async () => true);
-    lifecycle.setOwnership({
-      acquire: vi.fn(async () => ({ reclaimed: false })),
-      release,
-    });
+    const closed = vi.fn();
     lifecycle.setAppDrain(() => appDrain);
     lifecycle.bindServer(server, { drainHost: () => hostDrain });
     server.listen(0, '127.0.0.1');
     await new Promise<void>((resolve) => server.once('listening', resolve));
 
-    const close = lifecycle.close();
+    const close = lifecycle.close().then(closed);
     await vi.waitFor(() => expect(server.listening).toBe(false));
-    expect(release).not.toHaveBeenCalled();
+    expect(closed).not.toHaveBeenCalled();
     releaseApp?.();
     await Promise.resolve();
-    expect(release).not.toHaveBeenCalled();
+    expect(closed).not.toHaveBeenCalled();
     releaseHost?.();
     await close;
-    expect(release).toHaveBeenCalledOnce();
+    expect(closed).toHaveBeenCalledOnce();
   });
 
   it('uses the same cleanup when the embed closes the server directly', async () => {
@@ -139,12 +135,7 @@ describe('ServeAppLifecycle', () => {
     const server = createServer(app);
     servers.add(server);
     const drain = vi.fn(async () => undefined);
-    const release = vi.fn(async () => true);
     lifecycle.setAppDrain(drain);
-    lifecycle.setOwnership({
-      acquire: vi.fn(async () => ({ reclaimed: false })),
-      release,
-    });
     lifecycle.bindServer(server);
     server.listen(0, '127.0.0.1');
     await new Promise<void>((resolve) => server.once('listening', resolve));
@@ -152,7 +143,6 @@ describe('ServeAppLifecycle', () => {
     server.close();
     await lifecycle.close();
     expect(drain).toHaveBeenCalledOnce();
-    expect(release).toHaveBeenCalledOnce();
     expect(getServeAppLifecycle(app)).toBe(lifecycle);
   });
 
@@ -166,11 +156,6 @@ describe('ServeAppLifecycle', () => {
     const lifecycle = installServeAppLifecycle(app);
     const server = createServer(app);
     servers.add(server);
-    const release = vi.fn(async () => true);
-    lifecycle.setOwnership({
-      acquire: vi.fn(async () => ({ reclaimed: false })),
-      release,
-    });
     lifecycle.bindServer(server);
     server.listen(0, '127.0.0.1');
     await new Promise<void>((resolve) => server.once('listening', resolve));
@@ -184,7 +169,7 @@ describe('ServeAppLifecycle', () => {
     expect(server.listening).toBe(false);
     await lifecycle.close({ timeoutMs: 0 });
 
-    expect(release).toHaveBeenCalledOnce();
+    expect(server.listening).toBe(false);
     client.destroy();
   });
 
@@ -194,13 +179,8 @@ describe('ServeAppLifecycle', () => {
     const server = createServer(app);
     servers.add(server);
     const hostDrain = vi.fn(async () => undefined);
-    const release = vi.fn(async () => true);
     lifecycle.setAppDrain(() => {
       throw new Error('app drain failed');
-    });
-    lifecycle.setOwnership({
-      acquire: vi.fn(async () => ({ reclaimed: false })),
-      release,
     });
     lifecycle.bindServer(server, { drainHost: hostDrain });
     server.listen(0, '127.0.0.1');
@@ -209,7 +189,6 @@ describe('ServeAppLifecycle', () => {
     await expect(lifecycle.close()).rejects.toThrow('app drain failed');
     expect(hostDrain).toHaveBeenCalledOnce();
     expect(server.listening).toBe(false);
-    expect(release).not.toHaveBeenCalled();
   });
 
   it('tracks an explicit boot retry after the automatic attempt fails', async () => {
@@ -232,7 +211,7 @@ describe('ServeAppLifecycle', () => {
     expect(automaticBoot).toHaveBeenCalledTimes(2);
   });
 
-  it('waits for an explicit boot retry before releasing ownership', async () => {
+  it('waits for an explicit boot retry before completing close', async () => {
     const app = express();
     const lifecycle = installServeAppLifecycle(app);
     const server = createServer(app);
@@ -242,24 +221,20 @@ describe('ServeAppLifecycle', () => {
       finishBoot = resolve;
     });
     const boot = vi.fn(() => bootPending);
-    const release = vi.fn(async () => true);
-    lifecycle.setOwnership({
-      acquire: vi.fn(async () => ({ reclaimed: false })),
-      release,
-    });
+    const closed = vi.fn();
     lifecycle.bindServer(server);
     server.listen(0, '127.0.0.1');
     await new Promise<void>((resolve) => server.once('listening', resolve));
 
     const retry = lifecycle.startBoot(boot);
     await vi.waitFor(() => expect(boot).toHaveBeenCalledOnce());
-    const close = lifecycle.close();
+    const close = lifecycle.close().then(closed);
     await vi.waitFor(() => expect(server.listening).toBe(false));
-    expect(release).not.toHaveBeenCalled();
+    expect(closed).not.toHaveBeenCalled();
     finishBoot?.();
     await retry;
     await close;
-    expect(release).toHaveBeenCalledOnce();
+    expect(closed).toHaveBeenCalledOnce();
   });
 
   it('rejects a late boot after shutdown has sealed admission', async () => {

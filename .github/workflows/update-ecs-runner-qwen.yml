@@ -25,7 +25,7 @@ jobs:
     name: 'Resolve version'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 30
+    timeout-minutes: 100
     outputs:
       version: '${{ steps.version.outputs.version }}'
     steps:
@@ -36,12 +36,11 @@ jobs:
           # npm publishes asynchronously: `npm publish --provenance` returns
           # "Your package is being processed and may take a few minutes to
           # become available", and release.yml dispatches this workflow as soon
-          # as it returns. For v0.22.3 the gap was ~16 minutes (published
-          # 17:14Z, resolvable 17:30Z), so the single un-retried `npm view` this
-          # step used to run 404'd on 3 of the 4 pools and left the fleet split
-          # across two CLI versions until a maintainer noticed. Wait the
-          # registry out rather than losing the race.
-          RESOLVE_TIMEOUT_SECONDS: '1500'
+          # as it returns. v0.23.0 took 55m22s to become resolvable, so the
+          # previous 25-minute budget expired while the package was still in
+          # flight. Wait up to 90 minutes and treat anything longer as an
+          # anomalous publish.
+          RESOLVE_TIMEOUT_SECONDS: '5400'
           RESOLVE_INTERVAL_SECONDS: '30'
         run: |-
           set -euo pipefail
@@ -106,7 +105,9 @@ jobs:
             PKG_DIR='/usr/local/lib/node_modules/@qwen-code'
             for attempt in 1 2 3; do
               sudo rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
-              if sudo env -u NPM_CONFIG_PREFIX npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+              # --prefix pins the install to /usr/local: on the hk-4/hk-5
+              # machines root's npm global prefix is a custom Node directory
+              if sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
                 exit 0
               fi
               if [[ "${attempt}" -lt 3 ]]; then

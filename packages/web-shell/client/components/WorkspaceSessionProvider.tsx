@@ -40,25 +40,29 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
     workspaceCwd,
     sessionContext,
     lockWorkspaceCwd,
-    clientId,
-    restartSseOnPrompt,
-    historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
     webShellProps,
   } = props;
   const onSessionIdChange = webShellProps.onSessionIdChange;
   const attachedStandaloneSessionIdRef = useRef<string | undefined>(undefined);
+  // Keep an initially-needed standalone gate mounted so later context switches
+  // preserve the provider and App subtree it resolved.
+  const standaloneGateActiveRef = useRef(sessionContext?.kind === 'standalone');
   const handleSessionIdChange = useCallback<
     NonNullable<WebShellProps['onSessionIdChange']>
   >(
     (nextSessionId, nextWorkspaceId, nextWorkspaceCwd, nextSessionContext) => {
       attachedStandaloneSessionIdRef.current =
         nextSessionContext?.kind === 'standalone' ? nextSessionId : undefined;
-      onSessionIdChange?.(
-        nextSessionId,
-        nextWorkspaceId,
-        nextWorkspaceCwd,
-        nextSessionContext,
-      );
+      if (nextSessionContext) {
+        onSessionIdChange?.(
+          nextSessionId,
+          nextWorkspaceId,
+          nextWorkspaceCwd,
+          nextSessionContext,
+        );
+      } else {
+        onSessionIdChange?.(nextSessionId, nextWorkspaceId, nextWorkspaceCwd);
+      }
     },
     [onSessionIdChange],
   );
@@ -68,6 +72,12 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
       attachedStandaloneSessionIdRef.current !== sessionId)
   ) {
     attachedStandaloneSessionIdRef.current = undefined;
+  }
+  if (
+    sessionContext?.kind === 'standalone' &&
+    attachedStandaloneSessionIdRef.current !== sessionId
+  ) {
+    standaloneGateActiveRef.current = true;
   }
   const t = getTranslator(normalizeLanguage(webShellProps.language));
   const contextConflictsWithWorkspace =
@@ -86,25 +96,24 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
     );
   }
 
-  if (sessionContext?.kind === 'standalone') {
+  const routedProps = {
+    ...props,
+    webShellProps: {
+      ...webShellProps,
+      onSessionIdChange: onSessionIdChange ? handleSessionIdChange : undefined,
+    },
+  };
+
+  if (standaloneGateActiveRef.current) {
     return (
       <StandaloneSessionGate
-        sessionId={sessionId}
+        {...routedProps}
         attachedSessionId={attachedStandaloneSessionIdRef.current}
-        clientId={clientId}
-        restartSseOnPrompt={restartSseOnPrompt}
-        historyPageSize={historyPageSize}
-        webShellProps={{
-          ...webShellProps,
-          onSessionIdChange: onSessionIdChange
-            ? handleSessionIdChange
-            : undefined,
-        }}
       />
     );
   }
 
-  return <WorkspaceSessionProviderWorkspace {...props} />;
+  return <WorkspaceSessionProviderWorkspace {...routedProps} />;
 }
 
 function WorkspaceSessionProviderWorkspace({
@@ -233,14 +242,21 @@ function WorkspaceSessionProviderWorkspace({
     lockWorkspaceCwd,
   ]);
 
+  // Keep an unscoped session mounted when a later refresh fails.
   if (
-    (effectiveWorkspaceCwd || effectiveWorkspaceId) &&
+    (effectiveWorkspaceCwd ||
+      effectiveWorkspaceId ||
+      (effectiveSessionId && !workspace.capabilities)) &&
     workspace.status === 'error'
   ) {
     return (
       <WorkspaceUnavailableState
         title={t('workspace.loadFailed')}
-        description={t('workspace.loadFailedDescription')}
+        description={
+          workspace.error?.message
+            ? `${t('workspace.loadFailedDescription')} (${workspace.error.message})`
+            : t('workspace.loadFailedDescription')
+        }
         actionLabel={t('common.retry')}
         theme={webShellProps.theme}
         icon={<WifiOffIcon />}
@@ -251,7 +267,7 @@ function WorkspaceSessionProviderWorkspace({
     );
   }
   if (
-    (effectiveWorkspaceCwd || effectiveWorkspaceId) &&
+    (effectiveSessionId || effectiveWorkspaceCwd || effectiveWorkspaceId) &&
     !workspace.capabilities
   ) {
     return (
@@ -315,6 +331,7 @@ function WorkspaceSessionProviderWorkspace({
     <DaemonSessionProvider
       key="main-session"
       sessionId={effectiveSessionId}
+      sessionSourceType={webShellProps.sessionSourceType}
       sessionContext={
         usePrimaryNewSession
           ? undefined
@@ -363,18 +380,12 @@ type StandaloneResolution =
 
 function StandaloneSessionGate({
   sessionId,
+  sessionContext,
   attachedSessionId,
-  clientId,
-  restartSseOnPrompt,
-  historyPageSize,
   webShellProps,
-}: {
-  sessionId?: string;
+  ...workspaceProviderProps
+}: WorkspaceSessionProviderProps & {
   attachedSessionId?: string;
-  clientId?: string;
-  restartSseOnPrompt?: boolean;
-  historyPageSize: number;
-  webShellProps: WebShellProps;
 }) {
   const workspace = useWorkspace();
   const [attempt, setAttempt] = useState(0);
@@ -394,7 +405,7 @@ function StandaloneSessionGate({
     ) === true;
 
   useEffect(() => {
-    if (!standaloneSupported) return;
+    if (sessionContext?.kind !== 'standalone' || !standaloneSupported) return;
     const generation = resolutionGenerationRef.current + 1;
     resolutionGenerationRef.current = generation;
     setResolutionSessionId(sessionId);
@@ -462,9 +473,20 @@ function StandaloneSessionGate({
     attempt,
     attachedSessionId,
     sessionId,
+    sessionContext?.kind,
     standaloneSupported,
     workspace.client,
   ]);
+
+  const routedProps: WorkspaceSessionProviderProps = {
+    ...workspaceProviderProps,
+    sessionId,
+    sessionContext,
+    webShellProps,
+  };
+  if (sessionContext?.kind !== 'standalone') {
+    return <WorkspaceSessionProviderWorkspace {...routedProps} />;
+  }
 
   const capabilities = workspace.capabilities;
   if (workspace.status === 'error') {
@@ -505,10 +527,10 @@ function StandaloneSessionGate({
       />
     );
   }
-  if (
-    (resolutionSessionId !== sessionId && attachedSessionId !== sessionId) ||
-    resolution.status === 'loading'
-  ) {
+  if (attachedSessionId === sessionId) {
+    return <WorkspaceSessionProviderWorkspace {...routedProps} />;
+  }
+  if (resolutionSessionId !== sessionId || resolution.status === 'loading') {
     return (
       <div
         data-web-shell-root
@@ -607,23 +629,5 @@ function StandaloneSessionGate({
     );
   }
 
-  return (
-    <DaemonSessionProvider
-      key="main-session"
-      sessionId={sessionId}
-      sessionContext={{ kind: 'standalone' }}
-      clientId={clientId}
-      historyPageSize={historyPageSize}
-      subagentTranscriptMode="summary"
-      maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
-      suppressOwnUserEcho
-      restartEventStreamOnPrompt={restartSseOnPrompt}
-    >
-      <App
-        {...webShellProps}
-        historyPageSize={historyPageSize}
-        restartSseOnPrompt={restartSseOnPrompt}
-      />
-    </DaemonSessionProvider>
-  );
+  return <WorkspaceSessionProviderWorkspace {...routedProps} />;
 }

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getEventListeners } from 'node:events';
 import { promises as fs } from 'node:fs';
@@ -168,6 +170,136 @@ describe('WorkflowRunner', () => {
     );
   });
 
+  // The only path from the Workflow tool's authoring hint to a backgrounded
+  // run's notification goes through the runner's registration. A backgrounded
+  // run has no trailer; without this the hint would never reach it.
+  it('carries the authoring hint into a failed background run notification', async () => {
+    const { config, registry } = configWithRegistry();
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const hint =
+      'hint: Load the `workflow-authoring` skill for the script reference if you have not, fix the script, and retry.';
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'throw new Error("boom")',
+      args: undefined,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+      authoringHint: hint,
+    });
+    await handle.completion;
+    await vi.waitFor(() => expect(completion).toHaveBeenCalled());
+
+    const modelText = completion.mock.calls[0][1] as string;
+    const recovery = modelText.slice(
+      modelText.indexOf('<recovery>'),
+      modelText.indexOf('</recovery>'),
+    );
+    expect(recovery).toContain(hint);
+  });
+
+  async function generatedReview(script: string) {
+    const { config, registry } = configWithRegistry();
+    const root = await makeStorageRoot();
+    stubStorage(config, root);
+    const scriptPath = path.join(
+      root,
+      'generated',
+      'review',
+      'session',
+      `qwen-review-0123456789-${createHash('sha256').update(script).digest('hex')}.js`,
+    );
+    await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+    await fs.writeFile(scriptPath, script);
+    resolveSavedWorkflowScriptMock.mockResolvedValue({ scriptPath, script });
+    return { config, registry, scriptPath };
+  }
+
+  it('dispatches a generated review through a ten-agent window before any result returns', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_WORKFLOW_CONCURRENCY', undefined);
+    vi.stubEnv('QWEN_CODE_MAX_TOOL_CONCURRENCY', undefined);
+    vi.stubEnv('QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS', undefined);
+    vi.stubEnv('QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES', undefined);
+    vi.stubEnv('QWEN_REVIEW_DEADLINE_EPOCH', undefined);
+    const { config, scriptPath } = await generatedReview(
+      'return await parallel(args.map((p) => () => agent(p)));',
+    );
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    createProductionDispatchMock.mockReturnValue(async (prompt: string) => {
+      started.push(prompt);
+      await new Promise<void>((resolve) => {
+        releases.push(resolve);
+      });
+      return prompt;
+    });
+    const controller = new AbortController();
+    try {
+      const handle = await WorkflowRunner.start({
+        config,
+        scriptPath,
+        args: Array.from({ length: 11 }, (_, i) => String(i)),
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(started).toHaveLength(10));
+      expect(started).toEqual(Array.from({ length: 10 }, (_, i) => String(i)));
+      expect(createProductionDispatchMock.mock.calls[0]?.[4]).toEqual({
+        max_turns: 500,
+        max_time_minutes: 100,
+      });
+      releases[0]!();
+      await vi.waitFor(() => expect(started).toHaveLength(11));
+      releases.forEach((release) => release());
+      expect((await handle.completion).ok).toBe(true);
+    } finally {
+      controller.abort();
+      releases.forEach((release) => release());
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps an ordinary workflow on generic dispatch bounds despite review metadata', async () => {
+    const { config } = configWithRegistry();
+    createProductionDispatchMock.mockReturnValue(async () => 'done');
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script:
+        "export const meta = { name: 'review-step-3a', description: 'review' }; return await agent('read');",
+      args: undefined,
+    });
+    expect((await handle.completion).ok).toBe(true);
+    expect(createProductionDispatchMock.mock.calls[0]?.[4]).toBeUndefined();
+  });
+
+  it('runs beyond the generic thirty-minute limit and aborts at the review limit', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_WORKFLOW_SECONDS', undefined);
+    vi.stubEnv('QWEN_REVIEW_DEADLINE_EPOCH', undefined);
+    const { config, registry, scriptPath } = await generatedReview(
+      'await new Promise(() => {})',
+    );
+    vi.useFakeTimers();
+    try {
+      const handle = await WorkflowRunner.start({
+        config,
+        scriptPath,
+        signal: new AbortController().signal,
+        args: undefined,
+        dispatch: async () => 'unused',
+      });
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+      expect(registry.get(handle.runId)?.status).toBe('running');
+      await vi.advanceTimersByTimeAsync((6 * 60 - 30) * 60 * 1000);
+      expect((await handle.completion).ok).toBe(false);
+      expect(registry.get(handle.runId)?.status).toBe('failed');
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('passes the registry approval bridge only to production dispatch', async () => {
     const production = configWithRegistry();
     const productionBridge = vi.spyOn(
@@ -290,6 +422,59 @@ describe('WorkflowRunner', () => {
     ]);
   });
 
+  it('keeps a respawn diagnostic through final log replacement and telemetry', async () => {
+    const { config, registry } = configWithRegistry();
+    stubStorage(config, await makeStorageRoot());
+    const runId = 'wf_respawned';
+    const key = deriveAgentKey(deriveArgsSeed(undefined), 'work', {
+      label: 'scout',
+    });
+    vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValueOnce({
+      results: new Map(),
+      started: new Map([[key, [{ type: 'started', key, agentId: 'agent-1' }]]]),
+      failed: new Set(),
+    });
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: `return await agent('work', { label: 'scout' });`,
+      args: undefined,
+      resumeFromRunId: runId,
+      dispatch: async () => {
+        throw new Error('provider failed before classification');
+      },
+    });
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: null },
+    });
+    const line =
+      '[resume] respawning "scout": interrupted in a previous run (1 prior attempt)';
+    expect(registry.get(runId)).toMatchObject({
+      status: 'completed',
+      agentsRespawned: 1,
+      recentLogs: [line],
+    });
+    expect(
+      registry
+        .get(runId)
+        ?.events.filter(
+          (event) => event.type === 'log' && event.message === line,
+        ),
+    ).toHaveLength(1);
+    expect(logWorkflowRunMock).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({
+        agents_completed: 1,
+        agents_failed: 1,
+        agents_cached: 0,
+        agents_respawned: 1,
+      }),
+    );
+  });
+
   it('keeps sandbox and registry phase projections equal for normalization-colliding titles', async () => {
     const { config, registry } = configWithRegistry();
     const handle = await WorkflowRunner.start({
@@ -352,6 +537,7 @@ describe('WorkflowRunner', () => {
         [key, { type: 'result', key, agentId: 'agent-1', result: 'cached' }],
       ]),
       started: new Map(),
+      failed: new Set(),
     });
     vi.spyOn(WorkflowJournal.prototype, 'ensureExists').mockResolvedValueOnce(
       false,
@@ -374,6 +560,15 @@ describe('WorkflowRunner', () => {
     expect(dispatch).not.toHaveBeenCalled();
     expect(handle.journalPath).toBeUndefined();
     expect(registry.get(runId)?.journalPath).toBeUndefined();
+    expect(logWorkflowRunMock).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({
+        agents_completed: 1,
+        agents_failed: 0,
+        agents_cached: 1,
+        agents_respawned: 0,
+      }),
+    );
   });
 
   it('cancels a pending background resume before registration', async () => {
@@ -406,7 +601,11 @@ describe('WorkflowRunner', () => {
 
       await vi.waitFor(() => expect(resolveLoad).toBeDefined());
       registry.abortAll();
-      resolveLoad!({ results: new Map(), started: new Map() });
+      resolveLoad!({
+        results: new Map(),
+        started: new Map(),
+        failed: new Set(),
+      });
 
       await expect(start).rejects.toThrow('Workflow start was cancelled.');
       expect(registry.isStarting(runId)).toBe(false);
@@ -415,7 +614,11 @@ describe('WorkflowRunner', () => {
         fs.readdir(path.join(root, 'generated', 'inline')),
       ).rejects.toThrow();
     } finally {
-      resolveLoad?.({ results: new Map(), started: new Map() });
+      resolveLoad?.({
+        results: new Map(),
+        started: new Map(),
+        failed: new Set(),
+      });
       await start.catch(() => undefined);
       loadSpy.mockRestore();
     }
@@ -965,8 +1168,11 @@ describe('WorkflowRunner', () => {
     expect(settled).toBe(false);
 
     registry.resume(handle.runId);
-    await expect(handle.completion).resolves.toMatchObject({ ok: false });
-    expect(registry.get(handle.runId)?.status).toBe('failed');
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: null },
+    });
+    expect(registry.get(handle.runId)?.status).toBe('completed');
   });
 
   it('keeps queued agents stopped while pausing and starts them after resume', async () => {
@@ -1286,7 +1492,7 @@ describe('WorkflowRunner', () => {
     );
   });
 
-  it('classifies a background failure after caller abort as failed', async () => {
+  it('settles a background agent failure to null after caller abort', async () => {
     const { config, registry } = configWithRegistry();
     const caller = new AbortController();
     let rejectDispatch: ((error: Error) => void) | undefined;
@@ -1306,8 +1512,11 @@ describe('WorkflowRunner', () => {
     caller.abort();
     rejectDispatch?.(new Error('background boom'));
 
-    await expect(handle.completion).resolves.toMatchObject({ ok: false });
-    expect(registry.get(handle.runId)?.status).toBe('failed');
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: null },
+    });
+    expect(registry.get(handle.runId)?.status).toBe('completed');
   });
 
   it('routes registry cancellation through each live handle', async () => {
@@ -1356,6 +1565,33 @@ describe('WorkflowRunner', () => {
 
     expect(writeWorkflowSnapshotMock).toHaveBeenCalledTimes(2);
     expect(logWorkflowRunMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not journal a failed agent when the run handle aborts it', async () => {
+    const { config } = configWithRegistry();
+    stubStorage(config, await makeStorageRoot());
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: `return await agent('work');`,
+      args: undefined,
+      dispatch: () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    });
+    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+
+    handle.abort();
+    rejectDispatch?.(new Error('cancelled by run handle'));
+    await handle.completion;
+
+    const journalEntries = writeLineMock.mock.calls.map(
+      (call) => call[1] as { type: string },
+    );
+    expect(journalEntries.some((entry) => entry.type === 'started')).toBe(true);
+    expect(journalEntries.some((entry) => entry.type === 'failed')).toBe(false);
   });
 
   it('classifies the internal wall-clock timeout as failed', async () => {

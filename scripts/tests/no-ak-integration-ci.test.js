@@ -187,6 +187,7 @@ describe('no-AK integration CI wiring', () => {
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
         './cli/qwen-serve-streaming.test.ts',
+        './cli/qwen-serve-standalone-concurrency.test.ts',
         './sdk-typescript/abort-and-lifecycle.test.ts',
         './sdk-typescript/permission-control.test.ts',
         './sdk-typescript/sdk-mcp-server.test.ts',
@@ -848,14 +849,14 @@ describe('no-AK integration CI wiring', () => {
     );
   });
 
-  it('does not install Linux packages on self-hosted Playwright runners', () => {
+  it('installs Playwright system dependencies only on hosted runners', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    expect(webShellJob).toContain('ubuntu_runner');
+    expect(webShellJob).toContain("runs-on: 'ubuntu-latest'");
     const hostedInstall = getWorkflowStep(
       webShellJob,
       'Install Playwright Chromium (hosted)',
