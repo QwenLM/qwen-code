@@ -77,6 +77,8 @@ function verifyBundleArtifacts(rootDir, distDir) {
     // whose `GET /` 404s. copy_bundle_assets.js stays warn-and-skip for
     // --cli-only dev bundles; this is the release gate.
     path.join(distDir, 'web-shell', 'index.html'),
+    path.join(distDir, 'web-shell', 'manifest.webmanifest'),
+    path.join(distDir, 'web-shell', 'service-worker.js'),
     path.join(distDir, 'web-shell', 'assets'),
     path.join(distDir, 'export-transcript-document.js'),
     path.join(distDir, 'export-transcript-document.css'),

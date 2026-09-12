@@ -172,6 +172,34 @@ export function mountWebShellAssets(
   frameAncestors: readonly string[] = [],
 ): void {
   const sendIndex = createSendIndex(webShellDir, frameAncestors);
+  for (const [file, contentType] of [
+    ['manifest.webmanifest', 'application/manifest+json'],
+    ['service-worker.js', 'text/javascript'],
+  ]) {
+    app.get(`/${file}`, (_req: Request, res: Response) => {
+      res
+        .type(contentType)
+        .set('Cache-Control', 'no-cache')
+        .set('X-Content-Type-Options', 'nosniff');
+      res.sendFile(
+        path.join(webShellDir, file),
+        { cacheControl: false, dotfiles: 'allow' },
+        (error) => {
+          if (!error) return;
+          if (res.headersSent) {
+            res.end();
+            return;
+          }
+          res
+            .status(
+              (error as NodeJS.ErrnoException).code === 'ENOENT' ? 404 : 500,
+            )
+            .type('text/plain')
+            .send('Unable to load Web Shell asset');
+        },
+      );
+    });
+  }
   app.use(
     '/assets',
     express.static(path.join(webShellDir, 'assets'), {

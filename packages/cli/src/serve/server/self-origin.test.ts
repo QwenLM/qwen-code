@@ -105,6 +105,9 @@ describe('remote same-origin authentication', () => {
     installRemoteSelfOriginMiddleware(result, '0.0.0.0', 'secret');
     result.use(denyBrowserOriginCors);
     result.get('/assets/app.js', (_req, res) => res.sendStatus(200));
+    result.get('/manifest.webmanifest', (_req, res) => res.sendStatus(200));
+    result.get('/service-worker.js', (_req, res) => res.sendStatus(200));
+    result.post('/service-worker.js', (_req, res) => res.sendStatus(200));
     // Registered ahead of bearerAuth so the unauthenticated same-origin POST
     // row discriminates the pre-auth predicate's GET/HEAD method gate: with
     // the gate deleted the Origin is stripped and this route answers 200.
@@ -113,6 +116,10 @@ describe('remote same-origin authentication', () => {
     result.get('/capabilities', (_req, res) => res.sendStatus(200));
     for (const [method, path, status] of [
       ['get', '/assets/app.js', 200],
+      ['get', '/manifest.webmanifest', 200],
+      ['head', '/service-worker.js', 200],
+      ['post', '/service-worker.js', 401],
+      ['get', '/service-worker.js/extra', 401],
       ['get', '/capabilities', 401],
       ['post', '/assets/app.js', 401],
     ] as const) {

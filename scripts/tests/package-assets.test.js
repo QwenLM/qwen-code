@@ -661,6 +661,57 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
+  it('copies standalone PWA assets into the CLI bundle', () => {
+    const rootDir = createFixtureRoot();
+    stubConsole();
+    for (const [file, content] of [
+      ['index.html', '<!doctype html>'],
+      ['manifest.webmanifest', '{"start_url":"/"}'],
+      ['service-worker.js', 'self.addEventListener("fetch", () => {});'],
+      ['assets/pwa-icon-192-v1.png', 'icon'],
+    ]) {
+      writeFile(rootDir, `packages/web-shell/dist/${file}`, content);
+    }
+    copyBundleAssets({ root: rootDir });
+    expect(
+      readFileSync(
+        path.join(rootDir, 'dist/web-shell/manifest.webmanifest'),
+        'utf8',
+      ),
+    ).toContain('"start_url":"/"');
+    expect(
+      readFileSync(
+        path.join(rootDir, 'dist/web-shell/service-worker.js'),
+        'utf8',
+      ),
+    ).toContain('addEventListener');
+    expect(
+      existsSync(
+        path.join(rootDir, 'dist/web-shell/assets/pwa-icon-192-v1.png'),
+      ),
+    ).toBe(true);
+  });
+
+  it.each(['manifest.webmanifest', 'service-worker.js'])(
+    'requires %s in release packages',
+    (file) => {
+      const rootDir = createFixtureRoot();
+      stubConsole();
+      createBundleArtifacts(rootDir);
+      rmSync(path.join(rootDir, 'dist/web-shell', file));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`exit ${code}`);
+      });
+      expect(() => preparePackage({ rootDir })).toThrow('exit 1');
+      expect(
+        console.error.mock.calls.some(([message]) =>
+          String(message).includes(file),
+        ),
+      ).toBe(true);
+    },
+  );
+
   it('copies bundled skill scripts and references into the runtime dist', () => {
     const rootDir = createFixtureRoot();
     writeFile(
@@ -1403,6 +1454,8 @@ describe('package asset scripts', () => {
     // Web Shell release gate (prepare-package.js verifyBundleArtifacts): the
     // published package must ship the UI, so the fixture provides it too.
     writeFile(rootDir, 'dist/web-shell/index.html', '<!doctype html>');
+    writeFile(rootDir, 'dist/web-shell/manifest.webmanifest', '{}');
+    writeFile(rootDir, 'dist/web-shell/service-worker.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'web-shell', 'assets'), {
       recursive: true,
     });
