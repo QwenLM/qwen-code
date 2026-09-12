@@ -925,6 +925,28 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['metadata']).toBeUndefined();
     });
 
+    it('ignores a session false when the provider config has none', () => {
+      // Same isolation in the other direction: a session opt-out must not
+      // strip tracing from a cross-provider agent running a first-party model.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: undefined },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: false }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
     it.each([
       ['gpt-5.4', 'high', 'high'],
       ['gpt-5.4', 'max', 'xhigh'],
