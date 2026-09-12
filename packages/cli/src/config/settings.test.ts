@@ -1177,6 +1177,48 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.advanced?.excludedEnvVars).toHaveLength(2);
     });
 
+    it('should concatenate hook definitions from user and workspace scopes', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const hookRunning = (command: string) => [
+        { hooks: [{ type: 'command', command }] },
+      ];
+      const userSettings = {
+        hooks: {
+          PostCompact: hookRunning('user-post-compact'),
+          TodoCreated: hookRunning('user-todo-created'),
+        },
+      };
+      const workspaceSettings = {
+        hooks: {
+          PostCompact: hookRunning('workspace-post-compact'),
+          TodoCreated: hookRunning('workspace-todo-created'),
+        },
+      };
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return JSON.stringify(userSettings);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettings);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Both scopes run: a workspace definition does not replace the user's.
+      expect(settings.merged.hooks).toMatchObject({
+        PostCompact: [
+          { hooks: [{ command: 'user-post-compact' }] },
+          { hooks: [{ command: 'workspace-post-compact' }] },
+        ],
+        TodoCreated: [
+          { hooks: [{ command: 'user-todo-created' }] },
+          { hooks: [{ command: 'workspace-todo-created' }] },
+        ],
+      });
+    });
+
     it('should UNION-merge slashCommands.disabled across user and workspace scopes', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const userSettings = {

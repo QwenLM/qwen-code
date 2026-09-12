@@ -182,7 +182,8 @@ import { MessageDisplayDispatcher } from './message-display-dispatcher.js';
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
-import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
+import type { StopHookOutput } from '../hooks/types.js';
+import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
 
 const MAX_TURNS = 100;
 const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
@@ -2160,23 +2161,6 @@ export class LlmClient {
     }
   }
 
-  private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
-    switch (approvalMode) {
-      case ApprovalMode.DEFAULT:
-        return PermissionMode.Default;
-      case ApprovalMode.PLAN:
-        return PermissionMode.Plan;
-      case ApprovalMode.AUTO_EDIT:
-        return PermissionMode.AutoEdit;
-      case ApprovalMode.AUTO:
-        return PermissionMode.Auto;
-      case ApprovalMode.YOLO:
-        return PermissionMode.Yolo;
-      default:
-        return PermissionMode.Default;
-    }
-  }
-
   private async fireSessionStartHook(
     source: SessionStartSource,
     signal?: AbortSignal,
@@ -2195,14 +2179,14 @@ export class LlmClient {
         ? await hookSystem.fireSessionStartEvent(
             source,
             this.config.getModel() ?? '',
-            this.toPermissionMode(this.config.getApprovalMode()),
+            approvalModeToPermissionMode(this.config.getApprovalMode()),
             undefined,
             signal,
           )
         : await hookSystem.fireSessionStartEvent(
             source,
             this.config.getModel() ?? '',
-            this.toPermissionMode(this.config.getApprovalMode()),
+            approvalModeToPermissionMode(this.config.getApprovalMode()),
           );
       signal?.throwIfAborted();
       return output?.getAdditionalContext()?.trim() || undefined;
