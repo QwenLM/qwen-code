@@ -1050,10 +1050,14 @@ export function parseTrustedConfigRecords(
     const origin = fields[i + 1];
     const keyAndValue = fields[i + 2];
     const nl = keyAndValue.indexOf('\n');
-    if (!origin.startsWith('file:') || nl < 0) return null;
+    if (!origin.startsWith('file:')) return null;
     const file = origin.slice('file:'.length);
     if (!file || !isAbsolute(file)) return null;
-    records.push({ scope, file, key: keyAndValue.slice(0, nl) });
+    records.push({
+      scope,
+      file,
+      key: nl < 0 ? keyAndValue : keyAndValue.slice(0, nl),
+    });
   }
   return records;
 }
@@ -1077,6 +1081,11 @@ export interface FilterScreen {
    * measurements blank these keys, but leave unrelated global filters active.
    */
   reachedExempt: string[];
+  /**
+   * Attribution limitations that leave the exemption empty without weakening
+   * the local walk. Informational only: callers must not refuse on these.
+   */
+  attribution: string[];
   /**
    * Every file the walk could NOT read to the bottom, each with its reason:
    * another user's `~user/`, a target that is not a regular file, a parse
@@ -1203,11 +1212,12 @@ export function filterCommandsIn(
   const filters = new Set<string>();
   const exempt = new Set<string>();
   const reachedExempt = new Set<string>();
+  const attribution = new Set<string>();
   const unread = new Set<string>();
   const dangling = new Set<string>();
   const visited = new Set<string>();
   const trustedOrigins = new Set<string>();
-  const trustedFiltersByOrigin = new Map<string, string[]>();
+  const trustedFiltersByOrigin = new Map<string, Set<string>>();
   // Keep the spelling Git opens. A repo-controlled symlink may resolve to a
   // user config now and be repointed after this screen; realpath equality
   // would therefore turn that alias into authority it does not own.
@@ -1280,7 +1290,13 @@ export function filterCommandsIn(
   const controlledSpellings = [commonDir, gitDir, screenedTree].map((path) =>
     resolve(path),
   );
-  if (basename(resolve(commonDir)) === '.git') {
+  const commonLooksLikeGitDir =
+    existsSync(join(commonDir, 'HEAD')) &&
+    existsSync(join(commonDir, 'objects')) &&
+    existsSync(join(commonDir, 'refs'));
+  const mainWorktreeUnknown =
+    commonLooksLikeGitDir && basename(resolve(commonDir)) !== '.git';
+  if (commonLooksLikeGitDir && !mainWorktreeUnknown) {
     controlledSpellings.push(dirname(resolve(commonDir)));
   }
   const controlledRealpaths = controlledSpellings.flatMap((path) => {
@@ -1290,16 +1306,22 @@ export function filterCommandsIn(
       return [];
     }
   });
-  const repositoryControls = (file: string): boolean => {
+  const repositoryControl = (file: string): 'controlled' | 'outside' => {
+    // A separate git dir and a submodule common dir do not encode the main
+    // worktree location in a form this function can authenticate. Fail closed:
+    // without a complete containment set no origin can be granted authority.
+    if (mainWorktreeUnknown) return 'controlled';
     const spelled = resolve(file);
     if (controlledSpellings.some((root) => isSubpath(root, spelled))) {
-      return true;
+      return 'controlled';
     }
     try {
       const real = realpathSync.native(file);
-      return controlledRealpaths.some((root) => isSubpath(root, real));
+      return controlledRealpaths.some((root) => isSubpath(root, real))
+        ? 'controlled'
+        : 'outside';
     } catch {
-      return true;
+      return 'controlled';
     }
   };
 
@@ -1317,7 +1339,7 @@ export function filterCommandsIn(
       env: sanitizedGitEnv(),
     });
     if (result.error || (result.status !== 0 && result.status !== 1)) {
-      unread.add(
+      attribution.add(
         `the global/system config graph could not be read (${
           result.error
             ? result.error.message
@@ -1328,14 +1350,14 @@ export function filterCommandsIn(
     }
     if (result.status === 1) return [];
     if (typeof result.stdout !== 'string') {
-      unread.add(
+      attribution.add(
         'the global/system config graph returned no readable output — an included filter cannot be attributed to a user-owned origin',
       );
       return null;
     }
     const records = parseTrustedConfigRecords(result.stdout);
     if (records === null) {
-      unread.add(
+      attribution.add(
         'the global/system config graph returned malformed origin records — an included filter cannot be attributed to a user-owned origin',
       );
     }
@@ -1360,16 +1382,18 @@ export function filterCommandsIn(
   ]);
   if (trustedFilterRecords !== null && trustedOriginRecords !== null) {
     for (const { file } of trustedOriginRecords) {
-      if (!repositoryControls(file)) trustedOrigins.add(originKey(file));
+      if (repositoryControl(file) === 'outside') {
+        trustedOrigins.add(originKey(file));
+      }
     }
     for (const { file, key } of trustedFilterRecords) {
       const origin = originKey(file);
       if (trustedOrigins.has(origin)) {
         exempt.add(key);
-        const keys = trustedFiltersByOrigin.get(origin) ?? [];
-        keys.push(key);
+        const keys = trustedFiltersByOrigin.get(origin) ?? new Set<string>();
+        keys.add(key);
         trustedFiltersByOrigin.set(origin, keys);
-      } else if (repositoryControls(file)) {
+      } else if (repositoryControl(file) === 'controlled') {
         filters.add(key);
       }
     }
@@ -1456,7 +1480,7 @@ export function filterCommandsIn(
       return;
     }
     if (relocatedXdgConfig !== null && originKey(file) === relocatedXdgConfig) {
-      unread.add(
+      attribution.add(
         `${file} (the relocated XDG global config cannot be resolved by the trusted read because XDG_CONFIG_HOME is sanitized — not attributed as user-owned)`,
       );
     }
@@ -1501,6 +1525,7 @@ export function filterCommandsIn(
     filters: [...filters],
     exempt: [...exempt],
     reachedExempt: [...reachedExempt],
+    attribution: [...attribution],
     unread: [...unread],
     dangling: [...dangling],
   };

@@ -2123,6 +2123,7 @@ describe('filterCommandsIn — the include walk', () => {
       filters: ['filter.evil.process'],
       exempt: [],
       reachedExempt: [],
+      attribution: [],
       unread: [],
       dangling: [],
     });
@@ -2260,7 +2261,7 @@ describe('filterCommandsIn — the include walk', () => {
     writeFileSync(trackedFilter, '[filter "tracked"]\n\tclean = cat\n');
     git(repo, 'add', 'shared-filter.cfg');
     git(repo, 'commit', '-qm', 'tracked filter fixture');
-    git(repo, 'config', '--replace-all', 'include.path', trackedFilter);
+    git(repo, 'config', '--unset-all', 'include.path');
     writeFileSync(
       join(gitIsolation.home, '.gitconfig'),
       globalIncludeIf(`gitdir:${dir}/`, trackedFilter),
@@ -2283,6 +2284,95 @@ describe('filterCommandsIn — the include walk', () => {
     expect(filterCommandsIn(commonDir, gitDir).filters).toEqual([
       'filter.tracked.clean',
     ]);
+  });
+
+  it('does not trust a main-worktree source when the common dir is separate', () => {
+    const main = join(dir, 'separate-main');
+    const common = join(dir, 'admin', 'repo.git');
+    const linked = join(dir, 'separate-linked');
+    mkdirSync(main);
+    mkdirSync(dirname(common));
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    git(main, 'init', '-q', '-b', 'main', '--separate-git-dir', common);
+    git(main, 'config', 'user.email', 't@t.t');
+    git(main, 'config', 'user.name', 't');
+    const payload = join(main, 'team-filter.cfg');
+    writeFileSync(payload, '[filter "team"]\n\tclean = cat\n');
+    git(main, 'add', 'team-filter.cfg');
+    git(main, 'commit', '-qm', 'tracked filter source');
+    git(main, 'worktree', 'add', '--detach', '-q', linked, 'HEAD');
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      `[include]\n\tpath = ${JSON.stringify(payload)}\n`,
+    );
+    const gitDir = git(
+      linked,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+
+    const screen = filterCommandsIn(common, gitDir, linked);
+    expect(screen.filters).toEqual(['filter.team.clean']);
+    expect(screen.exempt).toEqual([]);
+  });
+
+  it('does not trust a submodule main-worktree source', () => {
+    const source = join(dir, 'sub-source');
+    const superRepo = join(dir, 'super');
+    mkdirSync(source);
+    mkdirSync(superRepo);
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    for (const repo of [source, superRepo]) {
+      git(repo, 'init', '-q', '-b', 'main');
+      git(repo, 'config', 'user.email', 't@t.t');
+      git(repo, 'config', 'user.name', 't');
+      writeFileSync(join(repo, 'seed'), 'x\n');
+      git(repo, 'add', 'seed');
+      git(repo, 'commit', '-qm', 'seed');
+    }
+    git(
+      superRepo,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      source,
+      'mod',
+    );
+    git(superRepo, 'commit', '-qam', 'add submodule');
+    const module = join(superRepo, 'mod');
+    git(module, 'config', 'user.email', 't@t.t');
+    git(module, 'config', 'user.name', 't');
+    const payload = join(module, 'team-filter.cfg');
+    writeFileSync(payload, '[filter "team"]\n\tclean = cat\n');
+    git(module, 'add', 'team-filter.cfg');
+    git(module, 'commit', '-qm', 'tracked filter source');
+    const linked = join(dir, 'submodule-linked');
+    git(module, 'worktree', 'add', '--detach', '-q', linked, 'HEAD');
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      `[include]\n\tpath = ${JSON.stringify(payload)}\n`,
+    );
+    const commonDir = git(
+      linked,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    const gitDir = git(
+      linked,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+
+    const screen = filterCommandsIn(commonDir, gitDir, linked);
+    expect(screen.filters).toEqual(['filter.team.clean']);
+    expect(screen.exempt).toEqual([]);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -2314,7 +2404,19 @@ describe('filterCommandsIn — the include walk', () => {
         process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
         const screen = filterCommandsIn(dir, dir);
         expect(screen.filters).toEqual(['filter.lfs.clean']);
-        expect(screen.unread.join(' ')).toContain('git config exited 129');
+        expect(screen.unread).toEqual([]);
+        expect(screen.attribution.join(' ')).toContain('git config exited 129');
+
+        writeFileSync(join(dir, 'config'), '');
+        writeFileSync(globalConfig, '');
+        const healthy = filterCommandsIn(dir, dir);
+        expect(healthy.filters).toEqual([]);
+        expect(healthy.exempt).toEqual([]);
+        expect(healthy.unread).toEqual([]);
+        expect(healthy.dangling).toEqual([]);
+        expect(healthy.attribution.join(' ')).toContain(
+          'git config exited 129',
+        );
       } finally {
         if (savedPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = savedPath;
@@ -2329,15 +2431,39 @@ describe('filterCommandsIn — the include walk', () => {
         : '/etc/gitconfig';
     expect(
       parseTrustedConfigRecords(
-        `system\0file:${systemConfig}\0filter.lfs.clean\ngit-lfs clean\0`,
+        `global\0file:${systemConfig}\0core.trustctime\0` +
+          `system\0file:${systemConfig}\0filter.lfs.clean\ngit-lfs clean\0`,
       ),
     ).toEqual([
+      {
+        scope: 'global',
+        file: systemConfig,
+        key: 'core.trustctime',
+      },
       {
         scope: 'system',
         file: systemConfig,
         key: 'filter.lfs.clean',
       },
     ]);
+  });
+
+  it('keeps a global filter attributable when the config also has a valueless key', () => {
+    const globalConfig = join(gitIsolation.home, '.gitconfig');
+    writeFileSync(
+      globalConfig,
+      '[core]\n\ttrustctime\n[filter "lfs"]\n\tclean = git-lfs clean\n',
+    );
+    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${globalConfig}\n`);
+
+    expect(filterCommandsIn(dir, dir)).toEqual({
+      filters: [],
+      exempt: ['filter.lfs.clean'],
+      reachedExempt: ['filter.lfs.clean'],
+      attribution: [],
+      unread: [],
+      dangling: [],
+    });
   });
 
   it('names a relocated XDG global slot that the sanitized read cannot attribute', () => {
@@ -2351,7 +2477,10 @@ describe('filterCommandsIn — the include walk', () => {
       process.env['XDG_CONFIG_HOME'] = xdg;
       const screen = filterCommandsIn(dir, dir);
       expect(screen.filters).toEqual(['filter.xdg.clean']);
-      expect(screen.unread.join(' ')).toContain('relocated XDG global config');
+      expect(screen.unread).toEqual([]);
+      expect(screen.attribution.join(' ')).toContain(
+        'relocated XDG global config',
+      );
     } finally {
       if (saved === undefined) delete process.env['XDG_CONFIG_HOME'];
       else process.env['XDG_CONFIG_HOME'] = saved;
@@ -2378,6 +2507,7 @@ describe('filterCommandsIn — the include walk', () => {
         filters: ['filter.evil.clean'],
         exempt: [],
         reachedExempt: [],
+        attribution: [],
         unread: [],
         dangling: [],
       });
@@ -2404,6 +2534,7 @@ describe('filterCommandsIn — the include walk', () => {
         filters: ['filter.x.clean'],
         exempt: [],
         reachedExempt: [],
+        attribution: [],
         unread: [],
         dangling: [],
       });
@@ -2427,6 +2558,7 @@ describe('filterCommandsIn — the include walk', () => {
       filters: ['filter.home.clean'],
       exempt: [],
       reachedExempt: [],
+      attribution: [],
       unread: [],
       dangling: [],
     });
