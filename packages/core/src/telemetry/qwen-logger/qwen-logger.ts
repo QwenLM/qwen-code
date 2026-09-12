@@ -107,6 +107,9 @@ const MAX_EVENTS = 1000;
  */
 const MAX_RETRY_EVENTS = 100;
 
+const ERROR_TEXT_PROPERTY_KEYS = ['error_message', 'error_excerpt'];
+const REDACTED_ERROR_TEXT = '***REDACTED***';
+
 export interface LogResponse {
   nextRequestWaitMs?: number;
 }
@@ -248,6 +251,11 @@ export class QwenLogger {
 
   enqueueLogEvent(event: RumEvent): void {
     try {
+      // The blanket pass owns `message` / `error_message` / `error_excerpt`;
+      // the targeted pass covers what it leaves raw (`stack`,
+      // `properties.error`). `redactErrorText` is a no-op on the blanket
+      // constant, so the order only avoids re-scanning discarded text.
+      this.redactEventErrorText(event);
       registerProcessSecrets(this.config);
       redactErrorTextFields(event);
 
@@ -267,6 +275,23 @@ export class QwenLogger {
       }
     } catch (error) {
       this.debugLogger.error('QwenLogger: Failed to enqueue log event.', error);
+    }
+  }
+
+  private redactEventErrorText(event: RumEvent): void {
+    const properties = event.properties;
+    if (properties) {
+      for (const key of ERROR_TEXT_PROPERTY_KEYS) {
+        const value = properties[key];
+        if (typeof value === 'string') {
+          properties[key] = REDACTED_ERROR_TEXT;
+        }
+      }
+    }
+
+    const message = (event as RumExceptionEvent).message;
+    if (typeof message === 'string') {
+      (event as RumExceptionEvent).message = REDACTED_ERROR_TEXT;
     }
   }
 
@@ -1167,10 +1192,6 @@ export class QwenLogger {
       success: event.success ? 1 : 0,
       exit_code: event.exit_code,
     };
-
-    if (event.error && this.config?.getTelemetryLogPromptsEnabled()) {
-      properties['error'] = event.error;
-    }
 
     const rumEvent = this.createActionEvent(
       'hook',
