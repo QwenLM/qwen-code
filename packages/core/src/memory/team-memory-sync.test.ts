@@ -282,4 +282,59 @@ describe('syncTeamMemory', () => {
     cleanup.push(path.dirname(verify));
     expect(fs.existsSync(path.join(verify, 'unrelated.txt'))).toBe(false);
   }, 30_000);
+
+  it.skipIf(process.platform === 'win32')(
+    'does not run a tree-shipped post-index-change hook on the clean-path status probe',
+    async () => {
+      // A repo with no upstream. Seed a committed team-memory file so the team
+      // path EXISTS and is clean: then the status probe is the flow's only
+      // index-writing call, and a shipped `.git/hooks/post-index-change` would
+      // run on it without the flag.
+      const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sync-pic-'));
+      cleanup.push(parent);
+      const repo = path.join(parent, 'repo');
+      fs.mkdirSync(repo);
+      git(repo, 'init', '--initial-branch=main');
+      git(repo, 'config', 'user.email', 'solo@example.com');
+      git(repo, 'config', 'user.name', 'solo');
+      writeTeamMemory(repo, 'feedback/seeded.md', 'seeded');
+      git(repo, 'add', '--', '.qwen/team-memory');
+      git(repo, 'commit', '-m', 'seed');
+
+      const canary = path.join(repo, 'PWNED');
+      const hook = path.join(repo, '.git', 'hooks', 'post-index-change');
+      fs.writeFileSync(hook, `#!/bin/sh\ntouch '${canary}'\n`);
+      fs.chmodSync(hook, 0o755);
+
+      const result = await syncTeamMemory(repo, { message: 'sync' });
+
+      expect(result.skippedReason).toBe('no-upstream');
+      expect(fs.existsSync(canary)).toBe(false);
+    },
+    30_000,
+  );
+
+  it('rolls back its own commit when the push is rejected', async () => {
+    const { bare, repo } = freshRemoteAndClone('alice');
+    // The remote rejects every push (e.g. a "require signed commits" rule), so
+    // this sync's unsigned commit would be stranded unless the flow undoes it.
+    const hook = path.join(bare, 'hooks', 'pre-receive');
+    fs.writeFileSync(hook, '#!/bin/sh\nexit 1\n');
+    fs.chmodSync(hook, 0o755);
+
+    writeTeamMemory(repo, 'feedback/x.md', 'note');
+    const preHead = git(repo, 'rev-parse', 'HEAD').trim();
+
+    const first = await syncTeamMemory(repo, { message: 'sync' });
+    expect(first.committed).toBe(true);
+    expect(first.pushed).toBe(false);
+    // The rejected push must not strand our commit on the branch.
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(preHead);
+
+    // A second sync must not read a stale ahead state (which would wedge
+    // pushing permanently): it tries again rather than returning 'local-ahead'.
+    const second = await syncTeamMemory(repo, { message: 'sync' });
+    expect(second.skippedReason).not.toBe('local-ahead');
+    expect(second.pushed).toBe(false);
+  }, 30_000);
 });

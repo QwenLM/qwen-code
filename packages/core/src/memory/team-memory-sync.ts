@@ -201,7 +201,15 @@ export async function syncTeamMemory(
   }
 
   // 2. Commit local team-memory changes (only the team path) on top of upstream.
+  // `--no-optional-locks` keeps this read from refreshing and writing the
+  // index, so a tree-shipped `.git/hooks/post-index-change` never runs. It
+  // matters precisely when the team path is clean: then this probe is the
+  // flow's only index-writing call (`add`/`commit`/`reset` are all gated on
+  // this returning a non-empty result). The flag must precede `status` — after
+  // the subcommand git answers `rc=129`, which `tryGit` swallows into `null`
+  // and this flow misreads as "no changes to sync".
   const status = await tryGit(gitRoot, [
+    '--no-optional-locks',
     'status',
     '--porcelain',
     '--',
@@ -251,6 +259,18 @@ export async function syncTeamMemory(
       'SIGKILL',
     )) !== null;
   if (!result.pushed) {
+    // A rejected push (e.g. a remote enforcing signed commits while the sync
+    // commit is deliberately `--no-gpg-sign`) leaves our commit stranded on the
+    // branch. That stranded commit trips the `wasAheadBeforeSync` gate next
+    // cycle and disables pushing permanently, and it also blocks the user's own
+    // next signed push. Undo our own commit so the branch returns to its
+    // pre-sync HEAD and cannot stay ahead. `--soft` keeps the index and working
+    // tree intact (unlike a whole-tree mixed reset, which would unstage
+    // unrelated work this sync never touches); the pathspec-limited reset then
+    // unstages only the team path, mirroring the unstage-on-commit-failure
+    // pattern above.
+    await tryGit(gitRoot, ['reset', '--soft', 'HEAD~1']);
+    await tryGit(gitRoot, ['reset', '--quiet', '--', relPath]);
     result.skippedReason = 'push-failed';
   }
   return result;
