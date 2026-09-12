@@ -1644,7 +1644,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as string | undefined,
         description:
-          'How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at "high"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default.',
+          'How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini 3 caps at "high"; Gemini 2.5 maps xhigh/max to its thinking-budget ceiling; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default.',
         showInDialog: true,
         options: [
           { value: 'low', label: 'Low' },

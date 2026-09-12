@@ -13,6 +13,17 @@ import type { Config } from '../../config/config.js';
 const mockReportLlmRequest = vi.hoisted(() => vi.fn());
 const mockReportLlmResponse = vi.hoisted(() => vi.fn());
 const mockReportLlmChunk = vi.hoisted(() => vi.fn());
+const mockDebugLogger = vi.hoisted(() => ({
+  isEnabled: vi.fn().mockReturnValue(true),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn().mockReturnValue(mockDebugLogger),
+}));
 
 vi.mock('@google/genai', () => {
   const mockGenerateContent = vi.fn();
@@ -98,10 +109,7 @@ describe('LlmContentGenerator', () => {
         config: expect.objectContaining({
           temperature: 1,
           topP: 0.95,
-          thinkingConfig: {
-            includeThoughts: true,
-            thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED',
-          },
+          thinkingConfig: { includeThoughts: true },
         }),
       }),
     );
@@ -408,10 +416,7 @@ describe('LlmContentGenerator', () => {
         config: expect.objectContaining({
           temperature: 1,
           topP: 0.95,
-          thinkingConfig: {
-            includeThoughts: true,
-            thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED',
-          },
+          thinkingConfig: { includeThoughts: true },
         }),
       }),
     );
@@ -536,7 +541,7 @@ describe('LlmContentGenerator', () => {
 
   it('should map reasoning effort to thinkingConfig', async () => {
     const generatorWithReasoning = new LlmContentGenerator({ apiKey: 'test' }, {
-      model: 'gemini-2.5-pro',
+      model: 'gemini-3-pro-preview',
       reasoning: {
         effort: 'high',
       },
@@ -544,7 +549,7 @@ describe('LlmContentGenerator', () => {
     } as any);
 
     const request = {
-      model: 'gemini-2.5-pro',
+      model: 'gemini-3-pro-preview',
       contents: [],
     };
 
@@ -563,16 +568,16 @@ describe('LlmContentGenerator', () => {
   });
 
   it("maps reasoning effort 'max' to HIGH (Gemini has no higher tier)", async () => {
-    // 'max' is a DeepSeek-specific extension. Gemini caps at HIGH, so the
-    // converter must clamp instead of falling through to UNSPECIFIED.
+    // 'max' is a DeepSeek-specific extension. The Gemini 3 ladder caps at
+    // HIGH, so the converter must clamp instead of dropping the tier.
     const generatorWithMax = new LlmContentGenerator({ apiKey: 'test' }, {
-      model: 'gemini-2.5-pro',
+      model: 'gemini-3-pro-preview',
       reasoning: { effort: 'max' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     await generatorWithMax.generateContent(
-      { model: 'gemini-2.5-pro', contents: [] },
+      { model: 'gemini-3-pro-preview', contents: [] },
       'prompt-id',
     );
 
@@ -588,15 +593,39 @@ describe('LlmContentGenerator', () => {
     );
   });
 
-  it("maps reasoning effort 'medium' to MEDIUM", async () => {
+  it("clamps reasoning effort 'medium' to HIGH on Gemini 3 Pro (supports low/high only)", async () => {
     const generatorWithMedium = new LlmContentGenerator({ apiKey: 'test' }, {
-      model: 'gemini-2.5-pro',
+      model: 'gemini-3-pro-preview',
       reasoning: { effort: 'medium' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     await generatorWithMedium.generateContent(
-      { model: 'gemini-2.5-pro', contents: [] },
+      { model: 'gemini-3-pro-preview', contents: [] },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: {
+            includeThoughts: true,
+            thinkingLevel: 'HIGH',
+          },
+        }),
+      }),
+    );
+  });
+
+  it("maps reasoning effort 'medium' to MEDIUM on Gemini 3 Flash", async () => {
+    const generatorWithMedium = new LlmContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-3-flash-preview',
+      reasoning: { effort: 'medium' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await generatorWithMedium.generateContent(
+      { model: 'gemini-3-flash-preview', contents: [] },
       'prompt-id',
     );
 
@@ -612,15 +641,39 @@ describe('LlmContentGenerator', () => {
     );
   });
 
+  it("maps reasoning effort 'low' to LOW on Gemini 3", async () => {
+    const generatorWithLow = new LlmContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-3-pro-preview',
+      reasoning: { effort: 'low' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await generatorWithLow.generateContent(
+      { model: 'gemini-3-pro-preview', contents: [] },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: {
+            includeThoughts: true,
+            thinkingLevel: 'LOW',
+          },
+        }),
+      }),
+    );
+  });
+
   it("clamps reasoning effort 'xhigh' to HIGH (Gemini has no xhigh tier)", async () => {
     const generatorWithXhigh = new LlmContentGenerator({ apiKey: 'test' }, {
-      model: 'gemini-2.5-pro',
+      model: 'gemini-3-pro-preview',
       reasoning: { effort: 'xhigh' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     await generatorWithXhigh.generateContent(
-      { model: 'gemini-2.5-pro', contents: [] },
+      { model: 'gemini-3-pro-preview', contents: [] },
       'prompt-id',
     );
 
@@ -634,6 +687,185 @@ describe('LlmContentGenerator', () => {
         }),
       }),
     );
+  });
+
+  describe('Gemini 2.5 thinking budget', () => {
+    const generatorFor = (model: string, reasoning?: unknown) =>
+      new LlmContentGenerator({ apiKey: 'test' }, {
+        model,
+        reasoning,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+
+    const sentThinkingConfig = () =>
+      mockGoogleGenAI.models.generateContent.mock.calls[0][0].config
+        .thinkingConfig;
+
+    it.each([
+      ['low', 2048],
+      ['medium', 8192],
+      ['high', 16384],
+      ['xhigh', 32768],
+      ['max', 32768],
+    ])(
+      'maps effort %s to a thinkingBudget on 2.5 Pro',
+      async (effort, budget) => {
+        const gen = generatorFor('gemini-2.5-pro', { effort });
+
+        await gen.generateContent(
+          { model: 'gemini-2.5-pro', contents: [] },
+          'prompt-id',
+        );
+
+        expect(sentThinkingConfig()).toEqual({
+          includeThoughts: true,
+          thinkingBudget: budget,
+        });
+      },
+    );
+
+    it('caps the top tiers at the Flash ceiling', async () => {
+      const gen = generatorFor('gemini-2.5-flash', { effort: 'max' });
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-flash', contents: [] },
+        'prompt-id',
+      );
+
+      expect(sentThinkingConfig()).toEqual({
+        includeThoughts: true,
+        thinkingBudget: 24576,
+      });
+    });
+
+    it('never sends thinkingLevel to a 2.5 model', async () => {
+      const gen = generatorFor('gemini-2.5-flash', { effort: 'high' });
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-flash', contents: [] },
+        'prompt-id',
+      );
+
+      expect(sentThinkingConfig()).not.toHaveProperty('thinkingLevel');
+    });
+
+    it('omits both knobs when no effort is configured', async () => {
+      const gen = generatorFor('gemini-2.5-pro');
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-pro', contents: [] },
+        'prompt-id',
+      );
+
+      expect(sentThinkingConfig()).toEqual({ includeThoughts: true });
+    });
+
+    it('omits both knobs when reasoning is set without an effort', async () => {
+      const gen = generatorFor('gemini-2.5-pro', {});
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-pro', contents: [] },
+        'prompt-id',
+      );
+
+      expect(sentThinkingConfig()).toEqual({ includeThoughts: true });
+    });
+
+    it('leaves an explicit request-level thinkingConfig alone', async () => {
+      const gen = generatorFor('gemini-2.5-pro');
+
+      await gen.generateContent(
+        {
+          model: 'gemini-2.5-pro',
+          contents: [],
+          config: {
+            thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
+          },
+        },
+        'prompt-id',
+      );
+
+      expect(sentThinkingConfig()).toEqual({
+        thinkingBudget: 0,
+        includeThoughts: false,
+      });
+    });
+  });
+
+  describe('warning latches', () => {
+    it('warns once when effort is clamped and latches for subsequent requests', async () => {
+      const gen = new LlmContentGenerator({ apiKey: 'test' }, {
+        model: 'gemini-3-pro-preview',
+        reasoning: { effort: 'medium' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+
+      await gen.generateContent(
+        { model: 'gemini-3-pro-preview', contents: [] },
+        'prompt-1',
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "reasoning.effort='medium' is not supported by Gemini; clamping to 'HIGH'.",
+      );
+
+      await gen.generateContent(
+        { model: 'gemini-3-pro-preview', contents: [] },
+        'prompt-2',
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not warn when effort is supported by the model', async () => {
+      const gen = new LlmContentGenerator({ apiKey: 'test' }, {
+        model: 'gemini-3-pro-preview',
+        reasoning: { effort: 'low' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+
+      await gen.generateContent(
+        { model: 'gemini-3-pro-preview', contents: [] },
+        'prompt-1',
+      );
+      expect(mockDebugLogger.warn).not.toHaveBeenCalled();
+    });
+
+    it('warns once when budget_tokens is set and latches for subsequent requests', async () => {
+      const gen = new LlmContentGenerator({ apiKey: 'test' }, {
+        model: 'gemini-2.5-pro',
+        reasoning: { effort: 'high', budget_tokens: 4096 },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-pro', contents: [] },
+        'prompt-1',
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'reasoning.budget_tokens=4096 is not supported by Gemini; ignoring budget_tokens.',
+      );
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-pro', contents: [] },
+        'prompt-2',
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not warn when budget_tokens is omitted', async () => {
+      const gen = new LlmContentGenerator({ apiKey: 'test' }, {
+        model: 'gemini-2.5-pro',
+        reasoning: { effort: 'high' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-pro', contents: [] },
+        'prompt-1',
+      );
+      expect(mockDebugLogger.warn).not.toHaveBeenCalled();
+    });
   });
 
   it('should strip displayName from inlineData and fileData before sending to API', async () => {
