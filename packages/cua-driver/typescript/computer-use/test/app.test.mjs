@@ -308,7 +308,7 @@ test("app API preserves actionable validation errors before dispatch", async () 
   assert.equal(calls.filter((call) => mutations.includes(call.method)).length, 0);
 });
 
-test("a structured pre-actuator refusal is returned without a foreground retry", async () => {
+test("a structured pre-actuator refusal retries once in foreground", async () => {
   let attempts = 0;
   const { computer, calls } = fixture({ action: () => {
     attempts += 1;
@@ -316,9 +316,53 @@ test("a structured pre-actuator refusal is returned without a foreground retry",
   } });
   const app = await computer.getApp("Fixture");
   await app.getState();
-  await assert.rejects(app.pressKey("Return"), { code: "same_pid_keyboard_ambiguity" });
-  assert.equal(attempts, 1);
-  assert.deepEqual(calls.filter((call) => call.method === "windowPressKey").map((call) => call.input.deliveryMode), ["background"]);
+  assert.deepEqual(await app.pressKey("Return"), { effect: "confirmed" });
+  assert.equal(attempts, 2);
+  assert.deepEqual(calls.filter((call) => call.method === "windowPressKey").map((call) => call.input.deliveryMode), ["background", "foreground"]);
+});
+
+test("foreground click retry leaves app-bound background routing", async () => {
+  let attempts = 0;
+  const { computer, calls } = fixture({ action: () => {
+    attempts += 1;
+    return attempts === 1 ? result({ code: "background_unavailable", effect: "refused", escalation: { recommended: "foreground" } }, { isError: true }) : result({ effect: "confirmed" });
+  } });
+  const app = await computer.getApp("Fixture");
+  await app.getState();
+  assert.deepEqual(await app.click(37), { effect: "confirmed" });
+  const clicks = calls.filter((call) => call.method === "windowClick").map((call) => call.input);
+  assert.equal(clicks[0].appContext, true);
+  assert.equal(clicks[0].deliveryMode, "background");
+  assert.equal(clicks[1].appContext, undefined);
+  assert.equal(clicks[1].deliveryMode, "foreground");
+});
+
+test("a foreground retry failure is never retried again", async () => {
+  const { computer, calls } = fixture({ action: () => result({ code: "background_unavailable", effect: "refused", escalation: { recommended: "foreground" } }, { isError: true }) });
+  const app = await computer.getApp("Fixture");
+  await app.getState();
+  await assert.rejects(app.pressKey("Return"), { code: "background_unavailable" });
+  assert.deepEqual(calls.filter((call) => call.method === "windowPressKey").map((call) => call.input.deliveryMode), ["background", "foreground"]);
+});
+
+test("getState returns a compact state when a running app has no windows", async () => {
+  const { computer, calls } = fixture({ windows: [] });
+  const app = await computer.getApp("Fixture");
+  assert.deepEqual(await app.getState(), { app: "Fixture", window: "", mode: "full", text: "No open application window." });
+  await assert.rejects(app.pressKey("Return"), { code: "app_window_unavailable" });
+  assert.equal(calls.filter((call) => call.method === "getWindowState").length, 0);
+});
+
+test("getState ignores a native placeholder after the last app window closes", async () => {
+  const { computer } = fixture({ windows: [{ window_id: 8, title: "", is_app_target: false }] });
+  const app = await computer.getApp("Fixture");
+  assert.equal((await app.getState()).text, "No open application window.");
+});
+
+test("getState keeps a selected untitled app window", async () => {
+  const { computer } = fixture({ windows: [{ ...document, title: "" }] });
+  const app = await computer.getApp("Fixture");
+  assert.equal((await app.getState()).text, compactState);
 });
 
 for (const effect of ["partial", "unverifiable", "suspected_noop"]) {

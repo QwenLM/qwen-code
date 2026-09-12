@@ -1066,6 +1066,9 @@ pub struct PasteInput {
     pub text: String,
     #[serde(default)]
     pub format: PasteFormat,
+    #[serde(default)]
+    #[uniffi(default = None)]
+    pub app_context: Option<bool>,
 }
 
 impl ToolInput for PasteInput {

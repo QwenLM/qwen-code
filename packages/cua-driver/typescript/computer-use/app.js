@@ -50,9 +50,10 @@ export function resolveApp(apps, selector, { allowStopped = false } = {}) {
   return candidates[0];
 }
 
-function currentWindow(windows) {
+function currentWindow(windows, { allowNone = false } = {}) {
   const selected = windows.filter((window) => window.is_app_target === true &&
     Number.isSafeInteger(window.window_id ?? window.windowId));
+  if (allowNone && selected.length === 0 && windows.every((window) => !window.title?.trim())) return undefined;
   if (selected.length !== 1) {
     throw new ComputerUseError("The native app window could not be determined. Open or select its window, then observe again.", {
       code: "app_window_unavailable",
@@ -93,7 +94,7 @@ export class ComputerUseApp {
     this.#window = undefined;
   }
 
-  async #target(signal, { launch = false } = {}) {
+  async #target(signal, { launch = false, allowNoWindow = false } = {}) {
     let app;
     try {
       app = resolveApp(await this.#computer.listApps({ signal, runningOnly: true }), this.#identity);
@@ -114,7 +115,8 @@ export class ComputerUseApp {
       this.#invalidate();
       this.#generation = this.#computer.connectionGeneration;
     }
-    const window = currentWindow(windows);
+    const window = currentWindow(windows, { allowNone: allowNoWindow });
+    if (!window) return { pid: this.#pid };
     return { window, pid: window.pid ?? this.#pid, windowId: window.window_id ?? window.windowId, key: `${window.pid ?? this.#pid}:${window.window_id ?? window.windowId}` };
   }
 
@@ -124,7 +126,12 @@ export class ComputerUseApp {
       throw new ComputerUseError("includeScreenshot must be a boolean");
     }
     const exposeScreenshot = options.includeScreenshot === true;
-    const target = resolved ?? await this.#target(options.signal, { launch: true });
+    const target = resolved ?? await this.#target(options.signal, { launch: true, allowNoWindow: true });
+    if (!target.window) {
+      this.#invalidate();
+      this.#generation = this.#computer.connectionGeneration;
+      return { app: this.name, window: "", mode: "full", text: "No open application window." };
+    }
     const changed = this.#window !== target.key;
     if (changed) this.#invalidate();
     let state;
@@ -210,6 +217,13 @@ export class ComputerUseApp {
     );
   }
 
+  #canRetryInForeground(method, error) {
+    return ["click", "doubleClick", "rightClick", "scroll", "typeText", "pressKey", "hotkey"].includes(method) &&
+      error instanceof ComputerUseError && error.details?.effect === "refused" &&
+      error.details?.escalation?.recommended === "foreground" &&
+      error.details?.operation?.dispatched === true && error.details?.operation?.committed === false;
+  }
+
   #act(method, point, options = {}, elementRequired = false) {
     optionsForApp(options);
     return this.#serial(async () => {
@@ -241,8 +255,16 @@ export class ComputerUseApp {
         }
         const semantic = ["setValue", "performSecondaryAction", "paste", "selectText"].includes(method);
         address = { ...options, ...address, ...(semantic ? {} : { deliveryMode: "background" }) };
-        if (["click", "doubleClick", "rightClick", "drag", "typeText"].includes(method)) address.appContext = true;
-        const result = await this.#computer[method](address);
+        if (["click", "doubleClick", "rightClick", "drag", "typeText", "paste"].includes(method)) address.appContext = true;
+        let result;
+        try {
+          result = await this.#computer[method](address);
+        } catch (error) {
+          if (!this.#canRetryInForeground(method, error)) throw error;
+          const foreground = { ...address, deliveryMode: "foreground" };
+          if (["click", "doubleClick", "rightClick"].includes(method)) delete foreground.appContext;
+          result = await this.#computer[method](foreground);
+        }
         const nativeEffects = ["confirmed", "partial", "unverifiable", "suspected_noop", "refused"];
         const nativeEffect = result.action?.effect;
         return { effect: result.effect ??

@@ -262,27 +262,41 @@ struct Outcome {
     dispatched: bool,
     consumed: bool,
     effect_observed: bool,
+    foreground: bool,
     restoration: Option<pasteboard::Restoration>,
     error: Option<String>,
 }
 
 fn action_record(outcome: &Outcome) -> ActionExecutionRecord {
+    let (transport, requested, actual, detail) = if outcome.foreground {
+        (
+            ActionTransport::MacosCgEventHid,
+            RequestedDelivery::Foreground,
+            ActualDelivery::Foreground,
+            "one exact-window foreground Command-V dispatch was attempted",
+        )
+    } else {
+        (
+            ActionTransport::MacosCgEventPid,
+            RequestedDelivery::Background,
+            ActualDelivery::Background,
+            "one targeted Command-V dispatch was attempted",
+        )
+    };
     let mut record = ActionExecutionRecord::builder(
         if outcome.dispatched {
             ActionEffect::Unverifiable
         } else {
             ActionEffect::Refused
         },
-        ActionTransport::MacosCgEventPid,
-        RequestedDelivery::Background,
+        transport,
+        requested,
     );
     if outcome.dispatched {
-        record = record
-            .actual_delivery(ActualDelivery::Background)
-            .evidence(ActionEvidence {
-                kind: EvidenceKind::NativeApiResult,
-                detail: "one targeted Command-V dispatch was attempted".into(),
-            });
+        record = record.actual_delivery(actual).evidence(ActionEvidence {
+            kind: EvidenceKind::NativeApiResult,
+            detail: detail.into(),
+        });
     }
     if outcome.dispatched && outcome.consumed {
         record = record.evidence(ActionEvidence {
@@ -303,41 +317,61 @@ fn run_paste(
     pid: i32,
     window_id: u32,
     content: pasteboard::Representations,
+    foreground: bool,
     cancelled: &AtomicBool,
 ) -> Outcome {
-    let mut outcome = Outcome::default();
+    let mut outcome = Outcome {
+        foreground,
+        ..Outcome::default()
+    };
     let signals = Arc::new(pasteboard::Signals::default());
     let result = (|| -> anyhow::Result<()> {
         check_cancelled(cancelled)?;
         if crate::input::keyboard::is_screen_sharing_pid(pid) {
             bail!("paste is unavailable for Screen Sharing modifier forwarding");
         }
-        crate::input::skylight::prepare_background_keyboard(pid, window_id)?;
+        if !foreground {
+            crate::input::skylight::prepare_background_keyboard(pid, window_id)?;
+        }
         let probe = EffectProbe::new(pid, window_id, Arc::clone(&signals));
         check_cancelled(cancelled)?;
         let mut transaction = pasteboard::Transaction::begin(content, Arc::clone(&signals))?;
         let action = (|| -> anyhow::Result<bool> {
             check_cancelled(cancelled)?;
-            let facts = crate::ax::exact_target::gather_background_facts(pid, window_id, None);
-            if !matches!(
-                decide_background_input(
-                    ExactWindowTarget { pid, window_id },
-                    &facts,
-                    BackgroundAction::GenericKey
-                ),
-                BackgroundInputDecision::Execute { .. }
-            ) {
-                bail!("paste target changed before dispatch; refresh app state");
-            }
-            crate::input::skylight::prepare_background_keyboard(pid, window_id)?;
-            check_cancelled(cancelled)?;
             if !transaction.owns_clipboard() {
                 bail!("clipboard changed before paste dispatch; new clipboard was preserved");
             }
-            // Mark the attempted send before the void native event API: an error
-            // cannot justify replaying a chord that may already be in flight.
-            outcome.dispatched = true;
-            crate::input::keyboard::hotkey(pid, "v", &["super"])?;
+            if foreground {
+                crate::input::skylight::with_foreground_hid_activation(pid, window_id, || {
+                    check_cancelled(cancelled)?;
+                    if !transaction.owns_clipboard() {
+                        bail!(
+                            "clipboard changed before paste dispatch; new clipboard was preserved"
+                        );
+                    }
+                    outcome.dispatched = true;
+                    crate::input::keyboard::press_key_global("v", &["super"])
+                })?;
+            } else {
+                let facts = crate::ax::exact_target::gather_background_facts(pid, window_id, None);
+                if !matches!(
+                    decide_background_input(
+                        ExactWindowTarget { pid, window_id },
+                        &facts,
+                        BackgroundAction::GenericKey
+                    ),
+                    BackgroundInputDecision::Execute { .. }
+                ) {
+                    bail!("paste target changed before dispatch; refresh app state");
+                }
+                crate::input::skylight::prepare_background_keyboard(pid, window_id)?;
+                check_cancelled(cancelled)?;
+                if !transaction.owns_clipboard() {
+                    bail!("clipboard changed before paste dispatch; new clipboard was preserved");
+                }
+                outcome.dispatched = true;
+                crate::input::keyboard::hotkey(pid, "v", &["super"])?;
+            }
             wait_for_paste(&transaction, &probe, cancelled)
         })();
         let restored = transaction.restore();
@@ -388,24 +422,35 @@ impl Tool for PasteTool {
             Ok(content) => content,
             Err(error) => return ToolResult::error(format!("paste: {error}")),
         };
-        let mutation = match super::gate_background_window_action(
-            pid,
-            window_id,
-            None,
-            BackgroundAction::GenericKey,
-        )
-        .await
-        {
-            Ok(lease) => lease,
-            Err(error) => return error,
+        let foreground = input.app_context == Some(true);
+        let mutation = if foreground {
+            super::acquire_background_mutation(pid).await
+        } else {
+            match super::gate_background_window_action(
+                pid,
+                window_id,
+                None,
+                BackgroundAction::GenericKey,
+            )
+            .await
+            {
+                Ok(lease) => lease,
+                Err(error) => return error,
+            }
         };
         let result = tokio::task::spawn_blocking(move || {
             let (_queue, _mutation) = (queue, mutation);
             let prior = crate::apps::frontmost_pid();
-            let _focus = prior.filter(|prior| *prior != pid).map(|prior| {
-                crate::focus_steal::begin_suppression(Some(pid), prior, "paste.CGEvent")
-            });
-            objc2::rc::autoreleasepool(|_| run_paste(pid, window_id, content, &cancelled))
+            let _focus = if foreground {
+                None
+            } else {
+                prior.filter(|prior| *prior != pid).map(|prior| {
+                    crate::focus_steal::begin_suppression(Some(pid), prior, "paste.CGEvent")
+                })
+            };
+            objc2::rc::autoreleasepool(|_| {
+                run_paste(pid, window_id, content, foreground, &cancelled)
+            })
         })
         .await;
         let outcome = match result {
@@ -413,7 +458,7 @@ impl Tool for PasteTool {
             Err(error) => return ToolResult::error(format!("paste worker failed: {error}")),
         };
         let structured = json!({
-            "path": "clipboard_paste",
+            "path": if outcome.foreground { "clipboard_paste_foreground" } else { "clipboard_paste" },
             "dispatched": outcome.dispatched,
             "clipboard_consumed": outcome.consumed,
             "ax_effect_observed": outcome.effect_observed,
@@ -462,6 +507,15 @@ mod tests {
         let refused = action_record(&Outcome::default());
         assert_eq!(refused.effect, ActionEffect::Refused);
         assert_eq!(refused.actual_delivery, None);
+
+        let foreground = action_record(&Outcome {
+            dispatched: true,
+            foreground: true,
+            ..Outcome::default()
+        });
+        assert_eq!(foreground.transport, ActionTransport::MacosCgEventHid);
+        assert_eq!(foreground.actual_delivery, Some(ActualDelivery::Foreground));
+        assert!(foreground.validate().is_ok());
     }
 
     #[test]

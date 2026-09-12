@@ -83,7 +83,7 @@ for (const sdk of [{}, numericSdk]) {
   });
 }
 
-test("app text methods bind observed short IDs to exact current tokens without delivery fields", async () => {
+test("app text methods bind observed IDs and route paste through app context", async () => {
   const { computer, mutations } = fixture({ sdk: numericSdk });
   const app = await computer.getApp("Text Fixture");
   await app.getState();
@@ -91,7 +91,7 @@ test("app text methods bind observed short IDs to exact current tokens without d
   await app.paste("<b>new</b>", { format: "html" });
   assert.deepEqual(mutations().map(({ input }) => input), [
     { pid: 42, windowId: 7n, elementToken: "rv1:window7:retained", text: " target_😀 ", prefix: "前", suffix: "后", selection: 2 },
-    { pid: 42, windowId: 7n, text: "<b>new</b>", format: 2 },
+    { pid: 42, windowId: 7n, text: "<b>new</b>", format: 2, appContext: true },
   ]);
 });
 

@@ -1173,6 +1173,7 @@ export class ComputerUse {
     if (typeof format !== "string" || !Object.hasOwn(formats, format)) throw new ComputerUseError("format must be text, md, or html");
     input.text = options.text;
     input.format = this.#sdk.PasteFormat?.[formats[format]] ?? format;
+    if (options?.appContext === true) input.appContext = true;
     if (await this.getPlatform({ signal: options.signal }) !== "macos") {
       throw new ComputerUseError("paste is supported only by the macOS driver", { code: "unsupported_platform" });
     }
