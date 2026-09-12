@@ -3001,7 +3001,9 @@ export async function runAcpAgent(
         // instead of the CLI exiting 0 as though every hook had run.
         if (controller.signal.aborted) {
           failures.push(
-            new Error('SessionEnd hook did not complete within 30s (cancelled)'),
+            new Error(
+              'SessionEnd hook did not complete within 30s (cancelled)',
+            ),
           );
         }
         for (const failure of failures) {
