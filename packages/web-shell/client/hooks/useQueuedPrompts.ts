@@ -605,7 +605,21 @@ export function useQueuedPrompts({
   const midTurnReconcileSeqRef = useRef(0);
   const restoredPromptIdsRef = useRef<Set<number>>(new Set());
   const pendingStartedByPromptIdRef = useRef<
-    Map<string, { text: string; rowIdFrontier: number }>
+    Map<
+      string,
+      {
+        text: string;
+        rowIdFrontier: number;
+        /**
+         * The one local row that could own this event, when exactly one
+         * could and nothing was echoed. A submit body whose admission fails
+         * after the daemon started the prompt is the only holder of that
+         * row's payload; this is what lets it hand the payload to the right
+         * park rather than guess between two that render alike.
+         */
+        soleCandidateRowId?: number;
+      }
+    >
   >(new Map());
   /**
    * Unbound `submitting` rows the confirming sync spliced out because an
@@ -639,9 +653,9 @@ export function useQueuedPrompts({
    * daemon either never dispatched the prompt or aborted the turn the user
    * asked to cancel. The removal can still come back not-removed (the id
    * absent, or already removed by another client while the doomed prompt
-   * runs on to settle), so the submit-body, discard and deferred-clear
-   * failure arms replay from here instead of dropping the message from the
-   * transcript; the two explicit user-action removal arms do not replay yet.
+   * runs on to settle), so every removal failure arm — submit-body,
+   * discard, deferred-clear and both user-action paths — replays from here
+   * instead of dropping the message from the transcript.
    */
   const startedDuringRemovalRef = useRef<Map<string, string>>(new Map());
   /**
@@ -816,8 +830,18 @@ export function useQueuedPrompts({
         const couldBeOurs =
           serverPrompt.originatorClientId === undefined ||
           serverPrompt.originatorClientId === clientId;
-        const submittingMatches = next.filter((p) =>
-          matchesUnboundSubmittingRow(p, serverPrompt, clientId),
+        // A row the drain has stamped `submitting` but not yet handed to a
+        // body has never been POSTed, so it cannot be the prompt this
+        // snapshot lists. Matching it here would either splice it — which
+        // `releaseChainedPrompt` reads as a user cancellation, bailing
+        // without POSTing, reporting or restoring anything — or bind it to an
+        // id it cannot own, which every later drop-by-id then treats as that
+        // prompt's row. Out of the count, no arm below can consume a row that
+        // has not been sent.
+        const submittingMatches = next.filter(
+          (p) =>
+            !unreleasedPromptIdsRef.current.has(p.id) &&
+            matchesUnboundSubmittingRow(p, serverPrompt, clientId),
         );
         if (submittingMatches.length === 1) {
           const submittingRow = submittingMatches[0]!;
@@ -940,19 +964,30 @@ export function useQueuedPrompts({
   );
 
   // The removal failed, so a started event parked on the removing-set guard
-  // was real after all: echo what it carried. The stash holds the payload
-  // for attachments the event cannot reproduce; a text-only message is
-  // reproduced faithfully by the event's own text.
+  // was real after all: echo what it carried. The stash holds the payload for
+  // attachments the event cannot reproduce, and so does a payload-complete row
+  // still bound to the id — the removal arms that run while the row is still
+  // queued have no stash to read. A text-only message is reproduced faithfully
+  // by the event's own text; a rendering that is only the daemon's attachment
+  // placeholder carries no message to show, and nothing guarantees any removal
+  // arm held the payload behind it.
   const replayStartedDuringRemoval = useCallback(
     (promptId: string) => {
       const startedText = startedDuringRemovalRef.current.get(promptId);
       if (startedText === undefined) return;
       startedDuringRemovalRef.current.delete(promptId);
       if (displayedServerPromptIdsRef.current.has(promptId)) return;
-      const stashed = pendingEchoByPromptIdRef.current.get(promptId);
-      if (stashed) {
-        appendLocalQueuedPrompt(stashed, promptId);
-      } else if (startedText) {
+      const full =
+        pendingEchoByPromptIdRef.current.get(promptId) ??
+        queuedPromptsRef.current.find(
+          (item) =>
+            item.serverPromptId === promptId &&
+            item.payloadCompleteness !== 'summary-only' &&
+            eventCannotReproducePayload(item),
+        );
+      if (full) {
+        appendLocalQueuedPrompt(full, promptId);
+      } else if (startedText && startedText !== IMAGE_ONLY_PROMPT_TEXT) {
         displayedServerPromptIdsRef.current.add(promptId);
         store.appendLocalUserMessage(startedText, undefined, { promptId });
       }
@@ -965,12 +1000,14 @@ export function useQueuedPrompts({
       // A start whose raw-text echo was suppressed (an unrelated unbound
       // submission was in flight) outlives its submit body's own consume;
       // settling is the last chance to show the message at all. Only an
-      // unechoed park is consumed: an echoed one stays as the "already
-      // started" marker late admissions dedupe against, a second terminal
-      // event for the same prompt must not re-append it, and a matching
-      // unbound submission means this prompt's own admission is still in
-      // flight — its body will echo the full payload when it lands, unless
-      // that body already returned without binding.
+      // unechoed park is consumed: an echoed one is dropped together with
+      // the displayed marker below, because the settled set then carries
+      // the same "already started" fact for every reader that dedupes
+      // against the park; a second terminal event for the same prompt must
+      // not re-append it, and a matching unbound submission means this
+      // prompt's own admission is still in flight — its body will echo the
+      // full payload when it lands, unless that body already returned
+      // without binding.
       const parked = pendingStartedByPromptIdRef.current.get(promptId);
       const parkedText = parked?.text;
       // A row already bound to this id proves the park is not the in-flight
@@ -1005,14 +1042,12 @@ export function useQueuedPrompts({
       if (
         parkedText !== undefined &&
         // A rendering with no payload source carries no message to show:
-        // leave the park (inert once settled) rather than echo a blank
-        // bubble, or the daemon's placeholder for an attachment this client
-        // no longer holds. This is the only consumer of a parked text that
-        // refuses the placeholder — the removal replay and the started
-        // handler's raw branch refuse a blank rendering alone, and are safe
-        // only because every removal arm that can park an attachment prompt
-        // stashes its payload first. A new replay site that can reach a
-        // prompt with no stash must add the same refusal.
+        // leave the park rather than echo a blank bubble, or the daemon's
+        // placeholder for an attachment this client no longer holds. A
+        // surviving park is not dead — a submit body still in flight reads
+        // it and echoes from the payload that body holds — but both
+        // consumers refuse the placeholder itself, since no removal arm is
+        // guaranteed to have stashed the payload behind it.
         (full !== undefined ||
           (parkedText !== '' && parkedText !== IMAGE_ONLY_PROMPT_TEXT)) &&
         !settledServerPromptIdsRef.current.has(promptId) &&
@@ -1034,7 +1069,15 @@ export function useQueuedPrompts({
           store.appendLocalUserMessage(parkedText, undefined, { promptId });
         }
       }
-      displayedServerPromptIdsRef.current.delete(promptId);
+      // A marker this settle found already set means either the message
+      // reached the transcript or the start was another client's and was
+      // never ours to echo. Either way the park beside it is a bare "already
+      // started" record: drop it with the marker, or a submit body still in
+      // flight reads that park as an echo it owes and appends the message a
+      // second time.
+      if (displayedServerPromptIdsRef.current.delete(promptId)) {
+        pendingStartedByPromptIdRef.current.delete(promptId);
+      }
       // A settled prompt will never start, so no echo is owed for it and its
       // stashed attachments must not stay reachable — unless a start is
       // parked behind an in-flight removal, whose failure arm replays from
@@ -1779,26 +1822,33 @@ export function useQueuedPrompts({
         pendingMidTurnAdmissionsRef.current.get(promptId)?.prompt;
       pendingMidTurnAdmissionsRef.current.delete(promptId);
       if (event.type === 'pending_prompt_started') {
-        if (removingServerPromptIdsRef.current.has(promptId)) {
-          // Park rather than drop: the removal may still come back
-          // not-removed (the id can be absent, or already removed by another
-          // client while the doomed prompt runs on to settle). The
-          // submit-body, discard and deferred-clear failure arms replay from
-          // here; the two explicit user-action removal arms do not yet.
-          startedDuringRemovalRef.current.set(
-            promptId,
-            typeof event.data.text === 'string' ? event.data.text : '',
-          );
-          while (startedDuringRemovalRef.current.size > 200) {
-            const oldest = startedDuringRemovalRef.current.keys().next().value;
-            if (typeof oldest !== 'string') break;
-            startedDuringRemovalRef.current.delete(oldest);
-          }
-          continue;
-        }
         const shouldAppendLocalUserMessage =
           event.originatorClientId === undefined ||
           event.originatorClientId === clientId;
+        if (removingServerPromptIdsRef.current.has(promptId)) {
+          // Park rather than drop: the removal may still come back
+          // not-removed (the id can be absent, or already removed by another
+          // client while the doomed prompt runs on to settle). Every removal
+          // failure arm — submit-body, discard, deferred-clear and both
+          // user-action paths — replays from here, so only this
+          // client's own message may park: a co-client's prompt reaches this
+          // transcript through the daemon's stream, and replaying its
+          // rendering here would show it a second time.
+          if (shouldAppendLocalUserMessage) {
+            startedDuringRemovalRef.current.set(
+              promptId,
+              typeof event.data.text === 'string' ? event.data.text : '',
+            );
+            while (startedDuringRemovalRef.current.size > 200) {
+              const oldest = startedDuringRemovalRef.current
+                .keys()
+                .next().value;
+              if (typeof oldest !== 'string') break;
+              startedDuringRemovalRef.current.delete(oldest);
+            }
+          }
+          continue;
+        }
         if (
           shouldAppendLocalUserMessage &&
           !displayedServerPromptIdsRef.current.has(promptId)
@@ -1809,15 +1859,21 @@ export function useQueuedPrompts({
           // echo: each submit body echoes its own row once its admission
           // resolves, and a body that already returned without binding
           // leaves the echo to this park's settle-time consume.
-          const unboundMatches = queuedPromptsRef.current.filter((item) =>
-            matchesUnboundSubmittingRow(
-              item,
-              {
-                text: eventText,
-                originatorClientId: event.originatorClientId,
-              },
-              clientId,
-            ),
+          // A row the drain has stamped but not handed to a body has never
+          // been POSTed, so it cannot own this event: counting it would
+          // manufacture an ambiguity and lose an echo. The sync's own matcher
+          // keeps matching those rows — it binds by snapshot, not by event.
+          const unboundMatches = queuedPromptsRef.current.filter(
+            (item) =>
+              !unreleasedPromptIdsRef.current.has(item.id) &&
+              matchesUnboundSubmittingRow(
+                item,
+                {
+                  text: eventText,
+                  originatorClientId: event.originatorClientId,
+                },
+                clientId,
+              ),
           );
           // An in-flight attachment row is invisible to that count: the event
           // carries no content, so the matcher refuses it outright. Since the
@@ -1826,14 +1882,16 @@ export function useQueuedPrompts({
           // not evidence of uniqueness, so the echo degrades to nothing. Rows
           // that render differently cannot own this event, and stay out of
           // the way.
-          const uncountableAttachmentRow = queuedPromptsRef.current.some(
+          const attachmentMatches = queuedPromptsRef.current.filter(
             (item) =>
               !item.serverPromptId &&
+              !unreleasedPromptIdsRef.current.has(item.id) &&
               item.serverState === 'submitting' &&
               ((item.images?.length ?? 0) > 0 ||
                 (item.files?.length ?? 0) > 0) &&
               pendingPromptTextsMatch(item.text, eventText),
           );
+          const uncountableAttachmentRow = attachmentMatches.length > 0;
           const prompt =
             queuedPromptsRef.current.find(
               (item) =>
@@ -1877,13 +1935,26 @@ export function useQueuedPrompts({
             displayedServerPromptIdsRef.current.add(promptId);
             store.appendLocalUserMessage(eventText, undefined, { promptId });
           }
-          if (!prompt?.serverPromptId) {
+          // A summary-only bound row shadows the text matcher and refuses to
+          // echo, so it leaves nothing behind either: park on it as well, or
+          // a payload its body stashes afterwards has no consumer at settle
+          // and the message the daemon ran reaches no transcript.
+          if (
+            !prompt?.serverPromptId ||
+            prompt.payloadCompleteness === 'summary-only'
+          ) {
+            const candidates = prompt
+              ? []
+              : [...unboundMatches, ...attachmentMatches];
             pendingStartedByPromptIdRef.current.set(promptId, {
               text: eventText,
               // Only a row that existed when the event was parked can be its
               // own in-flight admission: a younger row that renders the same
               // text is a different message and must not suppress the echo.
               rowIdFrontier: nextQueuedPromptIdRef.current,
+              ...(candidates.length === 1
+                ? { soleCandidateRowId: candidates[0]!.id }
+                : {}),
             });
             while (pendingStartedByPromptIdRef.current.size > 200) {
               const oldest = pendingStartedByPromptIdRef.current
@@ -2587,6 +2658,31 @@ export function useQueuedPrompts({
           ) {
             return;
           }
+          // A start that arrived while this row was in flight parked its
+          // rendering and echoed nothing: an attachment row is invisible to
+          // the text matcher, so ambiguity degraded the echo to silence.
+          // This body is the only holder of that payload, so echo from here
+          // before the row goes — the settle's last chance refuses the
+          // placeholder such a payload renders as. Admission must have
+          // started, or the daemon never received this message and the park
+          // belongs to some other prompt that merely renders alike. Only a
+          // park that named this row as the single
+          // candidate may be consumed: two messages that render alike stay
+          // silent rather than guess. A row the user already cleared took
+          // the early return above, so this never echoes a cancellation.
+          let echoedParkId: string | undefined;
+          if (admissionStarted && eventCannotReproducePayload(prompt)) {
+            const ownedParks: string[] = [];
+            pendingStartedByPromptIdRef.current.forEach((park, parkedId) => {
+              if (park.soleCandidateRowId === localId)
+                ownedParks.push(parkedId);
+            });
+            if (ownedParks.length === 1) {
+              echoedParkId = ownedParks[0];
+              pendingStartedByPromptIdRef.current.delete(echoedParkId);
+              appendLocalQueuedPrompt(prompt, echoedParkId);
+            }
+          }
           const next = queuedPromptsRef.current.filter(
             (prompt) => prompt.id !== localId,
           );
@@ -2595,7 +2691,15 @@ export function useQueuedPrompts({
           if (!admissionStarted) {
             restoreQueuedPromptsToEditor([prompt], targetSessionId);
           }
-          reportError(error, t('queue.queueFailed'));
+          // A message now visible in the transcript was admitted and started,
+          // so a queue-failure toast beside it would be false — the reason
+          // admission-started is distinguished at all.
+          if (
+            echoedParkId === undefined ||
+            !displayedServerPromptIdsRef.current.has(echoedParkId)
+          ) {
+            reportError(error, t('queue.queueFailed'));
+          }
         })
         .finally(() => {
           if (
@@ -3421,6 +3525,11 @@ export function useQueuedPrompts({
             isEditing: false,
             isRemoving: false,
           });
+          // The id is absent or already removed, so this action cancelled
+          // nothing: a start that parked inside the flight is owed its echo,
+          // and with no park this is a no-op. The success arm below drops the
+          // park instead — a removed prompt is a cancellation.
+          replayStartedDuringRemoval(target.serverPromptId);
           await refreshPendingPrompts(targetSessionId);
           if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
           reportError(
@@ -3455,6 +3564,10 @@ export function useQueuedPrompts({
           isEditing: false,
           isRemoving: false,
         });
+        // The DELETE never reported a verdict, so the prompt a parked start
+        // says the daemon ran is still owed its echo — the sibling removal
+        // arms read a lost DELETE the same way.
+        replayStartedDuringRemoval(target.serverPromptId);
         const refreshResult = await refreshPendingPrompts(targetSessionId);
         if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
         if (refreshResult.status !== 'refreshed') {
@@ -3466,6 +3579,7 @@ export function useQueuedPrompts({
     },
     [
       refreshPendingPrompts,
+      replayStartedDuringRemoval,
       reportError,
       restoreQueuedPrompts,
       sessionActions,
@@ -3770,16 +3884,7 @@ export function useQueuedPrompts({
           const pendingPrompt = queuedPromptsRef.current.find(
             (item) => item.id === prompt.id,
           );
-          if (pendingPrompt)
-            submitPendingPrompt({
-              ...pendingPrompt,
-              // Never strip provenance the row already carries: a held row
-              // the daemon refused at idle keeps its flag, and an insert
-              // refused for some other reason must not clear it.
-              ...(serverSaidIdle
-                ? { resubmittedAfterIdleRejection: true }
-                : {}),
-            });
+          if (pendingPrompt) submitPendingPrompt(pendingPrompt);
         }
         return submitAtIdle;
       };
@@ -4164,6 +4269,11 @@ export function useQueuedPrompts({
       ) {
         return;
       }
+      // A start that parked inside one of these flights was real: that
+      // prompt ran, so its echo is owed even though the clear did not take.
+      for (const prompt of failedPrompts) {
+        replayStartedDuringRemoval(prompt.serverPromptId!);
+      }
       const restoredPrompts = failedPrompts.map((prompt) => ({
         ...prompt,
         isRemoving: false,
@@ -4190,7 +4300,14 @@ export function useQueuedPrompts({
       store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
     })();
     return true;
-  }, [refreshPendingPrompts, reportError, store, t, sessionActions]);
+  }, [
+    refreshPendingPrompts,
+    replayStartedDuringRemoval,
+    reportError,
+    store,
+    t,
+    sessionActions,
+  ]);
 
   return {
     queuedPrompts: visibleQueuedPrompts,
