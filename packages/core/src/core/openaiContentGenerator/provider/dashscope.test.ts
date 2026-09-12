@@ -815,10 +815,10 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['metadata']).toBeUndefined();
     });
 
-    // buildRequest has a second, separate return for vision models, and until now no
-    // test reached it. A regression there would leave `metadata` on the wire for a
-    // non-qwen vision model while the non-vision path stayed correct, which is exactly
-    // the failure the gate exists to prevent.
+    // buildRequest has a second, separate return for vision models with its own
+    // metadata spread. The gate tests above only exercise the non-vision return, so
+    // a regression at the vision call site would ship `metadata` for a non-qwen
+    // vision model while every test above stayed green.
     it('ships metadata on the vision path for a qwen-family vision model', () => {
       const result = provider.buildRequest(
         { ...baseRequest, model: 'qwen-vl-max' },
@@ -849,6 +849,68 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       // Still the vision branch, so the gate is what changed and not the route.
       expect(result['vl_high_resolution_images']).toBe(true);
       expect(result['metadata']).toBeUndefined();
+    });
+
+    it('gates the vision path on the request model, not the configured model', () => {
+      // resolveWireModel falls back to the configured model when the request
+      // model is missing. A non-qwen configured model with a qwen vision request
+      // model is the one input where the two disagree, so it pins which one the
+      // vision call site hands the gate.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, model: 'ZHIPU/GLM-5.3-Flash' },
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    // A side-model generator is built with its own per-model config but shares
+    // the session Config, so the provider's own value has to win over the
+    // session's or a per-model opt-out never reaches the gate.
+    it('prefers the provider config enableRequestMetadata over the session value', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: true }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    it('honours a provider config enableRequestMetadata when the session sets none', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: true },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({}),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
     });
 
     it.each([
