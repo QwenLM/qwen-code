@@ -14,7 +14,7 @@ import {
   clickOptions,
   jsonResult,
   matcher,
-  releaseChordModifiers,
+  releaseChordKeys,
   selectOptions,
   stringArg,
   timeoutArg,
@@ -57,8 +57,19 @@ export async function executeLocatorOperation(
           timeout,
         ),
       );
-    case 'locator.allTextContents':
+    case 'locator.allTextContents': {
+      // Playwright's allTextContents takes no options and never waits, so
+      // honor the caller's budget with an attach wait on the first match; a
+      // locator that never attaches still resolves [].
+      await locator
+        .first()
+        .waitFor({ state: 'attached', timeout })
+        .catch((error: unknown) => {
+          if (error instanceof Error && error.name === 'TimeoutError') return;
+          throw error;
+        });
       return await locator.allTextContents();
+    }
     case 'locator.innerText':
       return await locator.innerText(options);
     case 'locator.textContent':
@@ -79,45 +90,75 @@ export async function executeLocatorOperation(
       await locator.dblclick(clickOptions(args, DEFAULT_ACTION_TIMEOUT_MS));
       return null;
     case 'locator.downloadMedia':
-      await locator.evaluate(
-        async (element) => {
-          element.scrollIntoView({ block: 'center', inline: 'nearest' });
-          const media =
-            element.closest('img, video, source, a[href]') ??
-            element.querySelector('img, video, source, a[href]') ??
-            element;
-          const readString = (name: string): string | null => {
-            const value = Reflect.get(media, name);
-            // An unloaded element exposes '' for these IDL properties, and
-            // '' must fall through to the next source.
-            return typeof value === 'string' && value !== '' ? value : null;
-          };
-          const url =
-            readString('currentSrc') ?? readString('src') ?? readString('href');
-          if (url === null)
-            throw new Error(
-              'Matched element does not expose a downloadable URL',
-            );
-          // The download attribute is honored only for same-origin URLs, so
-          // clicking a cross-origin anchor would navigate the claimed tab
-          // away instead; fetch the resource and download a same-origin
-          // object URL, failing loudly when the fetch yields no body.
-          const response = await fetch(url);
-          if (!response.ok)
-            throw new Error(`Media download failed: HTTP ${response.status}`);
-          const objectUrl = URL.createObjectURL(await response.blob());
-          const anchor = document.createElement('a');
-          anchor.href = objectUrl;
-          anchor.download = url.split('/').pop()?.split('?')[0] || 'download';
-          anchor.rel = 'noopener';
-          anchor.style.display = 'none';
-          document.body.append(anchor);
-          anchor.click();
-          anchor.remove();
-          setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
-        },
-        undefined,
-        options,
+      // locator.evaluate's own timeout bounds only element resolution, so
+      // race the whole page-side transfer against the caller's deadline and
+      // ship the deadline into the page to stop the fetch as well.
+      await withTimeout(
+        locator.evaluate(
+          async (element, budgetMs) => {
+            element.scrollIntoView({ block: 'center', inline: 'nearest' });
+            const mediaSelector = 'img, video, source, a[href]';
+            // A located wrapper (picture/figure) must resolve to the media
+            // it contains, not to an ancestor link; the located element
+            // itself still wins when it is the media or the link.
+            const media =
+              (element.matches(mediaSelector) ? element : null) ??
+              element.querySelector(mediaSelector) ??
+              element.closest(mediaSelector) ??
+              element;
+            const readString = (name: string): string | null => {
+              const value = Reflect.get(media, name);
+              // An unloaded element exposes '' for these IDL properties, and
+              // '' must fall through to the next source.
+              return typeof value === 'string' && value !== '' ? value : null;
+            };
+            const url =
+              readString('currentSrc') ??
+              readString('src') ??
+              readString('href');
+            if (url === null)
+              throw new Error(
+                'Matched element does not expose a downloadable URL',
+              );
+            if (!/^(?:https?|blob|data):/.test(url))
+              throw new Error(
+                `Unsupported media URL scheme: ${url.slice(0, 200)}`,
+              );
+            // The download attribute is honored only for same-origin URLs, so
+            // clicking a cross-origin anchor would navigate the claimed tab
+            // away instead; fetch the resource and download a same-origin
+            // object URL, failing loudly when the fetch yields no body.
+            let response: Response;
+            try {
+              response = await fetch(url, {
+                signal: AbortSignal.timeout(budgetMs),
+              });
+            } catch (error) {
+              // A CORS rejection surfaces as an opaque TypeError; name the
+              // actual cause so the model stops retrying the same read.
+              if (error instanceof TypeError)
+                throw new Error(
+                  `Media download requires reading the resource, but the page origin cannot read it (cross-origin without CORS): ${url.slice(0, 200)}`,
+                );
+              throw error;
+            }
+            if (!response.ok)
+              throw new Error(`Media download failed: HTTP ${response.status}`);
+            const objectUrl = URL.createObjectURL(await response.blob());
+            const anchor = document.createElement('a');
+            anchor.href = objectUrl;
+            anchor.download = url.split('/').pop()?.split('?')[0] || 'download';
+            anchor.rel = 'noopener';
+            anchor.style.display = 'none';
+            document.body.append(anchor);
+            anchor.click();
+            anchor.remove();
+            setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
+          },
+          timeout,
+          options,
+        ),
+        timeout,
       );
       return null;
     case 'locator.fill':
@@ -139,18 +180,20 @@ export async function executeLocatorOperation(
       await typeIntoLocator(locator, value, { timeout: scaled });
       return null;
     }
-    case 'locator.press':
+    case 'locator.press': {
+      const value = stringArg(args, 'value');
       try {
-        await locator.press(stringArg(args, 'value'), {
+        await locator.press(value, {
           ...options,
           noWaitAfter: true,
         });
       } catch (error) {
-        // An invalid later chord token leaves earlier modifiers held.
-        await releaseChordModifiers(tab.page);
+        // An invalid later chord token leaves the earlier tokens held.
+        await releaseChordKeys(tab.page, value.split('+'));
         throw error;
       }
       return null;
+    }
     case 'locator.selectOption':
       await locator.selectOption(selectOptions(args.value), options);
       return null;

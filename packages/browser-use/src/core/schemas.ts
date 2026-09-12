@@ -17,10 +17,10 @@ const timeoutMs = z.number().int().positive().max(120_000);
 const waitUntil = z.enum(['commit', 'domcontentloaded', 'load', 'networkidle']);
 const loadState = z.enum(['domcontentloaded', 'load', 'networkidle']);
 const matcher = z.union([
-  z.string().max(20_000),
+  z.string().min(1).max(20_000),
   z
     .object({
-      regex: z.string().max(20_000),
+      regex: z.string().min(1).max(20_000),
       flags: z
         .string()
         // Playwright compiles one RegExp per locator matcher and reuses it
@@ -38,7 +38,7 @@ function locatorStepSchema(depth: number): z.ZodType<LocatorStep> {
     .array(z.lazy(() => locatorStepSchema(depth + 1)))
     .min(1)
     .max(32);
-  return z.discriminatedUnion('kind', [
+  const step = z.discriminatedUnion('kind', [
     z
       .object({
         kind: z.literal('locator'),
@@ -117,6 +117,25 @@ function locatorStepSchema(depth: number): z.ZodType<LocatorStep> {
       })
       .strict(),
   ]);
+  return step.superRefine((value, ctx) => {
+    if (
+      (value.kind === 'getByRole' ||
+        value.kind === 'getByText' ||
+        value.kind === 'getByLabel' ||
+        value.kind === 'getByPlaceholder') &&
+      value.exact === true
+    ) {
+      const text = value.kind === 'getByRole' ? value.name : value.text;
+      // Playwright silently drops exact for a regex matcher, so the gate
+      // must reject the pair instead of certifying an unanchored match.
+      if (typeof text === 'object') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'exact matching requires a plain string, not a regex',
+        });
+      }
+    }
+  });
 }
 
 export const locatorStepsSchema = z.array(locatorStepSchema(1)).min(1).max(32);

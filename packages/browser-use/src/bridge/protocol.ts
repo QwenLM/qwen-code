@@ -5,12 +5,17 @@
  */
 
 import { statSync } from 'node:fs';
-import { join } from 'node:path';
+import { posix } from 'node:path';
 
 export const CHROME_BRIDGE_PROTOCOL_VERSION = 1;
 export const CHROME_NATIVE_HOST_NAME = 'com.qwen.browser';
 export const CHROME_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
 export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
+
+// Operation deadlines (core/schemas.ts timeoutMs) may reach 120s, and every
+// Playwright CDP command rides one bridge request: the request must outlive
+// the operation's own timeout so the caller's deadline reports first.
+export const CDP_REQUEST_TIMEOUT_MS = 130_000;
 
 export function defaultChromeBridgeSocketPath(
   environment: NodeJS.ProcessEnv = process.env,
@@ -24,7 +29,9 @@ export function defaultChromeBridgeSocketPath(
   }
   const uid =
     typeof process.getuid === 'function' ? process.getuid() : 'default';
-  return join(
+  // The win32 branch returned above; keep the remaining joins POSIX so the
+  // derived path is a pure function of uid and platform on every host.
+  return posix.join(
     defaultChromeBridgeSocketDirectory(uid),
     `qwen-browser-use-${uid}.sock`,
   );
@@ -39,8 +46,10 @@ interface DirectoryStat {
 // The world-writable temp root lets any local user squat a predictable
 // socket name (or its recovery lock) and deny the bridge permanently.
 // Prefer a per-user directory when the platform offers one; otherwise fall
-// back to a per-user subdirectory of the temp root, which the bridge server
-// creates 0700 and verifies before binding. The choice must stay a pure
+// back to a per-user directory directly under the sticky temp root, which
+// the bridge server creates 0700 and verifies before binding. A shared
+// intermediate directory would belong to whichever user created it first,
+// so the fallback never inserts one. The choice must stay a pure
 // function of uid and platform — never of $TMPDIR/$XDG_RUNTIME_DIR — so the
 // CLI and the Chrome-launched native host derive the same path without
 // sharing an environment.
@@ -61,7 +70,7 @@ export function defaultChromeBridgeSocketDirectory(
       return runtimeDir;
   }
   const base = platform === 'darwin' ? '/private/tmp' : '/tmp';
-  return join(base, 'qwen-browser-use', String(uid));
+  return posix.join(base, `qwen-browser-use-${uid}`);
 }
 
 function statDirectory(path: string): DirectoryStat | undefined {

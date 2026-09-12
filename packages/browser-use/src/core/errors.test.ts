@@ -110,5 +110,39 @@ describe('operation error classification', () => {
         new Error('page threw: invalid selector, timeout imminent'),
       ),
     ).toMatchObject({ code: 'OPERATION_FAILED' });
+    // Page-thrown values render behind an "Error: " wrapper, and appended
+    // log tails quote page markup; neither may pick the code.
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error('locator.evaluate: Error: page has been closed'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error('locator.evaluate: Error: strict mode violation'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'locator.click',
+        new Error('locator.click: slow response\nTarget crashed'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'locator.click',
+        new Error(
+          'locator.click: failed\n<button>Page has been closed</button>',
+        ),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    // A genuine Playwright timeout wins over crash-shaped page text.
+    const slowCrash = new Error('locator.click: slow\npage crashed');
+    slowCrash.name = 'TimeoutError';
+    expect(sanitizeOperationError('locator.click', slowCrash)).toMatchObject({
+      code: 'OPERATION_TIMEOUT',
+    });
   });
 });

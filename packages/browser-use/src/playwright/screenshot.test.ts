@@ -508,6 +508,29 @@ describe('Chrome screenshot acquisition', () => {
     });
   });
 
+  it('allows a full-page capture taller than one viewport', async () => {
+    const bridge = new ScreenshotBridge();
+    bridge.content = { x: 0, y: 0, width: 1920, height: 3000 };
+    bridge.captureData = jpeg(1920, 3000).toString('base64');
+    await expect(
+      captureTabScreenshot(tab(), { fullPage: true }, bridge),
+    ).resolves.toMatchObject({ width: 1920, height: 3000 });
+  });
+
+  it('rejects a capture whose decoded bytes exceed the model image ceiling', async () => {
+    const bridge = new ScreenshotBridge();
+    bridge.captureData = Buffer.concat([
+      jpeg(800, 1200),
+      Buffer.alloc(4 * 1024 * 1024),
+    ]).toString('base64');
+    await expect(
+      captureTabScreenshot(tab(), { fullPage: true }, bridge),
+    ).rejects.toMatchObject({
+      code: 'OPERATION_FAILED',
+      message: expect.stringContaining('byte budget'),
+    });
+  });
+
   it('rejects oversized full-page requests before capture', async () => {
     const bridge = new ScreenshotBridge();
     bridge.content.height = 10_000;

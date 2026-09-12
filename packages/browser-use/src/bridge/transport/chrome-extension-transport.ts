@@ -19,6 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { clearTimeout, setTimeout } from 'node:timers';
 
 import {
+  CDP_REQUEST_TIMEOUT_MS,
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
   defaultChromeBridgeSocketPath,
@@ -148,7 +149,9 @@ export class ChromeExtensionTransport implements ChromeBridge {
   async request(
     method: string,
     params: Record<string, unknown> = {},
-    timeoutMs = this.requestTimeoutMs,
+    timeoutMs = method === 'cdp.send'
+      ? CDP_REQUEST_TIMEOUT_MS
+      : this.requestTimeoutMs,
   ): Promise<unknown> {
     if (this.stopPromise !== undefined || !this.server?.listening)
       throw disconnectedError();
@@ -455,18 +458,81 @@ export async function ensureSocketDirectory(directory: string): Promise<void> {
     typeof process.getuid === 'function' ? process.getuid() : undefined;
   const info = await lstat(directory).catch(() => undefined);
   if (info !== undefined) {
-    if (
-      !info.isDirectory() ||
-      info.isSymbolicLink() ||
-      (owner !== undefined && info.uid !== owner)
-    )
-      throw new Error(
-        `Chrome bridge socket directory is not usable: ${directory}`,
-      );
-    if ((info.mode & 0o077) !== 0) await chmod(directory, 0o700);
+    await assertOwnedSocketDirectory(directory, info, owner, true);
+    await assertUsableAncestors(directory, owner);
     return;
   }
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  // mkdir(recursive) neither fails on an entry that already exists nor
+  // tightens its mode, so a co-tenant who won the lstat/mkdir window must
+  // not silently inherit the socket directory: re-verify what the create
+  // actually landed on. A strict check (no tightening) keeps the create
+  // branch fail-closed — a fresh mkdir(0o700) never needs a chmod.
+  const created = await lstat(directory).catch(() => undefined);
+  if (created === undefined)
+    throw new Error(
+      `Chrome bridge socket directory is not usable: ${directory}`,
+    );
+  await assertOwnedSocketDirectory(directory, created, owner, false);
+  await assertUsableAncestors(directory, owner);
+}
+
+async function assertOwnedSocketDirectory(
+  directory: string,
+  info: {
+    isDirectory(): boolean;
+    isSymbolicLink(): boolean;
+    uid: number;
+    mode: number;
+  },
+  owner: number | undefined,
+  tighten: boolean,
+): Promise<void> {
+  if (
+    !info.isDirectory() ||
+    info.isSymbolicLink() ||
+    (owner !== undefined && info.uid !== owner)
+  )
+    throw new Error(
+      `Chrome bridge socket directory is not usable: ${directory}`,
+    );
+  if ((info.mode & 0o077) !== 0) {
+    if (!tighten)
+      throw new Error(
+        `Chrome bridge socket directory is not usable: ${directory}`,
+      );
+    await chmod(directory, 0o700);
+  }
+}
+
+// Every ancestor up to the sticky world-writable temp root must be owned by
+// this user or root and not writable by anyone else; a writable or symlinked
+// ancestor lets a co-tenant swap the socket directory out from under us.
+async function assertUsableAncestors(
+  directory: string,
+  owner: number | undefined,
+): Promise<void> {
+  if (owner === undefined) return;
+  let current = dirname(directory);
+  for (;;) {
+    const info = await lstat(current).catch(() => undefined);
+    if (info === undefined || !info.isDirectory() || info.isSymbolicLink())
+      throw new Error(
+        `Chrome bridge socket directory is not usable: ${directory}`,
+      );
+    const mode = info.mode & 0o1777;
+    // A sticky world-writable root (/tmp, /private/tmp) is the trust
+    // boundary: every tenant may create entries there, but the sticky bit
+    // keeps anyone from renaming another tenant's entries.
+    if ((mode & 0o002) !== 0 && (mode & 0o1000) !== 0) return;
+    if ((info.uid !== owner && info.uid !== 0) || (mode & 0o022) !== 0)
+      throw new Error(
+        `Chrome bridge socket directory is not usable: ${directory}`,
+      );
+    const parent = dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
 }
 
 async function listen(server: Server, socketPath: string): Promise<void> {

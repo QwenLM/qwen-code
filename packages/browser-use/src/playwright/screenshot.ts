@@ -11,9 +11,11 @@ import type { ChromeBridge } from '../bridge/index.js';
 import { BrowserRuntimeError } from '../core/errors.js';
 import type { ScreenshotEnvelope } from '../core/primitives.js';
 import {
+  MAX_FULLPAGE_SCREENSHOT_PIXELS,
+  MAX_SCREENSHOT_BYTES,
+  MAX_SCREENSHOT_PIXELS,
   assertScreenshotBudget,
   assertScreenshotDimensions,
-  MAX_SCREENSHOT_BYTES,
 } from '../core/screenshot-budget.js';
 import {
   isClip,
@@ -134,7 +136,12 @@ async function capture(
       : numberArg(viewport, 'pageY') + (clip?.y ?? 0),
   };
   if (constrained)
-    assertScreenshotBudget(width, height, fullPage ? 'Full-page' : 'Clip');
+    assertScreenshotBudget(
+      width,
+      height,
+      fullPage ? 'Full-page' : 'Clip',
+      fullPage ? MAX_FULLPAGE_SCREENSHOT_PIXELS : MAX_SCREENSHOT_PIXELS,
+    );
 
   let data: string | undefined;
   if (!constrained && devicePixelRatio >= 1)
@@ -196,7 +203,12 @@ async function capture(
       'Chrome returned a screenshot that does not match the viewport; retry',
     );
   if (constrained)
-    assertScreenshotBudget(dimensions.width, dimensions.height, 'Captured');
+    assertScreenshotBudget(
+      dimensions.width,
+      dimensions.height,
+      'Captured',
+      fullPage ? MAX_FULLPAGE_SCREENSHOT_PIXELS : MAX_SCREENSHOT_PIXELS,
+    );
   else
     assertScreenshotDimensions(dimensions.width, dimensions.height, 'Captured');
   if (buffer.length > MAX_SCREENSHOT_BYTES)

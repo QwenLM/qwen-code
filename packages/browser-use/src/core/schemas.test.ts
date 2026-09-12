@@ -97,6 +97,48 @@ describe('recursive locator plans', () => {
   });
 });
 
+describe('locator matcher text', () => {
+  it('rejects empty matcher text and empty regex sources', () => {
+    for (const text of ['', { regex: '' }]) {
+      expect(
+        locatorStepsSchema.safeParse([{ kind: 'getByText', text }]).success,
+      ).toBe(false);
+    }
+    expect(
+      locatorStepsSchema.safeParse([{ kind: 'getByText', text: 'Save' }])
+        .success,
+    ).toBe(true);
+    expect(
+      locatorStepsSchema.safeParse([
+        { kind: 'getByText', text: { regex: 'Save|Cancel' } },
+      ]).success,
+    ).toBe(true);
+  });
+
+  it('rejects exact matching against a regex matcher', () => {
+    expect(
+      locatorStepsSchema.safeParse([
+        { kind: 'getByText', text: { regex: 'save' }, exact: true },
+      ]).success,
+    ).toBe(false);
+    expect(
+      locatorStepsSchema.safeParse([
+        {
+          kind: 'getByRole',
+          role: 'button',
+          name: { regex: 'save' },
+          exact: true,
+        },
+      ]).success,
+    ).toBe(false);
+    expect(
+      locatorStepsSchema.safeParse([
+        { kind: 'getByText', text: 'Save', exact: true },
+      ]).success,
+    ).toBe(true);
+  });
+});
+
 describe('locator matcher flags', () => {
   it('accepts stateless flags and rejects stateful g/y flags', () => {
     expect(

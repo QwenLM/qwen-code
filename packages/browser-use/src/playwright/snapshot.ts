@@ -103,12 +103,17 @@ function selectInteractiveNodes(
 ): SnapshotNode[] {
   const selected: SnapshotNode[] = [];
   for (const node of nodes) {
+    // AI mode appends [cursor=pointer] as the final attribute of a node's
+    // key; a page-controlled name or text value that merely contains the
+    // literal must not promote the line.
+    const cursorPointer =
+      node.role !== undefined &&
+      node.role !== 'text' &&
+      node.line.trimEnd().endsWith(' [cursor=pointer]');
     const keep =
       node.role === 'iframe' ||
       (node.role !== undefined && INTERACTIVE_ROLES.has(node.role)) ||
-      // AI mode marks clickable non-semantic elements with [cursor=pointer];
-      // without this the filter drops the ref the model is told to act on.
-      node.line.includes('[cursor=pointer]');
+      cursorPointer;
     if (keep) {
       selected.push({
         ...node,
@@ -144,11 +149,17 @@ function truncateLines(text: string, maxChars: number): string {
   const marker = `[truncated: snapshot exceeded ${maxChars} characters]`;
   const lines: string[] = [];
   let chars = marker.length + 1;
+  let truncated = false;
   for (const line of text.split('\n')) {
-    if (chars + line.length + 1 > maxChars) break;
+    // Skip a line that does not fit instead of stopping: one long node must
+    // not discard every ref that follows it.
+    if (chars + line.length + 1 > maxChars) {
+      truncated = true;
+      continue;
+    }
     lines.push(line);
     chars += line.length + 1;
   }
-  lines.push(marker);
+  if (truncated) lines.push(marker);
   return lines.join('\n');
 }

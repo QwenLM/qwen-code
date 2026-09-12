@@ -35,6 +35,7 @@ class FakeBridge implements ChromeBridge {
     method: string;
     params: Record<string, unknown>;
   }> = [];
+  readonly timeouts: Array<number | undefined> = [];
   private readonly eventListeners = new Set<BridgeEventListener>();
   private readonly connectionListeners = new Set<BridgeConnectionListener>();
 
@@ -46,8 +47,10 @@ class FakeBridge implements ChromeBridge {
   async request(
     method: string,
     params: Record<string, unknown> = {},
+    timeoutMs?: number,
   ): Promise<unknown> {
     this.calls.push({ method, params });
+    this.timeouts.push(timeoutMs);
     if (method === 'cdp.send' && params.method === 'Target.getTargetInfo') {
       return {
         targetInfo: {
@@ -81,6 +84,21 @@ class FakeBridge implements ChromeBridge {
 }
 
 describe('QwenPlaywrightTransport', () => {
+  it('enables CDP download events when attaching a tab', async () => {
+    const bridge = new FakeBridge();
+    const transport = new QwenPlaywrightTransport(bridge);
+    await transport.registerTab(7);
+    expect(bridge.calls).toContainEqual({
+      method: 'cdp.send',
+      params: {
+        tabId: 7,
+        method: 'Page.setDownloadBehavior',
+        params: { behavior: 'default', eventsEnabled: true },
+      },
+    });
+    await transport.close();
+  });
+
   it.each(['throw', 'reject'] as const)(
     'closes and releases tabs when message delivery %s fails',
     async (mode) => {
@@ -418,6 +436,11 @@ describe('QwenPlaywrightTransport', () => {
         },
       }),
     );
+    const evaluateCall = bridge.calls.findIndex(
+      (call) =>
+        call.method === 'cdp.send' && call.params.method === 'Runtime.evaluate',
+    );
+    expect(bridge.timeouts[evaluateCall]).toBeGreaterThan(120_000);
 
     bridge.emit({
       type: 'event',

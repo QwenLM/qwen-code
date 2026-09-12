@@ -206,14 +206,14 @@ describe('locator.press', () => {
     return { keyboard, locator, tab, args };
   }
 
-  it('releases every modifier when a later chord token is rejected', async () => {
+  it('releases every held token when a later chord token is rejected', async () => {
     const f = pressFixture();
     f.locator.press.mockRejectedValue(new Error('Unknown key: "Esc"'));
     await expect(
       executeLocatorOperation('locator.press', f.args, f.tab),
     ).rejects.toThrow('Unknown key');
-    expect(f.keyboard.up).toHaveBeenCalledTimes(4);
-    expect(f.keyboard.up).toHaveBeenCalledWith('Control');
+    expect(f.keyboard.up).toHaveBeenCalledTimes(2);
+    expect(f.keyboard.up.mock.calls).toEqual([['Esc'], ['Control']]);
   });
 
   it('leaves the keyboard alone when the press succeeds', async () => {
@@ -226,6 +226,52 @@ describe('locator.press', () => {
       noWaitAfter: true,
     });
     expect(f.keyboard.up).not.toHaveBeenCalled();
+  });
+});
+
+describe('locator.allTextContents', () => {
+  function textsFixture() {
+    const handle = { waitFor: vi.fn(async () => undefined) };
+    const locator = {
+      first: vi.fn(() => handle),
+      allTextContents: vi.fn(async () => ['a']),
+    };
+    const tab = { page: { locator: () => locator } } as unknown as TabState;
+    const args = {
+      steps: [{ kind: 'locator', selector: '.row' }],
+      timeoutMs: 50,
+    };
+    return { handle, locator, tab, args };
+  }
+
+  it('waits for the first match within the caller budget before reading', async () => {
+    const f = textsFixture();
+    await expect(
+      executeLocatorOperation('locator.allTextContents', f.args, f.tab),
+    ).resolves.toEqual(['a']);
+    expect(f.handle.waitFor).toHaveBeenCalledExactlyOnceWith({
+      state: 'attached',
+      timeout: 50,
+    });
+  });
+
+  it('resolves an empty read when nothing attaches in time', async () => {
+    const f = textsFixture();
+    const timeout = new Error('Timeout 50ms exceeded');
+    timeout.name = 'TimeoutError';
+    f.handle.waitFor.mockRejectedValue(timeout);
+    f.locator.allTextContents.mockResolvedValue([]);
+    await expect(
+      executeLocatorOperation('locator.allTextContents', f.args, f.tab),
+    ).resolves.toEqual([]);
+  });
+
+  it('propagates a wait failure that is not a timeout', async () => {
+    const f = textsFixture();
+    f.handle.waitFor.mockRejectedValue(new Error('Target crashed'));
+    await expect(
+      executeLocatorOperation('locator.allTextContents', f.args, f.tab),
+    ).rejects.toThrow('Target crashed');
   });
 });
 
@@ -262,12 +308,16 @@ describe('locator.downloadMedia', () => {
     );
     const element = {
       scrollIntoView: vi.fn(),
-      closest: vi.fn(() => media),
-      querySelector: vi.fn(() => null),
+      matches: vi.fn(() => false),
+      closest: vi.fn((): unknown => media),
+      querySelector: vi.fn((): unknown => null),
     };
     const locator = {
-      evaluate: vi.fn(async (read: (element: unknown) => unknown) =>
-        read(element),
+      evaluate: vi.fn(
+        async (
+          read: (element: unknown, budgetMs: number) => unknown,
+          budgetMs?: number,
+        ) => read(element, budgetMs ?? 100),
       ),
     };
     const tab = { page: { locator: () => locator } } as unknown as TabState;
@@ -275,7 +325,7 @@ describe('locator.downloadMedia', () => {
       steps: [{ kind: 'locator', selector: 'img' }],
       timeoutMs: 100,
     };
-    return { anchor, fetchMock, locator, tab, args };
+    return { anchor, element, fetchMock, locator, tab, args };
   }
 
   it('downloads a fetched object URL so a cross-origin URL cannot navigate the tab', async () => {
@@ -287,10 +337,59 @@ describe('locator.downloadMedia', () => {
     ).resolves.toBeNull();
     expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
       'https://cdn.example.com/media/video.mp4',
+      { signal: expect.any(AbortSignal) },
     );
     expect(f.anchor.href.startsWith('blob:')).toBe(true);
     expect(f.anchor.download).toBe('video.mp4');
     expect(f.anchor.click).toHaveBeenCalledOnce();
+  });
+
+  it('prefers media contained in a located wrapper over an ancestor link', async () => {
+    const f = downloadFixture({ href: '/product' });
+    f.element.closest.mockReturnValue({ href: '/product' });
+    f.element.querySelector.mockReturnValue({
+      currentSrc: 'https://cdn.example.com/inner.webp',
+    });
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/inner.webp',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('reports the cross-origin policy when the page cannot read the resource', async () => {
+    const f = downloadFixture({
+      currentSrc: 'https://cdn.example.com/media/video.mp4',
+    });
+    f.fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).rejects.toThrow('cross-origin without CORS');
+    expect(f.anchor.click).not.toHaveBeenCalled();
+  });
+
+  it('rejects a page-controlled URL with an unsupported scheme', async () => {
+    const f = downloadFixture({ href: 'file:///etc/passwd' });
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).rejects.toThrow('Unsupported media URL scheme');
+    expect(f.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('bounds the page-side transfer by the caller deadline', async () => {
+    const f = downloadFixture({
+      currentSrc: 'https://cdn.example.com/media/video.mp4',
+    });
+    f.locator.evaluate.mockReturnValue(new Promise(() => {}));
+    await expect(
+      executeLocatorOperation(
+        'locator.downloadMedia',
+        { ...f.args, timeoutMs: 50 },
+        f.tab,
+      ),
+    ).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' });
   });
 
   it('falls back past an unloaded element\u2019s empty currentSrc', async () => {
@@ -303,6 +402,7 @@ describe('locator.downloadMedia', () => {
     ).resolves.toBeNull();
     expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
       'https://cdn.example.com/image.png',
+      { signal: expect.any(AbortSignal) },
     );
   });
 

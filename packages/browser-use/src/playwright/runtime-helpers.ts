@@ -163,7 +163,6 @@ export async function withModifiers(
 ): Promise<void> {
   const keys = modifiers(value);
   const pressed: string[] = [];
-  let releaseFailure: PromiseRejectedResult | undefined;
   try {
     for (const key of keys) {
       pressed.push(key);
@@ -171,12 +170,12 @@ export async function withModifiers(
     }
     await action();
   } finally {
-    const releases = await Promise.allSettled(
+    // A failed release must not rewrite a completed action into a failure;
+    // the action's own rejection propagates through this finally on its own.
+    await Promise.allSettled(
       pressed.reverse().map((key) => page.keyboard.up(key)),
     );
-    releaseFailure = releases.find((release) => release.status === 'rejected');
   }
-  if (releaseFailure) throw releaseFailure.reason;
 }
 
 export async function pressKeyChord(page: Page, value: unknown): Promise<void> {
@@ -184,19 +183,20 @@ export async function pressKeyChord(page: Page, value: unknown): Promise<void> {
   try {
     await page.keyboard.press(keys.join('+'));
   } catch (error) {
-    await releaseChordModifiers(page);
+    await releaseChordKeys(page, keys);
     throw error;
   }
 }
 
-// Playwright presses chord modifiers left to right and never releases them
-// when a later token is rejected; release every modifier so the tab is not
-// left with keys physically held.
-export async function releaseChordModifiers(page: Page): Promise<void> {
+// Playwright presses chord tokens left to right and never releases them when
+// a later token is rejected; release the chord's own tokens so the tab is
+// not left with a key physically held.
+export async function releaseChordKeys(
+  page: Page,
+  chord: readonly string[],
+): Promise<void> {
   await Promise.allSettled(
-    (['Shift', 'Control', 'Alt', 'Meta'] as const).map((key) =>
-      page.keyboard.up(key),
-    ),
+    [...chord].reverse().map((key) => page.keyboard.up(key)),
   );
 }
 
