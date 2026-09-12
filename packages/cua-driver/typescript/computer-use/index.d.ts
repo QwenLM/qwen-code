@@ -25,6 +25,7 @@ export type AppPoint = number | { x: number; y: number };
 
 export interface AppObservationOptions extends CallOptions {
   disableDiff?: boolean;
+  /** Expose the screenshot captured with this App observation. */
   includeScreenshot?: boolean;
 }
 

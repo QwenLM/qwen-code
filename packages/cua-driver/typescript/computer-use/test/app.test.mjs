@@ -57,6 +57,7 @@ test("app aliases bind the same handle and hide OS addressing from state", async
   assert.equal(calls.find((call) => call.method === "listWindows").input.appContext, true);
   const observation = calls.find((call) => call.method === "getWindowState").input;
   assert.equal(observation.appContext, true);
+  assert.equal(observation.includeScreenshot, true);
   assert.equal(observation.observationRevision.projectionVersion, "app-tree-v1");
   await app.click(37);
   assert.equal(calls.at(-1).input.elementToken, "rv1:window_7:25");
@@ -127,14 +128,41 @@ test("app input dispatches once and delegates the drag route to native app conte
   assert.equal(calls.filter((call) => call.method === "getWindowState").length, 2);
 });
 
-test("coordinates need a screenshot while AX actions do not", async () => {
-  const { computer } = fixture();
+test("app observations retain a current screenshot without exposing it by default", async () => {
+  const { computer, calls } = fixture({ observe: (_input, state, count) => ({
+    ...state,
+    tree_markdown: count === 1 ? state.tree_markdown : "No accessibility changes.",
+    observation_revision: { ...state.observation_revision, mode: count === 1 ? "full" : "no_change" },
+  }) });
+  const app = await computer.getApp("Fixture");
+  const full = await app.getState();
+  assert.equal(full.screenshot, undefined);
+  const hidden = await app.getState({ includeScreenshot: false });
+  assert.equal(hidden.screenshot, undefined);
+  await app.click(37);
+  await app.click({ x: 1, y: 2 });
+  const unchanged = await app.getState();
+  assert.equal(unchanged.mode, "no_change");
+  assert.equal(unchanged.screenshot, undefined);
+  await app.click({ x: 2, y: 3 });
+  const visible = await app.getState({ includeScreenshot: true });
+  assert.equal(visible.screenshot.images[0].dataBase64, "fixture");
+  assert.deepEqual(
+    calls.filter((call) => call.method === "getWindowState")
+      .map((call) => call.input.includeScreenshot),
+    [true, true, true, true],
+  );
+});
+
+test("coordinates reject a screenshot frame that native marked invalid", async () => {
+  const { computer, calls } = fixture({ observe: (_input, state) => ({
+    ...state,
+    screenshot_frame_valid: false,
+  }) });
   const app = await computer.getApp("Fixture");
   await app.getState();
-  await app.click(37);
   await assert.rejects(app.click({ x: 1, y: 2 }), { code: "app_screenshot_required" });
-  await app.getState({ includeScreenshot: true });
-  await app.click({ x: 1, y: 2 });
+  assert.equal(calls.filter((call) => call.method === "windowClick").length, 0);
 });
 
 test("missing capability metadata does not make the facade choose another input route", async () => {
@@ -260,6 +288,26 @@ test("app API rejects manually supplied targeting and routing options", async ()
   assert.equal(calls.filter((call) => call.method === "windowClick").length, 0);
 });
 
+test("app API preserves actionable validation errors before dispatch", async () => {
+  const { computer, calls } = fixture();
+  const app = await computer.getApp("Fixture");
+  await app.getState();
+  await assert.rejects(app.click({ elementIndex: 29 }), /short element ID or screenshot coordinates/);
+  await assert.rejects(app.hotkey("Meta", "r"), /keys must list modifiers plus one key/);
+  await assert.rejects(app.pressKey({ key: "ArrowDown" }), /key must be a non-empty string/);
+  await assert.rejects(
+    app.drag({ from: { x: 1, y: 2 }, to: { x: 20, y: 25 } }),
+    /drag requires flat, finite fromX, fromY, toX and toY coordinates/,
+  );
+  const mutations = [
+    "windowClick",
+    "windowHotkey",
+    "windowPressKey",
+    "windowDrag",
+  ];
+  assert.equal(calls.filter((call) => mutations.includes(call.method)).length, 0);
+});
+
 test("a structured pre-actuator refusal is returned without a foreground retry", async () => {
   let attempts = 0;
   const { computer, calls } = fixture({ action: () => {
@@ -290,6 +338,7 @@ test("an action error with no pre-actuator proof is never replayed or exposed as
   const app = await computer.getApp("Fixture");
   await app.getState();
   await assert.rejects(app.click(37), (error) => {
+    assert.match(error.message, /may already have affected the app/);
     assert.doesNotMatch(error.message, /delivery|foreground|pid|window_id/);
     return error.code === "background_unavailable";
   });

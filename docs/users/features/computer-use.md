@@ -70,7 +70,9 @@ nodeRepl.write((await app.getState()).text);
 ```
 
 Refresh state after opening or closing a dialog before reusing element IDs.
-Screenshots are requested explicitly with `app.getState({ includeScreenshot: true })`.
+Each App state refresh captures the current screenshot internally. The default
+return keeps it hidden; request it explicitly with
+`app.getState({ includeScreenshot: true })` when the model needs the image.
 
 ## Permissions
 

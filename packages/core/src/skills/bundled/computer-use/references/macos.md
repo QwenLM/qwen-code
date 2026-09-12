@@ -118,7 +118,7 @@ Use the actual ID from your observation; `37` is only an example.
 - Prefer element IDs to coordinates. `setValue(id, value)` changes a writable control, and `performSecondaryAction(id, action)` invokes a secondary action listed for that element. Use an observed action name rather than guessing.
 - When an action opens or closes a dialog, sheet or menu, end the batch and call `app.getState()` to read the new window and IDs before continuing.
 - An action error can occur after the UI already changed. Read state before deciding whether to retry. Partial, unconfirmed or cancelled actions must not be blindly repeated.
-- Coordinate actions use pixels in the screenshot returned for this app, with `(0, 0)` at its top-left. Request a fresh screenshot after a window change. Do not infer coordinates from another window or desktop screenshot.
+- Coordinate actions use pixels in this app's current screenshot, with `(0, 0)` at its top-left. Every App observation refreshes that frame internally. Request `includeScreenshot: true` when you need to inspect the image, especially after a window change. Do not infer coordinates from another window or desktop screenshot.
 - `pressKey` sends one key, optionally with modifiers. `hotkey` sends a combination such as `['super', 's']`. Use the platform's appropriate shortcut.
 - Literal `\n` or `\r` in `typeText` sends Return. In a composer or form this may submit rather than insert a newline.
 - If AX is incomplete or does not explain the interface, request a screenshot and inspect it. Incomplete observations do not authorize element actions.
@@ -162,8 +162,9 @@ nodeRepl.write((await app.getState()).text);
 
 ## Reading screenshots
 
-`includeScreenshot: true` is the parameter that requests a screenshot.
-Image capture is independent of whether AX returns full state or a diff.
+Every App observation captures the current screenshot internally, independent
+of whether AX returns full state, a diff or no-change. The default return omits
+the image. `includeScreenshot: true` exposes it when visual inspection is needed.
 
 ```js
 var state = await app.getState({ includeScreenshot: true });

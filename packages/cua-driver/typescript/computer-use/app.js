@@ -120,6 +120,10 @@ export class ComputerUseApp {
 
   async #observe(options = {}, resolved) {
     optionsForApp(options);
+    if (options.includeScreenshot !== undefined && typeof options.includeScreenshot !== "boolean") {
+      throw new ComputerUseError("includeScreenshot must be a boolean");
+    }
+    const exposeScreenshot = options.includeScreenshot === true;
     const target = resolved ?? await this.#target(options.signal, { launch: true });
     const changed = this.#window !== target.key;
     if (changed) this.#invalidate();
@@ -127,6 +131,7 @@ export class ComputerUseApp {
     try {
       state = await this.#computer.observeWindow({
         ...options,
+        includeScreenshot: true,
         pid: target.pid,
         windowId: target.windowId,
         appContext: true,
@@ -153,7 +158,7 @@ export class ComputerUseApp {
       window: target.window.title ?? "",
       mode: state.mode,
       text,
-      ...(state.screenshot ? { screenshot: state.screenshot } : {}),
+      ...(exposeScreenshot && state.screenshot ? { screenshot: state.screenshot } : {}),
     };
   }
 
@@ -191,6 +196,12 @@ export class ComputerUseApp {
 
   #publicError(error, observing = false) {
     if (typeof error?.code === "string" && error.code.startsWith("app_")) return error;
+    const operation = error?.details?.operation;
+    if (error instanceof ComputerUseError &&
+        (operation?.dispatched === false ||
+          (operation === undefined && error.details === undefined))) {
+      return error;
+    }
     return new ComputerUseError(
       observing ? "The app state could not be read. Check that its window is available, then call app.getState() again." :
         "The app action could not be completed or confirmed. It may already have affected the app. " +
@@ -220,6 +231,11 @@ export class ComputerUseApp {
           ? { pid: target.pid, windowId: target.windowId }
           : this.#address(point, target);
         if (method === "drag") {
+          if (![options.fromX, options.fromY, options.toX, options.toY].every(Number.isFinite)) {
+            throw new ComputerUseError(
+              "drag requires flat, finite fromX, fromY, toX and toY coordinates",
+            );
+          }
           this.#address({ x: options.fromX, y: options.fromY }, target);
           this.#address({ x: options.toX, y: options.toY }, target);
         }
