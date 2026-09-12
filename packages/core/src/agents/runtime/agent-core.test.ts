@@ -33,6 +33,7 @@ import {
 } from '../../utils/subagentNameContext.js';
 import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import { ToolMode } from '../../tools/code-mode.js';
 import {
   getAgentName,
   getTeammateContext,
@@ -1004,6 +1005,82 @@ describe('AgentCore approval response deduplication', () => {
     expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
     // Allowlisted and not blocklisted → allowed.
     expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
+  });
+
+  it('keeps exec invocable in CodeModeOnly when the configured tools omit it', async () => {
+    // R30-1: in CodeModeOnly the registry declares exec unconditionally
+    // (getCodeModeFunctionDeclarations keeps exposure 'exec' regardless of
+    // the allowed set), so a finite tools list without exec must not fold
+    // into an execution allowlist that refuses the only declared tool — the
+    // agent would degrade to text-only. Mutation check: removing the exec
+    // carve-out from the executionAllowedTools === undefined branch of
+    // isToolExecutionAllowed turns this red.
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        warmAll: vi.fn().mockResolvedValue(undefined),
+        getTool: vi.fn(),
+        getAllToolNames: vi
+          .fn()
+          .mockReturnValue([ToolNames.EXEC, ToolNames.READ_FILE]),
+        getFunctionDeclarationsFiltered: vi
+          .fn()
+          .mockReturnValue([{ name: ToolNames.EXEC }]),
+      }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('code-mode-exec-session'),
+      getMaxSubagentDepth: vi.fn().mockReturnValue(5),
+      getToolMode: vi.fn().mockReturnValue(ToolMode.CodeModeOnly),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'code-mode-exec-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      { tools: [ToolNames.READ_FILE] },
+    );
+
+    let capturedPredicate: ((name: string) => boolean) | undefined;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        capturedPredicate = (
+          this as unknown as {
+            isToolExecutionAllowed?: (name: string) => boolean;
+          }
+        ).isToolExecutionAllowed;
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [
+        {
+          id: 'call-code-mode-exec',
+          name: ToolNames.EXEC,
+          args: { source: 'await tools.read_file({ path: "x" })' },
+        },
+      ],
+      abortController,
+      'prompt-code-mode-exec',
+      1,
+      [{ name: ToolNames.EXEC } as FunctionDeclaration],
+    );
+    await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+    abortController.abort();
+    await processing;
+    scheduleSpy.mockRestore();
+
+    expect(capturedPredicate).toBeDefined();
+    // The one tool code mode always declares stays invocable …
+    expect(capturedPredicate?.(ToolNames.EXEC)).toBe(true);
+    // … without widening the configured list for anything else.
+    expect(capturedPredicate?.('web_fetch')).toBe(false);
   });
 
   it('retries only a transiently failed listener', async () => {

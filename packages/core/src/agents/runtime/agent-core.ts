@@ -1685,6 +1685,17 @@ export class AgentCore {
       return false;
     }
     if (this.executionAllowedTools === undefined) {
+      // Code mode declares exec unconditionally (getCodeModeFunctionDeclarations
+      // keeps exposure 'exec' regardless of the allowed set), so a finite
+      // configured list that omits it must not refuse the only tool the model
+      // was shown — the same carve-out the executionAllowedTools branch
+      // applies below.
+      if (
+        toolName === ToolNames.EXEC &&
+        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+      ) {
+        return true;
+      }
       const configuredAllowlist = this.getConfiguredToolExecutionAllowlist();
       return (
         configuredAllowlist === undefined ||
