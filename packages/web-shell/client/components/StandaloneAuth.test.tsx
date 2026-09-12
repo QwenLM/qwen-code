@@ -139,6 +139,10 @@ it('reports an invalid daemon target without contacting another daemon', async (
   await mount(undefined, undefined, undefined, true, 'not-a-url');
   expect(container.textContent).toContain('Invalid daemon address');
   expect(container.querySelector('form')).not.toBeNull();
+  // `type="url"` plus an un-opted-out form would let native constraint
+  // validation swallow the submit for a bare `IP:port`, so the copy above is
+  // unreachable in a real browser unless noValidate is set.
+  expect(container.querySelector('form')!.noValidate).toBe(true);
   expect(addressInput().value).toBe('not-a-url');
   expect(fetch).not.toHaveBeenCalled();
 });

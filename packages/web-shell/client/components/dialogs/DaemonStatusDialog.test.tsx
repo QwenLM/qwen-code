@@ -350,10 +350,23 @@ describe('DaemonStatusDialog', () => {
           new Event('submit', { bubbles: true, cancelable: true }),
         );
     });
-    expect(container!.querySelector('[role="alert"]')?.textContent).toContain(
-      'valid HTTP or HTTPS',
-    );
+    const alert = container!.querySelector('[role="alert"]')!;
+    expect(alert.textContent).toContain('valid HTTP or HTTPS');
     expect(onChangeTarget).not.toHaveBeenCalled();
+    // The rejected string stays in the field so it can be corrected in place.
+    expect(address.value).toBe('file:///tmp/daemon');
+    // Native constraint validation must not preempt the localized copy.
+    expect(address.closest('form')!.noValidate).toBe(true);
+    // The alert describes the address field, not the token field below it.
+    const formChildren = Array.from(address.closest('form')!.children);
+    expect(alert.id).toBe('daemon-connection-address-error');
+    expect(address.getAttribute('aria-invalid')).toBe('true');
+    expect(address.getAttribute('aria-describedby')).toBe(alert.id);
+    expect(formChildren.indexOf(alert)).toBeLessThan(
+      formChildren.indexOf(
+        container!.querySelector('#daemon-connection-token')!,
+      ),
+    );
   });
 
   it('renders live summary counters with the full-detail rollup badge', () => {

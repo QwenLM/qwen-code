@@ -329,8 +329,14 @@ export function StandaloneAuth({
           >
             {status}
           </p>
+          {/* The address field is `type="url"`, so native constraint validation
+              would block submit — and this handler's localized invalid-address
+              copy — for the likeliest malformed input, a bare `IP:port`. The
+              app-level check below is the stricter one: it also rejects
+              non-http(s) schemes, credentials, paths, queries and hashes. */}
           <form
             className="flex flex-col gap-3"
+            noValidate
             onSubmit={(event) => {
               event.preventDefault();
               if (!normalizedAddress) {

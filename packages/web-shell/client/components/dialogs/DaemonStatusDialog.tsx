@@ -834,6 +834,7 @@ function DaemonStatusDialogInner({
             {standalone && (
               <form
                 className="mt-3 flex flex-col gap-2"
+                noValidate
                 onSubmit={(event) => {
                   event.preventDefault();
                   const daemonOrigin = getAllowedDaemonOrigin(
@@ -858,12 +859,27 @@ function DaemonStatusDialogInner({
                   type="url"
                   inputMode="url"
                   autoComplete="url"
+                  aria-invalid={connectionError ? true : undefined}
+                  aria-describedby={
+                    connectionError
+                      ? 'daemon-connection-address-error'
+                      : undefined
+                  }
                   value={connectionAddress}
                   onChange={(event) => {
                     setConnectionAddress(event.target.value);
                     setConnectionToken('');
                   }}
                 />
+                {connectionError && (
+                  <p
+                    id="daemon-connection-address-error"
+                    role="alert"
+                    className="text-xs text-destructive"
+                  >
+                    {connectionError}
+                  </p>
+                )}
                 <Label htmlFor="daemon-connection-token">
                   {t('daemon.connection.token')}
                 </Label>
@@ -874,11 +890,6 @@ function DaemonStatusDialogInner({
                   value={connectionToken}
                   onChange={(event) => setConnectionToken(event.target.value)}
                 />
-                {connectionError && (
-                  <p role="alert" className="text-xs text-destructive">
-                    {connectionError}
-                  </p>
-                )}
                 <Button type="submit" size="sm" className="mt-1 w-full">
                   {t('daemon.connection.connect')}
                 </Button>
