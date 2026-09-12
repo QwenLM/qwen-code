@@ -214,6 +214,10 @@ export class MonitorDebugStore {
         });
       } catch {
         /* One undeletable archive must not wedge the remaining prune. */
+        this.emit('proactive.monitor_debug_prune_failed', {
+          directory: entry.directory,
+          retained: true,
+        });
       }
     }
   }

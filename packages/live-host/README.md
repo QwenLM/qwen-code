@@ -122,6 +122,9 @@ Capture Mode（On Demand／Live Feed）三个同级设置组，以及独立 daem
 `~/.qwen-live/config.json`，也支持 daemon 的 `QWEN_LIVE_DATA_DIR`）。保存后需重启
 Qwen Live 才应用手动修改。旧 daemon 或内置 `qwen serve` 不提供此入口能力；文件
 缺失、不是常规文件（包括符号链接）或编辑器打开失败时会提示，不自动创建或覆盖配置。
+运行时保存（语言、显示器与 Memory 偏好）通过独占临时文件加 rename 原子重写
+`config.json`，并在 macOS／Linux 上置为仅所有者可访问（`0600`）；Windows 没有
+POSIX 权限位，文件隔离性取决于数据目录自身的 ACL。
 设置标题栏可以拖动，与小球共享位置记忆；打开时先等待原生窗口完成屏内定位再显示，
 避免边缘处先露出被裁切的面板。用户说话的小音量视觉响应已增强，保留有界动画和缓慢
 回落，不会提高发送给模型的音频音量。
@@ -267,6 +270,8 @@ daemon 的 debug 模式另外为视觉 Monitor 保存真实请求，目录为系
 `proactive.monitor_debug_started` 和 `proactive.monitor_request_saved` 日志给出绝对路径。
 仅 daemon debug 开启；Host 的 `--live-debug` 单独启用不会录制，纯音频 Monitor 也不录制。
 启动及新建 Monitor 时清理，只保留最近创建的 10 个 Monitor（不是最近 10 次请求）。
+删除尽力而为：操作系统无法删除的归档（例如 Windows 上被其他进程占用文件）会超出
+该上限保留，并上报 `proactive.monitor_debug_prune_failed`，直至可以移除。
 被清理的 Monitor 继续运行但停止录制。文件仅在 macOS／Linux 上保证仅当前用户可访问
 （0700/0600 强制执行，不满足则拒绝）；Windows 无法校验 POSIX 权限位，
 隔离性仅取决于系统临时目录自身继承的 ACL。内容包含真实屏幕／摄像头、

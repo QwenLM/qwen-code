@@ -27,6 +27,9 @@ import {
 } from './monitor-debug-store.js';
 
 const rmFailures = vi.hoisted(() => new Map<string, number>());
+const rmCalls = vi.hoisted(
+  () => [] as Array<{ path: string; options: unknown }>,
+);
 
 vi.mock('node:fs/promises', async (original) => {
   const fs = await original<typeof import('node:fs/promises')>();
@@ -36,6 +39,7 @@ vi.mock('node:fs/promises', async (original) => {
       path: Parameters<typeof fs.rm>[0],
       options?: Parameters<typeof fs.rm>[1],
     ) => {
+      rmCalls.push({ path: String(path), options });
       const remaining = rmFailures.get(String(path));
       if (remaining) {
         rmFailures.set(String(path), remaining - 1);
@@ -99,6 +103,7 @@ describe('MonitorDebugStore', () => {
     await Promise.all(stores.map((item) => item.flush()));
     vi.restoreAllMocks();
     rmFailures.clear();
+    rmCalls.length = 0;
     await rm(temporary, { recursive: true, force: true });
   });
 
@@ -447,11 +452,20 @@ describe('MonitorDebugStore', () => {
     const owned: string[] = [];
     for (let time = 1; time <= 12; time += 1)
       owned.push(await ownedDirectory(time));
-    // Every rm of the oldest archive reports a held handle.
-    rmFailures.set(owned[0]!, Number.POSITIVE_INFINITY);
+    // The prune visits stale archives newest-first, so blocking owned[1]
+    // leaves the older owned[0] to prove the loop continued.
+    rmFailures.set(owned[1]!, Number.POSITIVE_INFINITY);
     expect(await store.initialize()).toBe(true);
-    await expect(lstat(owned[1]!)).rejects.toMatchObject({ code: 'ENOENT' });
-    expect((await lstat(owned[0]!)).isDirectory()).toBe(true);
+    await expect(lstat(owned[0]!)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await lstat(owned[1]!)).isDirectory()).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      'proactive.monitor_debug_prune_failed',
+      expect.objectContaining({ directory: owned[1], retained: true }),
+    );
+    // maxRetries rides out a transient handle (AV scanner/indexer) on Windows.
+    expect(rmCalls.find((call) => call.path === owned[1])?.options).toEqual(
+      expect.objectContaining({ recursive: true, force: true, maxRetries: 3 }),
+    );
     const recorder = store.create(INFO);
     expect(recorder).toBeDefined();
     await recorder!.start();
@@ -483,6 +497,11 @@ describe('MonitorDebugStore', () => {
 
   it('accepts directories on Windows, where POSIX permission bits do not exist', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    // Both READMEs' Windows isolation caveat assumes the default root stays
+    // inside the OS temporary directory.
+    expect(new MonitorDebugStore(log).root).toBe(
+      join(tmpdir(), 'qwen-live-monitor-debug'),
+    );
     await mkdir(root, { mode: 0o700 });
     // Stand-in for Windows reporting every directory with group/other bits.
     await chmod(root, 0o755);
