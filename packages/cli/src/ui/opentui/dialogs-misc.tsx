@@ -242,7 +242,7 @@ export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
                 {editors.map((e, i) => (
                   <box key={e.type} flexDirection="row">
                     <text fg={i === sel ? C.accent : C.dim}>
-                      {i === sel ? '● ' : '○ '}
+                      {i === sel ? '› ' : '  '}
                     </text>
                     <text
                       fg={e.disabled ? C.dim : i === sel ? C.text : C.dim}
@@ -263,7 +263,7 @@ export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
                 {scopeItems.map((s, i) => (
                   <box key={s.value} flexDirection="row">
                     <text fg={i === scopeSel ? C.accent : C.dim}>
-                      {i === scopeSel ? '● ' : '○ '}
+                      {i === scopeSel ? '› ' : '  '}
                     </text>
                     <text fg={i === scopeSel ? C.text : C.dim}>{s.label}</text>
                   </box>
