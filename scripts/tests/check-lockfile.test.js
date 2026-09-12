@@ -35,6 +35,7 @@ const FILES = [
   'package.json',
   'package-lock.json',
   'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
   'packages/web-shell/package.json',
 ];
 
