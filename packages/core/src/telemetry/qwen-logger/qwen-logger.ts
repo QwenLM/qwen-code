@@ -74,11 +74,6 @@ import { sanitizeHookName } from '../sanitize.js';
 import { InstallationManager } from '../../config/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
-import {
-  redactUrlCredentials,
-  REDACTED_URL_CREDENTIAL,
-} from '../../extension/redaction.js';
-import { stripAnsiAndControl } from '../../utils/textUtils.js';
 
 // Usage statistics collection endpoint
 const USAGE_STATS_HOSTNAME = 'gb4w8c3ygj-default-sea.rum.aliyuncs.com';
@@ -108,91 +103,8 @@ const MAX_EVENTS = 1000;
  */
 const MAX_RETRY_EVENTS = 100;
 
-/**
- * Error-text keys in `properties` that can carry raw shell output or error
- * text (command lines, HTTP headers, provider error bodies, hook failures).
- */
 const ERROR_TEXT_PROPERTY_KEYS = ['error_message', 'error_excerpt', 'error'];
-
-/**
- * A secret value in free-form error text: either a quoted run (matched up to
- * its matching closing quote, so interior spaces and quotes don't split it)
- * or an unquoted run of non-whitespace characters. A quoted value is consumed
- * whole, so `--password='my secret pw'` and `Authorization: Bearer "x"` redact
- * without leaking a suffix after the marker. The unquoted alternative refuses
- * a leading quote/backtick/backslash, so a lone shell line-continuation `\` is
- * never consumed as a complete value — continuations are normalised ahead of
- * this pass, and a leading escaped-quote backslash is skipped by the
- * separators.
- */
-const SECRET_VALUE = String.raw`(?:"[^"]+"|'[^']+'|[^\s"'\`\\][^\s]*)`;
-
-/**
- * `Authorization: <scheme> <value>` / `authorization=<scheme> <value>` inside a
- * shell command line. Any auth scheme (Bearer, Basic, Digest, token, …) is
- * skipped before the value rather than only `Bearer`.
- */
-const AUTHORIZATION_PATTERN = new RegExp(
-  String.raw`\b(authorization\s*[:=]\s*)(?:[A-Za-z0-9._~+/-]+\s+)?(?:\\\s*)?` +
-    SECRET_VALUE,
-  'gi',
-);
-
-/**
- * Secret-bearing long flags: `--token x`, `--password=y`, `--aws-access-key
- * w`. The secret keyword may sit anywhere inside the flag name, so long flags
- * like `--github-api-key` or `--_authToken` are caught too, not only the exact
- * spellings `--token` / `--password`. The value must be a quoted run or an
- * unquoted run of at least 10 characters, mirroring {@link ENV_SECRET_PATTERN}
- * so `--max-tokens 8192` and `max_tokens=8192` are treated the same.
- */
-const SECRET_FLAG_VALUE = String.raw`(?:"[^"]{10,}"|'[^']{10,}'|[^\s"'\`\\][^\s]{9,})`;
-
-const SECRET_FLAG_PATTERN = new RegExp(
-  String.raw`(--[A-Za-z0-9_-]{0,64}?(?:token|password|secret|credential|key)[A-Za-z0-9_-]{0,64}(?:[=:]|\s+)(?:\\\s*)?)` +
-    SECRET_FLAG_VALUE,
-  'gi',
-);
-
-/**
- * `KEY=value` env-style secrets: `GITHUB_TOKEN=ghs_0123456789ab`,
- * `OPENAI_API_KEY=sk-0123456789ab`, `AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI`.
- * The key must name a secret — any of the canonical secret words, including
- * `key` for the `*_API_KEY` / `*_ACCESS_KEY*` LLM credential variables — and
- * the value must be a quoted run or an unquoted run of at least 10 characters,
- * so short counters like `tokens_used=8192` and ordinary assignments like
- * `USER=alice` pass through untouched.
- */
-const ENV_SECRET_PATTERN = new RegExp(
-  String.raw`\b([A-Za-z0-9_]{0,64}(?:token|password|secret|credential|key)[A-Za-z0-9_]{0,64}\s*=\s*(?:\\\s*)?)(?:"[^"]{10,}"|'[^']{10,}'|[^\s&;,]{10,})`,
-  'gi',
-);
-
-/**
- * Redacts error text before it enters the usage-statistics sink. Shell
- * command lines are the dominant leak vector — they can embed URL
- * credentials, Authorization headers, or secret flags — so this pass runs on
- * the single enqueue choke point rather than each call site.
- *
- * Shell line continuations (`\` + newline + leading whitespace) are first
- * joined away, then tabs are widened to spaces and ANSI/control characters
- * are stripped per line, so an escape or C0 control character can't hide or
- * reassemble a credential the pattern pass never saw. Splitting on `\n` and
- * re-joining keeps the newline delimiters the whitespace-delimited patterns
- * still depend on.
- */
-function redactTelemetryError(text: string): string {
-  const joined = text.replace(/\\\r?\n[ \t]*/g, '');
-  const normalized = joined
-    .replace(/\t/g, ' ')
-    .split('\n')
-    .map((line) => stripAnsiAndControl(line))
-    .join('\n');
-  return redactUrlCredentials(normalized)
-    .replace(AUTHORIZATION_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`)
-    .replace(SECRET_FLAG_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`)
-    .replace(ENV_SECRET_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`);
-}
+const REDACTED_ERROR_TEXT = '***REDACTED***';
 
 export interface LogResponse {
   nextRequestWaitMs?: number;
@@ -298,14 +210,14 @@ export class QwenLogger {
       for (const key of ERROR_TEXT_PROPERTY_KEYS) {
         const value = properties[key];
         if (typeof value === 'string') {
-          properties[key] = redactTelemetryError(value);
+          properties[key] = REDACTED_ERROR_TEXT;
         }
       }
     }
 
     const message = (event as RumExceptionEvent).message;
     if (typeof message === 'string') {
-      (event as RumExceptionEvent).message = redactTelemetryError(message);
+      (event as RumExceptionEvent).message = REDACTED_ERROR_TEXT;
     }
   }
 
@@ -1281,5 +1193,4 @@ export const TEST_ONLY = {
   MAX_RETRY_EVENTS,
   MAX_EVENTS,
   FLUSH_INTERVAL_MS,
-  redactTelemetryError,
 };
