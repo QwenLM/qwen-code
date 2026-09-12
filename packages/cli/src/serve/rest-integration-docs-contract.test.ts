@@ -60,7 +60,7 @@ const GUIDE_OPERATIONS: readonly string[] = [
 
 const HTTP_METHODS = ['get', 'post', 'patch', 'put', 'delete'] as const;
 const REGISTERED_METHODS = new Set<string>([...HTTP_METHODS, 'all']);
-const ROUTE_METHODS = '(GET|POST|PATCH|DELETE)';
+const ROUTE_METHODS = '(GET|POST|PATCH|PUT|DELETE)';
 const SCOPES = new Set([
   'process-global',
   'selected-runtime',
@@ -85,7 +85,10 @@ interface OpenApiOperation {
     in?: string;
     schema?: { minimum?: number; maximum?: number };
   }>;
-  responses?: Record<string, { content?: Record<string, unknown> }>;
+  responses?: Record<
+    string,
+    { description?: string; content?: Record<string, unknown> }
+  >;
   security?: Array<Record<string, unknown>>;
   externalDocs?: { url?: string };
   'x-qwen-capability'?: string | null;
@@ -119,30 +122,20 @@ function guideRouteRows(markdown: string): string[] {
     .filter(
       (line) =>
         line.startsWith('|') &&
-        /`(?:(?:GET|POST|PATCH|DELETE) )?\//.test(routeCell(line)),
+        new RegExp('`' + ROUTE_METHODS + ' \\/').test(routeCell(line)),
     );
 }
 
-/**
- * Operations named in a row, carrying a method forward so a continuation cell
- * such as "`GET /file` · `/file/bytes`" is collected instead of dropped.
- */
 function rowToOperations(row: string): string[] {
   const found: string[] = [];
-  let method: string | undefined;
   const cell = routeCell(row);
   for (const match of cell.matchAll(
-    new RegExp('`(?:' + ROUTE_METHODS + ' )?(\\/[^`]+)`', 'g'),
+    new RegExp('`' + ROUTE_METHODS + ' (\\/[^`]+)`', 'g'),
   )) {
-    if (match[1]) {
-      method = match[1];
-    }
-    if (!method) {
+    if (!match[1] || !match[2]) {
       continue;
     }
-    const route =
-      match[2] === '/resume' ? '/session/:id/resume' : (match[2] as string);
-    found.push(`${method} ${route}`);
+    found.push(`${match[1]} ${match[2]}`);
   }
   return found;
 }
@@ -410,6 +403,34 @@ describe('REST integration documentation contract', () => {
       'text/html',
       'text/markdown',
     ]);
+    const closeResponses =
+      openApi.paths?.['/session/{id}']?.delete?.responses ?? {};
+    expect(closeResponses['404']?.description).toContain('session_closing');
+    expect(closeResponses['409']?.description).toContain('live_session_active');
+    expect(closeResponses['409']?.description).not.toContain('session_closing');
+
+    const schemas = openApi.components?.schemas ?? {};
+    const metadataProperties = (
+      schemas['SessionMetadataRequest'] as {
+        properties?: Record<string, { pattern?: string }>;
+      }
+    ).properties;
+    const displayNamePattern = metadataProperties?.['displayName']?.pattern;
+    expect(displayNamePattern).toBeTruthy();
+    expect(new RegExp(displayNamePattern as string).test('bad\nname')).toBe(
+      false,
+    );
+    for (const schemaName of ['SessionPrInput', 'SessionPr', 'SessionIssue']) {
+      const urlPattern = (
+        schemas[schemaName] as {
+          properties?: Record<string, { pattern?: string }>;
+        }
+      ).properties?.['url']?.pattern;
+      expect(urlPattern).toBeTruthy();
+      expect(
+        new RegExp(urlPattern as string).test('https://example.com\n'),
+      ).toBe(false);
+    }
 
     const refs = new Set<string>();
     collectRefs(openApi, refs);

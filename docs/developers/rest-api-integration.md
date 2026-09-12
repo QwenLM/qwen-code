@@ -62,11 +62,12 @@ authentication; it is inert until a channel webhook source is configured.
 
 ## Start the daemon
 
-Export these once with the printed token, then repeat them in **every other
-terminal** you use — exported shell variables do not cross terminals:
+Generate the token once in terminal 1. The shell builtin prints it so you can
+paste the same value into the hidden prompt shown below in every other terminal:
 
 ```bash
 export QWEN_SERVER_TOKEN="$(openssl rand -hex 32)"
+printf 'Copy this token to the other terminals: %s\n' "$QWEN_SERVER_TOKEN"
 export DAEMON_URL=http://127.0.0.1:4170
 ```
 
@@ -76,6 +77,16 @@ Terminal 1 — this command blocks, so leave it running:
 qwen serve --no-web --require-auth \
   --hostname 0.0.0.0 --port 4170 \
   --workspace /srv/project
+```
+
+In every other terminal, paste the token printed by terminal 1 when `read`
+prompts for it. This keeps the token out of shell history and child-process
+arguments:
+
+```bash
+read -rsp 'QWEN_SERVER_TOKEN: ' QWEN_SERVER_TOKEN; printf '\n'
+export QWEN_SERVER_TOKEN
+export DAEMON_URL=http://127.0.0.1:4170
 ```
 
 `DAEMON_URL` is the loopback base URL every client command below uses — export
@@ -126,26 +137,28 @@ These are the ones a REST integration needs. Treat the rest as internal.
 
 ### Prompting and streaming
 
-| Route                                                                                                                                                                   | Purpose                                                |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| [`POST /session/:id/prompt`](./qwen-serve-protocol.md#post-sessionidprompt)                                                                                             | Submit. Returns `202` on **admission**, not completion |
-| [`POST /session/:id/cancel`](./qwen-serve-protocol.md#post-sessionidcancel)                                                                                             | Cancel the active prompt only                          |
-| [`GET /session/:id/events`](./qwen-serve-protocol.md#get-sessionidevents-sse)                                                                                           | SSE stream. Subscribe **before** prompting             |
-| [`GET /session/:id/transcript`](./qwen-serve-protocol.md#get-sessionidtranscript)                                                                                       | Conversation history                                   |
-| [`GET /session/:id/context`](./qwen-serve-protocol.md#get-sessionidcontext)                                                                                             | Model, mode, and config-option state                   |
-| [`GET /session/:id/export`](./qwen-serve-protocol.md#get-sessionidexport) · [`GET /session/:id/pending-prompts`](./qwen-serve-protocol.md#get-sessionidpending-prompts) | Export the persisted transcript · list queued prompts  |
+| Route                                                                                                                                                                   | Purpose                                                                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| [`POST /session/:id/prompt`](./qwen-serve-protocol.md#post-sessionidprompt)                                                                                             | Submit. Returns `202` on **admission**, not completion                                    |
+| [`POST /session/:id/cancel`](./qwen-serve-protocol.md#post-sessionidcancel)                                                                                             | Cancel the active prompt only                                                             |
+| [`GET /session/:id/events`](./qwen-serve-protocol.md#get-sessionidevents-sse)                                                                                           | SSE stream. Subscribe **before** prompting                                                |
+| [`GET /session/:id/transcript`](./qwen-serve-protocol.md#get-sessionidtranscript)                                                                                       | Conversation history                                                                      |
+| [`GET /session/:id/context`](./qwen-serve-protocol.md#get-sessionidcontext)                                                                                             | Top-level model, mode, and config-option state; virtual subagents return an empty `state` |
+| [`GET /session/:id/export`](./qwen-serve-protocol.md#get-sessionidexport) · [`GET /session/:id/pending-prompts`](./qwen-serve-protocol.md#get-sessionidpending-prompts) | Export the persisted transcript · list queued prompts                                     |
 
-Token usage is not part of this surface: `GET /session/:id/context` returns the
-live model, mode, and configuration-option state, while the usage counters sit on
-`GET /session/:id/context-usage`, a route this contract does not specify — it
-carries the `session_context_usage` capability tag and is described only in the
-internal [session lifecycle notes](./daemon/08-session-lifecycle.md#context-usage-session_context_usage-capability-tag).
+Token usage is not part of this surface: for a top-level session,
+`GET /session/:id/context` returns the live model, mode, and
+configuration-option state. A `subagent.`-prefixed virtual session id resolves
+against its parent runtime and returns an empty `state` object. Usage counters
+sit on `GET /session/:id/context-usage`, a route this contract does not specify
+— it carries the `session_context_usage` capability tag and is described only
+in the internal [session lifecycle notes](./daemon/08-session-lifecycle.md#context-usage-session_context_usage-capability-tag).
 
 ### Permissions
 
 | Route                                                                                                   | Purpose                                                                                                                                                                                                                                                                                     |
 | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`POST /session/:id/permission/:requestId`](./qwen-serve-protocol.md#post-sessionidpermissionrequestid) | Answer a `permission_request`. Routed to the runtime that owns the session and never to the primary bridge, but it fails closed when no single owner can be resolved                                                                                                                        |
+| [`POST /session/:id/permission/:requestId`](./qwen-serve-protocol.md#post-sessionidpermissionrequestid) | Answer a `permission_request`. Routed to the runtime that owns the session and never falls back to the primary bridge; an untrusted non-primary owner is rejected, while an untrusted primary owner proceeds to the active permission policy                                                |
 | [`POST /permission/:requestId`](./qwen-serve-protocol.md#post-permissionrequestid)                      | Process-global form, wired to the **primary** workspace's bridge only: it `404`s for a session owned by another registered runtime, with the same body as a lost vote under the default `first-responder` policy — so a `404` here does not by itself mean the request was already answered |
 
 ### Read-only workspace context
@@ -248,11 +261,13 @@ anyone having chosen it.
 
 Answer on the session-scoped route: it reaches the owning workspace whenever
 exactly one live runtime owns the session, and never falls back to the primary
-bridge. When the owner cannot be resolved it fails closed instead of voting on
-the wrong runtime — `404 session_not_found`, `500 ambiguous_session_owner`,
-`403 untrusted_workspace`, or `503 workspace_runtime_unavailable` with
-`Retry-After: 1` (retry; the vote was not recorded). Copy `data.requestId` from
-the `permission_request` event and set it before voting:
+bridge. An untrusted non-primary owner returns `403 untrusted_workspace`; the
+primary runtime is exempt from this trust check, so an untrusted primary owner
+may accept the vote. An unresolved owner fails closed instead of voting on the
+wrong runtime — `404 session_not_found`, `500 ambiguous_session_owner`, or
+`503 workspace_runtime_unavailable` with `Retry-After: 1` (retry; the vote was
+not recorded). Copy `data.requestId` from the `permission_request` event and
+set it before voting:
 
 ```bash
 export REQUEST_ID='<data.requestId>'

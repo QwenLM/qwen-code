@@ -2158,8 +2158,11 @@ caller named the path. Success responses and audit events include
 }
 ```
 
-`state` mirrors the same ACP model/mode/config-option shapes used by
-`POST /session`, `POST /session/:id/load`, and `POST /session/:id/resume`.
+For a top-level session, `state` mirrors the same ACP
+model/mode/config-option shapes used by `POST /session`,
+`POST /session/:id/load`, and `POST /session/:id/resume`. A
+`subagent.`-prefixed virtual session id resolves against its parent runtime
+and returns an empty `state` object.
 
 ### `GET /session/:id/supported-commands`
 
@@ -2616,8 +2619,14 @@ The route reads only `chats/archive/<id>.jsonl` in the selected trusted workspac
 Restore a persisted ACP session by id WITHOUT replaying history through SSE. The model context is restored internally on the agent side (via `geminiClient.initialize` reading `config.getResumedSessionData`); the SSE stream stays clean for clients that already have history rendered. Pre-flight `caps.features.session_resume`; `unstable_session_resume` remains a deprecated compatibility alias for older clients.
 
 Accepts the same `cwd`, `approvalMode`, `sourceType`, and `sourceId` fields
-as `/load`; the load-only `historyPageSize` and `liveReplayMode` are not
-accepted here. Same response shape — `state` mirrors ACP's `ResumeSessionResponse`. Same error envelope, including `409 restore_in_progress` (which fires when a `session/load` is in flight; `session/resume` racing behind another `session/resume` coalesces).
+as `/load`. `historyPageSize` is not parsed here and is silently ignored.
+`liveReplayMode` is parsed and validated — an invalid value returns
+`400 invalid_live_replay_mode` — but only the legacy-standalone compatibility
+restore forwards it; the ordinary resume path drops it. Neither field is part
+of the published resume request. Same response shape — `state` mirrors ACP's
+`ResumeSessionResponse`. Same error envelope, including
+`409 restore_in_progress` (which fires when a `session/load` is in flight;
+`session/resume` racing behind another `session/resume` coalesces).
 
 Use `/load` when the client has no history rendered (cold reconnect, picker → open). Use `/resume` when the client already has the turns on screen and only needs the daemon-side handle back.
 
@@ -3654,12 +3663,16 @@ instead of the legacy process-global route. Pre-flight
 The request body, mediation policies, outcomes, and success response are
 identical to `POST /permission/:requestId`. The optional
 `X-Qwen-Client-Id` header participates in designated and consensus policy.
-Every failure names a stable `code`:
+Failures use stable `code` values where noted; malformed input and a lost
+pending-request race can omit `code`:
 
 - `400` — a malformed vote body (no `code`) or an invalid client identity
-  (`invalid_client_id`).
+  (`invalid_client_id`), or `invalid_option_id` when the selected option was
+  not offered. Re-read the offered options instead of retrying the same vote.
 - `403` — `permission_forbidden` when the active policy rejects the voter, or
-  `untrusted_workspace` when the owning workspace is not trusted.
+  `untrusted_workspace` when a non-primary owning workspace is not trusted.
+  An untrusted primary owner is exempt from this trust check and the vote may
+  be accepted.
 - `404` — `session_not_found` when no live owner exists, or no `code` when the
   request is not pending.
 - `500` — `cancel_sentinel_collision` when the agent's `allowedOptionIds`
@@ -3668,7 +3681,8 @@ Every failure names a stable `code`:
 - `501` — `permission_policy_not_implemented` for a policy this build does not
   implement.
 - `503` — `workspace_runtime_unavailable` when the owning runtime is
-  unavailable.
+  unavailable, or `daemon_draining` when the daemon is no longer accepting
+  work.
 
 It never retries against the primary bridge. The TypeScript SDK method is
 `respondToSessionPermission()`.
@@ -3725,6 +3739,9 @@ Outcomes:
 Response:
 
 - `200 {}` — your vote was accepted (resolved OR recorded under consensus quorum)
+- `400` — a malformed vote body (no `code`), `invalid_client_id`, or
+  `invalid_option_id` when the selected option was not offered; re-read the
+  offered options instead of retrying the same vote
 - `403 { "code": "permission_forbidden", "reason": "designated_mismatch" | "remote_not_allowed", "requestId", "sessionId" }` — F3: the active policy rejected your vote
 - `404 { "error": "..." }` — the requestId is unknown (already resolved, never existed, or session torn down)
 - `500 { "code": "cancel_sentinel_collision", ... }` — F3: the agent's `allowedOptionIds` contains the reserved sentinel `'__cancelled__'`; agent / daemon contract violation

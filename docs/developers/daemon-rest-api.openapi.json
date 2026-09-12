@@ -343,7 +343,7 @@
             }
           },
           "404": {
-            "description": "The live session does not exist.",
+            "description": "The live session does not exist, or is already closing (code: session_closing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -353,7 +353,7 @@
             }
           },
           "409": {
-            "description": "The session is already closing.",
+            "description": "The session cannot be closed while it has an active Live Voice session (code: live_session_active).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1265,7 +1265,7 @@
         "operationId": "subscribeSessionEvents",
         "tags": ["Prompts and events"],
         "summary": "Subscribe to session events",
-        "description": "Opens a resumable Server-Sent Events stream. The data line contains the complete BridgeEvent envelope. When the replay cursor or epoch can no longer be honored (the ring buffer evicted the frames, the daemon restarted, or the replay budget was exhausted) the stream stays open and the daemon emits an in-band state_resync_required event; clients drop local state and resync from a fresh cursor instead of expecting an error status.",
+        "description": "Opens a resumable Server-Sent Events stream. The data line contains the complete BridgeEvent envelope. When a presented Last-Event-ID cursor can no longer be honored because the ring buffer evicted the frames, its paired epoch no longer matches after a daemon restart, or the replay budget was exhausted, the stream stays open and the daemon emits an in-band state_resync_required event. X-Qwen-Event-Epoch is evaluated only alongside a cursor. A connection without Last-Event-ID opens live-only with no replay or state_resync_required frame; clients that cannot present a cursor must rebuild through POST /session/{id}/load whenever the daemon may have restarted.",
         "externalDocs": {
           "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-sessionidevents-sse"
         },
@@ -1608,7 +1608,7 @@
         "operationId": "getSessionContext",
         "tags": ["Prompts and events"],
         "summary": "Read session context state",
-        "description": "Returns the live session model, mode, and configuration-option state.",
+        "description": "Returns the live model, mode, and configuration-option state for a top-level session. A `subagent.`-prefixed virtual session id resolves against its parent runtime and returns an empty state object.",
         "externalDocs": {
           "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-sessionidcontext"
         },
@@ -1891,7 +1891,7 @@
         "operationId": "respondToSessionPermission",
         "tags": ["Permissions"],
         "summary": "Resolve a session permission request",
-        "description": "Routes the vote to the runtime that owns the named session. New integrations should prefer this over the legacy request-id-only route.",
+        "description": "Routes the vote to the runtime that owns the named session. An untrusted non-primary owner is rejected, while an untrusted primary owner is not rejected by this trust check and proceeds to the active permission policy. New integrations should prefer this over the legacy request-id-only route.",
         "externalDocs": {
           "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-sessionidpermissionrequestid"
         },
@@ -1958,7 +1958,7 @@
             }
           },
           "400": {
-            "description": "The permission response or client id is invalid.",
+            "description": "The permission response or client id is invalid, or the selected option was not offered (code: invalid_option_id; re-read the offered options before retrying).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1968,7 +1968,7 @@
             }
           },
           "403": {
-            "description": "The active permission policy rejected this voter, or the session's owning workspace is registered but not trusted (untrusted_workspace).",
+            "description": "The active permission policy rejected this voter, or the session's non-primary owning workspace is registered but not trusted (code: untrusted_workspace).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2008,7 +2008,7 @@
             }
           },
           "503": {
-            "description": "The owning runtime is unavailable.",
+            "description": "The owning runtime is unavailable (code: workspace_runtime_unavailable), or the daemon is draining (code: daemon_draining).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2092,7 +2092,7 @@
             }
           },
           "400": {
-            "description": "The permission response or client id is invalid.",
+            "description": "The permission response or client id is invalid, or the selected option was not offered (code: invalid_option_id; re-read the offered options before retrying).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2102,7 +2102,7 @@
             }
           },
           "403": {
-            "description": "The active permission policy rejected this voter, or the session's owning workspace is registered but not trusted (untrusted_workspace).",
+            "description": "The active permission policy rejected this voter (code: permission_forbidden).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2122,7 +2122,7 @@
             }
           },
           "500": {
-            "description": "The permission contract is invalid, or more than one workspace claims the session (ambiguous_session_owner).",
+            "description": "The permission contract is invalid (code: cancel_sentinel_collision).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3396,7 +3396,8 @@
         "properties": {
           "displayName": {
             "type": "string",
-            "description": "Values longer than 256 UTF-16 code units are truncated, and the cut is not surrogate-pair aware, so a name ending in a non-BMP character can lose a lone surrogate half. An empty or whitespace-only value is rejected with 400 invalid_metadata; omit the field to leave the name unchanged."
+            "pattern": "^[^\\u0000-\\u001F\\u007F]*$",
+            "description": "The daemon first truncates values longer than 256 UTF-16 code units; the cut is not surrogate-pair aware, so a name ending in a non-BMP character can lose a lone surrogate half. The truncated value is rejected with 400 invalid_metadata when it is empty, whitespace-only, or contains a C0 control character or DEL. Omit the field to leave the name unchanged."
           },
           "pr": {
             "$ref": "#/components/schemas/SessionPrInput"
@@ -3415,7 +3416,7 @@
           "url": {
             "type": "string",
             "maxLength": 2048,
-            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://"
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\u0000-\\u001F\\u007F]*$"
           },
           "state": {
             "type": "string",
@@ -3435,7 +3436,7 @@
           "url": {
             "type": "string",
             "maxLength": 2048,
-            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://"
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\u0000-\\u001F\\u007F]*$"
           },
           "state": {
             "type": "string",
@@ -3455,7 +3456,7 @@
           "url": {
             "type": "string",
             "maxLength": 2048,
-            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://"
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\u0000-\\u001F\\u007F]*$"
           },
           "state": {
             "type": "string",
