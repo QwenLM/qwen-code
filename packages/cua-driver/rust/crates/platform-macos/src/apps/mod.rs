@@ -71,7 +71,10 @@ fn list_running_apps_native() -> Vec<AppInfo> {
                 bundle_id: app.bundleIdentifier().map(|value| value.to_string()),
                 running: true,
                 active: active_pid == Some(pid),
-                launch_path: None,
+                launch_path: app
+                    .bundleURL()
+                    .and_then(|url| url.path())
+                    .map(|path| canonical_app_path(&path.to_string())),
                 kind: Some("desktop".to_owned()),
                 last_used: None,
             });
@@ -371,6 +374,11 @@ pub(crate) fn resolve_bundle_id_to_locator(bundle_id: &str) -> Option<AppLocator
 ///    integration tests; can be added if we hit a non-English-name app
 ///    in the wild.
 pub(crate) fn locate_by_name(name: &str) -> Option<AppLocator> {
+    let path = std::path::Path::new(name);
+    if path.is_absolute() {
+        return (path.is_dir() && path.extension().is_some_and(|extension| extension == "app"))
+            .then(|| AppLocator::Path(canonical_app_path(name)));
+    }
     let app_name = if name.ends_with(".app") {
         name.to_owned()
     } else {
@@ -427,44 +435,37 @@ fn bundle_id_for_app_path(app_path: &str) -> Option<String> {
 pub fn list_all_apps() -> Vec<AppInfo> {
     let mut running = list_running_apps();
     let installed = scan_installed_apps();
-    // Lookup: bundle_id → (launch_path, last_used) from the installed scan.
-    let installed_by_bundle: std::collections::HashMap<String, (Option<String>, Option<String>)> =
-        installed
-            .iter()
-            .filter_map(|a| {
-                a.bundle_id
-                    .clone()
-                    .map(|b| (b, (a.launch_path.clone(), a.last_used.clone())))
-            })
-            .collect();
-    // Backfill running entries with the launch_path the installed scan resolved.
+    let installed_by_path: std::collections::HashMap<_, _> = installed
+        .iter()
+        .filter_map(|app| app.launch_path.as_ref().map(|path| (path, app)))
+        .collect();
     for app in running.iter_mut() {
-        if let Some(bid) = &app.bundle_id {
-            if let Some((path, last_used)) = installed_by_bundle.get(bid) {
-                if app.launch_path.is_none() {
-                    app.launch_path = path.clone();
-                }
-                if app.last_used.is_none() {
-                    app.last_used = last_used.clone();
-                }
-            }
+        if let Some(installed) = app
+            .launch_path
+            .as_ref()
+            .and_then(|path| installed_by_path.get(path))
+        {
+            app.last_used = installed.last_used.clone();
         }
     }
-
-    let running_bundles: std::collections::HashSet<String> =
-        running.iter().filter_map(|a| a.bundle_id.clone()).collect();
-
-    let mut installed = installed;
-    // Remove apps already in running list.
-    installed.retain(|a| {
-        !a.bundle_id
+    let mut paths: std::collections::HashSet<_> = running
+        .iter()
+        .filter_map(|app| app.launch_path.clone())
+        .collect();
+    running.extend(installed.into_iter().filter(|app| {
+        app.launch_path
             .as_ref()
-            .is_some_and(|b| running_bundles.contains(b))
-    });
+            .is_none_or(|path| paths.insert(path.clone()))
+    }));
+    running
+}
 
-    let mut all = running;
-    all.extend(installed);
-    all
+pub(crate) fn canonical_app_path(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(path))
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_owned()
 }
 
 fn scan_installed_apps() -> Vec<AppInfo> {
@@ -493,7 +494,7 @@ fn scan_installed_apps() -> Vec<AppInfo> {
             }
             let plist_path = path.join("Contents/Info.plist");
             if let Some(mut info) = read_app_plist(&plist_path) {
-                info.launch_path = path.to_str().map(str::to_owned);
+                info.launch_path = path.to_str().map(canonical_app_path);
                 info.kind = Some("desktop".to_owned());
                 info.last_used = fs_last_used(&path);
                 result.push(info);

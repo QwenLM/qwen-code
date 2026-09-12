@@ -1,12 +1,59 @@
 # @qwen-code/cua-sdk/computer-use
 
-Thin Computer Use wrapper included in the single `@qwen-code/cua-sdk` npm
-package. It calls that package's typed driver API directly and does not depend
-on Qwen Code, a Node REPL, or a Skill.
+Computer Use API included in `@qwen-code/cua-sdk`. It uses the typed native
+SDK and works in ordinary Node.js or a persistent Node REPL.
 
-The wrapper exposes a small surface — application discovery, exact-window
-observation, opaque element-token actions, and state verification — while
-keeping raw SDK constructors and arbitrary tool dispatch out of its public API.
+## App workflow
+
+On macOS, bind an application by name, identifier or installation path. The
+handle resolves its current native AX window and owns targeting internally:
+
+```js
+import { ComputerUse } from "@qwen-code/cua-sdk/computer-use";
+
+const computer = await ComputerUse.create();
+const app = await computer.getApp("Microsoft Excel");
+console.log((await app.getState()).text);
+// Use an ID from the returned state.
+await app.click(37);
+await app.typeText("hello");
+console.log((await app.getState()).text);
+await computer.close();
+```
+
+`getApp()` binds identity without launching. `getState()` can open a discovered
+stopped app through the native background launcher; actions never restart an app.
+Ambiguous names or identifiers require a unique installation path from
+`listApps()`. Different installations sharing a bundle ID have different handles.
+Native selection uses the focused AX window, main window, then last AX window,
+including attached sheets and the actual owning process.
+
+App methods accept short observed IDs or screenshot coordinates, and do not
+accept process IDs, window IDs, opaque tokens or delivery options.
+`getState()` returns `{ app, window, mode, text, screenshot? }`. Native AX
+projection preserves controls, meaningful disabled state and text, removes
+redundant layout/text structure, and renders compact full/diff/no-change output.
+Normal window observations include immediate menu-bar items. A selected open
+menu supplies its own context, including nested and disabled commands.
+Normal actions do not emit another full tree or image.
+
+Call `getState()` after a dialog, sheet or menu opens or closes before acting
+on its IDs. A process/window/session change invalidates prior IDs. Coordinates
+require a current screenshot from `getState({ includeScreenshot: true })`.
+
+Native code selects semantic or synthesized input after checking the target.
+App clicks and keyboard input use the native background path. Native drag input
+selects its supported foreground route before dispatch and restores the prior
+app afterward. There is no foreground retry. Failed,
+partial, unverifiable and cancelled dispatched actions are never replayed.
+Errors request fresh observation before another action; they do not ask the
+model to choose a delivery mode.
+
+## Exact-window SDK compatibility
+
+The lower-level `ComputerUse` methods remain available to programmatic clients.
+The bundled model Skill uses the app workflow above. The rest of this document
+describes the existing exact-window contract.
 
 ## Observation revisions
 

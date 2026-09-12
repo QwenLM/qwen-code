@@ -43,6 +43,20 @@ export async function exerciseComputerUseTypes(
   signal: AbortSignal,
 ): Promise<ActAndVerifyResult> {
   await computer.listApps({ signal });
+  const app = await computer.getApp("org.example.fixture", { signal });
+  const appState = await app.getState({ includeScreenshot: true, signal });
+  appState.screenshot?.images.at(0)?.dataBase64;
+  await app.click(37, { signal });
+  await app.setValue(37, "draft");
+  await app.pressKey("Return", { modifiers: ["shift"] });
+  await app.hotkey(["super", "s"]);
+  await app.scroll(37, { direction: "down" });
+  // @ts-expect-error app routing is internal
+  await app.click(37, { deliveryMode: "foreground" });
+  // @ts-expect-error app observations do not expose native identities
+  appState.pid;
+  // @ts-expect-error opaque tokens are not app action targets
+  await app.click({ elementToken: "private" });
   const observation = await computer.observeWindow({
     pid: 42,
     windowId: 7,

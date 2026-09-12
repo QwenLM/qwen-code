@@ -31,12 +31,12 @@ pub use inputs::{
     ClipboardWriteInput, DeliveryMode, DesktopScope, DoubleClickInput, DragInput, EndSessionInput,
     EscalateSessionInput, EscalationReason, GetAgentCursorStateInput, GetCursorPositionInput,
     GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput,
-    GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListAppsInput, ListSessionsInput,
-    ListWindowsInput, MoveCursorInput, ObservationRevisionInput, PerformSecondaryActionInput,
-    PressKeyInput, RightClickInput, ScrollBy, ScrollDirection, ScrollInput,
-    SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput, SetValueInput,
-    SetWindowFrameInput, StartSessionInput, ToolInput, TypeTextInput, WindowClickInput,
-    WindowDragInput, WindowHotkeyInput, WindowPressKeyInput, WindowScrollInput,
+    GetWindowStateInput, HotkeyInput, InvokeMenuInput, LaunchAppInput, ListAppsInput,
+    ListSessionsInput, ListWindowsInput, MoveCursorInput, ObservationRevisionInput,
+    PerformSecondaryActionInput, PressKeyInput, RightClickInput, ScrollBy, ScrollDirection,
+    ScrollInput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput,
+    SetValueInput, SetWindowFrameInput, StartSessionInput, ToolInput, TypeTextInput,
+    WindowClickInput, WindowDragInput, WindowHotkeyInput, WindowPressKeyInput, WindowScrollInput,
     WindowTypeTextInput, MULTI_CALL_SESSION_DESCRIPTION,
 };
 pub use outputs::{
@@ -302,6 +302,7 @@ mod tests {
             screenshot_out_file: None,
             max_elements: None,
             max_depth: None,
+            app_context: None,
             observation_revision: None,
         })
         .unwrap();
@@ -316,6 +317,7 @@ mod tests {
             screenshot_out_file: None,
             max_elements: None,
             max_depth: None,
+            app_context: None,
             observation_revision: Some(ObservationRevisionInput {
                 version: 1,
                 serializer_version: "accessibility-render-v1".into(),

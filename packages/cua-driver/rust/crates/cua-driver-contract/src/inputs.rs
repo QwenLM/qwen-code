@@ -496,10 +496,25 @@ impl ToolInput for GetDesktopStateInput {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
-pub struct ListAppsInput {}
+pub struct ListAppsInput {
+    #[uniffi(default = None)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_only: Option<bool>,
+}
 
 impl ToolInput for ListAppsInput {
     const TOOL_NAME: &'static str = "list_apps";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchAppInput {
+    /// Application name or absolute installation path discovered by list_apps.
+    pub name: String,
+}
+
+impl ToolInput for LaunchAppInput {
+    const TOOL_NAME: &'static str = "launch_app";
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
@@ -510,6 +525,10 @@ pub struct ListWindowsInput {
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_screen_only: Option<bool>,
+    /// Resolve the macOS application's current AX window and attached sheet.
+    #[uniffi(default = None)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
 }
 
 impl ToolInput for ListWindowsInput {
@@ -575,6 +594,10 @@ pub struct GetWindowStateInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "positive_integer_schema")]
     pub max_depth: Option<u32>,
+    /// Use the compact macOS application observation with contextual menus.
+    #[uniffi(default = None)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     /// Opt in to `accessibility.observation_revision.v1`. Requires a bound
     /// driver session. Omit to preserve the legacy full-snapshot contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -856,6 +879,10 @@ pub struct WindowDragInput {
     pub pid: u32,
     #[schemars(schema_with = "positive_integer_schema")]
     pub window_id: u64,
+    /// Let the macOS app workflow select the supported native drag route.
+    #[uniffi(default = None)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     #[schemars(schema_with = "number_schema")]
     pub from_x: f64,
     #[schemars(schema_with = "number_schema")]

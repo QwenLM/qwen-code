@@ -2250,6 +2250,10 @@ export type GetWindowStateInput = {
      */
     maxDepth?: number,
     /**
+     * Use the compact macOS application observation with contextual menus.
+     */
+    appContext?: boolean,
+    /**
      * Opt in to `accessibility.observation_revision.v1`. Requires a bound
      * driver session. Omit to preserve the legacy full-snapshot contract.
      */
@@ -2261,6 +2265,7 @@ export type GetWindowStateInput = {
  */
 export const GetWindowStateInput = (() => {
     const defaults = () => ({
+        appContext: undefined,
     });
     const create = (() => {
         return uniffiCreateRecord<GetWindowStateInput, ReturnType<typeof defaults>>(defaults);
@@ -2285,6 +2290,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
                 screenshotOutFile: FfiConverterOptionalString.read(from),
                 maxElements: FfiConverterOptionalUInt32.read(from),
                 maxDepth: FfiConverterOptionalUInt32.read(from),
+                appContext: FfiConverterOptionalBoolean.read(from),
                 observationRevision: FfiConverterOptionalTypeObservationRevisionInput.read(from)
             };
         }
@@ -2297,6 +2303,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
             FfiConverterOptionalString.write(value.screenshotOutFile, into);
             FfiConverterOptionalUInt32.write(value.maxElements, into);
             FfiConverterOptionalUInt32.write(value.maxDepth, into);
+            FfiConverterOptionalBoolean.write(value.appContext, into);
             FfiConverterOptionalTypeObservationRevisionInput.write(value.observationRevision, into);
         }
         allocationSize(value: TypeName): number {
@@ -2308,6 +2315,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
              FfiConverterOptionalString.allocationSize(value.screenshotOutFile) +
              FfiConverterOptionalUInt32.allocationSize(value.maxElements) +
              FfiConverterOptionalUInt32.allocationSize(value.maxDepth) +
+             FfiConverterOptionalBoolean.allocationSize(value.appContext) +
              FfiConverterOptionalTypeObservationRevisionInput.allocationSize(value.observationRevision);
 
         }
@@ -2433,7 +2441,50 @@ const FfiConverterTypeInvokeMenuInput = (() => {
     return new FFIConverter();
 })();
 
+export type LaunchAppInput = {
+    /**
+     * Application name or absolute installation path discovered by list_apps.
+     */
+    name: string
+}
+
+/**
+ * Generated factory for {@link LaunchAppInput} record objects.
+ */
+export const LaunchAppInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<LaunchAppInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<LaunchAppInput>,
+    });
+})();
+
+const FfiConverterTypeLaunchAppInput = (() => {
+    type TypeName = LaunchAppInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                name: FfiConverterString.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterString.write(value.name, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterString.allocationSize(value.name);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
 export type ListAppsInput = {
+    runningOnly?: boolean
 }
 
 /**
@@ -2441,6 +2492,7 @@ export type ListAppsInput = {
  */
 export const ListAppsInput = (() => {
     const defaults = () => ({
+        runningOnly: undefined
     });
     const create = (() => {
         return uniffiCreateRecord<ListAppsInput, ReturnType<typeof defaults>>(defaults);
@@ -2457,12 +2509,15 @@ const FfiConverterTypeListAppsInput = (() => {
     class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
         read(from: RustBuffer): TypeName {
             return {
+                runningOnly: FfiConverterOptionalBoolean.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
+            FfiConverterOptionalBoolean.write(value.runningOnly, into);
         }
         allocationSize(value: TypeName): number {
-            return 0;
+            return FfiConverterOptionalBoolean.allocationSize(value.runningOnly);
+
         }
     };
     return new FFIConverter();
@@ -2742,7 +2797,11 @@ const FfiConverterTypeListSessionsOutput = (() => {
 
 export type ListWindowsInput = {
     pid?: number,
-    onScreenOnly?: boolean
+    onScreenOnly?: boolean,
+    /**
+     * Resolve the macOS application's current AX window and attached sheet.
+     */
+    appContext?: boolean
 }
 
 /**
@@ -2750,6 +2809,7 @@ export type ListWindowsInput = {
  */
 export const ListWindowsInput = (() => {
     const defaults = () => ({
+        appContext: undefined
     });
     const create = (() => {
         return uniffiCreateRecord<ListWindowsInput, ReturnType<typeof defaults>>(defaults);
@@ -2767,16 +2827,19 @@ const FfiConverterTypeListWindowsInput = (() => {
         read(from: RustBuffer): TypeName {
             return {
                 pid: FfiConverterOptionalUInt32.read(from),
-                onScreenOnly: FfiConverterOptionalBoolean.read(from)
+                onScreenOnly: FfiConverterOptionalBoolean.read(from),
+                appContext: FfiConverterOptionalBoolean.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
             FfiConverterOptionalUInt32.write(value.pid, into);
             FfiConverterOptionalBoolean.write(value.onScreenOnly, into);
+            FfiConverterOptionalBoolean.write(value.appContext, into);
         }
         allocationSize(value: TypeName): number {
             return FfiConverterOptionalUInt32.allocationSize(value.pid) +
-             FfiConverterOptionalBoolean.allocationSize(value.onScreenOnly);
+             FfiConverterOptionalBoolean.allocationSize(value.onScreenOnly) +
+             FfiConverterOptionalBoolean.allocationSize(value.appContext);
 
         }
     };
@@ -4301,6 +4364,10 @@ const FfiConverterTypeWindowClickInput = (() => {
 export type WindowDragInput = {
     pid: number,
     windowId: bigint,
+    /**
+     * Let the macOS app workflow select the supported native drag route.
+     */
+    appContext?: boolean,
     fromX: number,
     fromY: number,
     toX: number,
@@ -4317,6 +4384,7 @@ export type WindowDragInput = {
  */
 export const WindowDragInput = (() => {
     const defaults = () => ({
+        appContext: undefined,
     });
     const create = (() => {
         return uniffiCreateRecord<WindowDragInput, ReturnType<typeof defaults>>(defaults);
@@ -4335,6 +4403,7 @@ const FfiConverterTypeWindowDragInput = (() => {
             return {
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterUInt64.read(from),
+                appContext: FfiConverterOptionalBoolean.read(from),
                 fromX: FfiConverterFloat64.read(from),
                 fromY: FfiConverterFloat64.read(from),
                 toX: FfiConverterFloat64.read(from),
@@ -4349,6 +4418,7 @@ const FfiConverterTypeWindowDragInput = (() => {
         write(value: TypeName, into: RustBuffer): void {
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterUInt64.write(value.windowId, into);
+            FfiConverterOptionalBoolean.write(value.appContext, into);
             FfiConverterFloat64.write(value.fromX, into);
             FfiConverterFloat64.write(value.fromY, into);
             FfiConverterFloat64.write(value.toX, into);
@@ -4362,6 +4432,7 @@ const FfiConverterTypeWindowDragInput = (() => {
         allocationSize(value: TypeName): number {
             return FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalBoolean.allocationSize(value.appContext) +
              FfiConverterFloat64.allocationSize(value.fromX) +
              FfiConverterFloat64.allocationSize(value.fromY) +
              FfiConverterFloat64.allocationSize(value.toX) +
@@ -4809,6 +4880,7 @@ export default Object.freeze({
     FfiConverterTypeGetWindowStateInput,
     FfiConverterTypeHotkeyInput,
     FfiConverterTypeInvokeMenuInput,
+    FfiConverterTypeLaunchAppInput,
     FfiConverterTypeListAppsInput,
     FfiConverterTypeListSessionsInput,
     FfiConverterTypeListSessionsOutput,

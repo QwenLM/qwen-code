@@ -10,6 +10,7 @@ const REVISION_TOKEN_PREFIX: &str = "rv1:";
 pub const OBSERVATION_REVISION_VERSION: u32 = 1;
 pub const ACCESSIBILITY_SERIALIZER_VERSION: &str = "accessibility-render-v1";
 pub const ACCESSIBILITY_PROJECTION_VERSION: &str = "full-tree-v1";
+pub const APP_ACCESSIBILITY_PROJECTION_VERSION: &str = "app-tree-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -466,6 +467,7 @@ pub struct ObservationLineage<I> {
     next_revision_id: u64,
     next_element_id: u64,
     revisions: VecDeque<StoredRevision<I>>,
+    app_rendering: bool,
 }
 
 impl<I> ObservationLineage<I>
@@ -489,7 +491,13 @@ where
             next_revision_id: 1,
             next_element_id: 0,
             revisions: VecDeque::new(),
+            app_rendering: false,
         })
+    }
+
+    pub fn for_app(mut self) -> Self {
+        self.app_rendering = true;
+        self
     }
 
     pub fn observe(
@@ -585,7 +593,8 @@ where
             revision_id: revision_id.clone(),
             nodes: stored_nodes,
         };
-        let full_text = render_full(&current.nodes, &self.lineage_id, stable_element_ids);
+        let render_tokens = stable_element_ids && !self.app_rendering;
+        let full_text = render_full(&current.nodes, &self.lineage_id, render_tokens);
 
         let requested_base = base_revision_id.and_then(|id| {
             self.revisions
@@ -609,7 +618,11 @@ where
             let base = requested_base.expect("checked above");
             let changes = ChangeSet::between(base, &current);
             if changes.is_empty() {
-                let candidate = render_no_change(&base.revision_id);
+                let candidate = if self.app_rendering {
+                    "No accessibility changes.".to_owned()
+                } else {
+                    render_no_change(&base.revision_id)
+                };
                 if candidate.len() >= full_text.len() {
                     (
                         ObservationMode::Full,
@@ -626,8 +639,7 @@ where
                     )
                 }
             } else {
-                let candidate =
-                    changes.render(base, &current, &self.lineage_id, stable_element_ids);
+                let candidate = changes.render(base, &current, &self.lineage_id, render_tokens);
                 if !changes.replays_to(base, &current) {
                     (
                         ObservationMode::Full,
@@ -1095,6 +1107,24 @@ fn render_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_lineage_keeps_stable_action_identity_without_rendering_private_tokens() {
+        let mut lineage = ObservationLineage::new("app", 8).unwrap().for_app();
+        let captured = vec![
+            node("window", 0, "Window \"Document\"", None),
+            node("button", 1, "Button \"Save\"", Some(0)),
+        ];
+        let full = lineage.observe(captured.clone(), None, false).unwrap();
+        assert!(full.stable_element_ids);
+        assert!(!full.text.contains("element_token="));
+        let unchanged = lineage
+            .observe(captured, Some(&full.revision_id), false)
+            .unwrap();
+        assert_eq!(unchanged.text, "No accessibility changes.");
+        assert_eq!(unchanged.nodes[1].element_id, full.nodes[1].element_id);
+        assert_eq!(unchanged.nodes[1].actionable_index, Some(0));
+    }
 
     fn node(
         identity: &'static str,

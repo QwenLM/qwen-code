@@ -21,6 +21,40 @@ export interface CallOptions {
   signal?: AbortSignal;
 }
 
+export type AppPoint = number | { x: number; y: number };
+
+export interface AppObservationOptions extends CallOptions {
+  disableDiff?: boolean;
+  includeScreenshot?: boolean;
+}
+
+export interface AppObservation {
+  app: string;
+  window: string;
+  mode: "full" | "diff" | "no_change";
+  text: string;
+  screenshot?: ComputerUseScreenshot;
+}
+
+export interface AppActionResult {
+  effect: ActionEffect;
+}
+
+export interface ComputerUseApp {
+  readonly name: string;
+  getState(options?: AppObservationOptions): Promise<AppObservation>;
+  click(point: AppPoint, options?: CallOptions & { button?: "left" | "right" | "middle"; count?: number }): Promise<AppActionResult>;
+  doubleClick(point: AppPoint, options?: CallOptions): Promise<AppActionResult>;
+  rightClick(point: AppPoint, options?: CallOptions & { modifier?: string[] }): Promise<AppActionResult>;
+  scroll(point: AppPoint, options: CallOptions & { direction: "up" | "down" | "left" | "right"; by?: "line" | "page"; amount?: number }): Promise<AppActionResult>;
+  drag(options: CallOptions & { fromX: number; fromY: number; toX: number; toY: number; durationMs?: number; steps?: number; button?: "left" | "right" | "middle"; modifier?: string[] }): Promise<AppActionResult>;
+  setValue(element: number, value: string, options?: CallOptions): Promise<AppActionResult>;
+  performSecondaryAction(element: number, action: string, options?: CallOptions): Promise<AppActionResult>;
+  typeText(text: string, options?: CallOptions & { delayMs?: number }): Promise<AppActionResult>;
+  pressKey(key: string, options?: CallOptions & { modifiers?: string[] }): Promise<AppActionResult>;
+  hotkey(keys: string[], options?: CallOptions): Promise<AppActionResult>;
+}
+
 export interface DeliveryOptions {
   deliveryMode?: "background" | "foreground";
 }
@@ -283,6 +317,7 @@ export class ComputerUse {
     operation?: ComputerUseOperationResult;
   }>;
   listApps(options?: CallOptions): Promise<JsonObject[]>;
+  getApp(selector: string, options?: CallOptions): Promise<ComputerUseApp>;
   listWindows(
     options?: CallOptions & {
       pid?: number;

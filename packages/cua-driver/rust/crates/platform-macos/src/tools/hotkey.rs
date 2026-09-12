@@ -385,15 +385,18 @@ impl Tool for HotkeyTool {
         };
 
         // ── Focus-suppression wrap (Swift WindowChangeDetector + FocusGuard) ──
-        // Hotkeys like Cmd+N, Cmd+W, Cmd+T explicitly open/close
-        // windows. Foreground HID delivery temporarily activates the target,
-        // which can race the wildcard suppressor. Wrapping ensures side-effects are observed
-        // and the prior frontmost is restored if the activation lingers.
+        // The foreground HID guard owns activation and restoration; suppression
+        // must not restore the prior app while the chord is still in flight.
         let prior_front = apps::frontmost_pid();
-        let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let foreground = fg && window_id.is_some();
+        let snapshot = if foreground {
+            WindowChangeDetector::snapshot_without_suppression(prior_front)
+        } else {
+            WindowChangeDetector::snapshot(prior_front)
+        };
 
         let result = focus_guard::with_focus_suppressed(
-            Some(pid),
+            if foreground { None } else { Some(pid) },
             prior_front,
             "hotkey.CGEvent",
             || async move {
@@ -427,8 +430,15 @@ impl Tool for HotkeyTool {
                         }
                         // background (default): auth-envelope post to the pid, no
                         // raise — even when window_id was supplied for targeting.
-                        (false, false, _, Some(ptr)) => {
-                            focus_hotkey_element(pid, ptr)?;
+                        (false, _, _, _) => {
+                            if !coordinate_focus {
+                                if let Some(ptr) = element_ptr {
+                                    focus_hotkey_element(pid, ptr)?;
+                                }
+                            }
+                            if let Some(wid) = window_id {
+                                crate::input::skylight::prepare_background_keyboard(pid, wid)?;
+                            }
                             crate::input::keyboard::hotkey(pid, &key, &m)
                         }
                         _ => crate::input::keyboard::hotkey(pid, &key, &m),

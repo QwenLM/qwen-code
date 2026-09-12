@@ -593,6 +593,36 @@ pub fn front_process_matches(target_pid: libc::pid_t, target_wid: u32) -> Option
     Some(front_psn == target_psn)
 }
 
+/// Prime AppKit's application-active state without making the process frontmost.
+/// This notification precedes input; it must never replay an unconfirmed action.
+pub(crate) fn prepare_background_keyboard(pid: pid_t, window_id: u32) -> anyhow::Result<()> {
+    crate::ax::exact_target::validate_keyboard_target(pid, window_id)?;
+    if front_process_matches(pid, window_id) == Some(true) {
+        return Ok(());
+    }
+    let post = post_to_pid_fn()
+        .ok_or_else(|| anyhow::anyhow!("background application activation is unavailable"))?;
+    objc2::rc::autoreleasepool(|_| unsafe {
+        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+        let event = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+            NSEventType::AppKitDefined,
+            objc2_foundation::NSPoint::new(0.0, 0.0),
+            NSEventModifierFlags::empty(),
+            0.0, 0, None, 1, 0, 0,
+        ).ok_or_else(|| anyhow::anyhow!("could not construct background application activation"))?;
+        let cg_event: *mut c_void = objc2::msg_send![&*event, CGEvent];
+        if cg_event.is_null() {
+            anyhow::bail!("background application activation has no CGEvent");
+        }
+        post(pid, cg_event);
+        Ok(())
+    })?;
+    // PID posts are asynchronous. Let AppKit consume the notification before
+    // validating its current first responder and sending the requested keys.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    crate::ax::exact_target::validate_keyboard_target(pid, window_id)
+}
+
 /// Make `target_pid` and `target_wid` WindowServer-frontmost and leave them
 /// there. Unlike [`with_foreground_assist`], this deliberately does not save or
 /// restore the previous process. It is the persistent counterpart required by

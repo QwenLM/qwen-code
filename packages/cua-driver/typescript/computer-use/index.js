@@ -4,6 +4,7 @@
  * authorization, transport, and cleanup.
  */
 import { randomUUID } from "node:crypto";
+import { ComputerUseApp, appIdentity, resolveApp } from "./app.js";
 
 const OBSERVATION_REVISION_CAPABILITY = "accessibility.observation_revision.v1";
 const ACCESSIBILITY_SERIALIZER_VERSION = "accessibility-render-v1";
@@ -348,6 +349,7 @@ export class ComputerUse {
   #closed = false;
   #revisionSupport;
   #defaultDeliveryMode;
+  #apps = new Map();
 
   /** Internal injection seam for hermetic tests. Use create/connect in applications. */
   constructor(
@@ -754,7 +756,7 @@ export class ComputerUse {
   async listApps(options = {}) {
     const { structured } = await this.#invoke(
       "listApps",
-      {},
+      options.runningOnly ? { runningOnly: true } : {},
       {
         readOnly: true,
         signal: options.signal,
@@ -763,10 +765,20 @@ export class ComputerUse {
     return structured?.apps ?? structured ?? [];
   }
 
-  async listWindows({ pid, onScreenOnly, signal } = {}) {
+  async getApp(selector, options = {}) {
+    const app = resolveApp(await this.listApps(options), selector, { allowStopped: true });
+    const identity = appIdentity(app);
+    if (!this.#apps.has(identity)) {
+      this.#apps.set(identity, new ComputerUseApp(this, app, (signal) => this.#invoke("launchApp", { name: identity }, { signal })));
+    }
+    return this.#apps.get(identity);
+  }
+
+  async listWindows({ pid, onScreenOnly, appContext, signal } = {}) {
     const input = {};
     if (pid !== undefined) input.pid = requirePid(pid);
     if (onScreenOnly !== undefined) input.onScreenOnly = Boolean(onScreenOnly);
+    if (appContext) input.appContext = true;
     const { structured } = await this.#invoke("listWindows", input, {
       readOnly: true,
       signal,
@@ -802,12 +814,13 @@ export class ComputerUse {
     }
     const target = exactWindow(options?.pid, options?.windowId);
     const surface = `${target.pid}:${target.windowId}`;
+    const cursorKey = `${surface}${options?.appContext ? ":app" : ""}`;
     const previous = this.#observationQueues.get(surface);
     const queued = (async () => {
       if (previous) {
         await previous.catch(() => undefined);
       }
-      return this.#observeWindow(options ?? {}, target, surface);
+      return this.#observeWindow(options ?? {}, target, cursorKey);
     })();
     this.#observationQueues.set(surface, queued);
     try {
@@ -835,6 +848,8 @@ export class ComputerUse {
       windowId: target.windowId,
       includeScreenshot,
     };
+    if (options.appContext) input.appContext = true;
+    const projectionVersion = options.appContext ? "app-tree-v1" : ACCESSIBILITY_PROJECTION_VERSION;
     if (screenshotOutFile !== undefined) input.screenshotOutFile = screenshotOutFile;
     if (maxElements !== undefined) {
       input.maxElements = requirePositiveInteger("maxElements", maxElements);
@@ -845,7 +860,7 @@ export class ComputerUse {
       input.observationRevision = {
         version: 1,
         serializerVersion: ACCESSIBILITY_SERIALIZER_VERSION,
-        projectionVersion: ACCESSIBILITY_PROJECTION_VERSION,
+        projectionVersion,
       };
       if (disableDiff) {
         input.observationRevision.forceFull = true;
@@ -915,7 +930,7 @@ export class ComputerUse {
           observationRevision: {
             version: 1,
             serializerVersion: ACCESSIBILITY_SERIALIZER_VERSION,
-            projectionVersion: ACCESSIBILITY_PROJECTION_VERSION,
+            projectionVersion,
           },
         };
         retriedIncompleteCapture = true;
@@ -1062,6 +1077,7 @@ export class ComputerUse {
       pid: target.pid,
       windowId: target.windowId,
     };
+    if (options.appContext) input.appContext = true;
     if (durationMs !== undefined) {
       input.durationMs = BigInt(requireIntegerRange("durationMs", durationMs, 0, 10000));
     }

@@ -35,6 +35,10 @@ fn def() -> &'static ToolDef {
                 "on_screen_only": {
                     "type": "boolean",
                     "description": "When true, drop windows not on the current Space. Default false."
+                },
+                "app_context": {
+                    "type": "boolean",
+                    "description": "Resolve the current application surface using AX focus/main window and attached sheets. Requires pid."
                 }
             },
             "additionalProperties": false
@@ -56,6 +60,10 @@ impl Tool for ListWindowsTool {
         use cua_driver_core::tool_args::ArgsExt;
         let pid_filter: Option<i32> = args.opt_i64("pid").map(|v| v as i32);
         let on_screen_only = args.bool_or("on_screen_only", false);
+        let app_context = args.bool_or("app_context", false);
+        if app_context && pid_filter.is_none() {
+            return ToolResult::error("app_context requires pid");
+        }
 
         let enumeration = if on_screen_only {
             crate::windows::visible_windows_with_space_snapshot()
@@ -82,7 +90,42 @@ impl Tool for ListWindowsTool {
             };
         }
 
-        let windows_json: Vec<Value> = windows.iter().map(window_record_json).collect();
+        let app_target = if app_context {
+            let pid = pid_filter.expect("validated above");
+            match tokio::task::spawn_blocking(move || {
+                crate::ax::bindings::app_window_id_of_pid(pid)
+                    .and_then(crate::windows::window_info_by_id)
+            })
+            .await
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    return ToolResult::error(format!("Could not resolve app window: {error}"))
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(target) = &app_target {
+            if !windows
+                .iter()
+                .any(|window| window.window_id == target.window_id)
+            {
+                windows.push(target.clone());
+            }
+        }
+        let windows_json: Vec<Value> = windows
+            .iter()
+            .map(|window| {
+                let mut record = window_record_json(window);
+                if app_context {
+                    record["is_app_target"] = serde_json::json!(app_target
+                        .as_ref()
+                        .is_some_and(|target| target.window_id == window.window_id));
+                }
+                record
+            })
+            .collect();
 
         ToolResult::text(format!("Found {} window(s).", windows_json.len())).with_structured(
             serde_json::json!({

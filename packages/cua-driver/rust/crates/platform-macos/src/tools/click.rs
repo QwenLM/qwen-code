@@ -80,6 +80,16 @@ fn selection_readback_confirms(
     }
 }
 
+fn preferred_click_action(actions: &[String]) -> Option<&'static str> {
+    ["AXPick", "AXPress"]
+        .into_iter()
+        .find(|candidate| actions.iter().any(|action| action.as_str() == *candidate))
+}
+
+fn is_editable_focus_role(role: &str) -> bool {
+    matches!(role, "AXComboBox" | "AXTextField" | "AXTextArea")
+}
+
 const SELECTION_READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 const SELECTION_READBACK_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 const SELECTION_READBACK_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -549,15 +559,14 @@ impl Tool for ClickTool {
                     .update_position(&cursor_key, cx, cy);
             }
 
-            // Finder icon/list items can expose a readable AXSelected state
-            // while refusing both AXSelected writes and AXPress. Resolve a
-            // verified coordinate frame only for those collection-like
-            // elements so perform_ax_click can cross that one failed semantic
-            // rung internally and confirm the result by AX read-back.
-            let selection_candidate = if effective_action == "press" {
-                tokio::task::spawn_blocking(move || {
-                    crate::input::ax_actions::nearest_container_selection_state(element_ptr)
-                        .is_some()
+            // Resolve a pointer alternative before dispatch for elements with
+            // no click-like action and collection items with AX selection.
+            let selection_candidate = if matches!(effective_action.as_str(), "press" | "click") {
+                tokio::task::spawn_blocking(move || unsafe {
+                    preferred_click_action(&copy_action_names(element_ptr as AXUIElementRef))
+                        .is_none()
+                        || crate::input::ax_actions::nearest_container_selection_state(element_ptr)
+                            .is_some()
                 })
                 .await
                 .unwrap_or(false)
@@ -569,11 +578,21 @@ impl Tool for ClickTool {
                     super::px_frame::resolve_or_refuse(wid)
                         .await
                         .ok()
-                        .map(|frame| SelectionPixelTarget {
-                            screen_x: cx,
-                            screen_y: cy,
-                            window_x: cx - frame.bounds.x,
-                            window_y: cy - frame.bounds.y,
+                        .and_then(|frame| {
+                            let window_x = cx - frame.bounds.x;
+                            let window_y = cy - frame.bounds.y;
+                            (window_x.is_finite()
+                                && window_y.is_finite()
+                                && window_x >= 0.0
+                                && window_y >= 0.0
+                                && window_x <= frame.bounds.width
+                                && window_y <= frame.bounds.height)
+                                .then_some(SelectionPixelTarget {
+                                    screen_x: cx,
+                                    screen_y: cy,
+                                    window_x,
+                                    window_y,
+                                })
                         })
                 } else {
                     None
@@ -1234,8 +1253,14 @@ fn perform_ax_click(
     modifiers: &[String],
     foreground: bool,
 ) -> anyhow::Result<(String, bool, bool, bool, bool)> {
-    let ax_action = map_action(action_str);
     let element = element_ptr as AXUIElementRef;
+
+    let advertised = unsafe { copy_action_names(element) };
+    let ax_action = if matches!(action_str, "press" | "click") {
+        preferred_click_action(&advertised).unwrap_or("AXPress")
+    } else {
+        map_action(action_str)
+    };
 
     // Check the live value immediately before dispatch. Foreground assist can
     // enable menu items that were disabled in the cached snapshot, while a
@@ -1243,16 +1268,12 @@ fn perform_ax_click(
     // otherwise return success for a disabled action that did nothing.
     crate::input::ax_actions::ensure_ax_action_enabled(element_ptr, ax_action)?;
 
-    // Capture advertised actions BEFORE dispatching so we can detect silent no-ops
-    // (AX returns success even when the element doesn't advertise the action).
-    let advertised = unsafe { copy_action_names(element) };
-
     let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
     let title = unsafe { copy_string_attr(element, "AXTitle") }.unwrap_or_default();
 
     if ax_action == "AXPress"
         && modifiers.is_empty()
-        && matches!(role.as_str(), "AXComboBox" | "AXTextField")
+        && is_editable_focus_role(&role)
         && !advertised.iter().any(|action| action == "AXPress")
         && unsafe { is_attribute_settable(element, "AXValue") }
         && unsafe { is_attribute_settable(element, "AXFocused") }
@@ -1277,7 +1298,7 @@ fn perform_ax_click(
     if ax_action == "AXPress" && !advertised.iter().any(|action| action == ax_action) {
         if modifiers.is_empty() {
             if let Some(selected_role) =
-                crate::input::ax_actions::select_nearest_container(element_ptr)
+                crate::input::ax_actions::select_nearest_container(element_ptr)?
             {
                 return Ok((
                     format!(
@@ -1382,27 +1403,44 @@ fn perform_ax_click(
         }
     }
 
+    if ax_action == "AXPress" && !advertised.iter().any(|action| action == ax_action) {
+        let target = selection_pixel.ok_or_else(|| {
+            anyhow::anyhow!("element has no click action and no proven window-pointer target")
+        })?;
+        let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
+        if foreground && !modifier_refs.is_empty() {
+            crate::input::mouse::click_at_xy_desktop_with_modifiers_preserving_cursor(
+                target.screen_x,
+                target.screen_y,
+                1,
+                "left",
+                &modifier_refs,
+            )?;
+        } else {
+            crate::input::mouse::click_at_xy_with_window_local(
+                pid,
+                target.screen_x,
+                target.screen_y,
+                target.window_x,
+                target.window_y,
+                window_id,
+                1,
+                &modifier_refs,
+            )?;
+        }
+        return Ok((
+            format!(
+                "Posted window-pointer click on [{idx}] {role} \"{title}\"; observe to confirm."
+            ),
+            false,
+            false,
+            false,
+            true,
+        ));
+    }
+
     let err = unsafe { crate::ax::bindings::perform_action(element, ax_action) };
     if err != crate::ax::bindings::kAXErrorSuccess {
-        // Some collection rows claim a click-like action but Finder returns
-        // kAXErrorCannotComplete. Use the same verified selection fallback
-        // before surfacing the dispatch error.
-        if ax_action == "AXPress" && modifiers.is_empty() {
-            if let Some(selected_role) =
-                crate::input::ax_actions::select_nearest_container(element_ptr)
-            {
-                return Ok((
-                    format!(
-                        "✅ Selected nearest {selected_role} for [{idx}] {role} \"{title}\" \
-                         after AXPress returned {err}; confirmed AXSelected=true."
-                    ),
-                    false,
-                    false,
-                    true,
-                    false,
-                ));
-            }
-        }
         anyhow::bail!("AXUIElementPerformAction({ax_action}) returned {err}");
     }
 
@@ -1527,6 +1565,30 @@ fn map_action(action: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn implicit_click_selects_an_advertised_action_before_dispatch() {
+        for (actions, expected) in [
+            (vec![], None),
+            (vec!["AXShowMenu"], None),
+            (vec!["AXPress"], Some("AXPress")),
+            (vec!["AXPick"], Some("AXPick")),
+            (vec!["AXPress", "AXPick"], Some("AXPick")),
+        ] {
+            let actions = actions.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(preferred_click_action(&actions), expected);
+        }
+    }
+
+    #[test]
+    fn text_areas_share_the_verified_editable_focus_path() {
+        for role in ["AXTextArea", "AXTextField", "AXComboBox"] {
+            assert!(is_editable_focus_role(role));
+        }
+        for role in ["AXStaticText", "AXButton", "AXWebArea"] {
+            assert!(!is_editable_focus_role(role));
+        }
+    }
 
     /// Surface 5: schema must advertise the new `button` field with the three
     /// canonical values and default to "left". Hermes / Codex / Claude Code
