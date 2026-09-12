@@ -44,10 +44,7 @@ interface PlanGraphLayout {
   width: number;
   height: number;
   edges: PlanEdgePath[];
-  /**
-   * How many stacked return lanes the layer-spanning edges needed. The canvas
-   * reserves bottom padding for them so a lane never runs under a node.
-   */
+
   lanes: number;
 }
 
@@ -58,18 +55,12 @@ const EMPTY_GRAPH_LAYOUT: PlanGraphLayout = {
   lanes: 0,
 };
 
-/** Vertical distance between two stacked layer-spanning return lanes. */
 const EDGE_LANE_HEIGHT = 9;
-/** Corner radius where an orthogonal edge turns. */
+
 const EDGE_CORNER = 6;
 
 const MAX_RENDERED_PLAN_EDGES = 500;
 
-/**
- * Status is carried by a glyph as well as a colour so the graph survives
- * colour-blindness, high-contrast mode, and a greyscale screenshot. Every
- * surface showing plan status uses the same glyph for the same status.
- */
 export const PLAN_STATUS_GLYPH: Record<PlanNodeStatus, string> = {
   blocked: '\u22ef',
   ready: '\u25cb',
@@ -88,30 +79,27 @@ export function layerPlanTodos(todos: readonly TodoItem[]): TodoItem[][] {
   for (const todo of byId.values()) {
     const dependencies = new Set(
       (todo.blockedBy ?? []).filter(
-        (dependencyId) => dependencyId !== todo.id && byId.has(dependencyId),
+        (depId) => depId !== todo.id && byId.has(depId),
       ),
     );
     indegrees.set(todo.id, dependencies.size);
     depths.set(todo.id, 0);
-    for (const dependencyId of dependencies) {
-      const children = dependents.get(dependencyId) ?? [];
+    for (const depId of dependencies) {
+      const children = dependents.get(depId) ?? [];
       children.push(todo.id);
-      dependents.set(dependencyId, children);
+      dependents.set(depId, children);
     }
   }
 
   const queue = [...byId.keys()].filter((id) => indegrees.get(id) === 0);
-  for (let index = 0; index < queue.length; index++) {
-    const id = queue[index];
+  for (let i = 0; i < queue.length; i++) {
+    const id = queue[i];
     const nextDepth = (depths.get(id) ?? 0) + 1;
-    for (const dependentId of dependents.get(id) ?? []) {
-      depths.set(
-        dependentId,
-        Math.max(depths.get(dependentId) ?? 0, nextDepth),
-      );
-      const remaining = (indegrees.get(dependentId) ?? 1) - 1;
-      indegrees.set(dependentId, remaining);
-      if (remaining === 0) queue.push(dependentId);
+    for (const depId of dependents.get(id) ?? []) {
+      depths.set(depId, Math.max(depths.get(depId) ?? 0, nextDepth));
+      const remaining = (indegrees.get(depId) ?? 1) - 1;
+      indegrees.set(depId, remaining);
+      if (remaining === 0) queue.push(depId);
     }
   }
 
@@ -182,14 +170,6 @@ function executionStatus(
   return isAgentCancelled(tool) ? 'cancelled' : getAgentDisplayStatus(tool);
 }
 
-/**
- * Whether an executionStatus counts toward the overview strip's "Active
- * agents". Deliberately the same statuses that make
- * `getPlanNodeStateFromIndex` render a node running/paused: the live task
- * statuses ('running' / 'paused') plus the transcript 'in_progress' that
- * `executionStatus` reports for an in-flight tool call with no live daemon
- * task — so the strip and the node badges never contradict each other.
- */
 function isAgentExecutionActive(status: string): boolean {
   return (
     status === 'running' || status === 'in_progress' || status === 'paused'
@@ -220,8 +200,8 @@ export function nestedTasksFromIndex(
     visited.add(entry.task.id);
     nested.push(entry);
     const descendants = taskIndex.childrenByParentId.get(entry.task.id) ?? [];
-    for (let index = descendants.length - 1; index >= 0; index--) {
-      stack.push({ task: descendants[index], depth: entry.depth + 1 });
+    for (let i = descendants.length - 1; i >= 0; i--) {
+      stack.push({ task: descendants[i], depth: entry.depth + 1 });
     }
   }
   taskIndex.nestedByRootId.set(root.id, nested);
@@ -235,14 +215,6 @@ export function nestedTasksForTool(
   return nestedTasksFromIndex(tool, createTaskExecutionIndex(tasks));
 }
 
-/**
- * Deliberately uncached. Keying on the tool object would be wrong the moment
- * a reused object gains a sub-tool — `appendSubTool` mutates `subTools` in
- * place — and the only thing standing between that and a stale render is
- * `useMessages`' prefix-reuse rule in another module. The callers' own
- * derivations are memoized, so the repetition this would remove is bounded to
- * a single derivation; a silent wrong subtree is not worth that.
- */
 export function nestedAgentToolsForTool(
   tool: ACPToolCall,
 ): Array<{ tool: ACPToolCall; depth: number }> {
@@ -258,17 +230,6 @@ export function nestedAgentToolsForTool(
   return result;
 }
 
-/**
- * The execution status observed for every agent under one tool: the tool's
- * own execution, every nested live task, and every nested transcript agent.
- * An agent observed through BOTH a live task and a persisted transcript tool
- * (a nested task whose toolUseId matches the nested tool's callId) counts
- * once, keeping the actionable observation: getAttentionAgentTool opens the
- * failed/cancelled surface when either reports one, so the tally must agree
- * with the affordance. getPlanNodeStateFromIndex decides attention on
- * exactly these statuses and the cockpit's attention stats tally them, so
- * the triage strip and the queue can never contradict each other.
- */
 function attentionAgentStatuses(
   tool: ACPToolCall,
   taskIndex: TaskExecutionIndex,
@@ -305,11 +266,6 @@ function attentionAgentStatuses(
   return [...byAgent.values()];
 }
 
-/**
- * Same agent-status walk as {@link attentionAgentStatuses}, for callers that
- * hold the raw task list instead of a prebuilt index (the cockpit's stats
- * strip, which must tally exactly what the attention queue shows).
- */
 export function getAttentionAgentStatuses(
   tool: ACPToolCall,
   tasks: readonly DaemonSessionTaskStatus[],
@@ -349,15 +305,6 @@ function activeAgentEntry(
   return transcriptAgentTask(tool, status, depth);
 }
 
-/**
- * One entry per agent the overview strip reports as active, and the single
- * source the workflow inspector summary counts: the live daemon task when
- * one exists, otherwise a transcript-derived stand-in for an in-flight tool
- * call with no live task (the replay shape). The walk mirrors the node
- * badges (executionStatus), so the strip, the badges, and the inspector can
- * never contradict each other. An agent observed through BOTH a live task
- * and a persisted transcript tool counts once (dedup by toolUseId).
- */
 export function getActiveAgents(
   tools: readonly ACPToolCall[],
   tasks: readonly DaemonSessionTaskStatus[],
@@ -365,12 +312,6 @@ export function getActiveAgents(
   return getActiveAgentsFromIndex(tools, createTaskExecutionIndex(tasks));
 }
 
-/**
- * {@link getActiveAgents} for callers that already hold an index. Building the
- * index is O(tasks); doing it per todo and per tool — as the workflow
- * projection used to — makes the walk O((todos + tools) x tasks) for a result
- * that never varies with the todo or the tool.
- */
 export function getActiveAgentsFromIndex(
   tools: readonly ACPToolCall[],
   taskIndex: TaskExecutionIndex,
@@ -388,7 +329,7 @@ export function getActiveAgentsFromIndex(
     const liveNestedToolUseIds = new Set(
       nestedLiveTasks
         .map(({ task }) => task.toolUseId)
-        .filter((toolUseId): toolUseId is string => toolUseId !== undefined),
+        .filter((id): id is string => id !== undefined),
     );
     for (const { tool: nestedTool, depth } of nestedAgentToolsForTool(tool)) {
       if (liveNestedToolUseIds.has(nestedTool.callId)) continue;
@@ -405,21 +346,15 @@ export function getPlanNodeStateFromIndex(
   tools: readonly ACPToolCall[],
   taskIndex: TaskExecutionIndex,
 ): { status: PlanNodeStatus; attention: boolean } {
-  const executionStatuses = tools.map((tool) =>
-    executionStatus(tool, taskIndex),
-  );
+  const execStatuses = tools.map((tool) => executionStatus(tool, taskIndex));
   const attention = tools.some((tool) =>
     attentionAgentStatuses(tool, taskIndex).some(
-      (status) => status === 'failed' || status === 'cancelled',
+      (s) => s === 'failed' || s === 'cancelled',
     ),
   );
-  if (
-    executionStatuses.includes('running') ||
-    executionStatuses.includes('in_progress')
-  )
+  if (execStatuses.includes('running') || execStatuses.includes('in_progress'))
     return { status: 'running', attention };
-  if (executionStatuses.includes('paused'))
-    return { status: 'paused', attention };
+  if (execStatuses.includes('paused')) return { status: 'paused', attention };
   if (todo.status === 'completed')
     return { status: 'completed', attention: false };
   const blocked = (todo.blockedBy ?? []).some(
@@ -445,7 +380,6 @@ export function getPlanNodeState(
   );
 }
 
-/** The plan step a tool call was issued for, when it declares one. */
 export function todoIdOf(tool: ACPToolCall): string | undefined {
   const value = tool.args?.todo_id;
   return typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -500,7 +434,7 @@ export function getAttentionAgentTool(
   const taskIndex = createTaskExecutionIndex(tasks);
   const nestedTools = nestedAgentToolsForTool(tool);
   const nestedToolByCallId = new Map(
-    nestedTools.map(({ tool: nestedTool }) => [nestedTool.callId, nestedTool]),
+    nestedTools.map(({ tool: nt }) => [nt.callId, nt]),
   );
   const failedTask = [...nestedTasksFromIndex(tool, taskIndex)]
     .reverse()
@@ -513,24 +447,16 @@ export function getAttentionAgentTool(
       toolForNestedTask(failedTask)
     );
   }
-  const failedTool = [...nestedTools].reverse().find(({ tool: nestedTool }) => {
-    const status = executionStatus(nestedTool, taskIndex);
-    return status === 'failed' || status === 'cancelled';
+  const failedTool = [...nestedTools].reverse().find(({ tool: nt }) => {
+    const s = executionStatus(nt, taskIndex);
+    return s === 'failed' || s === 'cancelled';
   })?.tool;
   if (failedTool) return failedTool;
-  const status = executionStatus(tool, taskIndex);
-  return status === 'failed' || status === 'cancelled' ? tool : undefined;
+  const s = executionStatus(tool, taskIndex);
+  return s === 'failed' || s === 'cancelled' ? tool : undefined;
 }
 
-export function PlanExecutionView({
-  todos,
-  tools,
-  tasks,
-  onOpenSubagent,
-  hideTitle = false,
-  selection,
-  showStepDetails = true,
-}: {
+export interface PlanExecutionViewProps {
   todos: readonly TodoItem[];
   tools: readonly ACPToolCall[];
   tasks: readonly DaemonSessionTaskStatus[];
@@ -545,19 +471,25 @@ export function PlanExecutionView({
     value: string | undefined;
     onChange: (todoId: string | undefined) => void;
   };
-  /** The full Workflow canvas renders selected-step detail in the right panel. */
+
   showStepDetails?: boolean;
-}) {
+  forceFlatLayout?: boolean;
+}
+
+export function PlanExecutionView({
+  todos,
+  tools,
+  tasks,
+  onOpenSubagent,
+  hideTitle = false,
+  selection,
+  showStepDetails = true,
+  forceFlatLayout = false,
+}: PlanExecutionViewProps): React.JSX.Element | null {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
   const taskIndex = useMemo(() => createTaskExecutionIndex(tasks), [tasks]);
 
-  // One derivation for the whole graph, so a hover — which only flips
-  // `data-focused` / `data-active` — no longer re-runs the topological sort,
-  // the topology serialization, and the per-todo x per-tool attention walk.
-  // `todos` arrives with a stable identity from `useStableArray`, and `tools`
-  // is rebuilt whenever the transcript changes, so this memo tracks content
-  // rather than defeating itself on fresh array identities.
   const {
     todosById,
     toolsByTodo,
@@ -568,7 +500,6 @@ export function PlanExecutionView({
     activeAgentCount,
     attentionCount,
     topology,
-    dependencyIdsByTodo,
     topologyKey,
     dependencyCount,
     hasDependencies,
@@ -578,99 +509,91 @@ export function PlanExecutionView({
     dependentsByTodo,
   } = useMemo(() => {
     const knownIds = new Set(todos.map((todo) => todo.id));
-    const todosById = new Map(todos.map((todo) => [todo.id, todo]));
-    const toolsByTodo = new Map<string, ACPToolCall[]>();
-    const unassigned: ACPToolCall[] = [];
+    const todosByIdLocal = new Map(todos.map((todo) => [todo.id, todo]));
+    const toolsByTodoLocal = new Map<string, ACPToolCall[]>();
+    const unassignedLocal: ACPToolCall[] = [];
     for (const tool of tools) {
-      const todoId = todoIdOf(tool);
-      if (!todoId || !knownIds.has(todoId)) {
-        unassigned.push(tool);
+      const tid = todoIdOf(tool);
+      if (!tid || !knownIds.has(tid)) {
+        unassignedLocal.push(tool);
         continue;
       }
-      const grouped = toolsByTodo.get(todoId) ?? [];
+      const grouped = toolsByTodoLocal.get(tid) ?? [];
       grouped.push(tool);
-      toolsByTodo.set(todoId, grouped);
+      toolsByTodoLocal.set(tid, grouped);
     }
-    const statesByTodo = new Map(
+    const statesByTodoLocal = new Map(
       todos.map((todo) => [
         todo.id,
         getPlanNodeStateFromIndex(
           todo,
-          todosById,
-          toolsByTodo.get(todo.id) ?? [],
+          todosByIdLocal,
+          toolsByTodoLocal.get(todo.id) ?? [],
           taskIndex,
         ),
       ]),
     );
-    const completedCount = todos.filter(
+    const completedCountLocal = todos.filter(
       (todo) => todo.status === 'completed',
     ).length;
-    // floor, not round: (N-1)/N rounds up to 100% on long plans, reporting
-    // completion (including to aria-valuenow) while a step is still
-    // outstanding.
-    const progressPercent =
+    const progressPercentLocal =
       todos.length === 0
         ? 0
-        : Math.floor((completedCount / todos.length) * 100);
-    // Derive from the same source as the node badges (executionStatus): the
-    // live daemon index when a task exists, otherwise the tool call's
-    // persisted/transcript status. Counting only live tasks contradicted the
-    // badges on a replayed transcript of an interrupted session — the node
-    // rendered Running off an in_progress tool call while this strip reported
-    // "Active agents: 0" because no live daemon task existed. The workflow
-    // inspector summary counts the very same helper output, so the two
-    // surfaces can never contradict each other.
-    const activeAgentCount = getActiveAgentsFromIndex(tools, taskIndex).length;
-    const attentionCount = [...statesByTodo.values()].filter(
+        : Math.floor((completedCountLocal / todos.length) * 100);
+    const activeAgentCountLocal = getActiveAgentsFromIndex(
+      tools,
+      taskIndex,
+    ).length;
+    const attentionCountLocal = [...statesByTodoLocal.values()].filter(
       (state) => state.attention,
     ).length;
-    const topology = todos.map((todo): [string, string[]] => [
+    const topologyLocal = todos.map((todo): [string, string[]] => [
       todo.id,
       [...new Set(todo.blockedBy ?? [])].filter(
-        (dependencyId) =>
-          dependencyId !== todo.id && knownIds.has(dependencyId),
+        (depId) => depId !== todo.id && knownIds.has(depId),
       ),
     ]);
-    const dependencyIdsByTodo = new Map(topology);
-    const topologyKey = JSON.stringify(topology);
-    const dependencyCount = topology.reduce(
+
+    const topologyKeyLocal = JSON.stringify(topologyLocal);
+    const dependencyCountLocal = topologyLocal.reduce(
       (total, entry) => total + entry[1].length,
       0,
     );
-    const hasDependencies = dependencyCount > 0;
-    const drawsDependencyEdges =
-      hasDependencies && dependencyCount <= MAX_RENDERED_PLAN_EDGES;
-    const layers = hasDependencies ? layerPlanTodos(todos) : [todos.slice()];
-    const layerByTodo = new Map<string, number>();
-    const dependentsByTodo = new Map<string, string[]>();
-    layers.forEach((layer, index) => {
-      for (const todo of layer) layerByTodo.set(todo.id, index);
+    const hasDependenciesLocal = dependencyCountLocal > 0;
+    const drawsDependencyEdgesLocal =
+      hasDependenciesLocal && dependencyCountLocal <= MAX_RENDERED_PLAN_EDGES;
+    const layersLocal = hasDependenciesLocal
+      ? layerPlanTodos(todos)
+      : [todos.slice()];
+    const layerByTodoLocal = new Map<string, number>();
+    const dependentsByTodoLocal = new Map<string, string[]>();
+    layersLocal.forEach((layer, index) => {
+      for (const todo of layer) layerByTodoLocal.set(todo.id, index);
     });
-    for (const [todoId, dependencies] of topology) {
-      for (const dependencyId of dependencies) {
-        const dependents = dependentsByTodo.get(dependencyId) ?? [];
-        dependents.push(todoId);
-        dependentsByTodo.set(dependencyId, dependents);
+    for (const [todoId, deps] of topologyLocal) {
+      for (const depId of deps) {
+        const depsList = dependentsByTodoLocal.get(depId) ?? [];
+        depsList.push(todoId);
+        dependentsByTodoLocal.set(depId, depsList);
       }
     }
     return {
-      todosById,
-      toolsByTodo,
-      unassigned,
-      statesByTodo,
-      completedCount,
-      progressPercent,
-      activeAgentCount,
-      attentionCount,
-      topology,
-      dependencyIdsByTodo,
-      topologyKey,
-      dependencyCount,
-      hasDependencies,
-      drawsDependencyEdges,
-      layers,
-      layerByTodo,
-      dependentsByTodo,
+      todosById: todosByIdLocal,
+      toolsByTodo: toolsByTodoLocal,
+      unassigned: unassignedLocal,
+      statesByTodo: statesByTodoLocal,
+      completedCount: completedCountLocal,
+      progressPercent: progressPercentLocal,
+      activeAgentCount: activeAgentCountLocal,
+      attentionCount: attentionCountLocal,
+      topology: topologyLocal,
+      topologyKey: topologyKeyLocal,
+      dependencyCount: dependencyCountLocal,
+      hasDependencies: hasDependenciesLocal,
+      drawsDependencyEdges: drawsDependencyEdgesLocal,
+      layers: layersLocal,
+      layerByTodo: layerByTodoLocal,
+      dependentsByTodo: dependentsByTodoLocal,
     };
   }, [taskIndex, todos, tools]);
   const graphId = useId().replaceAll(':', '');
@@ -691,9 +614,14 @@ export function PlanExecutionView({
   const selectedTodoId = selection ? selection.value : internalSelectedTodoId;
   const updateSelectedTodoId = selection?.onChange ?? setInternalSelectedTodoId;
   const [hoveredTodoId, setHoveredTodoId] = useState<string>();
-  // Hovering previews a step's dependency chain, selecting pins it. Both feed
-  // one focus value so the highlight never fights itself.
   const focusedTodoId = hoveredTodoId ?? selectedTodoId;
+
+  const todoIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    todos.forEach((todo, index) => map.set(todo.id, index));
+    return map;
+  }, [todos]);
+
   const focusTodoId =
     todos.find((todo) => {
       const status = statesByTodo.get(todo.id)?.status;
@@ -701,6 +629,66 @@ export function PlanExecutionView({
     })?.id ??
     todos.find((todo) => todo.status !== 'completed')?.id ??
     todos[0]?.id;
+
+  const handleOpenSubagent = useCallback(
+    (tool: ACPToolCall) => {
+      if (!getSubagentDetailsUnavailableReason(tool)) onOpenSubagent?.(tool);
+    },
+    [onOpenSubagent],
+  );
+
+  const handleSelectTodo = useCallback(
+    (todoId: string | undefined) => {
+      updateSelectedTodoId(todoId);
+    },
+    [updateSelectedTodoId],
+  );
+
+  const [activeUpIdx, setActiveUpIdx] = useState(0);
+  const [activeDownIdx, setActiveDownIdx] = useState(0);
+  useEffect(() => {
+    setActiveUpIdx(0);
+    setActiveDownIdx(0);
+  }, [selectedTodoId]);
+
+  const handleGraphKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (!selectedTodoId) return;
+      const todo = todosById.get(selectedTodoId);
+      if (!todo) return;
+
+      let nextId: string | undefined;
+      if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+        const blockedByIds = (todo.blockedBy ?? []).filter((id) =>
+          todosById.has(id),
+        );
+        if (blockedByIds.length > 0) {
+          nextId = blockedByIds[activeUpIdx % blockedByIds.length];
+          setActiveUpIdx((prev) => (prev + 1) % blockedByIds.length);
+        }
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+        const dependents = dependentsByTodo.get(selectedTodoId) ?? [];
+        if (dependents.length > 0) {
+          nextId = dependents[activeDownIdx % dependents.length];
+          setActiveDownIdx((prev) => (prev + 1) % dependents.length);
+        }
+      }
+
+      if (nextId) {
+        e.preventDefault();
+        updateSelectedTodoId(nextId);
+      }
+    },
+    [
+      selectedTodoId,
+      todosById,
+      dependentsByTodo,
+      activeUpIdx,
+      activeDownIdx,
+      updateSelectedTodoId,
+    ],
+  );
+
   const locateFocusTodo = useCallback(
     (behavior: ScrollBehavior) => {
       const viewport = viewportRef.current;
@@ -713,27 +701,75 @@ export function PlanExecutionView({
         nodeRect.left -
         viewportRect.left -
         (viewport.clientWidth - nodeRect.width) / 2;
-      // Mirror the horizontal computation vertically: on the fixed-height
-      // workflow page a tall graph overflows the viewport downwards, and
-      // scrollTo preserves scrollTop when only `left` is passed — the focused
-      // step would stay out of view.
       const top =
         viewport.scrollTop +
         nodeRect.top -
         viewportRect.top -
         (viewport.clientHeight - nodeRect.height) / 2;
-      // This runs inside a requestAnimationFrame, where a throw cannot be
-      // caught by anything and takes the surrounding render down with it.
-      // Centring the current step is a convenience; the plain assignment, or
-      // skipping it, always beats an unhandled exception.
-      if (typeof viewport.scrollTo === 'function') {
-        viewport.scrollTo({ left, top, behavior });
-      } else {
+      try {
+        if (typeof viewport.scrollTo === 'function') {
+          viewport.scrollTo({ left, top, behavior });
+        } else {
+          viewport.scrollLeft = left;
+          viewport.scrollTop = top;
+        }
+      } catch {
         viewport.scrollLeft = left;
         viewport.scrollTop = top;
       }
     },
     [focusTodoId],
+  );
+
+  const handleLocateClick = useCallback(() => {
+    locateFocusTodo('smooth');
+  }, [locateFocusTodo]);
+
+  const renderDependencyLinks = useCallback(
+    (ids: readonly string[], emptyLabel: string) => {
+      const validIds = ids.filter((id) => todosById.has(id));
+      if (validIds.length === 0) return <>{emptyLabel}</>;
+      return (
+        <>
+          {validIds.map((id, i) => {
+            const todo = todosById.get(id);
+            if (!todo) return null;
+            const stepNum = todoIndexMap.get(id);
+            const label =
+              stepNum != null
+                ? `${stepNum + 1}. ${todo.content}`
+                : todo.content;
+            return (
+              <span key={id} className={styles.dependencyLinkWrapper}>
+                {i > 0 && (
+                  <span className={styles.dependencySeparator}>, </span>
+                )}
+                <span
+                  className={styles.dependencyLink}
+                  role="link"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleSelectTodo(id);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handleSelectTodo(id);
+                    }
+                  }}
+                  aria-label={t('planExecution.navigateToStep', { label })}
+                >
+                  {label}
+                </span>
+              </span>
+            );
+          })}
+        </>
+      );
+    },
+    [todosById, todoIndexMap, handleSelectTodo, t],
   );
 
   useEffect(() => {
@@ -742,8 +778,6 @@ export function PlanExecutionView({
     }
   }, [selectedTodoId, todos, updateSelectedTodoId]);
 
-  // A removed node never gets a pointerleave, so a stale hover id would keep
-  // data-focused set with no edge matching it — dimming the whole graph.
   useEffect(() => {
     if (hoveredTodoId && !todos.some((todo) => todo.id === hoveredTodoId)) {
       setHoveredTodoId(undefined);
@@ -755,9 +789,8 @@ export function PlanExecutionView({
       !hasDependencies ||
       !focusTodoId ||
       autoLocatedTopologyRef.current === topologyKey
-    ) {
+    )
       return;
-    }
     const frame = requestAnimationFrame(() => {
       locateFocusTodo('auto');
       autoLocatedTopologyRef.current = topologyKey;
@@ -808,11 +841,11 @@ export function PlanExecutionView({
         endY: number;
         span: number;
       }> = [];
-      for (const [todoId, dependencies] of topologyRef.current) {
+      for (const [todoId, deps] of topologyRef.current) {
         const targetRect = measuredNodes.get(todoId);
         if (!targetRect) continue;
-        for (const dependencyId of dependencies) {
-          const sourceRect = measuredNodes.get(dependencyId);
+        for (const depId of deps) {
+          const sourceRect = measuredNodes.get(depId);
           if (!sourceRect) continue;
           const startX = sourceRect.right + 4;
           const startY = sourceRect.top + sourceRect.height / 2;
@@ -820,10 +853,10 @@ export function PlanExecutionView({
           const endY = targetRect.top + targetRect.height / 2;
           const span =
             (layerByTodoRef.current.get(todoId) ?? 0) -
-            (layerByTodoRef.current.get(dependencyId) ?? 0);
+            (layerByTodoRef.current.get(depId) ?? 0);
           if (span > 1) {
             spanning.push({
-              from: dependencyId,
+              from: depId,
               to: todoId,
               startX,
               startY,
@@ -835,16 +868,12 @@ export function PlanExecutionView({
           }
           const controlX = startX + Math.max(24, (endX - startX) / 2);
           edges.push({
-            from: dependencyId,
+            from: depId,
             to: todoId,
             d: `M ${startX} ${startY} C ${controlX} ${startY}, ${controlX} ${endY}, ${endX} ${endY}`,
           });
         }
       }
-      // Layer-spanning edges all shared one routeY, so any plan with two long
-      // dependencies drew them on top of each other. Give each its own lane,
-      // ordered by span so the longest sits furthest out and the lanes nest
-      // instead of crossing.
       spanning.sort((a, b) => a.span - b.span);
       spanning.forEach((edge, lane) => {
         const routeY = Math.min(
@@ -877,23 +906,12 @@ export function PlanExecutionView({
         edges,
         lanes: spanning.length,
       };
-      // Include edge identity in the signature: a re-issued plan revision
-      // that renumbers step ids while preserving every step's geometry
-      // produces identical path data, but the rendered edges carry from/to
-      // for highlighting — skipping the state update would leave stale
-      // identities wired to the wrong steps.
-      const signature = `${next.width}:${next.height}:${next.lanes}:${edges.map((edge) => `${edge.from}>${edge.to}>${edge.d}`).join('|')}`;
+      const signature = `${next.width}:${next.height}:${next.lanes}:${edges.map((e) => `${e.from}>${e.to}>${e.d}`).join('|')}`;
       if (signature === graphSignatureRef.current) return;
       graphSignatureRef.current = signature;
       setGraph(next);
     };
 
-    // Every node is observed and a window resize lands in the same frame as
-    // the observer's own batch, so one viewport change ran `measure` many
-    // times over — each run doing a getBoundingClientRect per node and
-    // concatenating a signature across every edge. Coalesce to one run per
-    // frame, which also lets the trailing run read a settled layout. The first
-    // measure stays synchronous so the edges are present on the initial paint.
     let frame: number | undefined;
     let pending = false;
     const scheduleMeasure = () => {
@@ -919,10 +937,6 @@ export function PlanExecutionView({
       observer?.disconnect();
     };
   }, [drawsDependencyEdges, topologyKey]);
-
-  const openSubagentDetails = (tool: ACPToolCall) => {
-    if (!getSubagentDetailsUnavailableReason(tool)) onOpenSubagent?.(tool);
-  };
 
   if (todos.length === 0) return null;
 
@@ -963,10 +977,7 @@ export function PlanExecutionView({
     const nestedTasks = nestedTasksFromIndex(tool, taskIndex);
     const transcriptNestedTools = nestedAgentToolsForTool(tool);
     const nestedToolByCallId = new Map(
-      transcriptNestedTools.map(({ tool: nestedTool }) => [
-        nestedTool.callId,
-        nestedTool,
-      ]),
+      transcriptNestedTools.map(({ tool: nt }) => [nt.callId, nt]),
     );
     const liveNestedCallIds = new Set(
       nestedTasks.flatMap(({ task }) =>
@@ -974,17 +985,16 @@ export function PlanExecutionView({
       ),
     );
     const nestedTools = transcriptNestedTools.filter(
-      ({ tool: nestedTool }) => !liveNestedCallIds.has(nestedTool.callId),
+      ({ tool: nt }) => !liveNestedCallIds.has(nt.callId),
     );
+
     return (
       <div className={styles.executionGroup} key={tool.callId}>
         <button
           type="button"
-          className={`${styles.execution}${
-            expanded ? ` ${styles.executionExpanded}` : ''
-          }`}
+          className={`${styles.execution}${expanded ? ` ${styles.executionExpanded}` : ''}`}
           data-plan-interactive
-          onClick={() => openSubagentDetails(tool)}
+          onClick={() => handleOpenSubagent(tool)}
           disabled={!onOpenSubagent}
           aria-disabled={
             !!getSubagentDetailsUnavailableReason(tool) || undefined
@@ -1042,7 +1052,7 @@ export function PlanExecutionView({
               data-plan-interactive
               key={task.id}
               style={{ paddingLeft: `${Math.min(depth, 3) * 12}px` }}
-              onClick={() => openSubagentDetails(nestedTool)}
+              onClick={() => handleOpenSubagent(nestedTool)}
               disabled={!onOpenSubagent}
               aria-disabled={
                 !!getSubagentDetailsUnavailableReason(nestedTool) || undefined
@@ -1064,30 +1074,28 @@ export function PlanExecutionView({
             </div>
           );
         })}
-        {nestedTools.map(({ tool: nestedTool, depth }) => (
+        {nestedTools.map(({ tool: nt, depth }) => (
           <button
             type="button"
             className={styles.nestedExecution}
             data-plan-interactive
-            key={nestedTool.callId}
+            key={nt.callId}
             style={{ paddingLeft: `${Math.min(depth, 3) * 12}px` }}
-            onClick={() => openSubagentDetails(nestedTool)}
+            onClick={() => handleOpenSubagent(nt)}
             disabled={!onOpenSubagent}
             aria-disabled={
-              !!getSubagentDetailsUnavailableReason(nestedTool) || undefined
+              !!getSubagentDetailsUnavailableReason(nt) || undefined
             }
             title={t(
-              getSubagentDetailsUnavailableReason(nestedTool) ??
+              getSubagentDetailsUnavailableReason(nt) ??
                 'planExecution.openDetails',
             )}
           >
             <span className={styles.executionLabel}>
-              ↳{' '}
-              {nestedTool.title ||
-                String(nestedTool.args?.description ?? nestedTool.toolName)}
+              ↳ {nt.title || String(nt.args?.description ?? nt.toolName)}
             </span>
             <span className={styles.executionStatus}>
-              {t(executionStatusKey(executionStatus(nestedTool, taskIndex)))}
+              {t(executionStatusKey(executionStatus(nt, taskIndex)))}
             </span>
           </button>
         ))}
@@ -1097,8 +1105,6 @@ export function PlanExecutionView({
 
   return (
     <section className={styles.section} aria-label={t('planExecution.title')}>
-      {/* With the caption suppressed and nothing to locate there is no row
-          left to draw, and an empty one still costs the section's row gap. */}
       {(!hideTitle || hasDependencies) && (
         <div
           className={styles.heading}
@@ -1115,13 +1121,14 @@ export function PlanExecutionView({
               type="button"
               className={styles.locateButton}
               data-plan-interactive
-              onClick={() => locateFocusTodo('smooth')}
+              onClick={handleLocateClick}
             >
               {t('planExecution.locateCurrent')}
             </button>
           )}
         </div>
       )}
+
       <div className={styles.overviewContainer}>
         <div
           className={styles.overview}
@@ -1165,24 +1172,35 @@ export function PlanExecutionView({
           </div>
         </div>
       </div>
-      {/* Past the edge budget the SVG is skipped entirely. The nodes still
-          list what they depend on, but the lines vanishing with no explanation
-          reads as a rendering failure, so say what happened. */}
-      {hasDependencies && !drawsDependencyEdges && (
+
+      {!forceFlatLayout && hasDependencies && !drawsDependencyEdges && (
         <p className={styles.edgeNotice} role="status">
           {t('planExecution.edgesHidden', { count: dependencyCount })}
         </p>
       )}
+
       <div
-        className={hasDependencies ? styles.dagViewport : styles.flatList}
-        ref={hasDependencies ? viewportRef : undefined}
-        {...(hasDependencies ? { 'data-plan-workflow': true } : {})}
+        className={
+          forceFlatLayout || !hasDependencies
+            ? styles.flatList
+            : styles.dagViewport
+        }
+        ref={!forceFlatLayout && hasDependencies ? viewportRef : undefined}
+        onKeyDown={handleGraphKeyDown}
+        tabIndex={0}
+        {...(!forceFlatLayout && hasDependencies
+          ? { 'data-plan-workflow': true }
+          : {})}
       >
         <div
-          className={hasDependencies ? styles.dagCanvas : styles.flatCanvas}
-          ref={hasDependencies ? graphRef : undefined}
+          className={
+            forceFlatLayout || !hasDependencies
+              ? styles.flatCanvas
+              : styles.dagCanvas
+          }
+          ref={!forceFlatLayout && hasDependencies ? graphRef : undefined}
           style={
-            hasDependencies
+            !forceFlatLayout && hasDependencies
               ? ({ '--plan-edge-lanes': graph.lanes } as CSSProperties)
               : undefined
           }
@@ -1211,9 +1229,6 @@ export function PlanExecutionView({
                     d="M 0 0 L 7 3.5 L 0 7 z"
                   />
                 </marker>
-                {/* Marker contents inherit from the marker's own ancestors,
-                    not from the path that references it, so a muted edge needs
-                    its own arrowhead rather than inherited opacity. */}
                 <marker
                   id={dimMarkerId}
                   markerWidth="7"
@@ -1249,11 +1264,15 @@ export function PlanExecutionView({
               })}
             </svg>
           )}
+
           {layers.map((layer, index) => (
             <div className={styles.layer} key={index}>
               {layer.map((todo) => {
                 const executions = toolsByTodo.get(todo.id) ?? [];
                 const state = statesByTodo.get(todo.id)!;
+                const isSelected = selectedTodoId === todo.id;
+                const blockedByIds = todo.blockedBy ?? [];
+
                 return (
                   <article
                     className={styles.node}
@@ -1264,8 +1283,6 @@ export function PlanExecutionView({
                         current === todo.id ? undefined : current,
                       )
                     }
-                    // Tabbing through the graph traces the same chain a pointer
-                    // does, so the highlight is not mouse-only.
                     onFocus={() => setHoveredTodoId(todo.id)}
                     onBlur={() =>
                       setHoveredTodoId((current) =>
@@ -1273,8 +1290,7 @@ export function PlanExecutionView({
                       )
                     }
                     data-plan-input={
-                      (drawsDependencyEdges &&
-                        (dependencyIdsByTodo.get(todo.id)?.length ?? 0) > 0) ||
+                      (drawsDependencyEdges && blockedByIds.length > 0) ||
                       undefined
                     }
                     data-plan-output={
@@ -1282,7 +1298,7 @@ export function PlanExecutionView({
                         (dependentsByTodo.get(todo.id)?.length ?? 0) > 0) ||
                       undefined
                     }
-                    data-selected={selectedTodoId === todo.id || undefined}
+                    data-selected={isSelected || undefined}
                     key={todo.id}
                     ref={(node) => {
                       if (node) nodeRefs.current.set(todo.id, node);
@@ -1294,25 +1310,19 @@ export function PlanExecutionView({
                       className={styles.nodeSummary}
                       data-plan-interactive
                       data-plan-node-id={todo.id}
-                      aria-pressed={selectedTodoId === todo.id}
-                      aria-expanded={
-                        showStepDetails ? selectedTodoId === todo.id : undefined
-                      }
+                      aria-pressed={isSelected}
+                      aria-expanded={showStepDetails ? isSelected : undefined}
                       aria-controls={
-                        showStepDetails && selectedTodoId === todo.id
-                          ? detailsId
-                          : undefined
+                        showStepDetails && isSelected ? detailsId : undefined
                       }
                       title={`${t(
-                        showStepDetails && selectedTodoId === todo.id
+                        showStepDetails && isSelected
                           ? 'todo.detail.hide'
                           : 'todo.detail.show',
                       )}: ${todo.content}`}
                       onClick={() =>
-                        updateSelectedTodoId(
-                          showStepDetails && selectedTodoId === todo.id
-                            ? undefined
-                            : todo.id,
+                        handleSelectTodo(
+                          showStepDetails && isSelected ? undefined : todo.id,
                         )
                       }
                       disabled={documentMode}
@@ -1334,10 +1344,13 @@ export function PlanExecutionView({
                         )}
                       </div>
                       <div className={styles.nodeContent}>{todo.content}</div>
-                      {(todo.blockedBy?.length ?? 0) > 0 && (
+                      {blockedByIds.length > 0 && (
                         <div className={styles.dependencies}>
                           {t('planExecution.dependsOn')}{' '}
-                          {todo.blockedBy!.join(', ')}
+                          {renderDependencyLinks(
+                            blockedByIds,
+                            t('workflow.dependencies.none'),
+                          )}
                         </div>
                       )}
                     </button>
@@ -1353,6 +1366,8 @@ export function PlanExecutionView({
           ))}
         </div>
       </div>
+
+      {/* Inline Step Details Panel */}
       {showStepDetails && selectedTodo && selectedState && (
         <section
           className={styles.stepDetails}
@@ -1378,14 +1393,22 @@ export function PlanExecutionView({
           {(selectedTodo.blockedBy?.length ?? 0) > 0 && (
             <div className={styles.dependencies}>
               {t('planExecution.dependsOn')}{' '}
-              {selectedTodo.blockedBy!.join(', ')}
+              {renderDependencyLinks(
+                selectedTodo.blockedBy!,
+                t('workflow.dependencies.none'),
+              )}
             </div>
           )}
           {selectedDependents.length > 0 && (
             <div className={styles.dependencies}>
-              {t('planExecution.unblocks')} {selectedDependents.join(', ')}
+              {t('planExecution.unblocks')}{' '}
+              {renderDependencyLinks(
+                selectedDependents,
+                t('workflow.dependencies.noDownstream'),
+              )}
             </div>
           )}
+
           {selectedExecutions.length > 0 && (
             <div className={styles.stepExecutions}>
               <div className={styles.stepExecutionsTitle}>
@@ -1403,6 +1426,7 @@ export function PlanExecutionView({
           )}
         </section>
       )}
+
       {unassigned.length > 0 && (
         <div className={styles.unassigned}>
           <div className={styles.unassignedTitle}>

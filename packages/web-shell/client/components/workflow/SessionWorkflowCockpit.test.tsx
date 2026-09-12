@@ -38,6 +38,7 @@ describe('SessionWorkflowCockpit', () => {
             onSelectedTodoIdChange={onSelectedTodoIdChange}
             onBackToChat={() => undefined}
             onOpenSubagent={() => undefined}
+            isDetailPanelVisible={true}
           />
         </I18nProvider>,
       );
@@ -65,6 +66,38 @@ describe('SessionWorkflowCockpit', () => {
         ?.click();
     });
     expect(onSelectedTodoIdChange).toHaveBeenCalledWith('deliver');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('shows inline step details when detail panel is not visible', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onSelectedTodoIdChange = vi.fn();
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowCockpit
+            sessionId="session-12345678"
+            connected
+            sessionName="Repository delivery"
+            todos={todos}
+            tools={[]}
+            tasks={[]}
+            selectedTodoId="research"
+            onSelectedTodoIdChange={onSelectedTodoIdChange}
+            onBackToChat={() => undefined}
+            onOpenSubagent={() => undefined}
+            isDetailPanelVisible={false}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.querySelector('[data-plan-step-details]')).not.toBeNull();
 
     act(() => root.unmount());
     container.remove();

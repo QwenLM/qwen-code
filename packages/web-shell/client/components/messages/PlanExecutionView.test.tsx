@@ -571,7 +571,7 @@ describe('PlanExecutionView', () => {
       );
     });
 
-    expect(container.textContent).toContain('Depends on: research');
+    expect(container.textContent).toContain('Depends on: 1. Research');
     expect(container.textContent).toContain('33%');
     expect(container.textContent).toContain('1 / 3');
     // 3, not 2: the strip now derives from the same source as the node
@@ -590,8 +590,8 @@ describe('PlanExecutionView', () => {
     const details = container.querySelector('[data-plan-step-details]');
     expect(details?.textContent).toContain('Step details');
     expect(details?.textContent).toContain('Build');
-    expect(details?.textContent).toContain('Depends on: research');
-    expect(details?.textContent).toContain('Unblocks: verify');
+    expect(details?.textContent).toContain('Depends on: 1. Research');
+    expect(details?.textContent).toContain('Unblocks: 3. Verify');
     expect(details?.textContent).toContain('Subagents');
     expect(details?.textContent).toContain(
       'Current activity:Inspecting the implementation',

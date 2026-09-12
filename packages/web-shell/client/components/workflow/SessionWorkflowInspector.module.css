@@ -394,22 +394,21 @@
 
 .stepIndex[data-status='completed'] {
   color: var(--status-done-fg);
-  border-color: color-mix(in srgb, var(--status-done-fg) 45%, var(--border));
+  border-color: var(--status-done-fg);
+  opacity: 0.85;
 }
 
 .stepIndex[data-status='running'],
 .stepIndex[data-status='in_progress'] {
   color: var(--status-running-fg);
-  border-color: color-mix(in srgb, var(--status-running-fg) 45%, var(--border));
+  border-color: var(--status-running-fg);
+  opacity: 0.85;
 }
 
 .stepIndex[data-status='paused'] {
   color: var(--status-attention-fg);
-  border-color: color-mix(
-    in srgb,
-    var(--status-attention-fg) 45%,
-    var(--border)
-  );
+  border-color: var(--status-attention-fg);
+  opacity: 0.85;
 }
 
 .stepList strong,
@@ -547,4 +546,45 @@
   max-width: 280px;
   margin: 0;
   font-size: 12px;
+}
+
+.dependencyLinkWrapper {
+  display: inline;
+}
+
+.dependencySeparator {
+  color: var(--muted-foreground);
+}
+
+.dependencyLink {
+  all: unset;
+  cursor: pointer;
+  color: var(--agent-blue-500);
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 2px;
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dependencyLink {
+    transition: text-decoration-color 140ms ease;
+  }
+}
+
+.dependencyLink:hover {
+  text-decoration-color: var(--agent-blue-500);
+}
+
+.dependencyLink:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+  text-decoration-color: var(--agent-blue-500);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dependencyLink {
+    transition: none;
+  }
 }

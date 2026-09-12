@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
 import { ArrowLeftIcon, GitBranchIcon } from 'lucide-react';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
@@ -10,7 +10,7 @@ import {
 } from './session-workflow-model';
 import styles from './SessionWorkflowCockpit.module.css';
 
-interface SessionWorkflowCockpitProps {
+export interface SessionWorkflowCockpitProps {
   sessionId: string;
   connected: boolean;
   sessionName?: string;
@@ -22,6 +22,7 @@ interface SessionWorkflowCockpitProps {
   onSelectedTodoIdChange: (todoId: string | undefined) => void;
   onBackToChat: () => void;
   onOpenSubagent: (tool: ACPToolCall) => void;
+  isDetailPanelVisible?: boolean;
 }
 
 export function SessionWorkflowCockpit({
@@ -36,25 +37,62 @@ export function SessionWorkflowCockpit({
   onSelectedTodoIdChange,
   onBackToChat,
   onOpenSubagent,
-}: SessionWorkflowCockpitProps) {
+  isDetailPanelVisible = true,
+}: SessionWorkflowCockpitProps): React.JSX.Element {
   const { t } = useI18n();
   const backButtonRef = useRef<HTMLButtonElement>(null);
+
+  const [isNarrow, setIsNarrow] = useState(false);
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(max-width: 768px)');
+    const handleChange = (e: MediaQueryListEvent) => setIsNarrow(e.matches);
+    setIsNarrow(mediaQuery.matches);
+    mediaQuery.addEventListener('change', handleChange);
+    return () => mediaQuery.removeEventListener('change', handleChange);
+  }, []);
+
   const projection = useMemo(
     () => buildSessionWorkflowProjection(todos, tools, tasks),
-    [tasks, todos, tools],
+    [todos, tools, tasks],
   );
-  const defaultTodoId = getDefaultWorkflowTodoId(todos, projection);
+
+  const defaultTodoId = useMemo(
+    () => getDefaultWorkflowTodoId(todos, projection),
+    [todos, projection],
+  );
+
+  const effectiveSelectedTodoId = useMemo(() => {
+    if (selectedTodoId != null && projection.todosById.has(selectedTodoId)) {
+      return selectedTodoId;
+    }
+    return defaultTodoId;
+  }, [selectedTodoId, defaultTodoId, projection.todosById]);
+
+  const showInlineStepDetails = !isDetailPanelVisible;
+
+  const handleSelectedTodoChange = useCallback(
+    (todoId: string | undefined) => {
+      onSelectedTodoIdChange(todoId);
+    },
+    [onSelectedTodoIdChange],
+  );
+
+  const handleBackToChat = useCallback(() => {
+    onBackToChat();
+  }, [onBackToChat]);
+
+  const handleOpenSubagent = useCallback(
+    (tool: ACPToolCall) => {
+      onOpenSubagent(tool);
+    },
+    [onOpenSubagent],
+  );
 
   useEffect(() => {
-    if (!projection.todosById.has(selectedTodoId ?? '')) {
-      onSelectedTodoIdChange(defaultTodoId);
+    if (effectiveSelectedTodoId !== selectedTodoId) {
+      onSelectedTodoIdChange(effectiveSelectedTodoId);
     }
-  }, [
-    defaultTodoId,
-    onSelectedTodoIdChange,
-    projection.todosById,
-    selectedTodoId,
-  ]);
+  }, [effectiveSelectedTodoId, selectedTodoId, onSelectedTodoIdChange]);
 
   useEffect(() => {
     backButtonRef.current?.focus();
@@ -66,12 +104,15 @@ export function SessionWorkflowCockpit({
         <GitBranchIcon aria-hidden="true" />
         <h1>{t('workflow.empty.title')}</h1>
         <p>{t('workflow.empty.copy')}</p>
-        <button onClick={onBackToChat} ref={backButtonRef} type="button">
+        <button onClick={handleBackToChat} ref={backButtonRef} type="button">
           {t('workflow.empty.action')}
         </button>
       </div>
     );
   }
+
+  const workspaceDisplayName =
+    workspaceCwd?.split('/').at(-1) || t('workflow.session.workspace');
 
   return (
     <div className={styles.cockpit} data-testid="session-workflow-cockpit">
@@ -80,9 +121,10 @@ export function SessionWorkflowCockpit({
           <button
             className={styles.backButton}
             data-testid="workflow-back-to-chat"
-            onClick={onBackToChat}
+            onClick={handleBackToChat}
             ref={backButtonRef}
             type="button"
+            aria-label={t('workflow.chatTitle')}
           >
             <ArrowLeftIcon aria-hidden="true" />
             {t('workflow.chatTitle')}
@@ -93,18 +135,16 @@ export function SessionWorkflowCockpit({
               {sessionName || t('workflow.session.defaultTitle')}
             </h1>
             <small>
-              {sessionId.slice(0, 8)} ·{' '}
-              {workspaceCwd?.split('/').at(-1) ||
-                t('workflow.session.workspace')}
+              {sessionId.slice(0, 8)} · {workspaceDisplayName}
             </small>
           </div>
         </div>
-        <div className={styles.headerStatus}>
+        <div className={styles.headerStatus} role="status" aria-live="polite">
           <span data-status={projection.taskStatusTone}>
             {t(projection.taskStatusI18nKey)}
           </span>
           <span data-connected={connected || undefined}>
-            <span className={styles.connectionDot} />
+            <span className={styles.connectionDot} aria-hidden="true" />
             {t(
               connected
                 ? 'workflow.connection.connected'
@@ -113,18 +153,20 @@ export function SessionWorkflowCockpit({
           </span>
         </div>
       </header>
+
       <main className={styles.canvas}>
         <PlanExecutionView
           hideTitle
           todos={todos}
           tools={tools}
           tasks={tasks}
-          onOpenSubagent={onOpenSubagent}
+          onOpenSubagent={handleOpenSubagent}
           selection={{
-            value: selectedTodoId,
-            onChange: onSelectedTodoIdChange,
+            value: effectiveSelectedTodoId,
+            onChange: handleSelectedTodoChange,
           }}
-          showStepDetails={false}
+          showStepDetails={showInlineStepDetails}
+          forceFlatLayout={isNarrow}
         />
       </main>
     </div>

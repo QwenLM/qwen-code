@@ -18058,6 +18058,7 @@ export function App({
                     onSelectedTodoIdChange={setSelectedWorkflowTodoId}
                     onBackToChat={closeCockpit}
                     onOpenSubagent={openSubagentPanel}
+                    isDetailPanelVisible={artifactPanelOpen}
                     {...(sessionDisplayName
                       ? { sessionName: sessionDisplayName }
                       : {})}

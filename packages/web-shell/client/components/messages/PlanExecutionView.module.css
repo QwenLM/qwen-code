@@ -629,3 +629,44 @@ button.nestedExecution:not(:disabled):focus-visible {
     animation: none;
   }
 }
+
+.dependencyLinkWrapper {
+  display: inline;
+}
+
+.dependencySeparator {
+  color: var(--muted-foreground);
+}
+
+.dependencyLink {
+  all: unset;
+  cursor: pointer;
+  color: var(--agent-blue-500);
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 2px;
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dependencyLink {
+    transition: text-decoration-color 140ms ease;
+  }
+}
+
+.dependencyLink:hover {
+  text-decoration-color: var(--agent-blue-500);
+}
+
+.dependencyLink:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+  text-decoration-color: var(--agent-blue-500);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dependencyLink {
+    transition: none;
+  }
+}

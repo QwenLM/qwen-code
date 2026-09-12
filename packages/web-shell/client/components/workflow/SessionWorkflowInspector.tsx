@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   DaemonSessionArtifact,
   DaemonSessionTaskStatus,
@@ -46,27 +46,183 @@ export function SessionWorkflowInspector({
   onOpenSubagent,
   onOpenArtifact,
   canvasMode = false,
-}: SessionWorkflowInspectorProps) {
+}: SessionWorkflowInspectorProps): React.JSX.Element {
   const { language, t } = useI18n();
   const projection = useMemo(
     () => buildSessionWorkflowProjection(todos, tools, tasks),
-    [tasks, todos, tools],
+    [todos, tools, tasks],
   );
-  const defaultTodoId = getDefaultWorkflowTodoId(todos, projection);
-  const effectiveSelectedTodoId = projection.todosById.has(selectedTodoId ?? '')
-    ? selectedTodoId
-    : defaultTodoId;
-  const selectedTodo = projection.todosById.get(effectiveSelectedTodoId ?? '');
+
+  const defaultTodoId = useMemo(
+    () => getDefaultWorkflowTodoId(todos, projection),
+    [todos, projection],
+  );
+
+  const effectiveSelectedTodoId = useMemo(() => {
+    if (selectedTodoId != null && projection.todosById.has(selectedTodoId)) {
+      return selectedTodoId;
+    }
+    return defaultTodoId;
+  }, [selectedTodoId, defaultTodoId, projection.todosById]);
+
+  const selectedTodo = useMemo(
+    () => projection.todosById.get(effectiveSelectedTodoId ?? ''),
+    [effectiveSelectedTodoId, projection.todosById],
+  );
+
+  const selectedState = useMemo(
+    () => (selectedTodo ? projection.states.get(selectedTodo.id) : undefined),
+    [selectedTodo, projection.states],
+  );
+
+  const selectedTools = useMemo(
+    () =>
+      selectedTodo
+        ? (projection.agentToolsByTodo.get(selectedTodo.id) ?? [])
+        : [],
+    [selectedTodo, projection.agentToolsByTodo],
+  );
+
+  // Filter upstream to only include todos that still exist in the projection.
+  // Guards against stale blockedBy references after plan mutations.
+  const upstreamIds = useMemo(
+    () =>
+      selectedTodo?.blockedBy?.filter((id) => projection.todosById.has(id)) ??
+      [],
+    [selectedTodo, projection.todosById],
+  );
+
+  // Downstream dependents are pre-derived by the projection. Falls back to
+  // empty array when no dependents exist. Drops self-references automatically.
+  const downstreamTodos = useMemo(
+    () =>
+      selectedTodo
+        ? (projection.dependentsByTodo.get(selectedTodo.id) ?? [])
+        : [],
+    [selectedTodo, projection.dependentsByTodo],
+  );
+
+  const todoIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    todos.forEach((todo, index) => map.set(todo.id, index));
+    return map;
+  }, [todos]);
+
+  const [showAllActivity, setShowAllActivity] = useState(false);
+
+  const handleSelectedTodoChange = useCallback(
+    (todoId: string | undefined) => {
+      onSelectedTodoIdChange(todoId);
+    },
+    [onSelectedTodoIdChange],
+  );
+
+  const handleExpandGraph = useCallback(() => {
+    onExpandGraph();
+  }, [onExpandGraph]);
+
+  const handleOpenSubagent = useCallback(
+    (tool: ACPToolCall) => {
+      if (!getSubagentDetailsUnavailableReason(tool)) {
+        onOpenSubagent(tool);
+      }
+    },
+    [onOpenSubagent],
+  );
+
+  const handleOpenArtifact = useCallback(
+    (artifactId: string) => {
+      onOpenArtifact?.(artifactId);
+    },
+    [onOpenArtifact],
+  );
+
+  const [activeUpIdx, setActiveUpIdx] = useState(0);
+  const [activeDownIdx, setActiveDownIdx] = useState(0);
+  useEffect(() => {
+    setActiveUpIdx(0);
+    setActiveDownIdx(0);
+  }, [effectiveSelectedTodoId]);
+
+  const handleKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      if (!effectiveSelectedTodoId || !selectedTodo) return;
+
+      let nextId: string | undefined;
+      switch (event.key) {
+        case 'ArrowUp':
+        case 'ArrowLeft': {
+          if (upstreamIds.length > 0) {
+            nextId = upstreamIds[activeUpIdx % upstreamIds.length];
+            setActiveUpIdx((prev) => (prev + 1) % upstreamIds.length);
+          }
+          break;
+        }
+        case 'ArrowDown':
+        case 'ArrowRight': {
+          if (downstreamTodos.length > 0) {
+            nextId =
+              downstreamTodos[activeDownIdx % downstreamTodos.length]?.id;
+            setActiveDownIdx((prev) => (prev + 1) % downstreamTodos.length);
+          }
+          break;
+        }
+        default:
+          return;
+      }
+
+      if (nextId != null) {
+        event.preventDefault();
+        event.stopPropagation();
+        onSelectedTodoIdChange(nextId);
+      }
+    },
+    [
+      effectiveSelectedTodoId,
+      selectedTodo,
+      upstreamIds,
+      downstreamTodos,
+      activeUpIdx,
+      activeDownIdx,
+      onSelectedTodoIdChange,
+    ],
+  );
 
   useEffect(() => {
     if (effectiveSelectedTodoId !== selectedTodoId) {
       onSelectedTodoIdChange(effectiveSelectedTodoId);
     }
-  }, [effectiveSelectedTodoId, onSelectedTodoIdChange, selectedTodoId]);
+  }, [effectiveSelectedTodoId, selectedTodoId, onSelectedTodoIdChange]);
 
-  const openSubagentDetails = (tool: ACPToolCall) => {
-    if (!getSubagentDetailsUnavailableReason(tool)) onOpenSubagent(tool);
-  };
+  const renderDependencyLink = useCallback(
+    (todoId: string, index: number) => {
+      const todo = projection.todosById.get(todoId);
+      if (!todo) return null;
+
+      const stepNumber = todoIndexMap.get(todoId);
+      const label =
+        stepNumber != null
+          ? `${stepNumber + 1}. ${todo.content}`
+          : todo.content;
+
+      return (
+        <span key={todoId} className={styles.dependencyLinkWrapper}>
+          {index > 0 && <span className={styles.dependencySeparator}>, </span>}
+          <button
+            className={styles.dependencyLink}
+            onClick={() => handleSelectedTodoChange(todoId)}
+            type="button"
+            aria-label={t('workflow.dependencies.navigateTo', {
+              step: label,
+            })}
+          >
+            {label}
+          </button>
+        </span>
+      );
+    },
+    [projection.todosById, todoIndexMap, handleSelectedTodoChange, t],
+  );
 
   if (todos.length === 0) {
     return (
@@ -77,23 +233,6 @@ export function SessionWorkflowInspector({
       </div>
     );
   }
-
-  const selectedState = selectedTodo
-    ? projection.states.get(selectedTodo.id)
-    : undefined;
-  const selectedTools = selectedTodo
-    ? (projection.agentToolsByTodo.get(selectedTodo.id) ?? [])
-    : [];
-  const upstream = selectedTodo?.blockedBy?.filter((id) =>
-    projection.todosById.has(id),
-  );
-  // The projection already derives this for the graph's edges; recomputing it
-  // here rescanned every todo's `blockedBy` for the same answer. It also drops
-  // a todo that lists itself in `blockedBy`, which the previous filter kept as
-  // its own downstream step.
-  const downstream = selectedTodo
-    ? (projection.dependentsByTodo.get(selectedTodo.id) ?? [])
-    : [];
 
   const detail = selectedTodo && selectedState && (
     <section className={styles.detail} data-testid="workflow-step-detail">
@@ -107,27 +246,32 @@ export function SessionWorkflowInspector({
         </span>
       </div>
       <code className={styles.stepId}>{selectedTodo.id}</code>
+
+      {/* Interactive dependency navigation */}
       <dl className={styles.dependencies}>
         <div>
           <dt>{t('workflow.dependencies.upstream')}</dt>
           <dd>
-            {upstream?.length
-              ? upstream.join(', ')
+            {upstreamIds.length > 0
+              ? upstreamIds.map((id, i) => renderDependencyLink(id, i))
               : t('workflow.dependencies.none')}
           </dd>
         </div>
         <div>
           <dt>{t('workflow.dependencies.unblocks')}</dt>
           <dd>
-            {downstream.length
-              ? downstream.map((todo) => todo.id).join(', ')
+            {downstreamTodos.length > 0
+              ? downstreamTodos.map((todo, i) =>
+                  renderDependencyLink(todo.id, i, downstreamTodos.length),
+                )
               : t('workflow.dependencies.noDownstream')}
           </dd>
         </div>
       </dl>
+
       <div className={styles.linkedAgents}>
         <h3>{t('planExecution.subagents')}</h3>
-        {selectedTools.length ? (
+        {selectedTools.length > 0 ? (
           selectedTools.map((tool) => {
             const task = projection.tasksByTool.get(tool);
             const metrics = task
@@ -145,17 +289,15 @@ export function SessionWorkflowInspector({
                       }),
                 ].filter(Boolean)
               : [];
+
+            const unavailableReason = getSubagentDetailsUnavailableReason(tool);
+
             return (
               <button
                 key={tool.callId}
-                aria-disabled={
-                  !!getSubagentDetailsUnavailableReason(tool) || undefined
-                }
-                title={t(
-                  getSubagentDetailsUnavailableReason(tool) ??
-                    'planExecution.openDetails',
-                )}
-                onClick={() => openSubagentDetails(tool)}
+                aria-disabled={!!unavailableReason || undefined}
+                title={unavailableReason ?? t('planExecution.openDetails')}
+                onClick={() => handleOpenSubagent(tool)}
                 type="button"
               >
                 <span className={styles.itemText}>
@@ -188,7 +330,14 @@ export function SessionWorkflowInspector({
 
   if (canvasMode) {
     return (
-      <div className={styles.inspector} data-testid="workflow-canvas-detail">
+      <div
+        className={styles.inspector}
+        data-testid="workflow-canvas-detail"
+        onKeyDown={handleKeyDown}
+        tabIndex={0}
+        role="application"
+        aria-label={t('workflow.inspector.keyboardNavLabel')}
+      >
         <div className={styles.canvasHint}>
           <GitBranchIcon aria-hidden="true" />
           <span>{t('workflow.inspector.canvasHint')}</span>
@@ -199,7 +348,15 @@ export function SessionWorkflowInspector({
   }
 
   return (
-    <div className={styles.inspector} data-testid="workflow-inspector">
+    <div
+      className={styles.inspector}
+      data-testid="workflow-inspector"
+      onKeyDown={handleKeyDown}
+      tabIndex={0}
+      role="application"
+      aria-label={t('workflow.inspector.keyboardNavLabel')}
+    >
+      {/* Summary Section */}
       <section className={styles.summary}>
         <div className={styles.summaryHeading}>
           <div>
@@ -237,7 +394,7 @@ export function SessionWorkflowInspector({
         </div>
         <button
           className={styles.expandButton}
-          onClick={onExpandGraph}
+          onClick={handleExpandGraph}
           type="button"
         >
           <GitBranchIcon aria-hidden="true" />
@@ -246,6 +403,7 @@ export function SessionWorkflowInspector({
         </button>
       </section>
 
+      {/* Attention-Requiring Steps */}
       {projection.attentionTodos.length > 0 && (
         <section className={styles.attention}>
           <div className={styles.compactHeading}>
@@ -256,7 +414,7 @@ export function SessionWorkflowInspector({
             <button
               aria-pressed={effectiveSelectedTodoId === todo.id}
               key={todo.id}
-              onClick={() => onSelectedTodoIdChange(todo.id)}
+              onClick={() => handleSelectedTodoChange(todo.id)}
               type="button"
             >
               <AlertCircleIcon
@@ -270,6 +428,7 @@ export function SessionWorkflowInspector({
         </section>
       )}
 
+      {/* All Steps List */}
       <section className={styles.steps} data-testid="workflow-step-list">
         <div className={styles.compactHeading}>
           <h2>{t('workflow.inspector.allSteps')}</h2>
@@ -282,7 +441,7 @@ export function SessionWorkflowInspector({
               <button
                 aria-pressed={effectiveSelectedTodoId === todo.id}
                 key={todo.id}
-                onClick={() => onSelectedTodoIdChange(todo.id)}
+                onClick={() => handleSelectedTodoChange(todo.id)}
                 type="button"
               >
                 <span className={styles.stepIndex} data-status={state?.status}>
@@ -306,15 +465,20 @@ export function SessionWorkflowInspector({
         </div>
       </section>
 
+      {/* Selected Step Detail */}
       {detail}
 
+      {/* Recent Activity */}
       <details className={styles.collapsible} open>
         <summary>
           <span>{t('workflow.inspector.recentActivity')}</span>
           <small>{projection.activity.length}</small>
         </summary>
         <div className={styles.activityList}>
-          {projection.activity.slice(0, 6).map((task) => {
+          {(showAllActivity
+            ? projection.activity
+            : projection.activity.slice(0, 6)
+          ).map((task) => {
             const tool = projection.toolsByTaskId.get(task.id);
             const at = task.endTime ?? task.startTime;
             const content = (
@@ -337,17 +501,17 @@ export function SessionWorkflowInspector({
                 </span>
               </>
             );
+
+            const unavailableReason = tool
+              ? getSubagentDetailsUnavailableReason(tool)
+              : undefined;
+
             return tool ? (
               <button
                 key={task.id}
-                aria-disabled={
-                  !!getSubagentDetailsUnavailableReason(tool) || undefined
-                }
-                title={t(
-                  getSubagentDetailsUnavailableReason(tool) ??
-                    'planExecution.openDetails',
-                )}
-                onClick={() => openSubagentDetails(tool)}
+                aria-disabled={!!unavailableReason || undefined}
+                title={unavailableReason ?? t('planExecution.openDetails')}
+                onClick={() => handleOpenSubagent(tool)}
                 type="button"
               >
                 {content}
@@ -359,9 +523,25 @@ export function SessionWorkflowInspector({
           {projection.activity.length === 0 && (
             <p>{t('workflow.activity.empty')}</p>
           )}
+
+          {projection.activity.length > 6 && (
+            <button
+              type="button"
+              className={styles.expandButton}
+              onClick={() => setShowAllActivity(!showAllActivity)}
+            >
+              {t(
+                showAllActivity
+                  ? 'workflow.activity.showLess'
+                  : 'workflow.activity.showAll',
+                { count: projection.activity.length },
+              )}
+            </button>
+          )}
         </div>
       </details>
 
+      {/* Deliverables / Artifacts */}
       <details className={styles.collapsible} open={artifacts.length > 0}>
         <summary>
           <span>{t('workflow.deliverables.title')}</span>
@@ -372,7 +552,7 @@ export function SessionWorkflowInspector({
             <button
               disabled={!onOpenArtifact}
               key={artifact.id}
-              onClick={() => onOpenArtifact?.(artifact.id)}
+              onClick={() => handleOpenArtifact(artifact.id)}
               type="button"
             >
               <span className={styles.itemText}>
