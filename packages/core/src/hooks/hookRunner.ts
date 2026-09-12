@@ -498,8 +498,31 @@ async function terminateSurvivingHookProcessGroup(
     //
     // The liveness probe is the #6067 guard: taskkill has no process-group
     // equivalent, so it must not be fired at a pid that has already exited and
-    // may have been recycled onto an unrelated application.
-    if (!isPidAlive(pid)) {
+    // may have been recycled onto an unrelated application. It is classified
+    // here rather than via `isPidAlive` so an unexpected errno (host memory
+    // or handle pressure, libuv's UV_UNKNOWN catch-all) is told apart from a
+    // provably gone pid: both skip the reap, but the unknown case leaves the
+    // hook's cmd.exe tree running and must not vanish silently. The decision
+    // is unchanged from the shared helper — alive is exactly success or
+    // EPERM/EACCES, anything else still skips.
+    let probe: 'alive' | 'gone' | 'unknown' = 'alive';
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      probe =
+        code === 'ESRCH'
+          ? 'gone'
+          : code === 'EPERM' || code === 'EACCES'
+            ? 'alive'
+            : 'unknown';
+    }
+    if (probe === 'unknown') {
+      debugLogger.warn(
+        `Skipping reap of surviving hook ${pid}: liveness probe failed for an unknown reason`,
+      );
+    }
+    if (probe !== 'alive') {
       return;
     }
     // `taskkillProcessTree` resolves false when execFile errors or when

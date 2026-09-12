@@ -1524,6 +1524,13 @@ describe('HookRunner', () => {
         // the pid is dead and immediately recyclable, so the fallback would
         // land on an unrelated process (the #6067 collateral kill).
         expect(killSpy).not.toHaveBeenCalledWith(survivingPid, 'SIGKILL');
+        // Nor may this branch fall through to the POSIX group path: that
+        // signals -pid, and signalFallback then signals the positive pid
+        // with no liveness re-probe at all.
+        expect(killSpy).not.toHaveBeenCalledWith(
+          -survivingPid,
+          expect.anything(),
+        );
       },
     );
 
@@ -1561,6 +1568,11 @@ describe('HookRunner', () => {
         ['/f', '/t', '/pid', String(survivingPid)],
         expect.anything(),
         expect.anything(),
+      );
+      // The proven-gone skip stays silent; only an unknown probe failure
+      // warns.
+      expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining(`surviving hook ${survivingPid}`),
       );
     });
 
@@ -1732,9 +1744,11 @@ describe('HookRunner', () => {
 
     it('does not taskkill a surviving Windows hook whose liveness probe fails unexpectedly', async () => {
       // A probe error that is neither "gone" (ESRCH) nor "exists but denied"
-      // (EPERM/EACCES) establishes nothing about the pid. isPidAlive treats it
-      // as dead, because taskkilling a pid of unknown state risks the #6067
-      // recycled-pid collateral kill.
+      // (EPERM/EACCES) establishes nothing about the pid. The reap still skips
+      // it — taskkilling a pid of unknown state risks the #6067 recycled-pid
+      // collateral kill — but the skip must warn, or a host-level probe
+      // failure leaves the hook's cmd.exe tree running (#11303) with no
+      // trace.
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       const survivingPid = 9916;
       vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
@@ -1767,6 +1781,9 @@ describe('HookRunner', () => {
         ['/f', '/t', '/pid', String(survivingPid)],
         expect.anything(),
         expect.anything(),
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(`surviving hook ${survivingPid}`),
       );
     });
 
