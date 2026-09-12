@@ -516,14 +516,13 @@ function convertToHistoryItems(
           // Same stamp as the at-command branch above. The modelText
           // carry-through prefers the record's model-facing parts over the
           // resolved display value: on the displayText-wins path (a
-          // UserPromptSubmit-hook record) `raw` is the clean projection,
-          // so `text === raw` always holds and the enveloped model text
-          // would be dropped — killing the rewind re-arm for exactly the
-          // records whose envelope was injected. The parts-derived text is
-          // adopted only when it differs from `text` by a pure leading
-          // envelope run (a hook-context trailing part is stripped first);
-          // otherwise `raw` itself is the model text that carried the
-          // envelope.
+          // UserPromptSubmit-hook record) the display value is the typed
+          // text, so when `text === raw` the enveloped model text would be
+          // dropped — killing the rewind re-arm for exactly the records
+          // whose envelope was injected. The parts-derived text is adopted
+          // only when it differs from `text` by a pure leading envelope
+          // run (a hook-context trailing part is stripped first); otherwise
+          // `raw` itself is the model text that carried the envelope.
           const envelopePrefix =
             modelFromParts !== '' &&
             modelFromParts !== text &&
