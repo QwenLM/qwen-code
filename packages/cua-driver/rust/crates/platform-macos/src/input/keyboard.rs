@@ -51,27 +51,44 @@ pub fn press_key(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Type a string character-by-character to `pid`.
+fn text_characters(text: &str) -> impl Iterator<Item = char> + '_ {
+    let mut previous_was_cr = false;
+    text.chars().filter_map(move |ch| {
+        let skip_lf = previous_was_cr && ch == '\n';
+        previous_was_cr = ch == '\r';
+        if skip_lf {
+            None
+        } else {
+            Some(if ch == '\r' { '\n' } else { ch })
+        }
+    })
+}
+
+fn text_event(source: &CGEventSource, ch: char, down: bool) -> anyhow::Result<CGEvent> {
+    // A Unicode LF on keycode 0 inserts a line inside an Excel cell. Text
+    // synthesis promises Return semantics, so use the actual Return keycode.
+    let code = if ch == '\n' { 36 } else { 0 };
+    let event = CGEvent::new_keyboard_event(source.clone(), code, down)
+        .map_err(|_| anyhow::anyhow!("CGEvent text keyboard event failed"))?;
+    if ch != '\n' {
+        event.set_string(&ch.to_string());
+    }
+    // Avoid leaking inferred Shift state from an uppercase Unicode payload.
+    event.set_flags(CGEventFlags::CGEventFlagNull);
+    Ok(event)
+}
+
+/// Type a string character-by-character to `pid`, with line breaks as Return.
 pub fn type_text(pid: i32, text: &str) -> anyhow::Result<()> {
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
 
-    for ch in text.chars() {
-        let ch_str = ch.to_string();
-        let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard down failed"))?;
-        down.set_string(&ch_str);
-        // Always zero flags: Chrome inspects the flags field to infer modifier
-        // state; without this, uppercase chars (e.g. 'E') are seen as Shift+e
-        // and the modifier leaks into the next character (Swift fix: event.flags = []).
-        down.set_flags(CGEventFlags::CGEventFlagNull);
+    for ch in text_characters(text) {
+        let down = text_event(&source, ch, true)?;
         post_keyboard_event(pid, &down);
         std::thread::sleep(std::time::Duration::from_millis(8));
 
-        let up = CGEvent::new_keyboard_event(source.clone(), 0, false)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard up failed"))?;
-        up.set_string(&ch_str);
-        up.set_flags(CGEventFlags::CGEventFlagNull);
+        let up = text_event(&source, ch, false)?;
         post_keyboard_event(pid, &up);
         std::thread::sleep(std::time::Duration::from_millis(8));
     }
@@ -84,19 +101,12 @@ pub fn type_text_with_delay(pid: i32, text: &str, inter_char_delay_ms: u64) -> a
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
 
-    for ch in text.chars() {
-        let ch_str = ch.to_string();
-        let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard down failed"))?;
-        down.set_string(&ch_str);
-        down.set_flags(CGEventFlags::CGEventFlagNull);
+    for ch in text_characters(text) {
+        let down = text_event(&source, ch, true)?;
         post_keyboard_event(pid, &down);
         std::thread::sleep(std::time::Duration::from_millis(8));
 
-        let up = CGEvent::new_keyboard_event(source.clone(), 0, false)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard up failed"))?;
-        up.set_string(&ch_str);
-        up.set_flags(CGEventFlags::CGEventFlagNull);
+        let up = text_event(&source, ch, false)?;
         post_keyboard_event(pid, &up);
 
         // Additional inter-character delay on top of the 8 ms internal gap.
@@ -295,7 +305,7 @@ fn release_global_modifiers(
 
 fn modifier_key_code_and_flag(modifier: &str) -> Option<(u16, CGEventFlags)> {
     match modifier.to_lowercase().as_str() {
-        "cmd" | "command" => Some((55, CGEventFlags::CGEventFlagCommand)),
+        "cmd" | "command" | "meta" | "super" => Some((55, CGEventFlags::CGEventFlagCommand)),
         "shift" => Some((56, CGEventFlags::CGEventFlagShift)),
         "option" | "alt" => Some((58, CGEventFlags::CGEventFlagAlternate)),
         "ctrl" | "control" => Some((59, CGEventFlags::CGEventFlagControl)),
@@ -363,18 +373,11 @@ pub fn type_text_global(text: &str, inter_char_delay_ms: u64) -> anyhow::Result<
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
-    for ch in text.chars() {
-        let value = ch.to_string();
-        let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard down failed"))?;
-        down.set_string(&value);
-        down.set_flags(CGEventFlags::CGEventFlagNull);
+    for ch in text_characters(text) {
+        let down = text_event(&source, ch, true)?;
         down.post(CGEventTapLocation::HID);
         std::thread::sleep(std::time::Duration::from_millis(8));
-        let up = CGEvent::new_keyboard_event(source.clone(), 0, false)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard up failed"))?;
-        up.set_string(&value);
-        up.set_flags(CGEventFlags::CGEventFlagNull);
+        let up = text_event(&source, ch, false)?;
         up.post(CGEventTapLocation::HID);
         std::thread::sleep(std::time::Duration::from_millis(inter_char_delay_ms.max(8)));
     }
@@ -634,7 +637,7 @@ fn modifier_flags(modifiers: &[&str]) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
     for m in modifiers {
         match m.to_lowercase().as_str() {
-            "cmd" | "command" => flags |= CGEventFlags::CGEventFlagCommand,
+            "cmd" | "command" | "meta" | "super" => flags |= CGEventFlags::CGEventFlagCommand,
             "shift" => flags |= CGEventFlags::CGEventFlagShift,
             "option" | "alt" => flags |= CGEventFlags::CGEventFlagAlternate,
             "ctrl" | "control" => flags |= CGEventFlags::CGEventFlagControl,
@@ -652,7 +655,7 @@ pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
         "space" => 49,
         "delete" | "backspace" => 51,
         "escape" | "esc" => 53,
-        "command" | "cmd" => 55,
+        "command" | "cmd" | "meta" | "super" => 55,
         "shift" => 56,
         "capslock" => 57,
         "option" | "alt" => 58,
@@ -663,10 +666,10 @@ pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
         "del" | "forward_delete" => 117,
         "end" => 119,
         "pagedown" => 121,
-        "left" | "left_arrow" => 123,
-        "right" | "right_arrow" => 124,
-        "down" | "down_arrow" => 125,
-        "up" | "up_arrow" => 126,
+        "left" | "left_arrow" | "arrowleft" => 123,
+        "right" | "right_arrow" | "arrowright" => 124,
+        "down" | "down_arrow" | "arrowdown" => 125,
+        "up" | "up_arrow" | "arrowup" => 126,
         "f1" => 122,
         "f2" => 120,
         "f3" => 99,
@@ -735,6 +738,51 @@ pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
 mod tests {
     use super::*;
     use core_graphics::event::CGEventType;
+
+    #[test]
+    fn synthesized_line_breaks_coalesce_crlf_and_preserve_unicode() {
+        assert_eq!(
+            text_characters("甲\té🙂\r\nx\ny\rz\r\r\n").collect::<String>(),
+            "甲\té🙂\nx\ny\nz\n\n"
+        );
+    }
+
+    #[test]
+    fn synthesized_return_uses_physical_keycode_in_both_transitions() {
+        use core_graphics::event::EventField;
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).unwrap();
+        for down in [true, false] {
+            for (ch, expected_code) in [('a', 0), ('甲', 0), ('\t', 0), ('\n', 36)] {
+                let event = text_event(&source, ch, down).unwrap();
+                assert_eq!(
+                    event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+                    expected_code
+                );
+                assert_eq!(event.get_flags(), CGEventFlags::CGEventFlagNull);
+            }
+        }
+    }
+
+    #[test]
+    fn common_key_aliases_preserve_native_codes_and_flags() {
+        for alias in ["meta", "super", "Meta"] {
+            assert_eq!(
+                modifier_key_code_and_flag(alias),
+                modifier_key_code_and_flag("cmd")
+            );
+            assert_eq!(modifier_flags(&[alias]), modifier_flags(&["cmd"]));
+            assert_eq!(key_name_to_code(alias).unwrap(), 55);
+        }
+        for (name, code) in [
+            ("ArrowLeft", 123),
+            ("ArrowRight", 124),
+            ("ArrowDown", 125),
+            ("ArrowUp", 126),
+        ] {
+            assert_eq!(key_name_to_code(name).unwrap(), code);
+        }
+        assert!(key_name_to_code("ArrowDiagonal").is_err());
+    }
 
     #[test]
     fn physical_text_uses_flags_changed_for_balanced_shift_transitions() {

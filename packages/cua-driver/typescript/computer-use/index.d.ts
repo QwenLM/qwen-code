@@ -107,6 +107,16 @@ export interface WindowObservation {
   text: string;
   elements: ComputerUseElement[];
   screenshot?: ComputerUseScreenshot;
+  context: {
+    backgroundInput?: JsonObject;
+    degraded?: boolean;
+    degradedReason?: string;
+    escalation?: JsonObject;
+    windowBounds?: { x: number; y: number; width: number; height: number };
+    screenshotScale?: number;
+    screenshotFrameValid?: boolean;
+    screenshotError?: JsonObject;
+  };
   diagnostics: ComputerUseObservationDiagnostics;
 }
 
@@ -195,6 +205,8 @@ export interface ComputerUseOperationResult {
 }
 
 export interface ComputerUseActionResult {
+  /** Native action message, including new-window notices when available. */
+  text?: string;
   effect: ActionEffect;
   route: ActionRoute;
   delivery?: {

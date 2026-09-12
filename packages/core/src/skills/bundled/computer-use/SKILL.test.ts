@@ -38,10 +38,13 @@ describe('bundled computer-use skill', () => {
     expect(body).toContain("import('@qwen-code/cua-sdk/computer-use')");
     expect(body).toContain('ComputerUse.create()');
     expect(body).toContain('computer.listApps()');
-    expect(body).toContain('computer.listWindows({ pid: matches[0].pid })');
+    expect(body).toMatch(
+      /computer\.listWindows\(\{\s*pid: targetPid,\s*onScreenOnly: true,/,
+    );
     expect(body).toContain('computer.observeWindow(target)');
     expect(body).toMatch(/After performing one or more UI actions/);
-    expect(body).toMatch(/Perform one or more actions, and then fetch/);
+    expect(body).toMatch(/Batch actions whose target remains the same/);
+    expect(body).not.toContain('windowId: windows[0].window_id');
     expect(body).toContain('hotkey:');
     expect(body).toContain('modifiers?: string[]');
     expect(body).not.toMatch(/after every action/i);

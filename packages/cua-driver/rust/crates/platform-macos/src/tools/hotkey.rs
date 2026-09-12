@@ -54,7 +54,7 @@ fn def() -> &'static ToolDef {
              accepts paste, call `clipboard_write`, then `clipboard_read` and verify its \
              types (and text when applicable) before selecting or replacing editor content; \
              only then send Cmd+V.\n\n\
-             Recognized modifiers: cmd/command, shift, option/alt, ctrl/control, fn. \
+             Recognized modifiers: cmd/command/meta/super, shift, option/alt, ctrl/control, fn. \
              Non-modifier keys use the same vocabulary as `press_key`. Order: \
              modifiers first, one non-modifier last."
             .into(),
@@ -95,8 +95,26 @@ fn def() -> &'static ToolDef {
 fn is_modifier(k: &str) -> bool {
     matches!(
         k.to_lowercase().as_str(),
-        "cmd" | "command" | "shift" | "option" | "alt" | "ctrl" | "control" | "fn"
+        "cmd"
+            | "command"
+            | "meta"
+            | "super"
+            | "shift"
+            | "option"
+            | "alt"
+            | "ctrl"
+            | "control"
+            | "fn"
     )
+}
+
+fn split_hotkey(keys: &[String]) -> Result<(String, Vec<String>), &'static str> {
+    let (modifiers, base_keys): (Vec<_>, Vec<_>) =
+        keys.iter().cloned().partition(|key| is_modifier(key));
+    if base_keys.len() != 1 {
+        return Err("keys must contain exactly one non-modifier key; recognized modifiers: cmd/command/meta/super, shift, option/alt, ctrl/control, fn");
+    }
+    Ok((base_keys[0].clone(), modifiers))
 }
 
 const HOTKEY_FOCUS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
@@ -164,15 +182,9 @@ impl Tool for HotkeyTool {
                 return ToolResult::error("hotkey.keys must contain at least two keys.")
                     .with_structured(serde_json::json!({ "code": "invalid_arguments" }));
             }
-            let modifiers: Vec<String> = raw_keys
-                .iter()
-                .filter(|key| is_modifier(key))
-                .cloned()
-                .collect();
-            let Some(key) = raw_keys.iter().rev().find(|key| !is_modifier(key)).cloned() else {
-                return ToolResult::error(
-                    "keys must include at least one non-modifier key for desktop hotkey",
-                );
+            let (key, modifiers) = match split_hotkey(&raw_keys) {
+                Ok(chord) => chord,
+                Err(error) => return ToolResult::error(error),
             };
             let display = raw_keys.join("+");
             let result = tokio::task::spawn_blocking(move || {
@@ -206,27 +218,10 @@ impl Tool for HotkeyTool {
             return ToolResult::error("keys must be a non-empty array of strings.");
         }
 
-        // Split: modifiers are all entries that are modifier names; base key is everything else.
-        // Typically: last non-modifier is the key; all others are modifiers.
-        let modifiers: Vec<String> = raw_keys
-            .iter()
-            .filter(|k| is_modifier(k))
-            .cloned()
-            .collect();
-        let non_modifiers: Vec<String> = raw_keys
-            .iter()
-            .filter(|k| !is_modifier(k))
-            .cloned()
-            .collect();
-
-        if non_modifiers.is_empty() {
-            return ToolResult::error(
-                "keys must include at least one non-modifier key (e.g. \"c\" in [\"cmd\", \"c\"]).",
-            );
-        }
-
-        // Use the last non-modifier key; if there are multiple, treat earlier ones as extra keys.
-        let key = non_modifiers.last().unwrap().clone();
+        let (key, modifiers) = match split_hotkey(&raw_keys) {
+            Ok(chord) => chord,
+            Err(error) => return ToolResult::error(error),
+        };
         let key_display = raw_keys.join("+");
         let element_token_arg = args.opt_str("element_token");
         let window_id_arg = args.opt_u64("window_id").map(|v| v as u32);
@@ -391,9 +386,8 @@ impl Tool for HotkeyTool {
 
         // ── Focus-suppression wrap (Swift WindowChangeDetector + FocusGuard) ──
         // Hotkeys like Cmd+N, Cmd+W, Cmd+T explicitly open/close
-        // windows. The NSMenu path also briefly activates the target via
-        // SLPSSetFrontProcessWithOptions which can race the wildcard
-        // suppressor — wrapping ensures both side-effects are observed
+        // windows. Foreground HID delivery temporarily activates the target,
+        // which can race the wildcard suppressor. Wrapping ensures side-effects are observed
         // and the prior frontmost is restored if the activation lingers.
         let prior_front = apps::frontmost_pid();
         let snapshot = WindowChangeDetector::snapshot(prior_front);
@@ -406,60 +400,28 @@ impl Tool for HotkeyTool {
                 tokio::task::spawn_blocking(move || {
                     let m: Vec<&str> = modifiers.iter().map(String::as_str).collect();
                     match (fg, coordinate_focus, window_id, element_ptr) {
-                        // Chrome's native omnibox and Chromium/Electron inputs
-                        // require a genuine foreground HID chord. Keep the exact
-                        // target frontmost until both key events are consumed;
-                        // otherwise Cmd+A/Cmd+V can be silently ignored.
-                        (true, true, Some(wid), _) => {
+                        // Native text-editing shortcuts need the same guarded HID
+                        // delivery as renderer inputs. Brief NSMenu activation can
+                        // lose Cmd+A when another app was frontmost. Hold the exact
+                        // window through dispatch and restore only after it drains.
+                        (true, _, Some(wid), _) => {
                             crate::input::skylight::with_foreground_hid_activation(
                                 pid as libc::pid_t,
                                 wid,
                                 || {
+                                    if !coordinate_focus {
+                                        if let Some(ptr) = element_ptr {
+                                            focus_hotkey_element(pid, ptr)?;
+                                        }
+                                    }
                                     if screen_sharing_target {
+                                        // The remote input forwarder needs bare physical
+                                        // transitions; ordinary apps also need base flags.
                                         crate::input::keyboard::press_key_bare_global(&key, &m)
                                     } else {
                                         crate::input::keyboard::press_key_global(&key, &m)
                                     }
                                 },
-                            )?;
-                            Ok(())
-                        }
-                        // An AX-addressed chord has the same renderer-focus
-                        // requirement as the px form. Activate the exact window,
-                        // establish and confirm the requested child focus after
-                        // activation, then use the guarded global HID queue.
-                        (true, false, Some(wid), Some(ptr)) => {
-                            crate::input::skylight::with_foreground_hid_activation(
-                                pid as libc::pid_t,
-                                wid,
-                                || {
-                                    focus_hotkey_element(pid, ptr)?;
-                                    crate::input::keyboard::press_key_bare_global(&key, &m)
-                                },
-                            )?;
-                            Ok(())
-                        }
-                        // Screen Sharing is an input forwarder: modifier flags
-                        // on a PID-routed base-key event are not relayed to the
-                        // guest. Emit the physical modifier down/base/up
-                        // sequence through the guarded foreground HID path.
-                        (true, false, Some(wid), None)
-                            if crate::input::keyboard::is_screen_sharing_pid(pid) =>
-                        {
-                            crate::input::skylight::with_foreground_hid_activation(
-                                pid as libc::pid_t,
-                                wid,
-                                || crate::input::keyboard::press_key_bare_global(&key, &m),
-                            )?;
-                            Ok(())
-                        }
-                        // foreground rung: briefly front the window so NSMenu key
-                        // equivalents dispatch, then restore prior frontmost.
-                        (true, false, Some(wid), None) => {
-                            crate::input::skylight::with_menu_shortcut_activation(
-                                pid as libc::pid_t,
-                                wid,
-                                || crate::input::keyboard::hotkey_no_auth(pid, &key, &m),
                             )?;
                             Ok(())
                         }
@@ -532,6 +494,19 @@ fn validate_target_coordinates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hotkey_aliases_preserve_command_and_reject_extra_base_keys() {
+        for modifier in ["cmd", "command", "meta", "super", "Meta"] {
+            let keys = vec![modifier.to_owned(), "shift".to_owned(), "o".to_owned()];
+            assert_eq!(split_hotkey(&keys), Ok(("o".into(), keys[..2].to_vec())));
+        }
+        for keys in [vec!["cmd"], vec!["typo", "o"], vec!["cmd", "o", "f"]] {
+            assert!(
+                split_hotkey(&keys.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err()
+            );
+        }
+    }
 
     #[test]
     fn hotkey_contract_accepts_snapshot_bound_ax_targets() {

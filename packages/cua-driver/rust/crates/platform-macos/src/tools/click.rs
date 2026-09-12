@@ -25,12 +25,13 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_action_names, copy_children, copy_string_attr, element_at_screen_position,
-    element_screen_rect, kAXErrorSuccess, AXUIElementPerformAction, AXUIElementRef,
+    copy_action_names, copy_children, copy_element_attr, copy_string_attr,
+    element_at_screen_position, element_screen_rect, focused_element_of_pid, is_attribute_settable,
+    kAXErrorSuccess, set_bool_attr_true, AXUIElementPerformAction, AXUIElementRef,
 };
 use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
-use core_foundation::base::{CFRelease, TCFType};
+use core_foundation::base::{CFEqual, CFRelease, CFTypeRef, TCFType};
 
 use super::ToolState;
 
@@ -695,7 +696,7 @@ impl Tool for ClickTool {
                         mut msg,
                         needs_webkit_delay,
                         suspected_noop,
-                        selection_verified,
+                        interaction_verified,
                         selection_via_pixel,
                     ),
                     fronted,
@@ -706,15 +707,8 @@ impl Tool for ClickTool {
                         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                     }
                     msg.push_str(&changes.result_suffix());
-                    // AX dispatch went through, but AXPerformAction returning
-                    // success does not confirm the on-screen effect (many elements
-                    // no-op silently). A click is never driver-verifiable (no
-                    // read-back) → verified:false stays for back-compat. The
-                    // tri-state `effect` is the richer signal:
-                    //   * suspected_noop — the element didn't advertise the action,
-                    //     so the press likely did nothing → cross to vision/pixel.
-                    //   * unverifiable — dispatched fine, driver just can't confirm;
-                    //     the caller verifies via screenshot.
+                    // Dispatch alone is not verification. Only explicit selection
+                    // or editable-combo focus read-back confirms the effect.
                     let mut structured = serde_json::json!({
                         "path": if selection_via_pixel {
                             if fronted { "cgevent_fg" } else { "cgevent" }
@@ -723,8 +717,8 @@ impl Tool for ClickTool {
                         } else {
                             "ax"
                         },
-                        "verified": selection_verified,
-                        "effect": if selection_verified {
+                        "verified": interaction_verified,
+                        "effect": if interaction_verified {
                             "confirmed"
                         } else if suspected_noop {
                             "suspected_noop"
@@ -732,7 +726,7 @@ impl Tool for ClickTool {
                             "unverifiable"
                         },
                     });
-                    if selection_verified {
+                    if interaction_verified {
                         structured["evidence"] = serde_json::json!([
                             { "kind": "accessibility_readback" }
                         ]);
@@ -1193,8 +1187,36 @@ impl Tool for ClickTool {
 
 // ── AX click implementation (blocking) ───────────────────────────────────────
 
+fn focus_editable_control(element: AXUIElementRef, pid: i32, role: &str) -> anyhow::Result<()> {
+    let before = unsafe { copy_string_attr(element, "AXValue") }
+        .ok_or_else(|| anyhow::anyhow!("editable control value unavailable before focus"))?;
+    let err = unsafe { set_bool_attr_true(element, "AXFocused") };
+    anyhow::ensure!(err == kAXErrorSuccess, "AXFocused write returned {err}");
+
+    let focused = unsafe { focused_element_of_pid(pid) }
+        .ok_or_else(|| anyhow::anyhow!("editable control focus could not be read back"))?;
+    let mut matches = unsafe { CFEqual(focused as CFTypeRef, element as CFTypeRef) != 0 };
+    // AppKit may put the first responder on the combo's embedded editor.
+    if !matches
+        && role == "AXComboBox"
+        && unsafe { copy_string_attr(focused, "AXRole") }.as_deref() == Some("AXTextField")
+    {
+        if let Some(parent) = unsafe { copy_element_attr(focused, "AXParent") } {
+            matches = unsafe { CFEqual(parent as CFTypeRef, element as CFTypeRef) != 0 };
+            unsafe { CFRelease(parent as CFTypeRef) };
+        }
+    }
+    unsafe { CFRelease(focused as CFTypeRef) };
+    anyhow::ensure!(matches, "editable control did not receive verified focus");
+    anyhow::ensure!(
+        unsafe { copy_string_attr(element, "AXValue") }.as_deref() == Some(before.as_str()),
+        "editable control value changed or became unreadable during focus; observe before retrying"
+    );
+    Ok(())
+}
+
 /// Returns `(summary_text, needs_webkit_delay, suspected_noop,
-/// selection_verified, selection_via_pixel)`.
+/// interaction_verified, selection_via_pixel)`.
 ///
 /// `suspected_noop` is true when the element did not advertise the action we
 /// dispatched — AXUIElementPerformAction returns success regardless, so this is
@@ -1227,6 +1249,26 @@ fn perform_ax_click(
 
     let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
     let title = unsafe { copy_string_attr(element, "AXTitle") }.unwrap_or_default();
+
+    if ax_action == "AXPress"
+        && modifiers.is_empty()
+        && matches!(role.as_str(), "AXComboBox" | "AXTextField")
+        && !advertised.iter().any(|action| action == "AXPress")
+        && unsafe { is_attribute_settable(element, "AXValue") }
+        && unsafe { is_attribute_settable(element, "AXFocused") }
+    {
+        focus_editable_control(element, pid, &role)?;
+        return Ok((
+            format!(
+                "✅ Focused editable {role} [{idx}] \"{title}\"; confirmed focus on the \
+                 control or a combo's direct text editor, with AXValue unchanged."
+            ),
+            false,
+            false,
+            true,
+            false,
+        ));
+    }
 
     // A click on an AppKit collection item is frequently represented by a
     // label child or row that does not advertise AXPress. Prefer a bounded,

@@ -20,6 +20,8 @@
 //!
 //! Use `type_text_chars` when you explicitly need per-character pacing
 //! (e.g., to trigger live-search debounce handlers).
+//! Unicode character synthesis emits LF/CR as Return and coalesces CRLF. Atomic AX
+//! insertion retains literal text semantics.
 
 use async_trait::async_trait;
 use cua_driver_contract::TypeTextInput;
@@ -66,7 +68,9 @@ fn def() -> &'static ToolDef {
              character synthesis automatically when the estimated route stays \
              within the daemon transport budget. Longer synthesized routes are \
              refused before character events and return a safe chunk size; \
-             one-call AX insertion remains uncapped.\n\n\
+             one-call AX insertion remains uncapped. Unicode character synthesis sends \
+             LF/CR as Return (CRLF sends one Return); verify the resulting UI, \
+             since one field value cannot confirm input across Return.\n\n\
              Optional `element_index` + `window_id` (from the last \
              `get_window_state` snapshot) directs the write to a specific field. \
              Without `element_index`, the write goes to the pid's currently \
@@ -1015,6 +1019,7 @@ pub(super) fn target_in_web_area(
 /// Type via CGEvent keystrokes at the current insertion point, then verify by
 /// read-back. `type_text` is deliberately non-idempotent: it must never clear
 /// an existing value merely because AX cannot read that value back.
+#[allow(clippy::too_many_arguments)]
 fn cgevent_type_verified(
     pid: i32,
     text: &str,
@@ -1023,13 +1028,14 @@ fn cgevent_type_verified(
     element_ptr_and_idx: Option<(usize, Option<usize>)>,
     settle_ms: u64,
     window_id: Option<u32>,
+    global_hid: bool,
 ) -> anyhow::Result<(bool, Option<usize>)> {
     // Focus the target element so the keystrokes land in IT. Critical in
     // foreground mode: a freshly-fronted window's keyboard focus may be on the
     // search box or nowhere, so without this the text goes into the void (or the
     // wrong field). AXFocused is best-effort — harmless when unsupported.
     //
-    // Ordering matters as much as the write itself. `with_foreground_assist` has
+    // Ordering matters as much as the write itself. The foreground guard has
     // already waited for the activation to land, so AppKit has installed the
     // window's remembered first responder by now and this write lands *after*
     // it rather than being clobbered by it. Re-applying once on a failed
@@ -1050,7 +1056,14 @@ fn cgevent_type_verified(
     if settle_ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(settle_ms));
     }
-    crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
+    if global_hid {
+        if crate::ax::bindings::focused_window_id_of_pid(pid) != window_id {
+            anyhow::bail!("exact target window lost focus while preparing foreground text input");
+        }
+        crate::input::keyboard::type_text_global(text, delay_ms)?;
+    } else {
+        crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
+    }
 
     // CGEvent posting is asynchronous with respect to the renderer. In
     // particular, Chromium can acknowledge the posting process while a long
@@ -1069,6 +1082,13 @@ fn await_typed_delivery(
     deadline: std::time::Instant,
     mut read_value: impl FnMut() -> Option<String>,
 ) -> (bool, Option<usize>) {
+    // Return can submit a field or move to another cell. Comparing one field's
+    // value would invent a partial count and recommend replaying prior input.
+    // This verifier is used only after keystrokes; atomic AX insertion keeps
+    // its separate literal-text read-back.
+    if text.contains(['\n', '\r']) {
+        return (false, None);
+    }
     let mut best_partial = None;
     loop {
         let after = read_value();
@@ -1158,6 +1178,7 @@ fn type_text_blocking(
                 element_ptr_and_idx,
                 foreground_settle_ms,
                 window_id,
+                window_id.is_some(),
             )
         };
         let ((verified, delivered_chars), fronted) = match window_id {
@@ -1183,12 +1204,11 @@ fn type_text_blocking(
                 ((false, None), true)
             }
             Some(wid) => {
-                // Front → type → restore. The closure returns the read-back
-                // result; with_foreground_assist returns whether it actually
-                // fronted (Ok(false) when the fronting SPIs are unavailable —
-                // the keystrokes still ran, just as background input).
+                // Explicit foreground typing must use the HID route: AppKit
+                // file panels can ignore PID-routed Unicode even while focused.
+                // The exact-window guard must succeed before posting globally.
                 let mut typed_delivery = (false, None);
-                let fronted = crate::input::skylight::with_foreground_assist(
+                crate::input::skylight::with_foreground_hid_activation(
                     pid as libc::pid_t,
                     wid,
                     || {
@@ -1196,14 +1216,13 @@ fn type_text_blocking(
                         Ok(())
                     },
                 )?;
-                (typed_delivery, fronted)
+                (typed_delivery, true)
             }
             // No window to front — best-effort background keystrokes instead.
             None => (do_type()?, false),
         };
-        // Only claim the `_fg` path when a front actually happened; when no
-        // foregrounding occurred (no window, or SPIs unavailable) these were
-        // background keystrokes and `path` must say so honestly.
+        // Only claim the `_fg` path after the exact-window guard succeeded.
+        // A pid-only request still uses the PID route.
         return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
             detail: format!(" via foreground keystrokes ({delay_ms}ms delay)"),
             path: if fronted {
@@ -1247,6 +1266,7 @@ fn type_text_blocking(
             element_ptr_and_idx,
             /*settle_ms=*/ 0,
             window_id,
+            false,
         )?;
         return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
             detail: format!(" via CGEvent (terminal emulator, {delay_ms}ms delay)"),
@@ -1359,6 +1379,7 @@ fn type_text_blocking(
         element_ptr_and_idx,
         /*settle_ms=*/ 0,
         window_id,
+        false,
     )?;
     Ok(TypeTextDelivery::Typed(TypeTextOutcome {
         detail: format!(" via CGEvent ({delay_ms}ms delay)"),
@@ -1558,6 +1579,16 @@ mod tests {
             || Some("BEGIN".to_owned()),
         );
         assert_eq!(delivery, (false, Some(5)));
+    }
+
+    #[test]
+    fn return_delivery_does_not_invent_a_single_field_retry_offset() {
+        for text in ["11\t12\n21\t22", "submit\r", "a\r\nb"] {
+            let delivery = await_typed_delivery(Some(""), text, std::time::Instant::now(), || {
+                panic!("Return delivery must not use one field as a prefix oracle")
+            });
+            assert_eq!(delivery, (false, None));
+        }
     }
 
     #[test]

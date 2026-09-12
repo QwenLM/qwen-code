@@ -310,7 +310,7 @@ impl Tool for PressKeyTool {
         let display_key = key_raw.clone();
         // delivery_mode gates the raise: background (default) never fronts the
         // window (auth-envelope post, even with window_id); foreground is the
-        // explicit NSMenu-activation rung. Matches click/type_text/hotkey.
+        // explicit guarded HID rung. Matches click/type_text/hotkey.
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
         let fg = delivery_mode.is_foreground();
 
@@ -456,7 +456,19 @@ impl Tool for PressKeyTool {
                                         let _ =
                                             crate::input::ax_actions::focus_element(element_ptr);
                                     }
-                                    crate::input::keyboard::press_key_bare_global(&key, &m)
+                                    if m.is_empty()
+                                        || crate::input::keyboard::is_screen_sharing_pid(pid)
+                                    {
+                                        // Standalone keys retain their native flags (notably
+                                        // CapsLock's AlphaShift); remote forwarding also
+                                        // requires the original bare event sequence.
+                                        crate::input::keyboard::press_key_bare_global(&key, &m)
+                                    } else {
+                                        // Preconstructed bare base-key events do not inherit
+                                        // modifiers posted later. Native apps need explicit
+                                        // flags as well as the physical modifier transitions.
+                                        crate::input::keyboard::press_key_global(&key, &m)
+                                    }
                                 },
                             )
                         });

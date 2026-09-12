@@ -17,10 +17,13 @@
 //! - 2-space indent per depth level
 
 pub mod bindings;
+pub(crate) mod dialogs;
 pub mod cache;
 pub mod enablement;
 pub mod exact_target;
+mod placeholder;
 pub mod revision;
+pub mod sheets;
 pub mod tree;
 pub mod window_scope;
 

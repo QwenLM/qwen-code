@@ -80,6 +80,7 @@ function actionResult(result) {
   const value = result.structured ?? { text: result.text };
   return {
     ...value,
+    ...(result.text ? { text: result.text } : {}),
     ...(result.action === undefined ? {} : { action: result.action }),
     operation: result.operation,
   };
@@ -904,7 +905,8 @@ export class ComputerUse {
       }
       if (
         !retriedIncompleteCapture &&
-        observed.structured?.capture_complete === false &&
+        (envelope?.capture_complete ?? observed.structured?.capture_complete) ===
+          false &&
         envelope?.resync_reason === "capture_incomplete" &&
         activeInput.observationRevision
       ) {
@@ -923,7 +925,8 @@ export class ComputerUse {
     }
     const { text, structured, images } = observed;
     const envelope = structured?.observation_revision;
-    const captureComplete = structured?.capture_complete;
+    const captureComplete =
+      envelope?.capture_complete ?? structured?.capture_complete;
     const treeText = structured?.tree_markdown ?? text;
     const publicText =
       captureComplete === false
@@ -950,6 +953,16 @@ export class ComputerUse {
               images,
             }
           : undefined,
+      context: {
+        backgroundInput: structured?.background_input,
+        degraded: structured?.degraded,
+        degradedReason: structured?.degraded_reason,
+        escalation: structured?.escalation,
+        windowBounds: structured?.window_bounds,
+        screenshotScale: structured?.screenshot_scale,
+        screenshotFrameValid: structured?.screenshot_frame_valid,
+        screenshotError: structured?.screenshot_error,
+      },
       diagnostics: {
         revisionSupported: Boolean(envelope),
         stableElementIds: envelope?.stable_element_ids === true,
