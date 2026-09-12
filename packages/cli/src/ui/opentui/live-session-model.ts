@@ -16,6 +16,7 @@ import type { HistoryItem } from '../model/streaming-model.js';
 import type { GoalSnapshotLike, OpenTuiStreamEvent } from './event-adapter.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
+import { goalCheckpointHealthLine } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
 import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
@@ -672,6 +673,8 @@ export type GoalCardView =
       subtitle: string | null;
       objective: string;
       reason?: string;
+      /** Checkpoint health, when goalCheckpointHealthVisible shows it. */
+      checkpoint?: string;
     };
 
 /** Computes the GoalStateCard view (icon/title/subtitle/objective/reason)
@@ -746,6 +749,11 @@ export function describeGoalCard(
     (goal.status ?? 'active') !== 'active' || activity === 'verifying'
       ? goal.lastReason?.trim()
       : undefined;
+  // Checkpoint health, worded by core like the ink card's; transcript-view
+  // sanitizes the line when it renders it, so no cleaner is passed here.
+  const checkpointLine = goalCheckpointHealthLine(goal);
+  const checkpoint =
+    checkpointLine === undefined ? undefined : `Checkpoint: ${checkpointLine}`;
   return {
     state: 'card',
     icon: lifecycle.icon,
@@ -754,6 +762,7 @@ export function describeGoalCard(
     subtitle: stats.length > 0 ? stats.join(' · ') : null,
     objective: goal.objective ?? '',
     reason,
+    ...(checkpoint ? { checkpoint } : {}),
   };
 }
 

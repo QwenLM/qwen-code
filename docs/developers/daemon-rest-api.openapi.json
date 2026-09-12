@@ -1,0 +1,4304 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Qwen Code Daemon REST API",
+    "version": "v1",
+    "description": "The supported 25-operation REST/SSE integration surface for qwen serve. The daemon registers a wider route surface, including other public, capability-gated routes that are not part of this compatibility promise.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    }
+  },
+  "externalDocs": {
+    "description": "REST API integration guide",
+    "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/rest-api-integration/"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:4170"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Discovery",
+      "description": "Daemon discovery and negotiation."
+    },
+    {
+      "name": "Sessions",
+      "description": "Session creation, restoration, metadata, and lifecycle."
+    },
+    {
+      "name": "Prompts and events",
+      "description": "Prompt admission, cancellation, status, history, and SSE."
+    },
+    {
+      "name": "Permissions",
+      "description": "Resolve permission requests emitted on the session stream."
+    },
+    {
+      "name": "Workspace reads",
+      "description": "Read-only context from the primary workspace runtime."
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "tags": ["Discovery"],
+        "summary": "Probe daemon health",
+        "description": "Returns a cheap listener probe by default. Set deep to aggregate informational daemon-wide runtime counters. Bearer authentication is required except on an ordinary loopback bind without --require-auth, where the probe is also served anonymously; non-loopback and hardened loopback binds answer 401 without a token.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-health"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "health",
+        "x-qwen-scope": "process-global",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.health",
+        "parameters": [
+          {
+            "name": "deep",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer",
+                  "enum": [1]
+                }
+              ]
+            },
+            "description": "Request the informational aggregate probe."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The daemon listener is up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Bearer authentication is required for this bind.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The deep probe could not produce a complete snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/capabilities": {
+      "get": {
+        "operationId": "getCapabilities",
+        "tags": ["Discovery"],
+        "summary": "Discover protocol capabilities",
+        "description": "Returns protocol versions, feature tags, limits, transports, and registered workspaces. Clients should call this before using optional behavior.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-capabilities"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "capabilities",
+        "x-qwen-scope": "process-global",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.capabilities",
+        "responses": {
+          "200": {
+            "description": "Current daemon capabilities.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capabilities"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Bearer authentication failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session": {
+      "post": {
+        "operationId": "createOrAttachSession",
+        "tags": ["Sessions"],
+        "summary": "Create or attach to a session",
+        "description": "Creates a session in the selected workspace runtime. sessionScope=thread is recommended for independent conversations.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-session"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_create",
+        "x-qwen-scope": "selected-runtime",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.createOrAttachSession",
+        "parameters": [
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session created or attached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The workspace, session id, scope, or request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The selected workspace is untrusted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The requested session id or workspace state conflicts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Session admission or the selected runtime is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Agent initialization timed out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}": {
+      "delete": {
+        "operationId": "closeSession",
+        "tags": ["Sessions"],
+        "summary": "Close a live session",
+        "description": "Force-closes the live session but keeps its persisted transcript available for load or resume.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#delete-sessionid"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_close",
+        "x-qwen-scope": "live-session-owner",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.closeSession",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Session closed."
+          },
+          "400": {
+            "description": "The `X-Qwen-Client-Id` header is invalid (`code: invalid_client_id`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The live session does not exist, or is already closing (code: session_closing).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The session cannot be closed while it has an active Live Voice session (code: live_session_active).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/load": {
+      "post": {
+        "operationId": "loadSession",
+        "tags": ["Sessions"],
+        "summary": "Load a persisted session with replay",
+        "description": "Restores a persisted session and returns a bounded replay snapshot for rebuilding client state.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-sessionidload"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_load",
+        "x-qwen-scope": "selected-runtime",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.loadSession",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session restored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoredSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The workspace or restore request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The selected workspace is untrusted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The persisted session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The persisted or live session state conflicts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The runtime cannot currently admit the restore.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Initialization or restoration timed out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/resume": {
+      "post": {
+        "operationId": "resumeSession",
+        "tags": ["Sessions"],
+        "summary": "Resume a persisted session without replay",
+        "description": "Restores model context while leaving the SSE stream free of historical replay.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-sessionidresume"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_resume",
+        "x-qwen-scope": "selected-runtime",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.resumeSession",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResumeSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session restored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoredSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The workspace or restore request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The selected workspace is untrusted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The persisted session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The persisted or live session state conflicts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The runtime cannot currently admit the restore.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Initialization or restoration timed out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/heartbeat": {
+      "post": {
+        "operationId": "heartbeatSession",
+        "tags": ["Sessions"],
+        "summary": "Refresh session activity bookkeeping",
+        "description": "Updates the daemon last-seen timestamp for a live session and, when supplied, its attached client.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-sessionidheartbeat"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "client_heartbeat",
+        "x-qwen-scope": "live-session-owner",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.heartbeat",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyObject"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Activity timestamp updated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Heartbeat"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The client id is invalid for this session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The live session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/metadata": {
+      "patch": {
+        "operationId": "updateSessionMetadata",
+        "tags": ["Sessions"],
+        "summary": "Update session metadata",
+        "description": "Updates the display name or binds a pull request to a live session and its persisted metadata.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#patch-sessionidmetadata"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_metadata",
+        "x-qwen-scope": "live-session-owner",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.updateSessionMetadata",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionMetadataRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMetadataResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The metadata payload is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Caller lacks operator authority for this strict-gated mutation (`code: token_required`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The persisted session state conflicts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/model": {
+      "post": {
+        "operationId": "setSessionModel",
+        "tags": ["Sessions"],
+        "summary": "Switch the session model",
+        "description": "Selects a model within the session current model service and emits model_switched or model_switch_failed.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-sessionidmodel"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_set_model",
+        "x-qwen-scope": "live-session-owner",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.setSessionModel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionModelRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Model switched.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionModelResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The model id or client id is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The session or model does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The session cannot switch model in its current state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/status": {
+      "get": {
+        "operationId": "getSessionStatus",
+        "tags": ["Prompts and events"],
+        "summary": "Read live session status",
+        "description": "Returns the owning runtime in-memory session summary, including prompt and pending-interaction state.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-sessionidstatus"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_status",
+        "x-qwen-scope": "live-session-owner",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.sessionStatus",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Live session summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSummary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The live session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning runtime is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/prompt": {
+      "post": {
+        "operationId": "submitPrompt",
+        "tags": ["Prompts and events"],
+        "summary": "Submit a prompt",
+        "description": "Admits a prompt to the per-session FIFO. A 202 response is admission, not completion; correlate terminal SSE events by promptId. When the prompt_absolute_deadline capability is advertised, deadlineMs bounds the turn: expiry is reported in band as a turn_error event with code prompt_deadline_exceeded, never as a 504 response.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-sessionidprompt"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_prompt",
+        "x-qwen-scope": "live-session-owner",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.promptNonBlocking",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Prompt admitted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The prompt or client id is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The live session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The session cannot admit this prompt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The prompt body exceeds the configured limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The session prompt queue or rate limit is full.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning runtime is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The owning runtime could not initialize its ACP channel in time (`code: init_timeout`). Prompt-deadline expiry is not an HTTP failure: expiry is reported in-band as a `turn_error` with `code: prompt_deadline_exceeded` on the session event stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/cancel": {
+      "post": {
+        "operationId": "cancelSessionPrompt",
+        "tags": ["Prompts and events"],
+        "summary": "Cancel the active prompt",
+        "description": "Cancels only the currently running prompt. Queued prompts remain scheduled.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-sessionidcancel"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_cancel",
+        "x-qwen-scope": "live-session-owner",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyObject"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Cancellation accepted."
+          },
+          "400": {
+            "description": "The client id is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The live session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/events": {
+      "get": {
+        "operationId": "subscribeSessionEvents",
+        "tags": ["Prompts and events"],
+        "summary": "Subscribe to session events",
+        "description": "Opens a resumable Server-Sent Events stream. The data line contains the complete BridgeEvent envelope. When a presented Last-Event-ID cursor can no longer be honored because the ring buffer evicted the frames, its paired epoch no longer matches after a daemon restart, or the replay budget was exhausted, the stream stays open and the daemon emits an in-band state_resync_required event. X-Qwen-Event-Epoch is evaluated only alongside a cursor. A connection without Last-Event-ID opens live-only with no replay or state_resync_required frame; clients that cannot present a cursor must rebuild through POST /session/{id}/load whenever the daemon may have restarted.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-sessionidevents-sse"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_events",
+        "x-qwen-scope": "live-session-owner",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.subscribeEvents",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Replay events with an id greater than this cursor. A malformed value is ignored: the stream opens live-only with no replay. A cursor the daemon can no longer replay is refused in band with a state_resync_required event on the 200 stream, not a 4xx."
+          },
+          {
+            "name": "X-Qwen-Event-Epoch",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "description": "Epoch paired with Last-Event-ID to detect daemon restarts. Echo the token the handshake advertised in the X-Qwen-Event-Epoch response header; any other value mismatches and reads as a restart. Read only when a Last-Event-ID resume cursor is present: a stale token is then answered with 200 plus an id-less state_resync_required frame before replay, while a value the published pattern rejects is treated as not provided. Without a cursor the header is ignored, and a malformed value never fails the request."
+          },
+          {
+            "name": "maxQueued",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 16,
+              "maximum": 2048
+            },
+            "description": "Per-subscriber live frame cap."
+          },
+          {
+            "name": "connectReason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "initial",
+                "resume",
+                "prompt_restart",
+                "stream_end",
+                "transport_error",
+                "state_resync",
+                "unknown"
+              ]
+            },
+            "description": "Best-effort connection telemetry."
+          },
+          {
+            "name": "previousStreamId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Best-effort physical stream lineage."
+          },
+          {
+            "name": "snapshot",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["1"]
+            },
+            "description": "Set to 1 to inject a synthetic session_snapshot frame at stream start (or right after replay_complete) so a fresh or reconnecting client can seed its reducer without an extra round trip."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream. Each data line is an EventEnvelope. A stale X-Qwen-Event-Epoch token presented together with a Last-Event-ID resume cursor, or a Last-Event-ID the replay ring no longer holds, is reported in band: the stream stays open and emits an id-less state_resync_required frame before replay. Treat that frame as state is stale and rebuild via POST /session/{id}/load, not as a transport error.",
+            "headers": {
+              "X-Qwen-SSE-Stream-Id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "description": "Physical REST/SSE stream identifier."
+              },
+              "X-Qwen-Event-Epoch": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Epoch for replay cursor validation."
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "x-qwen-event-schema": {
+                  "$ref": "#/components/schemas/EventEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The maxQueued queue bound is outside 16-2048.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The live session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The daemon SSE subscriber limit is reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning runtime is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/transcript": {
+      "get": {
+        "operationId": "getSessionTranscript",
+        "tags": ["Prompts and events"],
+        "summary": "Read persisted transcript events",
+        "description": "Returns a bounded page of id-less replay events reconstructed from the active persisted transcript.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-sessionidtranscript"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_transcript",
+        "x-qwen-scope": "persisted-workspace",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.getSessionTranscriptPage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Continuation cursor from the previous page's nextCursor. Omit for a first page. Cannot be combined with direction or with any anchor (beforeRecordId, atRecordId, snapshot). Requires the session_transcript_pagination capability."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            },
+            "description": "Maximum number of records in the page. Defaults to 100; values outside 1-500 return 400 invalid_transcript_limit."
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["backward"]
+            },
+            "description": "backward is the only accepted value: the page ends at the newest records. Omit the parameter to page forward on a first page, or to continue the direction frozen in cursor. Cannot be combined with cursor, beforeRecordId, atRecordId, or snapshot."
+          },
+          {
+            "name": "beforeRecordId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Start a backward page before this persisted record id. Implies backward, so do not also send direction. Cannot be combined with cursor or atRecordId; may be paired with snapshot to pin the page to a frozen transcript snapshot."
+          },
+          {
+            "name": "atRecordId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Return the forward page containing this persisted record id. Requires snapshot; cannot be combined with direction, cursor, or beforeRecordId."
+          },
+          {
+            "name": "snapshot",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Frozen transcript snapshot the anchors read from. Required when atRecordId is present; otherwise may only accompany beforeRecordId. Cannot be combined with direction or cursor."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transcript page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The cursor, anchor, direction, limit, id, or snapshot is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The active persisted session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The transcript snapshot or storage state changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The transcript or requested page exceeds its budget.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/context": {
+      "get": {
+        "operationId": "getSessionContext",
+        "tags": ["Prompts and events"],
+        "summary": "Read session context state",
+        "description": "Returns the live model, mode, and configuration-option state for a top-level session. A `subagent.`-prefixed virtual session id resolves against its parent runtime and returns an empty state object.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-sessionidcontext"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_context",
+        "x-qwen-scope": "live-session-owner",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.sessionContext",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current session context.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionContext"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The live session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning runtime is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/export": {
+      "get": {
+        "operationId": "exportSession",
+        "tags": ["Prompts and events"],
+        "summary": "Export a persisted session",
+        "description": "Downloads the active persisted transcript as HTML, Markdown, JSON, or JSONL.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-sessionidexport"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_export",
+        "x-qwen-scope": "legacy-primary",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.exportSession",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["html", "md", "json", "jsonl"],
+              "default": "html"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transcript attachment in the selected format.",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Attachment filename selected by the daemon."
+              }
+            },
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {}
+              },
+              "application/jsonl": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The session id or format is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The active persisted session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The session storage state conflicts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/pending-prompts": {
+      "get": {
+        "operationId": "getPendingPrompts",
+        "tags": ["Prompts and events"],
+        "summary": "List pending prompts",
+        "description": "Returns the currently running prompt and any prompts waiting in the per-session FIFO.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-sessionidpending-prompts"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": null,
+        "x-qwen-scope": "live-session-owner",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.getPendingPrompts",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current prompt queue.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingPrompts"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The client id is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The live session does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning runtime is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{id}/permission/{requestId}": {
+      "post": {
+        "operationId": "respondToSessionPermission",
+        "tags": ["Permissions"],
+        "summary": "Resolve a session permission request",
+        "description": "Routes the vote to the runtime that owns the named session. An untrusted non-primary owner is rejected, while an untrusted primary owner is not rejected by this trust check and proceeds to the active permission policy. New integrations should prefer this over the legacy request-id-only route.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-sessionidpermissionrequestid"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "session_permission_vote",
+        "x-qwen-scope": "live-session-owner",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.respondToSessionPermission",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Daemon session identifier."
+          },
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Identifier from a permission_request event."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PermissionResponse"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Vote accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The permission response or client id is invalid, or the selected option was not offered (code: invalid_option_id; re-read the offered options before retrying).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The active permission policy rejected this voter, or the session's non-primary owning workspace is registered but not trusted (code: untrusted_workspace).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The session or pending request does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The permission contract is invalid, or more than one workspace claims the session (ambiguous_session_owner).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The configured permission policy is not implemented.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning runtime is unavailable (code: workspace_runtime_unavailable), or the daemon is draining (code: daemon_draining).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/permission/{requestId}": {
+      "post": {
+        "operationId": "respondToPrimaryPermission",
+        "tags": ["Permissions"],
+        "summary": "Resolve a primary-workspace permission request",
+        "description": "Legacy process route wired only to the primary workspace bridge. Use the session-scoped route for multi-workspace correctness.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-permissionrequestid"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "permission_vote",
+        "x-qwen-scope": "legacy-primary",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.respondToPermission",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Identifier from a permission_request event."
+          },
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PermissionResponse"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Vote accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The permission response or client id is invalid, or the selected option was not offered (code: invalid_option_id; re-read the offered options before retrying).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The active permission policy rejected this voter (code: permission_forbidden).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The pending request does not exist on the primary bridge.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The permission contract is invalid (code: cancel_sentinel_collision).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The configured permission policy is not implemented.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspace/tools": {
+      "get": {
+        "operationId": "getWorkspaceTools",
+        "tags": ["Workspace reads"],
+        "summary": "Read the primary workspace tool catalog",
+        "description": "Returns tools reported by the primary workspace live ACP child. An idle child produces an empty not-started snapshot.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-workspacetools"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": null,
+        "x-qwen-scope": "legacy-primary",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.workspaceTools",
+        "responses": {
+          "200": {
+            "description": "Current tool catalog snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceTools"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The primary runtime is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/file": {
+      "get": {
+        "operationId": "readWorkspaceFile",
+        "tags": ["Workspace reads"],
+        "summary": "Read a workspace text file",
+        "description": "Reads a bounded UTF-8 text snapshot or line/cursor window through the primary workspace file policy.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-file"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "workspace_file_read",
+        "x-qwen-scope": "legacy-primary",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.readWorkspaceFile",
+        "parameters": [
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "maxBytes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 262144
+            }
+          },
+          {
+            "name": "line",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Requires the workspace_file_read_cursor capability; an older daemon ignores the parameter and returns the first window."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Text file window.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceFile"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A query parameter is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Workspace trust or file policy denied the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The path does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The cursor file identity changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The requested text window exceeds the read budget.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The target exists but is a binary file that cannot be decoded as UTF-8 text (`errorKind: binary_file`). Read it with GET /file/bytes instead.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The workspace file boundary failed unexpectedly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workspace filesystem reported an I/O failure (`errorKind: io_error`). The same request may succeed on retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/file/bytes": {
+      "get": {
+        "operationId": "readWorkspaceFileBytes",
+        "tags": ["Workspace reads"],
+        "summary": "Read a workspace byte window",
+        "description": "Reads a bounded raw byte window and returns it as base64.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-filebytes"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "workspace_file_bytes",
+        "x-qwen-scope": "legacy-primary",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.readWorkspaceFileBytes",
+        "parameters": [
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "maxBytes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 262144,
+              "default": 65536
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw file byte window.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceFileBytes"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A query parameter is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Workspace trust or file policy denied the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The path does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The workspace file boundary failed unexpectedly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workspace filesystem reported an I/O failure (`errorKind: io_error`). The same request may succeed on retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stat": {
+      "get": {
+        "operationId": "statWorkspacePath",
+        "tags": ["Workspace reads"],
+        "summary": "Stat a workspace path",
+        "description": "Returns type, size, and modification time for one path.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-stat"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "workspace_file_read",
+        "x-qwen-scope": "legacy-primary",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.fileStat",
+        "parameters": [
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Path metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceStat"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The path parameter is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Workspace trust or file policy denied the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The path does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The workspace file boundary failed unexpectedly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workspace filesystem reported an I/O failure (`errorKind: io_error`). The same request may succeed on retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/list": {
+      "get": {
+        "operationId": "listWorkspaceDirectory",
+        "tags": ["Workspace reads"],
+        "summary": "List a workspace directory",
+        "description": "Returns at most 2000 entries. Set includeIgnored only when ignored paths are intentionally needed.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-list"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "workspace_file_read",
+        "x-qwen-scope": "legacy-primary",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.dirList",
+        "parameters": [
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "includeIgnored",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer",
+                  "enum": [1]
+                }
+              ],
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The path parameter is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Workspace trust or file policy denied the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The path does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The workspace file boundary failed unexpectedly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workspace filesystem reported an I/O failure (`errorKind: io_error`). The same request may succeed on retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/glob": {
+      "get": {
+        "operationId": "globWorkspace",
+        "tags": ["Workspace reads"],
+        "summary": "Match workspace paths",
+        "description": "Runs a bounded glob inside the primary workspace and returns workspace-relative paths.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-glob"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "workspace_file_read",
+        "x-qwen-scope": "legacy-primary",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.glob",
+        "parameters": [
+          {
+            "name": "X-Qwen-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "description": "Daemon-issued client identity for attribution and session attachment."
+          },
+          {
+            "name": "pattern",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "cwd",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "maxResults",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50000,
+              "default": 5000
+            }
+          },
+          {
+            "name": "includeIgnored",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer",
+                  "enum": [1]
+                }
+              ],
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Glob result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceGlob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A glob query parameter is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Workspace trust or file policy denied the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The cwd does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The workspace file boundary failed unexpectedly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workspace filesystem reported an I/O failure (`errorKind: io_error`). The same request may succeed on retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque",
+        "description": "QWEN_SERVER_TOKEN. Normal API routes require it when authentication is enabled; non-loopback binds require authentication."
+      }
+    },
+    "schemas": {
+      "EmptyObject": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "errorKind": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "retryAfterSeconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["ok", "degraded"]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "workspaceCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sessions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pendingPermissions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "activePrompts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "activeWork": {
+            "type": "boolean"
+          },
+          "activeWorkReporting": {
+            "type": "string",
+            "enum": ["full", "partial", "none"]
+          },
+          "activeWorkStaleMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "connectedClients": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "channelAlive": {
+            "type": "boolean"
+          },
+          "lastActivityAt": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "idleSinceMs": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": true
+      },
+      "WorkspaceCapability": {
+        "type": "object",
+        "required": ["id", "cwd", "primary", "trusted"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "primary": {
+            "type": "boolean"
+          },
+          "trusted": {
+            "type": "boolean"
+          },
+          "removable": {
+            "type": "boolean"
+          },
+          "workflowsEnabled": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["live"],
+            "description": "Present only when the workspace is backed by a live-conversation runtime."
+          }
+        },
+        "additionalProperties": true
+      },
+      "Capabilities": {
+        "type": "object",
+        "required": ["v", "mode", "features", "modelServices"],
+        "properties": {
+          "v": {
+            "type": "integer",
+            "const": 1
+          },
+          "protocolVersions": {
+            "type": "object",
+            "required": ["current", "supported"],
+            "properties": {
+              "current": {
+                "type": "string"
+              },
+              "supported": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "qwenCodeVersion": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "modelServices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "transports": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "workspaceCwd": {
+            "type": "string"
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceCapability"
+            }
+          },
+          "policy": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "sessionLiveStatePollIntervalMs": {
+            "type": "integer",
+            "minimum": 1000,
+            "description": "Live-session state poll interval in milliseconds. Defaults to 5000; override with QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS."
+          },
+          "supportedLanguages": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Prompt and UI language codes the daemon accepts, plus auto."
+          }
+        },
+        "additionalProperties": true
+      },
+      "WorktreeRequest": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateSessionRequest": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+            "description": "Caller-supplied session id. Only RFC 4122 UUID versions 1-5 are admitted; RFC 9562 v7/v8 ids are rejected with 400 invalid_session_id."
+          },
+          "modelServiceId": {
+            "type": "string"
+          },
+          "sessionScope": {
+            "type": "string",
+            "enum": ["single", "thread"]
+          },
+          "approvalMode": {
+            "type": "string"
+          },
+          "sourceType": {
+            "type": "string"
+          },
+          "sourceId": {
+            "type": "string"
+          },
+          "worktree": {
+            "$ref": "#/components/schemas/WorktreeRequest"
+          },
+          "branch": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "Session": {
+        "type": "object",
+        "required": ["sessionId", "workspaceCwd", "attached"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "workspaceCwd": {
+            "type": "string"
+          },
+          "currentCwd": {
+            "type": "string"
+          },
+          "attached": {
+            "type": "boolean"
+          },
+          "clientId": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "hasActivePrompt": {
+            "type": "boolean"
+          },
+          "sourceType": {
+            "type": "string"
+          },
+          "sourceId": {
+            "type": "string"
+          },
+          "sourcePersisted": {
+            "type": "boolean"
+          },
+          "modelApplied": {
+            "type": "boolean"
+          },
+          "worktree": {
+            "type": "object",
+            "required": ["slug", "path", "branch"],
+            "properties": {
+              "slug": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "branch": {
+                "type": "string"
+              }
+            }
+          },
+          "worktreeState": {
+            "type": "string",
+            "const": "persisted-v1"
+          },
+          "branch": {
+            "type": "object",
+            "required": ["name", "baseBranch"],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "baseBranch": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "RestoreSessionRequest": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": "string"
+          },
+          "approvalMode": {
+            "type": "string"
+          },
+          "historyPageSize": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "liveReplayMode": {
+            "type": "string",
+            "enum": ["full", "summary"]
+          },
+          "sourceType": {
+            "type": "string"
+          },
+          "sourceId": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ResumeSessionRequest": {
+        "type": "object",
+        "description": "Resume request. historyPageSize is not parsed on this route, and liveReplayMode is not passed to the bridge resume call (only the legacy-standalone compatibility restore sees it), so neither field is published here.",
+        "properties": {
+          "cwd": {
+            "type": "string"
+          },
+          "approvalMode": {
+            "type": "string"
+          },
+          "sourceType": {
+            "type": "string"
+          },
+          "sourceId": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionState": {
+        "type": "object",
+        "properties": {
+          "_meta": {
+            "type": ["object", "null"],
+            "additionalProperties": true
+          },
+          "models": {},
+          "modes": {},
+          "configOptions": {
+            "type": ["array", "null"],
+            "items": {}
+          }
+        },
+        "additionalProperties": true
+      },
+      "RestoredSession": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Session"
+          },
+          {
+            "type": "object",
+            "required": ["state"],
+            "properties": {
+              "state": {
+                "$ref": "#/components/schemas/SessionState"
+              },
+              "artifactWarnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "partial": {
+                "type": "boolean",
+                "const": true
+              },
+              "replayError": {
+                "type": "string"
+              },
+              "compactedReplay": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EventEnvelope"
+                }
+              },
+              "liveJournal": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EventEnvelope"
+                }
+              },
+              "historyHasMore": {
+                "type": "boolean"
+              },
+              "historyAnchorRecordId": {
+                "type": "string"
+              },
+              "lastEventId": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "eventEpoch": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        ]
+      },
+      "Heartbeat": {
+        "type": "object",
+        "required": ["sessionId", "lastSeenAt"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "clientId": {
+            "type": "string"
+          },
+          "lastSeenAt": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionMetadataRequest": {
+        "type": "object",
+        "properties": {
+          "displayName": {
+            "type": "string",
+            "pattern": "^[^\\u0000-\\u001F\\u007F]*$",
+            "description": "The daemon first truncates values longer than 256 UTF-16 code units; the cut is not surrogate-pair aware, so a name ending in a non-BMP character can lose a lone surrogate half. The truncated value is rejected with 400 invalid_metadata when it is empty, whitespace-only, or contains a C0 control character or DEL. Omit the field to leave the name unchanged."
+          },
+          "pr": {
+            "$ref": "#/components/schemas/SessionPrInput"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionPrInput": {
+        "type": "object",
+        "required": ["number", "url"],
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "url": {
+            "type": "string",
+            "maxLength": 2048,
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\u0000-\\u001F\\u007F]*$"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["open", "merged", "closed"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionIssue": {
+        "type": "object",
+        "required": ["number", "url"],
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "url": {
+            "type": "string",
+            "maxLength": 2048,
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\u0000-\\u001F\\u007F]*$"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["open", "completed", "not_planned"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionPr": {
+        "type": "object",
+        "required": ["number", "url"],
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "url": {
+            "type": "string",
+            "maxLength": 2048,
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\u0000-\\u001F\\u007F]*$"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["open", "merged", "closed"]
+          },
+          "issues": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "$ref": "#/components/schemas/SessionIssue"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionMetadataResult": {
+        "type": "object",
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "prs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionPr"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionModelRequest": {
+        "type": "object",
+        "required": ["modelId"],
+        "properties": {
+          "modelId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionModelResult": {
+        "type": "object",
+        "properties": {
+          "_meta": {
+            "type": ["object", "null"],
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "PendingInteraction": {
+        "type": "object",
+        "required": ["requestId", "kind", "createdAt"],
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["permission", "user_question"]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "title": {
+            "type": "string"
+          },
+          "action": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "content": {},
+              "locations": {},
+              "input": {}
+            },
+            "additionalProperties": true
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["answerKey"],
+              "properties": {
+                "answerKey": {
+                  "type": "string"
+                },
+                "header": {
+                  "type": "string"
+                },
+                "question": {
+                  "type": "string"
+                },
+                "multiSelect": {
+                  "type": "boolean"
+                },
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "label": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": true
+                  }
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "options": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "additionalProperties": true
+      },
+      "SessionSummary": {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "workspaceCwd",
+          "createdAt",
+          "clientCount",
+          "hasActivePrompt"
+        ],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "workspaceCwd": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "parentSessionId": {
+            "type": "string"
+          },
+          "sourceType": {
+            "type": "string"
+          },
+          "sourceId": {
+            "type": "string"
+          },
+          "clientCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "hasActivePrompt": {
+            "type": "boolean"
+          },
+          "activeWorkState": {
+            "type": "string",
+            "enum": ["active", "idle", "unknown", "unsupported"]
+          },
+          "isWaitingForPermission": {
+            "type": "boolean"
+          },
+          "isWaitingForUserQuestion": {
+            "type": "boolean"
+          },
+          "pendingInteractionCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "hasTurnError": {
+            "type": "boolean"
+          },
+          "turnError": {
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "errorKind": {
+                "type": "string"
+              }
+            }
+          },
+          "pendingInteractions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PendingInteraction"
+            }
+          },
+          "worktree": {
+            "type": "object",
+            "required": ["slug", "path", "branch"],
+            "properties": {
+              "slug": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "branch": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "branch": {
+            "type": "object",
+            "required": ["name", "baseBranch"],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "baseBranch": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "prs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionPr"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "PromptContentBlock": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "attachmentId": {
+            "type": "string"
+          },
+          "mimeType": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "data": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "PromptRequest": {
+        "type": "object",
+        "required": ["prompt"],
+        "properties": {
+          "prompt": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/PromptContentBlock"
+            }
+          },
+          "deadlineMs": {
+            "type": "integer",
+            "minimum": 1,
+            "x-qwen-capability": "prompt_absolute_deadline",
+            "description": "Ignored unless /capabilities advertises prompt_absolute_deadline (daemon booted with --prompt-deadline-ms). The effective deadline is min(server flag, this value); a request can shorten it, never extend it."
+          },
+          "delivery": {
+            "type": "object",
+            "required": ["kind", "target"],
+            "additionalProperties": false,
+            "description": "Channel delivery target. Only this shape is accepted; any other object, unknown key, or non-blank-string violation is rejected with 400 channel_delivery_invalid.",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "channel"
+              },
+              "target": {
+                "type": "object",
+                "required": ["channelName", "type", "id"],
+                "additionalProperties": false,
+                "properties": {
+                  "channelName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["user", "chat"]
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  }
+                }
+              }
+            }
+          },
+          "_meta": {
+            "type": ["object", "null"],
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "PromptAccepted": {
+        "type": "object",
+        "required": ["promptId", "lastEventId"],
+        "properties": {
+          "promptId": {
+            "type": "string"
+          },
+          "lastEventId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "eventEpoch": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EventEnvelope": {
+        "type": "object",
+        "required": ["v", "type", "data"],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "v": {
+            "type": "integer",
+            "const": 1
+          },
+          "type": {
+            "type": "string"
+          },
+          "data": {},
+          "originatorClientId": {
+            "type": "string"
+          },
+          "_meta": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "TranscriptPage": {
+        "type": "object",
+        "required": ["v", "sessionId", "events", "hasMore"],
+        "properties": {
+          "v": {
+            "type": "integer",
+            "const": 1
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventEnvelope"
+            }
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "startTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastUpdated": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "partial": {
+            "type": "boolean",
+            "const": true
+          },
+          "replayError": {
+            "type": "string"
+          },
+          "targetRecordId": {
+            "type": "string"
+          },
+          "hasOlder": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionContext": {
+        "type": "object",
+        "required": ["v", "sessionId", "workspaceCwd", "state"],
+        "properties": {
+          "v": {
+            "type": "integer",
+            "const": 1
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "workspaceCwd": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/SessionState"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PendingPrompt": {
+        "type": "object",
+        "required": ["promptId", "text", "queuedAt", "state"],
+        "properties": {
+          "promptId": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptContentBlock"
+            }
+          },
+          "queuedAt": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string",
+            "enum": ["queued", "running"]
+          },
+          "originatorClientId": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PendingPrompts": {
+        "type": "object",
+        "required": ["pendingPrompts"],
+        "properties": {
+          "pendingPrompts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PendingPrompt"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "PermissionResponse": {
+        "type": "object",
+        "required": ["outcome"],
+        "properties": {
+          "outcome": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["outcome"],
+                "properties": {
+                  "outcome": {
+                    "type": "string",
+                    "const": "cancelled"
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": ["outcome", "optionId"],
+                "properties": {
+                  "outcome": {
+                    "type": "string",
+                    "const": "selected"
+                  },
+                  "optionId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          },
+          "expectedPlanExecutionMode": {
+            "type": "string"
+          },
+          "answers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "StatusCell": {
+        "type": "object",
+        "required": ["kind", "status"],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "warning",
+              "error",
+              "disabled",
+              "not_started",
+              "unknown"
+            ]
+          },
+          "error": {
+            "type": "string"
+          },
+          "errorKind": {
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "WorkspaceTool": {
+        "type": "object",
+        "required": ["name", "enabled"],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceTools": {
+        "type": "object",
+        "required": [
+          "v",
+          "workspaceCwd",
+          "initialized",
+          "acpChannelLive",
+          "tools"
+        ],
+        "properties": {
+          "v": {
+            "type": "integer",
+            "const": 1
+          },
+          "workspaceCwd": {
+            "type": "string"
+          },
+          "initialized": {
+            "type": "boolean",
+            "const": true
+          },
+          "acpChannelLive": {
+            "type": "boolean"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceTool"
+            }
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatusCell"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceFile": {
+        "type": "object",
+        "required": [
+          "kind",
+          "path",
+          "content",
+          "encoding",
+          "bom",
+          "lineEnding",
+          "sizeBytes",
+          "returnedBytes",
+          "truncated",
+          "matchedIgnore",
+          "originalLineCount"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "file"
+          },
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "encoding": {
+            "type": "string"
+          },
+          "bom": {
+            "type": "boolean"
+          },
+          "lineEnding": {
+            "type": "string",
+            "enum": ["crlf", "lf"]
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "returnedBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "matchedIgnore": {
+            "type": ["string", "null"],
+            "enum": ["file", "directory", null]
+          },
+          "originalLineCount": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "nextCursor": {
+            "type": ["string", "null"]
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceFileBytes": {
+        "type": "object",
+        "required": [
+          "kind",
+          "path",
+          "offset",
+          "sizeBytes",
+          "returnedBytes",
+          "truncated",
+          "contentBase64"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "file_bytes"
+          },
+          "path": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "returnedBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "contentBase64": {
+            "type": "string",
+            "contentEncoding": "base64"
+          },
+          "hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceStat": {
+        "type": "object",
+        "required": ["kind", "path", "type", "sizeBytes", "modifiedMs"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "stat"
+          },
+          "path": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["file", "directory", "symlink", "other"]
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "modifiedMs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceList": {
+        "type": "object",
+        "required": ["kind", "path", "entries", "truncated", "matchedIgnore"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "list"
+          },
+          "path": {
+            "type": "string"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "kind", "ignored"],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": ["file", "directory", "symlink", "other"]
+                },
+                "ignored": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "matchedIgnore": {
+            "type": "null"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceGlob": {
+        "type": "object",
+        "required": [
+          "kind",
+          "pattern",
+          "cwd",
+          "matches",
+          "count",
+          "truncated",
+          "durationMs"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "glob"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "matches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

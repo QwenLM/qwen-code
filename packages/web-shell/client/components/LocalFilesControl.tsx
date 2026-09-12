@@ -49,6 +49,8 @@ const BLOCKER_KEY: Record<NonNullable<LocalFilesBlocker>, string> = {
   'cross-origin-frame': 'localFiles.blocker.crossOriginFrame',
   'unsupported-browser': 'localFiles.blocker.unsupportedBrowser',
   'workspace-ineligible': 'localFiles.blocker.workspaceIneligible',
+  'workspace-resolving': 'localFiles.blocker.workspaceResolving',
+  'unsupported-daemon': 'localFiles.blocker.unsupportedDaemon',
 };
 
 const BUSY: readonly LocalFilesPhase[] = [
@@ -81,14 +83,19 @@ export function LocalFilesPanel({
   // A grant worth releasing: a directory is bound, or a bridge is running.
   const granted = status.rootName !== undefined || busy || active;
   const canConnect = status.phase !== 'unavailable' && !busy && !active;
+  // The one transient blocker: pairing it with the permanent "Unavailable
+  // here" header would assert impossibility next to a promise of progress.
+  const resolving = status.blocker === 'workspace-resolving';
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
-        {busy ? <Spinner /> : null}
+        {busy || resolving ? <Spinner /> : null}
         <h2 className="text-sm font-medium">{t('localFiles.title')}</h2>
         <span className="ml-auto text-xs text-muted-foreground">
-          {t(STATUS_KEY[status.phase])}
+          {resolving
+            ? t('localFiles.status.resolving')
+            : t(STATUS_KEY[status.phase])}
         </span>
       </div>
 
@@ -184,20 +191,29 @@ interface LocalFilesControlProps {
  * for the eligible cases (primary → legacy `/acp`, trusted secondary →
  * workspace-qualified route). Unlike voice, this surface also needs an
  * explicit "no bridge" outcome: an untrusted or live workspace must withhold
- * the entry instead of collapsing onto the primary mount, and `undefined` is
- * reserved for "cannot tell yet" (capabilities snapshot pending).
+ * the entry instead of collapsing onto the primary mount, and
+ * `{ kind: 'pending' }` is reserved for "cannot tell yet" (capabilities
+ * snapshot or registry entry not landed). The resolver never returns
+ * `undefined`; whether a resolved route may actually be offered also depends
+ * on the daemon's client_mcp_over_ws feature gate, which the caller applies
+ * separately.
  */
 export type LocalFilesWorkspaceRoute =
   | { kind: 'legacy' }
   | { kind: 'qualified'; selector: AcpWorkspaceSelector }
-  | { kind: 'none' };
+  | { kind: 'none' }
+  | { kind: 'pending' };
 
 export function resolveLocalFilesWorkspaceRoute(options: {
   capabilities: DaemonCapabilities | undefined;
   workspaces?: readonly DaemonWorkspaceCapability[];
   workspaceCwd: string | undefined;
   sessionId: string | undefined;
-}): LocalFilesWorkspaceRoute | undefined {
+}): LocalFilesWorkspaceRoute {
+  // Until the snapshot lands no judgement is possible: starting the bridge
+  // now would dial the bare /acp primary mount for a session the primary
+  // mount does not own.
+  if (options.capabilities === undefined) return { kind: 'pending' };
   const target = resolveVoiceWorkspaceTarget({
     capabilities: options.capabilities,
     ...(options.workspaces === undefined
@@ -215,28 +231,46 @@ export function resolveLocalFilesWorkspaceRoute(options: {
     // surface must withhold: the bare /acp mount performs no trust check at
     // registration, so an untrusted or live primary would receive the granted
     // directory - write tool included.
+    // The lookup keys on the target's cwd: with no session yet the shared
+    // resolver matched the primary by the cwd it derived itself, so keying
+    // on the undefined workspaceCwd would miss and fail open.
+    const entryCwd = target.cwd ?? options.workspaceCwd;
     const entry = (
       options.workspaces ?? options.capabilities?.workspaces
-    )?.find((w) => w.cwd === options.workspaceCwd);
+    )?.find((w) => w.cwd === entryCwd);
+    // `trusted !== true`, not `=== false`: a field absent on the wire must
+    // withhold like an explicit false, as session-context does for the same
+    // field. This surface fails closed.
     if (
       entry !== undefined &&
-      (entry.kind === 'live' || entry.trusted === false)
+      (entry.kind === 'live' || entry.trusted !== true)
     ) {
       return { kind: 'none' };
     }
     return { kind: 'legacy' };
   }
-  const list = options.workspaces ?? options.capabilities?.workspaces;
-  if (list === undefined) return undefined;
+  const list = options.workspaces ?? options.capabilities.workspaces;
+  // A daemon that advertises dynamic registration but has published no
+  // workspace entries yet is bootstrapping, not registry-less: its trust
+  // verdict has not landed, so withhold rather than answer eligible for a
+  // primary the bare mount would register without any trust check.
+  if (list === undefined || list.length === 0) {
+    return options.capabilities.features?.includes(
+      'dynamic_workspace_registration',
+    )
+      ? { kind: 'pending' }
+      : { kind: 'legacy' };
+  }
   if (options.workspaceCwd === undefined) return { kind: 'none' };
   const matches = list.filter((entry) => entry.cwd === options.workspaceCwd);
   if (matches.length > 1) return { kind: 'none' };
   const entry = matches[0];
-  if (entry === undefined) return undefined;
-  if (entry.kind === 'live' || entry.trusted === false) {
+  // Registry lag: the session's workspace is not in the snapshot yet.
+  if (entry === undefined) return { kind: 'pending' };
+  if (entry.kind === 'live' || entry.trusted !== true) {
     return { kind: 'none' };
   }
-  return undefined;
+  return { kind: 'legacy' };
 }
 
 /**
@@ -300,9 +334,19 @@ export function LocalFilesControl({
     [capabilities, workspaces, workspaceCwd, sessionId],
   );
   const workspaceSelector =
-    route?.kind === 'qualified' ? route.selector : undefined;
+    route.kind === 'qualified' ? route.selector : undefined;
+  // Preflight: a daemon that does not advertise the reverse channel cannot
+  // host the bridge at all; pending snapshot and ineligible workspaces must
+  // withhold instead of failing open onto the primary mount.
   const withheldBlocker =
-    route?.kind === 'none' ? ('workspace-ineligible' as const) : undefined;
+    capabilities !== undefined &&
+    !capabilities.features?.includes('client_mcp_over_ws')
+      ? ('unsupported-daemon' as const)
+      : route.kind === 'none'
+        ? ('workspace-ineligible' as const)
+        : route.kind === 'pending'
+          ? ('workspace-resolving' as const)
+          : undefined;
 
   const rewarm = useCallback(
     () =>
