@@ -608,6 +608,7 @@ export type {
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   DaemonSessionContextStatus,
+  DaemonContinueSessionResult,
   DaemonLspServerStatus,
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
