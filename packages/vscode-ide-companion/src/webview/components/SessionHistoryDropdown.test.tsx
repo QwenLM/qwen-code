@@ -33,8 +33,9 @@ function makeSession(
 
 const mounted: Array<{ container: HTMLElement; root: Root }> = [];
 
-async function renderDropdown() {
+async function renderDropdown(editable = true) {
   const onClose = vi.fn();
+  const onSourceChange = vi.fn();
   const onSelect = vi.fn();
   const onRename = vi.fn(async () => {});
   const container = document.createElement('div');
@@ -47,9 +48,12 @@ async function renderDropdown() {
         sessions={[makeSession('s1', 'First'), makeSession('s2', 'Second')]}
         currentSessionId="s1"
         searchQuery=""
+        source={editable ? 'vscode' : 'default'}
+        editable={editable}
         loading={false}
         hasMore={false}
         onSearchChange={() => {}}
+        onSourceChange={onSourceChange}
         onSelect={onSelect}
         onRename={onRename}
         onDelete={async () => {}}
@@ -60,7 +64,7 @@ async function renderDropdown() {
     await Promise.resolve();
   });
   mounted.push({ container, root });
-  return { container, onClose };
+  return { container, onClose, onSourceChange };
 }
 
 afterEach(() => {
@@ -158,5 +162,32 @@ describe('SessionHistoryDropdown focus management', () => {
     const dialog = document.getElementById('qwen-session-history');
     expect(dialog?.contains(document.activeElement)).toBe(true);
     outside.remove();
+  });
+});
+
+describe('SessionHistoryDropdown sources', () => {
+  it('switches sources from the source buttons', async () => {
+    const { container, onSourceChange } = await renderDropdown();
+    const terminalSource = container.querySelector(
+      '[data-session-source="default"]',
+    ) as HTMLButtonElement;
+
+    await act(async () => {
+      terminalSource.click();
+      await Promise.resolve();
+    });
+
+    expect(onSourceChange).toHaveBeenCalledWith('default');
+  });
+
+  it('does not expose rename or delete for non-VS Code sessions', async () => {
+    const { container } = await renderDropdown(false);
+
+    expect(
+      container.querySelector(`[aria-label="${t('session.renameLabel')}"]`),
+    ).toBeNull();
+    expect(
+      container.querySelector(`[aria-label="${t('session.deleteLabel')}"]`),
+    ).toBeNull();
   });
 });

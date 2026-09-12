@@ -159,6 +159,94 @@ function turnCompleteFrame(promptId: string): string {
 }
 
 describe('DaemonSessionClient', () => {
+  it('binds continuation admission to the session without waiting for SSE', async () => {
+    const body = {
+      accepted: true,
+      interruption: 'interrupted_turn',
+      promptId: 'continue-1',
+      lastEventId: 12,
+      eventEpoch: 'epoch-1',
+    };
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+      lastEventId: 20,
+      eventEpoch: 'epoch-1',
+    });
+
+    await expect(session.continueSession()).resolves.toEqual(body);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      url: 'http://daemon/session/s-1/continue',
+      headers: { 'x-qwen-client-id': 'client-1' },
+    });
+    expect(session.lastEventId).toBe(20);
+    expect(pendingPromptIds(session)).toEqual([]);
+  });
+
+  it('re-registers only an explicitly rejected continuation identity', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/resume')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'fresh-client',
+        });
+      }
+      return req.headers['x-qwen-client-id'] === 'old-client'
+        ? jsonResponse(400, {
+            code: 'invalid_client_id',
+            error: 'Invalid client',
+          })
+        : jsonResponse(200, { accepted: false, interruption: 'none' });
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'old-client',
+      },
+    });
+
+    await expect(session.continueSession()).resolves.toEqual({
+      accepted: false,
+      interruption: 'none',
+    });
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      '/session/s-1/continue',
+      '/session/s-1/resume',
+      '/session/s-1/continue',
+    ]);
+    expect(calls[2]?.headers['x-qwen-client-id']).toBe('fresh-client');
+  });
+
+  it('does not retry an unknown continuation admission outcome', async () => {
+    const { fetch, calls } = recordingFetch(() => {
+      throw new TypeError('fetch failed');
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.continueSession()).rejects.toThrow('fetch failed');
+    expect(calls).toHaveLength(1);
+  });
+
   it('binds agent, trace, and attachment reads to the session identity', async () => {
     const controller = new AbortController();
     const { signal } = controller;
