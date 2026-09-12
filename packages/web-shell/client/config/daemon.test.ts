@@ -161,7 +161,7 @@ describe('buildDaemonConnectionUrl', () => {
     const { buildDaemonConnectionUrl } = await import('./daemon');
     const result = buildDaemonConnectionUrl(
       'http://remote.example:4170/',
-      'http://localhost:5173/app/session/old?workspace=one&context=live&theme=light#token=secret',
+      'http://localhost:5173/app/session/old?workspace=one&context=live&theme=light&split=a,b#token=secret',
     );
     expect(result).toBe(
       'http://localhost:5173/app?theme=light&daemon=http%3A%2F%2Fremote.example%3A4170',
@@ -183,6 +183,61 @@ describe('buildDaemonConnectionUrl', () => {
     expect(
       buildDaemonConnectionUrl('file:///tmp/daemon', 'http://localhost:5173/'),
     ).toBeUndefined();
+  });
+});
+
+describe('navigateToDaemon', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    window.sessionStorage.clear();
+  });
+
+  // The split set is per-tab (sessionStorage) and the daemon switch navigates
+  // in the same tab on the page origin, so storage — not the URL — is what
+  // would carry the previous daemon's split into the new one.
+  function setupPage(href: string) {
+    const url = new URL(href);
+    const assign = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: {
+        origin: url.origin,
+        hostname: url.hostname,
+        href: url.href,
+        search: url.search,
+        assign,
+      },
+      writable: true,
+      configurable: true,
+    });
+    return assign;
+  }
+
+  it('forgets the split set when switching to another daemon', async () => {
+    window.sessionStorage.setItem(
+      'qwen-webshell-split-sessions',
+      JSON.stringify(['old-daemon-session']),
+    );
+    const assign = setupPage('http://localhost:5173/app');
+    const mod = await import('./daemon');
+    mod.navigateToDaemon('http://remote.example:4170');
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(
+      window.sessionStorage.getItem('qwen-webshell-split-sessions'),
+    ).toBeNull();
+  });
+
+  it('keeps the split set when reconnecting to the page-origin daemon', async () => {
+    const saved = JSON.stringify(['local-session']);
+    window.sessionStorage.setItem('qwen-webshell-split-sessions', saved);
+    const assign = setupPage(
+      'http://localhost:5173/app?daemon=https%3A%2F%2Fremote.example',
+    );
+    const mod = await import('./daemon');
+    mod.navigateToDaemon('http://localhost:5173');
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(window.sessionStorage.getItem('qwen-webshell-split-sessions')).toBe(
+      saved,
+    );
   });
 });
 

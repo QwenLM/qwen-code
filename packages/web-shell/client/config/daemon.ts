@@ -1,4 +1,5 @@
 import { buildSessionPathname } from '../utils/sessionPath';
+import { clearSplitSessions } from '../utils/splitUrl';
 
 export function getDaemonBaseUrl(): string {
   if (typeof window === 'undefined') {
@@ -235,6 +236,9 @@ export function buildDaemonConnectionUrl(
   url.searchParams.delete('addWorkspace');
   url.searchParams.delete('workspaceReturn');
   url.searchParams.delete('token');
+  // Session-scoped like the rest: a `?split=` deep link names sessions of the
+  // daemon being left behind.
+  url.searchParams.delete('split');
   if (daemonOrigin === url.origin) {
     url.searchParams.delete('daemon');
   } else {
@@ -272,5 +276,13 @@ export function navigateToDaemon(raw: string, token?: string): void {
   if (!daemonOrigin || !nextUrl) return;
   if (token !== undefined) persistDaemonToken(token.trim(), daemonOrigin);
   confirmDaemonTarget(daemonOrigin);
+  // The per-tab split set (App.tsx's refresh restore) is session-scoped state
+  // for the daemon being left: this navigation stays in the same tab on the
+  // page origin, so the entry would survive and boot the new daemon into a
+  // split of sessions it has never had. Keep it for a same-origin reconnect —
+  // that is the case a plain refresh relies on.
+  if (daemonOrigin !== window.location.origin) {
+    clearSplitSessions();
+  }
   window.location.assign(nextUrl);
 }
