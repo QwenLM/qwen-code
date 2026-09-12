@@ -1849,7 +1849,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -1961,7 +1961,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2073,7 +2073,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2185,7 +2185,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2297,7 +2297,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2409,7 +2409,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2521,7 +2521,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2633,7 +2633,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2745,7 +2745,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2857,7 +2857,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2969,7 +2969,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3081,7 +3081,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3193,7 +3193,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3305,7 +3305,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3417,7 +3417,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3529,7 +3529,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3641,7 +3641,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3753,7 +3753,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3865,7 +3865,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3977,7 +3977,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -4089,7 +4089,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -4201,7 +4201,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
