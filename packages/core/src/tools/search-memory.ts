@@ -8,6 +8,7 @@ import type { Config } from '../config/config.js';
 import { logMemorySearch, MemorySearchEvent } from '../telemetry/index.js';
 import {
   executeSearchMemory,
+  type MemoryBodyCoverage,
   type SearchMemoryToolResult,
   type SearchMemoryToolParams,
 } from '../memory/search-memory.js';
@@ -74,6 +75,14 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
     const callBodyPresentVersions = new Map(bodyPresentVersions);
     const callBodyCoverage = structuredClone(bodyCoverage);
     const callExhaustedBodyRefs = new Set(exhaustedBodyRefs);
+    // Pre-call snapshots detect which entries the call itself wrote; only
+    // those are committed back. Replaying the whole pre-call state would
+    // resurrect entries a mid-call eviction (memory-pressure compaction)
+    // deliberately cleared, and the next read would claim an evicted body is
+    // still available.
+    const preCallBodyPresentVersions = new Map(bodyPresentVersions);
+    const preCallBodyCoverage = structuredClone(bodyCoverage);
+    const preCallExhaustedBodyRefs = new Set(exhaustedBodyRefs);
     let result: SearchMemoryToolResult;
     try {
       result = await executeSearchMemory(this.params, {
@@ -103,10 +112,18 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
       }
       throw error;
     }
-    callBodyPresentVersions.forEach((version, ref) =>
-      bodyPresentVersions.set(ref, version),
-    );
+    callBodyPresentVersions.forEach((version, ref) => {
+      // Commit only what the call itself wrote: replaying untouched pre-call
+      // entries would resurrect state a mid-call eviction cleared on purpose.
+      if (preCallBodyPresentVersions.get(ref) === version) return;
+      const live = bodyPresentVersions.get(ref);
+      if (live === undefined || live < version) {
+        bodyPresentVersions.set(ref, version);
+      }
+    });
     callBodyCoverage.forEach((coverage, ref) => {
+      const before = preCallBodyCoverage.get(ref);
+      if (before !== undefined && sameBodyCoverage(before, coverage)) return;
       const live = bodyCoverage.get(ref);
       if (!live || live.version < coverage.version) {
         bodyCoverage.set(ref, coverage);
@@ -132,13 +149,71 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
       }
       live.ranges.sort((a, b) => a.start - b.start);
     });
-    callExhaustedBodyRefs.forEach((ref) => exhaustedBodyRefs.add(ref));
+    callExhaustedBodyRefs.forEach((ref) => {
+      if (!preCallExhaustedBodyRefs.has(ref)) {
+        exhaustedBodyRefs.add(ref);
+      }
+    });
     const content = JSON.stringify(result, null, 2);
     return {
       llmContent: content,
-      returnDisplay: content,
+      // The model gets the full JSON; the transcript shows a one-line
+      // summary — a fetch body can be tens of thousands of characters.
+      returnDisplay: summarizeSearchMemoryResult(result),
     };
   }
+}
+
+function sameBodyCoverage(
+  a: MemoryBodyCoverage,
+  b: MemoryBodyCoverage,
+): boolean {
+  return (
+    a.version === b.version &&
+    a.total === b.total &&
+    a.ranges.length === b.ranges.length &&
+    a.ranges.every((range, index) => {
+      const other = b.ranges[index];
+      return other?.start === range.start && other?.end === range.end;
+    })
+  );
+}
+
+function summarizeSearchMemoryResult(result: SearchMemoryToolResult): string {
+  if (result.mode === 'fetch') {
+    const fetched = result.results.filter(
+      (entry) => entry.content !== undefined,
+    );
+    const chars = fetched.reduce(
+      (total, entry) => total + (entry.content?.length ?? 0),
+      0,
+    );
+    const parts = [
+      `Fetched ${result.results.length} memory ${
+        result.results.length === 1 ? 'body' : 'bodies'
+      }`,
+    ];
+    if (chars > 0) {
+      parts.push(`${chars.toLocaleString('en-US')} chars`);
+    }
+    const alreadyAvailable = result.results.length - fetched.length;
+    if (alreadyAvailable > 0) {
+      parts.push(`${alreadyAvailable} already available`);
+    }
+    if (result.missingRefs && result.missingRefs.length > 0) {
+      parts.push(`${result.missingRefs.length} missing`);
+    }
+    return parts.join(', ');
+  }
+  if (result.mode === 'search') {
+    return `Found ${result.results.length} matching ${
+      result.results.length === 1 ? 'memory' : 'memories'
+    }`;
+  }
+  return `Listed ${result.branches.length} memory categories (${result.branches.reduce(
+    (total, branch) => total + branch.leaves.length,
+    0,
+  )} entries)`;
 }
 
 function searchMemoryRequestSignature(params: SearchMemoryToolParams): string {

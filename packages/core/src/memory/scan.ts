@@ -122,20 +122,42 @@ function stringValue(value: unknown): string | undefined {
 }
 
 // A trailing ` #...` on a PLAIN scalar is structurally a YAML comment, but
-// for free-text memory fields the writer meant it literally. Rebuild the
-// intended text from the parsed document's own nodes rather than scraping
-// raw lines: the document model anchors each field at the top level, so a
-// nested same-named key (or any other legal YAML shape) cannot be mistaken
-// for the field being rescued.
-function plainScalarTextWithComment(node: unknown): string | undefined {
+// for free-text memory fields the writer meant it literally. Only a `#` on
+// the scalar's OWN line is content: the parser also attaches an indented
+// comment sitting on a following line to the scalar, and that one stays a
+// comment. Rebuild the intended text from the parsed document's own nodes
+// rather than scraping raw lines: the document model anchors each field at
+// the top level, so a nested same-named key (or any other legal YAML shape)
+// cannot be mistaken for the field being rescued.
+function plainScalarTextWithComment(
+  node: unknown,
+  frontmatter: string,
+): string | undefined {
   if (
     !isScalar(node) ||
     node.type !== 'PLAIN' ||
-    typeof node.comment !== 'string'
+    typeof node.comment !== 'string' ||
+    !node.range
   ) {
     return undefined;
   }
-  return `${node.value} #${node.comment}`;
+  const [, valueEnd, nodeEnd] = node.range;
+  const tail = frontmatter.slice(valueEnd, nodeEnd);
+  const hashIndex = tail.indexOf('#');
+  if (hashIndex === -1 || tail.slice(0, hashIndex).includes('\n')) {
+    return undefined;
+  }
+  // The comment text ends at the line break: an indented `# ...` continuation
+  // line attached to the same scalar is a real comment, not content.
+  const lineEnd = tail.indexOf('\n', hashIndex);
+  const comment = tail.slice(hashIndex, lineEnd === -1 ? undefined : lineEnd);
+  const value =
+    typeof node.value === 'string'
+      ? node.value
+      : node.value == null
+        ? ''
+        : String(node.value);
+  return value === '' ? comment : `${value} ${comment}`;
 }
 
 // Fixed-vocabulary fields keep plain YAML semantics (a trailing ` #...` is a
@@ -156,17 +178,23 @@ function rescueUnquotedHashFields(
   const rescued: Record<string, unknown> = { ...parsed };
   for (const pair of document.contents.items) {
     const key = isScalar(pair.key) ? String(pair.key.value) : undefined;
-    if (
-      key === undefined ||
-      YAML_VOCABULARY_KEYS.has(key) ||
-      !(key in rescued)
-    ) {
+    if (key === undefined || YAML_VOCABULARY_KEYS.has(key)) {
+      continue;
+    }
+    const node = pair.value;
+    if (!(key in rescued)) {
+      // parseYaml drops null-valued keys — exactly the field whose entire
+      // value YAML read as a comment (`name: #1 fix`). Rescue that text too;
+      // an empty value with no comment stays missing.
+      const text = plainScalarTextWithComment(node, frontmatter);
+      if (text !== undefined) {
+        rescued[key] = text;
+      }
       continue;
     }
     const value = rescued[key];
-    const node = pair.value;
     if (typeof value === 'string') {
-      const text = plainScalarTextWithComment(node);
+      const text = plainScalarTextWithComment(node, frontmatter);
       if (text !== undefined) {
         rescued[key] = text;
       }
@@ -174,7 +202,7 @@ function rescueUnquotedHashFields(
       if (node.items.length !== value.length) continue;
       rescued[key] = value.map((item, index) =>
         typeof item === 'string'
-          ? (plainScalarTextWithComment(node.items[index]) ?? item)
+          ? (plainScalarTextWithComment(node.items[index], frontmatter) ?? item)
           : item,
       );
     }
@@ -383,6 +411,7 @@ async function listMarkdownFiles(root: string) {
     root,
     getMemoryRootTrustedAnchor(root),
     AUTO_MEMORY_INDEX_FILENAME,
+    { followRootSymlink: true },
   );
 }
 
@@ -752,6 +781,7 @@ export async function rereadAutoMemoryDocument(
       root,
       getMemoryRootTrustedAnchor(root),
       doc.relativePath,
+      { followRootSymlink: true },
     );
     if (!trustedFile) return null;
     const stats = await fs.stat(trustedFile);

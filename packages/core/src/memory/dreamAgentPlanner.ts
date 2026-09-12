@@ -22,7 +22,10 @@ import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
-import { MEMORY_CATEGORY_SECTION } from './prompt.js';
+import {
+  MEMORY_CATEGORY_SECTION,
+  MEMORY_FRONTMATTER_EXAMPLE,
+} from './prompt.js';
 
 const MAX_TURNS = 8;
 const MAX_TIME_MINUTES = 5;
@@ -42,7 +45,10 @@ Rules:
 - Every memory must have one fixed category, 1-3 usage_scenarios, and 2-6 keywords in YAML frontmatter; keep each keyword and usage_scenario at most 64 characters and keywords unique case-insensitively.
 - Use discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words and put at most 2 exact identifiers last.
 - Do not edit MEMORY.md. The runtime rebuilds it after your work.
-- If nothing needs consolidation, do nothing and say so.`;
+- If nothing needs consolidation, do nothing and say so.
+
+Memory file format reference:
+${MEMORY_FRONTMATTER_EXAMPLE.join('\n')}`;
 
 export function getTranscriptDir(projectRoot: string): string {
   return path.join(new Storage(projectRoot).getProjectDir(), 'chats');

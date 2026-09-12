@@ -19,7 +19,7 @@ const DIR_EXISTS_GUIDANCE =
 const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four'] as const;
 
 export const MEMORY_METADATA_ITEM_BOUNDS =
-  'Keep each keyword and usage_scenario at most 64 characters, and keywords unique case-insensitively; double-quote any value that contains a colon or " #", or starts with "#", so YAML never misparses it.';
+  'Keep each keyword and usage_scenario at most 64 characters, and keywords unique case-insensitively; double-quote every keyword and usage_scenario value, so YAML never misparses it.';
 
 export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```markdown',
@@ -29,9 +29,9 @@ export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   'type: {{user, feedback, project, reference}}',
   'category: {{one fixed memory category}}',
   'keywords:',
-  '  - {{2-6 discriminative retrieval terms or short phrases, each at most 64 characters and unique case-insensitively; prefer domain-qualified phrases over generic single words; put at most 2 exact identifiers last; double-quote any value that contains a colon or " #", or starts with "#"}}',
+  '  - {{2-6 discriminative retrieval terms or short phrases, each at most 64 characters and unique case-insensitively; prefer domain-qualified phrases over generic single words; put at most 2 exact identifiers last; double-quote every value}}',
   'usage_scenarios:',
-  '  - {{1-3 future tasks where this memory would help, each at most 64 characters — do not repeat the description}}',
+  '  - {{1-3 future tasks where this memory would help, each at most 64 characters — do not repeat the description; double-quote every value}}',
   '---',
   '',
   '{{memory content — for feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines}}',

@@ -6547,6 +6547,11 @@ export class Config {
     this.memoryRecallMode = 'legacy';
     this.memoryCorpusRevision = '';
     this.memoryRecallModeInitialized = false;
+    // The prompt was built for the previous workspace's roots; when the
+    // refresh below throws (returned as memoryRefreshError), nothing
+    // reassigns it, and the stale text keeps routing to search_memory while
+    // the reset mode leaves that tool undeclared.
+    this.autoMemoryPrompt = '';
 
     let memoryRefreshError: unknown;
     try {
@@ -7643,20 +7648,32 @@ export class Config {
     }
     const projectRoot = this.getProjectRoot();
     const configuredProjectRoot = getAutoMemoryRoot(projectRoot);
-    await Promise.all([
-      ...getProjectMetadataMigrationRoots(
-        projectRoot,
-        this.isTrustedFolder(),
-      ).map((root) =>
-        root === configuredProjectRoot
-          ? rebuildManagedAutoMemoryIndex(projectRoot)
-          : rebuildAutoMemoryIndexAtRoot(root, 'project'),
+    // Index rebuilds refresh the legacy MEMORY.md artifacts; the structured
+    // prompt is built from scans, not these indexes, so a tier that cannot be
+    // read or written (EACCES, a rejected root) must not block the
+    // transition — the failed tier's staleness is visible to the next scan.
+    await Promise.all(
+      [
+        ...getProjectMetadataMigrationRoots(
+          projectRoot,
+          this.isTrustedFolder(),
+        ).map((root) =>
+          root === configuredProjectRoot
+            ? rebuildManagedAutoMemoryIndex(projectRoot)
+            : rebuildAutoMemoryIndexAtRoot(root, 'project'),
+        ),
+        rebuildUserAutoMemoryIndex(),
+        ...(this.getTeamMemoryEnabled() && this.isTrustedFolder()
+          ? [rebuildTeamAutoMemoryIndex(projectRoot)]
+          : []),
+      ].map((pending) =>
+        pending.catch((error: unknown) => {
+          this.debugLogger.debug(
+            `Memory index rebuild failed during recall transition: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
       ),
-      rebuildUserAutoMemoryIndex(),
-      ...(this.getTeamMemoryEnabled() && this.isTrustedFolder()
-        ? [rebuildTeamAutoMemoryIndex(projectRoot)]
-        : []),
-    ]);
+    );
     const autoMemoryPrompt = await this.buildAutoMemoryPromptForMode(to);
     const confirmed = await this.scanMemoryRecallCorpusStatus();
     if (confirmed.revision !== status.revision) return undefined;

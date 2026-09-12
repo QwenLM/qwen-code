@@ -22,15 +22,39 @@ function comparable(filePath: string): string {
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
+export interface TrustedMemoryAccessOptions {
+  /**
+   * Read/scan paths follow a symlinked memory ROOT: it is the user's own
+   * layout (e.g. `~/.qwen/memories` linked into a synced dotfiles dir), which
+   * the pre-trust scans followed. Migration and write-commit callers omit
+   * this and keep the strict rejection. Within-root entries stay
+   * symlink-screened either way.
+   */
+  followRootSymlink?: boolean;
+}
+
 export async function resolveTrustedMemoryRoot(
   root: string,
   trustedAnchor: string,
+  options: TrustedMemoryAccessOptions = {},
 ): Promise<string | undefined> {
   const stats = await fs.lstat(root).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw error;
   });
   if (!stats) return undefined;
+  if (options.followRootSymlink && stats.isSymbolicLink()) {
+    const target = await fs.stat(root).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!target?.isDirectory()) {
+      throw new Error(
+        `Refusing symlinked memory root or non-directory: ${root}`,
+      );
+    }
+    return fs.realpath(root);
+  }
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
     throw new Error(`Refusing symlinked memory root or non-directory: ${root}`);
   }
@@ -65,8 +89,13 @@ export async function listTrustedMemoryMarkdownFiles(
   root: string,
   trustedAnchor: string,
   excludedFilename: string,
+  options: TrustedMemoryAccessOptions = {},
 ): Promise<TrustedMemoryFile[]> {
-  const resolvedRoot = await resolveTrustedMemoryRoot(root, trustedAnchor);
+  const resolvedRoot = await resolveTrustedMemoryRoot(
+    root,
+    trustedAnchor,
+    options,
+  );
   if (!resolvedRoot) return [];
   const files: TrustedMemoryFile[] = [];
 
@@ -121,8 +150,13 @@ export async function resolveTrustedMemoryFile(
   root: string,
   trustedAnchor: string,
   relativePath: string,
+  options: TrustedMemoryAccessOptions = {},
 ): Promise<string | undefined> {
-  const resolvedRoot = await resolveTrustedMemoryRoot(root, trustedAnchor);
+  const resolvedRoot = await resolveTrustedMemoryRoot(
+    root,
+    trustedAnchor,
+    options,
+  );
   if (!resolvedRoot) return undefined;
   const candidate = path.join(root, relativePath);
   const stats = await fs.lstat(candidate).catch((error: unknown) => {

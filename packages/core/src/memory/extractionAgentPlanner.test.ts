@@ -51,6 +51,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     getApprovalMode: vi.fn(),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
+    getAutoMemoryPrompt: vi.fn().mockReturnValue('session routing contract'),
   } as unknown as Config;
 
   beforeEach(() => {
@@ -123,6 +124,26 @@ describe('runAutoMemoryExtractionByAgent', () => {
       expect(systemPrompt).toContain(category);
     }
     expect(systemPrompt).toContain('at most 64 characters');
+  });
+
+  it('does not inherit the session auto-memory routing contract', async () => {
+    // The session contract routes body access through search_memory /
+    // manage_memory — tools this agent does not have — and forbids the
+    // direct file tools it does have. The extraction prompt already embeds
+    // the frontmatter reference, so blanking the inherited section loses
+    // nothing.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    expect(call?.config.getAutoMemoryPrompt()).toBe('');
+    expect(call?.systemPrompt).toContain('Memory file format reference:');
   });
 
   it('threads the configured memory agent timeout into the forked agent', async () => {

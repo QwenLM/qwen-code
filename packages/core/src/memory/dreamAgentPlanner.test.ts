@@ -55,6 +55,7 @@ describe('dreamAgentPlanner', () => {
       getApprovalMode: vi.fn(),
       getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
       getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue('session routing contract'),
     } as unknown as Config;
     vi.mocked(runForkedAgent).mockReset();
   });
@@ -233,6 +234,28 @@ describe('dreamAgentPlanner', () => {
         ],
       }),
     );
+  });
+
+  it('does not inherit the session auto-memory routing contract', async () => {
+    // The session contract routes body access through search_memory /
+    // manage_memory — tools this agent does not have — and forbids the
+    // direct file tools it does have.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+      systemPrompt: string;
+    };
+    expect(params.config.getAutoMemoryPrompt()).toBe('');
+    // The frontmatter format reference travels with the agent's own prompt
+    // instead (it used to arrive via the inherited legacy section).
+    expect(params.systemPrompt).toContain('Memory file format reference:');
+    expect(params.systemPrompt).toContain('usage_scenarios:');
   });
 
   it('threads the configured memory agent timeout into the forked agent', async () => {

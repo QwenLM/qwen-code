@@ -323,9 +323,11 @@ Migration follows these constraints:
 - treat a missing compatibility root as a no-op without creating it;
 - expose each committed canonical phrase to subsequent metadata generation.
 
-Readiness becomes true only when every requested scope validates. Index
-rebuild, revision revalidation, and prompt construction must all succeed before
-the structured protocol is committed.
+Readiness becomes true only when every requested scope validates. Revision
+revalidation and prompt construction must succeed before the structured
+protocol is committed; the legacy-index rebuilds in that step are best-effort
+because the structured prompt is built from scans, not those indexes, so a
+tier that cannot be read or written must not block the transition.
 
 ## Observability
 

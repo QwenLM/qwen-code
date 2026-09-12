@@ -12,6 +12,7 @@ import {
   clearAutoMemoryRootCache,
   getAutoMemoryFilePath,
   getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
 } from './paths.js';
 import {
   parseAutoMemoryTopicDocument,
@@ -20,6 +21,7 @@ import {
   scanAllAutoMemoryTopicDocuments,
   scanAutoMemorySnapshot,
   scanAutoMemoryTopicDocuments,
+  scanUserAutoMemoryTopicDocuments,
   type AutoMemoryDocumentCache,
   validateStructuredAutoMemoryDocument,
 } from './scan.js';
@@ -343,6 +345,78 @@ describe('auto-memory topic scanning', () => {
     expect(parsed?.description).toBe('Pointers to issue #1234');
   });
 
+  it('does not fold an own-line comment into the preceding field', () => {
+    // An indented `# ...` line after a scalar is a real YAML comment that the
+    // parser attaches to that scalar's node; only a same-line ` #...` is
+    // rescued as content.
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/own-line-comment.md',
+      [
+        '---',
+        'type: project',
+        'name: Release issue',
+        '  # see ticket tracker',
+        'description: Pointers to issue',
+        'category: project_introduction',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+
+    expect(parsed?.title).toBe('Release issue');
+    expect(parsed?.description).toBe('Pointers to issue');
+  });
+
+  it('rescues a free-text field whose whole value YAML read as a comment', () => {
+    const content = [
+      '---',
+      'type: project',
+      'name: #1 priority fix',
+      'description: #1234 regression notes',
+      'category: project_introduction',
+      'keywords:',
+      '  - alpha',
+      '  - beta',
+      'usage_scenarios:',
+      '  - triaging regressions',
+      '---',
+      'Body.',
+    ].join('\n');
+
+    const parsed = parseAutoMemoryTopicDocument('/tmp/hash-value.md', content);
+    expect(parsed?.title).toBe('#1 priority fix');
+    expect(parsed?.description).toBe('#1234 regression notes');
+    // The validator must not report a field the author wrote as missing.
+    expect(validateStructuredAutoMemoryDocument(content)).toEqual({
+      valid: true,
+      missingOrInvalidFields: [],
+    });
+  });
+
+  it('does not rescue a vocabulary field whose whole value is a comment', () => {
+    const content = [
+      '---',
+      'type: # scoped comment',
+      'name: Release plan',
+      'description: Release context',
+      'category: project_introduction',
+      'keywords:',
+      '  - alpha',
+      '  - beta',
+      'usage_scenarios:',
+      '  - planning',
+      '---',
+      'Body.',
+    ].join('\n');
+
+    expect(
+      parseAutoMemoryTopicDocument('/tmp/type-comment.md', content),
+    ).toBeNull();
+    expect(
+      validateStructuredAutoMemoryDocument(content).missingOrInvalidFields,
+    ).toContain('type');
+  });
+
   it('ignores invalid keyword fields while preserving semantic recall data', () => {
     const parsed = parseAutoMemoryTopicDocument(
       '/tmp/invalid-keywords.md',
@@ -527,6 +601,46 @@ describe('auto-memory topic scanning', () => {
       false,
     );
     await expect(fs.readFile(outsideFile, 'utf-8')).resolves.toContain('body');
+  });
+
+  it('follows a symlinked memory root when scanning (dotfiles layout)', async () => {
+    // A symlinked ROOT is the user's own layout choice (e.g. ~/.qwen/memories
+    // linked into a synced dotfiles dir) — the pre-trust scans followed it, so
+    // read paths do too. Within-root entries stay symlink-screened (see the
+    // test above), and migration/write paths keep the strict rejection.
+    const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(
+      tempDir,
+      'memory-base',
+    );
+    clearAutoMemoryRootCache();
+    try {
+      const realRoot = path.join(tempDir, 'dotfiles-memories');
+      await fs.mkdir(realRoot, { recursive: true });
+      await fs.writeFile(
+        path.join(realRoot, 'role.md'),
+        '---\ntype: user\nname: user role\ndescription: who the user is\n---\nbody',
+        'utf-8',
+      );
+      const userRoot = getUserAutoMemoryRoot();
+      await fs.mkdir(path.dirname(userRoot), { recursive: true });
+      await fs.symlink(
+        realRoot,
+        userRoot,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+
+      const docs = await scanUserAutoMemoryTopicDocuments();
+
+      expect(docs.map((doc) => doc.title)).toEqual(['user role']);
+    } finally {
+      if (previousBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBaseDir;
+      }
+      clearAutoMemoryRootCache();
+    }
   });
 
   it('rejects a memory replaced by an outside symlink after scanning', async () => {

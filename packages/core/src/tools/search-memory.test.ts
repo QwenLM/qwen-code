@@ -236,6 +236,96 @@ describe('SearchMemoryTool', () => {
     });
   });
 
+  it('does not resurrect state a mid-call eviction cleared', async () => {
+    // Memory-pressure compaction clears the live residency maps while a call
+    // is parked inside the executor; the write-back must commit only the
+    // entries the call itself wrote, not replay the pre-call snapshot.
+    const mockConfig = config();
+    const tool = new SearchMemoryTool(mockConfig);
+    const memoryManager = mockConfig.getMemoryManager();
+    const liveVersions = memoryManager.getBodyPresentVersionsInHistory();
+    const liveCoverage = memoryManager.getBodyCoverageInHistory();
+    const liveExhausted = memoryManager.getExhaustedBodyRefsForCurrentTurn();
+    liveVersions.set('project:untouched.md', 100);
+    liveCoverage.set('project:untouched.md', {
+      version: 100,
+      total: 500,
+      ranges: [{ start: 0, end: 100 }],
+    });
+    liveExhausted.add('project:untouched.md');
+    vi.mocked(executeSearchMemory).mockImplementationOnce(
+      async (_params, options) => {
+        liveVersions.clear();
+        liveCoverage.clear();
+        liveExhausted.clear();
+        options?.bodyPresentVersions?.set('project:read.md', 200);
+        options?.bodyCoverage?.set('project:read.md', {
+          version: 200,
+          total: 800,
+          ranges: [{ start: 0, end: 800 }],
+        });
+        options?.exhaustedBodyRefs?.add('project:read.md');
+        return {
+          mode: 'fetch',
+          sourceStatus: {
+            requestedScopes: ['project'],
+            searchedScopes: ['project'],
+            unavailableScopes: [],
+            complete: true,
+            incompleteScopes: [],
+          },
+          results: [],
+        };
+      },
+    );
+
+    await tool
+      .build({ mode: 'fetch', refs: ['project:read.md'] })
+      .execute(new AbortController().signal);
+
+    // The call's own writes commit…
+    expect(liveVersions.get('project:read.md')).toBe(200);
+    expect(liveCoverage.get('project:read.md')).toEqual({
+      version: 200,
+      total: 800,
+      ranges: [{ start: 0, end: 800 }],
+    });
+    expect(liveExhausted.has('project:read.md')).toBe(true);
+    // …but the untouched pre-call entries stay evicted.
+    expect(liveVersions.has('project:untouched.md')).toBe(false);
+    expect(liveCoverage.has('project:untouched.md')).toBe(false);
+    expect(liveExhausted.has('project:untouched.md')).toBe(false);
+  });
+
+  it('summarizes the result for display instead of dumping the full JSON', async () => {
+    const tool = new SearchMemoryTool(config());
+    vi.mocked(executeSearchMemory).mockResolvedValue({
+      mode: 'fetch',
+      sourceStatus: {
+        requestedScopes: ['project'],
+        searchedScopes: ['project'],
+        unavailableScopes: [],
+        complete: true,
+        incompleteScopes: [],
+      },
+      results: [
+        {
+          ref: 'project:long.md',
+          version: 9,
+          content: 'x'.repeat(5000),
+          truncated: false,
+        },
+      ],
+    });
+
+    const result = await tool
+      .build({ mode: 'fetch', refs: ['project:long.md'] })
+      .execute(new AbortController().signal);
+
+    expect(result.returnDisplay).toBe('Fetched 1 memory body, 5,000 chars');
+    expect(result.llmContent).toContain('"ref": "project:long.md"');
+  });
+
   it('rejects stale historical calls while the legacy protocol is active', async () => {
     const mockConfig = config();
     vi.mocked(mockConfig.getMemoryRecallMode).mockReturnValue('legacy');

@@ -115,6 +115,7 @@ import {
 } from '../memory/paths.js';
 import {
   rebuildTeamAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
   TeamMemoryRootSecurityError,
 } from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
@@ -8980,6 +8981,44 @@ describe('Server Config (config.ts)', () => {
     ).resolves.toBe(false);
   });
 
+  it('prepareMemoryRecallTransition tolerates a failed tier index rebuild', async () => {
+    // A tier that cannot be read or written (EACCES, a rejected root) leaves
+    // its legacy MEMORY.md stale, but the structured prompt is built from
+    // scans — the rebuild must not block the protocol transition.
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: 'legacy prompt',
+      debugLogger: createDebugLogger('TEST'),
+    });
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    Object.assign(config, {
+      scanMemoryRecallCorpusStatus: vi
+        .fn()
+        .mockResolvedValue({ ready: true, revision: 'structured-revision' }),
+      buildAutoMemoryPromptForMode: vi
+        .fn()
+        .mockResolvedValue('structured prompt'),
+    });
+    vi.mocked(rebuildUserAutoMemoryIndex).mockRejectedValueOnce(
+      new Error('EACCES: cannot read user root'),
+    );
+
+    const transition = await config.prepareMemoryRecallTransition();
+
+    expect(transition).toMatchObject({
+      from: 'legacy',
+      to: 'structured',
+      revision: 'structured-revision',
+      autoMemoryPrompt: 'structured prompt',
+    });
+  });
+
   it('prepareMemoryRecallTransition stays inert in safe mode', async () => {
     const config = Object.create(Config.prototype) as Config;
     Object.assign(config, {
@@ -10115,6 +10154,34 @@ describe('Server Config (config.ts)', () => {
 
     expect(config.getTargetDir()).toBe(newDir);
     expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should drop the stale structured memory prompt when the refresh fails', async () => {
+    // The reset below clears the recall mode; the prompt paired with it must
+    // go too, or a failed refresh leaves the session routing to search_memory
+    // while the legacy mode leaves that tool undeclared.
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    Object.assign(config, {
+      autoMemoryPrompt: 'structured prompt naming the old workspace',
+      memoryRecallMode: 'structured',
+    });
+    vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
+      new Error('memory failed'),
+    );
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+    expect(config.getAutoMemoryPrompt()).toBe('');
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();

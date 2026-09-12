@@ -19,7 +19,10 @@ import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
 import { scanUserAutoMemoryTopicDocuments } from './scan.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
-import { MEMORY_CATEGORY_SECTION } from './prompt.js';
+import {
+  MEMORY_CATEGORY_SECTION,
+  MEMORY_FRONTMATTER_EXAMPLE,
+} from './prompt.js';
 
 const MAX_TURNS = 8;
 const MAX_TIME_MINUTES = 5;
@@ -39,7 +42,10 @@ Rules:
 - Compress repetition; split only at semantic retrieval boundaries.
 - Preserve the complete rule or fact, including Why and How to apply when present.
 - Do not edit MEMORY.md. The runtime rebuilds it after your work.
-- If nothing needs consolidation, do nothing.`;
+- If nothing needs consolidation, do nothing.
+
+Memory file format reference:
+${MEMORY_FRONTMATTER_EXAMPLE.join('\n')}`;
 
 export function buildUserConsolidationTaskPrompt(
   memoryRoot: string,

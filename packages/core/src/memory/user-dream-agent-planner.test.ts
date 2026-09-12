@@ -43,6 +43,7 @@ describe('User Dream agent planner', () => {
       getModel: vi.fn().mockReturnValue('qwen-test'),
       getApprovalMode: vi.fn(),
       getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue('session routing contract'),
     } as unknown as Config;
     vi.mocked(runForkedAgent).mockReset();
     vi.mocked(runForkedAgent).mockResolvedValue({
@@ -135,6 +136,23 @@ describe('User Dream agent planner', () => {
       dedupedEntries: 1,
       splitEntries: 1,
     });
+  });
+
+  it('does not inherit the session auto-memory routing contract', async () => {
+    // The session contract routes body access through search_memory /
+    // manage_memory — tools this agent does not have — and forbids the
+    // direct file tools it does have.
+    await planUserAutoMemoryDreamByAgent(config, projectRoot);
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+      systemPrompt: string;
+    };
+    expect(call.config.getAutoMemoryPrompt()).toBe('');
+    // The frontmatter format reference travels with the agent's own prompt
+    // instead (it used to arrive via the inherited legacy section).
+    expect(call.systemPrompt).toContain('Memory file format reference:');
+    expect(call.systemPrompt).toContain('usage_scenarios:');
   });
 
   it('allows only User Memory reads and writes', async () => {

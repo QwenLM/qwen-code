@@ -350,14 +350,21 @@ describe('managed auto-memory prompt helpers', () => {
   });
 
   it('tells writers to double-quote values YAML would misparse', () => {
-    // An unquoted keyword like `git: bisect` or `#1234` is parsed by YAML as
-    // a map / comment and fails validation — the recipe must keep those
-    // values expressible by quoting them.
+    // An unquoted keyword like `git: bisect`, `#1234`, or `!important` is
+    // parsed by YAML as a map / comment / unresolved tag — the hazard list
+    // has no last corner, so the recipe requires quoting unconditionally.
     const example = MEMORY_FRONTMATTER_EXAMPLE.join('\n');
 
-    expect(example).toContain('double-quote');
-    expect(example).toContain('"#"');
-    expect(MEMORY_METADATA_ITEM_BOUNDS).toContain('double-quote');
+    const keywordsLine = example
+      .split('\n')
+      .find((line) => line.includes('discriminative retrieval terms'));
+    const scenariosLine = example
+      .split('\n')
+      .find((line) => line.includes('future tasks'));
+    expect(keywordsLine).toContain('double-quote every value');
+    expect(scenariosLine).toContain('double-quote every value');
+    expect(example).not.toContain('starts with "#"');
+    expect(MEMORY_METADATA_ITEM_BOUNDS).toContain('double-quote every');
   });
 
   it('condensed prompt includes read-path behavioral guidance', () => {
