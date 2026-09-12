@@ -464,11 +464,14 @@ export function WorkspaceSection({
   // In-flight reads are discarded only when the poll target changes. A
   // consumer closing keeps the read alive so its snapshot is retained for the
   // next open instead of being thrown away mid-flight.
-  const gitPollTargetRef = useRef<{
-    client: DaemonClient;
-    cwd: string | undefined;
-    trusted: boolean;
-  }>();
+  const gitPollTargetRef = useRef<
+    | {
+        client: DaemonClient;
+        cwd: string | undefined;
+        trusted: boolean;
+      }
+    | undefined
+  >(undefined);
   useEffect(() => {
     gitPollTargetRef.current = {
       client,
