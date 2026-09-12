@@ -88,6 +88,34 @@
   word-break: break-all;
 }
 
+.modelId {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.modelDescription,
+.modelDetails {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.modelDetails {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.capability {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
 .currentBadge {
   font-size: 11px;
   padding: 1px 8px;
@@ -143,6 +171,7 @@
   border-color: var(--error-color);
 }
 
+.addButton:disabled,
 .actionButton:disabled,
 .deleteButton:disabled,
 .confirmButton:disabled {
@@ -156,4 +185,16 @@
 .confirmButton:focus-visible {
   outline: 2px solid var(--agent-blue-500);
   outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .modelRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .modelActions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
 }

@@ -10,7 +10,6 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import {
-  loadVoiceProviders,
   loadVoiceStatus,
   resolveVoiceWorkspaceTarget,
   setVoiceModelSetting,
@@ -302,14 +301,11 @@ describe('Voice target route adapters', () => {
     await expect(
       loadVoiceStatus(client as never, target),
     ).resolves.toMatchObject({ workspaceCwd: secondary.cwd });
-    await expect(
-      loadVoiceProviders(client as never, target),
-    ).resolves.toMatchObject({ workspaceCwd: secondary.cwd });
     await setVoiceModelSetting(client as never, target, 'workspace', 'voice-1');
 
     expect(client.workspaceById).toHaveBeenCalledWith(secondary.id);
     expect(workspaceVoice).toHaveBeenCalledTimes(1);
-    expect(workspaceProviders).toHaveBeenCalledTimes(1);
+    expect(workspaceProviders).not.toHaveBeenCalled();
     expect(setWorkspaceSetting).toHaveBeenCalledWith(
       'workspace',
       'voiceModel',
