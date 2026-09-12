@@ -167,4 +167,145 @@ describe('loadProjectMcpServers', () => {
     expect(servers['good']).toMatchObject({ command: 'ok', scope: 'project' });
     expect(errors).toHaveLength(2);
   });
+
+  describe('env-var expansion (#11499)', () => {
+    const savedToken = process.env['MY_MCP_TOKEN'];
+    const savedHostName = process.env['HOST_NAME'];
+    const savedHome = process.env['QWEN_HOME'];
+    let homeDir: string;
+
+    beforeEach(() => {
+      process.env['MY_MCP_TOKEN'] = 'tok-from-process-env';
+      process.env['HOST_NAME'] = 'example.test';
+      homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpjson-home-'));
+      process.env['QWEN_HOME'] = homeDir;
+    });
+
+    afterEach(() => {
+      for (const [key, saved] of [
+        ['MY_MCP_TOKEN', savedToken],
+        ['HOST_NAME', savedHostName],
+        ['QWEN_HOME', savedHome],
+      ] as const) {
+        if (saved === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = saved;
+        }
+      }
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    });
+
+    it('resolves $VAR and ${VAR} in headers, env, url and command/args', () => {
+      write(
+        JSON.stringify({
+          mcpServers: {
+            http: {
+              httpUrl: 'https://${HOST_NAME}/mcp',
+              headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
+            },
+            stdio: {
+              command: 'node',
+              args: ['--flag', '$MY_MCP_TOKEN'],
+              env: { TOKEN: '$MY_MCP_TOKEN' },
+            },
+          },
+        }),
+      );
+      const { servers, errors } = loadProjectMcpServers(dir);
+      expect(errors).toEqual([]);
+      expect(servers['http']).toMatchObject({
+        httpUrl: 'https://example.test/mcp',
+        headers: { Authorization: 'Bearer tok-from-process-env' },
+        scope: 'project',
+      });
+      expect(servers['stdio']).toMatchObject({
+        command: 'node',
+        args: ['--flag', 'tok-from-process-env'],
+        env: { TOKEN: 'tok-from-process-env' },
+      });
+    });
+    it('falls back to the home ~/.qwen/.env for vars not in process.env', () => {
+      delete process.env['MY_MCP_TOKEN'];
+      fs.writeFileSync(
+        path.join(homeDir, '.env'),
+        'MY_MCP_TOKEN=tok-from-home-env\n',
+      );
+      write(
+        JSON.stringify({
+          mcpServers: {
+            http: {
+              httpUrl: 'https://example.test/mcp',
+              headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
+            },
+          },
+        }),
+      );
+      const { servers, errors } = loadProjectMcpServers(dir);
+      expect(errors).toEqual([]);
+      expect(servers['http']).toMatchObject({
+        headers: { Authorization: 'Bearer tok-from-home-env' },
+      });
+    });
+
+    it('keeps an unresolved placeholder literal rather than erroring', () => {
+      delete process.env['MY_MCP_TOKEN'];
+      write(
+        JSON.stringify({
+          mcpServers: {
+            http: {
+              httpUrl: 'https://example.test/mcp',
+              headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
+            },
+          },
+        }),
+      );
+      const { servers, errors } = loadProjectMcpServers(dir);
+      expect(errors).toEqual([]);
+      expect(servers['http']).toMatchObject({
+        headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
+      });
+    });
+
+    it('reports the pre-expansion literal configs alongside the resolved ones', () => {
+      write(
+        JSON.stringify({
+          mcpServers: {
+            http: {
+              httpUrl: 'https://example.test/mcp',
+              headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
+            },
+          },
+        }),
+      );
+      const { servers, literalServers } = loadProjectMcpServers(dir);
+      expect(servers['http']).toMatchObject({
+        headers: { Authorization: 'Bearer tok-from-process-env' },
+      });
+      expect(literalServers['http']).toMatchObject({
+        httpUrl: 'https://example.test/mcp',
+        headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
+        scope: 'project',
+      });
+    });
+
+    it('expands after Claude transport normalization (httpUrl carries the placeholder)', () => {
+      write(
+        JSON.stringify({
+          mcpServers: {
+            claudeHttp: {
+              type: 'http',
+              url: 'https://example.test/${MY_MCP_TOKEN}/mcp',
+            },
+          },
+        }),
+      );
+      const { servers, errors } = loadProjectMcpServers(dir);
+      expect(errors).toEqual([]);
+      expect(servers['claudeHttp']).toMatchObject({
+        httpUrl: 'https://example.test/tok-from-process-env/mcp',
+        scope: 'project',
+      });
+    });
+  });
 });

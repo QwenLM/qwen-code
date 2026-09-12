@@ -9,7 +9,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
-import { assembleMcpServers } from './mcpServers.js';
+import {
+  assembleMcpServers,
+  getProjectMcpLiteralSource,
+} from './mcpServers.js';
 
 /**
  * Precedence contract (#4615), lowest → highest:
@@ -93,5 +96,28 @@ describe('assembleMcpServers (precedence + scope tagging)', () => {
   it('returns only settings servers when there is no `.mcp.json`', () => {
     const result = assembleMcpServers({ usr: { command: 'user-cmd' } }, dir);
     expect(Object.keys(result)).toEqual(['usr']);
+  });
+
+  it('records the pre-expansion literal configs for approval hashing (#11499)', () => {
+    writeMcpJson({
+      gated: {
+        httpUrl: 'https://example.test/mcp',
+        headers: { Authorization: 'Bearer ${MY_TOKEN}' },
+      },
+    });
+    process.env['MY_TOKEN'] = 'tok-live-1';
+
+    try {
+      assembleMcpServers({}, dir);
+      const literal = getProjectMcpLiteralSource(dir);
+      expect(literal?.['gated']).toMatchObject({
+        httpUrl: 'https://example.test/mcp',
+        headers: { Authorization: 'Bearer ${MY_TOKEN}' },
+      });
+      // The literal map stays unresolved even though the resolved map has
+      // the real value — the approval hash must not bind to the secret.
+    } finally {
+      delete process.env['MY_TOKEN'];
+    }
   });
 });
