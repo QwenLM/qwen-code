@@ -6550,7 +6550,7 @@ class QwenAgent implements Agent {
       // `skipArtifactMigration: true`, so it never replaces `storage`). The
       // live cwd would make all twelve handlers read/write a stray
       // `<subdir>/.qwen/settings.json` after a single cd.
-      return session.getConfig().storage.getProjectRoot();
+      return this.sessionWorkspaceRoot(session.getConfig());
     }
     return this.config.getTargetDir();
   }
@@ -6725,7 +6725,9 @@ class QwenAgent implements Agent {
           // stable workspace root; skip sessions in other workspaces so a
           // worktree's grant/deny doesn't fan out to every live session with
           // no record in their own settings files.
-          const sessionWorkspace = session.getConfig().storage.getProjectRoot();
+          const sessionWorkspace = this.sessionWorkspaceRoot(
+            session.getConfig(),
+          );
           if (path.resolve(sessionWorkspace) !== path.resolve(settingsCwd)) {
             continue;
           }
@@ -6755,6 +6757,21 @@ class QwenAgent implements Agent {
 
   private workspaceCwd(config: Config): string {
     return config.getTargetDir();
+  }
+
+  /**
+   * The stable workspace root a session was admitted under. Unlike
+   * `workspaceCwd` (the live `getTargetDir()`) and `Config.getProjectRoot()`
+   * (also live `targetDir`), this reads the admission-bound `storage`, which
+   * `relocateWorkingDirectory` leaves untouched when `session/cd` moves a
+   * session into a subdirectory (`skipArtifactMigration: true`). Keying the
+   * twelve `qwen/settings/*` / `qwen/permissions/*` handlers and the
+   * workspace-scoped permission fan-out on this root — rather than the live
+   * cwd — is what keeps a post-`cd` request from reading/writing a stray
+   * `<subdir>/.qwen/settings.json`.
+   */
+  private sessionWorkspaceRoot(config: Config): string {
+    return config.storage.getProjectRoot();
   }
 
   private safeWorkspaceCwd(config: Config): string {

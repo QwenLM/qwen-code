@@ -17655,7 +17655,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getId: () => 'worktree-session',
       getConfig: () => ({
         ...mockConfig,
-        getTargetDir: vi.fn().mockReturnValue(worktreeRoot),
+        // The requesting session has `session/cd`-ed into a subdirectory:
+        // its live cwd differs from its admission root. The workspace filter
+        // must key on the stable admission root (`storage.getProjectRoot()`),
+        // not the live `getTargetDir()`, or the requesting session would be
+        // skipped by its own fan-out.
+        getTargetDir: vi.fn().mockReturnValue(`${worktreeRoot}/packages/core`),
         storage: { getProjectRoot: () => worktreeRoot },
         getPermissionManager: () => requestingPm,
       }),
@@ -17684,6 +17689,64 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
     expect(otherPm.addPersistentRule).not.toHaveBeenCalled();
     expect(otherPm.removePersistentRule).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('a user-scoped setRules delta still fans out daemon-wide across workspaces', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const worktreeRoot = '/work/project/.qwen/worktrees/slug-a';
+    const otherRoot = '/work/project';
+    const requestingPm = {
+      addPersistentRule: vi.fn(),
+      removePersistentRule: vi.fn(),
+    };
+    const otherPm = {
+      addPersistentRule: vi.fn(),
+      removePersistentRule: vi.fn(),
+    };
+    const sessions = (agent as unknown as { sessions: Map<string, unknown> })
+      .sessions;
+    sessions.set('worktree-session', {
+      getId: () => 'worktree-session',
+      getConfig: () => ({
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue(worktreeRoot),
+        storage: { getProjectRoot: () => worktreeRoot },
+        getPermissionManager: () => requestingPm,
+      }),
+    });
+    sessions.set('other-session', {
+      getId: () => 'other-session',
+      getConfig: () => ({
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue(otherRoot),
+        storage: { getProjectRoot: () => otherRoot },
+        getPermissionManager: () => otherPm,
+      }),
+    });
+
+    await agent.extMethod('qwen/permissions/setRules', {
+      sessionId: 'worktree-session',
+      scope: 'user',
+      ruleType: 'allow',
+      rules: ['Bash(git push:*)'],
+    });
+
+    // User scope is genuinely process-wide: the delta must reach the other
+    // workspace's live manager too, so removing the Workspace guard from the
+    // filter (making it unconditional) turns this red.
+    expect(requestingPm.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(git push:*)',
+      'allow',
+    );
+    expect(otherPm.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(git push:*)',
+      'allow',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
