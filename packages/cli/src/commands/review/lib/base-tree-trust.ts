@@ -34,8 +34,11 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import {
+  closeSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -468,7 +471,31 @@ export function establishTrust(
   });
   const minted = mint();
   try {
-    writeFileSync(trustPath, `${JSON.stringify(minted)}\n`, { flag: 'wx' });
+    // `wx` on the FINAL path, because this create IS the mutual exclusion —
+    // two shards asking together must agree on one file, and a tmp-then-
+    // rename has no atomic test-and-set. So durability is bought explicitly
+    // instead: write, `fsync`, close. Without the flush the bytes sat in the
+    // page cache while the multi-minute build ran, and a host reset left a
+    // 0-BYTE trust file — which the next review of the same PR reads as
+    // torn, heals, and then spends as provenance it does not have.
+    //
+    // NO MUTATION REACHES THE `fsync`, and that is a property of what it
+    // buys rather than a gap: durability is only observable across a crash,
+    // which an in-process test cannot stage. Deleting it leaves every
+    // assertion in this suite green. What IS pinned, one level out, is the
+    // half that the flush makes reliable and that the failure mode turns on
+    // — `flushes the create before the build, so a crash cannot leave 0
+    // bytes (R3-1)` asserts the file has content and the recorded identity
+    // the moment the create returns, and that a later ask under a different
+    // identity therefore ROTATES (dropping the leftover) instead of healing
+    // and mis-attributing it.
+    const fd = openSync(trustPath, 'wx');
+    try {
+      writeFileSync(fd, `${JSON.stringify(minted)}\n`);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     return { nonce: minted.nonce, established: 'created', conflict: false };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;

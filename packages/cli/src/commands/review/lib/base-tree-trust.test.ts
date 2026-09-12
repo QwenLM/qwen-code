@@ -24,6 +24,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -474,6 +475,31 @@ describe('base-tree trust store', () => {
     acquireLease('prompt-repair');
     expect(lstatSync(leaseFileFor()).isFile()).toBe(true);
     expect(runIdentity(worktree).identity).toBe(leaseIdentity());
+  });
+
+  it('flushes the create before the build, so a crash cannot leave 0 bytes (R3-1)', () => {
+    // The `wx` create IS the mutual exclusion — two shards asking together
+    // must agree on one file, and tmp-then-rename has no atomic test-and-set
+    // — so durability is bought explicitly instead. Without the flush the
+    // bytes sat in the page cache through a multi-minute build, and a host
+    // reset left a 0-BYTE trust file; the next review of the same PR read it
+    // as torn, HEALED it, and then spent that as "this run built the standing
+    // tree" — false, about a rebuildable leftover, with the concurrent-shard
+    // clobber as the prescribed cure.
+    acquireLease();
+    const p = baseTreeTrustPath(worktree, plan);
+    const identity = runIdentity(worktree).identity;
+    const state = establishTrust(p, identity, SHA_A);
+    expect(state.established).toBe('created');
+
+    // The file has CONTENT the moment the create returns — which is what
+    // makes the next review read a different identity and ROTATE (dropping
+    // the leftover), rather than heal and mis-attribute.
+    expect(statSync(p).size).toBeGreaterThan(0);
+    expect(JSON.parse(readFileSync(p, 'utf8')).identity).toBe(identity);
+
+    const next = establishTrust(p, identity + 1, SHA_A);
+    expect(next.established).toBe('rotated');
   });
 
   it('heals a torn file a crashed writer left instead of wedging the run', () => {

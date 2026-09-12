@@ -1529,6 +1529,8 @@ describe('lease acquisition is atomic (#9205)', () => {
 
     const after = readReviewWorktreeLease(root, 'pr-1');
     expect(after?.mergeBaseSha).toBe('b'.repeat(40));
+    // A MOVED base rotates, and the rotation survives the refresh having
+    // dropped the anchor — see the R4-9 case for why it is dropped.
     expect(after?.identity).not.toBe(first);
   });
 
@@ -1636,6 +1638,58 @@ describe('lease acquisition is atomic (#9205)', () => {
     createReviewWorktreeLease(leaseParams(root, { promptId: 'after' }));
     expect(lstatSync(path).ino).not.toBe(inodeBefore);
     expect(readReviewWorktreeLease(root, 'pr-1')?.promptId).toBe('after');
+  });
+
+  it('mints a fresh identity only when the merge base MOVES, across refreshes (R4-9)', () => {
+    // The refresh used to carry the previous capture's `mergeBaseSha`
+    // forward, so a round whose own record write failed inherited a stale
+    // host-side anchor that `base-tree` then read as this capture's fact —
+    // and both invariants (`fetch-pr`'s "the anchor belongs to the capture
+    // that owns the plan" and `base-tree`'s "a missing anchor refuses") held
+    // only for round 1.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+    );
+    const n1 = readReviewWorktreeLease(root, 'pr-1')?.identity;
+
+    // Round 2 acquires. The anchor is DROPPED — a capture that records
+    // nothing has none, which refuses — while the identity stands.
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
+    const afterRefresh = readReviewWorktreeLease(root, 'pr-1');
+    expect(afterRefresh?.mergeBaseSha).toBeUndefined();
+    expect(afterRefresh?.identity).toBe(n1);
+
+    // Round 2 records the SAME base: no move, so no rotation, and the
+    // standing base tree is still reused.
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+    );
+    expect(readReviewWorktreeLease(root, 'pr-1')?.identity).toBe(n1);
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBe(
+      'a'.repeat(40),
+    );
+
+    // Round 3 acquires and records a MOVED base — a genuine rebase. The
+    // rotation survives the dropped anchor because the previous value is
+    // remembered in a field that is not the anchor.
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-c' }));
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'b'.repeat(40),
+      'session-a',
+    );
+    const moved = readReviewWorktreeLease(root, 'pr-1');
+    expect(moved?.mergeBaseSha).toBe('b'.repeat(40));
+    expect(moved?.identity).not.toBe(n1);
   });
 
   it('reclaims the base-tree trust state for the target it clears, and only that one', () => {

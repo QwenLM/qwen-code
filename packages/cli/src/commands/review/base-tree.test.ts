@@ -32,7 +32,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runBaseTree, type BaseTreeReport } from './base-tree.js';
+import {
+  runBaseTree,
+  sweepStaleLock,
+  type BaseTreeReport,
+} from './base-tree.js';
 import { baseWorktreePath } from './lib/paths.js';
 import {
   baseTreeTrustPath,
@@ -1057,9 +1061,14 @@ describe('runBaseTree', () => {
           writeFileSync(join(w, 'dist', 'cli.js'), 'built');
           return okBuild;
         });
-        // The build ran; the certification did not follow it.
+        // The build ran; the certification did not follow it — and the call
+        // itself refuses, rather than returning `available: true` with no
+        // record behind it. A residue walk that cannot complete leaves
+        // nothing to certify the tree against, and every other arm here
+        // treats "could not enumerate" as a refusal.
         expect(buildBuilds).toEqual([tree]);
-        expect(built.available).toBe(true); // this call saw its own build
+        expect(built.available).toBe(false);
+        expect(built.note).toContain('residue could not be enumerated');
       } finally {
         process.env['PATH'] = savedPath;
       }
@@ -1372,8 +1381,17 @@ describe('runBaseTree', () => {
     ]) {
       const r = run({ plan: { mergeBaseSha: bad } });
       expect(r.available).toBe(false);
-      expect(r.note).toContain('not a full 40-character object name');
+      expect(r.note).toContain('not a full object name');
     }
+    // ...and the SHA-256 form is NOT malformed. Every sibling validator in
+    // this pipeline accepts 40 or 64, and a repository created with
+    // `--object-format=sha256` resolves a genuine 64-hex merge base — a
+    // 40-only gate here would accuse an honest capture of tampering and kill
+    // the A/B lane for every round of every such review. It gets past the
+    // shape gate and is refused later, by the host-side anchor, for a
+    // different and true reason.
+    const r256 = run({ plan: { mergeBaseSha: 'a'.repeat(64) } });
+    expect(r256.note).not.toContain('not a full object name');
   });
 
   itWhereContainmentExists(
@@ -1640,6 +1658,253 @@ describe('runBaseTree', () => {
       ).toBeNull();
     },
   );
+
+  itWhereContainmentExists(
+    'refuses — never certifies — when the residue walk throws (R4-1)',
+    () => {
+      // `built === null` meant the walk threw, and the code then SKIPPED the
+      // undescribable check and still returned `available: true` — the fence
+      // failing open in the one direction it fails closed everywhere else.
+      // Both halves are staged together here: a live escaping link to a
+      // DIRECTORY (the entry the skipped check exists to refuse) AND a
+      // listing that cannot be completed.
+      //
+      // The enumeration failure is driven by a `git` shim rather than by
+      // `chmod`, for the reason the R2-2 case gives: this suite runs as root
+      // in the CI image, where mode bits stop nothing.
+      const outsideDir = join(repo, 'outside-pkg');
+      mkdirSync(outsideDir, { recursive: true });
+      writeFileSync(join(outsideDir, 'run.js'), 'the real thing');
+      const shimDir = join(repo, 'git-shim-r41');
+      mkdirSync(shimDir, { recursive: true });
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      writeFileSync(
+        join(shimDir, 'git'),
+        `#!/bin/sh\n` +
+          `for a in "$@"; do\n` +
+          `  if [ "$a" = ls-files ]; then\n` +
+          `    ${realGit} "$@"; st=$?\n` +
+          `    echo "warning: unable to readdir 'nested/locked'" >&2\n` +
+          `    exit $st\n` +
+          `  fi\n` +
+          `done\n` +
+          `exec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        mkdirSync(join(w, 'node_modules'), { recursive: true });
+        symlinkSync(outsideDir, join(w, 'node_modules', 'pkg'));
+        return okBuild;
+      };
+      const savedPath = process.env['PATH'];
+      let r: BaseTreeReport;
+      try {
+        process.env['PATH'] = `${shimDir}:${savedPath}`;
+        r = run({}, build);
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('residue could not be enumerated');
+      expect(builds).toEqual([tree()]);
+      // Nothing certified, and nothing recorded for a later shard to reuse.
+      expect(
+        builtTreeRecord(baseTreeTrustPath(worktree, planPath), tree()),
+      ).toBeNull();
+    },
+  );
+
+  it('does not SETTLE a build killed by its own deadline, or refused (R4-2)', () => {
+    // `runBuildTest` answers `ok: false` for two shapes that are explicitly
+    // not facts about the sha, and the settled `failed` state is re-served to
+    // every later shard with no rebuild: a per-command TIMEOUT (whose own
+    // note says "an infrastructure result, not a defect in the diff", and
+    // whose default deadline here is below the budget module's documented
+    // slowest command), and a sandbox REFUSAL that ran no command at all.
+    for (const shape of [
+      { ok: false, timedOut: ['npm run build --workspace=packages/cli'] },
+      { ok: false, toolchain: 'refused', build: [], timedOut: [] },
+    ]) {
+      planPath = '';
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return { ...okBuild, ...shape } as unknown as BuildTestReport;
+      };
+      const first = run({}, build);
+      expect(first.available).toBe(false);
+      const second = run({}, build);
+      expect(second.note).not.toContain('already failed');
+      expect(builds).toHaveLength(2); // repaid, not settled
+    }
+  });
+
+  itWhereContainmentExists(
+    'bounds the ancestor walk at the OUTERMOST review temp dir (R3-3)',
+    () => {
+      // Resolution walks EVERY ancestor, not the nearest one — so bounding
+      // at the innermost `.qwen/tmp` marker stopped one directory short of
+      // the outer review's read-write temp dir in the nested geometry, which
+      // is the directory the OUTER reviewed code holds.
+      const inner = join(repo, '.qwen', 'tmp', 'review-pr-9', '.qwen', 'tmp');
+      mkdirSync(inner, { recursive: true });
+      const innerWt = join(inner, 'review-pr-1');
+      git(repo, 'worktree', 'add', '--detach', '-q', innerWt, headSha);
+      createReviewWorktreeLease({
+        sessionId: 's',
+        promptId: 'p',
+        target: 'pr-1',
+        repositoryRoot: repo,
+        worktreePath: innerWt,
+        branch: 'qwen-review/pr-1',
+      });
+      recordReviewWorktreeLeaseMergeBase(repo, 'pr-1', baseSha);
+
+      // The plant is in the OUTER temp dir — two levels above the inner base
+      // tree, and never touched by the inner review at all.
+      const planted = join(repo, '.qwen', 'tmp', 'node_modules', '.bin');
+      mkdirSync(planted, { recursive: true });
+      writeFileSync(join(planted, 'node'), '#!/bin/sh\necho PWNED\n');
+
+      const r = runBaseTree({
+        plan: planPath || writePlan(),
+        worktree: innerWt,
+        timeout: 60,
+        install: false,
+        build: () => okBuild,
+      });
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('module resolution state');
+      expect(r.note).toContain(join(repo, '.qwen', 'tmp', 'node_modules'));
+    },
+  );
+
+  itWhereContainmentExists(
+    'sees inside a REGISTERED submodule, which ls-files omits entirely (R4-4)',
+    () => {
+      // A gitlink makes `ls-files --others` emit nothing at all for that path
+      // — not the files inside it and not even the collapsed `dir/` an
+      // UNREGISTERED nested repository gets — and `status -uno` reports a
+      // moved pointer but never the content. So the whole subtree was absent
+      // from the inventory while the tree was certified around it.
+      const sub = mkdtempSync(join(tmpdir(), 'qwen-base-sub-'));
+      git(sub, 'init', '-q', '-b', 'main');
+      git(sub, 'config', 'user.email', 't@t.t');
+      git(sub, 'config', 'user.name', 't');
+      writeFileSync(join(sub, 'lib.js'), 'sub\n');
+      git(sub, 'add', '-A');
+      git(sub, 'commit', '-qm', 'sub');
+      git(
+        repo,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        sub,
+        'deps/lib',
+      );
+      git(repo, 'commit', '-qm', 'add submodule');
+      baseSha = git(repo, 'rev-parse', 'HEAD');
+      planPath = '';
+      recordReviewWorktreeLeaseMergeBase(repo, 'pr-1', baseSha);
+
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        if (builds.length === 1) {
+          git(
+            w,
+            '-c',
+            'protocol.file.allow=always',
+            'submodule',
+            'update',
+            '--init',
+            '-q',
+          );
+          writeFileSync(join(w, 'deps', 'lib', 'built.js'), 'built');
+        }
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+
+      // The premise, pinned rather than assumed: git really does omit it.
+      expect(
+        execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
+          cwd: tree(),
+          encoding: 'utf8',
+        }),
+      ).not.toContain('deps/lib');
+      // ...and the fence enumerated it anyway.
+      const rec = builtTreeRecord(
+        baseTreeTrustPath(worktree, planPath),
+        tree(),
+      )!;
+      expect(Object.keys(rec.untracked)).toContain('deps/lib/built.js');
+      expect(run({}, build).note).toContain('reusing it'); // the control
+
+      writeFileSync(join(tree(), 'deps', 'lib', 'built.js'), 'planted');
+      const second = run({}, build);
+      expect(second.available).toBe(false);
+      expect(second.note).toContain(
+        'no longer holds exactly what this run recorded',
+      );
+      rmSync(sub, { recursive: true, force: true });
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses the reuse check when the resolved config defines filters (R4-5)',
+    () => {
+      // The reuse arm's `git status` REFRESHES the index, which runs
+      // `filter.<driver>.clean` on the host — and computes its verdict on the
+      // filtered bytes rather than on the files, so a rewrite whose filtered
+      // form maps back to the indexed blob prints nothing at all. The two
+      // `-c` pins cover only the fixed-key channels; this one is enumerated
+      // out of the resolved config by the house's own screen.
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it'); // the control
+
+      git(tree(), 'config', 'filter.evil.clean', 'sh -c "echo PWNED >&2"');
+
+      const second = run({}, build);
+      expect(second.available).toBe(false);
+      expect(second.note).toContain('content filters');
+      expect(builds).toEqual([tree()]); // declined, never swept
+    },
+  );
+
+  it('sweeps a stale lock, keeps a fresh one, and touches nothing when absent (R4-7)', () => {
+    // Deciding this on a "is a builder holding it" predicate makes it a
+    // check-then-destroy on the hot path: that predicate answers `false` for
+    // "no lock" and for "a corpse" alike, so a sibling that takes the lock
+    // between the check and the remove has its LIVE lock deleted — after
+    // which both shards enter the build and the opening sweep destroys the
+    // tree the other is mid-`npm ci` in. The three answers are the
+    // distinction, and the no-op removal on an absent path is why nothing
+    // downstream can see it.
+    const lock = join(repo, 'probe.lock');
+    expect(sweepStaleLock(lock, 60_000)).toBe('absent');
+
+    mkdirSync(lock);
+    expect(sweepStaleLock(lock, 60_000)).toBe('fresh');
+    expect(existsSync(lock)).toBe(true);
+
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(lock, old, old);
+    expect(sweepStaleLock(lock, 60_000)).toBe('removed');
+    expect(existsSync(lock)).toBe(false);
+  });
 
   itWhereContainmentExists(
     'writes NOTHING into the tree, and a plant at a marker name settles nothing',

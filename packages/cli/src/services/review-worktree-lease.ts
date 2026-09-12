@@ -93,6 +93,18 @@ export interface ReviewWorktreeLease {
    */
   identity?: number;
   /**
+   * What the PREVIOUS capture of this session resolved — kept only to decide
+   * whether the next capture's merge base is a MOVE.
+   *
+   * It is deliberately not the anchor. The anchor (`mergeBaseSha`) is this
+   * capture's own fact and is dropped on every refresh, so that a round whose
+   * record write failed has none and `base-tree` refuses rather than reading
+   * someone else's round as this one's. But dropping it also drops the
+   * rotation signal a genuine rebase needs, so the value is remembered here
+   * instead, where nothing reads it as an anchor.
+   */
+  priorMergeBaseSha?: string;
+  /**
    * The merge base this capture resolved, recorded HOST-SIDE.
    *
    * `base-tree` pins the base it certifies against, and its only source used
@@ -280,16 +292,23 @@ export function recordReviewWorktreeLeaseMergeBase(
   // state and sweeping the base tree it is mid-A/B in.
   if (sessionId !== undefined && existing.sessionId !== sessionId) return;
   if (existing.mergeBaseSha === mergeBaseSha) return;
+  // The MOVE is judged against what the last capture resolved, which survives
+  // a refresh in `priorMergeBaseSha` even though the anchor itself does not.
+  // Without that the rotation a genuine rebase is entitled to would be lost
+  // the moment the anchor started being dropped: every round would look like
+  // "the first capture to record one".
+  const previous = existing.mergeBaseSha ?? existing.priorMergeBaseSha;
   const next: ReviewWorktreeLease = {
     ...existing,
     mergeBaseSha,
+    priorMergeBaseSha: mergeBaseSha,
     // A lease from a build before the identity field existed carries none,
     // and leaving it undefined here would write it back out missing — after
     // which `runIdentity` refuses and the A/B lane is unavailable for the
     // rest of the review. The capture is exactly the moment a fresh identity
     // is legitimate, so mint one.
     identity:
-      existing.mergeBaseSha === undefined
+      previous === undefined || previous === mergeBaseSha
         ? (existing.identity ?? mintIdentity())
         : mintIdentity(),
   };
@@ -363,7 +382,7 @@ export function createReviewWorktreeLease(params: {
 
   const repositoryRoot = resolve(params.repositoryRoot);
   const path = leasePath(repositoryRoot, params.target);
-  const leaseFor = (identity: number, mergeBaseSha?: string): string => {
+  const leaseFor = (identity: number, priorMergeBaseSha?: string): string => {
     const lease: ReviewWorktreeLease = {
       sessionId: params.sessionId!,
       promptId: params.promptId!,
@@ -372,7 +391,7 @@ export function createReviewWorktreeLease(params: {
       worktreePath: resolve(repositoryRoot, params.worktreePath),
       branch: params.branch,
       identity,
-      ...(mergeBaseSha === undefined ? {} : { mergeBaseSha }),
+      ...(priorMergeBaseSha === undefined ? {} : { priorMergeBaseSha }),
     };
     return `${JSON.stringify(lease, null, 2)}\n`;
   };
@@ -422,12 +441,21 @@ export function createReviewWorktreeLease(params: {
     // one. The merge base rides along the same way: it is this capture's
     // fact, and `recordReviewWorktreeLeaseMergeBase` is what moves it.
     if (existing) {
+      // The identity carries forward; the MERGE BASE does not. It is this
+      // capture's own fact, and carrying the previous one forward left a
+      // stale host-side anchor that `base-tree` then read as belonging to
+      // this capture — so `fetch-pr`'s invariant ("the anchor has to belong
+      // to the capture that owns the plan") and `base-tree`'s fail-closed
+      // rule ("a missing anchor refuses") both held only for round 1. Dropped
+      // here, a round whose own record write fails has NO anchor, which
+      // refuses; `recordReviewWorktreeLeaseMergeBase` puts this capture's
+      // value back a moment later on the ordinary path.
       data = leaseFor(
         typeof existing.identity === 'number' &&
           Number.isFinite(existing.identity)
           ? existing.identity
           : mintIdentity(),
-        existing.mergeBaseSha,
+        existing.mergeBaseSha ?? existing.priorMergeBaseSha,
       );
     }
     // tmp-then-rename, not a truncate in place: `runIdentity` reads this file
@@ -586,7 +614,9 @@ function readLease(path: string): ReviewWorktreeLease | null {
         (typeof value.identity !== 'number' ||
           !Number.isFinite(value.identity))) ||
       (value.mergeBaseSha !== undefined &&
-        typeof value.mergeBaseSha !== 'string')
+        typeof value.mergeBaseSha !== 'string') ||
+      (value.priorMergeBaseSha !== undefined &&
+        typeof value.priorMergeBaseSha !== 'string')
     ) {
       return null;
     }
