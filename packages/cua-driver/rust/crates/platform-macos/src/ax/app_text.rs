@@ -137,6 +137,61 @@ pub(super) fn markdown_link(text: &str, url: &str) -> String {
 pub struct RichText {
     pub text: String,
     pub markdown: String,
+    pub source_offsets: Vec<usize>,
+}
+
+#[derive(Default)]
+struct MappedText {
+    text: String,
+    offsets: Vec<usize>,
+}
+
+impl MappedText {
+    fn plain(text: &str, escape: bool) -> Self {
+        let mut value = Self {
+            text: String::new(),
+            offsets: vec![0],
+        };
+        let mut offset = 0;
+        for character in text.chars() {
+            if escape && matches!(character, '\\' | '*' | '_' | '[' | ']' | '<' | '>') {
+                value.text.push('\\');
+                value.offsets.push(offset);
+            }
+            value.text.push(character);
+            for _ in 0..character.len_utf16() {
+                offset += 1;
+                value.offsets.push(offset);
+            }
+        }
+        value
+    }
+
+    fn wrap(self, prefix: &str, suffix: &str) -> Self {
+        let length = *self.offsets.last().unwrap_or(&0);
+        let mut offsets = vec![0; prefix.encode_utf16().count()];
+        offsets.extend(self.offsets);
+        offsets.extend(std::iter::repeat_n(length, suffix.encode_utf16().count()));
+        Self {
+            text: format!("{prefix}{}{suffix}", self.text),
+            offsets,
+        }
+    }
+
+    fn append(&mut self, other: Self) {
+        let base = *self.offsets.last().unwrap_or(&0);
+        if self.offsets.is_empty() {
+            self.offsets.push(0);
+        }
+        self.text.push_str(&other.text);
+        self.offsets.extend(
+            other
+                .offsets
+                .into_iter()
+                .skip(1)
+                .map(|offset| base + offset),
+        );
+    }
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -149,39 +204,42 @@ struct TextStyle {
 }
 
 impl TextStyle {
-    fn render(&self, text: &str) -> String {
-        text.split_inclusive('\n')
-            .map(|line| {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    return line.to_owned();
-                }
-                let start = line.len() - line.trim_start().len();
-                let end = start + trimmed.len();
-                let mut content = escape_markdown(trimmed);
-                if self.traits & 1 != 0 {
-                    content = format!("*{content}*");
-                }
-                if self.traits & 2 != 0 {
-                    content = format!("**{content}**");
-                }
-                if self.strikethrough {
-                    content = format!("~~{content}~~");
-                }
-                if self.underline {
-                    content = format!("<u>{content}</u>");
-                }
-                if self.script > 0 {
-                    content = format!("<sup>{content}</sup>");
-                } else if self.script < 0 {
-                    content = format!("<sub>{content}</sub>");
-                }
-                if let Some(target) = &self.link {
-                    content = format!("[{content}](<{}>)", markdown_destination(target));
-                }
-                format!("{}{content}{}", &line[..start], &line[end..])
-            })
-            .collect()
+    fn render_mapped(&self, text: &str) -> MappedText {
+        let mut rendered = MappedText::default();
+        for line in text.split_inclusive('\n') {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                rendered.append(MappedText::plain(line, false));
+                continue;
+            }
+            let start = line.len() - line.trim_start().len();
+            let end = start + trimmed.len();
+            let mut content = MappedText::plain(trimmed, true);
+            if self.traits & 1 != 0 {
+                content = content.wrap("*", "*");
+            }
+            if self.traits & 2 != 0 {
+                content = content.wrap("**", "**");
+            }
+            if self.strikethrough {
+                content = content.wrap("~~", "~~");
+            }
+            if self.underline {
+                content = content.wrap("<u>", "</u>");
+            }
+            if self.script > 0 {
+                content = content.wrap("<sup>", "</sup>");
+            } else if self.script < 0 {
+                content = content.wrap("<sub>", "</sub>");
+            }
+            if let Some(target) = &self.link {
+                content = content.wrap("[", &format!("](<{}>)", markdown_destination(target)));
+            }
+            rendered.append(MappedText::plain(&line[..start], false));
+            rendered.append(content);
+            rendered.append(MappedText::plain(&line[end..], false));
+        }
+        rendered
     }
 }
 
@@ -258,14 +316,20 @@ unsafe fn render_attributed(value: CFTypeRef) -> Option<RichText> {
         index = end;
     }
     let styled = runs.iter().any(|(style, _)| *style != TextStyle::default());
-    let markdown = if styled {
-        runs.into_iter()
-            .map(|(style, run)| style.render(&run))
-            .collect()
+    let mapped = if styled {
+        let mut mapped = MappedText::default();
+        for (style, run) in runs {
+            mapped.append(style.render_mapped(&run));
+        }
+        mapped
     } else {
-        text.clone()
+        MappedText::plain(&text, false)
     };
-    Some(RichText { markdown, text })
+    Some(RichText {
+        markdown: mapped.text,
+        text,
+        source_offsets: mapped.offsets,
+    })
 }
 
 unsafe fn parameterized(
@@ -288,7 +352,7 @@ unsafe fn parameterized(
     render_attributed(value?.as_CFTypeRef())
 }
 
-pub(super) unsafe fn read_rich_text(
+pub(crate) unsafe fn read_rich_text(
     element: AXUIElementRef,
     role: &str,
     value: Option<&str>,
@@ -333,6 +397,33 @@ mod tests {
         dictionary::CFDictionary,
         number::CFNumber,
     };
+
+    #[test]
+    fn formatting_maps_visible_utf16_boundaries_to_source() {
+        let style = TextStyle {
+            traits: 3,
+            underline: true,
+            link: Some("https://example.com".into()),
+            ..Default::default()
+        };
+        let mapped = style.render_mapped(" A🙂_[中]\nnext ");
+        assert_eq!(mapped.offsets.len(), mapped.text.encode_utf16().count() + 1);
+        for target in ["A", "🙂", "中", "next"] {
+            let start = mapped.text.find(target).unwrap();
+            let start = mapped.text[..start].encode_utf16().count();
+            let end = start + target.encode_utf16().count();
+            let utf16: Vec<_> = " A🙂_[中]\nnext ".encode_utf16().collect();
+            assert_eq!(
+                String::from_utf16(&utf16[mapped.offsets[start]..mapped.offsets[end]]).unwrap(),
+                target
+            );
+        }
+        assert_eq!(
+            *mapped.offsets.last().unwrap(),
+            " A🙂_[中]\nnext ".encode_utf16().count()
+        );
+        assert!(mapped.offsets.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
 
     #[test]
     fn real_attributed_string_runs_preserve_unicode_and_independent_styles() {

@@ -40,6 +40,16 @@ export interface AppActionResult {
   effect: ActionEffect;
 }
 
+export interface PasteOptions extends CallOptions {
+  format?: "text" | "md" | "html";
+}
+
+export interface TextSelectionOptions extends CallOptions {
+  prefix?: string;
+  suffix?: string;
+  selection?: "text" | "cursor_before" | "cursor_after";
+}
+
 export interface ComputerUseApp {
   readonly name: string;
   getState(options?: AppObservationOptions): Promise<AppObservation>;
@@ -51,6 +61,10 @@ export interface ComputerUseApp {
   setValue(element: number, value: string, options?: CallOptions): Promise<AppActionResult>;
   performSecondaryAction(element: number, action: string, options?: CallOptions): Promise<AppActionResult>;
   typeText(text: string, options?: CallOptions & { delayMs?: number }): Promise<AppActionResult>;
+  /** macOS only. Paste once and restore the clipboard unless another writer changed it. */
+  paste(text: string, options?: PasteOptions): Promise<AppActionResult>;
+  /** macOS only. Select a unique match in an observed text element. */
+  selectText(element: number, text: string, options?: TextSelectionOptions): Promise<AppActionResult>;
   pressKey(key: string, options?: CallOptions & { modifiers?: string[] }): Promise<AppActionResult>;
   hotkey(keys: string[], options?: CallOptions): Promise<AppActionResult>;
 }
@@ -311,6 +325,7 @@ export class ComputerUse {
   readonly connectionGeneration: number;
 
   supportsObservationRevision(): Promise<boolean>;
+  getPlatform(options?: CallOptions): Promise<"macos" | "windows" | "linux">;
   sessionInfo(options?: CallOptions): Promise<NativeSessionOutput>;
   reconnect(options?: CallOptions): Promise<{
     connectionGeneration: number;
@@ -336,6 +351,8 @@ export class ComputerUse {
   scroll(options: ScrollOptions): Promise<ComputerUseActionResult>;
   setValue(options: ElementValueOptions): Promise<ComputerUseActionResult>;
   typeText(options: TextOptions): Promise<ComputerUseActionResult>;
+  paste(options: WindowRef & PasteOptions & { text: string }): Promise<ComputerUseActionResult>;
+  selectText(options: WindowRef & ElementRef & TextSelectionOptions & { text: string }): Promise<ComputerUseActionResult>;
   pressKey(options: KeyOptions): Promise<ComputerUseActionResult>;
   hotkey(options: HotkeyOptions): Promise<ComputerUseActionResult>;
   performSecondaryAction(options: SecondaryActionOptions): Promise<ComputerUseActionResult>;

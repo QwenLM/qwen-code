@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url"
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const driverRoot = resolve(scriptDirectory, "..")
 const packageRoot = join(driverRoot, "typescript")
+const skillResources = ["SKILL.md", "references/macos.md", "references/windows-linux.md"]
 
 function valueAfter(flag) {
   const index = process.argv.indexOf(flag)
@@ -167,7 +168,7 @@ for (const required of [
   "computer-use/index.js",
   "computer-use/app.js",
   "computer-use/index.d.ts",
-  "computer-use/SKILL.md",
+  ...skillResources.map((resource) => `computer-use/${resource}`),
   "scripts/install-native.mjs",
 ]) {
   if (!packedPaths.includes(required)) {
@@ -230,6 +231,13 @@ try {
     ],
     { cwd: consumer, env: environment },
   )
+  for (const resource of skillResources) {
+    const canonical = readFileSync(join(driverRoot, "..", "core", "src", "skills", "bundled", "computer-use", resource))
+    const installed = readFileSync(join(consumer, "node_modules", "@qwen-code", "cua-sdk", "computer-use", resource))
+    if (!canonical.equals(installed)) {
+      throw new Error(`installed Computer Use skill differs from canonical resource: ${resource}`)
+    }
+  }
   const dependencyTree = run("npm", ["ls", "--all", "--json"], {
     cwd: consumer,
     env: environment,

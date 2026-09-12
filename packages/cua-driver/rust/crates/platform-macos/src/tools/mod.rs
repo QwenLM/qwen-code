@@ -12,9 +12,12 @@ mod kill_app;
 mod launch_app;
 mod list_apps;
 mod list_windows;
+mod paste;
+mod pasteboard;
 mod press_key;
 mod right_click;
 mod scroll;
+mod select_text;
 mod set_value;
 mod set_window_frame;
 mod type_text;
@@ -1074,6 +1077,8 @@ pub fn register_all(
     registry.register(Box::new(cursor_tools::SetAgentCursorEnabledTool::new(
         state.clone(),
     )));
+    registry.register(Box::new(paste::PasteTool::new(state.clone())));
+    registry.register(Box::new(select_text::SelectTextTool::new(state.clone())));
     registry.register(Box::new(cursor_tools::SetAgentCursorMotionTool::new(
         state.clone(),
     )));

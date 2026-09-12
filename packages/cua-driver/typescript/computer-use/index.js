@@ -534,6 +534,31 @@ export class ComputerUse {
     return this.#connectionGeneration;
   }
 
+  async getPlatform(options = {}) {
+    this.#requireOpen();
+    requireDispatchableSignal("getPlatform", options.signal);
+    if (typeof this.#owner?.listToolsJson !== "function") {
+      throw new ComputerUseError("the connected driver does not report its platform", {
+        code: "driver_platform_unavailable",
+      });
+    }
+    const raw = await awaitNativeTerminal(this.#owner.listToolsJson(), options.signal);
+    let platform;
+    try {
+      platform = JSON.parse(raw)?.platform;
+    } catch {
+      throw new ComputerUseError("the connected driver returned invalid platform metadata", {
+        code: "driver_platform_unavailable",
+      });
+    }
+    if (!["macos", "windows", "linux"].includes(platform)) {
+      throw new ComputerUseError("the connected driver did not report a supported platform; update the driver and SDK", {
+        code: "driver_platform_unavailable",
+      });
+    }
+    return platform;
+  }
+
   async sessionInfo(options = {}) {
     const { value } = await this.#call("getSession", {}, options);
     return value;
@@ -1138,6 +1163,40 @@ export class ComputerUse {
         signal: options.signal,
       }),
     );
+  }
+
+  async paste(options) {
+    const input = exactWindow(options?.pid, options?.windowId);
+    if (typeof options?.text !== "string") throw new ComputerUseError("text must be a string");
+    const format = options.format ?? "text";
+    const formats = { text: "Text", md: "Md", html: "Html" };
+    if (typeof format !== "string" || !Object.hasOwn(formats, format)) throw new ComputerUseError("format must be text, md, or html");
+    input.text = options.text;
+    input.format = this.#sdk.PasteFormat?.[formats[format]] ?? format;
+    if (await this.getPlatform({ signal: options.signal }) !== "macos") {
+      throw new ComputerUseError("paste is supported only by the macOS driver", { code: "unsupported_platform" });
+    }
+    return actionResult(await this.#invoke("paste", input, { signal: options.signal }));
+  }
+
+  async selectText(options) {
+    const input = this.#windowAddress(options, { coordinates: false, tokenRequired: true });
+    Object.assign(input, exactWindow(options?.pid, options?.windowId));
+    input.text = requireNonEmptyString("text", options?.text);
+    for (const field of ["prefix", "suffix"]) {
+      if (options[field] !== undefined) {
+        if (typeof options[field] !== "string") throw new ComputerUseError(`${field} must be a string`);
+        input[field] = options[field];
+      }
+    }
+    const selection = options.selection ?? "text";
+    const selections = { text: "Text", cursor_before: "CursorBefore", cursor_after: "CursorAfter" };
+    if (typeof selection !== "string" || !Object.hasOwn(selections, selection)) throw new ComputerUseError("selection must be text, cursor_before, or cursor_after");
+    input.selection = this.#sdk.TextSelection?.[selections[selection]] ?? selection;
+    if (await this.getPlatform({ signal: options.signal }) !== "macos") {
+      throw new ComputerUseError("selectText is supported only by the macOS driver", { code: "unsupported_platform" });
+    }
+    return actionResult(await this.#invoke("selectText", input, { signal: options.signal }));
   }
 
   async pressKey(options) {

@@ -3,6 +3,22 @@
 Computer Use API included in `@qwen-code/cua-sdk`. It uses the typed native
 SDK and works in ordinary Node.js or a persistent Node REPL.
 
+## Platform workflows
+
+`await computer.getPlatform()` returns `macos`, `windows`, or `linux` from the
+connected driver's inventory. It does not infer the target from the CLI or Node
+host and does not capture the desktop. Missing or invalid platform metadata
+raises `driver_platform_unavailable`; update the driver and SDK before continuing.
+
+The single [Computer Use Skill](./SKILL.md) routes to one platform resource:
+
+- [macOS](./references/macos.md): App handles, compact app state and text operations.
+- [Windows/Linux](./references/windows-linux.md): existing exact-window targeting.
+
+Skill resources stay beside the entrypoint on the CLI host. Read the selected
+resource relative to the Skill's displayed base directory, even when the driver
+controls another machine. After changing connections, query the platform again.
+
 ## App workflow
 
 On macOS, bind an application by name, identifier or installation path. The
@@ -49,11 +65,40 @@ partial, unverifiable and cancelled dispatched actions are never replayed.
 Errors request fresh observation before another action; they do not ask the
 model to choose a delivery mode.
 
+## macOS text operations
+
+`app.paste(text, { format?, signal? })` pastes once into the current app window.
+`format` defaults to `text`; `md` and `html` supply formatted content, and the
+receiving app chooses which supplied format it accepts. The clipboard is restored
+only while the transaction still owns it, preserving newer external clipboard
+changes.
+
+`app.selectText(element, text, { prefix?, suffix?, selection?, signal? })` uses a
+current short element ID and selects one exact, case-sensitive text match. Prefix
+and suffix are optional immediately adjacent context; no match or multiple matches
+fail. `selection` defaults to `text`; `cursor_before` and `cursor_after` place the
+insertion point at that boundary. The element must support writable text selection.
+
+```js
+await app.selectText(37, "draft", { prefix: "Status: " });
+console.log((await app.getState()).text);
+// After confirming the intended selection:
+await app.paste("ready");
+console.log((await app.getState()).text);
+```
+
+Both methods return the native action effect. An error, cancellation or completed
+dispatch does not establish what changed; observe before deciding whether to retry.
+Neither method accepts delivery options. Exact-window callers can use
+`computer.paste({ pid, windowId, text, format? })` or
+`computer.selectText({ pid, windowId, elementToken, text, prefix?, suffix?, selection? })`.
+These operations are macOS-only and reject other driver platforms before mutation.
+
 ## Exact-window SDK compatibility
 
 The lower-level `ComputerUse` methods remain available to programmatic clients.
-The bundled model Skill uses the app workflow above. The rest of this document
-describes the existing exact-window contract.
+The bundled model Skill uses this workflow on Windows/Linux and the App workflow
+on macOS. The rest of this document describes the existing exact-window contract.
 
 ## Observation revisions
 
@@ -171,7 +216,7 @@ identity and permissions.
 
 ## Tests
 
-- `npm test` — hermetic unit tests against a fake driver handle.
+- `npm test` — hermetic facade tests against a fake driver handle and Skill packaging checks.
 - `npm run test:e2e` — standalone high-level wrapper run against a real target;
   set `COMPUTER_USE_PID` and `COMPUTER_USE_WINDOW`. It uses an isolated
   configured runtime by default; set `COMPUTER_USE_SOCKET` only when testing a

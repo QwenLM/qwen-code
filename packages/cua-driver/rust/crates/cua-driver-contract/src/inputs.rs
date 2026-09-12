@@ -1045,6 +1045,66 @@ impl ToolInput for SetValueInput {
     const TOOL_NAME: &'static str = "set_value";
 }
 
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PasteFormat {
+    #[default]
+    Text,
+    Md,
+    Html,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct PasteInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: u64,
+    pub text: String,
+    #[serde(default)]
+    pub format: PasteFormat,
+}
+
+impl ToolInput for PasteInput {
+    const TOOL_NAME: &'static str = "paste";
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TextSelection {
+    #[default]
+    Text,
+    CursorBefore,
+    CursorAfter,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct SelectTextInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: u64,
+    #[schemars(schema_with = "element_token_schema")]
+    pub element_token: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+    #[serde(default)]
+    pub selection: TextSelection,
+}
+
+impl ToolInput for SelectTextInput {
+    const TOOL_NAME: &'static str = "select_text";
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
 pub struct ClipboardReadInput {
