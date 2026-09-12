@@ -10,6 +10,7 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  boundImageBuffer,
   orientedSize,
   renderImageOverview,
   renderNormalizedImageCrop,
@@ -110,6 +111,50 @@ describe('image views', () => {
     });
     expect(metadata).toMatchObject({ width: 80, height: 80, format: 'jpeg' });
     expect(view.bytes.length).toBeLessThanOrEqual(9 * 1024 * 1024);
+  });
+
+  it('leaves an in-budget image buffer untouched', async () => {
+    const bytes = await sharp({
+      create: { width: 200, height: 100, channels: 3, background: '#306090' },
+    })
+      .png()
+      .toBuffer();
+
+    await expect(boundImageBuffer(bytes, 'image/png', signal)).resolves.toBe(
+      null,
+    );
+  });
+
+  it('bounds an oversized image buffer to the shared budget', async () => {
+    const bytes = await sharp({
+      create: { width: 3840, height: 2160, channels: 3, background: '#804020' },
+    })
+      .png()
+      .toBuffer();
+
+    const view = await boundImageBuffer(bytes, 'image/png', signal);
+
+    expect(view).not.toBe(null);
+    expect(view!.mimeType).toBe('image/jpeg');
+    expect(Math.max(view!.outputWidth, view!.outputHeight)).toBeLessThanOrEqual(
+      1568,
+    );
+    expect(
+      Math.ceil(view!.outputWidth / 28) * Math.ceil(view!.outputHeight / 28),
+    ).toBeLessThanOrEqual(1568);
+    expect(view!.bytes.length).toBeLessThan(bytes.length);
+  });
+
+  it('reports unsupported_image for a format the renderer cannot bound', async () => {
+    const bytes = await sharp({
+      create: { width: 3840, height: 2160, channels: 3, background: '#804020' },
+    })
+      .gif()
+      .toBuffer();
+
+    await expect(
+      boundImageBuffer(bytes, 'image/gif', signal),
+    ).rejects.toMatchObject({ code: 'unsupported_image' });
   });
 
   it('reports decode_failed for a corrupt canonical image', async () => {
