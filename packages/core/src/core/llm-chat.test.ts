@@ -15352,6 +15352,430 @@ describe('LlmChat', async () => {
     expect(chat.getLastModelMessageText()).toBe(response);
   });
 
+  it('retries a response that opens with tool-result scaffolding tags (#10797)', async () => {
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockImplementationOnce(async () =>
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { text: 'planning the edit', thought: true },
+                    {
+                      text:
+                        '<file_path>/tmp/app.ts</file_path>' +
+                        '<action>saved</action>' +
+                        '<summary>Wrote the file.</summary>' +
+                        '</tool_result>' +
+                        '\n\nI saved the file.',
+                    },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      )
+      .mockImplementationOnce(async () =>
+        streamResponse(stopResponse([{ text: 'Saved the file cleanly.' }])),
+      );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-tool-result-scaffolding-leak',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      true,
+    );
+    const emittedText = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(emittedText).toBe('Saved the file cleanly.');
+    expect(emittedText).not.toContain('file_path');
+    expect(chat.getLastModelMessageText()).toBe('Saved the file cleanly.');
+  });
+
+  it('holds a split tool-result scaffolding prefix across chunks and still retries (#10797)', async () => {
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockImplementationOnce(async () =>
+        (async function* () {
+          yield {
+            candidates: [{ content: { parts: [{ text: '<file_pa' }] } }],
+          } as unknown as GenerateContentResponse;
+          yield stopResponse([
+            {
+              text:
+                'th>/tmp/app.ts</file_path>' +
+                '<action>saved</action>' +
+                '</tool_result>' +
+                '\n\nDone.',
+            },
+          ]);
+        })(),
+      )
+      .mockImplementationOnce(async () =>
+        streamResponse(stopResponse([{ text: 'All set.' }])),
+      );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-split-tool-result-scaffolding-leak',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      true,
+    );
+    const emittedText = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(emittedText).toBe('All set.');
+  });
+
+  it('does not reject tool-result scaffolding tag names in mid-prose (#10797)', async () => {
+    const response =
+      'Pass <file_path> in the schema and mark the <action> field optional.';
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      streamResponse(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-tool-result-tags-in-prose',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('strips a backtick-wrapped system-reminder echo without retrying (#10797)', async () => {
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      (async function* () {
+        yield {
+          candidates: [{ content: { parts: [{ text: '`<system-remi' }] } }],
+        } as unknown as GenerateContentResponse;
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text:
+                      'nder>\nThe current task still has unfinished todo items:\n' +
+                      '- [ ] write tests\n' +
+                      '</system-reminder>`',
+                  },
+                ],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+        yield stopResponse([
+          { text: '\n\nUpdating the todo list now.' },
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'todo_write',
+              args: { todos: [] },
+            },
+          },
+        ]);
+      })(),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-system-reminder-echo-strip',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    const emittedParts = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+    const emittedText = emittedParts.map((part) => part.text ?? '').join('');
+    expect(emittedText).toBe('\n\nUpdating the todo list now.');
+    expect(emittedText).not.toContain('system-reminder');
+    expect(emittedParts).toContainEqual({
+      functionCall: {
+        id: 'call-1',
+        name: 'todo_write',
+        args: { todos: [] },
+      },
+    });
+    const recordedText = (chat.getHistory().at(-1)?.parts ?? [])
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(recordedText).toBe('\n\nUpdating the todo list now.');
+  });
+
+  it('strips a fenced system-reminder echo between paragraphs (#10797)', async () => {
+    const response =
+      'First paragraph.\n\n```\n<system-reminder>\nstale todos\n</system-reminder>\n```\nLast paragraph.';
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      streamResponse(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-fenced-system-reminder-echo',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(
+      'First paragraph.\n\nLast paragraph.',
+    );
+  });
+
+  it('keeps a line-start code-span mention of the system-reminder tag intact (#10797)', async () => {
+    const response =
+      'Line one\n`<system-reminder>` tags and `code` spans are kept verbatim.';
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      streamResponse(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-inline-system-reminder-mention',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('releases an unterminated backtick-wrapped reminder echo verbatim (#10797)', async () => {
+    const response =
+      '`<system-reminder>\nThe current task still has unfinished todo items:';
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      streamResponse(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-unterminated-reminder-echo',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('does not strip an unwrapped system-reminder mention (#10797)', async () => {
+    const response =
+      'Reminders arrive as <system-reminder> blocks in the conversation.';
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      streamResponse(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-unwrapped-system-reminder-mention',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('strips two consecutive echoed reminder lines without leaking the second (#10797)', async () => {
+    const response =
+      '`<system-reminder>\nThe current task still has unfinished todo items:\n' +
+      '- [ ] write tests\n' +
+      '</system-reminder>`\n' +
+      '`<system-reminder>\nAnother stale reminder arrived meanwhile.\n' +
+      '</system-reminder>`\n' +
+      'Now updating the todo list.';
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      streamResponse(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-consecutive-system-reminder-echo-strip',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    const emittedText = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(emittedText).toBe('Now updating the todo list.');
+    expect(emittedText).not.toContain('system-reminder');
+    expect(chat.getLastModelMessageText()).toBe('Now updating the todo list.');
+  });
+
+  it('retries an echo-only reply that strips to empty instead of leaking it (#10797)', async () => {
+    // An echo-only reply (no tool call, no thought part) strips to an empty
+    // response, fails closed through NO_RESPONSE_TEXT, and burns one
+    // transient retry — pinned here because the PR description's
+    // "never retries the turn" only holds for echoes paired with a tool
+    // call. Failing closed with a retry is the intended behaviour.
+    const echo =
+      '`<system-reminder>\nThe current task still has unfinished todo items:\n' +
+      '- [ ] write tests\n' +
+      '</system-reminder>`\n';
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockImplementationOnce(async () =>
+        streamResponse(stopResponse([{ text: echo }])),
+      )
+      .mockImplementationOnce(async () =>
+        streamResponse(stopResponse([{ text: 'All done.' }])),
+      );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-echo-only-reply-empty-strip',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      true,
+    );
+    const emittedText = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(emittedText).toBe('All done.');
+    expect(emittedText).not.toContain('system-reminder');
+    expect(chat.getLastModelMessageText()).toBe('All done.');
+  });
+
+  it('keeps sibling text when an empty part follows released text in one chunk (#10797)', async () => {
+    // Regression: the empty-text guard used to withdraw earlier parts of the
+    // same chunk whenever the echo filter was idle, parking text that had
+    // already been released past every buffer; the stripped flush then
+    // dropped it ('Hello ' vanished and only 'world' reached the user).
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      streamResponse(
+        stopResponse([{ text: 'Hello ' }, { text: '' }, { text: 'world' }]),
+      ),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-empty-part-between-text',
+    );
+    const events: StreamEvent[] = [];
+    let emittedText = '';
+    for await (const event of stream) {
+      events.push(event);
+      if (event.type === StreamEventType.CHUNK) {
+        // Snapshot the text as each chunk arrives: history consolidation
+        // later merges text parts by mutating the yielded part objects, so
+        // aggregating after the loop would double-count merged text.
+        emittedText += (event.value.candidates?.[0]?.content?.parts ?? [])
+          .map((part) => part.text ?? '')
+          .join('');
+      }
+    }
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(emittedText).toBe('Hello world');
+    expect(chat.getLastModelMessageText()).toBe('Hello world');
+  });
+
+  it('keeps the whole reply when a trailing empty part ends the chunk (#10797)', async () => {
+    // Regression: with the echo filter idle, a trailing empty part withdrew
+    // the already-released 'Hello world' into the pending buffer and the
+    // stripped finish dropped it — the entire reply went missing and the
+    // turn burned an avoidable NO_RESPONSE_TEXT retry.
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockImplementationOnce(async () =>
+        streamResponse(stopResponse([{ text: 'Hello world' }, { text: '' }])),
+      )
+      .mockImplementationOnce(async () =>
+        streamResponse(stopResponse([{ text: 'RETRY REPLY' }])),
+      );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-trailing-empty-part',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe('Hello world');
+  });
+
   it('retries leaked JSON before a structured tool call', async () => {
     vi.useFakeTimers();
     try {
