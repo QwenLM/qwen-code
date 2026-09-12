@@ -436,7 +436,13 @@ function extractText(response: unknown): string {
 }
 
 function parseJudgeReply(text: string): JudgeWireResult | null {
-  const cleaned = stripMarkdownFence(text).trim();
+  const stripped = stripMarkdownFence(text);
+  // The fence helper's multi-line branch discards the opening fence line, so a
+  // reply whose payload is glued to that line (` ```json {"ok":true}` with the
+  // closing fence on the next line) unwraps to brace-less text. Fall back to
+  // the raw reply when the unwrap produced no `{`, keeping the tolerant scan
+  // below able to find the payload.
+  const cleaned = (stripped.includes('{') ? stripped : text).trim();
   // Accept the JSON anywhere in the reply: tolerant to chatty preambles when
   // the model ignores structured-output mode.
   const start = cleaned.indexOf('{');
