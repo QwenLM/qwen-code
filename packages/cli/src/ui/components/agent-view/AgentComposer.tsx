@@ -34,6 +34,7 @@ import { StreamingState } from '../../types.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useAgentStreamingState } from '../../hooks/useAgentStreamingState.js';
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
+import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
 import { useTextBuffer } from '../shared/text-buffer.js';
 import { calculatePromptWidths } from '../../utils/layoutUtils.js';
 import { BaseTextInput } from '../BaseTextInput.js';
@@ -115,6 +116,13 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     lastPromptTokenCount,
   } = useAgentStreamingState(interactiveAgent);
 
+  // An open right-click context menu owns the keyboard while it is up
+  // (mounted on this tab by AgentChatContent's ContentMouseController).
+  // KeypressContext broadcasts to every subscriber and discards return
+  // values, so the menu cannot consume a key for us — each consumer has to go
+  // quiet itself, exactly as InputPrompt does for the main view.
+  const { menu: contextMenu, closeMenu } = useContextMenu();
+
   // ── Escape to cancel the active agent round ──
 
   useKeypress(
@@ -128,7 +136,9 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     },
     {
       isActive:
-        streamingState === StreamingState.Responding && !agentShellFocused,
+        streamingState === StreamingState.Responding &&
+        !agentShellFocused &&
+        contextMenu === null,
     },
   );
 
@@ -190,6 +200,23 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
 
   const handleKeypress = useCallback(
     (key: Key): boolean => {
+      // While the right-click context menu is open it owns the navigation
+      // keys (the overlay handles them); any other key closes the menu and is
+      // then processed normally, mirroring click-away dismissal. The
+      // dismissing key must fall through rather than be swallowed, since
+      // BaseTextInput still owns every non-navigation key.
+      if (contextMenu !== null) {
+        if (
+          key.name === 'up' ||
+          key.name === 'down' ||
+          key.name === 'return' ||
+          key.name === 'escape'
+        ) {
+          return true;
+        }
+        closeMenu();
+      }
+
       // When tab bar has focus, block all non-printable keys so they don't
       // act on the hidden buffer. Printable characters fall through to
       // BaseTextInput naturally; the tab bar handler releases focus on the
@@ -219,7 +246,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       }
       return false;
     },
-    [buffer, agentTabBarFocused, setAgentTabBarFocused],
+    [buffer, agentTabBarFocused, setAgentTabBarFocused, contextMenu, closeMenu],
   );
 
   // ── Message queue display ──
