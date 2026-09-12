@@ -24,33 +24,44 @@ Tell the user to restart Qwen Code, then stop. If only the SDK import is missing
 run the second command and retry.
 
 Reuse an existing `computer` connected to the intended desktop. Otherwise import
-the `ComputerUse` API once per fresh `node_repl` session:
+the `ComputerUse` API once per fresh `node_repl` session. Combine initialization,
+connected-platform discovery and the selected resource read in one call. Set
+`skillBase` to the absolute Skill base directory of this `SKILL.md`, as shown by
+the skill loader or the file you just read:
 
 ```js
 globalThis.computer = await (
   await import('@qwen-code/cua-sdk/computer-use')
 ).ComputerUse.create();
+var platform = await computer.getPlatform();
+var reference = {
+  macos: 'macos.md',
+  windows: 'windows-linux.md',
+  linux: 'windows-linux.md',
+}[platform];
+if (!reference) throw new Error('Unsupported connected platform');
+var skillBase = '/absolute/path/to/computer-use';
+nodeRepl.write(`Connected platform: ${platform}`);
+nodeRepl.write(await (await import('node:fs/promises')).readFile(
+  `${skillBase}/references/${reference}`, 'utf8',
+));
 ```
 
 ## Select the target platform workflow
-
-Query the connected driver before discovering apps or sending UI actions:
-
-```js
-nodeRepl.write(await computer.getPlatform());
-```
 
 Use this returned platform, not the CLI or Node host operating system. A connected
 driver may control a different machine. If the platform cannot be determined,
 resolve the reported driver/SDK error before continuing; do not guess a platform.
 
+The initialization call above reads exactly one resource. If filesystem imports
+are unavailable, use the following fallback before any UI work.
 Read exactly one resource with `read_file`, resolving its absolute path from the
 Skill base directory shown above:
 
 - `macos`: read `references/macos.md` for the App workflow and text operations.
 - `windows` or `linux`: read `references/windows-linux.md` for the exact-window workflow.
 
-Read the selected resource before continuing. Its contents are not loaded by this
-entrypoint. After changing the connected desktop, query its platform again and
-read the matching resource. Resource files remain on the machine hosting this
-Skill; do not look for them on the controlled desktop.
+Read the selected resource before continuing. Once it has been printed in the
+initialization result, do not read it again. After changing the connected desktop,
+query its platform again and read the matching resource. Resource files remain on
+the machine hosting this Skill; do not look for them on the controlled desktop.

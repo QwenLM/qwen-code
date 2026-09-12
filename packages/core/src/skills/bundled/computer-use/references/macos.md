@@ -123,6 +123,13 @@ nodeRepl.write((await app.getState()).text);
 
 Use the actual ID from your observation; `37` is only an example.
 
+An observation is a decision boundary. When the current state already identifies
+the controls and the next actions are known, combine those actions and saving
+in the same call. Read state after the batch. End the batch at a new dialog,
+menu, changed target or uncertain result; use that state before choosing the
+next action. Do not split a known sequence merely to put each action in its own
+call.
+
 - Prefer element IDs to coordinates. `setValue(id, value)` changes a writable control, and `performSecondaryAction(id, action)` invokes a secondary action listed for that element. Use an observed action name rather than guessing.
 - When an action opens or closes a dialog, sheet or menu, end the batch and call `app.getState()` to read the new window and IDs before continuing.
 - `No open application window.` means the app is still running without a document window. If closing it completed the task, finish instead of retrying actions; otherwise open the intended file or window first.
@@ -175,6 +182,9 @@ nodeRepl.write((await app.getState()).text);
 Every App observation captures the current screenshot internally, independent
 of whether AX returns full state, a diff or no-change. The default return omits
 the image. `includeScreenshot: true` exposes it when visual inspection is needed.
+Prefer the text-only default when it identifies the controls and confirms the
+requested change. Request an image to resolve missing or ambiguous information,
+choose coordinates or verify an appearance that AX does not describe.
 
 ```js
 var state = await app.getState({ includeScreenshot: true });
@@ -184,7 +194,10 @@ for (const image of state.screenshot?.images ?? []) {
 }
 ```
 
-When all Computer Use work is complete:
+Include connection cleanup at the end of the call that emits the final
+verification. Inspect that result before reporting success; reconnect and
+continue if it reveals unfinished work. A separate cleanup-only model turn is
+unnecessary:
 
 ```js
 await computer.close();
