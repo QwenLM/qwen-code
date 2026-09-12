@@ -692,6 +692,26 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
+  it.each([
+    ['both PWA files', []],
+    ['the manifest', ['service-worker.js']],
+    ['the service worker', ['manifest.webmanifest']],
+  ])('warns and skips Web Shell output missing %s', (_missing, publicFiles) => {
+    const rootDir = createFixtureRoot();
+    stubConsole();
+    writeFile(rootDir, 'packages/web-shell/dist/index.html', '<!doctype html>');
+    writeFile(rootDir, 'packages/web-shell/dist/assets/main.js', 'app');
+    for (const file of publicFiles) {
+      writeFile(rootDir, `packages/web-shell/dist/${file}`, 'public fixture');
+    }
+
+    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Warning: Web Shell assets not found'),
+    );
+    expect(existsSync(path.join(rootDir, 'dist', 'web-shell'))).toBe(false);
+  });
+
   it.each(['manifest.webmanifest', 'service-worker.js'])(
     'requires %s in release packages',
     (file) => {
