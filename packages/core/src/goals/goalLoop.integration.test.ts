@@ -74,6 +74,7 @@ function makeConfigWithRealHookSystem(): {
     getSessionId: () => SESSION,
     isTrustedFolder: () => true,
     getDisableAllHooks: () => false,
+    getApprovalMode: () => 'default',
     getBackgroundTaskRegistry: () => ({ hasRunningTasks: () => false }),
     getBackgroundShellRegistry: () => ({ hasRunningEntries: () => false }),
     getWorkflowRunRegistry: () => ({ hasRunningEntries: () => false }),
