@@ -2480,6 +2480,9 @@ export default {
   '阿里云百炼 (aliyun.com)': '阿里云百炼（aliyun.com）',
   'No compression needed.': '无需压缩。',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    '指定版本升级需要独立安装。请使用当前安装方式手动安装 {{version}} 版本。',
+  'Install an exact version without querying npm': '安装指定版本，不查询 npm',
   'Check for Qwen Code updates and install if available':
     '检查 Qwen Code 更新并安装（如果可用）',
   'Qwen Code update available! {{current}} → {{latest}}':

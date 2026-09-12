@@ -1947,6 +1947,10 @@ export default {
   out: '出力',
   'In/Out': '入力/出力',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    '指定バージョンへの更新にはスタンドアロン版が必要です。現在のインストール方法でバージョン {{version}} を手動インストールしてください。',
+  'Install an exact version without querying npm':
+    'npm に問い合わせずに指定したバージョンをインストール',
   'Check for Qwen Code updates and install if available':
     'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
   'Qwen Code update available! {{current}} → {{latest}}':

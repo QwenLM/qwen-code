@@ -846,6 +846,15 @@ The URL must use HTTPS and cannot contain credentials, a query string, or a frag
 
 Configure this variable in the launching shell or a user-level `.env` file. It is rejected from project `.env` and `.qwen/.env` files and from the top-level `settings.json` `env` section at every scope. A user-level `.env` value is loaded at startup; restart Qwen Code after changing it.
 
+To install a selected release without querying the npm registry, combine the download source with an exact target version:
+
+```bash
+QWEN_UPDATE_BASE_URL="https://downloads.example.com/qwen-code" \
+  qwen update --target-version 0.23.1
+```
+
+`--target-version` accepts a concrete stable or prerelease version, optionally prefixed with `v`. It rejects mutable tags such as `latest` and `nightly`. Explicit targets permit same-version reinstalls and downgrades; the downloaded executable must report the requested version before activation. For non-standalone installations, the command returns an error directing you to install the selected version manually using your installation method. Omitting the option preserves normal version discovery.
+
 This setting applies to `qwen update`, `/update`, and automatic standalone updates. It does not change npm registry version discovery. It is separate from the installer's `QWEN_INSTALL_BASE_URL`, which points directly to a version-specific directory.
 
 ## Command-Line Arguments

@@ -2278,6 +2278,9 @@ export default {
   'start server': '啟動伺服器',
   'No compression needed.': '無需壓縮。',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    '指定版本升級需要獨立安裝。請使用目前的安裝方式手動安裝 {{version}} 版本。',
+  'Install an exact version without querying npm': '安裝指定版本，不查詢 npm',
   'Check for Qwen Code updates and install if available':
     '檢查 Qwen Code 更新並安裝（如果可用）',
   'Qwen Code update available! {{current}} → {{latest}}':
