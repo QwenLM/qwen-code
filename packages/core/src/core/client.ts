@@ -2739,6 +2739,33 @@ export class LlmClient {
     args?: Record<string, unknown>,
     outcome?: CompletedToolCallOutcome,
   ): void {
+    this.recordCompletedToolCalls([{ toolName, args, outcome }]);
+  }
+
+  recordCompletedToolCalls(
+    calls: ReadonlyArray<{
+      toolName: string;
+      args?: Record<string, unknown>;
+      outcome?: CompletedToolCallOutcome;
+    }>,
+  ): void {
+    const stagedIds: string[] = [];
+    for (const { toolName, args, outcome } of calls) {
+      const callId = this.stageCompletedToolCall(toolName, args, outcome);
+      if (callId) stagedIds.push(callId);
+    }
+    if (stagedIds.length === 0) return;
+    const historyIds = this.chat?.getHistoryFunctionResponseIds();
+    this.acceptCompletedToolCallBatch(
+      stagedIds.filter((callId) => historyIds?.has(callId)),
+    );
+  }
+
+  private stageCompletedToolCall(
+    toolName: string,
+    args?: Record<string, unknown>,
+    outcome?: CompletedToolCallOutcome,
+  ): string | undefined {
     if (outcome && !didToolCallProduceWork(outcome)) {
       return;
     }
@@ -2768,32 +2795,34 @@ export class LlmClient {
           toolName,
           outcome: experienceOutcome,
         });
-        if (
-          this.chat?.getHistoryFunctionResponseIds().has(outcome.callId) ===
-          true
-        ) {
-          this.acceptCompletedToolCallOutcome(outcome.callId);
-        }
+        return outcome.callId;
+      }
+    }
+    return undefined;
+  }
+
+  private acceptCompletedToolCallBatch(callIds: readonly string[]): void {
+    // Successes can resolve earlier batches, not failures from parallel siblings.
+    for (const outcome of ['success', 'failure'] as const) {
+      for (const callId of callIds) {
+        const pending = this.pendingExperienceOutcomes.get(callId);
+        if (pending?.outcome !== outcome) continue;
+        this.pendingExperienceOutcomes.delete(callId);
+        this.experienceSignalsSinceReview = accumulateExperienceOutcome(
+          this.experienceSignalsSinceReview,
+          pending.toolName,
+          pending.outcome,
+        );
       }
     }
   }
 
-  private acceptCompletedToolCallOutcome(callId: string): void {
-    const pending = this.pendingExperienceOutcomes.get(callId);
-    if (!pending) return;
-    this.pendingExperienceOutcomes.delete(callId);
-    this.experienceSignalsSinceReview = accumulateExperienceOutcome(
-      this.experienceSignalsSinceReview,
-      pending.toolName,
-      pending.outcome,
-    );
-  }
-
   private acceptCompletedToolCallOutcomes(content: Content): void {
-    for (const part of content.parts ?? []) {
-      const callId = part.functionResponse?.id;
-      if (callId) this.acceptCompletedToolCallOutcome(callId);
-    }
+    this.acceptCompletedToolCallBatch(
+      (content.parts ?? []).flatMap((part) =>
+        part.functionResponse?.id ? [part.functionResponse.id] : [],
+      ),
+    );
   }
 
   private rememberCompletedToolName(toolName: string): void {

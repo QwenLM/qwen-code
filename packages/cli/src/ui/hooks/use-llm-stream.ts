@@ -4845,20 +4845,21 @@ export const useLlmStream = (
         // tools (which the original loop also skipped) stay skipped.
         // No status filter here: cancelled calls without a settled
         // `executionStatus` are dropped by `didToolCallProduceWork`
-        // inside `recordCompletedToolCall`, while cancellations that
+        // inside `recordCompletedToolCalls`, while cancellations that
         // settled first still count (matching the main loop).
-        for (const tc of dedupedTools) {
-          if (tc.request.isClientInitiated) continue;
-          llmClient?.recordCompletedToolCall(
-            tc.request.name,
-            tc.request.args as Record<string, unknown>,
-            toCompletedToolCallOutcome(
-              tc.request.callId,
-              tc.status,
-              tc.response,
-            ),
-          );
-        }
+        llmClient?.recordCompletedToolCalls(
+          dedupedTools
+            .filter((tc) => !tc.request.isClientInitiated)
+            .map((tc) => ({
+              toolName: tc.request.name,
+              args: tc.request.args as Record<string, unknown>,
+              outcome: toCompletedToolCallOutcome(
+                tc.request.callId,
+                tc.status,
+                tc.response,
+              ),
+            })),
+        );
         markToolsAsSubmitted(dedupedCallIds);
         const detachedAbortControllers = new Set<AbortController>();
         const foregroundAbortControllers = new Set<AbortController>();

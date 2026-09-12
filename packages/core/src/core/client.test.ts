@@ -9677,6 +9677,97 @@ hello
         acceptTurns();
       });
 
+      it.each(
+        ['history', 'stream', 'dedup'].flatMap((acceptance) =>
+          [false, true].flatMap((priorFailure) =>
+            [false, true].map((reverse) => ({
+              acceptance,
+              priorFailure,
+              reverse,
+            })),
+          ),
+        ),
+      )(
+        'keeps mixed outcomes batch-scoped ($acceptance, prior failure: $priorFailure, reversed: $reverse)',
+        async ({ acceptance, priorFailure, reverse }) => {
+          if (priorFailure) {
+            recordOutcome('old-failure', ToolNames.SHELL, 'error', 'error', {});
+            await client.addHistory({
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'old-failure',
+                    name: ToolNames.SHELL,
+                    response: {},
+                  },
+                },
+              ],
+            });
+          }
+          for (let i = 0; i < 3; i++)
+            client.recordCompletedToolCall('read_file');
+          const calls = (['error', 'success'] as const).map((status) => ({
+            toolName: ToolNames.SHELL,
+            outcome: {
+              callId: `batch-${status}`,
+              status,
+              executionStatus: status,
+              exitCode: status === 'error' ? 1 : 0,
+            },
+          }));
+          if (reverse) calls.reverse();
+          const content: Content = {
+            role: 'user',
+            parts: calls.map(({ toolName, outcome }) => ({
+              functionResponse: {
+                id: outcome.callId,
+                name: toolName,
+                response: {},
+              },
+            })),
+          };
+          if (acceptance === 'dedup') {
+            vi.mocked(
+              client.getChat().getHistoryFunctionResponseIds,
+            ).mockReturnValue(
+              new Set(calls.map(({ outcome }) => outcome.callId)),
+            );
+            client.recordCompletedToolCalls(calls);
+          } else {
+            for (const { toolName, outcome } of calls) {
+              client.recordCompletedToolCall(toolName, undefined, outcome);
+            }
+            if (acceptance === 'stream') {
+              await fromAsync(
+                client.sendMessageStream(
+                  content.parts!,
+                  new AbortController().signal,
+                  'mixed-batch',
+                  { type: SendMessageType.ToolResult },
+                ),
+              );
+            } else {
+              await client.addHistory(content);
+            }
+          }
+          expect(client['experienceSignalsSinceReview']).toEqual({
+            retryArc: priorFailure,
+            hasSubstantiveWork: true,
+            failedToolNames: new Set([ToolNames.SHELL]),
+          });
+          expect(client['toolCallCount']).toBe(priorFailure ? 6 : 5);
+          expect(client['pendingExperienceOutcomes'].size).toBe(0);
+          await client.addHistory(content);
+          expect(client['experienceSignalsSinceReview'].retryArc).toBe(
+            priorFailure,
+          );
+          expect(
+            client['experienceSignalsSinceReview'].failedToolNames,
+          ).toEqual(new Set([ToolNames.SHELL]));
+        },
+      );
+
       it.each([
         ['all true', true],
         ['all false', false],
