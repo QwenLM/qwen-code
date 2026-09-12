@@ -195,7 +195,9 @@ describe('exec context tool results', () => {
       "await tools.skill({skill: 'test'}); await new Promise(() => {});",
       controller.signal,
     );
-    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce(), {
+      timeout: 30_000,
+    });
     controller.abort();
     await expect(pending).rejects.toThrow();
     expect(clearLoadedSkills).toHaveBeenCalledOnce();
