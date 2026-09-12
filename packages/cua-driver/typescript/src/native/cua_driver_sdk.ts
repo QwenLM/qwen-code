@@ -6,12 +6,12 @@
 import nativeModule from "./cua_driver_sdk-ffi.js";
 import { type UniffiRustFutureContinuationCallback, type UniffiForeignFutureDroppedCallback, type UniffiForeignFutureDroppedCallbackStruct, type UniffiVTableCallbackInterfaceCuaDriverSdkDriverActivityObserver, type UniffiForeignFutureResultRustBuffer, type UniffiForeignFutureCompleterustBuffer, type UniffiVTableCallbackInterfaceCuaDriverSdkDriverAuthorizationHost,
 } from "./cua_driver_sdk-ffi.js";
-import { type ActionResult, type ClickInput, type ClipboardReadInput, type ClipboardWriteInput, type DoubleClickInput, type DragInput, type EndSessionInput, type EndSessionOutput, type EscalateSessionInput, type GetAgentCursorStateInput, type GetCursorPositionInput, type GetDesktopStateInput, type GetScreenSizeInput, type GetSessionInput, type GetSessionStateInput, type GetWindowStateInput, type HotkeyInput, type InvokeMenuInput, type ListAppsInput, type ListSessionsInput, type ListSessionsOutput, type ListWindowsInput, type MoveCursorInput, type PerformSecondaryActionInput, type PressKeyInput, type RightClickInput, type ScrollInput, type SessionOutput, type SessionStateOutput, type SetAgentCursorEnabledInput, type SetAgentCursorMotionInput, type SetAgentCursorThemeInput, type SetValueInput, type SetWindowFrameInput, type StartSessionInput, type StartSessionOutput, type TypeTextInput, type VerifyStateInput, type VerifyStateOutput, type WindowClickInput, type WindowDragInput, type WindowHotkeyInput, type WindowPressKeyInput, type WindowScrollInput, type WindowTypeTextInput,
+import { type ActionResult, type ClickInput, type ClipboardReadInput, type ClipboardWriteInput, type DoubleClickInput, type DragInput, type EndSessionInput, type EndSessionOutput, type EscalateSessionInput, type GetAgentCursorStateInput, type GetCursorPositionInput, type GetDesktopStateInput, type GetScreenSizeInput, type GetSessionInput, type GetSessionStateInput, type GetWindowStateInput, type HotkeyInput, type InvokeMenuInput, type LaunchAppInput, type ListAppsInput, type ListSessionsInput, type ListSessionsOutput, type ListWindowsInput, type MoveCursorInput, type PerformSecondaryActionInput, type PressKeyInput, type RightClickInput, type ScrollInput, type SessionOutput, type SessionStateOutput, type SetAgentCursorEnabledInput, type SetAgentCursorMotionInput, type SetAgentCursorThemeInput, type SetValueInput, type SetWindowFrameInput, type StartSessionInput, type StartSessionOutput, type TypeTextInput, type VerifyStateInput, type VerifyStateOutput, type WindowClickInput, type WindowDragInput, type WindowHotkeyInput, type WindowPressKeyInput, type WindowScrollInput, type WindowTypeTextInput,
 } from "./cua_driver_contract.js";
 import { type FfiConverter, type UniffiByteArray, type UniffiGcObject, type UniffiHandle, type UniffiObjectFactory, type UniffiReferenceHolder, type UniffiRustCallStatus, AbstractFfiConverterByteArray, FfiConverterArray, FfiConverterBool, FfiConverterInt32, FfiConverterObject, FfiConverterObjectWithCallbacks, FfiConverterOptional, FfiConverterUInt32, FfiConverterUInt64, FfiConverterUInt8, RustBuffer, UniffiAbstractObject, UniffiEnum, UniffiError, UniffiInternalError, UniffiResult, UniffiRustCaller, destructorGuardSymbol, pointerLiteralSymbol, uniffiCreateFfiConverterString, uniffiCreateRecord, uniffiRustCallAsync, uniffiTraitInterfaceCall, uniffiTraitInterfaceCallAsyncWithError, uniffiTypeNameSymbol, variantOrdinalSymbol,
 } from "@ubjs/core";
 import uniffiCuaDriverContractModule from "./cua_driver_contract.js";
-const { FfiConverterTypeActionResult, FfiConverterTypeClickInput, FfiConverterTypeClipboardReadInput, FfiConverterTypeClipboardWriteInput, FfiConverterTypeDoubleClickInput, FfiConverterTypeDragInput, FfiConverterTypeEndSessionInput, FfiConverterTypeEndSessionOutput, FfiConverterTypeEscalateSessionInput, FfiConverterTypeGetAgentCursorStateInput, FfiConverterTypeGetCursorPositionInput, FfiConverterTypeGetDesktopStateInput, FfiConverterTypeGetScreenSizeInput, FfiConverterTypeGetSessionInput, FfiConverterTypeGetSessionStateInput, FfiConverterTypeGetWindowStateInput, FfiConverterTypeHotkeyInput, FfiConverterTypeInvokeMenuInput, FfiConverterTypeListAppsInput, FfiConverterTypeListSessionsInput, FfiConverterTypeListSessionsOutput, FfiConverterTypeListWindowsInput, FfiConverterTypeMoveCursorInput, FfiConverterTypePerformSecondaryActionInput, FfiConverterTypePressKeyInput, FfiConverterTypeRightClickInput, FfiConverterTypeScrollInput, FfiConverterTypeSessionOutput, FfiConverterTypeSessionStateOutput, FfiConverterTypeSetAgentCursorEnabledInput, FfiConverterTypeSetAgentCursorMotionInput, FfiConverterTypeSetAgentCursorThemeInput, FfiConverterTypeSetValueInput, FfiConverterTypeSetWindowFrameInput, FfiConverterTypeStartSessionInput, FfiConverterTypeStartSessionOutput, FfiConverterTypeTypeTextInput, FfiConverterTypeVerifyStateInput, FfiConverterTypeVerifyStateOutput, FfiConverterTypeWindowClickInput, FfiConverterTypeWindowDragInput, FfiConverterTypeWindowHotkeyInput, FfiConverterTypeWindowPressKeyInput, FfiConverterTypeWindowScrollInput, FfiConverterTypeWindowTypeTextInput } = uniffiCuaDriverContractModule.converters;
+const { FfiConverterTypeActionResult, FfiConverterTypeClickInput, FfiConverterTypeClipboardReadInput, FfiConverterTypeClipboardWriteInput, FfiConverterTypeDoubleClickInput, FfiConverterTypeDragInput, FfiConverterTypeEndSessionInput, FfiConverterTypeEndSessionOutput, FfiConverterTypeEscalateSessionInput, FfiConverterTypeGetAgentCursorStateInput, FfiConverterTypeGetCursorPositionInput, FfiConverterTypeGetDesktopStateInput, FfiConverterTypeGetScreenSizeInput, FfiConverterTypeGetSessionInput, FfiConverterTypeGetSessionStateInput, FfiConverterTypeGetWindowStateInput, FfiConverterTypeHotkeyInput, FfiConverterTypeInvokeMenuInput, FfiConverterTypeLaunchAppInput, FfiConverterTypeListAppsInput, FfiConverterTypeListSessionsInput, FfiConverterTypeListSessionsOutput, FfiConverterTypeListWindowsInput, FfiConverterTypeMoveCursorInput, FfiConverterTypePerformSecondaryActionInput, FfiConverterTypePressKeyInput, FfiConverterTypeRightClickInput, FfiConverterTypeScrollInput, FfiConverterTypeSessionOutput, FfiConverterTypeSessionStateOutput, FfiConverterTypeSetAgentCursorEnabledInput, FfiConverterTypeSetAgentCursorMotionInput, FfiConverterTypeSetAgentCursorThemeInput, FfiConverterTypeSetValueInput, FfiConverterTypeSetWindowFrameInput, FfiConverterTypeStartSessionInput, FfiConverterTypeStartSessionOutput, FfiConverterTypeTypeTextInput, FfiConverterTypeVerifyStateInput, FfiConverterTypeVerifyStateOutput, FfiConverterTypeWindowClickInput, FfiConverterTypeWindowDragInput, FfiConverterTypeWindowHotkeyInput, FfiConverterTypeWindowPressKeyInput, FfiConverterTypeWindowScrollInput, FfiConverterTypeWindowTypeTextInput } = uniffiCuaDriverContractModule.converters;
 const uniffiCaller = new UniffiRustCaller(() => ({ code: 0 }));
 
 const uniffiIsDebug =
@@ -2626,6 +2626,7 @@ export interface CuaDriverLike {
     hotkey(input: HotkeyInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
     invokeMenu(input: InvokeMenuInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
     isAvailable(): boolean;
+    launchApp(input: LaunchAppInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
     listApps(input: ListAppsInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
 /**
  * Content-free lifecycle summaries for the trusted host's runtime or
@@ -3510,6 +3511,38 @@ private constructor(pointer: UniffiHandle) {
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
     ));
+    }
+
+    async launchApp(input: LaunchAppInput, asyncOpts_?: { signal: AbortSignal }): Promise<ToolResult> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().uniffi_cua_driver_sdk_fn_method_cuadriver_launch_app(
+                    uniffiTypeCuaDriverObjectFactory.clonePointer(this),FfiConverterTypeLaunchAppInput.lower(input, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterTypeToolResult.lift.bind(FfiConverterTypeToolResult),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeDriverError.lift.bind(FfiConverterTypeDriverError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
     }
 
     async listApps(input: ListAppsInput, asyncOpts_?: { signal: AbortSignal }): Promise<ToolResult> /*throws*/ {
@@ -4496,6 +4529,7 @@ export interface CuaDriverSessionLike {
     getWindowState(input: GetWindowStateInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
     hotkey(input: HotkeyInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
     invokeMenu(input: InvokeMenuInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
+    launchApp(input: LaunchAppInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
     listApps(input: ListAppsInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
     listSessions(input: ListSessionsInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ListSessionsOutput>;
     listWindows(input: ListWindowsInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
@@ -5102,6 +5136,38 @@ private constructor(pointer: UniffiHandle) {
             /*rustFutureFunc:*/ () => {
                 return nativeModule().uniffi_cua_driver_sdk_fn_method_cuadriversession_invoke_menu(
                     uniffiTypeCuaDriverSessionObjectFactory.clonePointer(this),FfiConverterTypeInvokeMenuInput.lower(input, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterTypeToolResult.lift.bind(FfiConverterTypeToolResult),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeDriverError.lift.bind(FfiConverterTypeDriverError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+    async launchApp(input: LaunchAppInput, asyncOpts_?: { signal: AbortSignal }): Promise<ToolResult> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().uniffi_cua_driver_sdk_fn_method_cuadriversession_launch_app(
+                    uniffiTypeCuaDriverSessionObjectFactory.clonePointer(this),FfiConverterTypeLaunchAppInput.lower(input, nativeModule().rustbuffer_alloc)
                 );
             },
             /*pollFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_poll_rust_buffer,
@@ -6750,6 +6816,9 @@ function uniffiEnsureInitialized() {
     if (nativeModule().uniffi_cua_driver_sdk_checksum_method_cuadriver_is_available() !== 42961) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_cuadriver_is_available");
     }
+    if (nativeModule().uniffi_cua_driver_sdk_checksum_method_cuadriver_launch_app() !== 61868) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_cuadriver_launch_app");
+    }
     if (nativeModule().uniffi_cua_driver_sdk_checksum_method_cuadriver_list_apps() !== 26703) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_cuadriver_list_apps");
     }
@@ -6890,6 +6959,9 @@ function uniffiEnsureInitialized() {
     }
     if (nativeModule().uniffi_cua_driver_sdk_checksum_method_cuadriversession_invoke_menu() !== 2742) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_cuadriversession_invoke_menu");
+    }
+    if (nativeModule().uniffi_cua_driver_sdk_checksum_method_cuadriversession_launch_app() !== 12587) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_cuadriversession_launch_app");
     }
     if (nativeModule().uniffi_cua_driver_sdk_checksum_method_cuadriversession_list_apps() !== 41939) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_cuadriversession_list_apps");

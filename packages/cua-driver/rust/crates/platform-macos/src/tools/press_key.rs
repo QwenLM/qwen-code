@@ -412,10 +412,15 @@ impl Tool for PressKeyTool {
         // so any reflex activations it triggers are caught by both the
         // wildcard snapshot suppressor and the targeted FocusGuard lease.
         let prior_front = apps::frontmost_pid();
-        let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let foreground = fg && window_id.is_some();
+        let snapshot = if foreground {
+            WindowChangeDetector::snapshot_without_suppression(prior_front)
+        } else {
+            WindowChangeDetector::snapshot(prior_front)
+        };
 
         let result = focus_guard::with_focus_suppressed(
-            Some(pid),
+            if foreground { None } else { Some(pid) },
             prior_front,
             "press_key.CGEvent",
             || async move {
@@ -475,6 +480,11 @@ impl Tool for PressKeyTool {
                     }
                     // background (default): auth-envelope post, no raise.
                     dispatch_with_ax_oracle(pid, window_id, pre_focus_ptr, || {
+                        if !fg {
+                            if let Some(wid) = window_id {
+                                crate::input::skylight::prepare_background_keyboard(pid, wid)?;
+                            }
+                        }
                         crate::input::keyboard::press_key(pid, &key, &m)
                     })
                 })

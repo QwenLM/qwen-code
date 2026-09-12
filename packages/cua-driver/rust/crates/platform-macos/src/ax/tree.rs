@@ -118,7 +118,7 @@ impl Hash for AXIdentity {
 }
 
 /// A single node in the AX tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AXNode {
     /// 0-based index (Some = actionable, None = non-actionable display-only node)
     pub element_index: Option<usize>,
@@ -166,6 +166,8 @@ pub struct AXNode {
     /// This trust marker is independent of actionable ancestry because
     /// AXWebArea is commonly non-actionable and therefore has no element index.
     pub in_web_content: bool,
+    pub focused: Option<bool>,
+    pub focusable_or_selectable: bool,
 }
 
 #[derive(Default)]
@@ -265,6 +267,24 @@ pub fn walk_tree_bounded(
     max_elements: usize,
     max_depth: usize,
 ) -> TreeWalkResult {
+    walk_tree_with_context(pid, window_id, query, max_elements, max_depth, false)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WalkMode {
+    Legacy,
+    AppWindow,
+    AppMenu,
+}
+
+pub(crate) fn walk_tree_with_context(
+    pid: i32,
+    window_id: Option<u32>,
+    query: Option<&str>,
+    max_elements: usize,
+    max_depth: usize,
+    app_context: bool,
+) -> TreeWalkResult {
     let mut nodes: Vec<AXNode> = Vec::new();
     let mut lines: Vec<(usize, String)> = Vec::new(); // (depth, line)
     let mut index_counter = 0usize;
@@ -334,7 +354,7 @@ pub fn walk_tree_bounded(
         // nothing claims the requested id, `decide_window_scope` reports why
         // and walks nothing; it must never fall back to "everything that isn't
         // a window", which is how issue #2237 returned menu bars as panels.
-        let walk_these: Vec<AXUIElementRef> = if let Some(wid) = window_id {
+        let mut walk_these: Vec<AXUIElementRef> = if let Some(wid) = window_id {
             let mut candidates: Vec<TopLevelCandidate> = top_level
                 .iter()
                 .map(|&child| {
@@ -401,6 +421,27 @@ pub fn walk_tree_bounded(
             top_level.to_vec()
         };
 
+        let mut mode = if app_context {
+            WalkMode::AppWindow
+        } else {
+            WalkMode::Legacy
+        };
+        let open_menu = if app_context
+            && window_scope
+                .as_ref()
+                .is_some_and(|scope| scope.is_matched())
+        {
+            let (menu, menu_complete) = super::bindings::copy_open_menu_context(app_elem);
+            complete &= menu_complete;
+            menu
+        } else {
+            None
+        };
+        if let Some(menu) = open_menu {
+            walk_these = vec![menu];
+            mode = WalkMode::AppMenu;
+        }
+
         // Walk each top-level child at depth 0.
         let mut visited_identities = HashSet::new();
         for child in walk_these {
@@ -409,6 +450,7 @@ pub fn walk_tree_bounded(
                 0,
                 None,
                 false,
+                mode,
                 &mut visited_identities,
                 &mut nodes,
                 &mut lines,
@@ -421,6 +463,10 @@ pub fn walk_tree_bounded(
             );
         }
 
+        if let Some(menu) = open_menu {
+            CFRelease(menu as CFTypeRef);
+        }
+
         // Release all top-level elements (copy_children / copy_ax_windows both retain).
         for child in top_level {
             CFRelease(child as CFTypeRef);
@@ -429,6 +475,23 @@ pub fn walk_tree_bounded(
         CFRelease(app_elem as CFTypeRef);
     }
 
+    if app_context {
+        nodes = super::projection::project_app_nodes(nodes);
+        lines = nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.depth,
+                    match node.element_index {
+                        Some(index) => {
+                            format!("[{index}] {}", super::projection::format_app_body(node))
+                        }
+                        None => super::projection::format_app_body(node),
+                    },
+                )
+            })
+            .collect();
+    }
     let truncated_flag = truncated;
     let raw_markdown = render_lines(&lines);
     let mut tree_markdown = if let Some(q) = query {
@@ -462,6 +525,7 @@ unsafe fn walk_element(
     depth: usize,
     parent_index: Option<usize>,
     in_web_content: bool,
+    mode: WalkMode,
     visited_identities: &mut HashSet<AXIdentity>,
     nodes: &mut Vec<AXNode>,
     lines: &mut Vec<(usize, String)>,
@@ -484,6 +548,7 @@ unsafe fn walk_element(
         depth,
         parent_index,
         in_web_content,
+        mode,
         visited_identities,
         nodes,
         lines,
@@ -502,6 +567,7 @@ unsafe fn walk_element_contents(
     depth: usize,
     parent_index: Option<usize>,
     in_web_content: bool,
+    mode: WalkMode,
     visited_identities: &mut HashSet<AXIdentity>,
     nodes: &mut Vec<AXNode>,
     lines: &mut Vec<(usize, String)>,
@@ -547,7 +613,7 @@ unsafe fn walk_element_contents(
     let in_web_content = in_web_content || is_web_content_role(&role);
 
     // Skip pure layout containers that have no interesting content.
-    if role == "AXScrollArea" || role == "AXGroup" {
+    if mode == WalkMode::Legacy && (role == "AXScrollArea" || role == "AXGroup") {
         // Still recurse — children may be interesting. Layout containers
         // collapse, so children inherit the parent's depth AND the same
         // parent_index (no actionable node was emitted here).
@@ -559,6 +625,7 @@ unsafe fn walk_element_contents(
                 depth,
                 parent_index,
                 in_web_content,
+                mode,
                 visited_identities,
                 nodes,
                 lines,
@@ -637,16 +704,40 @@ unsafe fn walk_element_contents(
     // those controls disabled. Never assign such a row a live element index:
     // the same native state also causes dispatch to refuse it, and exposing an
     // index for it invites agents to retain an unusable menu target.
-    let enabled = if !actions.is_empty() || value_settable {
+    let enabled = if mode != WalkMode::Legacy || !actions.is_empty() || value_settable {
         let enabled = copy_bool_attr_with_status(element, "AXEnabled");
         *complete &= enabled.complete;
         enabled.value
     } else {
         None
     };
-    let is_actionable = is_addressable(!actions.is_empty(), value_settable, enabled);
+    let focused = if mode != WalkMode::Legacy {
+        let read = copy_bool_attr_with_status(element, "AXFocused");
+        *complete &= read.complete;
+        read.value
+    } else {
+        None
+    };
+    let focusable_or_selectable = if mode != WalkMode::Legacy && actions.is_empty() {
+        let focus = is_attribute_settable_with_status(element, "AXFocused");
+        let selection = is_attribute_settable_with_status(element, "AXSelected");
+        *complete &= focus.complete && selection.complete;
+        focus.value == Some(true) || selection.value == Some(true)
+    } else {
+        false
+    };
+    let is_actionable = is_addressable(
+        !actions.is_empty(),
+        value_settable || focusable_or_selectable,
+        enabled,
+    );
 
-    if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
+    if mode == WalkMode::Legacy
+        && !is_actionable
+        && !has_content
+        && role != "AXWindow"
+        && role != "AXSheet"
+    {
         let children = copy_children_with_status(element);
         *complete &= children.complete;
         for child in children.elements {
@@ -655,6 +746,7 @@ unsafe fn walk_element_contents(
                 depth + 1,
                 parent_index,
                 in_web_content,
+                mode,
                 visited_identities,
                 nodes,
                 lines,
@@ -675,34 +767,34 @@ unsafe fn walk_element_contents(
     let frame_read = element_screen_rect_with_status(element);
     *complete &= frame_read.complete;
     let frame = frame_read.value;
-    // Structured `elements` only contains actionable nodes. Keep all new AX
-    // round-trips behind that same gate so display-only rows pay no cost.
-    let control_state = read_control_state_if_actionable(is_actionable, || {
-        let value_description = copy_string_attr_with_status(element, "AXValueDescription");
-        *complete &= value_description.complete;
-        let min_value = copy_number_attr_with_status(element, "AXMinValue");
-        *complete &= min_value.complete;
-        let max_value = copy_number_attr_with_status(element, "AXMaxValue");
-        *complete &= max_value.complete;
-        let selected = copy_bool_attr_with_status(element, "AXSelected");
-        *complete &= selected.complete;
-        ControlState {
-            value_state: copied_value
-                .map(|copied| copied.state_value)
-                .filter(|v| !v.trim().is_empty())
-                .or_else(|| value.clone())
-                .map(|v| v.trim().to_owned())
-                .filter(|v| !v.is_empty()),
-            value_description: value_description
-                .value
-                .map(|v| v.trim().to_owned())
-                .filter(|v| !v.is_empty()),
-            min_value: min_value.value,
-            max_value: max_value.value,
-            enabled,
-            selected: selected.value,
-        }
-    });
+    // App projection also needs state on descriptive, disabled display nodes.
+    let control_state =
+        read_control_state_if_actionable(is_actionable || mode != WalkMode::Legacy, || {
+            let value_description = copy_string_attr_with_status(element, "AXValueDescription");
+            *complete &= value_description.complete;
+            let min_value = copy_number_attr_with_status(element, "AXMinValue");
+            *complete &= min_value.complete;
+            let max_value = copy_number_attr_with_status(element, "AXMaxValue");
+            *complete &= max_value.complete;
+            let selected = copy_bool_attr_with_status(element, "AXSelected");
+            *complete &= selected.complete;
+            ControlState {
+                value_state: copied_value
+                    .map(|copied| copied.state_value)
+                    .filter(|v| !v.trim().is_empty())
+                    .or_else(|| value.clone())
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty()),
+                value_description: value_description
+                    .value
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty()),
+                min_value: min_value.value,
+                max_value: max_value.value,
+                enabled,
+                selected: selected.value,
+            }
+        });
     let node = if is_actionable {
         let idx = *counter;
         *counter += 1;
@@ -742,6 +834,8 @@ unsafe fn walk_element_contents(
             enabled: control_state.enabled,
             selected: control_state.selected,
             in_web_content,
+            focused,
+            focusable_or_selectable,
         }
     } else {
         AXNode {
@@ -764,7 +858,11 @@ unsafe fn walk_element_contents(
             },
             identifier: identifier.clone(),
             help: help.clone(),
-            actions: vec![],
+            actions: if mode == WalkMode::Legacy {
+                vec![]
+            } else {
+                actions.clone()
+            },
             element_ptr,
             identity,
             depth,
@@ -777,6 +875,8 @@ unsafe fn walk_element_contents(
             enabled: control_state.enabled,
             selected: control_state.selected,
             in_web_content,
+            focused,
+            focusable_or_selectable,
         }
     };
 
@@ -789,6 +889,10 @@ unsafe fn walk_element_contents(
     lines.push((depth, line));
     nodes.push(node);
 
+    if mode == WalkMode::AppWindow && role == "AXMenuBarItem" {
+        return;
+    }
+
     let children = copy_children_with_status(element);
     *complete &= children.complete;
     for child in children.elements {
@@ -797,6 +901,7 @@ unsafe fn walk_element_contents(
             depth + 1,
             next_parent,
             in_web_content,
+            mode,
             visited_identities,
             nodes,
             lines,
@@ -1116,6 +1221,8 @@ mod tests {
             enabled: Some(false),
             selected: Some(true),
             in_web_content: true,
+            focused: None,
+            focusable_or_selectable: false,
         };
 
         assert_eq!(

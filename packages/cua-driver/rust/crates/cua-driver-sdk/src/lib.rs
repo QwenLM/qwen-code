@@ -9,8 +9,8 @@ use cua_driver_contract::{
     ActionResult, ClickInput, ClipboardReadInput, ClipboardWriteInput, DoubleClickInput, DragInput,
     EndSessionInput, EndSessionOutput, EscalateSessionInput, GetAgentCursorStateInput,
     GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, GetSessionInput,
-    GetSessionStateInput, GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListAppsInput,
-    ListSessionsInput, ListSessionsOutput, ListWindowsInput, MoveCursorInput,
+    GetSessionStateInput, GetWindowStateInput, HotkeyInput, InvokeMenuInput, LaunchAppInput,
+    ListAppsInput, ListSessionsInput, ListSessionsOutput, ListWindowsInput, MoveCursorInput,
     PerformSecondaryActionInput, PressKeyInput, RightClickInput, ScrollInput, SessionOutput,
     SessionStateOutput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput,
     SetAgentCursorThemeInput, SetValueInput, SetWindowFrameInput, StartSessionInput,
@@ -623,6 +623,7 @@ macro_rules! desktop_tool_methods {
     ($callback:ident) => {
         $callback! {
             list_apps: ListAppsInput,
+            launch_app: LaunchAppInput,
             list_windows: ListWindowsInput,
             get_desktop_state: GetDesktopStateInput,
             get_window_state: GetWindowStateInput,

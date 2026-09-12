@@ -275,6 +275,8 @@ mod tests {
             enabled: None,
             selected: None,
             in_web_content: false,
+            focused: None,
+            focusable_or_selectable: false,
         }
     }
 

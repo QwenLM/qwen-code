@@ -26,7 +26,7 @@ When first used, the skill runs these commands itself:
 
 ```bash
 qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.3
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.5
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.6
 ```
 
 Restart Qwen Code after the MCP server is first added. The skill then resumes
@@ -42,19 +42,35 @@ execution path; there is no legacy fallback.
 ## Use
 
 Ask Qwen Code to use `$computer-use` for the desktop task. After bootstrap, it
-follows the standard Computer Use workflow:
+uses the app workflow on macOS:
 
-1. discovers the exact application and window;
-2. observes full accessibility state, then accumulates automatic incremental
-   updates into the current state;
-3. performs one or more actions through current semantic element tokens,
-   including unchanged tokens retained across compatible diffs;
+1. binds the application with `computer.getApp(nameOrIdentifierOrPath)`;
+2. reads `app.getState()` for compact accessibility text, followed by automatic
+   incremental updates;
+3. performs one or more actions using the short element IDs in that text;
 4. fetches the latest state before deciding what to do next; and
 5. closes the SDK client and resets the REPL only when no other persistent
    state is needed.
 
 The driver is the only component that computes observation diffs. Model code
 uses the typed SDK methods and does not dispatch arbitrary driver tool names.
+The app handle tracks the current window and dialogs, keeps native element
+identity internally, and delegates input to the native driver. Model code does
+not choose foreground/background modes. Unconfirmed actions are not replayed.
+`getState()` can open a discovered stopped app; actions never restart it.
+Existing exact-window APIs remain available on Windows and Linux.
+
+```js
+const app = await computer.getApp('Microsoft Excel');
+nodeRepl.write((await app.getState()).text);
+// Use an element ID from the returned state.
+await app.click(37);
+await app.typeText('hello');
+nodeRepl.write((await app.getState()).text);
+```
+
+Refresh state after opening or closing a dialog before reusing element IDs.
+Screenshots are requested explicitly with `app.getState({ includeScreenshot: true })`.
 
 ## Permissions
 

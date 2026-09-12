@@ -22,6 +22,7 @@ pub mod cache;
 pub mod enablement;
 pub mod exact_target;
 mod placeholder;
+pub(crate) mod projection;
 pub mod revision;
 pub mod sheets;
 pub mod tree;

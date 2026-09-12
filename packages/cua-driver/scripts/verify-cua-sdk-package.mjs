@@ -165,6 +165,7 @@ for (const required of [
   "dist/index.d.ts",
   "dist/native-assets.js",
   "computer-use/index.js",
+  "computer-use/app.js",
   "computer-use/index.d.ts",
   "computer-use/SKILL.md",
   "scripts/install-native.mjs",
