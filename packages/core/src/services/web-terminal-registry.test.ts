@@ -288,6 +288,156 @@ describe('WebTerminalRegistry', () => {
     expect(output).not.toContain('\x1b[c');
   });
 
+  it('strips every query family the browser client answers, not just DA/DSR', async () => {
+    // The client's xterm.js answers more than the DA / DSR probes: tertiary
+    // DA (`=`), DECRQM (`$ p`), DECRQSS (`$ q`), XTVERSION (`> q`),
+    // DECREQTPARM (`x`) and the OSC colour queries all fire a reply too, so a
+    // regex over just the `c`/`n` finals would leave them in the scrollback to
+    // be re-answered into the live shell. Every one of these must come out.
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:queries',
+      workspaceCwd: '/workspace',
+    });
+
+    onData('prompt> ');
+    onData('\x1b[c'); // DA1
+    onData('\x1b[>c'); // DA2
+    onData('\x1b[=c'); // DA3
+    onData('\x1b[6n'); // DSR cursor position
+    onData('\x1b[?6n'); // DEC DSR cursor position
+    onData('\x1b[?1$p'); // DECRQM
+    onData('\x1b[>0q'); // XTVERSION
+    onData('\x1b[1$q'); // DECRQSS
+    onData('\x1b[3x'); // DECREQTPARM
+    onData('\x1b]10;?\x07'); // OSC foreground-colour query
+    onData('\x1b]11;?\x07'); // OSC background-colour query
+    onData('\x1b]4;5;?\x07'); // OSC palette-colour query
+    onData('done');
+
+    const output = registry.readSnapshot('terminal:queries')?.output ?? '';
+    expect(output).toContain('prompt> ');
+    expect(output).toContain('done');
+    expect(output).not.toContain('\x1b');
+  });
+
+  it('strips a query split across two chunks', async () => {
+    // node-pty can deliver a probe split across two chunks; a stateless
+    // per-chunk matcher would leave the halves in the scrollback and only the
+    // second half would never be re-answered as a whole. The stripper carries
+    // the incomplete CSI prefix to the next chunk and strips it whole.
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:split',
+      workspaceCwd: '/workspace',
+    });
+
+    onData('before ');
+    onData('\x1b[');
+    onData('6n');
+    onData(' after');
+
+    const output = registry.readSnapshot('terminal:split')?.output ?? '';
+    expect(output).toContain('before ');
+    expect(output).toContain(' after');
+    expect(output).not.toContain('\x1b');
+  });
+
+  it('keeps non-query escapes (SGR, cursor motion) in the scrollback', async () => {
+    // The finals/intermediates the scrub removes are all requests; SGR (`m`),
+    // erase (`J`) and cursor-position (`H`) are display/control content and
+    // must survive so the client still re-renders colours on reconnect.
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:nonquery',
+      workspaceCwd: '/workspace',
+    });
+
+    onData('\x1b[1;31mred\x1b[0m');
+    onData('\x1b[2J');
+    onData('\x1b[12;1H');
+
+    const output = registry.readSnapshot('terminal:nonquery')?.output ?? '';
+    expect(output).toContain('\x1b[1;31mred\x1b[0m');
+    expect(output).toContain('\x1b[2J');
+    expect(output).toContain('\x1b[12;1H');
+  });
+
+  it('resizes the headless responder with the client grid', async () => {
+    // The responder is constructed once at 80x24; a client resize that only
+    // touched session.pty would leave geometry-dependent replies (DSR cursor
+    // position) computed on the wrong grid. resize() must forward to it too.
+    osPlatform.mockReturnValue('win32');
+    const resizeSpy = vi
+      .spyOn(Terminal.prototype, 'resize')
+      .mockImplementation(() => {});
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:responder-resize',
+      workspaceCwd: '/workspace',
+    });
+
+    expect(registry.resize('terminal:responder-resize', 120, 40)).toBe(true);
+    expect(resize).toHaveBeenCalledWith(120, 40);
+    expect(resizeSpy).toHaveBeenCalledWith(120, 40);
+    resizeSpy.mockRestore();
+  });
+
+  it('cancels an in-flight create released during the headless load', async () => {
+    // `loadXtermHeadless` is the second suspension point after getPty(); a
+    // release() landing during it must cancel the spawn, not leak a PTY the
+    // caller already gave up on (the getPty() re-check alone does not cover
+    // this window).
+    osPlatform.mockReturnValue('win32');
+    let resolveHeadless: ((value: unknown) => void) | undefined;
+    loadXtermHeadless.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveHeadless = resolve;
+      }),
+    );
+    const registry = new WebTerminalRegistry();
+    const creating = registry.create({
+      terminalId: 'terminal:pending-headless',
+      workspaceCwd: '/workspace',
+    });
+
+    await vi.waitFor(() => expect(loadXtermHeadless).toHaveBeenCalled());
+    expect(registry.release('terminal:pending-headless')).toBe(true);
+    resolveHeadless?.({ Terminal });
+
+    await expect(creating).resolves.toEqual({
+      error: 'Web terminal creation cancelled',
+    });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('does not spawn after disposal wins during the headless load', async () => {
+    osPlatform.mockReturnValue('win32');
+    let resolveHeadless: ((value: unknown) => void) | undefined;
+    loadXtermHeadless.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveHeadless = resolve;
+      }),
+    );
+    const registry = new WebTerminalRegistry();
+    const creating = registry.create({
+      terminalId: 'terminal:pending-headless-dispose',
+      workspaceCwd: '/workspace',
+    });
+
+    await vi.waitFor(() => expect(loadXtermHeadless).toHaveBeenCalled());
+    registry.dispose();
+    resolveHeadless?.({ Terminal });
+
+    await expect(creating).resolves.toEqual({
+      error: 'Web terminal registry disposed',
+    });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it('spawns non-Windows terminals without the bundled backend', async () => {
     osPlatform.mockReturnValue('linux');
     const registry = new WebTerminalRegistry();

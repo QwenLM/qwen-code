@@ -63,23 +63,49 @@ export const MAX_CONCURRENT_WEB_TERMINALS = 8;
 const IDLE_RECLAIM_MS = 15 * 60 * 1000;
 
 /**
- * Terminal queries a probing shell emits — requests, not display content — are
- * CSI sequences whose final byte is `c` (Device Attributes, e.g. PowerShell's
- * startup DA probe) or `n` (Device Status Report, e.g. PSReadLine's
- * cursor-position request). The bundled ConPTY backend answers none of them
- * itself (see shellExecutionService.ts), so they reach this registry as
- * ordinary PTY output. Recording them in the scrollback lets a reconnect that
- * replays `session.buffer` make the client's xterm.js re-answer each query and
- * write the fresh reply back into the still-live shell's stdin. Both final
- * bytes are unambiguous requests, so stripping them can never drop rendered
- * content. Only complete sequences within one chunk are stripped — node-pty
- * delivers these 3-6 byte probes as a single chunk.
+ * Terminal queries a probing shell emits — requests, not display content —
+ * reach this registry as ordinary PTY output because the bundled ConPTY
+ * backend answers none of them itself (see shellExecutionService.ts). Recording
+ * one in the scrollback lets a reconnect that replays `session.buffer` make the
+ * client's xterm.js re-answer it and write the fresh reply back into the
+ * still-live shell's stdin. The sequences matched below are exactly the query
+ * families xterm.js answers — Device Attributes (`c`, incl. the `>`/`=`
+ * intermediates), Device Status Report (`n`), DECREQTPARM (`x`), DECRQM
+ * (`$ p`), DECRQSS (`$ q`), XTVERSION (`> q`) and the OSC 10/11/4 colour
+ * queries — and none of those finals/intermediates is display content, so
+ * stripping them cannot drop rendered output.
  */
-function stripTerminalQueries(data: string): string {
-  // `no-control-regex` fires on the ESC byte, which is the whole point here:
-  // these are terminal CSI query sequences, not stray controls.
+// `no-control-regex` fires on the ESC/BEL bytes, which is the whole point here:
+// these are terminal query sequences, not stray controls.
+const TERMINAL_QUERY_SEQUENCE_RE =
   // eslint-disable-next-line no-control-regex
-  return data.replace(/\x1b\[[?0-9;>]*[cn]/g, '');
+  /\x1b\[[0-9;>?=]*[cnx]|\x1b\[[0-9;?]*\$[pq]|\x1b\[>[0-9;]*q|\x1b\](?:10|11|4;[0-9]+);\?(?:\x07|\x1b\\)/g;
+
+/**
+ * An incomplete trailing escape sequence — a query node-pty split across two
+ * chunks. It is carried to the next chunk and stripped as a whole rather than
+ * left to leak the partial probe into the scrollback.
+ */
+const PARTIAL_ESCAPE_SUFFIX_RE =
+  // eslint-disable-next-line no-control-regex
+  /(?:\x1b|\x1b\[[0-9;>?=$]*|\x1b\](?:[^\x07\x1b]|\x1b(?!\\))*)$/;
+
+/**
+ * Stateful per-session stripper: `node-pty` may deliver a probe split across
+ * two chunks, so an incomplete trailing escape sequence is held back until the
+ * next chunk completes (or never, if the stream simply ends — a trailing
+ * partial probe is not display content, so dropping it is harmless).
+ */
+class TerminalQueryStripper {
+  private pending = '';
+
+  strip(data: string): string {
+    const combined = this.pending + data;
+    const partial = PARTIAL_ESCAPE_SUFFIX_RE.exec(combined);
+    this.pending = partial ? partial[0] : '';
+    const complete = partial ? combined.slice(0, partial.index) : combined;
+    return complete.replace(TERMINAL_QUERY_SEQUENCE_RE, '');
+  }
 }
 
 interface PtySession {
@@ -270,21 +296,35 @@ export class WebTerminalRegistry {
     // cannot make the client re-answer them into the still-live shell.
     let queryTerminal: Terminal | undefined;
     if (useBundledConpty) {
-      try {
-        const { Terminal: HeadlessTerminal } = await loadXtermHeadless();
-        queryTerminal = new HeadlessTerminal({
+      // `loadXtermHeadless` is a suspension point AFTER the getPty() re-checks
+      // above: a release()/releaseWorkspace()/dispose() landing during it must
+      // cancel the spawn here, or create() would leak a PTY the caller already
+      // gave up on. The rejection arm is folded into the same re-check — no
+      // responder is still a valid terminal, but a cancelled one is not.
+      const headlessModule = await loadXtermHeadless().catch(() => undefined);
+      if (this.cancelledCreations.has(terminalId)) {
+        this.finishCreating(terminalId);
+        return { error: 'Web terminal creation cancelled' };
+      }
+      if (this.disposed) {
+        this.finishCreating(terminalId);
+        return { error: 'Web terminal registry disposed' };
+      }
+      if (headlessModule) {
+        queryTerminal = new headlessModule.Terminal({
           allowProposedApi: true,
           cols: 80,
           rows: 24,
           logLevel: 'off',
         });
-      } catch {
-        // No responder available: the query stays unanswered (a bounded ~2s
-        // stall), never injected — the strip below still keeps it out of the
-        // scrollback.
-        queryTerminal = undefined;
       }
+      // No responder (headlessModule undefined): the query stays unanswered (a
+      // bounded ~2s stall), never injected — the strip still keeps it out of
+      // the scrollback.
     }
+    const queryStripper = useBundledConpty
+      ? new TerminalQueryStripper()
+      : undefined;
     let spawned: SpawnedWebTerminalPty;
     let proc: WebTerminalPty;
     let queryReplyDisposable: { dispose(): void } | undefined;
@@ -313,7 +353,7 @@ export class WebTerminalRegistry {
           // Terminal disposed mid-stream (release raced a trailing chunk).
         }
       }
-      let buffered = useBundledConpty ? stripTerminalQueries(data) : data;
+      let buffered = queryStripper ? queryStripper.strip(data) : data;
       if (Buffer.byteLength(buffered) > MAX_BUFFER_BYTES) {
         buffered = Buffer.from(buffered)
           .subarray(-MAX_BUFFER_BYTES)
@@ -549,6 +589,11 @@ export class WebTerminalRegistry {
     if (!session || session.exited) return false;
     try {
       session.pty.resize(cols, rows);
+      // Keep the headless query responder on the same grid the client renders:
+      // geometry-dependent replies (DSR cursor position, DECRQSS) must be
+      // computed against the browser's actual size, not the 80x24 it spawned
+      // with.
+      session.queryTerminal?.resize(cols, rows);
       return true;
     } catch {
       return false;
