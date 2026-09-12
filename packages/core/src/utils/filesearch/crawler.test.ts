@@ -20,6 +20,9 @@ import {
 } from '../../test-utils/file-system-test-helpers.js';
 import type { Ignore } from './ignore.js';
 import { loadIgnoreRules } from './ignore.js';
+import { INTERNAL_SECRET_ENV_VARS } from '../sanitize-child-env.js';
+
+vi.mock('node:child_process', { spy: true });
 
 async function runExecFile(
   command: string,
@@ -69,6 +72,7 @@ describe('crawler', () => {
     }
     __setCommandRunnerForTests();
     __resetCrawlerStateForTests();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -821,6 +825,41 @@ describe('crawler', () => {
   });
 
   describe('two-tier strategy: git ls-files + ripgrep fallback', () => {
+    it.skipIf(process.platform === 'win32')(
+      'strips internal secrets from crawler processes',
+      async () => {
+        tmpDir = await createTmpDir({ 'file1.js': '' });
+        await initGitRepo(tmpDir);
+        vi.mocked(childProcess.spawn).mockClear();
+        for (const key of INTERNAL_SECRET_ENV_VARS) {
+          vi.stubEnv(key, `secret-${key}`);
+        }
+
+        const ignore = loadIgnoreRules({
+          projectRoot: tmpDir,
+          useGitignore: false,
+          useQwenignore: false,
+          ignoreDirs: [],
+        });
+        await crawl({
+          crawlDirectory: tmpDir,
+          cwd: tmpDir,
+          ignore,
+          cache: false,
+          cacheTtl: 0,
+        });
+
+        expect(childProcess.spawn).toHaveBeenCalled();
+        for (const call of vi.mocked(childProcess.spawn).mock.calls) {
+          const env = call[2]?.env;
+          expect(env).toBeDefined();
+          for (const key of INTERNAL_SECRET_ENV_VARS) {
+            expect(env).not.toHaveProperty(key);
+          }
+        }
+      },
+    );
+
     it('should use git ls-files in a git repo', async () => {
       tmpDir = await createTmpDir({
         'file1.js': '',

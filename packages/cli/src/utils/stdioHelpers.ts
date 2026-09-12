@@ -67,6 +67,42 @@ export const writeStderrLineSafe = (message: string): void => {
 };
 
 /**
+ * Wait until any pending stdout/stderr writes have flushed.
+ *
+ * On POSIX pipes `process.stdout.write` flushes asynchronously, so a
+ * `process.exit()` right after writing silently discards buffered output
+ * (beyond the ~80KB pipe buffer). Call this before a deliberate early exit
+ * that follows user-facing writes (e.g. `qwen agents` subcommands, `--bg`).
+ *
+ * A pipe consumer that exits early (`qwen agents logs <id> | head`) turns
+ * the queued writes into EPIPE errors, and one that holds the pipe open
+ * without reading would block the drain forever — so errors settle the
+ * drain immediately and a timeout caps the wait.
+ */
+export const drainStdioBeforeExit = (timeoutMs = 5000): Promise<void> =>
+  new Promise((resolve) => {
+    let settled = false;
+    const settle = (): void => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    const onError = (): void => settle();
+    // Persistent listeners: Node emits stream errors asynchronously, so an
+    // EPIPE from a queued write can arrive after a successful drain removed
+    // one-shot listeners, crashing the process with an unhandled 'error'.
+    // The process exits right after the drain, so keeping them is harmless.
+    process.stdout.on('error', onError);
+    process.stderr.on('error', onError);
+    const timer = setTimeout(settle, timeoutMs);
+    timer.unref?.();
+    process.stdout.write('', () => {
+      process.stderr.write('', settle);
+    });
+  });
+
+/**
  * Clears the terminal screen.
  * Use instead of console.clear() to satisfy no-console lint rules.
  */

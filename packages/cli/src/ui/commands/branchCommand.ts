@@ -7,6 +7,7 @@
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { readAgentViewWorkerSidebandEnv } from '../../agent-view/worker-sideband.js';
 
 export const branchCommand: SlashCommand = {
   name: 'branch',
@@ -15,6 +16,16 @@ export const branchCommand: SlashCommand = {
     return t('Fork the current conversation into a new session');
   },
   action: async (context, args): Promise<SlashCommandActionReturn> => {
+    if (readAgentViewWorkerSidebandEnv() !== undefined) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          'Branching is disabled inside an attached background agent. Detach to `qwen agents` and branch from a foreground session.',
+        ),
+      };
+    }
+
     const { config } = context.services;
     if (!config) {
       return {

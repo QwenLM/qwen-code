@@ -325,7 +325,7 @@ describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
     const expectations: Array<[string, readonly string[]]> = [
       ['help', ['dialog']],
       ['clear', ['message']],
-      ['quit', ['quit']],
+      ['quit', ['quit', 'agent_view_detach']],
       ['config', ['message']],
       ['theme', ['dialog', 'message']],
       ['model', ['dialog', 'message', 'submit_prompt']],

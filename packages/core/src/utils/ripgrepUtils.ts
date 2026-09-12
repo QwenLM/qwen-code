@@ -10,6 +10,8 @@ import { execFile } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { resolveBundleDir } from './bundlePaths.js';
 import { fileExists } from './fileUtils.js';
+import { sanitizeChildEnv } from './sanitize-child-env.js';
+import { normalizePathEnvForWindows } from './windowsPath.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
 import { createDebugLogger } from './debugLogger.js';
 
@@ -233,6 +235,9 @@ export async function ensureRipgrepHealthy(
       ['--version'],
       {
         timeout: RIPGREP_TEST_TIMEOUT_MS,
+        // Same env scrub as the search invocation itself, so the health
+        // probe never bypasses the child-env sanitization.
+        env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
       },
     );
     probeOutput = stdout;
@@ -496,6 +501,9 @@ async function runRipgrepOnce(
           maxBuffer: RIPGREP_BUFFER_LIMIT,
           timeout: wslTimeout(),
           signal,
+          // Agent-reachable spawn: scrub Qwen-internal secrets (including
+          // the Agent View worker identity) from the inherited env.
+          env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
         },
         (error, stdout = '', stderr = '') => {
           const stdoutText = stdout.toString();

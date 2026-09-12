@@ -54,6 +54,11 @@ vi.mock('../utils/resumeHistoryUtils.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../../startup/agent-view-resume-guard.js', () => ({
+  isManagedAgentViewResumeBlocked: vi.fn(async () => false),
+  MANAGED_AGENT_VIEW_RESUME_MESSAGE: 'managed session message',
+}));
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();

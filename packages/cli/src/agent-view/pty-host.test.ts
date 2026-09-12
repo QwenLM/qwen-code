@@ -238,10 +238,12 @@ describe('launchAgentViewPtyHost', () => {
     const originalNoColor = process.env['NO_COLOR'];
     const originalForceColor = process.env['FORCE_COLOR'];
     const originalCi = process.env['CI'];
+    const originalBare = process.env['QWEN_CODE_SIMPLE'];
     process.env['TERM'] = 'dumb';
     process.env['NO_COLOR'] = '1';
     process.env['FORCE_COLOR'] = '0';
     process.env['CI'] = '1';
+    process.env['QWEN_CODE_SIMPLE'] = '1';
     try {
       await launchAgentViewPtyHost(createLaunch(), { pty });
     } finally {
@@ -265,6 +267,11 @@ describe('launchAgentViewPtyHost', () => {
       } else {
         process.env['CI'] = originalCi;
       }
+      if (originalBare === undefined) {
+        delete process.env['QWEN_CODE_SIMPLE'];
+      } else {
+        process.env['QWEN_CODE_SIMPLE'] = originalBare;
+      }
     }
 
     expect(pty.spawnCalls[0]?.options.name).toBe('xterm-256color');
@@ -272,6 +279,9 @@ describe('launchAgentViewPtyHost', () => {
     expect(pty.spawnCalls[0]?.options.env['NO_COLOR']).toBeUndefined();
     expect(pty.spawnCalls[0]?.options.env['FORCE_COLOR']).toBeUndefined();
     expect(pty.spawnCalls[0]?.options.env['CI']).toBeUndefined();
+    // A --bare caller's marker in the daemon env must not silently turn
+    // every background worker into bare mode.
+    expect(pty.spawnCalls[0]?.options.env['QWEN_CODE_SIMPLE']).toBeUndefined();
   });
 
   it('falls back when launch TERM is empty', async () => {

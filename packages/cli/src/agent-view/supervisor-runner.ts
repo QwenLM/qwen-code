@@ -22,9 +22,9 @@ import type {
   AgentViewSupervisorSubscription,
 } from './supervisor-client.js';
 import {
+  authorizeAgentViewWorkerSideband,
   createAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
-  requireValidWorkerToken,
 } from './supervisor-process.js';
 import type { AgentViewSupervisorHibernationPolicy } from './supervisor-process.js';
 import { createAgentViewSupervisorServer } from './supervisor-server.js';
@@ -35,9 +35,14 @@ import {
   writeAgentViewSupervisor,
 } from './supervisor-store.js';
 import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
+import { restoreInvocationScopedEnv } from '../config/invocation-env.js';
 
 export const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
   '--internal-agent-view-supervisor';
+
+// Set on the spawned supervisor child so the startup branch can tell a real
+// daemon launch from a natural-language prompt that mentions the flag.
+export const INTERNAL_AGENT_VIEW_SUPERVISOR_ENV = 'QWEN_AGENT_VIEW_SUPERVISOR';
 
 const SUPERVISOR_READY_RETRIES = 600;
 const SUPERVISOR_READY_DELAY_MS = 50;
@@ -64,6 +69,7 @@ export interface AgentViewSupervisorClientHandle {
   stop(sessionId: string): Promise<unknown>;
   kill(sessionId: string): Promise<unknown>;
   respawn(sessionId?: string): Promise<unknown>;
+  release(sessionId: string): Promise<unknown>;
   remove(sessionId: string): Promise<unknown>;
   pin(sessionId: string, pinned?: boolean): Promise<unknown>;
   rename(sessionId: string, displayName: string): Promise<unknown>;
@@ -154,23 +160,12 @@ export async function runAgentViewSupervisor(
       });
     },
   });
-  const authorizeSideband: AgentViewSidebandAuthorizer = async (
-    _op,
-    params,
-  ) => {
-    const sessionId = params?.['sessionId'];
-    if (typeof sessionId !== 'string' || sessionId.length === 0) return false;
-    try {
-      await requireValidWorkerToken(
-        sessionId,
-        params,
-        options.globalDir ? { globalDir: options.globalDir } : {},
-      );
-      return true;
-    } catch {
-      return false;
-    }
-  };
+  const authorizeSideband: AgentViewSidebandAuthorizer = async (op, params) =>
+    authorizeAgentViewWorkerSideband(
+      op,
+      params,
+      options.globalDir ? { globalDir: options.globalDir } : {},
+    );
   const server = createAgentViewSupervisorServer(handler, {
     socketPath,
     authToken,
@@ -290,9 +285,25 @@ function createSupervisorHandle(
     logs: (sessionId: string) =>
       callAgentViewSupervisor(socketPath, 'logs', { sessionId }, authOptions),
     stop: (sessionId: string) =>
-      callAgentViewSupervisor(socketPath, 'stop', { sessionId }, authOptions),
+      callAgentViewSupervisor(
+        socketPath,
+        'stop',
+        { sessionId },
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
+      ),
     kill: (sessionId: string) =>
-      callAgentViewSupervisor(socketPath, 'kill', { sessionId }, authOptions),
+      callAgentViewSupervisor(
+        socketPath,
+        'kill',
+        { sessionId },
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
+      ),
     respawn: (sessionId?: string) =>
       callAgentViewSupervisor(
         socketPath,
@@ -303,8 +314,26 @@ function createSupervisorHandle(
           timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
         },
       ),
+    release: (sessionId: string) =>
+      callAgentViewSupervisor(
+        socketPath,
+        'release',
+        { sessionId },
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
+      ),
     remove: (sessionId: string) =>
-      callAgentViewSupervisor(socketPath, 'remove', { sessionId }, authOptions),
+      callAgentViewSupervisor(
+        socketPath,
+        'remove',
+        { sessionId },
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
+      ),
     pin: (sessionId: string, pinned?: boolean) =>
       callAgentViewSupervisor(
         socketPath,
@@ -495,12 +524,18 @@ async function readSupervisorAuthToken(
 
 function defaultSpawnSupervisor(args: readonly string[]): ChildProcess {
   const argv = buildCurrentQwenCliArgv(args);
+  // Invocation-scoped flags must not leak into the long-lived daemon: a
+  // `--bare` caller would otherwise contaminate every session the daemon
+  // later spawns (bare mode is env-driven via QWEN_CODE_SIMPLE).
+  const env = restoreInvocationScopedEnv(process.env);
+  delete env['QWEN_CODE_SIMPLE'];
   return spawn(argv[0]!, argv.slice(1), {
     detached: true,
     stdio: 'ignore',
     env: {
-      ...process.env,
+      ...env,
       QWEN_CODE_NO_RELAUNCH: '1',
+      [INTERNAL_AGENT_VIEW_SUPERVISOR_ENV]: '1',
     },
   });
 }

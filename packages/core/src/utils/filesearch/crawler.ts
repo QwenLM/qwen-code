@@ -10,6 +10,8 @@ import { spawn } from 'node:child_process';
 import { fdir } from 'fdir';
 import type { Ignore } from './ignore.js';
 import * as cache from './crawlCache.js';
+import { sanitizeChildEnv } from '../sanitize-child-env.js';
+import { normalizePathEnvForWindows } from '../windowsPath.js';
 
 export interface CrawlOptions {
   // The directory to start the crawl from.
@@ -422,16 +424,16 @@ function runCommand(
         cwd,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
-        ...(command === 'git'
-          ? {
-              env: {
-                ...process.env,
+        env: {
+          ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+          ...(command === 'git'
+            ? {
                 GIT_DIR: undefined,
                 GIT_WORK_TREE: undefined,
                 GIT_INDEX_FILE: undefined,
-              },
-            }
-          : {}),
+              }
+            : {}),
+        },
       });
     } catch (err) {
       if (!options?.silentOnFailure) {

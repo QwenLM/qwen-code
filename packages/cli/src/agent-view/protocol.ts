@@ -60,6 +60,7 @@ export interface AgentViewSessionStateFile {
   activeCwd: string;
   createdAt: string;
   updatedAt: string;
+  initialPromptPending?: boolean;
   lastError?: AgentViewLastError;
   worktree: AgentViewWorktreeState;
 }

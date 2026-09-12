@@ -28,6 +28,8 @@ import type { PermissionDecision } from '../permissions/types.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
 
 const debugLogger = createDebugLogger('GREP');
@@ -465,6 +467,7 @@ class GrepToolInvocation extends BaseToolInvocation<
             const child = spawn('git', gitArgs, {
               cwd: absolutePath,
               windowsHide: true,
+              env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
             });
             const stdoutChunks: Buffer[] = [];
             const stderrChunks: Buffer[] = [];
@@ -539,6 +542,7 @@ class GrepToolInvocation extends BaseToolInvocation<
             const child = spawn('grep', grepArgs, {
               cwd: absolutePath,
               windowsHide: true,
+              env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
             });
             const stdoutChunks: Buffer[] = [];
             const stderrChunks: Buffer[] = [];

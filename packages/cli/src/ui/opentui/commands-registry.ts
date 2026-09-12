@@ -195,6 +195,7 @@ export type SlashResultKind =
   | 'confirm_shell_commands'
   | 'confirm_action'
   | 'goal_control'
+  | 'agent_view_detach'
   | 'stream_messages';
 
 /** Config-based gates mirrored from services/BuiltinCommandLoader.ts. */
@@ -246,6 +247,11 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
     altNames: ['connect', 'login'],
     results: ['dialog', 'message'],
     dialogs: ['auth'],
+  },
+  {
+    name: 'background',
+    altNames: ['bg'],
+    results: ['agent_view_detach', 'message'],
   },
   // /branch returns a dialog-kind result but no renderer opens a dialog for
   // it — both ink and OpenTUI intercept it as a host action (handleBranch).
@@ -322,7 +328,11 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
     dialogs: ['trust'],
     gatedBy: 'folder-trust',
   },
-  { name: 'quit', altNames: ['exit'], results: ['quit'] },
+  {
+    name: 'quit',
+    altNames: ['exit'],
+    results: ['quit', 'agent_view_detach'],
+  },
   { name: 'recap', results: ['message'] },
   { name: 'reload-plugins', results: ['message'] },
   { name: 'rename', altNames: ['tag'], results: ['message'] },

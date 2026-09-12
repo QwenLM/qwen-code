@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { INTERNAL_SECRET_ENV_VARS } from '@qwen-code/qwen-code-core';
 import {
   AGENT_VIEW_WORKER_ENV_KEYS,
   createAgentViewWorkerSidebandEnv,
@@ -21,6 +22,7 @@ import {
   sendAgentViewWorkerEvent,
   startAgentViewWorkerHeartbeat,
 } from './worker-sideband.js';
+import { INTERNAL_AGENT_VIEW_SUPERVISOR_ENV } from './supervisor-runner.js';
 
 const mockCallAgentViewSupervisor = vi.hoisted(() =>
   vi.fn(async (): Promise<unknown> => ({ accepted: true })),
@@ -53,6 +55,20 @@ describe('worker sideband env', () => {
       [QWEN_AGENT_VIEW_ACTIVE_CWD]: '/repo',
     });
     expect(AGENT_VIEW_WORKER_ENV_KEYS).toContain(QWEN_AGENT_VIEW_WORKER);
+  });
+
+  it('keeps every worker identity key covered by the child-env denylist', () => {
+    // sanitizeChildEnv strips INTERNAL_SECRET_ENV_VARS from agent-run
+    // children; a worker key missing from that list would let a child
+    // inherit the worker identity and impersonate the sideband.
+    for (const key of AGENT_VIEW_WORKER_ENV_KEYS) {
+      expect(INTERNAL_SECRET_ENV_VARS).toContain(key);
+    }
+    // The supervisor startup-gate marker must be stripped too, or an
+    // agent-run child could re-enter supervisor mode.
+    expect(INTERNAL_SECRET_ENV_VARS).toContain(
+      INTERNAL_AGENT_VIEW_SUPERVISOR_ENV,
+    );
   });
 
   it('detects worker mode only when explicitly enabled', () => {

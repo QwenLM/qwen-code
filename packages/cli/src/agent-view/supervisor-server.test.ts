@@ -126,6 +126,46 @@ describe('Agent View supervisor server', () => {
     }
   });
 
+  it('reopens the operation gate when shutdown cannot stop every worker', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const handler = {
+      status: vi.fn(() => ({ running: true })),
+      list: vi.fn(() => [{ sessionId: 'session-1' }]),
+      shutdown: vi
+        .fn()
+        .mockReturnValueOnce({
+          shuttingDown: false,
+          workersStopped: 0,
+          workersFailed: [
+            { sessionId: 'session-1', error: 'host refused shutdown' },
+          ],
+        })
+        .mockReturnValueOnce({
+          shuttingDown: true,
+          workersStopped: 1,
+          workersFailed: [],
+        }),
+    };
+    const server = createAgentViewSupervisorServer(handler, { socketPath });
+
+    await server.listen();
+    try {
+      await expect(
+        callAgentViewSupervisor(socketPath, 'shutdown'),
+      ).resolves.toMatchObject({ shuttingDown: false });
+      await expect(
+        callAgentViewSupervisor(socketPath, 'list'),
+      ).resolves.toEqual([{ sessionId: 'session-1' }]);
+      await expect(
+        callAgentViewSupervisor(socketPath, 'shutdown'),
+      ).resolves.toMatchObject({ shuttingDown: true });
+      expect(handler.shutdown).toHaveBeenCalledTimes(2);
+    } finally {
+      await server.close();
+    }
+  });
+
   it('requires the supervisor auth token when configured', async () => {
     const { dir, socketPath } = await makeSocketPath();
     cleanupPaths.push(dir);

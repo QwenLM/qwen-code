@@ -22,6 +22,7 @@ import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
 import { FatalSandboxError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { AGENT_VIEW_WORKER_ENV_KEYS } from '../agent-view/worker-sideband.js';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { parseSandboxImageName } from '../utils/sandboxImageName.js';
@@ -36,6 +37,7 @@ import {
   QWEN_CODE_DESKTOP_ENV,
   QWEN_CODE_SERVE_ENV,
 } from '../config/acp-channel-fallback.js';
+import { restoreInvocationScopedEnv } from '../config/invocation-env.js';
 
 const execAsync = promisify(exec);
 
@@ -87,6 +89,10 @@ export function getSandboxPassthroughEnvArgs(
     HOST_UPDATE_RELAUNCH_ENV_VAR,
     QWEN_CODE_SERVE_ENV,
     QWEN_CODE_DESKTOP_ENV,
+    // Agent View worker identity: startup routing, the resume/continue
+    // guards and the sideband ready/heartbeat all run after the container
+    // hop and read these keys, so a managed worker mis-starts without them.
+    ...AGENT_VIEW_WORKER_ENV_KEYS,
   ].flatMap((envVar) =>
     env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
   );
@@ -377,7 +383,7 @@ export async function start_sandbox(
     process.stdin.pause();
     sandboxProcess = spawn(config.command, args, {
       stdio: 'inherit',
-      ...(childEnv ? { env: { ...process.env, ...childEnv } } : {}),
+      env: { ...restoreInvocationScopedEnv(process.env), ...childEnv },
     });
     return new Promise((resolve, reject) => {
       sandboxProcess?.on('error', reject);
