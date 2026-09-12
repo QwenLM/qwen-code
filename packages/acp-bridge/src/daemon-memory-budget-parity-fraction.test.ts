@@ -20,7 +20,8 @@ const { mockedTotalMem, mockedHeapSizeLimit } = vi.hoisted(() => ({
 
 // Without this stub each of the 11 vi.resetModules() + spawnChannel.js
 // re-imports below re-evaluates core's built barrel, which registers two
-// top-level process 'exit' listeners per cycle (hookRunner, sleepInhibitor):
+// top-level process 'exit' listeners per cycle (sleepInhibitor and
+// ShellExecutionService's static block):
 // ~6s slower here, and Node's MaxListenersExceededWarning once past 5 cycles.
 // The suite still passes without it, so this is a runtime/noise guard, not a
 // module-resolution requirement. Extend this object if the closure grows
@@ -136,4 +137,10 @@ describe('spawn-path constant parity', () => {
       ]);
     },
   );
+
+  it('caps the modeled ceiling at MAX_CHILD_HEAP_MB on a saturated host', () => {
+    // floor(32_768 * 0.5) lands exactly on the cap, so only a host strictly
+    // above it exercises the Math.min in legacyChildCeilingMb.
+    expect(legacyChildCeilingMb(65_536)).toBe(MAX_CHILD_HEAP_MB);
+  });
 });
