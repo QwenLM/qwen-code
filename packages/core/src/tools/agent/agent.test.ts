@@ -49,6 +49,7 @@ import { AuthType } from '../../core/contentGenerator.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
 import {
+  runWithAgentConfiguredToolAllowlist,
   runWithAgentContext,
   runWithAgentDisallowedTools,
 } from '../../agents/runtime/agent-context.js';
@@ -4676,6 +4677,73 @@ describe('AgentTool', () => {
       // The fork's own invocation-level re-check enforces the blocklist too,
       // covering wildcard fork_tools patterns an exact-name filter misses.
       expect(toolConfig?.disallowedTools).toEqual(['mcp__slack']);
+    });
+
+    it("keeps the parent subagent's configured allowlist around the fork execution surface", async () => {
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_SEARCH,
+          description: 'Search deferred tools',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_CALL,
+          description: 'Call a deferred tool',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+        ToolNames.WRITE_FILE,
+        'mcp__slack__post_message',
+      ]);
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'fork inside an explicitly restricted parent',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+      });
+      await runWithAgentConfiguredToolAllowlist(
+        [
+          ToolNames.READ_FILE,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+          'missing_tool',
+          'mcp__slack',
+        ],
+        () => invocation.execute(),
+      );
+
+      const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      expect(toolConfig?.executionAllowedTools).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ]);
+      expect(toolConfig?.executionAllowedTools).not.toContain(
+        ToolNames.WRITE_FILE,
+      );
+      expect(toolConfig?.executionAllowedTools).not.toContain(
+        'mcp__slack__post_message',
+      );
     });
 
     it('preserves display_image in the fork declarations but denies its execution', async () => {

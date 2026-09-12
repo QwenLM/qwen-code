@@ -17,10 +17,12 @@ import {
 import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
 import {
   getCurrentAgentDepth,
+  getCurrentAgentConfiguredToolAllowlist,
   getCurrentAgentDisallowedTools,
   getCurrentAgentId,
   getRuntimeContentGenerator,
   runWithAgentContext,
+  runWithAgentConfiguredToolAllowlist,
   runWithAgentDisallowedTools,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
@@ -164,6 +166,31 @@ describe('AgentCore.runInAgentFrames', () => {
       });
       await plain.runInAgentFrames(async () => {
         expect(getCurrentAgentDisallowedTools()).toBeUndefined();
+      });
+    });
+  });
+
+  it('publishes the configured tool allowlist, shadowing any parent frame', async () => {
+    const restricted = makeCore(
+      'restricted-agent',
+      undefined,
+      undefined,
+      undefined,
+      {
+        tools: [ToolNames.READ_FILE, ToolNames.TOOL_CALL],
+      },
+    );
+    const plain = makeCore('plain-agent');
+
+    await runWithAgentConfiguredToolAllowlist(['outer_tool'], async () => {
+      await restricted.runInAgentFrames(async () => {
+        expect(getCurrentAgentConfiguredToolAllowlist()).toEqual([
+          ToolNames.READ_FILE,
+          ToolNames.TOOL_CALL,
+        ]);
+      });
+      await plain.runInAgentFrames(async () => {
+        expect(getCurrentAgentConfiguredToolAllowlist()).toBeUndefined();
       });
     });
   });
@@ -763,6 +790,71 @@ describe('AgentCore approval response deduplication', () => {
     expect(capturedPredicate).toBeDefined();
     expect(capturedPredicate?.('web_fetch')).toBe(false);
     expect(capturedPredicate?.('read_file')).toBe(true);
+    expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
+  });
+
+  it('folds the configured tool allowlist into the bridged-target re-check', async () => {
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(),
+      }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('configured-allowlist-session'),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'configured-allowlist-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      {
+        tools: [
+          ToolNames.READ_FILE,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+        ],
+      },
+    );
+
+    let capturedPredicate: ((name: string) => boolean) | undefined;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        capturedPredicate = (
+          this as unknown as {
+            isToolExecutionAllowed?: (name: string) => boolean;
+          }
+        ).isToolExecutionAllowed;
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [
+        {
+          id: 'call-configured-allowlist',
+          name: ToolNames.TOOL_CALL,
+          args: { name: 'mcp__slack__post_message', arguments: {} },
+        },
+      ],
+      abortController,
+      'prompt-configured-allowlist',
+      1,
+      [{ name: ToolNames.TOOL_CALL } as FunctionDeclaration],
+    );
+    await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+    abortController.abort();
+    await processing;
+    scheduleSpy.mockRestore();
+
+    expect(capturedPredicate).toBeDefined();
+    expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
+    expect(capturedPredicate?.(ToolNames.READ_FILE)).toBe(true);
     expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
   });
 

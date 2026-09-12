@@ -29,6 +29,7 @@ import {
   getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
+  runWithAgentConfiguredToolAllowlist,
   runWithAgentContext,
   runWithAgentDisallowedTools,
   runWithRuntimeContentGenerator,
@@ -875,15 +876,19 @@ export class AgentCore {
           },
           () => {
             const runWithView = () => this.withRuntimeView(fn, inheritedView);
-            // Publish this agent's per-agent disallowedTools blocklist so a
-            // fork it launches inherits the blocklist one level down
-            // (getCurrentAgentDisallowedTools). The helper always re-sets the
-            // field, so an agent without a blocklist shadows its parent's
-            // frame instead of leaking it.
+            // Publish this agent's effective positive allowlist and its
+            // disallowedTools blocklist so a fork it launches cannot widen
+            // either policy. Both helpers always re-set their field, so an
+            // unrestricted nested agent shadows rather than inherits its
+            // parent's policy frame.
             const runWithToolPolicy = () =>
-              runWithAgentDisallowedTools(
-                this.toolConfig?.disallowedTools,
-                runWithView,
+              runWithAgentConfiguredToolAllowlist(
+                this.getConfiguredToolExecutionAllowlist(),
+                () =>
+                  runWithAgentDisallowedTools(
+                    this.toolConfig?.disallowedTools,
+                    runWithView,
+                  ),
               );
             // inheritedAgentDepth restores the agent's original nesting depth.
             // Without it the frame recomputes from the UI's frame-less async
@@ -1633,12 +1638,58 @@ export class AgentCore {
     );
   }
 
+  /**
+   * The finite positive allowlist configured for this agent. Wildcard/empty
+   * configurations inherit the registry and therefore return `undefined`.
+   * A separate execution allowlist also returns `undefined`: fork agents use
+   * `toolConfig.tools` as a declaration snapshot while deliberately allowing
+   * additional bridged targets through `executionAllowedTools`.
+   */
+  private getConfiguredToolExecutionAllowlist(): readonly string[] | undefined {
+    if (!this.toolConfig || this.executionAllowedTools !== undefined) {
+      return undefined;
+    }
+
+    const stringTools = this.toolConfig.tools.filter(
+      (tool): tool is string => typeof tool === 'string',
+    );
+    const inlineToolNames = this.toolConfig.tools
+      .filter((tool): tool is FunctionDeclaration => typeof tool !== 'string')
+      .map((tool) => tool.name)
+      .filter((name): name is string => typeof name === 'string');
+    if (
+      stringTools.includes('*') ||
+      (stringTools.length === 0 && inlineToolNames.length === 0)
+    ) {
+      return undefined;
+    }
+
+    const allowed = new Set([...stringTools, ...inlineToolNames]);
+    if (
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
+      allowed.has(ToolNames.EXEC)
+    ) {
+      for (const toolName of this.runtimeContext
+        .getToolRegistry()
+        .getAllToolNames()) {
+        if (getToolExposure(toolName) === 'code-mode-callable') {
+          allowed.add(toolName);
+        }
+      }
+    }
+    return [...allowed];
+  }
+
   private isToolExecutionAllowed(toolName: string): boolean {
     if (this.isToolDisallowedByAgentConfig(toolName)) {
       return false;
     }
     if (this.executionAllowedTools === undefined) {
-      return true;
+      const configuredAllowlist = this.getConfiguredToolExecutionAllowlist();
+      return (
+        configuredAllowlist === undefined ||
+        configuredAllowlist.includes(toolName)
+      );
     }
     if (
       toolName === ToolNames.EXEC &&

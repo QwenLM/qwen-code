@@ -69,6 +69,7 @@ import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
 import { getStartupContextLength } from '../../core/environmentContext.js';
 import {
   childLaunchDepth,
+  getCurrentAgentConfiguredToolAllowlist,
   getCurrentAgentDisallowedTools,
   getCurrentAgentId,
   isTopLevelSession,
@@ -1711,24 +1712,84 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // to the fork's toolConfig, whose invocation-level re-check enforces it
     // against wildcard fork_tools patterns a name filter cannot see (R24-1).
     const parentDisallowedTools = getCurrentAgentDisallowedTools();
+    const parentConfiguredToolAllowlist =
+      getCurrentAgentConfiguredToolAllowlist();
     const keepOffParentBlocklist = (toolName: string): boolean =>
       !matchesAgentToolBlocklist(parentDisallowedTools, toolName);
+    const keepWithinParentConfiguredAllowlist = (toolName: string): boolean =>
+      parentConfiguredToolAllowlist === undefined ||
+      parentConfiguredToolAllowlist.includes(toolName);
     const defaultExecutionToolNames = Array.from(
       new Set([
         ...parentToolNames,
         ...agentConfig.getToolRegistry().getAllToolNames(),
       ]),
-    ).filter((toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName));
+    ).filter(
+      (toolName) =>
+        !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
+        keepOffParentBlocklist(toolName) &&
+        keepWithinParentConfiguredAllowlist(toolName),
+    );
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
     const requestedTools = this.forkProfile?.tools ?? this.params.fork_tools;
+    const isRequestedByFork = (toolName: string): boolean => {
+      if (requestedTools === undefined) return true;
+      if (requestedTools.includes(toolName)) return true;
+      if (!toolName.startsWith('mcp__')) return false;
+
+      const registeredTool = agentConfig.getToolRegistry().getTool(toolName) as
+        | { serverName?: unknown; serverToolName?: unknown }
+        | undefined;
+      if (
+        typeof registeredTool?.serverName !== 'string' ||
+        typeof registeredTool.serverToolName !== 'string'
+      ) {
+        return requestedTools.includes('mcp__*');
+      }
+
+      const serverName = registeredTool.serverName;
+      const serverToolName = registeredTool.serverToolName;
+      const serverPattern = `mcp__${serverName}`;
+      const rawToolName = `${serverPattern}__${serverToolName}`;
+      return requestedTools.some((pattern) => {
+        if (
+          pattern === 'mcp__*' ||
+          pattern === serverPattern ||
+          pattern === rawToolName
+        ) {
+          return true;
+        }
+        const toolPatternPrefix = `${serverPattern}__`;
+        return (
+          pattern.startsWith(toolPatternPrefix) &&
+          pattern.endsWith('*') &&
+          serverToolName.startsWith(pattern.slice(toolPatternPrefix.length, -1))
+        );
+      });
+    };
+    const buildParentBoundExecutionAllowlist = (
+      fallbackTools: readonly string[],
+    ): string[] => {
+      if (parentConfiguredToolAllowlist === undefined) {
+        return buildForkExecutionAllowlist(
+          requestedTools,
+          fallbackTools,
+        ).filter(keepOffParentBlocklist);
+      }
+      return fallbackTools.filter(
+        (toolName) =>
+          toolName !== ToolNames.ASK_USER_QUESTION &&
+          !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
+          keepOffParentBlocklist(toolName) &&
+          isRequestedByFork(toolName),
+      );
+    };
     const requestedExecutionAllowedTools =
       requestedTools === undefined
         ? undefined
         : resolveForkExecutionAllowedTools(
             parentToolNames,
-            buildForkExecutionAllowlist(requestedTools, []).filter(
-              keepOffParentBlocklist,
-            ),
+            buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
           );
     const profilePromptHint = this.forkProfile?.promptHint;
     let rawHistory: Content[] = [];
@@ -1844,10 +1905,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         tools: parentToolNames.length > 0 ? parentToolNames : ['*'],
         executionAllowedTools: resolveForkExecutionAllowedTools(
           parentToolNames,
-          buildForkExecutionAllowlist(
-            requestedTools,
-            defaultExecutionToolNames,
-          ).filter(keepOffParentBlocklist),
+          buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
         ),
         ...(parentDisallowedTools?.length
           ? { disallowedTools: [...parentDisallowedTools] }
@@ -1862,10 +1920,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         tools: ['*'],
         executionAllowedTools: resolveForkExecutionAllowedTools(
           parentToolNames,
-          buildForkExecutionAllowlist(
-            requestedTools,
-            defaultExecutionToolNames,
-          ).filter(keepOffParentBlocklist),
+          buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
         ),
         ...(parentDisallowedTools?.length
           ? { disallowedTools: [...parentDisallowedTools] }
