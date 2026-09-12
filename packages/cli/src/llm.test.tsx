@@ -27,6 +27,7 @@ import {
   createNonInteractivePromptId,
   main,
   registerLspHotReload,
+  setupUncaughtExceptionHandler,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
 } from './llm.js';
@@ -36,7 +37,7 @@ import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, OutputFormat, Storage } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
@@ -3605,6 +3606,91 @@ describe('validateDnsResolutionOrder', () => {
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       'Invalid value for dnsResolutionOrder in settings: "invalid-value". Using default "ipv4first".',
     );
+  });
+});
+
+describe('setupUncaughtExceptionHandler', () => {
+  let tmpDir: string;
+  let installedHandler: ((error: unknown) => void) | undefined;
+  let exitSpy: MockInstance;
+  let debugLogPathSpy: MockInstance;
+
+  const makeConfig = (abortAll: () => void) =>
+    ({
+      ...sessionRegistryConfigStub,
+      getSessionId: () => 'uncaught-test-session',
+      getMonitorRegistry: () => ({ abortAll }),
+    }) as unknown as Config;
+
+  const installHandler = (config: Config): ((error: unknown) => void) => {
+    const before = new Set(process.listeners('uncaughtException'));
+    setupUncaughtExceptionHandler(config);
+    const installed = process
+      .listeners('uncaughtException')
+      .filter((listener) => !before.has(listener))
+      .pop();
+    if (!installed) {
+      throw new Error('uncaughtException handler was not installed');
+    }
+    installedHandler = installed as (error: unknown) => void;
+    return installedHandler;
+  };
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'qwen-uncaught-'));
+    debugLogPathSpy = vi
+      .spyOn(Storage, 'getDebugLogPath')
+      .mockReturnValue(join(tmpDir, 'debug.txt'));
+    exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as typeof process.exit);
+  });
+
+  afterEach(() => {
+    if (installedHandler) {
+      process.removeListener('uncaughtException', installedHandler);
+      installedHandler = undefined;
+    }
+    exitSpy.mockRestore();
+    debugLogPathSpy.mockRestore();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('reaps running monitors before exiting on an uncaught exception', () => {
+    const abortAll = vi.fn();
+    const handler = installHandler(makeConfig(abortAll));
+
+    handler(new Error('boom'));
+
+    expect(abortAll).toHaveBeenCalledWith({ notify: false });
+    // The reap must land before exit: a reordering that exits first would
+    // silently skip it, and a mocked no-op exit cannot catch that by itself.
+    expect(abortAll.mock.invocationCallOrder[0]).toBeLessThan(
+      (exitSpy.mock.invocationCallOrder[0] as number) ?? 0,
+    );
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const log = readFileSync(join(tmpDir, 'debug.txt'), 'utf8');
+    expect(log).toContain('[UNCAUGHT_EXCEPTION] boom');
+  });
+
+  it('leaves monitors alone for expected PTY teardown races', () => {
+    const abortAll = vi.fn();
+    const handler = installHandler(makeConfig(abortAll));
+
+    handler(new Error('read EIO'));
+
+    expect(abortAll).not.toHaveBeenCalled();
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('still exits when the monitor registry throws during reap', () => {
+    const abortAll = vi.fn(() => {
+      throw new Error('registry broken');
+    });
+    const handler = installHandler(makeConfig(abortAll));
+
+    expect(() => handler(new Error('boom'))).not.toThrow();
+    expect(exitSpy).toHaveBeenCalledWith(1);
   });
 });
 

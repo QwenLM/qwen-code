@@ -247,6 +247,20 @@ export function setupUncaughtExceptionHandler(config: Config) {
     writeStderrLineSafe(
       `\nFatal: uncaught exception${logged ? ' (logged to debug file)' : ''}\n${sanitizeTerminalText(error.stack ?? error.message)}`,
     );
+    // Monitors are spawned `detached` (their own process group) so the tool
+    // can group-kill them; a side effect is that they outlive this process
+    // unless something kills them first. Reap whatever is still running:
+    // the crashed session can never consume their terminal events, and the
+    // in-memory registry gives a resumed session no way to reattach. The
+    // SIGKILL escalation timer in the abort path cannot survive the exit
+    // below, so children ignoring SIGTERM may still leak — best-effort, and
+    // a crash handler must never throw. (On Windows the taskkill spawn is
+    // fire-and-forget for the same reason.)
+    try {
+      config.getMonitorRegistry().abortAll({ notify: false });
+    } catch {
+      // The debug log and stderr line above are the record.
+    }
     process.exit(1);
   };
   process.on('uncaughtException', uncaughtExceptionHandler);
