@@ -3397,6 +3397,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 executionAllowedTools: [...bgToolConfig.executionAllowedTools],
               }
             : {}),
+          // Unlike the allowlist above, the blocklist persists whenever the
+          // fork carries one — it also bounds plain forks whose allowlist is
+          // rebuilt from the live parent surface on resume.
+          ...(isFork && bgToolConfig?.disallowedTools?.length
+            ? { disallowedTools: [...bgToolConfig.disallowedTools] }
+            : {}),
           executor: subagentConfig.executor?.kind,
           persistedCliFlags:
             subagentConfig.executor !== undefined
@@ -4292,6 +4298,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             ? {
                 executionAllowedTools: [...toolConfig.executionAllowedTools],
               }
+            : {}),
+          // Unlike the allowlist above, the blocklist persists whenever the
+          // fork carries one — it also bounds plain forks whose allowlist is
+          // rebuilt from the live parent surface on resume.
+          ...(isFork && toolConfig?.disallowedTools?.length
+            ? { disallowedTools: [...toolConfig.disallowedTools] }
             : {}),
           executor: subagentConfig.executor?.kind,
           persistedCliFlags:

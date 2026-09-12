@@ -4679,6 +4679,59 @@ describe('AgentTool', () => {
       expect(toolConfig?.disallowedTools).toEqual(['mcp__slack']);
     });
 
+    it("persists the fork's disallowedTools blocklist in the agent meta sidecar", async () => {
+      // R29-1: the launch path keeps the parent's disallowedTools blocklist
+      // next to a wildcard fork_tools allowlist, but the resume path rebuilds
+      // the fork's toolConfig from the persisted meta alone — a sidecar that
+      // drops the blocklist lets a backgrounded fork resume past it and reach
+      // the very tool the blocklist excluded. Mutation check: dropping the
+      // disallowedTools spread in the writeAgentMeta call turns this red.
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.READ_FILE,
+        'mcp__slack__post_message',
+      ]);
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'fork inside a slack-blocked parent',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+        fork_tools: ['mcp__*'],
+        run_in_background: true,
+      });
+      await runWithAgentDisallowedTools(['mcp__slack'], () =>
+        invocation.execute(),
+      );
+
+      const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      expect(toolConfig?.executionAllowedTools).toEqual(['mcp__*']);
+      expect(toolConfig?.disallowedTools).toEqual(['mcp__slack']);
+      const writtenMeta = writeMetaSpy.mock.calls[0]?.[1];
+      expect(writtenMeta).toMatchObject({
+        executionAllowedTools: ['mcp__*'],
+        disallowedTools: ['mcp__slack'],
+      });
+      writeMetaSpy.mockRestore();
+    });
+
     it("keeps the parent subagent's configured allowlist around the fork execution surface", async () => {
       const parentToolDecls = [
         {
