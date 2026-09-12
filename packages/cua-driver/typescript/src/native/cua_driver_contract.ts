@@ -2915,6 +2915,89 @@ const FfiConverterTypeMoveCursorInput = (() => {
     return new FFIConverter();
 })();
 
+export enum PasteFormat {
+    Text,
+    Md,
+    Html
+}
+
+const FfiConverterTypePasteFormat = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = PasteFormat;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return PasteFormat.Text;
+                case 2: return PasteFormat.Md;
+                case 3: return PasteFormat.Html;
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value) {
+                case PasteFormat.Text: return ordinalConverter.write(1, into);
+                case PasteFormat.Md: return ordinalConverter.write(2, into);
+                case PasteFormat.Html: return ordinalConverter.write(3, into);
+            }
+        }
+        allocationSize(value: TypeName): number {
+            return ordinalConverter.allocationSize(0);
+        }
+    }
+    return new FFIConverter();
+})();
+
+export type PasteInput = {
+    pid: number,
+    windowId: bigint,
+    text: string,
+    format: PasteFormat
+}
+
+/**
+ * Generated factory for {@link PasteInput} record objects.
+ */
+export const PasteInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<PasteInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<PasteInput>,
+    });
+})();
+
+const FfiConverterTypePasteInput = (() => {
+    type TypeName = PasteInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterUInt64.read(from),
+                text: FfiConverterString.read(from),
+                format: FfiConverterTypePasteFormat.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterUInt64.write(value.windowId, into);
+            FfiConverterString.write(value.text, into);
+            FfiConverterTypePasteFormat.write(value.format, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterUInt64.allocationSize(value.windowId) +
+             FfiConverterString.allocationSize(value.text) +
+             FfiConverterTypePasteFormat.allocationSize(value.format);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
 export type PerformSecondaryActionInput = {
     pid: number,
     windowId?: bigint,
@@ -3357,6 +3440,101 @@ const FfiConverterTypeScrollInput = (() => {
              FfiConverterOptionalString.allocationSize(value.session) +
              FfiConverterOptionalTypeScrollBy.allocationSize(value.by) +
              FfiConverterOptionalUInt64.allocationSize(value.amount);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+export enum TextSelection {
+    Text,
+    CursorBefore,
+    CursorAfter
+}
+
+const FfiConverterTypeTextSelection = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = TextSelection;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return TextSelection.Text;
+                case 2: return TextSelection.CursorBefore;
+                case 3: return TextSelection.CursorAfter;
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value) {
+                case TextSelection.Text: return ordinalConverter.write(1, into);
+                case TextSelection.CursorBefore: return ordinalConverter.write(2, into);
+                case TextSelection.CursorAfter: return ordinalConverter.write(3, into);
+            }
+        }
+        allocationSize(value: TypeName): number {
+            return ordinalConverter.allocationSize(0);
+        }
+    }
+    return new FFIConverter();
+})();
+
+export type SelectTextInput = {
+    pid: number,
+    windowId: bigint,
+    elementToken: string,
+    text: string,
+    prefix?: string,
+    suffix?: string,
+    selection: TextSelection
+}
+
+/**
+ * Generated factory for {@link SelectTextInput} record objects.
+ */
+export const SelectTextInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<SelectTextInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<SelectTextInput>,
+    });
+})();
+
+const FfiConverterTypeSelectTextInput = (() => {
+    type TypeName = SelectTextInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterUInt64.read(from),
+                elementToken: FfiConverterString.read(from),
+                text: FfiConverterString.read(from),
+                prefix: FfiConverterOptionalString.read(from),
+                suffix: FfiConverterOptionalString.read(from),
+                selection: FfiConverterTypeTextSelection.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterUInt64.write(value.windowId, into);
+            FfiConverterString.write(value.elementToken, into);
+            FfiConverterString.write(value.text, into);
+            FfiConverterOptionalString.write(value.prefix, into);
+            FfiConverterOptionalString.write(value.suffix, into);
+            FfiConverterTypeTextSelection.write(value.selection, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterUInt64.allocationSize(value.windowId) +
+             FfiConverterString.allocationSize(value.elementToken) +
+             FfiConverterString.allocationSize(value.text) +
+             FfiConverterOptionalString.allocationSize(value.prefix) +
+             FfiConverterOptionalString.allocationSize(value.suffix) +
+             FfiConverterTypeTextSelection.allocationSize(value.selection);
 
         }
     };
@@ -4903,6 +5081,8 @@ export default Object.freeze({
     FfiConverterTypeListWindowsInput,
     FfiConverterTypeMoveCursorInput,
     FfiConverterTypeObservationRevisionInput,
+    FfiConverterTypePasteFormat,
+    FfiConverterTypePasteInput,
     FfiConverterTypePerformSecondaryActionInput,
     FfiConverterTypePlatform,
     FfiConverterTypePredicateOutcome,
@@ -4911,6 +5091,7 @@ export default Object.freeze({
     FfiConverterTypeScrollBy,
     FfiConverterTypeScrollDirection,
     FfiConverterTypeScrollInput,
+    FfiConverterTypeSelectTextInput,
     FfiConverterTypeSessionClientKindOutput,
     FfiConverterTypeSessionLifecycleState,
     FfiConverterTypeSessionOutput,
@@ -4927,6 +5108,7 @@ export default Object.freeze({
     FfiConverterTypeStartSessionInput,
     FfiConverterTypeStartSessionOutput,
     FfiConverterTypeStatePredicate,
+    FfiConverterTypeTextSelection,
     FfiConverterTypeTypeTextInput,
     FfiConverterTypeUnknownReason,
     FfiConverterTypeVerificationStatus,

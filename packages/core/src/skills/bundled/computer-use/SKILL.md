@@ -23,7 +23,8 @@ npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.6
 Tell the user to restart Qwen Code, then stop. If only the SDK import is missing,
 run the second command and retry.
 
-Import the `ComputerUse` API directly once per fresh `node_repl` session:
+Reuse an existing `computer` connected to the intended desktop. Otherwise import
+the `ComputerUse` API once per fresh `node_repl` session:
 
 ```js
 globalThis.computer = await (
@@ -31,130 +32,25 @@ globalThis.computer = await (
 ).ComputerUse.create();
 ```
 
-## API surface
+## Select the target platform workflow
 
-```ts
-type Point = number | { x: number; y: number };
-type ComputerUse = {
-  getApp: (nameOrIdentifierOrPath: string) => Promise<App>;
-  listApps: () => Promise<
-    Array<{ name?: string; bundle_id?: string; launch_path?: string }>
-  >;
-  close: () => Promise<void>;
-};
-type App = {
-  getState: (options?: {
-    disableDiff?: boolean;
-    includeScreenshot?: boolean;
-  }) => Promise<State>;
-  click: (
-    point: Point,
-    options?: { button?: 'left' | 'right' | 'middle'; count?: number },
-  ) => Promise<object>;
-  doubleClick: (point: Point) => Promise<object>;
-  rightClick: (
-    point: Point,
-    options?: { modifier?: string[] },
-  ) => Promise<object>;
-  setValue: (element: number, value: string) => Promise<object>;
-  performSecondaryAction: (element: number, action: string) => Promise<object>;
-  typeText: (text: string) => Promise<object>;
-  pressKey: (
-    key: string,
-    options?: { modifiers?: string[] },
-  ) => Promise<object>;
-  hotkey: (keys: string[]) => Promise<object>;
-  scroll: (
-    point: Point,
-    options: { direction: 'up' | 'down' | 'left' | 'right'; amount?: number },
-  ) => Promise<object>;
-  drag: (options: {
-    fromX: number;
-    fromY: number;
-    toX: number;
-    toY: number;
-  }) => Promise<object>;
-};
-type State = {
-  app: string;
-  window: string;
-  mode: 'full' | 'diff' | 'no_change';
-  text: string;
-  screenshot?: { images: Array<{ mimeType: string; dataBase64: string }> };
-};
-```
-
-## Workflow
-
-### 1. Initialize
-
-On macOS, bind the app named by the task, then read its state.
-`getApp()` binds identity; `getState()` can open a discovered stopped app. Combine these
-steps in one Node REPL call:
+Query the connected driver before discovering apps or sending UI actions:
 
 ```js
-var app = await computer.getApp('Microsoft Excel');
-nodeRepl.write((await app.getState()).text);
+nodeRepl.write(await computer.getPlatform());
 ```
 
-The app handle tracks its current window and dialog. Read the returned window
-title to confirm the intended document. If the app is unknown or its name is
-ambiguous, discover applications with `computer.listApps()` and use a matching
-application identifier or path.
+Use this returned platform, not the CLI or Node host operating system. A connected
+driver may control a different machine. If the platform cannot be determined,
+resolve the reported driver/SDK error before continuing; do not guess a platform.
 
-AX text uses short numeric IDs, such as `[37] TextField "Name"`. Use IDs from
-the current observation for element actions. IDs can change when the app's
-window or session changes. Disabled and static-text rows are observation-only.
+Read exactly one resource with `read_file`, resolving its absolute path from the
+Skill base directory shown above:
 
-For token efficiency, the accessibility tree will be returned
-as a diff when appropriate. Prefer this default diff output. A full state
-replaces the previous state; a diff updates it; no-change preserves it. If you
-need a full replacement, use `disableDiff: true` only when the previous state
-is unavailable or no longer useful. Do not disregard the text and then assume
-that a subsequent diff will reproduce the information you skipped.
+- `macos`: read `references/macos.md` for the App workflow and text operations.
+- `windows` or `linux`: read `references/windows-linux.md` for the exact-window workflow.
 
-### 2. Actions using app
-
-After performing one or more UI actions, call `app.getState()` before deciding
-what to do next. Batch actions whose target remains the same, then print only
-the state needed for the next decision:
-
-```js
-await app.click(37);
-await app.hotkey(['super', 'a']);
-await app.typeText('hello');
-await app.pressKey('Return');
-nodeRepl.write((await app.getState()).text);
-```
-
-Use the actual ID from your observation; `37` is only an example.
-
-- Prefer element IDs to coordinates. `setValue(id, value)` changes a writable control, and `performSecondaryAction(id, action)` invokes a secondary action listed for that element. Use an observed action name rather than guessing.
-- When an action opens or closes a dialog, sheet or menu, end the batch and call `app.getState()` to read the new window and IDs before continuing.
-- An action error can occur after the UI already changed. Read state before deciding whether to retry. Partial, unconfirmed or cancelled actions must not be blindly repeated.
-- Coordinate actions use pixels in the screenshot returned for this app, with `(0, 0)` at its top-left. Request a fresh screenshot after a window change. Do not infer coordinates from another window or desktop screenshot.
-- `pressKey` sends one key, optionally with modifiers. `hotkey` sends a combination such as `['super', 's']`. Use the platform's appropriate shortcut.
-- Literal `\n` or `\r` in `typeText` sends Return. In a composer or form this may submit rather than insert a newline.
-- If AX is incomplete or does not explain the interface, request a screenshot and inspect it. Incomplete observations do not authorize element actions.
-
-## Reading screenshots
-
-`includeScreenshot: true` is the parameter that requests a screenshot.
-Image capture is independent of whether AX returns full state or a diff.
-
-```js
-var state = await app.getState({ includeScreenshot: true });
-nodeRepl.write(state.text);
-for (const image of state.screenshot?.images ?? []) {
-  await nodeRepl.emitImage(`data:${image.mimeType};base64,${image.dataBase64}`);
-}
-```
-
-When all Computer Use work is complete:
-
-```js
-await computer.close();
-globalThis.computer = undefined;
-```
-
-Reset the Node REPL only when no other persistent state is needed.
+Read the selected resource before continuing. Its contents are not loaded by this
+entrypoint. After changing the connected desktop, query its platform again and
+read the matching resource. Resource files remain on the machine hosting this
+Skill; do not look for them on the controlled desktop.

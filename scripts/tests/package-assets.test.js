@@ -661,6 +661,40 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
+  it('copies Computer Use platform references to both CLI and core distributions', () => {
+    const rootDir = createFixtureRoot();
+    const coreDir = path.join(rootDir, 'packages', 'core');
+    const resources = [
+      'SKILL.md',
+      'references/macos.md',
+      'references/windows-linux.md',
+    ];
+    for (const resource of resources) {
+      writeFile(
+        rootDir,
+        `packages/core/src/skills/bundled/computer-use/${resource}`,
+        resource,
+      );
+    }
+    stubConsole();
+    copyBundleAssets({ root: rootDir });
+    copyFiles({ root: coreDir });
+    for (const resource of resources) {
+      expect(
+        readFileSync(
+          path.join(rootDir, 'dist/bundled/computer-use', resource),
+          'utf8',
+        ),
+      ).toBe(resource);
+      expect(
+        readFileSync(
+          path.join(coreDir, 'dist/src/skills/bundled/computer-use', resource),
+          'utf8',
+        ),
+      ).toBe(resource);
+    }
+  });
+
   it('copies bundled skill scripts and references into the runtime dist', () => {
     const rootDir = createFixtureRoot();
     writeFile(

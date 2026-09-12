@@ -16,7 +16,7 @@
 //! - Non-indexed (no actions, not interesting): `- AXRole = "value"`
 //! - 2-space indent per depth level
 
-mod app_text;
+pub(crate) mod app_text;
 pub mod bindings;
 pub mod cache;
 pub(crate) mod dialogs;

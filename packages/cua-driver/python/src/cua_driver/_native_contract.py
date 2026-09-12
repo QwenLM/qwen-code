@@ -4178,6 +4178,102 @@ class _UniffiFfiConverterTypeMoveCursorInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeDesktopScope.write(value.scope, buf)
         _UniffiFfiConverterOptionalString.write(value.session, buf)
 
+
+
+
+
+
+class PasteFormat(enum.Enum):
+
+    TEXT = 0
+
+    MD = 1
+
+    HTML = 2
+
+
+
+class _UniffiFfiConverterTypePasteFormat(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return PasteFormat.TEXT
+        if variant == 2:
+            return PasteFormat.MD
+        if variant == 3:
+            return PasteFormat.HTML
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == PasteFormat.TEXT:
+            return
+        if value == PasteFormat.MD:
+            return
+        if value == PasteFormat.HTML:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == PasteFormat.TEXT:
+            buf.write_i32(1)
+        if value == PasteFormat.MD:
+            buf.write_i32(2)
+        if value == PasteFormat.HTML:
+            buf.write_i32(3)
+
+
+
+@dataclass
+class PasteInput:
+    def __init__(self, *, pid:int, window_id:int, text:str, format:PasteFormat):
+        self.pid = pid
+        self.window_id = window_id
+        self.text = text
+        self.format = format
+
+
+
+
+    def __str__(self):
+        return "PasteInput(pid={}, window_id={}, text={}, format={})".format(self.pid, self.window_id, self.text, self.format)
+    def __eq__(self, other):
+        if self.pid != other.pid:
+            return False
+        if self.window_id != other.window_id:
+            return False
+        if self.text != other.text:
+            return False
+        if self.format != other.format:
+            return False
+        return True
+
+class _UniffiFfiConverterTypePasteInput(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return PasteInput(
+            pid=_UniffiFfiConverterUInt32.read(buf),
+            window_id=_UniffiFfiConverterUInt64.read(buf),
+            text=_UniffiFfiConverterString.read(buf),
+            format=_UniffiFfiConverterTypePasteFormat.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterUInt32.check_lower(value.pid)
+        _UniffiFfiConverterUInt64.check_lower(value.window_id)
+        _UniffiFfiConverterString.check_lower(value.text)
+        _UniffiFfiConverterTypePasteFormat.check_lower(value.format)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterUInt32.write(value.pid, buf)
+        _UniffiFfiConverterUInt64.write(value.window_id, buf)
+        _UniffiFfiConverterString.write(value.text, buf)
+        _UniffiFfiConverterTypePasteFormat.write(value.format, buf)
+
 @dataclass
 class PerformSecondaryActionInput:
     def __init__(self, *, pid:int, window_id:typing.Optional[int], element_token:str, action:str):
@@ -4745,6 +4841,120 @@ class _UniffiFfiConverterTypeScrollInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalString.write(value.session, buf)
         _UniffiFfiConverterOptionalTypeScrollBy.write(value.by, buf)
         _UniffiFfiConverterOptionalUInt64.write(value.amount, buf)
+
+
+
+
+
+
+class TextSelection(enum.Enum):
+
+    TEXT = 0
+
+    CURSOR_BEFORE = 1
+
+    CURSOR_AFTER = 2
+
+
+
+class _UniffiFfiConverterTypeTextSelection(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return TextSelection.TEXT
+        if variant == 2:
+            return TextSelection.CURSOR_BEFORE
+        if variant == 3:
+            return TextSelection.CURSOR_AFTER
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == TextSelection.TEXT:
+            return
+        if value == TextSelection.CURSOR_BEFORE:
+            return
+        if value == TextSelection.CURSOR_AFTER:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == TextSelection.TEXT:
+            buf.write_i32(1)
+        if value == TextSelection.CURSOR_BEFORE:
+            buf.write_i32(2)
+        if value == TextSelection.CURSOR_AFTER:
+            buf.write_i32(3)
+
+
+
+@dataclass
+class SelectTextInput:
+    def __init__(self, *, pid:int, window_id:int, element_token:str, text:str, prefix:typing.Optional[str], suffix:typing.Optional[str], selection:TextSelection):
+        self.pid = pid
+        self.window_id = window_id
+        self.element_token = element_token
+        self.text = text
+        self.prefix = prefix
+        self.suffix = suffix
+        self.selection = selection
+
+
+
+
+    def __str__(self):
+        return "SelectTextInput(pid={}, window_id={}, element_token={}, text={}, prefix={}, suffix={}, selection={})".format(self.pid, self.window_id, self.element_token, self.text, self.prefix, self.suffix, self.selection)
+    def __eq__(self, other):
+        if self.pid != other.pid:
+            return False
+        if self.window_id != other.window_id:
+            return False
+        if self.element_token != other.element_token:
+            return False
+        if self.text != other.text:
+            return False
+        if self.prefix != other.prefix:
+            return False
+        if self.suffix != other.suffix:
+            return False
+        if self.selection != other.selection:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeSelectTextInput(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return SelectTextInput(
+            pid=_UniffiFfiConverterUInt32.read(buf),
+            window_id=_UniffiFfiConverterUInt64.read(buf),
+            element_token=_UniffiFfiConverterString.read(buf),
+            text=_UniffiFfiConverterString.read(buf),
+            prefix=_UniffiFfiConverterOptionalString.read(buf),
+            suffix=_UniffiFfiConverterOptionalString.read(buf),
+            selection=_UniffiFfiConverterTypeTextSelection.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterUInt32.check_lower(value.pid)
+        _UniffiFfiConverterUInt64.check_lower(value.window_id)
+        _UniffiFfiConverterString.check_lower(value.element_token)
+        _UniffiFfiConverterString.check_lower(value.text)
+        _UniffiFfiConverterOptionalString.check_lower(value.prefix)
+        _UniffiFfiConverterOptionalString.check_lower(value.suffix)
+        _UniffiFfiConverterTypeTextSelection.check_lower(value.selection)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterUInt32.write(value.pid, buf)
+        _UniffiFfiConverterUInt64.write(value.window_id, buf)
+        _UniffiFfiConverterString.write(value.element_token, buf)
+        _UniffiFfiConverterString.write(value.text, buf)
+        _UniffiFfiConverterOptionalString.write(value.prefix, buf)
+        _UniffiFfiConverterOptionalString.write(value.suffix, buf)
+        _UniffiFfiConverterTypeTextSelection.write(value.selection, buf)
 
 
 
@@ -6339,10 +6549,12 @@ __all__ = [
     "SessionLifecycleState",
     "SessionClientKindOutput",
     "SessionTransportOutput",
+    "PasteFormat",
     "VerificationStatus",
     "UnknownReason",
     "ScrollDirection",
     "ScrollBy",
+    "TextSelection",
     "CaptureScope",
     "EffectiveScope",
     "Platform",
@@ -6386,11 +6598,13 @@ __all__ = [
     "ListSessionsOutput",
     "ListWindowsInput",
     "MoveCursorInput",
+    "PasteInput",
     "PerformSecondaryActionInput",
     "PredicateOutcome",
     "PressKeyInput",
     "RightClickInput",
     "ScrollInput",
+    "SelectTextInput",
     "SessionStateOutput",
     "SetAgentCursorEnabledInput",
     "SetAgentCursorEnabledOutput",

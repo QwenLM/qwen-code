@@ -32,12 +32,13 @@ pub use inputs::{
     EscalateSessionInput, EscalationReason, GetAgentCursorStateInput, GetCursorPositionInput,
     GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput,
     GetWindowStateInput, HotkeyInput, InvokeMenuInput, LaunchAppInput, ListAppsInput,
-    ListSessionsInput, ListWindowsInput, MoveCursorInput, ObservationRevisionInput,
-    PerformSecondaryActionInput, PressKeyInput, RightClickInput, ScrollBy, ScrollDirection,
-    ScrollInput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput,
-    SetValueInput, SetWindowFrameInput, StartSessionInput, ToolInput, TypeTextInput,
-    WindowClickInput, WindowDragInput, WindowHotkeyInput, WindowPressKeyInput, WindowScrollInput,
-    WindowTypeTextInput, MULTI_CALL_SESSION_DESCRIPTION,
+    ListSessionsInput, ListWindowsInput, MoveCursorInput, ObservationRevisionInput, PasteFormat,
+    PasteInput, PerformSecondaryActionInput, PressKeyInput, RightClickInput, ScrollBy,
+    ScrollDirection, ScrollInput, SelectTextInput, SetAgentCursorEnabledInput,
+    SetAgentCursorMotionInput, SetAgentCursorThemeInput, SetValueInput, SetWindowFrameInput,
+    StartSessionInput, TextSelection, ToolInput, TypeTextInput, WindowClickInput, WindowDragInput,
+    WindowHotkeyInput, WindowPressKeyInput, WindowScrollInput, WindowTypeTextInput,
+    MULTI_CALL_SESSION_DESCRIPTION,
 };
 pub use outputs::{
     advertised_output_schema, refusal_envelope_schema, ActionDelivery, ActionDeliveryMode,
@@ -89,6 +90,8 @@ pub const ACTION_RESULT_TOOLS: &[&str] = &[
     "press_key",
     "hotkey",
     "set_value",
+    "paste",
+    "select_text",
     "perform_secondary_action",
     "set_window_frame",
     "invoke_menu",
@@ -477,6 +480,39 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn text_operations_are_exact_mac_only_actions() {
+        for name in ["paste", "select_text"] {
+            let contract = tool_contract(name).unwrap();
+            assert_eq!(contract.platforms, vec![Platform::Macos]);
+            assert_eq!(contract.schema_mode, SchemaMode::CanonicalRuntime);
+            assert!(!contract.annotations.read_only);
+            assert!(is_action_result_tool(name));
+            assert_eq!(contract.input_schema["properties"]["pid"]["minimum"], 1);
+            assert_eq!(
+                contract.input_schema["properties"]["window_id"]["minimum"],
+                1
+            );
+            assert!(contract.input_schema["properties"]
+                .get("delivery_mode")
+                .is_none());
+        }
+        let paste: PasteInput =
+            serde_json::from_value(serde_json::json!({"pid":1,"window_id":2,"text":"hello"}))
+                .unwrap();
+        assert_eq!(paste.format, PasteFormat::Text);
+        let select: SelectTextInput = serde_json::from_value(
+            serde_json::json!({"pid":1,"window_id":2,"element_token":"token","text":"hello"}),
+        )
+        .unwrap();
+        assert_eq!(select.selection, TextSelection::Text);
+        assert!(serde_json::from_value::<PasteInput>(
+            serde_json::json!({"pid":1,"window_id":2,"text":"hello","format":"rtf"})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<SelectTextInput>(serde_json::json!({"pid":1,"window_id":2,"element_token":"token","text":"hello","selection":"all"})).is_err());
     }
 
     #[test]

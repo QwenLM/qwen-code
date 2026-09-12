@@ -660,6 +660,7 @@ mod tests {
         editor.rich_text = Some(super::super::app_text::RichText {
             text: "hello".into(),
             markdown: "**hello**".into(),
+            source_offsets: Vec::new(),
         });
         let projected = project_app_nodes(vec![
             node("AXWindow", "Document", 0, None),
@@ -749,6 +750,7 @@ mod tests {
             editor.rich_text = Some(super::super::app_text::RichText {
                 text: "word".into(),
                 markdown: markdown.into(),
+                source_offsets: Vec::new(),
             });
             vec![CapturedNode {
                 identity: "editor",

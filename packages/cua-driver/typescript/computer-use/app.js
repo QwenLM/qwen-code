@@ -223,7 +223,7 @@ export class ComputerUseApp {
           this.#address({ x: options.fromX, y: options.fromY }, target);
           this.#address({ x: options.toX, y: options.toY }, target);
         }
-        const semantic = method === "setValue" || method === "performSecondaryAction";
+        const semantic = ["setValue", "performSecondaryAction", "paste", "selectText"].includes(method);
         address = { ...options, ...address, ...(semantic ? {} : { deliveryMode: "background" }) };
         if (["click", "doubleClick", "rightClick", "drag", "typeText"].includes(method)) address.appContext = true;
         const result = await this.#computer[method](address);
@@ -247,6 +247,8 @@ export class ComputerUseApp {
     return this.#act("performSecondaryAction", element, { ...options, action }, true);
   }
   typeText(text, options) { return this.#act("typeText", undefined, { ...options, text }); }
+  paste(text, options) { return this.#act("paste", undefined, { ...options, text }); }
+  selectText(element, text, options) { return this.#act("selectText", element, { ...options, text }, true); }
   pressKey(key, options) { return this.#act("pressKey", undefined, { ...options, key }); }
   hotkey(keys, options) { return this.#act("hotkey", undefined, { ...options, keys }); }
 }
