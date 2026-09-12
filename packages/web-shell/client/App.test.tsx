@@ -18,6 +18,7 @@ import {
   type DaemonSessionArtifact,
   type DaemonSessionAttachmentReference,
   type DaemonSessionSummary,
+  type DaemonSessionContextStatus,
   type DaemonSessionContextUsageStatus,
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionShellTaskStatus,
@@ -55,7 +56,7 @@ type MockConnection = {
   status: 'connected' | 'connecting' | 'disconnected' | 'error';
   sessionId: string | undefined;
   sessionContext?: { kind: 'standalone' };
-  context?: { sessionId: string };
+  context?: DaemonSessionContextStatus;
   clientId: string;
   displayName: string | undefined;
   titleSource?: 'manual' | 'auto';
@@ -407,6 +408,7 @@ const {
   const mockSessionActions = {
     setDaemonActivePrompt: vi.fn(),
     sendPrompt: vi.fn().mockResolvedValue(undefined),
+    continueSession: vi.fn().mockResolvedValue(undefined),
     btwSession: vi.fn().mockResolvedValue({ answer: 'side answer' }),
     generateSessionContent: vi.fn(async function* () {}),
     createSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
@@ -21676,6 +21678,102 @@ describe('App session callbacks', () => {
     expect(order).toEqual(['prepare', 'gate:resolved', 'transport:resolved']);
   });
 
+  // #9911: a rejected preflight cancels the submission, and used to do it with
+  // nothing but a console warning. Hosts put user-facing text in these errors —
+  // the VS Code companion throws localized rewind failures here — so a silent
+  // cancel leaves the user in front of a composer that appeared to do nothing.
+  it('surfaces a rejected preparation instead of cancelling silently', async () => {
+    const prepareSubmit = vi
+      .fn()
+      .mockRejectedValue(
+        new Error('The original message can no longer be edited.'),
+      );
+    const onToast = vi.fn();
+    const { container } = renderApp({ prepareSubmit, onToast });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'The original message can no longer be edited.',
+    );
+  });
+
+  // #9911 queued half: while the assistant is still responding, a rejected
+  // preflight cancels the queued submission. The immediate-path witness above
+  // never sets `streamingState`, so this branch and its `submissionSessionIsCurrent`
+  // guard would otherwise ship unwitnessed — a silent cancel for the exact
+  // mid-turn edit the companion's rewind failure hits.
+  it('surfaces a queued preparation rejection instead of cancelling silently', async () => {
+    const prepareSubmit = vi
+      .fn()
+      .mockRejectedValue(
+        new Error('The original message can no longer be edited.'),
+      );
+    const onToast = vi.fn();
+    const { container, rerender } = renderApp({ prepareSubmit, onToast });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ prepareSubmit, onToast });
+    });
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalled();
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'The original message can no longer be edited.',
+    );
+  });
+
+  // #11432: a daemon teardown rejects the preflight with an AbortError, which
+  // is a cancellation rather than a failure. reportError suppresses aborts, so
+  // no toast should surface — unlike a real (localized) rejection above.
+  it('stays silent when preparation rejects with an AbortError', async () => {
+    const abortError = new Error('cancelled');
+    abortError.name = 'AbortError';
+    const prepareSubmit = vi.fn().mockRejectedValue(abortError);
+    const onToast = vi.fn();
+    const { container } = renderApp({ prepareSubmit, onToast });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('stays silent when a queued preparation rejects with an AbortError', async () => {
+    const abortError = new Error('cancelled');
+    abortError.name = 'AbortError';
+    const prepareSubmit = vi.fn().mockRejectedValue(abortError);
+    const onToast = vi.fn();
+    const { container, rerender } = renderApp({ prepareSubmit, onToast });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ prepareSubmit, onToast });
+    });
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalled();
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
   it('keeps the draft when preparation removes all prompt content', async () => {
     const prepareSubmit = vi.fn().mockResolvedValue({
       prompt: '',
@@ -23093,6 +23191,13 @@ describe('App session callbacks', () => {
   it('waits for the current session to detach before auto-submitting the suggested new-session draft', async () => {
     vi.useFakeTimers();
     const clear = deferred<void>();
+    mockConnection.context = {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      state: {},
+      recovery: { kind: 'interrupted_prompt', canContinue: true },
+    };
     mockConnection.capabilities.features = ['session_generation'];
     (
       mockConnection as typeof mockConnection & {
@@ -23115,9 +23220,9 @@ describe('App session callbacks', () => {
     const delayedPrompt =
       'Help me brainstorm Web Shell interaction ideas on top of this interface for a design doc';
     testState.prompt = delayedPrompt;
-    mockSessionActions.clearSession.mockImplementation(() => {
+    mockSessionActions.clearSession.mockImplementation(async () => {
+      await clear.promise;
       mockConnection.sessionId = undefined;
-      return clear.promise;
     });
     mockSessionActions.generateSessionContent.mockImplementation(
       async function* () {
@@ -23165,6 +23270,12 @@ describe('App session callbacks', () => {
     });
 
     expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    expect(mockConnection.sessionId).toBe('session-1');
+    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    expect(
+      container.querySelector('[data-testid="session-recovery-banner"]'),
+    ).toBeNull();
+    expect(mockSessionActions.continueSession).not.toHaveBeenCalled();
     rerender();
     await flush();
     act(() => {
@@ -23713,7 +23824,12 @@ describe('App session callbacks', () => {
       mockConnection.sessionContext = standalone
         ? { kind: 'standalone' }
         : undefined;
-      mockConnection.context = { sessionId: 'session-1' };
+      mockConnection.context = {
+        v: 1,
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+        state: {},
+      };
       renderApp();
       await flush();
       await act(async () => {
@@ -29732,6 +29848,80 @@ describe('App session callbacks', () => {
     );
   });
 
+  // R3-15: the exact-request-id gate was only ever crossed with a matching id.
+  // The host votes by id precisely so a stale native diff — one left over from
+  // an approval that has already moved on — cannot resolve the current
+  // request; nothing pinned the refusal.
+  it('refuses a native edit approval vote bound to a different request id', async () => {
+    let shellApi: WebShellApi | null = null;
+    const { rerender } = renderApp({
+      hostOwnsEditDiffPreview: true,
+      shellRef: (api) => {
+        shellApi = api;
+      },
+    });
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({
+          toolName: 'run_shell_command',
+          kind: 'execute',
+          content: [
+            {
+              type: 'diff',
+              path: 'file.ts',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
+          options: [
+            {
+              optionId: 'proceed_once',
+              label: 'Allow',
+              raw: { kind: 'allow_once' },
+            },
+            {
+              optionId: 'cancel',
+              label: 'Reject',
+              raw: { kind: 'reject_once' },
+            },
+          ],
+        }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+
+    let resolved: boolean | undefined;
+    await act(async () => {
+      resolved = await shellApi?.respondToPendingPermission(
+        'req-stale',
+        'allow',
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(resolved).toBe(false);
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+
+    // The pending approval is untouched and the matching id still votes.
+    await act(async () => {
+      resolved = await shellApi?.respondToPendingPermission('req-1', 'allow');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(resolved).toBe(true);
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
+      'req-1',
+      'proceed_once',
+      undefined,
+    );
+  });
+
   it('does not let stale split classification replace a newer direct open', async () => {
     const classification = deferred<never>();
     mockWorkspace.capabilities = {
@@ -33975,6 +34165,118 @@ describe('App prompt send failure retry', () => {
       document.querySelector('[data-testid="prompt-admission-unknown"]'),
     ).not.toBeNull();
   });
+
+  it.each(['discard', 'restore'] as const)(
+    'exposes recovery after %s unlocks an unknown admission and a later turn is interrupted',
+    async (unlock) => {
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      const firstSend = deferred<void>();
+      const secondSend = deferred<void>();
+      mockSessionActions.sendPrompt
+        .mockImplementationOnce((_text, options) => {
+          options?.onAdmissionStarted?.();
+          return firstSend.promise;
+        })
+        .mockImplementationOnce((_text, options) => {
+          options?.onAdmissionStarted?.();
+          options?.onAdmitted?.();
+          return secondSend.promise;
+        });
+      mockSessionActions.continueSession.mockResolvedValue(undefined);
+      const recoveryContext = {
+        v: 1 as const,
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+        state: {},
+        recovery: { kind: 'interrupted_prompt' as const, canContinue: true },
+      };
+      mockConnection.context = recoveryContext;
+      const { container, rerender } = renderApp();
+      await flush();
+      const banner = () =>
+        container.querySelector('[data-testid="session-recovery-banner"]');
+      const notice = () =>
+        container.querySelector('[data-testid="prompt-admission-unknown"]');
+      expect(banner()).not.toBeNull();
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('request A');
+        await Promise.resolve();
+      });
+      await vi.waitFor(() =>
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1),
+      );
+      await act(async () => {
+        firstSend.reject(new Error('admission response lost'));
+        await Promise.resolve();
+      });
+      expect(testState.latestChatEditorProps?.disabled).toBe(true);
+      expect(notice()?.querySelectorAll('button')).toHaveLength(2);
+      expect(banner()).toBeNull();
+
+      act(() => {
+        const activeContext = {
+          ...recoveryContext,
+          recovery: { ...recoveryContext.recovery, canContinue: false },
+        };
+        mockConnection.context = activeContext;
+        rerender();
+        notice()
+          ?.querySelectorAll('button')
+          .item(unlock === 'discard' ? 1 : 0)
+          .click();
+      });
+      expect(testState.latestChatEditorProps?.disabled).toBe(false);
+      expect(notice()).not.toBeNull();
+      expect(notice()?.querySelectorAll('button')).toHaveLength(0);
+      if (unlock === 'restore') expect(window.confirm).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('request B');
+        await Promise.resolve();
+      });
+      await vi.waitFor(() =>
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2),
+      );
+      expect(sessionCatalogController.promptAdmitted).toHaveBeenCalledWith(
+        '/tmp/project',
+        'session-1',
+      );
+      act(() => {
+        testState.streamingState = 'responding';
+        testState.sessionHasActivePrompt = true;
+        rerender();
+      });
+      expect(banner()).toBeNull();
+      await act(async () => {
+        secondSend.reject(
+          Object.assign(new Error('interrupted'), { _daemonTurnError: true }),
+        );
+        await Promise.resolve();
+        testState.streamingState = 'idle';
+        testState.sessionHasActivePrompt = false;
+        testState.blocks = [
+          {
+            kind: 'error',
+            source: 'turn_error',
+            id: 'request-b-error',
+            text: 'interrupted',
+          },
+        ];
+        mockConnection.context = { ...recoveryContext };
+        rerender();
+      });
+      await flush();
+      expect(testState.latestChatEditorProps?.disabled).toBe(false);
+      expect(notice()).not.toBeNull();
+      expect(notice()?.querySelectorAll('button')).toHaveLength(0);
+      const continueButton = banner()?.querySelector('button');
+      expect(continueButton).toBeTruthy();
+      await act(async () => continueButton?.click());
+      expect(mockSessionActions.continueSession).toHaveBeenCalledOnce();
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it('restores direct prompt annotations after uncertain admission', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);

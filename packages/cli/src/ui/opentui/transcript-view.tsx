@@ -639,6 +639,11 @@ function GoalCard({
           {`  ${sanitizeTerminalText(view.reason)}`}
         </text>
       ) : null}
+      {view.checkpoint ? (
+        <text fg={C.yellow} {...selectionProps()}>
+          {`  ${sanitizeTerminalText(view.checkpoint)}`}
+        </text>
+      ) : null}
     </box>
   );
 }
