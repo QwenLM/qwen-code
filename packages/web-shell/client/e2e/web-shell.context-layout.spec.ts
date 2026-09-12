@@ -242,7 +242,13 @@ for (const theme of ['light', 'dark']) {
     ).toHaveCount(0);
     expect(contextRequests).toEqual([false, true]);
     const detailCard = cards.last();
+    await expect(detailCard.locator('[class*="total"]')).toHaveText(
+      '60.0k / 100.0k tokens',
+    );
     await expect(detailCard.locator('details[open]')).toHaveCount(5);
+    await expect(
+      detailCard.locator('summary').filter({ hasText: 'Built-in tools' }),
+    ).toHaveAccessibleName('Built-in tools 10.0k (10.0%)');
     await expect(
       detailCard
         .locator('summary')

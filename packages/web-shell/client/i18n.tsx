@@ -2797,6 +2797,8 @@ const EN: Messages = {
     'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
   'contextUsage.retry': 'Retry',
   'contextUsage.loadError': 'Failed to load context usage.',
+  'contextUsage.previousReading':
+    'Could not refresh. Showing a previous reading.',
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
@@ -6354,6 +6356,7 @@ const ZH: Messages = {
     '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
   'contextUsage.retry': '重试',
   'contextUsage.loadError': '上下文使用情况加载失败。',
+  'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',

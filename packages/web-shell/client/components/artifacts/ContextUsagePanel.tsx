@@ -24,14 +24,14 @@ export function ContextUsagePanel({
 }: {
   sessionActions?: DaemonSessionActions;
   sessionId: string;
-  controls?: ContextUsageControls;
+  controls?: Omit<ContextUsageControls, 'captureOwner'>;
 }) {
   const { t } = useI18n();
   const [status, setStatus] = useState<DaemonSessionContextUsageStatus | null>(
     null,
   );
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<false | 'transient' | 'hard'>(false);
   const compressionRevision = useRef(0);
   const refreshRef = useRef<() => void>(() => {});
   // Outlives the effect closure so a StrictMode-replayed mount reuses the
@@ -45,7 +45,9 @@ export function ContextUsagePanel({
   const compressionResult = liveControls?.result;
   const [dismissedResult, setDismissedResult] = useState(compressionResult);
   const showCompressionResult = Boolean(
-    compressionResult && compressionResult !== dismissedResult,
+    compressionResult &&
+      compressionResult !== dismissedResult &&
+      (compressionResult.kind !== 'completed' || !error),
   );
 
   useEffect(() => {
@@ -59,7 +61,14 @@ export function ContextUsagePanel({
   useEffect(() => {
     let active = true;
     let pending = false;
-    setStatus(null);
+    const previousResult = controlsRef.current?.result;
+    setStatus((current) =>
+      current?.sessionId === sessionId
+        ? current
+        : previousResult?.kind === 'completed'
+          ? previousResult.usage
+          : null,
+    );
     setError(false);
     setLoading(Boolean(getContextUsage));
 
@@ -81,10 +90,7 @@ export function ContextUsagePanel({
               promise: getContextUsage({
                 detail: true,
                 silent: true,
-                ...(controlsRef.current?.result?.kind === 'refreshFailed' ||
-                controlsRef.current?.result?.kind === 'cancelled'
-                  ? { syncCounters: true }
-                  : {}),
+                ...(controlsRef.current?.result ? { syncCounters: true } : {}),
               }),
             };
       inFlightRef.current = entry;
@@ -99,11 +105,7 @@ export function ContextUsagePanel({
         );
       } catch (err) {
         if (!active || revision !== compressionRevision.current) return;
-        // A failed refresh keeps the last good reading. Transient failures
-        // (disconnect, transport close, network blip) are requested silently
-        // and stay silent here too, leaving the unavailable copy plus the
-        // enabled Refresh as the retry affordance.
-        setError(!isTransientSessionReadError(err));
+        setError(isTransientSessionReadError(err) ? 'transient' : 'hard');
       } finally {
         pending = false;
         if (inFlightRef.current === entry) inFlightRef.current = null;
@@ -117,6 +119,13 @@ export function ContextUsagePanel({
     };
   }, [getContextUsage, sessionId]);
 
+  const refreshDisabled =
+    !getContextUsage || loading || liveControls?.compressing;
+  const handleRefresh = () => {
+    setDismissedResult(compressionResult);
+    refreshRef.current();
+  };
+
   return (
     <div className={styles.panel} aria-busy={loading}>
       <div className={styles.toolbar}>
@@ -128,32 +137,32 @@ export function ContextUsagePanel({
             size="icon-sm"
             aria-label={t('contextUsage.refresh')}
             title={t('contextUsage.refresh')}
-            disabled={!getContextUsage || loading || liveControls?.compressing}
-            onClick={() => {
-              setDismissedResult(compressionResult);
-              refreshRef.current();
-            }}
+            disabled={refreshDisabled}
+            onClick={handleRefresh}
           >
             <RefreshCwIcon aria-hidden="true" />
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={!liveControls?.canCompress || loading}
+          <span
             title={
               !liveControls?.canCompress
                 ? t('contextUsage.compressUnavailable')
                 : undefined
             }
-            onClick={() => void liveControls?.compress()}
           >
-            {t(
-              liveControls?.compressing
-                ? 'contextUsage.compressing'
-                : 'contextUsage.compress',
-            )}
-          </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!liveControls?.canCompress || loading}
+              onClick={() => void liveControls?.compress()}
+            >
+              {t(
+                liveControls?.compressing
+                  ? 'contextUsage.compressing'
+                  : 'contextUsage.compress',
+              )}
+            </Button>
+          </span>
         </div>
       </div>
       {(liveControls?.compressing || showCompressionResult) && (
@@ -179,14 +188,20 @@ export function ContextUsagePanel({
           )}
         </div>
       )}
-      {error ? (
+      {error === 'transient' && status && (
+        <div className={styles.feedback} role="status">
+          {t('contextUsage.previousReading')}
+        </div>
+      )}
+      {error === 'hard' ? (
         <div className={styles.state} role="alert">
           <span>{t('contextUsage.loadError')}</span>
           <Button
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => refreshRef.current()}
+            disabled={refreshDisabled}
+            onClick={handleRefresh}
           >
             {t('contextUsage.retry')}
           </Button>

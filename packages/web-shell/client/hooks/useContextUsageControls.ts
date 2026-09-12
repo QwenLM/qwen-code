@@ -18,6 +18,7 @@ export interface ContextUsageControls {
   compressing: boolean;
   result?: CompressionResult;
   compress(): Promise<void>;
+  captureOwner(): DaemonSessionOwnerSnapshot;
   getContextUsage: DaemonSessionActions['getContextUsage'];
 }
 
@@ -129,8 +130,9 @@ export function useContextUsageControls({
             result,
             compress,
             getContextUsage: actions.getContextUsage,
+            captureOwner: () => ownerGuard.capture({ includeRecovery: true }),
           }
         : undefined,
-    [sessionId, available, compressing, result, compress, actions],
+    [sessionId, available, compressing, result, compress, actions, ownerGuard],
   );
 }

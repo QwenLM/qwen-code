@@ -101,6 +101,8 @@ describe('context usage counter reconciliation', () => {
     'unknown-count',
     'context-window',
     'model-round-trip',
+    'connection-session',
+    'zero-window',
   ] as const)(
     'does not overwrite a newer or different owner: %s',
     async (change) => {
@@ -139,6 +141,8 @@ describe('context usage counter reconciliation', () => {
         h.replaceConnection({ ...connection, [change]: true });
       if (change === 'workspace')
         h.replaceConnection({ ...connection, workspaceCwd: '/other' });
+      if (change === 'connection-session')
+        h.replaceConnection({ ...connection, sessionId: 'session-b' });
       if (change === 'context-window')
         h.replaceConnection({ ...connection, contextWindow: 32_000 });
       if (change === 'model-round-trip') {
@@ -158,6 +162,7 @@ describe('context usage counter reconciliation', () => {
         value.usage.breakdown.messages = 0;
         value.usage.breakdown.freeSpace = 80;
       }
+      if (change === 'zero-window') value.usage.contextWindowSize = 0;
       resolve(value);
       await request;
       expect(h.getConnection().tokenCount).toBe(change === 'usage' ? 70 : 60);

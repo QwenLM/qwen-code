@@ -75,6 +75,9 @@ function render(
 describe('ContextUsageMessage', () => {
   it('separates remaining capacity from free space and clamps exhausted capacity', () => {
     const container = render(makeStatus(60, false));
+    expect(container.querySelector('[class*="total"]')?.textContent).toBe(
+      '60 / 100 tokens',
+    );
     expect(container.querySelector('[class*="remaining"]')?.textContent).toBe(
       'Remaining 40',
     );
@@ -154,6 +157,13 @@ describe('ContextUsageMessage', () => {
         'Free',
         'Autocompact buffer',
       ]);
+      const symbols = Array.from(
+        container.querySelectorAll('[class*="row"] > [class*="symbol"]'),
+        (node) => node.className,
+      );
+      expect(symbols[0]).toMatch(/accent/);
+      expect(symbols[1]).toMatch(/secondary/);
+      expect(symbols[2]).toMatch(/warning/);
 
       expect(
         Array.from(
@@ -178,6 +188,9 @@ describe('ContextUsageMessage', () => {
 
   it('caps the meter while showing real overflow in the transcript heading', () => {
     const container = render(makeStatus(150, false));
+    expect(
+      container.querySelector('[class*="row"] > [class*="symbol"]')?.className,
+    ).toMatch(/error/);
     expect(container.querySelector('[class*="percentage"]')?.textContent).toBe(
       '150.0%',
     );

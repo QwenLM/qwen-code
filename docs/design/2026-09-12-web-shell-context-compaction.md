@@ -60,6 +60,22 @@ result to a new session. Before submission, the host disarms the previous prompt
 retry state and clears stale follow-up suggestions. The ordinary composer draft and attachments are
 retained.
 
+Settled results follow the session across main-view and split-pane transitions.
+The app retains the last outcome without granting operation authority to an
+unmounted pane. Counter reads are deduplicated while their captured connection
+owner remains current. A session switch or replay recovery can restore old
+counters even on the same reader, so the next eligible owner reconciles again.
+Failed reconciliation remains recoverable with Refresh. Automatic reconciliation
+skips failed command outcomes; opening or explicitly refreshing a panel after any
+settled outcome still synchronizes the newly read snapshot. A new live outcome takes precedence over the
+retained result, so a failed second compression cannot restore an older reading.
+Changing readers for the same session preserves the panel's current reading.
+Reopening the panel can seed a completed reading; if the new read fails
+transiently, the panel labels it as a previous reading instead of claiming it
+was refreshed. Successful Refresh clears that label. A pane compressing the
+primary session also disarms the main view's ordinary-prompt retry before
+submitting, without clearing another session's retry.
+
 Only the advertised built-in `compress` command enables the action; an identically
 named custom command is not compression authority. Reuse the existing Goal gate
 and source view's busy/write guards. Compression output does not carry ordinary
@@ -98,4 +114,7 @@ branch.
 All three context surfaces agree on used and remaining capacity. Category details
 appear once under their totals. Compression is available only for its idle,
 writable live owner; pending, failure, and completion are visible. Current usage
-refreshes while historical readings remain unchanged. No open product questions.
+refreshes while historical readings remain unchanged. A failed subsequent
+compression cannot replace a newer panel reading with an older result. A fallback
+reading after a transient refresh failure is explicitly marked as previous and
+can recover through Refresh. No open product questions.

@@ -81,6 +81,7 @@ export interface SplitViewProps {
     sessionActions: DaemonSessionActions,
   ) => void;
   registerContextUsageControls?: RegisterContextUsageControls;
+  onBeforeContextCompress?: (sessionId: string) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
@@ -127,6 +128,7 @@ export function SplitView({
   onOpenMonitor,
   onPaneArtifactsChange,
   registerContextUsageControls,
+  onBeforeContextCompress,
   messageTurnOutputs,
   renderPaneHeaderActions,
   includeOtherWorkspaces = true,
@@ -660,6 +662,7 @@ export function SplitView({
                       registerContextUsageControls={
                         registerContextUsageControls
                       }
+                      onBeforeContextCompress={onBeforeContextCompress}
                       messageTurnOutputs={messageTurnOutputs}
                       sessionWorkflowEnabled={sessionWorkflowEnabled}
                       planControlVisible={planControlVisible}

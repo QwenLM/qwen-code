@@ -234,7 +234,7 @@
 }
 
 .detailSummary::before {
-  content: '\203A';
+  content: '\203A' / '';
   width: 12px;
   flex-shrink: 0;
 }

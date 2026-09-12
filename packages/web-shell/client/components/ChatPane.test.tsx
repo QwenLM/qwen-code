@@ -560,6 +560,21 @@ describe('ChatPane', () => {
         canCompress: true,
       }),
     );
+    pendingPermission = {
+      id: 'perm-1',
+      toolName: 'write_file',
+      rawInput: {},
+    };
+    rerender({ registerContextUsageControls });
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: false }),
+    );
+    pendingPermission = null;
+    rerender({ registerContextUsageControls });
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: true }),
+    );
     sessionHasActivePromptValue = true;
     rerender({ registerContextUsageControls });
     expect(registerContextUsageControls).toHaveBeenLastCalledWith(
@@ -579,17 +594,24 @@ describe('ChatPane', () => {
       (_controls: ContextUsageControls) => vi.fn(),
     );
     const command = deferred<{ stopReason: 'cancelled' }>();
-    sendPrompt.mockImplementation(() => {
-      expect(clearFollowup).toHaveBeenCalledOnce();
-      return command.promise;
-    });
-    render({ registerContextUsageControls });
+    const onBeforeContextCompress = vi.fn();
+    sendPrompt.mockReturnValue(command.promise);
+    render({ registerContextUsageControls, onBeforeContextCompress });
     let pending!: Promise<void>;
     act(() => {
       pending = registerContextUsageControls.mock.calls.at(-1)![0].compress();
     });
     expect(sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress');
     expect(clearFollowup).toHaveBeenCalledOnce();
+    expect(onBeforeContextCompress).toHaveBeenCalledExactlyOnceWith(
+      connectionState.sessionId,
+    );
+    expect(clearFollowup.mock.invocationCallOrder[0]).toBeLessThan(
+      sendPrompt.mock.invocationCallOrder[0],
+    );
+    expect(onBeforeContextCompress.mock.invocationCallOrder[0]).toBeLessThan(
+      sendPrompt.mock.invocationCallOrder[0],
+    );
     await act(async () => {
       command.resolve({ stopReason: 'cancelled' });
       await pending;

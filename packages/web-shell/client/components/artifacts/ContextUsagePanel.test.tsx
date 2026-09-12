@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { StrictMode, act } from 'react';
+import { StrictMode, act, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -7,8 +7,11 @@ import type {
   DaemonSessionContextUsageStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
-import type { ContextUsageControls } from '../../hooks/useContextUsageControls';
 import { ContextUsagePanel } from './ContextUsagePanel';
+
+type ContextUsageControls = NonNullable<
+  ComponentProps<typeof ContextUsagePanel>['controls']
+>;
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
@@ -118,6 +121,9 @@ describe('ContextUsagePanel', () => {
         (node) => node.textContent === 'Compress context',
       )!;
       expect(button.disabled).toBe(true);
+      expect(button.parentElement?.title).toContain(
+        'Requires an idle, connected, writable session',
+      );
       act(() => button.click());
     }
     expect(compress).not.toHaveBeenCalled();
@@ -232,6 +238,17 @@ describe('ContextUsagePanel', () => {
     });
     expect(container.querySelector('[role="alert"]')).toBeNull();
     await act(async () => {});
+    expect(get).toHaveBeenCalledWith({
+      detail: true,
+      silent: true,
+      syncCounters: true,
+    });
+    await act(async () => refresh(container).click());
+    expect(get).toHaveBeenLastCalledWith({
+      detail: true,
+      silent: true,
+      syncCounters: true,
+    });
     expect(container.querySelector('[role="alert"]')).toBeNull();
     expect(container.querySelector('[class*="percentage"]')?.textContent).toBe(
       '60.0%',
@@ -306,6 +323,185 @@ describe('ContextUsagePanel', () => {
       expect(refresh(container).disabled).toBe(false);
     },
   );
+
+  it.each(['s-1', 'foreign'])(
+    'keeps only the matching completed reading when a mount read fails: %s',
+    async (ownerId) => {
+      const get = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+      const updated = fixture(ownerId);
+      updated.usage.totalTokens = 30;
+      const { container } = renderPanel(get, {
+        sessionId: ownerId,
+        canCompress: true,
+        compressing: false,
+        compress: vi.fn(),
+        getContextUsage: get,
+        result: { kind: 'completed', usage: updated },
+      });
+      await act(async () => {});
+      expect(
+        container.querySelector('[class*="percentage"]')?.textContent,
+      ).toBe(ownerId === 's-1' ? '30.0%' : undefined);
+      expect(
+        container.textContent?.includes('Context usage is unavailable'),
+      ).toBe(ownerId !== 's-1');
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(get).toHaveBeenCalledWith({
+        detail: true,
+        silent: true,
+        ...(ownerId === 's-1' ? { syncCounters: true } : {}),
+      });
+    },
+  );
+
+  it.each(['remount', 'reader', 'session'] as const)(
+    'labels a previous reading after a failed %s read and recovers on Refresh',
+    async (transition) => {
+      const current = fixture();
+      current.usage.totalTokens = 90;
+      current.usage.breakdown.messages = 50;
+      current.usage.breakdown.freeSpace = 0;
+      const get = vi.fn().mockResolvedValue(current);
+      const controls: ContextUsageControls = {
+        sessionId: 's-1',
+        canCompress: true,
+        compressing: false,
+        compress: vi.fn(),
+        getContextUsage: get,
+        result: { kind: 'completed', usage: fixture() },
+      };
+      const { container, root, rerender } = renderPanel(get, controls);
+      await act(async () => {});
+      expect(
+        container.querySelector('[class*="percentage"]')?.textContent,
+      ).toBe('90.0%');
+      const replacement = vi
+        .fn()
+        .mockRejectedValue(new TypeError('fetch failed'));
+      const sessionId = transition === 'session' ? 's-2' : 's-1';
+      if (transition === 'remount') act(() => root.render(null));
+      rerender(undefined, sessionId, {
+        ...controls,
+        sessionId,
+        getContextUsage: replacement,
+        result: transition === 'session' ? undefined : controls.result,
+      });
+      await act(async () => {});
+      expect(
+        container.querySelector('[class*="percentage"]')?.textContent,
+      ).toBe(
+        transition === 'session'
+          ? undefined
+          : transition === 'reader'
+            ? '90.0%'
+            : '60.0%',
+      );
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        transition === 'session'
+          ? undefined
+          : 'Could not refresh. Showing a previous reading.',
+      );
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(container.textContent).not.toContain('Compression completed.');
+      replacement.mockResolvedValue({ ...current, sessionId });
+      await act(async () => refresh(container).click());
+      expect(
+        container.querySelector('[class*="percentage"]')?.textContent,
+      ).toBe('90.0%');
+      expect(container.querySelector('[role="status"]')).toBeNull();
+      expect(controls.compress).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not claim a delayed retained completion was refreshed after a read failure', async () => {
+    const get = vi.fn().mockResolvedValue(fixture());
+    const { container, rerender } = renderPanel(get);
+    await act(async () => {});
+    rerender(undefined, 's-1', {
+      sessionId: 's-1',
+      canCompress: true,
+      compressing: false,
+      compress: vi.fn(),
+      getContextUsage: vi.fn().mockRejectedValue(new TypeError('fetch failed')),
+      result: { kind: 'completed', usage: fixture() },
+    });
+    await act(async () => {});
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'Could not refresh. Showing a previous reading.',
+    );
+    expect(container.textContent).not.toContain('Compression completed.');
+  });
+
+  it('blocks error retry during compression and clears the error on completion', async () => {
+    const get = vi.fn().mockRejectedValue(new Error('hard read failure'));
+    const controls: ContextUsageControls = {
+      sessionId: 's-1',
+      canCompress: true,
+      compressing: false,
+      compress: vi.fn(),
+      getContextUsage: get,
+    };
+    const { container, rerender } = renderPanel(get, controls);
+    await act(async () => {});
+    const retry = container.querySelector<HTMLButtonElement>(
+      '[role="alert"] button',
+    )!;
+    expect(retry).not.toBeNull();
+    rerender(undefined, 's-1', {
+      ...controls,
+      compressing: true,
+      canCompress: false,
+    });
+    expect(retry.disabled).toBe(true);
+    act(() => retry.click());
+    expect(get).toHaveBeenCalledTimes(1);
+    const updated = fixture();
+    updated.usage.totalTokens = 30;
+    rerender(undefined, 's-1', {
+      ...controls,
+      result: { kind: 'completed', usage: updated },
+    });
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector('[class*="percentage"]')?.textContent).toBe(
+      '30.0%',
+    );
+  });
+
+  it('dismisses a failed refresh banner when error retry loads the current reading', async () => {
+    const get = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('hard read failure'))
+      .mockResolvedValue(fixture());
+    const controls: ContextUsageControls = {
+      sessionId: 's-1',
+      canCompress: true,
+      compressing: false,
+      compress: vi.fn(),
+      getContextUsage: get,
+    };
+    const { container, rerender } = renderPanel(get, controls);
+    await act(async () => {});
+    rerender(undefined, 's-1', {
+      ...controls,
+      result: { kind: 'refreshFailed' },
+    });
+    expect(container.textContent).toContain(
+      'Compression completed, but usage could not be refreshed.',
+    );
+    const retry = container.querySelector<HTMLButtonElement>(
+      '[role="alert"] button',
+    )!;
+    await act(async () => retry.click());
+    expect(get).toHaveBeenLastCalledWith({
+      detail: true,
+      silent: true,
+      syncCounters: true,
+    });
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector('[class*="percentage"]')?.textContent).toBe(
+      '60.0%',
+    );
+  });
 
   it('reuses the in-flight request across a StrictMode-replayed mount', async () => {
     const request = deferred();

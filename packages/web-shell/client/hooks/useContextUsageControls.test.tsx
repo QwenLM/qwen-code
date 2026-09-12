@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -75,12 +75,11 @@ function mount() {
     ],
   };
   let generation = 0;
-  const ownerGuard = {
-    capture: () => {
-      const captured = generation;
-      return { isCurrent: () => generation === captured };
-    },
-  };
+  const captureOwner = vi.fn(() => {
+    const captured = generation;
+    return { isCurrent: () => generation === captured };
+  });
+  const ownerGuard = { capture: captureOwner };
   let busy = false;
   let writeBlocked = false;
   let latest: ContextUsageControls | undefined;
@@ -97,7 +96,14 @@ function mount() {
   }
   const root = createRoot(document.createElement('div'));
   roots.push(root);
-  const render = () => act(() => root.render(<Probe />));
+  const render = () =>
+    act(() =>
+      root.render(
+        <StrictMode>
+          <Probe />
+        </StrictMode>,
+      ),
+    );
   render();
   return {
     command,
@@ -105,6 +111,7 @@ function mount() {
     sendPrompt,
     getContextUsage,
     onBeforeCompress,
+    captureOwner,
     get controls() {
       return latest!;
     },
@@ -131,6 +138,19 @@ function mount() {
 }
 
 describe('useContextUsageControls', () => {
+  it('captures recovery-aware owners for retained counter reconciliation', () => {
+    const h = mount();
+    const original = h.controls.captureOwner();
+    expect(h.captureOwner).toHaveBeenLastCalledWith({ includeRecovery: true });
+    expect(original.isCurrent()).toBe(true);
+    h.update({ sessionId: 'session-b' });
+    expect(original.isCurrent()).toBe(false);
+    expect(h.controls.captureOwner().isCurrent()).toBe(true);
+    h.update({ sessionId: 'session-a' });
+    expect(original.isCurrent()).toBe(false);
+    expect(h.controls.captureOwner().isCurrent()).toBe(true);
+  });
+
   it('waits for completion, submits once, and reads fresh usage through the owner', async () => {
     const h = mount();
     let operation!: Promise<void>;
@@ -167,6 +187,24 @@ describe('useContextUsageControls', () => {
     { loadingTranscript: true },
     { catchingUp: true },
     { goalState: undefined },
+    {
+      goalState: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g1',
+          revision: 1,
+          objective: 'ship it',
+          status: 'active',
+          evidenceCursor: { recordId: null },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      },
+    },
+    { commands: undefined },
     { commands: [] },
     {
       commands: [
@@ -304,6 +342,55 @@ describe('useContextUsageControls', () => {
     expect(h.controls.result).toEqual({ kind: 'cancelled' });
     expect(h.getContextUsage).not.toHaveBeenCalled();
   });
+
+  it.each(['command', 'read'] as const)(
+    'keeps the replacement compression active when a stale %s settles',
+    async (stage) => {
+      const h = mount();
+      let first!: Promise<void>;
+      act(() => {
+        first = h.controls.compress();
+      });
+      if (stage === 'read') {
+        await act(async () => h.command.resolve({ stopReason: 'end_turn' }));
+      }
+      h.update({ sessionId: 'session-b' });
+      expect(h.controls.canCompress).toBe(true);
+      expect(h.controls.compressing).toBe(false);
+      expect(h.controls.result).toBeUndefined();
+      const nextCommand = deferred<{ stopReason: 'end_turn' }>();
+      const nextRead = deferred<DaemonSessionContextUsageStatus>();
+      h.sendPrompt.mockReturnValueOnce(nextCommand.promise);
+      h.getContextUsage.mockReturnValueOnce(nextRead.promise);
+      let second!: Promise<void>;
+      act(() => {
+        second = h.controls.compress();
+      });
+      expect(h.sendPrompt).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        if (stage === 'command') h.command.resolve({ stopReason: 'end_turn' });
+        else h.read.resolve(usage());
+        await first;
+      });
+      expect(h.controls.compressing).toBe(true);
+      expect(h.controls.result).toBeUndefined();
+      act(() => void h.controls.compress());
+      expect(h.sendPrompt).toHaveBeenCalledTimes(2);
+      await act(async () => nextCommand.resolve({ stopReason: 'end_turn' }));
+      await act(async () => {
+        nextRead.resolve(usage('session-b'));
+        await second;
+      });
+      expect(h.controls.result).toEqual({
+        kind: 'completed',
+        usage: usage('session-b'),
+      });
+      h.sendPrompt.mockResolvedValueOnce({ stopReason: 'cancelled' });
+      await act(async () => h.controls.compress());
+      expect(h.sendPrompt).toHaveBeenCalledTimes(3);
+      expect(h.controls.result).toEqual({ kind: 'cancelled' });
+    },
+  );
 
   it('distinguishes command failure from post-compression read failure', async () => {
     for (const failRead of [false, true]) {

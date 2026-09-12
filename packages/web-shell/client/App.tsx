@@ -17088,6 +17088,12 @@ export function App({
     setShowRetryHint(false);
     clearFollowup();
   }, [clearFollowup, disarmSubmittedPromptRetry]);
+  const preparePaneContextCompression = useCallback(
+    (sessionId: string) => {
+      if (sessionId === connection.sessionId) prepareContextCompression();
+    },
+    [connection.sessionId, prepareContextCompression],
+  );
   const primaryContextControls = useContextUsageControls({
     connection,
     actions: sessionActions,
@@ -17117,8 +17123,67 @@ export function App({
           return next;
         });
     }, []);
-  const contextUsageControls = useMemo(
-    () =>
+  const [compressionResults, setCompressionResults] = useState<
+    Record<string, NonNullable<ContextUsageControls['result']>>
+  >({});
+  const observedCompressionResults = useRef(
+    new WeakSet<NonNullable<ContextUsageControls['result']>>(),
+  );
+  const reconciledContextReaders = useRef(
+    new WeakMap<
+      ContextUsageControls['getContextUsage'],
+      {
+        result: NonNullable<ContextUsageControls['result']>;
+        owner: ReturnType<ContextUsageControls['captureOwner']>;
+      }
+    >(),
+  );
+  useEffect(() => {
+    const updates: typeof compressionResults = {};
+    const owners = [
+      primaryContextControls,
+      ...Object.values(paneContextControls),
+    ];
+    for (const controls of owners) {
+      const result = controls?.result;
+      if (result && !observedCompressionResults.current.has(result)) {
+        observedCompressionResults.current.add(result);
+        updates[controls.sessionId] = result;
+        reconciledContextReaders.current.set(controls.getContextUsage, {
+          result,
+          owner: controls.captureOwner(),
+        });
+      }
+    }
+    if (Object.keys(updates).length > 0)
+      setCompressionResults((current) => ({ ...current, ...updates }));
+    for (const controls of owners) {
+      const result =
+        controls &&
+        (updates[controls.sessionId] ?? compressionResults[controls.sessionId]);
+      const reconciled =
+        controls &&
+        reconciledContextReaders.current.get(controls.getContextUsage);
+      if (
+        !controls?.canCompress ||
+        !result ||
+        result.kind === 'failed' ||
+        (reconciled?.result === result && reconciled.owner.isCurrent())
+      )
+        continue;
+      reconciledContextReaders.current.set(controls.getContextUsage, {
+        result,
+        owner: controls.captureOwner(),
+      });
+      // Reattachment can restore old replay counters even on the same reader.
+      // Reconcile through its current owner, never copy another one's counters.
+      void controls
+        .getContextUsage({ silent: true, syncCounters: true })
+        .catch(() => undefined);
+    }
+  }, [primaryContextControls, paneContextControls, compressionResults]);
+  const contextUsageControls = useMemo(() => {
+    const live =
       primaryContextControls &&
       (mainView !== 'split' ||
         !splitSessionIds.includes(primaryContextControls.sessionId))
@@ -17126,9 +17191,28 @@ export function App({
             ...paneContextControls,
             [primaryContextControls.sessionId]: primaryContextControls,
           }
-        : paneContextControls,
-    [mainView, splitSessionIds, paneContextControls, primaryContextControls],
-  );
+        : paneContextControls;
+    return Object.fromEntries(
+      Object.entries(live).map(([id, controls]) => [
+        id,
+        {
+          ...controls,
+          result: controls.compressing
+            ? undefined
+            : controls.result &&
+                !observedCompressionResults.current.has(controls.result)
+              ? controls.result
+              : (compressionResults[id] ?? controls.result),
+        },
+      ]),
+    );
+  }, [
+    mainView,
+    splitSessionIds,
+    paneContextControls,
+    primaryContextControls,
+    compressionResults,
+  ]);
 
   // Shared by the drawer and docked render sites below; only the genuine
   // per-variant props (variant / panelWidth) stay at each site.
@@ -18617,6 +18701,7 @@ export function App({
                         onOpenMonitor={openMonitorPanel}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         registerContextUsageControls={registerContextUsageControls}
+                        onBeforeContextCompress={preparePaneContextCompression}
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}

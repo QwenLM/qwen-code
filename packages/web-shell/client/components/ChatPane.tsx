@@ -228,6 +228,7 @@ export interface ChatPaneProps {
     sessionActions: DaemonSessionActions,
   ) => void;
   registerContextUsageControls?: RegisterContextUsageControls;
+  onBeforeContextCompress?: (sessionId: string) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
@@ -272,6 +273,7 @@ export function ChatPane({
   onOpenMonitor,
   onPaneArtifactsChange,
   registerContextUsageControls,
+  onBeforeContextCompress,
   messageTurnOutputs,
   embedded = false,
   onFirstPromptAdmitted,
@@ -1426,11 +1428,15 @@ export function ChatPane({
   // workspace provider (the pane's own session connection may not carry it).
   const showWorkspaceChip =
     hasMultipleWorkspaces(workspace.capabilities) && !!paneWorkspaceCwd;
+  const prepareContextCompression = useCallback(() => {
+    clearFollowup();
+    if (connection.sessionId) onBeforeContextCompress?.(connection.sessionId);
+  }, [clearFollowup, connection.sessionId, onBeforeContextCompress]);
   const contextUsageControls = useContextUsageControls({
     connection,
     actions,
     ownerGuard: sessionOwnerGuard,
-    onBeforeCompress: clearFollowup,
+    onBeforeCompress: prepareContextCompression,
     busy: streamingState !== 'idle' || sessionHasActivePrompt,
     writeBlocked:
       Boolean(connection.loadingTranscript) ||
