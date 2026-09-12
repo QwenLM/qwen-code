@@ -245,6 +245,15 @@ describe('BuiltinCommandLoader', () => {
     expect(advisorCmd?.kind).toBe(CommandKind.BUILT_IN);
   });
 
+  it('should always register the /commit command', async () => {
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+    const commitCmd = commands.find((c) => c.name === 'commit');
+    expect(commitCmd).toBeDefined();
+    expect(commitCmd?.kind).toBe(CommandKind.BUILT_IN);
+    expect(commitCmd?.supportedModes).toEqual(['interactive']);
+  });
+
   it('should include lsp command only when LSP is enabled', async () => {
     const disabledLoader = new BuiltinCommandLoader(mockConfig);
     const disabledCommands = await disabledLoader.loadCommands(
