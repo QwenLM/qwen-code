@@ -194,8 +194,9 @@ let lastProbedBaseUrl;
 
 /**
  * Compute the browser-automation warning banner. Only the legacy external
- * adapter path (`browser_automation_mcp`) has a discoverable adapter status;
- * the native tool catalog needs no banner, so return null when it is absent.
+ * adapter path (`browser_automation_mcp`) has a discoverable adapter status, so
+ * only that path polls `/workspace/mcp`; the states that warn without a
+ * snapshot (chat-only, tunnel-only) are derived from the feature list alone.
  */
 async function deriveWarning(baseUrl, token, features) {
   const { deriveCapabilityStatus } = QwenCapabilityStatus;
@@ -204,24 +205,28 @@ async function deriveWarning(baseUrl, token, features) {
     mcpProbeCounter = 0;
     cachedMcpSnapshot = undefined;
   }
-  if (!features.includes('browser_automation_mcp')) {
+  let mcpSnapshot;
+  if (features.includes('browser_automation_mcp')) {
+    // `/workspace/mcp` is a cross-process RPC to the ACP child while a channel
+    // is live, so refresh it on a slower cadence than health/capabilities and
+    // reuse the last snapshot in between. The banner content changes rarely and
+    // need not contend with an in-flight generation on every 2s tick.
+    if (mcpProbeCounter % MCP_POLL_EVERY === 0) {
+      const fresh = await probeJson(`${baseUrl}/workspace/mcp`, token);
+      // A transient failure after a successful probe keeps the previous
+      // snapshot instead of pinning automation-unavailable for MCP_POLL_EVERY
+      // ticks.
+      if (fresh !== null || !cachedMcpSnapshot) cachedMcpSnapshot = fresh;
+    }
+    mcpProbeCounter += 1;
+    mcpSnapshot = cachedMcpSnapshot;
+  } else {
+    // No discoverable adapter to inspect. The earlier capability states
+    // (chat-only, tunnel-only) warn without a snapshot, so the banner must
+    // still be derived from the feature list.
     mcpProbeCounter = 0;
     cachedMcpSnapshot = undefined;
-    return null;
   }
-  // `/workspace/mcp` is a cross-process RPC to the ACP child while a channel
-  // is live, so refresh it on a slower cadence than health/capabilities and
-  // reuse the last snapshot in between. The banner content changes rarely and
-  // need not contend with an in-flight generation on every 2s tick.
-  let mcpSnapshot;
-  if (mcpProbeCounter % MCP_POLL_EVERY === 0) {
-    const fresh = await probeJson(`${baseUrl}/workspace/mcp`, token);
-    // A transient failure after a successful probe keeps the previous snapshot
-    // instead of pinning automation-unavailable for MCP_POLL_EVERY ticks.
-    if (fresh !== null || !cachedMcpSnapshot) cachedMcpSnapshot = fresh;
-  }
-  mcpProbeCounter += 1;
-  mcpSnapshot = cachedMcpSnapshot;
   return deriveCapabilityStatus(true, features, mcpSnapshot, baseUrl).warning;
 }
 

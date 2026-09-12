@@ -11590,6 +11590,9 @@ describe('ACP WebSocket transport security', () => {
           ? {
               cdpTunnelOverWs: true,
               cdpTunnelRegistry: new CdpTunnelRegistry(),
+              // These cases drive CDP-tunnel registration; the bridge presents
+              // no pairing credential, so the daemon accepts the extension.
+              verifyExtensionPairingCredential: () => true,
             }
           : {}),
       });
@@ -11866,7 +11869,7 @@ describe('ACP WebSocket transport security', () => {
       command: process.execPath,
       args: expect.arrayContaining([
         '--wsEndpoint',
-        `ws://127.0.0.1:${port}/cdp`,
+        expect.stringContaining(`ws://127.0.0.1:${port}/cdp?access_token=`),
       ]),
     });
 
