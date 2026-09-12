@@ -364,15 +364,21 @@ Extensions can provide custom skills by placing skill files in a `skills/` subdi
 
 **Example**
 
+An extension named `gcp` with the following structure:
+
 ```
-.qwen/extensions/my-extension/
+.qwen/extensions/gcp/
 ├── qwen-extension.json
 └── skills/
     └── pdf-processor/
-        └── SKILL.md
+        └── SKILL.md   # frontmatter: name: pdf-processor
 ```
 
-The skill will be available via the `/skills` command when the extension is active.
+provides one skill, registered as `gcp:pdf-processor` — the extension's `name`, a colon, then the name the `SKILL.md` authors. Run it with `/gcp:pdf-processor`; `/skills` lists it and labels it with the extension's display name, falling back to its `name` when the manifest declares none.
+
+Unlike the extension's custom commands, which are named after their files (`/deploy` and `/gcs:sync` above, and prefixed only when one collides — see Conflict resolution below), an extension skill always carries its owner: two extensions that both ship a `pdf-processor` give you two skills instead of one shadowing the other. The prefix is added as the skill loads, so the `name` in your `SKILL.md` is never rewritten on disk.
+
+Settings that name skills treat the two spellings asymmetrically: `skills.disabled` blocks a skill under either name, while `skills.enabled` opts it in under the prefixed name only. See [Extension Skills](../features/skills.md#extension-skills).
 
 ### Custom subagents
 
