@@ -20,7 +20,10 @@ import type {
   InputModalities,
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
-import type { ReasoningEffort } from '../core/reasoning-effort.js';
+import {
+  setGeneratorReasoningEffort,
+  type ReasoningEffort,
+} from '../core/reasoning-effort.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
@@ -5847,26 +5850,12 @@ export class Config {
    * cannot silently re-enable it.
    */
   setReasoningEffort(effort: ReasoningEffort | undefined): void {
+    // One rule for every config that carries the tier; a workflow agent's own
+    // config goes through the same helper (see setGeneratorReasoningEffort).
     const applyEffort = (
       cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
     ): void => {
-      if (!cfg || cfg.reasoning === false) {
-        return;
-      }
-      const next: { effort?: ReasoningEffort; budget_tokens?: number } = {
-        ...(cfg.reasoning ?? {}),
-      };
-      if (effort) {
-        next.effort = effort;
-      } else {
-        delete next.effort;
-      }
-      // Clearing the last key (e.g. setReasoningEffort(undefined) with no
-      // sibling budget_tokens) collapses `reasoning` back to undefined rather
-      // than leaving an empty `{}` — an empty object is truthy, so downstream
-      // `if (cfg.reasoning)` checks would treat reasoning as active and the
-      // pipeline would emit `reasoning: {}` as wire noise.
-      cfg.reasoning = Object.keys(next).length > 0 ? next : undefined;
+      setGeneratorReasoningEffort(cfg, effort);
     };
     // The main session and a runtime (sub-agent) content generator may hold
     // distinct config objects; update whichever the request path reads.
