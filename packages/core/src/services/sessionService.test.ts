@@ -998,10 +998,13 @@ describe('SessionService', () => {
         `${sessionIdB}.jsonl`,
         `${sessionIdC}.jsonl`,
       ] as unknown as Array<fs.Dirent<Buffer>>);
-      statSyncSpy.mockImplementation((_filePath: fs.PathLike) => ({
-        mtimeMs: tieMtime,
-        isFile: () => true,
-      } as fs.Stats));
+      statSyncSpy.mockImplementation(
+        (_filePath: fs.PathLike) =>
+          ({
+            mtimeMs: tieMtime,
+            isFile: () => true,
+          }) as fs.Stats,
+      );
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
           if (filePath.includes(sessionIdC)) {
