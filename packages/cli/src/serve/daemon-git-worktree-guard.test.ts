@@ -100,6 +100,22 @@ describe('createDaemonToolGuard', () => {
     });
   });
 
+  it('resolves an absolute Windows path written with mixed separators without doubling the drive root', async () => {
+    if (process.platform !== 'win32') return;
+    const guard = createDaemonToolGuard();
+    // The win32 resolution branch of resolvePhysicalPath strips the drive
+    // root before splitting, so `C:/Users/.../outside/repo` must collapse to
+    // the same physical path as the `C:\Users\...` form (a raw `C:` segment
+    // joined back onto `C:\` would double the drive and fail to resolve).
+    const mixedSeparator = outsideRepo.replace(/\\/g, '/');
+    await expect(
+      guard(request(`git -C ${mixedSeparator} reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining(outsideRepo),
+    });
+  });
+
   it('allows relocated read-only Git commands', async () => {
     const guard = createDaemonToolGuard();
 
@@ -1466,13 +1482,17 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     expect(longReason.length).toBeLessThanOrEqual(500);
     expect(longReason).toContain('…');
 
-    const tabTarget = path.join(temporaryRoot, 'tab\tdir');
-    // Windows file names cannot contain control characters, so the fixture
-    // directory cannot exist there; the guard denies the nonexistent target
-    // all the same and must still strip the tab from its reason.
-    if (process.platform !== 'win32') {
-      await mkdir(path.join(tabTarget, '.git'), { recursive: true });
+    if (process.platform === 'win32') {
+      // Windows forbids control characters in file names, so the
+      // control-character scenario cannot even be constructed there.
+      return;
     }
+    const tabTarget = path.join(temporaryRoot, 'tab\tdir');
+    // Reaching this point means we are on POSIX (win32 returned above);
+    // Windows cannot represent this fixture (control characters are illegal
+    // in its file names), so the guard denies the nonexistent target there
+    // all the same and must still strip the tab from its reason.
+    await mkdir(path.join(tabTarget, '.git'), { recursive: true });
     const controlDenial = await guard(
       request(`git -C '${tabTarget}' reset --hard`),
     );
@@ -3228,5 +3248,143 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
       reason: expect.stringContaining('without an active prompt binding'),
     });
     expect(externalGuard).not.toHaveBeenCalled();
+  });
+});
+
+// The win32 backslash-masking surface only runs on the Windows lane today, so
+// these tests stub the platform + shell to exercise the fail-closed gates on
+// the Linux CI lane as well. `process.platform` is stubbed through a getter
+// (the pattern used elsewhere in this suite); `getShellConfiguration()` reads
+// `os.platform()` plus the environment, so forcing `ComSpec=cmd.exe` with no
+// MSYSTEM/TERM makes the guard believe it is masking for cmd.exe.
+describe('createDaemonToolGuard – win32 backslash masking (platform-stubbed)', () => {
+  const savedPlatformDescriptor = Object.getOwnPropertyDescriptor(
+    process,
+    'platform',
+  );
+  const savedMsystem = process.env['MSYSTEM'];
+  const savedTerm = process.env['TERM'];
+  const savedComSpec = process.env['ComSpec'];
+
+  let platformSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    vi.spyOn(os, 'platform').mockReturnValue('win32');
+    delete process.env['MSYSTEM'];
+    delete process.env['TERM'];
+    process.env['ComSpec'] = 'cmd.exe';
+  });
+
+  afterEach(() => {
+    platformSpy.mockRestore();
+    delete process.env['MSYSTEM'];
+    delete process.env['TERM'];
+    delete process.env['ComSpec'];
+    if (savedMsystem !== undefined) process.env['MSYSTEM'] = savedMsystem;
+    if (savedTerm !== undefined) process.env['TERM'] = savedTerm;
+    if (savedComSpec !== undefined) process.env['ComSpec'] = savedComSpec;
+    if (savedPlatformDescriptor !== undefined) {
+      Object.defineProperty(process, 'platform', savedPlatformDescriptor);
+    }
+  });
+
+  it('keeps an in-boundary, backslash-free command allowed', async () => {
+    const guard = createDaemonToolGuard();
+    await expect(guard(request('git status'))).resolves.toEqual({
+      allowed: true,
+    });
+  });
+
+  it('denies an absolute Windows relocation carrying a control byte', async () => {
+    const guard = createDaemonToolGuard();
+    await expect(
+      guard(request(`git -c user.name=${'\u0001'} -C C:\\proj reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('unresolvable repository location'),
+    });
+  });
+
+  it('fails closed when a double-quoted section holds a backslash before a quote', async () => {
+    const guard = createDaemonToolGuard();
+    await expect(
+      guard(request(`git -C "sub x\\" ..\\..\\outside" reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('unresolvable repository location'),
+    });
+  });
+
+  it('fails closed on an escaped # that POSIX tokenisation would read as a comment', async () => {
+    const guard = createDaemonToolGuard();
+    await expect(
+      guard(request(`git -c a.b=\\# -C ..\\outside reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('Windows shell syntax'),
+    });
+  });
+
+  it('allows a benign backslash-escaped quote that hides no path separator', async () => {
+    // `"say \"hi\""` carries only quote-escapes, so masking cannot conceal a
+    // relocation behind the backslashes; this must not be refused.
+    const guard = createDaemonToolGuard();
+    await expect(
+      guard(request('git commit -m "say \\"hi\\""')),
+    ).resolves.toEqual({ allowed: true });
+  });
+
+  it('denies a backslash-escaped-quote relocation (structure-matching input)', async () => {
+    const guard = createDaemonToolGuard();
+    // `"..\"..\outside"` parses to the same token shape however the
+    // backslashes are read, so the denial has to come from resolving the
+    // relocation target rather than from a parse refusal.
+    await expect(
+      guard(request(`git -C "..\\"..\\outside" reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('unresolvable repository location'),
+    });
+  });
+
+  it('collapses cmd.exe caret escapes so a relocated path is seen, not a literal caret directory', async () => {
+    const guard = createDaemonToolGuard();
+    // `..^\..^\outside^\repo` reaches cmd.exe (and git) as `..\..\outside\repo`
+    // once the carets are eaten; without normalization the guard would validate
+    // a literal `..^` directory that never exists.
+    const rel = path.relative(effectiveCwd, outsideRepo);
+    const caretized = rel.replaceAll('\\', '^\\');
+    await expect(
+      guard(request(`git -C ${caretized} reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining(outsideRepo),
+    });
+  });
+
+  it('does not backslash-mask a POSIX shell payload, so a traversal inside sh -c is seen', async () => {
+    const guard = createDaemonToolGuard();
+    // The payload of `sh -c` runs under a POSIX shell even when the daemon's
+    // outer lane is cmd.exe, so `./\.\./\.\.` must resolve as a `../../`
+    // traversal rather than be masked into an in-boundary-looking literal.
+    await expect(
+      guard(request('sh -c "git -C ./\\..\\/..\\/ reset --hard"')),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('unresolvable repository location'),
+    });
+  });
+
+  it('treats backslashes as POSIX escapes and does not refute a benign command when the shell is git bash', async () => {
+    // win32 + MSYSTEM=MINGW64 → getShellConfiguration().shell === 'bash', so
+    // the lane is POSIX and backslash masking is skipped. A backslash-escaped
+    // quote must therefore be parsed as the executing shell sees it and not
+    // refused.
+    process.env['MSYSTEM'] = 'MINGW64';
+    const guard = createDaemonToolGuard();
+    await expect(
+      guard(request('git commit -m "say \\"hi\\""')),
+    ).resolves.toEqual({ allowed: true });
   });
 });
