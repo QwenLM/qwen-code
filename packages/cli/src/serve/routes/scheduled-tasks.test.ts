@@ -730,6 +730,15 @@ describe('scheduled-tasks routes', () => {
     expect(perRun.status).toBe(200);
     expect(perRun.body.sessionMode).toBe('per_run');
     expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+
+    // A PATCH that cannot change default-catalog membership (a rename) must
+    // not mark the catalog at all.
+    h.bridge.markSessionCatalogChanged.mockClear();
+    const renamed = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ name: 'Renamed' });
+    expect(renamed.status).toBe(200);
+    expect(h.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
   });
 
   it('restores a per-run one-shot when fresh-session admission fails', async () => {

@@ -9086,7 +9086,12 @@ export class Session implements SessionContext {
             job.boundSessionId !== undefined)) &&
         job.id &&
         job.cronExpr !== '@wakeup' &&
-        !detectAutonomousSentinel(job.prompt)
+        !detectAutonomousSentinel(job.prompt) &&
+        // A durable /loop task binds through the legacy branch (bound
+        // sessionId, no sessionMode); wrapping its `<<loop.md>>` sentinel in
+        // the envelope would hide it from detectLoopSentinel's whole-string
+        // match below and the loop would never tick.
+        !detectLoopSentinel(job.prompt)
           ? buildScheduledTaskRunPrompt({
               id: job.id,
               name: job.name,

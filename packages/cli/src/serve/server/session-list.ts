@@ -963,8 +963,6 @@ async function listOrganizedWorkspaceSessionsForResponse(
   readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
-  const persistentScheduledTaskControllers =
-    await loadPersistentScheduledTaskControllers(workspaceCwd, options);
   const sessionService = new SessionService(workspaceCwd);
   const organizationService = createSessionOrganizationService(workspaceCwd);
   readOptions.signal?.throwIfAborted();
@@ -1009,6 +1007,11 @@ async function listOrganizedWorkspaceSessionsForResponse(
     readOptions.signal,
   );
   readOptions.signal?.throwIfAborted();
+  // Read only after the shared single-flight join above: awaiting the
+  // uncached task store before it lets a waiter's leader settle in between,
+  // so the waiter starts a second scan instead of riding the first.
+  const persistentScheduledTaskControllers =
+    await loadPersistentScheduledTaskControllers(workspaceCwd, options);
   for (const session of persisted.sessions) {
     bySessionId.set(
       session.sessionId,
@@ -1187,8 +1190,6 @@ async function listWorkspaceSessionsByMetadataForResponse(
   readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
-  const persistentScheduledTaskControllers =
-    await loadPersistentScheduledTaskControllers(workspaceCwd, filter);
   const sessionService = new SessionService(workspaceCwd);
   const bySessionId = new Map<string, BridgeSessionSummary>();
   const persisted = await listAllPersistedSummaries(
@@ -1200,6 +1201,10 @@ async function listWorkspaceSessionsByMetadataForResponse(
     readOptions.signal,
   );
   readOptions.signal?.throwIfAborted();
+  // See the organized path: the task-store read must follow the shared
+  // single-flight join so overlapping requests keep coalescing.
+  const persistentScheduledTaskControllers =
+    await loadPersistentScheduledTaskControllers(workspaceCwd, filter);
   const canonicalizeStandaloneIds =
     filter.conversationKind === 'standalone-top-level';
   const conflictedStandaloneIds = new Set<string>();

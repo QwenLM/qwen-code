@@ -4417,7 +4417,12 @@ export function WebShellSidebar({
       const showPin = !standalone && canOrganizeSession(session, 'pin');
       const showArchive = standalone
         ? sessionActionItems.has('archive') && Boolean(standalone.onArchive)
-        : sessionActionItems.has('archive') && canMutateSessionArchive(session);
+        : sessionActionItems.has('archive') &&
+          // Archiving a task-bound controller silently disables its scheduled
+          // task (the daemon couples the two), with no confirmation — keep
+          // that pause on the Tasks surface instead.
+          session.sourceType !== 'scheduled_task' &&
+          canMutateSessionArchive(session);
       const showRename = standalone
         ? sessionActionItems.has('rename')
         : canRenameSession(session);
@@ -5308,9 +5313,13 @@ export function WebShellSidebar({
           >
             <div className={styles.confirmContent}>
               <p className={styles.confirmDescription}>
-                {t('sidebar.deleteConfirmDescription', {
-                  name: deleteCandidateLabel,
-                })}
+                {deleteCandidate.sourceType === 'scheduled_task'
+                  ? t('sidebar.deleteScheduledTaskConfirmDescription', {
+                      name: deleteCandidateLabel,
+                    })
+                  : t('sidebar.deleteConfirmDescription', {
+                      name: deleteCandidateLabel,
+                    })}
               </p>
               <div className={styles.confirmActions}>
                 <button

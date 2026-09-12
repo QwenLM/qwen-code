@@ -1690,6 +1690,8 @@ const EN: Messages = {
   'sidebar.currentDeleteDisabled': 'Current session cannot be deleted',
   'sidebar.deleteConfirmDescription': (v) =>
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
+  'sidebar.deleteScheduledTaskConfirmDescription': (v) =>
+    `Delete "${v?.name ?? ''}"? Its scheduled task will also be deleted and stop running. This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.activeWork': 'Active work',
@@ -5314,6 +5316,8 @@ const ZH: Messages = {
   'sidebar.currentDeleteDisabled': '不能删除当前会话',
   'sidebar.deleteConfirmDescription': (v) =>
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
+  'sidebar.deleteScheduledTaskConfirmDescription': (v) =>
+    `确定删除“${v?.name ?? ''}”吗？其定时任务也会被删除并停止运行，删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.activeWork': '有活动任务',

@@ -4497,6 +4497,64 @@ describe('Session', () => {
     });
   });
 
+  it('keeps a bound /loop sentinel task firing as a loop instead of enveloping it', async () => {
+    // A durable /loop task is stored with prompt '<<loop.md>>' and no
+    // sessionMode; the keepalive then binds it, so at fire time it satisfies
+    // the envelope gate's legacy branch (bound sessionId, undefined mode).
+    // Wrapping the sentinel would defeat detectLoopSentinel's whole-string
+    // match downstream, so the gate must leave it bare.
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loop-md-bound-'));
+    const loopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+    await fs.mkdir(path.dirname(loopMdPath), { recursive: true });
+    await fs.writeFile(loopMdPath, '- check the deploy queue');
+    mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            boundSessionId: string;
+          }) => void,
+        ) => {
+          callback({
+            id: 'loop-task-1',
+            prompt: '<<loop.md>>',
+            cronExpr: '*/5 * * * *',
+            lastFiredAt: 123,
+            boundSessionId: 'test-session-id',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    try {
+      session.startCronScheduler();
+
+      // The loop tick resolves: the model receives the loop.md task block.
+      await vi.waitFor(() => {
+        const sentToModel = textParts(firstSentMessage()).join('');
+        expect(sentToModel).toContain('The user configured a loop-tasks file.');
+        expect(sentToModel).toContain('- check the deploy queue');
+      });
+      const sentToModel = textParts(firstSentMessage()).join('');
+      expect(sentToModel).not.toContain('Scheduled task:');
+      expect(sentToModel).not.toContain('Execute the instructions below now');
+      expect(sentToModel).not.toContain('<<loop.md>>');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps a legacy unbound scheduled fire as a plain prompt', async () => {
     const scheduler = {
       hasPendingWork: true,
@@ -4871,6 +4929,55 @@ describe('Session', () => {
       SERVE_CONTROL_EXT_METHODS.createSubSession,
       expect.anything(),
     );
+    const enqueued = JSON.stringify(
+      vi.mocked(mockChat.sendMessageStream).mock.calls[0],
+    );
+    expect(enqueued).toContain('First ask the user whether to run it now');
+    expect(enqueued).not.toContain('Execute the instructions below now');
+  });
+
+  it('enqueues a missed one-shot carrier for a persistent task without the envelope', async () => {
+    // Same carrier as the per-run case above, but standing for a persistent
+    // task: the mode clause no longer rejects it, so `!job.missed` is the
+    // only condition keeping the confirm-first notification out of the
+    // execute-now envelope (which would run it headless, unanswered).
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'persistent';
+            missed: true;
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt:
+              'Do NOT execute this prompt yet. First ask the user whether to run it now: review the next PR',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'persistent',
+            missed: true,
+          });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+    });
     const enqueued = JSON.stringify(
       vi.mocked(mockChat.sendMessageStream).mock.calls[0],
     );

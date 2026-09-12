@@ -23999,6 +23999,88 @@ describe('createServeApp', () => {
         ).toEqual([defaultId]);
       });
 
+      it('includes a legacy fixed-session task controller in the default source filter', async () => {
+        // A task created before `sessionMode` existed carries only a stored
+        // `sessionId`; the absent mode means historical fixed-session
+        // behaviour, so its controller must stay in the default catalog.
+        const legacyBoundId = '550e8400-e29b-41d4-a716-446655440205';
+        await writeStoredSession({
+          sessionId: legacyBoundId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'legacy fixed task controller',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          sourceType: 'scheduled_task',
+          sourceId: 'task-legacy',
+        });
+        await qwenCore.updateCronTasks(WS_BOUND, () => [
+          {
+            id: 'task-legacy',
+            cron: '0 9 * * *',
+            prompt: 'legacy fixed task',
+            recurring: true,
+            createdAt: 1,
+            lastFiredAt: null,
+            enabled: true,
+            sessionId: legacyBoundId,
+          },
+        ]);
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+        );
+
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?sourceType=default`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(
+          res.body.sessions.map(
+            (session: { sessionId: string }) => session.sessionId,
+          ),
+        ).toEqual([legacyBoundId]);
+      });
+
+      it('still serves the default catalog when the cron task store is unreadable', async () => {
+        const defaultId = '550e8400-e29b-41d4-a716-446655440206';
+        await writeStoredSession({
+          sessionId: defaultId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'default web shell session',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          sourceType: 'default',
+          sourceId: 'web-1',
+        });
+        const cronFile = qwenCore.getCronFilePath(WS_BOUND);
+        await fsp.mkdir(path.dirname(cronFile), { recursive: true });
+        await fsp.writeFile(cronFile, 'CORRUPT {{{', 'utf8');
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+        );
+
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?sourceType=default`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        // A corrupt task store hides the fixed controllers but must not fail
+        // the whole catalog.
+        expect(res.status).toBe(200);
+        expect(
+          res.body.sessions.map(
+            (session: { sessionId: string }) => session.sessionId,
+          ),
+        ).toEqual([defaultId]);
+      });
+
       it('returns persisted sessions matching sourceType and sourceId', async () => {
         await writeStoredSession({
           sessionId: '550e8400-e29b-41d4-a716-446655440101',
