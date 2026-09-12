@@ -294,7 +294,7 @@ describe('startInteractiveUI cross-session messaging', () => {
         },
       }) as unknown as LoadedSettings;
 
-    await start(makeConfig(), settingsWith('1m'));
+    await start(makeConfig(true), settingsWith('1m'));
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
     const minute = peerMessagingStart.mock.calls[0]?.[0] as {
       getHeldExpiryMs: () => number | null;
@@ -306,7 +306,7 @@ describe('startInteractiveUI cross-session messaging', () => {
       close: vi.fn().mockResolvedValue(undefined),
     });
 
-    await start(makeConfig(), settingsWith('never'));
+    await start(makeConfig(true), settingsWith('never'));
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
     const never = peerMessagingStart.mock.calls[0]?.[0] as {
       getHeldExpiryMs: () => number | null;
@@ -333,7 +333,7 @@ describe('startInteractiveUI cross-session messaging', () => {
       }),
     } as unknown as LoadedSettings;
 
-    await start(makeConfig(), settings);
+    await start(makeConfig(true), settings);
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
     const options = peerMessagingStart.mock.calls[0]?.[0] as {
       getPolicyScope: () => string | undefined;
@@ -346,7 +346,7 @@ describe('startInteractiveUI cross-session messaging', () => {
     // fewer parameters is assignable — and every record would then
     // advertise an address with no token: peers resolve it, fail to
     // authenticate, and every send is dropped while still reporting 'sent'.
-    const config = makeConfig();
+    const config = makeConfig(true);
 
     await start(config, enabledSettings);
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
@@ -445,7 +445,7 @@ describe('startInteractiveUI cross-session messaging', () => {
     lastPeerInboxFailure.value = failure;
     peerMessagingStart.mockResolvedValue(null);
 
-    await start(makeConfig(), enabledSettings);
+    await start(makeConfig(true), enabledSettings);
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
     const appTree = inkRender.mock.calls[0]?.[0] as ReactElement;
     const mounted = renderDom(appTree);
