@@ -34,6 +34,21 @@ const generalRestrictedSyntaxSelectors = [
   },
 ];
 
+// Undeclared imports are checked in shipped sources only: tests resolve
+// shared tooling such as vitest from the root manifest by design.
+const extraneousDependencyTestFiles = [
+  '**/*.test.{ts,tsx}',
+  '**/*.spec.{ts,tsx}',
+  '**/__tests__/**',
+  '**/test/**',
+  '**/tests/**',
+];
+const extraneousDependencyOptions = {
+  devDependencies: true,
+  optionalDependencies: true,
+  peerDependencies: true,
+};
+
 export default tseslint.config(
   {
     // Global ignores
@@ -219,6 +234,39 @@ export default tseslint.config(
       'prefer-const': ['error', { destructuring: 'all' }],
       radix: 'error',
       'default-case': 'error',
+    },
+  },
+  {
+    // A package must declare what its own sources import. npm and the hoisted
+    // pnpm layout both resolve a sibling's or the root's dependency, so a
+    // missing declaration stays invisible until the package is installed on
+    // its own — the check an isolated node_modules layout would add. Type-only
+    // imports are exempt because they disappear at build time.
+    files: [
+      'packages/**/src/**/*.{ts,tsx}',
+      'integrations/**/src/**/*.{ts,tsx}',
+    ],
+    ignores: extraneousDependencyTestFiles,
+    rules: {
+      'import/no-extraneous-dependencies': [
+        'error',
+        extraneousDependencyOptions,
+      ],
+    },
+  },
+  {
+    // export-html and insight carry a package.json only for "type" and their
+    // build script; web-templates declares what they import.
+    files: ['packages/web-templates/src/**/*.{ts,tsx}'],
+    ignores: extraneousDependencyTestFiles,
+    rules: {
+      'import/no-extraneous-dependencies': [
+        'error',
+        {
+          ...extraneousDependencyOptions,
+          packageDir: `${import.meta.dirname}/packages/web-templates`,
+        },
+      ],
     },
   },
   {

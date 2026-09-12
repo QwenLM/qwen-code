@@ -14756,7 +14756,11 @@ export class Session implements SessionContext {
               },
             };
           } else {
-            return { text: `@${part.uri}` };
+            return {
+              text: part.name
+                ? `@${part.uri} (original filename: ${JSON.stringify(part.name)})`
+                : `@${part.uri}`,
+            };
           }
         }
         case 'resource': {
