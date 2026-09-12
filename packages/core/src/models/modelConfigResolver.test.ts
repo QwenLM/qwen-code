@@ -895,6 +895,87 @@ describe('modelConfigResolver', () => {
     });
   });
 
+  describe('enableRequestMetadata reaches the provider through configuration', () => {
+    // The DashScope provider reads enableRequestMetadata off the resolved
+    // ContentGeneratorConfig. If the field is missing from
+    // MODEL_GENERATION_CONFIG_FIELDS the resolver drops it silently, so the option is
+    // readable in the provider but unsettable by a user. These go through
+    // resolveModelConfig rather than injecting the getter, which is the path that was
+    // broken.
+    it('carries a settings generationConfig value onto the resolved config', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          apiKey: 'key',
+          generationConfig: { enableRequestMetadata: true },
+        },
+        env: {
+          OPENAI_API_KEY: 'key',
+          OPENAI_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          OPENAI_MODEL: 'ZHIPU/GLM-5.3-Flash',
+        },
+      });
+
+      expect(result.config.enableRequestMetadata).toBe(true);
+      expect(result.sources['enableRequestMetadata'].kind).toBe('settings');
+    });
+
+    it('carries an explicit false, so the option can suppress as well as restore', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          apiKey: 'key',
+          generationConfig: { enableRequestMetadata: false },
+        },
+        env: {
+          OPENAI_API_KEY: 'key',
+          OPENAI_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          OPENAI_MODEL: 'qwen-max',
+        },
+      });
+
+      expect(result.config.enableRequestMetadata).toBe(false);
+    });
+
+    it('lets a modelProvider generationConfig win over settings, like every other field', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.QWEN_OAUTH,
+        cli: {},
+        settings: {
+          generationConfig: { enableRequestMetadata: false },
+        },
+        env: {},
+        modelProvider: {
+          id: 'qwen-oauth',
+          name: 'Qwen OAuth',
+          generationConfig: { enableRequestMetadata: true },
+        },
+      });
+
+      expect(result.config.enableRequestMetadata).toBe(true);
+      expect(result.sources['enableRequestMetadata'].kind).toBe(
+        'modelProviders',
+      );
+    });
+
+    it('stays undefined when nothing sets it, preserving the model-family default', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: { apiKey: 'key' },
+        env: {
+          OPENAI_API_KEY: 'key',
+          OPENAI_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          OPENAI_MODEL: 'qwen-max',
+        },
+      });
+
+      expect(result.config.enableRequestMetadata).toBeUndefined();
+    });
+  });
+
   describe('[Regression] issue-4219 — env-var-only path must call defaultModalities()', () => {
     it('[Regression] env-var-only path: modalities auto-detected for qwen3.6-35b-a3b', () => {
       // REPRODUCES issue-4219:
