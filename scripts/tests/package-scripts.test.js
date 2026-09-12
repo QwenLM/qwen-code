@@ -255,6 +255,23 @@ describe('package scripts', () => {
       expect(result.stderr).toContain('- mime-db@1.52.0');
     });
 
+    it('fails when a knownNpmLockGaps entry leaves the pnpm graph', () => {
+      // Deleting the pnpm key exercises the `!pnpmVersions.includes(key)`
+      // arm: the allowlist entry survives with nothing to describe, and the
+      // gate must say so instead of passing the version agreement.
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmLock(fixtureRoot, (lock) => {
+          delete lock.packages['mime-db@1.52.0'];
+        }),
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        'remove these entries from knownNpmLockGaps',
+      );
+      expect(result.stderr).toContain('- mime-db@1.52.0');
+    });
+
     it('fails when an install script has no allowBuilds decision', () => {
       const result = runCheckLockfile((fixtureRoot) =>
         mutatePnpmWorkspace(fixtureRoot, (workspace) => {
@@ -265,6 +282,30 @@ describe('package scripts', () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('no allowBuilds entry');
       expect(result.stderr).toContain('- esbuild');
+    });
+
+    it('reports an aliased install script under its real package name', () => {
+      // npmPackageName returns `details.name` for an aliased install
+      // (`"build-tool-cjs": "npm:build-tool@…"`). The build-approval loop
+      // must compare the real name, not the alias, so an allowBuilds entry
+      // under the alias cannot silence the gate.
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePackageLock(fixtureRoot, (lock) => {
+          lock.packages['node_modules/build-tool-cjs'] = {
+            name: 'build-tool',
+            version: '1.0.0',
+            resolved:
+              'https://registry.npmjs.org/build-tool/-/build-tool-1.0.0.tgz',
+            integrity: 'sha512-bogus',
+            hasInstallScript: true,
+          };
+        }),
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('no allowBuilds entry');
+      expect(result.stderr).toContain('- build-tool');
+      expect(result.stderr).not.toContain('- build-tool-cjs');
     });
 
     it('fails closed when pnpm-lock.yaml has no packages section', () => {
