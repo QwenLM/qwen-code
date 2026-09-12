@@ -2591,11 +2591,13 @@ export class LlmClient {
       return;
     }
 
-    // autoSkill counts tool calls and can trigger on both UserQuery and
-    // ToolResult turns so the threshold can fire mid-session.
+    // Accepted experience may finish in a Steer, Retry, or Hook continuation.
+    // Evaluate it there rather than waiting for another user/tool-result turn.
     if (
       messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.ToolResult
+      messageType === SendMessageType.ToolResult ||
+      this.userSteeredSinceReview ||
+      this.experienceSignalsSinceReview.retryArc
     ) {
       const projectRoot = this.config.getProjectRoot();
       const sessionId = this.config.getSessionId();

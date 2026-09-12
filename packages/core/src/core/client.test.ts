@@ -10002,6 +10002,104 @@ hello
         );
       });
 
+      it('schedules and resets the window after a terminal recursive steer', async () => {
+        for (let i = 0; i < 5; i++) {
+          recordOutcome(`read-${i}`, 'read_file', 'success', 'success', {});
+        }
+        mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
+          status: 'scheduled',
+          taskId: 'steer-review',
+        });
+        const accept = vi.fn();
+        const restore = vi.fn();
+        const getSteerInput = vi
+          .fn<() => Promise<SteerInput | undefined>>()
+          .mockResolvedValueOnce({
+            parts: [{ text: 'explain the result differently' }],
+            accept,
+            restore,
+          })
+          .mockResolvedValue(undefined);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'summarize the files' }],
+            new AbortController().signal,
+            'terminal-steer-review',
+            { type: SendMessageType.UserQuery, getSteerInput },
+          ),
+        );
+
+        expect(accept).toHaveBeenCalledOnce();
+        expect(restore).not.toHaveBeenCalled();
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledOnce();
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+          expect.objectContaining({
+            toolCallCount: 5,
+            experienceSignals: {
+              retryArc: false,
+              userSteer: true,
+              hasSubstantiveWork: false,
+            },
+          }),
+        );
+        expect(client['toolCallCount']).toBe(0);
+        expect(client['userSteeredSinceReview']).toBe(false);
+        expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+        expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      });
+
+      it('schedules recovery accepted by a terminal Retry', async () => {
+        Object.assign(client.getChat(), {
+          getHistoryLength: vi.fn().mockReturnValue(2),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        recordOutcome('failed-read', 'read_file', 'error', 'error', {});
+        await client.addHistory({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'failed-read',
+                name: 'read_file',
+                response: {},
+              },
+            },
+          ],
+        });
+        for (let i = 0; i < 3; i++) {
+          recordOutcome(`read-${i}`, 'read_file', 'success', 'success', {});
+        }
+        recordOutcome('recovered-read', 'read_file', 'success', 'success', {});
+        mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
+          status: 'scheduled',
+          taskId: 'retry-review',
+        });
+
+        await sendToolResult(
+          'recovered-read',
+          'read_file',
+          {},
+          SendMessageType.Retry,
+        );
+
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledOnce();
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+          expect.objectContaining({
+            toolCallCount: 5,
+            experienceSignals: {
+              retryArc: true,
+              userSteer: false,
+              hasSubstantiveWork: false,
+            },
+          }),
+        );
+        expect(client['toolCallCount']).toBe(0);
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(false);
+        expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+        expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      });
+
       it('records accepted steer input and ignores rejected steer input', async () => {
         await fromAsync(
           client.sendMessageStream(
