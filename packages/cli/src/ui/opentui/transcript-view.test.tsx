@@ -578,9 +578,9 @@ describe('OpenTuiTranscriptView', () => {
     // resolve-then-re-park appends the call at the waiting list's end while
     // its transcript card keeps its original index, so the mounted call can
     // be a LATER transcript item. Every parked card must budget against the
-    // mounted dialog (t2's fixed-lines mcp arm), not the first parked
-    // card's — cards pricing themselves against different dialogs
-    // over-commit the shared region.
+    // mounted dialog (t2's exec arm, with its outside-window warning row),
+    // not the first parked card's — cards pricing themselves against
+    // different dialogs over-commit the shared region.
     const hookBody = Array.from({ length: 20 }, () => 'reason').join('\n');
     const callsBefore = mocks.pendingSpy.mock.calls.length;
     render(
@@ -599,10 +599,12 @@ describe('OpenTuiTranscriptView', () => {
           }),
           toolItem({
             id: 't2',
-            tool: 'mcp__fs__write_file',
+            tool: 'run_shell_command',
             description: '{"c":"d"}',
             confirm: 'pending',
-            confirmType: 'mcp',
+            confirmType: 'exec',
+            confirmBody: 'echo $(date)',
+            confirmExtra: '⚠ Command substitution detected',
           }),
         ]}
       />,
@@ -613,9 +615,9 @@ describe('OpenTuiTranscriptView', () => {
     expect(dialogs.length).toBeGreaterThanOrEqual(2);
     for (const dialog of dialogs) {
       expect(dialog).toEqual({
-        type: 'mcp',
-        body: undefined,
-        extra: undefined,
+        type: 'exec',
+        body: 'echo $(date)',
+        extra: '⚠ Command substitution detected',
       });
     }
   });
