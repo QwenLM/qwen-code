@@ -68,6 +68,63 @@ describe('useHistoryManager', () => {
     expect(result.current.history[0].id).toBeGreaterThanOrEqual(timestamp);
   });
 
+  it('mints strictly increasing ids when callers pass out-of-order base timestamps', () => {
+    const { result } = renderHook(() => useHistory());
+
+    // Notification-turn shape from use-llm-stream.ts: the turn's items reuse
+    // the timestamp captured at submitQuery entry, while the notification
+    // display item is minted mid-turn from onRequestStarted with a fresh
+    // Date.now() base. When the ms gap between the two bases equals the
+    // counter delta between the two mints, base + counter repeats and the
+    // transcript renders two items under one React key.
+    const turnBase = 1_700_000_000_000;
+    const ids: number[] = [];
+    act(() => {
+      // Notification item minted first, 3ms after the turn's base.
+      ids.push(
+        result.current.addItem(
+          { type: 'notification', text: 'background task done' },
+          turnBase + 3,
+        ),
+      );
+      // Then the turn's own items, still on the entry timestamp.
+      ids.push(
+        result.current.addItem({ type: 'user', text: 'turn' }, turnBase),
+      );
+      ids.push(
+        result.current.addItem({ type: 'gemini', text: 'reply' }, turnBase),
+      );
+      ids.push(
+        result.current.addItem(
+          { type: 'gemini_content', text: 'reply continued' },
+          turnBase,
+        ),
+      );
+    });
+
+    expect(result.current.history).toHaveLength(4);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual([...ids].sort((a, b) => a - b));
+  });
+
+  it('keeps minting ids above the loaded range after loadHistory', () => {
+    const { result } = renderHook(() => useHistory());
+    const loaded = [
+      { id: 5001, type: 'user', text: 'restored' },
+      { id: 5003, type: 'gemini', text: 'restored reply' },
+    ] as HistoryItem[];
+
+    let minted = 0;
+    act(() => {
+      result.current.loadHistory(loaded);
+    });
+    act(() => {
+      minted = result.current.addItem({ type: 'user', text: 'fresh' }, 1000);
+    });
+
+    expect(minted).toBeGreaterThan(5003);
+  });
+
   it('replaces earlier findings displays when a new report_findings group commits', () => {
     // A delivered findings list REPLACES the session's earlier one: the
     // previous group's display collapses to the marker at commit time, so

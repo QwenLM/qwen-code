@@ -47,11 +47,24 @@ export interface UseHistoryManagerReturn {
 export function useHistory(): UseHistoryManagerReturn {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const messageIdCounterRef = useRef(0);
+  const lastMessageIdRef = useRef(0);
 
   // Generates a unique message ID based on a timestamp and a counter.
+  // Callers pass bases captured at different wall-clock times: a turn's items
+  // reuse the timestamp taken at submitQuery entry, while notification items
+  // are minted mid-turn from onRequestStarted with a fresh Date.now(). When
+  // the ms gap between two bases equals the counter delta between the two
+  // mints, base + counter repeats — a duplicate React key in the <Static>
+  // transcript. Clamp against the last minted id so ids stay strictly
+  // increasing no matter which base a caller supplies.
   const getNextMessageId = useCallback((baseTimestamp: number): number => {
     messageIdCounterRef.current += 1;
-    return baseTimestamp + messageIdCounterRef.current;
+    const id = Math.max(
+      baseTimestamp + messageIdCounterRef.current,
+      lastMessageIdRef.current + 1,
+    );
+    lastMessageIdRef.current = id;
+    return id;
   }, []);
 
   const loadHistory = useCallback((newHistory: HistoryItem[]) => {
@@ -73,6 +86,7 @@ export function useHistory(): UseHistoryManagerReturn {
       messageIdCounterRef.current,
       maxLoadedId - Date.now(),
     );
+    lastMessageIdRef.current = Math.max(lastMessageIdRef.current, maxLoadedId);
   }, []);
 
   // Adds a new item to the history state with a unique ID.
@@ -167,6 +181,7 @@ export function useHistory(): UseHistoryManagerReturn {
     }
     setHistory([]);
     messageIdCounterRef.current = 0;
+    lastMessageIdRef.current = 0;
   }, []);
 
   // Truncates history to exclude the item with the given ID and everything after it.
