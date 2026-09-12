@@ -17464,6 +17464,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     return { agent, agentPromise };
   }
 
+  it('qwen/settings getCore resolves the bootstrap target dir when cwd and sessionId are omitted', async () => {
+    const settings = makeCoreSettings();
+    // The no-sessionId fallback is the branch every in-repo caller actually
+    // takes (`serve/workspace-service/index.ts` sends `cwd` and no
+    // `sessionId`). Pin it with a distinct target dir so a revert to
+    // `process.cwd()` goes red.
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/boot-workspace-pin');
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/settings/getCore', {});
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
+      '/boot-workspace-pin',
+      expect.objectContaining({
+        consumeCorruptionEnvVars: true,
+        skipLoadEnvironment: true,
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/settings handlers resolve the active session target dir when cwd is omitted', async () => {
     const settings = makeCoreSettings();
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
@@ -17575,7 +17597,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('does not repoint the process-wide settings cache for a session-scoped read', async () => {
     const bootstrapSettings = makeCoreSettings();
     const worktreeSettings = makeCoreSettings();
-    const { agent, agentPromise } = await bootCoreSettingsAgent(bootstrapSettings);
+    const { agent, agentPromise } =
+      await bootCoreSettingsAgent(bootstrapSettings);
 
     const worktreeRoot = '/work/project/.qwen/worktrees/slug-a';
     vi.mocked(loadSettings).mockImplementation(
@@ -17604,9 +17627,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // A bare sessionId read must stay request-local: the process-wide cache
     // (read by workspaceReload / getPath / workspace status) must still hold
     // the bootstrap workspace's instance, not the worktree's.
-    expect(
-      (agent as unknown as { settings: LoadedSettings }).settings,
-    ).toBe(bootstrapSettings);
+    expect((agent as unknown as { settings: LoadedSettings }).settings).toBe(
+      bootstrapSettings,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -17685,6 +17708,51 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       code: -32004,
       data: { errorKind: 'session_not_found' },
     });
+    expect(vi.mocked(loadSettings)).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/getCore honors an explicit cwd over an unresolvable sessionId', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    // A request that names its workspace explicitly must resolve against that
+    // cwd even when the sessionId is stale/unpublished; the sessionId lookup is
+    // only needed when cwd is absent.
+    await agent.extMethod('qwen/settings/getCore', {
+      cwd: '/explicit',
+      sessionId: 'missing-session',
+    });
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
+      '/explicit',
+      expect.objectContaining({
+        consumeCorruptionEnvVars: true,
+        skipLoadEnvironment: true,
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/permissions/setRules rejects a malformed sessionId instead of silently retargeting the bootstrap workspace', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    // A present-but-malformed sessionId is a caller error, not "absent":
+    // treating it as absent would persist against the daemon's bootstrap
+    // workspace while the caller believes it addressed a specific session.
+    vi.mocked(loadSettings).mockClear();
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        sessionId: 12345,
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['Bash(git:*)'],
+      }),
+    ).rejects.toThrow('Invalid sessionId: expected a non-empty string');
     expect(vi.mocked(loadSettings)).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();

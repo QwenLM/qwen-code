@@ -6477,7 +6477,9 @@ class QwenAgent implements Agent {
     settings: LoadedSettings,
     settingsCwd: string,
   ): LoadedSettings {
-    if (path.resolve(settingsCwd) === path.resolve(this.config.getTargetDir())) {
+    if (
+      path.resolve(settingsCwd) === path.resolve(this.config.getTargetDir())
+    ) {
       this.settings = settings;
     }
     return settings;
@@ -6515,8 +6517,25 @@ class QwenAgent implements Agent {
     requestedCwd: string | undefined,
     params: Record<string, unknown>,
   ): string {
+    // An explicit `cwd` from the request wins outright: the `sessionId` lookup
+    // below only exists to resolve the session's own workspace root when the
+    // caller did not name one, so a well-targeted request must not be rejected
+    // over a field the resolver will not use.
+    if (requestedCwd) {
+      return requestedCwd;
+    }
     const sessionId = params['sessionId'];
-    if (typeof sessionId === 'string' && sessionId.length > 0) {
+    if (sessionId !== undefined && sessionId !== null) {
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        // A present-but-malformed `sessionId` (a number, an object, an empty
+        // string) is a caller error, not "absent": falling through would
+        // silently read/write the bootstrap workspace the caller never
+        // selected.
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid sessionId: expected a non-empty string',
+        );
+      }
       const session = this.sessions.get(sessionId);
       if (!session) {
         throw new RequestError(-32004, `Session not found: ${sessionId}`, {
@@ -6531,9 +6550,9 @@ class QwenAgent implements Agent {
       // `skipArtifactMigration: true`, so it never replaces `storage`). The
       // live cwd would make all twelve handlers read/write a stray
       // `<subdir>/.qwen/settings.json` after a single cd.
-      return requestedCwd || session.getConfig().storage.getProjectRoot();
+      return session.getConfig().storage.getProjectRoot();
     }
-    return requestedCwd || this.config.getTargetDir();
+    return this.config.getTargetDir();
   }
 
   private async buildCoreSettings(
@@ -6706,9 +6725,7 @@ class QwenAgent implements Agent {
           // stable workspace root; skip sessions in other workspaces so a
           // worktree's grant/deny doesn't fan out to every live session with
           // no record in their own settings files.
-          const sessionWorkspace = session
-            .getConfig()
-            .storage.getProjectRoot();
+          const sessionWorkspace = session.getConfig().storage.getProjectRoot();
           if (path.resolve(sessionWorkspace) !== path.resolve(settingsCwd)) {
             continue;
           }
@@ -13727,7 +13744,12 @@ class QwenAgent implements Agent {
         // (avoids redundant I/O and a concurrency window where another handler
         // could mutate settings between the two loads).
         const after = readPermissionRuleSet(settings.merged);
-        this.syncLivePermissionManagers(before, after, settingScope, settingsCwd);
+        this.syncLivePermissionManagers(
+          before,
+          after,
+          settingScope,
+          settingsCwd,
+        );
         return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
