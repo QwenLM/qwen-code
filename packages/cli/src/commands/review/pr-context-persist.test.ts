@@ -110,6 +110,39 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
+  it('a roundless stub does not divert the anonymous recovery (#10136 R20-1)', () => {
+    // The anonymous counter-advance branch protects a work list this
+    // machine already holds. Keyed on the file merely EXISTING, a
+    // contentless object diverted the recovery into it: `exRound` read -1,
+    // the branch advanced a counter over nothing, and the recovered
+    // findings were never written — so the next round had no ledger to
+    // dedup against and re-posted what the previous round already reported.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(side, JSON.stringify({ mergeBaseSha: 'b'.repeat(40) }));
+      persistRecoveredLedger(
+        side,
+        {
+          ledger,
+          commitId: 'a'.repeat(40),
+          reviewId: 42,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: false },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      expect(written['findings']).toEqual(ledger.findings);
+      expect(written['anonymousAdoption']).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a FOREIGN winner carries no planted churn state — and own streak still restores across the round gap', () => {
     // The round trip for the recovery seam, both halves: any account that
     // can submit a review can post a marker carrying `churnRounds`, and

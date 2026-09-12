@@ -31,7 +31,7 @@ import { pathTool } from '../script-lint.js';
 // The topology gate lives in `budget.ts` — it is a size ruling, and the round
 // cap needs the same one. Re-exported here because this file was its home and
 // the roster is where a reader looks for "which fan-out was owed".
-export { isTerritoryFanOut } from './budget.js';
+export { isTerritoryFanOut, isFixAuditRound } from './budget.js';
 import { isTerritoryFanOut } from './budget.js';
 
 /**
@@ -88,6 +88,12 @@ export interface RosterPlan {
    */
   effort?: unknown;
   repositoryContext?: unknown;
+  /**
+   * The capture command's incremental ruling. The roster reads it through
+   * `isTerritoryFanOut` — a critical-posture round keeps the territory
+   * shape and the full agent set whatever the narrowed delta's size says.
+   */
+  incremental?: unknown;
 }
 
 /** One agent this review must launch. */
@@ -297,6 +303,18 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // issue-fidelity pass regardless of whether it has a worktree. Both halves of
   // the identity, because the brief builder needs both — requiring an agent
   // nobody could build would wedge the run.
+  // …and on a fix-audit round too (#10104). The posture's first draft
+  // dropped Agent 0 here on the claim that the one Critical-grade fidelity
+  // regression — a fix commit removing behaviour the issue required — is
+  // the removed-behavior audit's territory (1b), which the round keeps. A
+  // probe through the real pipeline disproved the claim in its canonical
+  // shape: the published scope is assembled from `base..head`, and
+  // behaviour the PR itself added is absent at the merge base and — once a
+  // fix commit removes it — absent at head, so the removal appears on
+  // NEITHER side: `removedLines` stays 0, `hasDeletions` drops 1b, and no
+  // chunk territory displays it. Issue fidelity re-checks head against the
+  // issue whatever the diff displays, so it is the one auditor that can
+  // still see the class, and the round keeps it.
   if (isPositivePrNumber(plan.prNumber) && typeof plan.ownerRepo === 'string') {
     add('0');
   }
@@ -399,14 +417,14 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   //
   // Skipping them was tempting and wrong. The premise was that an interaction
   // file's full-range slice is code the previous round already cleared — true
-  // only while the MERGE BASE holds still between rounds, and nothing
-  // enforces that. The anchor gate validates `--since` against head history;
-  // neither the round cache nor the posted ledger carries a base identity, so
-  // a BACKWARD base move — the author retargets the PR to an older base, an
-  // ordinary GitHub operation — is accepted. `newBase..anchor` then carries
-  // hunks no round has read, they arrive inside a heavy interaction file's
-  // full-range slice, and these three agents are the only ones that would
-  // have walked them. A clean verdict re-anchors past them for good.
+  // only while the MERGE BASE holds still between rounds. The anchor gate
+  // validates `--since` against head history and rules nothing about the
+  // base, so a BACKWARD base move — the author retargets the PR to an older
+  // base, an ordinary GitHub operation — is accepted. `newBase..anchor` then
+  // carries hunks no round has read, they arrive inside a heavy interaction
+  // file's full-range slice, and these three agents are the only ones that
+  // would have walked them. A clean verdict re-anchors past them for good.
+
   //
   // So the skip is off until the anchor can prove base continuity. It costs
   // three agents on a rare shape — heavy, unchanged since the anchor, and

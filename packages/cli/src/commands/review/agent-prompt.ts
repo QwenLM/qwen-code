@@ -51,7 +51,11 @@ import {
   MAX_RESUME_CALLS,
   SHELL_TOOL_MAX_TIMEOUT_MS,
 } from './lib/build-budget.js';
-import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
+import {
+  interactionEntryOf,
+  launchToolBudget,
+  reverseAuditRoundCap,
+} from './lib/budget.js';
 import { DOCS_NAV_PATH_RE, DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import {
   clearBudgetStop,
@@ -108,6 +112,7 @@ import {
   type WorktreeResidue,
 } from './lib/worktree.js';
 import {
+  isFixAuditRound,
   isTerritoryFanOut,
   isPositivePrNumber,
   requiredAgents,
@@ -198,6 +203,26 @@ interface IncrementalScope {
   deltaFiles: string[];
   interaction: Array<{ path: string; importsChanged: string[] }>;
 }
+
+/**
+ * The fix-audit round's framing (#10104), rendered wherever a territory is
+ * briefed under the posture — the chunk agent's brief and the reverse
+ * auditor's role brief alike (#10136): an auditor that never learns the
+ * floor governs posting, not finding, can drop or inflate a finding on the
+ * wave the posture exists to keep running.
+ */
+const FIX_AUDIT_BANNER =
+  `**Fix-audit round (critical posting posture).** The commits since the anchor ` +
+  `answer earlier rounds' findings, and this round's posting floor is Critical — ` +
+  `everything below it is recorded and deferred, never posted — except ` +
+  `pre-confirmed \`[build]\`/\`[test]\`/\`[probe]\` findings, which stay inline at any ` +
+  `floor. Spend your walk ` +
+  `where such a round's signal measurably lives: for each change in your ` +
+  `territory, work out what the fix changed and what that change could break — ` +
+  `the guard added with no test of its own, the caller the moved callee leaves ` +
+  `behind, the invariant the fix's shortcut skips. Severities are unchanged: ` +
+  `report every finding at its true severity (the floor governs posting, never ` +
+  `finding), and never inflate one to clear the floor.`;
 
 /**
  * The per-file scope bullets for ONE chunk's files — uncapped, because the
@@ -301,23 +326,14 @@ function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
     Array.isArray(v)
       ? v.filter((s): s is string => typeof s === 'string' && s.length > 0)
       : [];
+  // ONE admission per entry, shared with the roster and compose's
+  // round-shape disclosure (`interactionEntryOf`, #10136): an entry IS its
+  // edge, and a census that cannot be true is dropped from an entry that
+  // is otherwise kept.
   const interaction = Array.isArray(raw.interaction)
     ? raw.interaction
-        .filter(
-          (e): e is { path: string; importsChanged?: unknown } =>
-            !!e &&
-            typeof (e as { path?: unknown }).path === 'string' &&
-            (e as { path: string }).path.length > 0 &&
-            // An interaction entry IS its edge: with no surviving
-            // importsChanged the brief would read "because it imports ,
-            // which changed" — a seam pointing at nothing.
-            strings((e as { importsChanged?: unknown }).importsChanged).length >
-              0,
-        )
-        .map((e) => ({
-          path: e.path,
-          importsChanged: strings(e.importsChanged),
-        }))
+        .map(interactionEntryOf)
+        .filter((e): e is NonNullable<typeof e> => e !== null)
     : [];
   // The SAME validity notion the roster applies
   // (`incrementalInteractionPaths`): a partially corrupt delta list
@@ -756,6 +772,9 @@ export function buildChunkAgentPrompt(
         `previous clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), ` +
         `plus still-clean files one import hop from a change. Your files' scopes:`,
     ];
+    if (isFixAuditRound(report)) {
+      lines.splice(1, 0, FIX_AUDIT_BANNER, '');
+    }
     if (deltaHere.length > 0) {
       lines.push(
         ...deltaHere.map(
@@ -1155,6 +1174,10 @@ function diffReadingBlock(
     // as the bare chunk agent's brief lists them.
     ...(incremental && scoped
       ? [
+          // The posture's framing rides with the territory it frames: a
+          // reverse auditor briefed under the fix-audit shape must hear the
+          // same floor-governs-posting rule the chunk agent did (#10136).
+          ...(isFixAuditRound(report) ? [FIX_AUDIT_BANNER, ''] : []),
           ...chunkScopeBullets(
             incremental,
             chunks.find((c) => c.id === chunkId),
@@ -2981,16 +3004,37 @@ function admitReverseAuditRound(
  * compose-review splice that dedups it no longer runs — only this
  * instruction removes it.
  */
-function refuseConverged(planPath: string): void {
+function refuseConverged(
+  planPath: string,
+  narrowed: ReadonlyArray<{ chunkId: number; dryRound: number }> = [],
+): void {
   clearBudgetStop(planPath);
+  // The round that converges through narrowing prints no round output, so
+  // its `posture narrowing:` note would never appear (#10136): the trade
+  // is named here instead, chunk by chunk, exactly as a built round names
+  // it — the cleanest run must disclose no less than the others.
+  const narrowedNote =
+    narrowed.length === 0
+      ? ''
+      : ' Posture-narrowed this round (#10104): ' +
+        narrowed
+          .map(
+            (n) =>
+              `chunk ${n.chunkId} — not a delta territory, dry in round ${n.dryRound}`,
+          )
+          .join('; ') +
+        '.';
   writeStderrLine(
-    'CONVERGED: every chunk holds two consecutive substantive dry audits; ' +
+    'CONVERGED: every chunk has left the wave — retired territories hold ' +
+      'two consecutive substantive dry audits, and on a fix-audit round a ' +
+      'posture-narrowed territory holds its single one; ' +
       'the reverse audit has converged — stop the loop and proceed to ' +
       'Step 6. This is a clean convergence, not a gap: no ' +
       'unreviewedDimensions entry is owed. If an earlier round-cap or ' +
       'budget refusal told you to add its stop entry to ' +
       'unreviewedDimensions, remove it now — this convergence supersedes ' +
-      'it.',
+      'it.' +
+      narrowedNote,
   );
   process.exitCode = 5;
 }
@@ -3019,6 +3063,74 @@ function noteUncertifiedChunks(planPath: string, diagnostics: string[]): void {
 }
 
 /**
+ * The fix-audit posture's wave-narrowing context (#10104): which chunks hold
+ * a delta file. Null everywhere the posture is off, so the schedule is
+ * byte-for-byte what it always was. A chunk holding only interaction files
+ * is NOT a delta territory — it is exactly the territory the narrowing
+ * exists to stop re-auditing once provably dry. Null ALSO when no chunk
+ * covers a delta file: an honest capture cannot produce that disjoint state
+ * (delta files come from the narrowing's own touched set, and chunks tile
+ * the published diff), so the input is a hand-edited plan — and an empty
+ * set would treat EVERY chunk as non-delta, converging the loop after one
+ * dry receipt each. Every sibling reader fails malformed input toward more
+ * coverage; null restores the ordinary schedule and does the same.
+ */
+function postureNarrowing(
+  report: PlanReport,
+): { deltaChunkIds: ReadonlySet<number> } | null {
+  if (!isFixAuditRound(report)) return null;
+  const scope = incrementalScopeOf(report);
+  if (scope === null) return null;
+  const delta = new Set(scope.deltaFiles);
+  const classified = new Set([
+    ...scope.deltaFiles,
+    ...scope.interaction.map((e) => e.path),
+  ]);
+  const ids = new Set<number>();
+  const chunks = Array.isArray(report.chunks)
+    ? (report.chunks as Array<{ id?: unknown; files?: unknown }>)
+    : [];
+  for (const c of chunks) {
+    if (!Number.isSafeInteger(c?.id)) continue;
+    // An unreadable `files` list is the one malformed shape that must NOT
+    // be coerced to `[]` (#10136 R17-5): `[]` passes both gates below
+    // vacuously, silently classifying the chunk as a NON-delta territory —
+    // failing it toward LESS coverage where every sibling shape returns
+    // null. An honest capture never emits a chunk without a files list
+    // (`planChunks` tiles the published diff), so unreadable — or
+    // explicitly empty — is a hand-edited plan and restores the ordinary
+    // schedule like every other malformed shape here.
+    if (!Array.isArray(c?.files) || c.files.length === 0) return null;
+    const files = c.files as Array<{ path?: unknown }>;
+    // Containment (#10136 R12-1): a chunk holding a file the scope record
+    // classifies as NEITHER delta nor interaction is a chunk the record
+    // never ruled on. An honest capture cannot produce it (`widenScope`
+    // publishes exactly touched ∪ interaction, and the sections are tiled
+    // from that), so the input is a hand-edited or corrupted plan — and
+    // narrowing such a chunk out on one dry receipt would fail it toward
+    // LESS coverage. Null restores the ordinary schedule, like every
+    // sibling reader of malformed input.
+    if (
+      files.some(
+        (f) =>
+          typeof f?.path !== 'string' ||
+          f.path === '' ||
+          !classified.has(f.path),
+      )
+    ) {
+      return null;
+    }
+    // Every path is a non-empty string here — the gate above returned
+    // otherwise.
+    if (files.some((f) => delta.has(f.path as string))) {
+      ids.add(c.id as number);
+    }
+  }
+  if (ids.size === 0) return null;
+  return { deltaChunkIds: ids };
+}
+
+/**
  * The schedule read shared by the round builder and the per-chunk path
  * (#9272 — hand-rolled at both sites and edited in lockstep across three
  * consecutive PRs: the naming, the repair suppression, the deferral): a
@@ -3029,11 +3141,11 @@ function noteUncertifiedChunks(planPath: string, diagnostics: string[]): void {
  * the build's own scope.
  */
 function reverseAuditScheduleOrNote(
+  report: PlanReport,
   planPath: string,
   chunkIds: number[],
   round: number,
   env: NodeJS.ProcessEnv,
-  diffPathAbsolute: unknown,
   noteTail: string,
 ): { schedule: RoundSchedule | null; scheduleNote: string | null } {
   try {
@@ -3043,7 +3155,10 @@ function reverseAuditScheduleOrNote(
         chunkIds,
         round,
         env,
-        typeof diffPathAbsolute === 'string' ? diffPathAbsolute : undefined,
+        typeof report.diffPathAbsolute === 'string'
+          ? report.diffPathAbsolute
+          : undefined,
+        postureNarrowing(report),
       ),
       scheduleNote: null,
     };
@@ -3144,11 +3259,11 @@ function runAllChunks(
     round >= retirementReadsFrom
   ) {
     const read = reverseAuditScheduleOrNote(
+      report,
       planPath,
       chunks.map((c) => c.id),
       round,
       process.env,
-      report.diffPathAbsolute,
       'auditing every chunk.',
     );
     schedule = read.schedule;
@@ -3156,7 +3271,7 @@ function runAllChunks(
   }
 
   if (schedule !== null && schedule.converged) {
-    refuseConverged(planPath);
+    refuseConverged(planPath, schedule.narrowed);
     return;
   }
 
@@ -3205,6 +3320,7 @@ function runAllChunks(
   );
   const coldSet = new Set(schedule?.coldChecks ?? []);
   const skipped = schedule?.skipped ?? [];
+  const narrowedOut = schedule?.narrowed ?? [];
 
   const digest = findingsDigest(findingsContent, rules);
   const roundPart = roundPartOf(round);
@@ -3243,11 +3359,16 @@ function runAllChunks(
   // counts; when nothing is retired the sentence is byte-identical to what
   // it always said.
   const scope =
-    skipped.length === 0
+    skipped.length === 0 && narrowedOut.length === 0
       ? 'one per chunk'
-      : `one per chunk still under audit (${skipped.length} retired ` +
-        `chunk(s) skipped; the retirement note after the end-of-round line ` +
-        `says which — relay it to the terminal)`;
+      : narrowedOut.length === 0
+        ? `one per chunk still under audit (${skipped.length} retired ` +
+          `chunk(s) skipped; the retirement note after the end-of-round line ` +
+          `says which — relay it to the terminal)`
+        : `one per chunk still under audit (${skipped.length} retired and ` +
+          `${narrowedOut.length} posture-narrowed chunk(s) skipped; the ` +
+          `notes after the end-of-round line say which — relay them to ` +
+          `the terminal)`;
   const planRoundCap = reverseAuditRoundCap(
     report,
     hasReviewDeadline(process.env),
@@ -3273,9 +3394,36 @@ function runAllChunks(
               )
               .join('\n'),
         ];
+  const narrowingNote =
+    narrowedOut.length === 0
+      ? []
+      : [
+          `posture narrowing (#10104): on this critical-posture round the ` +
+            `wave re-launches the delta territories under the ordinary ` +
+            `retirement rules (a twice-dry one only on its cold-check ` +
+            `rounds) and every non-delta chunk the previous waves could not ` +
+            `certify dry — one that yielded, one whose latest receipt is ` +
+            `uncertified (unknown), or one with no audit history stays in ` +
+            `the wave, and one whose dry receipt is stale against a ` +
+            `same-digest yield, an uncertified receipt, or a filing whose ` +
+            `file line cannot be read as a comparable token returns to the ` +
+            `ordinary retirement rules; a chunk holding no delta file ` +
+            `leaves the schedule after one substantive dry audit — a round the ` +
+            `record certifies dry in every member, and whose findings list ` +
+            `can be read at all where an earlier round was not dry — and ` +
+            `takes no cold checks. Narrowed out this round:\n` +
+            narrowedOut
+              .map(
+                (n) =>
+                  `chunk ${n.chunkId} — not a delta territory, dry in round ` +
+                  `${n.dryRound}`,
+              )
+              .join('\n'),
+        ];
   if (batch) {
     writeStdoutLine(JSON.stringify(createWorkflowBatch(planPath, keys)));
-    for (const note of retirementNote) writeStderrLine(note);
+    for (const note of [...retirementNote, ...narrowingNote])
+      writeStderrLine(note);
   } else {
     writeStdoutLine(
       [
@@ -3285,7 +3433,8 @@ function runAllChunks(
           `deliverable, and a launch reconstructed from a sample matches no ` +
           `record. Blocks are numbered \`auditor k of ${dueChunks.length}\`, and ` +
           `the output ends with an end-of-round line — followed by the ` +
-          `retirement note, when there is one. If either the numbering or the ` +
+          `retirement and posture-narrowing notes, when there are any. If ` +
+          `either the numbering or the ` +
           `end-of-round line is missing, the output was truncated in transit; ` +
           `rebuild just the missing chunks with --chunk <id>. Write each ` +
           `Agent call's \`description\` (the task ` +
@@ -3295,6 +3444,7 @@ function runAllChunks(
         ...blocks,
         `───── end of round — ${dueChunks.length} auditors ─────`,
         ...retirementNote,
+        ...narrowingNote,
       ].join('\n\n'),
     );
   }
@@ -3744,17 +3894,17 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     let scheduleNote: string | null = null;
     if (args.round !== undefined) {
       const read = reverseAuditScheduleOrNote(
+        report,
         args.plan,
         planChunkIds,
         args.round,
         process.env,
-        report.diffPathAbsolute,
         'auditing the chunk.',
       );
       const schedule = read.schedule;
       scheduleNote = read.scheduleNote;
       if (!roundAdmitted && schedule !== null && schedule.converged) {
-        refuseConverged(args.plan);
+        refuseConverged(args.plan, schedule.narrowed);
         return;
       }
       // The round builder's diagnostic, narrowed to this chunk (#9213 on

@@ -1600,7 +1600,15 @@ export function persistRecoveredLedger(
       ) {
         return;
       }
-      if (!identityKnown && existing !== null) {
+      // The anonymous branch protects a work list this machine already
+      // holds, so it turns on the file HOLDING one — a real round — not on
+      // the file merely existing (#10136 R20-1). A contentless object (a
+      // torn write, a stub some other writer left) carries no round, reads
+      // `exRound: -1`, and diverted the recovery here: the branch advanced
+      // a counter over nothing and dropped the recovered work list, so the
+      // next round had no ledger to dedup against and re-posted what the
+      // previous round already reported.
+      if (!identityKnown && existing !== null && exRound >= 0) {
         // Anonymous recovery over an existing file: the guard the docblock's
         // fourth outcome describes. A same-round winner changes nothing (the
         // drive-by shape: equal round, later review); a strictly higher one
