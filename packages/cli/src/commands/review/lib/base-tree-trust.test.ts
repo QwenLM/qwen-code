@@ -16,7 +16,7 @@
 // hand-built fixture used an integer millisecond, and the sub-millisecond
 // drift that broke the real thing could not occur in it.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   existsSync,
   lstatSync,
@@ -42,6 +42,30 @@ import {
   createReviewWorktreeLease,
   recordReviewWorktreeLeaseMergeBase,
 } from '../../../services/review-worktree-lease.js';
+
+// Set from exactly the cases that need it: `readFileSync` throws the errno the
+// predicate returns for a path — a trust file this process cannot read. Mode
+// bits cannot stage that here, because the suite runs as root in the CI image.
+const fsFaults = vi.hoisted(() => ({
+  readFails: null as ((path: string) => string | null) | null,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    readFileSync: ((...args: Parameters<typeof actual.readFileSync>) => {
+      const code = fsFaults.readFails?.(String(args[0])) ?? null;
+      if (code !== null) {
+        throw Object.assign(
+          new Error(`${code}: stubbed read failure, open '${String(args[0])}'`),
+          { code },
+        );
+      }
+      return actual.readFileSync(...args);
+    }) as typeof actual.readFileSync,
+  };
+});
 
 describe('base-tree trust store', () => {
   let repo: string;
@@ -268,6 +292,7 @@ describe('base-tree trust store', () => {
     recordReviewWorktreeLeaseMergeBase(repo, 'pr-1', SHA_A);
     const first = runIdentity(worktree);
     expect(first.mergeBaseSha).toBe(SHA_A);
+    expect(first.mergeBaseStale).toBe(false);
     // Recording the base this capture resolved does NOT rotate: there was
     // nothing to disagree with, and rotating here would drop a standing
     // tree on the ordinary path.
@@ -276,6 +301,12 @@ describe('base-tree trust store', () => {
     // A same-session re-capture at the SAME base leaves the identity alone,
     // so the standing base tree is still reused.
     acquireLease('prompt-b');
+    // ...and between that refresh and the capture's own record there is NO
+    // anchor. The refresh keeps the previous capture's merge base only as
+    // `priorMergeBaseSha`, which the read site never treats as one — so a
+    // capture whose own record write fails refuses, rather than inheriting
+    // the last round's base as its own (R4-7).
+    expect(runIdentity(worktree).mergeBaseSha).toBeUndefined();
     recordReviewWorktreeLeaseMergeBase(repo, 'pr-1', SHA_A);
     expect(runIdentity(worktree).identity).toBe(first.identity);
 
@@ -284,6 +315,13 @@ describe('base-tree trust store', () => {
     const moved = runIdentity(worktree);
     expect(moved.mergeBaseSha).toBe(SHA_B);
     expect(moved.identity).not.toBe(first.identity);
+
+    // The capture's staleness ruling is read from the same host-side record,
+    // never from the plan (R5-7).
+    recordReviewWorktreeLeaseMergeBase(repo, 'pr-1', SHA_B, undefined, {
+      stale: true,
+    });
+    expect(runIdentity(worktree).mergeBaseStale).toBe(true);
   });
 
   it('takes the plan entirely out of the identity — no touch of any kind rotates', () => {
@@ -512,6 +550,49 @@ describe('base-tree trust store', () => {
     expect(state.established).toBe('healed');
     expect(state.nonce).toMatch(/^[0-9a-f]{32}$/);
     expect(JSON.parse(readFileSync(p, 'utf8')).nonce).toBe(state.nonce);
+  }, 10_000);
+
+  it('refuses — never overwrites — a trust file it cannot READ (R3-1)', () => {
+    // Twenty null reads do not make a file torn: `readTrust` answers null for
+    // any read errno as well. Healing over an EACCES/EIO/ESTALE file
+    // destroyed state whose provenance nobody established, and then called
+    // it this run's own torn bookkeeping.
+    acquireLease();
+    const p = baseTreeTrustPath(worktree, plan);
+    const identity = runIdentity(worktree).identity;
+    mkdirSync(join(p, '..'), { recursive: true });
+    const standing = JSON.stringify({
+      identity: identity + 1,
+      baseSha: SHA_B,
+      nonce: 'n',
+      trees: {},
+    });
+    writeFileSync(p, standing);
+    fsFaults.readFails = (path) => (path === p ? 'EACCES' : null);
+    try {
+      expect(() => establishTrust(p, identity, SHA_A)).toThrow(/EACCES/);
+    } finally {
+      fsFaults.readFails = null;
+    }
+    expect(readFileSync(p, 'utf8')).toBe(standing);
+  }, 10_000);
+
+  it('reports a PARSEABLE file of another shape as a rotation, not a heal (R3-1)', () => {
+    // The fence spends `healed` as "this run's own bookkeeping tore", which
+    // declines instead of rebuilding. A file that PARSES is some other
+    // generation's — an older build's format, a hand edit — so replacing it
+    // is a rotation, and a tree standing beside it is a leftover.
+    acquireLease();
+    const p = baseTreeTrustPath(worktree, plan);
+    const identity = runIdentity(worktree).identity;
+    mkdirSync(join(p, '..'), { recursive: true });
+    writeFileSync(
+      p,
+      JSON.stringify({ identity: 'an-older-format', trees: {} }),
+    );
+    const state = establishTrust(p, identity, SHA_A);
+    expect(state.established).toBe('rotated');
+    expect(JSON.parse(readFileSync(p, 'utf8')).identity).toBe(identity);
   }, 10_000);
 
   it('records what a build left, per tree, preserving the rest of the file', () => {

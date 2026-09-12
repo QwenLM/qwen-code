@@ -34,6 +34,7 @@ import {
   clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
   recordReviewWorktreeLeaseMergeBase,
+  restoreReviewWorktreeLeaseMergeBase,
   readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
@@ -977,7 +978,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     let priorFetchedSha: string | null = null;
     if (args.resume) {
       const outcome = tryResume(args, wt, platform);
-      if (outcome.resumed) return;
+      if (outcome.resumed) {
+        // A continuation returns before the resolution that records the
+        // host-side merge base, and the lease acquisition above has already
+        // dropped the anchor (on purpose — see `createReviewWorktreeLease`).
+        // Without putting it back, every resumed review had no anchor and
+        // `base-tree` refused for the rest of it. The value restored is the
+        // lease's own prior, never the report or the plan.
+        restoreReviewWorktreeLeaseMergeBase(
+          process.cwd(),
+          leaseTarget,
+          sessionId,
+        );
+        return;
+      }
       resumeRefusal = outcome.reason;
       priorFetchedSha = outcome.priorFetchedSha;
       writeStdoutLine(
@@ -1188,15 +1202,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // PREVIOUS round's value survive in the lease and then AUTHENTICATE a
     // plan rewritten back to it. The anchor has to belong to the capture
     // that owns the plan, so a capture that resolved a (possibly stale)
-    // merge base records it; `base-tree` refuses the stale-base round on
-    // `plan.baseFetchFailed` separately, which is where that judgement
-    // belongs.
+    // merge base records it — together with the capture's own ruling that it
+    // may be stale, which is what `base-tree` refuses the stale-base round
+    // on. That ruling used to be read from `plan.baseFetchFailed` alone,
+    // inside the mount, where the reviewed code could flip it to "fresh" and
+    // have the anchor authenticate a stale base; see `mergeBaseStale`.
     if (mergeBaseSha !== null) {
       recordReviewWorktreeLeaseMergeBase(
         process.cwd(),
         leaseTarget,
         mergeBaseSha,
         sessionId,
+        { stale: baseFetchFailed },
       );
     }
     const diffRel = tmpFile(`pr-${prNumber}`, 'diff.txt');

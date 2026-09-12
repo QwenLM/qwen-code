@@ -272,6 +272,8 @@ function reviewTargetOf(worktree: string): string {
 export function runIdentity(worktree: string): {
   identity: number;
   mergeBaseSha?: string;
+  /** The capture's own ruling that `mergeBaseSha` may be stale, host-side. */
+  mergeBaseStale: boolean;
 } {
   const resolved = resolve(worktree);
   const target = reviewTargetOf(worktree);
@@ -286,6 +288,7 @@ export function runIdentity(worktree: string): {
     worktreePath?: unknown;
     identity?: unknown;
     mergeBaseSha?: unknown;
+    mergeBaseStale?: unknown;
   };
   const raw = readJsonFileSafely(leaseFile, { clearWedge: false });
   if (raw === null) {
@@ -328,6 +331,7 @@ export function runIdentity(worktree: string): {
       typeof lease.mergeBaseSha === 'string' && lease.mergeBaseSha
         ? lease.mergeBaseSha
         : undefined,
+    mergeBaseStale: lease.mergeBaseStale === true,
   };
 }
 
@@ -409,6 +413,31 @@ function readTrust(trustPath: string): TrustFile | null {
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * What an unreadable trust file actually is — see the heal arm of
+ * `establishTrust`. Throws on any errno other than ENOENT.
+ */
+function classifyUnreadableTrust(path: string): 'torn' | 'foreign' {
+  let isFile: boolean;
+  try {
+    isFile = lstatSync(path).isFile();
+  } catch (err) {
+    // Gone — `readJsonFileSafely` clears a non-regular wedge, and a racing
+    // writer may have renamed over it. Nothing stands to be destroyed.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'torn';
+    throw err;
+  }
+  if (!isFile) return 'torn';
+  const raw = readFileSync(path, 'utf8'); // errno propagates, by design
+  if (raw.trim() === '') return 'torn';
+  try {
+    JSON.parse(raw);
+  } catch {
+    return 'torn';
+  }
+  return 'foreign';
 }
 
 /** tmp-then-rename, so lock-free readers on the reuse path never see a half file. */
@@ -524,9 +553,28 @@ export function establishTrust(
   // already read as no state by every reader, and leaving it wedges the
   // run's shards on a file none of them can adopt. The 'healed' marker lets
   // the fence tell "this run's bookkeeping tore" from "this run never ran".
-  const healed = mint();
-  atomicWrite(trustPath, healed);
-  return { nonce: healed.nonce, established: 'healed', conflict: false };
+  //
+  // But ONLY a file that is actually torn. Twenty consecutive nulls from
+  // `readTrust` do not establish that: it also answers null for a file that
+  // parses but does not have this build's shape, and for any read errno. So
+  // the file is classified before anything is written over it —
+  //   - an errno other than ENOENT (EACCES, EIO, ESTALE, fd exhaustion)
+  //     THROWS, and the caller reports the command unavailable. Overwriting a
+  //     file this process cannot read destroys state whose provenance nobody
+  //     established, which is the one thing this function must not do.
+  //   - a file that PARSES is not torn; it is some other generation's (an
+  //     older build's format, a hand edit). Replacing it is a rotation, and
+  //     is reported as one — never as `healed`, which the fence spends as
+  //     "this run's own bookkeeping tore".
+  //   - empty, unparseable, or cleared as a non-regular wedge: torn. Healed.
+  const kind = classifyUnreadableTrust(trustPath);
+  const replacement = mint();
+  atomicWrite(trustPath, replacement);
+  return {
+    nonce: replacement.nonce,
+    established: kind === 'foreign' ? 'rotated' : 'healed',
+    conflict: false,
+  };
 }
 
 /**

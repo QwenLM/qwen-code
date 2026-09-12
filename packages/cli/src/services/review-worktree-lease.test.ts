@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cleanupReviewWorktreeLeases,
   recordReviewWorktreeLeaseMergeBase,
+  restoreReviewWorktreeLeaseMergeBase,
   clearReviewWorktreeLease,
   clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
@@ -1515,8 +1516,9 @@ describe('lease acquisition is atomic (#9205)', () => {
     // mount had rewritten back to that stale sha, so the run reused and
     // certified a base tree at a commit that was not this round's base at
     // all. Whether a stale fetch makes the sha untrustworthy is
-    // `base-tree`'s to judge from `plan.baseFetchFailed`; it is not a reason
-    // to leave the anchor pointing at someone else's round.
+    // `base-tree`'s to judge, from the ruling recorded beside the anchor (see
+    // the R5-7 case); it is not a reason to leave the anchor pointing at
+    // someone else's round.
     const root = createRepository();
     createReviewWorktreeLease(leaseParams(root));
     recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'a'.repeat(40));
@@ -1690,6 +1692,156 @@ describe('lease acquisition is atomic (#9205)', () => {
     const moved = readReviewWorktreeLease(root, 'pr-1');
     expect(moved?.mergeBaseSha).toBe('b'.repeat(40));
     expect(moved?.identity).not.toBe(n1);
+  });
+
+  it('restores the anchor on a RESUMED capture from the host-side prior (R5-2)', () => {
+    // `fetch-pr --resume` re-acquires the lease — whose refresh drops the
+    // anchor — and returns before the resolution that records one, because a
+    // continuation does not recapture. Every resumed review then had no
+    // anchor, and `base-tree` refused for the rest of it.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+      { stale: true },
+    );
+    const n1 = readReviewWorktreeLease(root, 'pr-1')?.identity;
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBeUndefined();
+
+    // Only this session's lease.
+    restoreReviewWorktreeLeaseMergeBase(root, 'pr-1', 'session-other');
+    restoreReviewWorktreeLeaseMergeBase(root, 'pr-1', undefined);
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBeUndefined();
+
+    restoreReviewWorktreeLeaseMergeBase(root, 'pr-1', 'session-a');
+    const restored = readReviewWorktreeLease(root, 'pr-1');
+    expect(restored?.mergeBaseSha).toBe('a'.repeat(40));
+    // The staleness ruling comes back WITH it, and nothing moved.
+    expect(restored?.mergeBaseStale).toBe(true);
+    expect(restored?.identity).toBe(n1);
+
+    // Never over an anchor that already stands.
+    writeFileSync(
+      reviewLeasePath(root, 'pr-1'),
+      JSON.stringify({ ...restored, mergeBaseSha: 'c'.repeat(40) }),
+    );
+    restoreReviewWorktreeLeaseMergeBase(root, 'pr-1', 'session-a');
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBe(
+      'c'.repeat(40),
+    );
+
+    // Never inventing one where no capture recorded any.
+    const fresh = createRepository();
+    createReviewWorktreeLease(leaseParams(fresh));
+    restoreReviewWorktreeLeaseMergeBase(fresh, 'pr-1', 'session-a');
+    const untouched = readReviewWorktreeLease(fresh, 'pr-1');
+    expect(untouched?.mergeBaseSha).toBeUndefined();
+    expect(untouched?.mergeBaseStale).toBeUndefined();
+  });
+
+  it('carries the staleness ruling host-side WITH the merge base (R5-7)', () => {
+    // The anchor covered the sha while the capture's own judgement that the
+    // sha may be STALE stayed in the plan, inside the mount — so the reviewed
+    // code flipped it and the anchor authenticated a stale base as fresh.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+      { stale: true },
+    );
+    const n1 = readReviewWorktreeLease(root, 'pr-1')?.identity;
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseStale).toBe(true);
+
+    // A capture at the same sha whose base fetch now succeeds clears it: a
+    // changed ruling is a change, and it moves no identity.
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+      { stale: false },
+    );
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseStale).toBe(false);
+    expect(readReviewWorktreeLease(root, 'pr-1')?.identity).toBe(n1);
+
+    // A refresh drops it with the anchor, into the prior pair.
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
+    const refreshed = readReviewWorktreeLease(root, 'pr-1');
+    expect(refreshed?.mergeBaseSha).toBeUndefined();
+    expect(refreshed?.mergeBaseStale).toBeUndefined();
+    expect(refreshed?.priorMergeBaseSha).toBe('a'.repeat(40));
+    expect(refreshed?.priorMergeBaseStale).toBe(false);
+
+    // And a ruling that is not a boolean is no lease at all.
+    writeFileSync(
+      reviewLeasePath(root, 'pr-1'),
+      JSON.stringify({ ...refreshed, mergeBaseStale: 'false' }),
+    );
+    expect(readReviewWorktreeLease(root, 'pr-1')).toBeNull();
+  });
+
+  it('restores only the prior of the capture being resumed (R5-2)', () => {
+    // A capture that acquired after the anchor was recorded and never recorded
+    // its own — no merge base resolved, or the write failed — left the prior
+    // naming the round BEFORE it. A later `--resume` restored that, and a plan
+    // rewritten back to it was authenticated.
+    const root = createRepository();
+    const lease = () => readReviewWorktreeLease(root, 'pr-1');
+    const resume = (promptId: string) => {
+      createReviewWorktreeLease(leaseParams(root, { promptId }));
+      restoreReviewWorktreeLeaseMergeBase(root, 'pr-1', 'session-a');
+    };
+    createReviewWorktreeLease(leaseParams(root));
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+    );
+    expect(lease()?.priorMergeBaseCurrent).toBe(true);
+
+    // Round N acquires — the acquisition snapshots and clears the flag in its
+    // one atomic write, so there is no separate write to fail — and records
+    // nothing.
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
+    expect(lease()?.priorMergeBaseCurrent).toBeUndefined();
+    expect(lease()?.priorMergeBaseResumable).toBe(true);
+
+    // A later resume restores nothing: its acquisition saw a prior that no
+    // capture since had recorded.
+    resume('prompt-c');
+    expect(lease()?.priorMergeBaseResumable).toBe(false);
+    expect(lease()?.mergeBaseSha).toBeUndefined();
+
+    // A capture records again; resuming it restores — and so does resuming the
+    // resumed capture, because a restore makes the prior current again.
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+    );
+    resume('prompt-d');
+    expect(lease()?.mergeBaseSha).toBe('a'.repeat(40));
+    resume('prompt-e');
+    expect(lease()?.mergeBaseSha).toBe('a'.repeat(40));
+
+    // And a flag that is not a boolean is no lease at all, for either field.
+    const standing = lease();
+    for (const field of ['priorMergeBaseCurrent', 'priorMergeBaseResumable']) {
+      writeFileSync(
+        reviewLeasePath(root, 'pr-1'),
+        JSON.stringify({ ...standing, [field]: 'yes' }),
+      );
+      expect(readReviewWorktreeLease(root, 'pr-1')).toBeNull();
+    }
   });
 
   it('reclaims the base-tree trust state for the target it clears, and only that one', () => {

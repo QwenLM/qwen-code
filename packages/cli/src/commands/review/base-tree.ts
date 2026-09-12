@@ -55,12 +55,22 @@ import {
   statSync,
   writeFileSync,
   type Dirent,
+  type Stats,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath, REVIEW_TMP_DIR } from './lib/paths.js';
 import {
-  checkoutFilterCommands,
+  filterBlankEnv,
+  filterScreenForTree,
   untrustedGitfile,
   discardWorktree,
   sanitizedGitEnv,
@@ -68,6 +78,7 @@ import {
   type SweepResult,
 } from './lib/worktree.js';
 import { runBuildTest, type BuildTestReport } from './build-test.js';
+import { DEFAULT_WHOLE_CALL_BUDGET_S } from './lib/build-budget.js';
 import {
   baseTreeTrustPath,
   builtTreeRecord,
@@ -119,6 +130,19 @@ export interface BaseTreeArgs {
    * survives. Undefined in production.
    */
   onReuseWindow?: () => void;
+  /**
+   * Test seam: runs in the post-build stage, between the HEAD read and the
+   * pointer re-ask before its index-refreshing `status` — the same window
+   * `onReuseWindow` stages for the reuse arm. Undefined in production.
+   */
+  onCertifyWindow?: () => void;
+  /**
+   * Test seam: runs inside `settleCheckoutIndex`, after its second-boundary
+   * wait and before the screen and the pointer are asked again — the window
+   * its un-blanked refresh must not be steered through. Undefined in
+   * production.
+   */
+  onSettleWindow?: () => void;
 }
 
 // Sanitized env on both helpers: an exported GIT_DIR redirects repository
@@ -159,10 +183,24 @@ const GIT_MAX_BUFFER = 512 * 1024 * 1024;
 const GIT_TIMEOUT_MS = 120_000;
 
 function gitOut(cwd: string, ...args: string[]): string {
+  return gitOutWith(cwd, {}, ...args);
+}
+
+/**
+ * `gitOut` with extra environment layered OVER the sanitized one — which is
+ * how a filter screen's blanks (`filterBlankEnv`) reach the one command that
+ * would otherwise run a content filter: `sanitizedGitEnv` strips every
+ * inherited `GIT_CONFIG_KEY_n`, and these are added back after it.
+ */
+function gitOutWith(
+  cwd: string,
+  extraEnv: NodeJS.ProcessEnv,
+  ...args: string[]
+): string {
   const r = spawnSync('git', [...GIT_NEUTRALIZE, ...args], {
     cwd,
     encoding: 'utf8',
-    env: sanitizedGitEnv(),
+    env: { ...sanitizedGitEnv(), ...extraEnv },
     maxBuffer: GIT_MAX_BUFFER,
     timeout: GIT_TIMEOUT_MS,
   });
@@ -171,6 +209,183 @@ function gitOut(cwd: string, ...args: string[]): string {
     throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
   }
   return (r.stdout ?? '').trim();
+}
+
+/**
+ * Blanks for every content filter the tree's resolved config defines, or the
+ * reason the config could not be read to the bottom.
+ *
+ * The shape `worktreeResidue` uses for the identical `status` refresh, and
+ * for its stated reason: a repository whose own config defines a filter
+ * (git-lfs `--local`, git-crypt) keeps its measurement, where refusing would
+ * leave it unmeasured for good — and refusing here while the build arm
+ * certified meant only the ask that BUILT ever got a base tree, with a
+ * "remove the tree" recovery that loops forever. What cannot be blanked is a
+ * filter the screen could not see, so that half still refuses — `unread`
+ * only. A dangling include is dropped, exactly as `checkoutFilterCommands`
+ * drops it for the same question ("will this spawn run a command"): git skips
+ * it, so the refresh reads and runs nothing from it, and refusing on it
+ * darkened every CI checkout `actions/checkout` had left an `includeIf` in
+ * (see `FilterScreen.dangling` for the measurement).
+ */
+function unseenConfigNote(baseSha: string, reason: string): string {
+  return (
+    `the base tree at ${baseSha.slice(0, 9)} cannot be re-measured ` +
+    `safely: ${reason}. Declining to reuse or discard it; settle the claim ` +
+    'by reading'
+  );
+}
+
+function statusFilterBlanks(tree: string): NodeJS.ProcessEnv | string {
+  const screen = filterScreenForTree(tree);
+  if (screen === null) {
+    return 'the repository the base tree resolves to could not be screened for content filters';
+  }
+  const unseen = screen.unread;
+  if (unseen.length > 0) {
+    return (
+      `its repo-local git config could not be read to the bottom ` +
+      `(${unseen.slice(0, 3).join(', ')}${unseen.length > 3 ? ', …' : ''}), ` +
+      'and a content filter reached that way would run on the index refresh ' +
+      'with nothing to blank it'
+    );
+  }
+  return filterBlankEnv(screen.filters);
+}
+
+/**
+ * Settle a fresh checkout's index once, WITH the repository's own filters, so
+ * the blanked refreshes after it compare what they should.
+ *
+ * `worktree add` smudges every file a content filter selects (git-lfs
+ * `--local`, git-crypt), so those working bytes are not the cleaned blob. And
+ * git can judge "racily clean" in whole seconds — the git this was measured
+ * on does, while a build that compares nanoseconds does not: a file whose
+ * timestamp falls in the second the index was written must then have its
+ * CONTENT compared on every later refresh. A BLANKED refresh compares it without the clean filter, finds
+ * bytes that differ from the blob, and reports it modified — measured on git
+ * 2.47.3 — so the post-build check refused every such tree and the reuse arm
+ * declined it: the lane dead for any repository with a filtered tracked file.
+ *
+ * One refresh after the second has turned compares those files through their
+ * filters and writes an index newer than they are, after which a blanked
+ * refresh compares only what CHANGED — and compares raw bytes for it, which is
+ * stricter.
+ *
+ * This runs filters, deliberately and only here: the ones the repository's own
+ * config defines, on the tree `worktree add` has just checked out through those
+ * very filters, before the build opens the window — the exposure the
+ * checkout's own smudge already has. What the wait itself opens is closed the
+ * way the reuse arm closes its window: the screen and the pointer are asked
+ * AGAIN after it, immediately before the spawn, and a config that changed in
+ * between settles nothing — a filter key that appeared, an include target that
+ * appeared or vanished (which is how a known key gets a new command from a file
+ * that was dangling), config that became unreadable. What it cannot see is a
+ * command rewritten in place under a known key, in a config file that was
+ * already readable: whoever can write such a file already chooses what
+ * `worktree add`'s own smudge runs, so the window adds nothing to that. Nor
+ * does it see a per-worktree `config.worktree` created mid-wait under the
+ * common dir's `worktrees/` — the screen does not list that file while it is
+ * absent — which lives host-side, outside the mount, where nothing the
+ * reviewed code runs can write. A repository with no filter pays nothing: no
+ * wait, no spawn. Best effort: a refresh that does not land leaves the blanked
+ * check to refuse, which is the fail-closed answer.
+ */
+function settleCheckoutIndex(tree: string, onWindow?: () => void): void {
+  const before = filterScreenForTree(tree);
+  if (before === null || before.filters.length === 0) return;
+  const wait = 1000 - (Date.now() % 1000) + 20;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
+  onWindow?.();
+  const after = filterScreenForTree(tree);
+  if (after === null || after.unread.length > 0) return;
+  if (
+    JSON.stringify([after.filters, after.dangling]) !==
+    JSON.stringify([before.filters, before.dangling])
+  ) {
+    return;
+  }
+  if (untrustedGitfile(tree) !== null) return;
+  spawnSync('git', [...GIT_NEUTRALIZE, 'update-index', '-q', '--refresh'], {
+    cwd: tree,
+    env: sanitizedGitEnv(),
+    stdio: 'ignore',
+    timeout: GIT_TIMEOUT_MS,
+  });
+}
+
+/**
+ * A path npm's PATH or Node's resolution walk reaches under a `node_modules`:
+ * the `.bin` directory itself or anything in it, or a PACKAGE — any entry
+ * right after `node_modules/` that is not a dot-directory. The dot-directories
+ * other than `.bin` (`.vite`, `.cache`) are where the A/B's own caches land,
+ * and no bare specifier can name one.
+ */
+const RESOLVED_UNDER_NODE_MODULES =
+  /(?:^|\/)node_modules\/(?:\.bin(?:\/|$)|[^./])/;
+
+/**
+ * Files a package manager reads BY NAME from the tree it runs in, and which
+ * choose what runs: `.npmrc` (`script-shell`, `node-options`), a nested
+ * `package.json` (a new prefix, with its own `scripts`), and the yarn and
+ * pnpm equivalents — Yarn PnP's resolution map among them.
+ */
+const PACKAGE_MANAGER_CONFIG = new Set([
+  '.npmrc',
+  '.yarnrc',
+  '.yarnrc.yml',
+  '.pnpmfile.cjs',
+  '.pnp.cjs',
+  '.pnp.loader.mjs',
+  'package.json',
+]);
+
+/**
+ * The first path the tree holds now, and the record does not, whose SHAPE
+ * confers execution — or null.
+ *
+ * `inventoryMatches` tolerates additions, because the A/B's own cache and
+ * coverage output lands in this tree. But not every addition is output. A
+ * NEW `<tree>/node_modules/.bin/node` is a command: npm run-script prepends
+ * that directory to PATH, so it wins over `/usr/bin/node` for everything the
+ * base side runs. The reason once given for tolerating it — that an ancestor
+ * `.bin` outranked it anyway — stopped holding when `unfencedResolutionAncestor`
+ * started refusing on exactly that ancestor.
+ *
+ * So the shapes that confer execution are taken back, and each is one no
+ * honest A/B writes: a symlink (it can stand in for any file or directory), an
+ * execute bit, a path under `.bin` or a package directory, a package
+ * manager's config. `npm ci` writes all of these, and those are recorded.
+ * What remains tolerated is a plain data file at a new path — see
+ * `inventoryMatches` for what that still leaves open.
+ */
+function executableAddition(
+  tree: string,
+  current: Record<string, BuiltTreeStat>,
+  recorded: Record<string, BuiltTreeStat>,
+): string | null {
+  for (const p of Object.keys(current)) {
+    if (Object.prototype.hasOwnProperty.call(recorded, p)) continue;
+    if (RESOLVED_UNDER_NODE_MODULES.test(p)) return p;
+    if (PACKAGE_MANAGER_CONFIG.has(p.slice(p.lastIndexOf('/') + 1))) return p;
+    // Asked of the path as it stands NOW, through `lstat`: a link — which
+    // can stand in for any file or directory — or a regular file carrying an
+    // execute bit. The file test is kept to regular files because a link's
+    // own mode carries every bit, which would otherwise answer the link
+    // question by accident.
+    let st: Stats;
+    try {
+      st = lstatSync(joinBytes(tree, Buffer.from(p, 'latin1')));
+    } catch (err) {
+      // Gone since the walk: nothing stands there to run. Anything else is
+      // a path this cannot describe, which refuses like every other arm.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      return p;
+    }
+    if (st.isSymbolicLink()) return p;
+    if (st.isFile() && (st.mode & 0o111) !== 0) return p;
+  }
+  return null;
 }
 
 /**
@@ -368,9 +583,45 @@ function expandCollapsed(tree: string, rel: Buffer, out: Buffer[]): void {
   while (stack.length > 0) {
     const dir = stack.pop()!;
     const abs = joinBytes(tree, dir);
+    // `readdirSync` FOLLOWS a symlink at the path it is handed, so the
+    // `withFileTypes` guarantee above covers the children only — never the
+    // directory being opened. That directory was a real one when git listed
+    // it (a collapsed `dir/`) or when its parent was read, but the walk runs
+    // seconds later on a tree a sibling may be writing, and a swap to a link
+    // in that window made this record the HOST files the link led to as
+    // though they were the tree's — certifying where the same link, planted
+    // before the listing, is refused.
+    //
+    // So the path is `lstat`ed first, and anything that is no longer a real
+    // directory is handed to the per-entry stat as an entry in its own
+    // right. That stat describes a link as a link — and an escaping
+    // directory target as undescribable, which is the truthful refusal — and
+    // skips a path that vanished, like any other churn. Never skipped HERE:
+    // an inventory that silently omits a subtree is not a baseline.
+    let before: Stats | undefined;
+    try {
+      before = lstatSync(abs);
+    } catch {
+      before = undefined;
+    }
+    if (before === undefined || !before.isDirectory()) {
+      out.push(dir);
+      continue;
+    }
     let entries: Array<Dirent<Buffer>>;
     try {
       entries = readdirSync(abs, { withFileTypes: true, encoding: 'buffer' });
+      // ...and asked again after the read, for a swap DURING it: the same
+      // real directory both times, or the listing is refused (R4-1). A double
+      // swap back to the very same inode is the residual.
+      const after = lstatSync(abs);
+      if (
+        !after.isDirectory() ||
+        after.ino !== before.ino ||
+        after.dev !== before.dev
+      ) {
+        throw new Error('it was replaced while it was being read');
+      }
     } catch (err) {
       // Unreadable is the same class as `ls-files`' own readdir warning: an
       // inventory that omits a subtree is not a baseline.
@@ -453,11 +704,17 @@ function untrackedInventory(tree: string): Record<string, BuiltTreeStat> {
   // host where an ancestor is itself a link — `/tmp` on macOS is the everyday
   // case. The lexical spelling is the fallback for a tree that cannot be
   // resolved at all, where the caller's own gates rule anyway.
+  // In `latin1` byte space, like every path this function judges. The
+  // entries are built from raw bytes (`joinBytes`) and carried as `latin1`
+  // strings; comparing them against a root spelled in UTF-8 put every link
+  // on a non-ASCII path on the wrong side of the containment test.
   let treeRoot: string;
   try {
-    treeRoot = realpathSync(tree);
+    treeRoot = realpathSync(Buffer.from(resolve(tree)), {
+      encoding: 'buffer',
+    }).toString('latin1');
   } catch {
-    treeRoot = resolve(tree);
+    treeRoot = Buffer.from(resolve(tree)).toString('latin1');
   }
   const insideAnyRoot = (target: string): boolean => {
     const rel = relative(treeRoot, target);
@@ -485,7 +742,17 @@ function untrackedInventory(tree: string): Record<string, BuiltTreeStat> {
       // whole bug — `../pkg-real` is lexically in-tree while `pkg-real` is
       // itself a link out, so the file that actually runs is outside and
       // went unwatched.
-      return !insideAnyRoot(realpathSync(target));
+      // A BUFFER path, as the `statSync` below already does: the string
+      // overload re-encodes a `latin1` path as UTF-8, so one byte >= 0x80
+      // anywhere on it (a non-ASCII home directory is enough) resolved to
+      // nothing, the catch answered "escaping" for EVERY link in the tree,
+      // and an in-tree workspace link to an in-tree directory was then
+      // refused as undescribable — the lane dead for that whole repository.
+      return !insideAnyRoot(
+        realpathSync(Buffer.from(target, 'latin1'), {
+          encoding: 'buffer',
+        }).toString('latin1'),
+      );
     } catch {
       // Unresolvable counts as escaping: it is the one answer that cannot be
       // checked cheaply, and recording the sentinel for it is what makes a
@@ -586,12 +853,18 @@ function untrackedInventory(tree: string): Record<string, BuiltTreeStat> {
  * path rule, so that decline waves through a real regression in an untouched
  * file. No adversary is involved: it is what an honest round does to itself.
  *
- * So an ADDITION is tolerated. That is a real loss and it is named here
- * rather than papered over: a file planted at a NEW path inside the tree —
- * `node_modules/.bin/x`, a file dropped inside the `dist/` the build left —
- * is no longer seen by this compare.
+ * So an ADDITION is tolerated HERE, and `executableAddition` takes back the
+ * shapes of addition that confer execution — a link, an execute bit, a
+ * command on npm's PATH or a package on Node's resolution walk, a package
+ * manager's config. What stays tolerated is a plain data file at a new path,
+ * and that is a real loss, named rather than papered over: a file some tool
+ * LOADS as code, by path or by name, is seen by neither compare — a chunk
+ * under `node_modules/.vite/deps`, a `foo.js` beside the `foo/index.js` a
+ * CommonJS build left, a test runner's config that outranks the one the
+ * build left (`vitest.config.mjs` beside `vite.config.ts`, a
+ * `jest.config.js`).
  *
- * It is the lesser loss, for three reasons. The lane dying on every honest
+ * It is the lesser loss, for two reasons. The lane dying on every honest
  * round is a total loss of the feature, and an `available: false` base tree
  * makes the agent fall back to the path rule, which waves through exactly
  * the regressions the A/B exists to catch. There is no discriminator: the
@@ -600,10 +873,10 @@ function untrackedInventory(tree: string): Record<string, BuiltTreeStat> {
  * — re-recording the extras would promote a plant into "what this run
  * built", which is a false statement written into the record itself, and
  * gating on the build lock only discriminates during the build, which is not
- * when the A/B writes. And the arm was never a complete defence anyway: the
- * base tree's own PARENT is the mounted directory, so `node_modules/.bin`
- * one level up outranks anything inside the tree on npm's PATH
- * (`unfencedResolutionAncestor`).
+ * when the A/B writes. (A third reason used to stand here — that a
+ * `node_modules/.bin` one level up outranked anything inside the tree anyway
+ * — and it stopped being true when `unfencedResolutionAncestor` began
+ * refusing on exactly that ancestor.)
  *
  * So the claim this function makes is stated exactly, and it is the claim
  * the fence can actually keep: what this run BUILT is still here and still
@@ -726,7 +999,25 @@ function unfencedResolutionAncestor(tree: string): string | null {
   for (;;) {
     const rel = relative(mountRoot, dir);
     if (rel !== '' && (rel.startsWith('..') || isAbsolute(rel))) return null;
-    if (existsSync(join(dir, 'node_modules'))) return join(dir, 'node_modules');
+    // An ENCLOSING review worktree — any `review-pr-<n>` directory above the
+    // tree inside the outermost mount — is skipped. The nearest one is the
+    // checkout the inner review was launched from, and its `node_modules` is
+    // there whenever that checkout was installed: refusing on it refused every
+    // nested review of an installed Node checkout.
+    //
+    // That is a stated trade-off, not an oversight. The outer reviewed code
+    // holds that directory read-write, so a plant there is possible — and the
+    // temp dirs around it, which are still checked, are no harder for it to
+    // write. What separates this directory is that it has an honest occupant.
+    // A plant there reaches what the launch already exposed: the inner review
+    // runs with that checkout as its repository and working directory. The
+    // name is the grammar `reviewTargetOf` keys on.
+    if (
+      !/^review-pr-\d+$/.test(basename(dir)) &&
+      existsSync(join(dir, 'node_modules'))
+    ) {
+      return join(dir, 'node_modules');
+    }
     if (rel === '') return null;
     const up = dirname(dir);
     if (up === dir) return null;
@@ -735,12 +1026,34 @@ function unfencedResolutionAncestor(tree: string): string | null {
 }
 
 /**
+ * The file a build lock's holder writes its own staleness bound into.
+ *
+ * The bound is sized from a call's budget, and the ASKER's budget is not the
+ * holder's: a shard started with a larger `--timeout` can still be building
+ * past the bound a default-budget sibling computes, and that sibling swept its
+ * live lock. So the holder records the bound it is entitled to — host-side,
+ * where nothing else writes — and every reader honours the larger of the two.
+ */
+const LOCK_BOUND_FILE = 'stale-after-ms';
+
+function lockStaleBound(lock: string, own: number): number {
+  try {
+    const held = Number(readFileSync(join(lock, LOCK_BOUND_FILE), 'utf8'));
+    return Number.isFinite(held) && held > own ? held : own;
+  } catch {
+    // No holder's word — a lock from before the file existed, or one caught
+    // between its `mkdir` and the write: the asker's own bound applies.
+    return own;
+  }
+}
+
+/**
  * Remove a build lock ONLY when one stands and is a corpse.
  *
  * Exported for its test, which is the only way to observe the distinction
- * that matters: the three answers differ in whether a removal happened, and
- * the removal itself is a no-op on an absent path, so nothing downstream can
- * tell a speculative sweep from a skipped one.
+ * that matters: the answers differ in whether a removal happened, and the
+ * removal itself is a no-op on an absent path, so nothing downstream can tell
+ * a speculative sweep from a skipped one.
  *
  * The `statSync` throw is the whole guard. Deciding on a "is a builder
  * holding it" predicate instead makes this a check-then-destroy on the hot
@@ -753,18 +1066,22 @@ function unfencedResolutionAncestor(tree: string): string | null {
 export function sweepStaleLock(
   lock: string,
   staleMs: number,
-): 'removed' | 'fresh' | 'absent' {
+): 'removed' | 'fresh' | 'absent' | 'unremovable' {
   let age: number;
   try {
     age = Date.now() - statSync(lock).mtimeMs;
   } catch {
     return 'absent';
   }
-  if (age <= staleMs) return 'fresh';
+  if (age <= lockStaleBound(lock, staleMs)) return 'fresh';
   try {
     rmSync(lock, { recursive: true, force: true });
   } catch {
-    // Unremovable: the `mkdirSync` below answers busy, which is honest.
+    // Reported, not swallowed. Answering `removed` sent the caller on to a
+    // `mkdirSync` that meets the corpse and answers BUSY — telling the
+    // operator a live builder holds a lock nothing holds, for the rest of the
+    // review. That answer was never "honest": no builder exists.
+    return 'unremovable';
   }
   return 'removed';
 }
@@ -837,18 +1154,29 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   }
 
   const tree = baseWorktreePath(worktree);
-  const lock = `${tree}.lock`;
+  // Assigned beside the trust file once its path is known — see below.
+  let lock = '';
   /**
    * How long a build lock may stand before it is a corpse rather than a
-   * builder. Longer than any plausible install+build; a lock older than this
-   * is swept and the build taken.
+   * builder: 30 minutes, and never less than twice this call's whole-call
+   * budget. Every install and build step is bounded by what remains of that
+   * budget (`npm-toolchain` gives each one `min(per-command, remaining)`), so
+   * a lock older than twice it has no live holder — while a fixed 30 minutes
+   * let a larger `--timeout` age a slow honest build into a "corpse" a
+   * sibling swept, putting two builders in the critical section. The holder
+   * also writes its bound into the lock (`LOCK_BOUND_FILE`), because the
+   * asker's budget is not the holder's.
    */
-  const LOCK_STALE_MS = 30 * 60 * 1000;
+  const LOCK_STALE_MS = Math.max(
+    30 * 60 * 1000,
+    2 * Math.max(args.timeout, DEFAULT_WHOLE_CALL_BUDGET_S) * 1000,
+  );
   /**
    * Is a sibling building RIGHT NOW?
    *
    * `mkdirSync` without `recursive` is the atomic test-and-set below, and the
-   * lock directory's mtime is its creation time (nothing touches it after),
+   * lock directory's mtime is set when it is created (and again milliseconds
+   * later, when the holder writes its bound into it; nothing touches it after),
    * so this answers the question the reuse arm needs: "the tree exists with
    * no record — is that a torn write, or the ordinary state of a build in
    * flight?". `worktree add` creates the tree as its first act and the record
@@ -857,7 +1185,10 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
    */
   const buildLockHeld = (): boolean => {
     try {
-      return Date.now() - statSync(lock).mtimeMs <= LOCK_STALE_MS;
+      return (
+        Date.now() - statSync(lock).mtimeMs <=
+        lockStaleBound(lock, LOCK_STALE_MS)
+      );
     } catch {
       return false;
     }
@@ -895,14 +1226,23 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   let trust: TrustState;
   let identityMs: number;
   let anchoredBaseSha: string | undefined;
+  let anchoredStale = false;
   try {
     // `runIdentity` first: it is the one that refuses a worktree with no
     // host-side lease naming it, and `baseTreeTrustPath` keys under the same
     // target — so a refusal here must happen before any path is derived.
     const identity = runIdentity(worktree);
     trustPath = baseTreeTrustPath(worktree, args.plan);
+    // The build lock lives HOST-SIDE, beside the trust file. Beside the tree
+    // it was a direct child of the directory the sandbox mounts read-write,
+    // so its mtime — the whole of the staleness test — was the reviewed
+    // code's to backdate, and the lock itself was its to delete; either way
+    // two builders entered the critical section together. Nothing mounts
+    // this directory, and releasing the lease reclaims it.
+    lock = join(dirname(trustPath), `${basename(tree)}.lock`);
     identityMs = identity.identity;
     anchoredBaseSha = identity.mergeBaseSha;
+    anchoredStale = identity.mergeBaseStale;
   } catch (err) {
     return unavailable(
       `could not establish the run's trust artifact: ${(err as Error).message}`,
@@ -947,6 +1287,18 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         'plan lives inside the review temp dir — declining to build or ' +
         'reuse at a sha the capture never resolved; an A/B is not available ' +
         'for this review',
+    );
+  }
+  if (anchoredStale) {
+    // The capture's OWN ruling, host-side: the base branch could not be
+    // fetched, so this sha was resolved from a local ref that may be stale.
+    // The plan carries the same flag, but the plan is inside the mount and
+    // the reviewed code can flip it to "fresh" before the first ask; this
+    // copy it cannot reach.
+    return unavailable(
+      'the base branch could not be fetched when this review was captured, ' +
+        'so mergeBaseSha may be stale (recorded host-side); an A/B against ' +
+        "it would attribute the base branch's own commits to this PR",
     );
   }
   try {
@@ -1031,9 +1383,10 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         // standing for the rest of the run.
       } else {
         // Tracked dirt OR an untracked change. Both have benign causes
-        // on a tree this run built: codegen and lockfile rewrites from
-        // this run's own build, a concurrent shard's snapshot `--update`
-        // mid-A/B, the A/B's own cache output. Both are also what a plant
+        // on a tree this run built: a concurrent shard's snapshot
+        // `--update` mid-A/B, the A/B's own cache output. (A build that
+        // rewrites tracked files is no longer one of them — the post-build
+        // stage does not certify its tree.) Both are also what a plant
         // looks like — and that ambiguity is exactly why the answer is to
         // DECLINE rather than to discard: discarding on this signal
         // sweeps a live tree another shard may be mid-A/B in (the
@@ -1072,22 +1425,21 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         //
         // `gitOut`'s `-c` pins blank the two FIXED-KEY execution channels,
         // `core.fsmonitor` and `core.hooksPath`. The third is
-        // `filter.<driver>.clean|process`, whose key is not fixed — and the
-        // earlier note here claimed that meant it could not be blanked,
-        // which is false in this repository: `filterCommandsIn` enumerates
-        // the driver names out of the RESOLVED config and
-        // `checkoutFilterCommands` hands them to a caller that refuses. The
-        // sibling `worktreeResidue` layers exactly that onto the identical
-        // `status` refresh.
+        // `filter.<driver>.clean|process`, whose key is not fixed — but
+        // `filterCommandsIn` enumerates the driver names out of the RESOLVED
+        // config, and `statusFilterBlanks` blanks every one of them on this
+        // spawn, refusing only on config it could not read to the bottom.
+        // That is what the sibling `worktreeResidue` does on the identical
+        // `status` refresh. (For one round this arm REFUSED on any filter
+        // instead, and a repository with git-lfs installed `--local` then got
+        // a base tree only on the ask that built it.)
         //
-        // It matters in both directions. A normalizing `clean` filter (LFS,
-        // a formatter, RCS keyword expansion) makes `status` compute its
-        // verdict on the FILTERED bytes, so a rewrite of a tracked source
-        // whose filtered form maps back to the indexed blob prints nothing
-        // and the arm certifies the reviewed code's own tree. And a filter
-        // that is missing or exits non-zero makes `status` exit non-zero,
-        // which `gitOut` turns into a throw and the enclosing `try` resolves
-        // into the destructive rebuild.
+        // Blanking is also what makes the verdict mean anything. A
+        // normalizing `clean` filter (LFS, a formatter, RCS keyword
+        // expansion) would have `status` judge the FILTERED bytes, so a
+        // rewrite whose filtered form maps back to the indexed blob printed
+        // nothing; blanked, it judges the bytes on disk. And a filter that is
+        // missing or exits non-zero no longer reaches the check at all.
         args.onReuseWindow?.();
         const unfenced = unfencedResolutionAncestor(tree);
         if (unfenced !== null) {
@@ -1098,17 +1450,11 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         if (opaque !== null) {
           return unavailable(undescribableNote(opaque));
         }
-        const filters = checkoutFilterCommands(tree);
-        if (filters.length > 0) {
-          return unavailable(
-            `the base tree's resolved git config defines content filters ` +
-              `(${filters.slice(0, 3).join(', ')}${filters.length > 3 ? ', …' : ''}), ` +
-              'and the reuse check refreshes the index — which would run ' +
-              'them on the host, and would compute its verdict on their ' +
-              'output rather than on the files. Declining to reuse or ' +
-              `discard this tree; settle the claim by reading, or remove ${tree} ` +
-              'to force a rebuild',
-          );
+        const blanks = statusFilterBlanks(tree);
+        if (typeof blanks === 'string') {
+          // No "remove the tree" here: the config named is the repository's,
+          // not the tree's, and a rebuild would meet it again.
+          return unavailable(unseenConfigNote(baseSha, blanks));
         }
         const stillTrusted = untrustedGitfile(tree);
         if (stillTrusted !== null) {
@@ -1120,8 +1466,13 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
           );
         }
         if (
-          gitOut(tree, 'status', '--porcelain', '--untracked-files=no') !==
-            '' ||
+          gitOutWith(
+            tree,
+            blanks,
+            'status',
+            '--porcelain',
+            '--untracked-files=no',
+          ) !== '' ||
           inventory === null ||
           !inventoryMatches(inventory, recorded.untracked)
         ) {
@@ -1141,6 +1492,24 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
               'concurrent probe may be writing it mid-A/B, or something ' +
               'changed it); declining to reuse or discard it — settle the ' +
               `claim by reading, or remove ${tree} to force a rebuild`,
+          );
+        }
+        const executable = executableAddition(
+          tree,
+          inventory,
+          recorded.untracked,
+        );
+        if (executable !== null) {
+          // Declined like the compare above, for the same reason: discarding
+          // sweeps a tree a sibling may be mid-A/B in, and a plant wedged
+          // here is never run.
+          return unavailable(
+            `the base tree at ${baseSha.slice(0, 9)} was built by this run, ` +
+              `but ${executable} has appeared in it since — a path that ` +
+              'runs or resolves as code (a link, an executable, a command ' +
+              "on npm's PATH, a package, or a package manager's config), " +
+              'which no A/B writes. Declining to reuse or discard it; settle ' +
+              `the claim by reading, or remove ${tree} to force a rebuild`,
           );
         }
         return {
@@ -1208,13 +1577,21 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         // Narrowing this to `adopted` alone was the wrong repair: within a
         // run, a torn write really is this run's bookkeeping, and declining
         // on it is what keeps a sibling's live tree from being swept.
+        // A tree the post-build stage refused because the repository's config
+        // could not be read to the bottom lands here too, and removing it is
+        // no recovery for that: the rebuild meets the same config. Say so.
+        const unseen = statusFilterBlanks(tree);
+        if (typeof unseen === 'string') {
+          return unavailable(unseenConfigNote(baseSha, unseen));
+        }
         return unavailable(
           `the base tree at ${baseSha.slice(0, 9)} was built by this run ` +
-            'but its host-side build record is missing or unreadable — a ' +
-            'torn write says nothing about the tree, and discarding on it ' +
-            'would sweep a live tree another probe may be mid-A/B in; ' +
-            'declining to reuse or discard it — settle the claim by ' +
-            `reading, or remove ${tree} to force a rebuild`,
+            'but its host-side build record is missing or unreadable — the ' +
+            'record tore, or the build that made the tree declined to ' +
+            'certify it. Neither says the tree is safe to discard, and ' +
+            'discarding would sweep a live tree another probe may be ' +
+            'mid-A/B in; declining to reuse or discard it — settle the ' +
+            `claim by reading, or remove ${tree} to force a rebuild`,
         );
       }
     }
@@ -1241,7 +1618,15 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // A lock older than any plausible install+build is a corpse — sweep it and
   // take the build. `buildLockHeld` above reads the same bound, so the reuse
   // arm's busy answer and this sweep can never disagree about which it is.
-  sweepStaleLock(lock, LOCK_STALE_MS);
+  if (sweepStaleLock(lock, LOCK_STALE_MS) === 'unremovable') {
+    return unavailable(
+      `the base-tree build lock ${lock} is stale — no build has held it for ` +
+        'longer than one can run — but it could not be removed, so no build ' +
+        'can take it; remove it by hand, or clean up this review, which ' +
+        'reclaims it. An A/B is not available until then (this is an ' +
+        'infrastructure result, never a finding against the PR)',
+    );
+  }
   try {
     mkdirSync(lock);
   } catch (err) {
@@ -1254,6 +1639,12 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       );
     }
     return unavailable(BUSY_NOTE);
+  }
+  try {
+    writeFileSync(join(lock, LOCK_BOUND_FILE), String(LOCK_STALE_MS));
+  } catch {
+    // Unwritten: a sibling falls back to its own bound, which is the answer
+    // before a holder could state one.
   }
   try {
     return buildBaseTree(baseSha);
@@ -1290,6 +1681,12 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       return unavailable(
         worktreeCreateFailureDetail('base', e, String(sweep?.stderr ?? '')),
       );
+    }
+    // Before the build opens the window, never after — see the function.
+    try {
+      settleCheckoutIndex(tree, args.onSettleWindow);
+    } catch {
+      // Best effort: an unsettled index only makes the blanked checks refuse.
     }
 
     const build = args.build
@@ -1383,10 +1780,21 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       //     at all: one transient container-runtime probe failure would
       //     settle the lane for the whole run.
       // Both are `truncated`: unavailable, and repaid by the next shard.
+      //
+      // And the round after that found the exclusion list was still an
+      // enumeration: `npm-toolchain` also answers `ok: false` with an EMPTY
+      // build list for an install that failed on a registry blip, a disk
+      // preflight that tripped, and a budget spent before the install could
+      // start — each with a note saying "environment failure, not a defect
+      // in the diff". So the rule is stated positively instead: a failure is
+      // settled only when a BUILD STEP ACTUALLY RAN and exited non-zero on
+      // its own, without being killed by its deadline. That is the one shape
+      // that is a fact about this sha.
       const settled =
         !build.ok &&
-        build.toolchain !== 'refused' &&
-        (build.timedOut?.length ?? 0) === 0;
+        build.build.some(
+          (c) => !c.timedOut && c.exitCode !== null && c.exitCode !== 0,
+        );
       try {
         recordBuiltTree(trustPath, identityMs, tree, {
           baseSha,
@@ -1437,6 +1845,77 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
           'infrastructure result, never a finding against the PR)',
       );
     }
+    // And the two questions the reuse arm always asks beside the pointer.
+    // The containerized build held these working files read-write for
+    // minutes, and the reviewed code's own tests run under the same mount in
+    // that window: a plain copy of the PR's sources over the tracked files
+    // leaves the pointer untouched and HEAD where it was, and the record
+    // below carries no tracked baseline — so without this the copy is
+    // certified `ok`, and the ask that built it is served the reviewed
+    // code's program as the merge base's before the reuse arm's `status`
+    // ever looks. Whatever changed them (that copy, or a build that rewrites
+    // tracked sources), a tree whose tracked files are not the merge base's
+    // is not the merge base's program.
+    //
+    // Nothing is recorded, and the tree is left standing. A later ask meets a
+    // tree with no record and declines without discarding — the answer the
+    // reuse arm gives tracked dirt — except when HEAD moved, which that ask's
+    // pointer-and-HEAD arm rebuilds, as it would for any tree.
+    const blanksAfterBuild = statusFilterBlanks(tree);
+    if (typeof blanksAfterBuild === 'string') {
+      return unavailable(
+        `the base tree at ${baseSha.slice(0, 9)} was built, but it cannot be ` +
+          `checked for tracked changes: ${blanksAfterBuild}. Nothing was ` +
+          'recorded; an A/B is not available for this review (this is an ' +
+          'infrastructure result, never a finding against the PR)',
+      );
+    }
+    let trackedWhy: string | null = null;
+    try {
+      if (gitOut(tree, 'rev-parse', 'HEAD') !== baseSha) {
+        trackedWhy = 'its HEAD moved off the merge base';
+      } else {
+        // The pointer question asked AGAIN, immediately before the one spawn
+        // in this stage that refreshes the index — the reuse arm's R1-60
+        // re-ask, for the same window: the screen and the HEAD read above
+        // take spawns of their own, and a sibling under the same read-write
+        // mount can rewrite `<base>/.git` inside them.
+        args.onCertifyWindow?.();
+        const rewritten = untrustedGitfile(tree);
+        if (rewritten !== null) {
+          return unavailable(
+            `the base tree's .git pointer was rewritten while it was being ` +
+              `certified (${rewritten}), so its tracked files cannot be ` +
+              'checked safely and nothing was recorded about it; the next ask ' +
+              'rebuilds it, which sweeps the plant. An A/B is not available ' +
+              'for this review (this is an infrastructure result, never a ' +
+              'finding against the PR)',
+          );
+        }
+        if (
+          gitOutWith(
+            tree,
+            blanksAfterBuild,
+            'status',
+            '--porcelain',
+            '--untracked-files=no',
+          ) !== ''
+        ) {
+          trackedWhy = 'its tracked files no longer match the merge base';
+        }
+      }
+    } catch (err) {
+      trackedWhy = `its tracked state could not be read (${(err as Error).message})`;
+    }
+    if (trackedWhy !== null) {
+      return unavailable(
+        `the base tree at ${baseSha.slice(0, 9)} was built, but ${trackedWhy} ` +
+          "by the time the build finished, so it is not the merge base's " +
+          'program and nothing was recorded about it — no later ask will ' +
+          'reuse it. An A/B is not available for this review (this is an ' +
+          'infrastructure result, never a finding against the PR)',
+      );
+    }
     // The execution environment the certified tree would be USED in, asked
     // before the record is written: an ancestor `node_modules` inside the
     // mount outranks the tree's own on npm's PATH and on Node's resolution
@@ -1468,7 +1947,8 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       return unavailable(
         `the base tree at ${baseSha.slice(0, 9)} was built, but its residue ` +
           'could not be enumerated, so there is nothing to certify it ' +
-          'against; the next ask rebuilds it. An A/B is not available for ' +
+          'against, and nothing was recorded — no later ask will reuse it. ' +
+          'An A/B is not available for ' +
           'this review (this is an infrastructure result, never a finding ' +
           'against the PR)',
       );

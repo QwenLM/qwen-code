@@ -954,13 +954,15 @@ export function runCleanup(target: string): void {
     for (const path of scratch.paths) {
       report('scratch worktree', path);
     }
-    // The base-tree build lock is a plain directory (`mkdirSync` test-and-set),
-    // not a git worktree, so `releaseWorktree` above does not touch it. A builder
-    // killed mid-build leaves it behind (its `finally` rmSync never runs), and every
-    // later base-tree probe for this PR then hits EEXIST and reports "another probe
-    // is building" until a manual rm. Sweep it here, at the end of the review when no
-    // builder is active. Best effort only — a lock that will not delete is an
-    // operational paper-cut, never a wrong verdict, so it does not fail the cleanup.
+    // The base-tree build lock's LEGACY location, beside the tree. The lock now
+    // lives host-side beside the base-tree trust file — here, inside the mounted
+    // directory, the reviewed code could backdate or delete it — and releasing
+    // the lease reclaims that directory whole. A builder from before the move,
+    // killed mid-build, can still have left one at this path (a plain directory,
+    // which `releaseWorktree` above does not touch), so it is swept here too.
+    // Best effort only: nothing reads this path any more, so a lock that will
+    // not delete is clutter, never a wrong verdict, and it does not fail the
+    // cleanup.
     try {
       rmSync(`${baseWorktreePath(wt)}.lock`, { recursive: true, force: true });
     } catch (err) {
