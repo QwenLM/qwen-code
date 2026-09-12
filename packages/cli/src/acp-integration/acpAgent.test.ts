@@ -706,6 +706,27 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       this.code = code;
     }
   },
+  // The real helper: `isInactiveExtensionSkill` resolves a registry-qualified
+  // skill back to the authored spelling the manifest keys on through it. A
+  // mock that omits the export does not fail to compile — it throws at the
+  // call, and `buildWorkspaceSkillsStatus` swallows that into an error cell,
+  // so the whole skills list degrades to empty.
+  authoredSkillName: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).authoredSkillName,
+  // `buildWorkspaceSkillsStatus` de-duplicates the inactive-extension manifest
+  // against the registry rows by qualifying the authored name. Same failure
+  // mode as above: an omitted export throws at the call and empties the list.
+  qualifySkillName: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).qualifySkillName,
+  // `lookupSkillDisablement` resolves which settings entry blocks a skill
+  // through it, so the ACP skill rows need the shipped normalization too.
+  // Same failure mode as above: an omitted export throws at the call and
+  // empties the list.
+  skillRestrictionNames: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).skillRestrictionNames,
   getMCPDiscoveryState: vi.fn().mockReturnValue('completed'),
   getMCPServerStatus: vi.fn().mockReturnValue('connected'),
   MCPServerConfig: vi.fn().mockImplementation((...args: unknown[]) => ({
@@ -2199,6 +2220,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         getDefaultReasoningConfig: ReturnType<typeof vi.fn>;
+        getRecoveryStatus: ReturnType<typeof vi.fn>;
         reloadReasoningSelection: ReturnType<typeof vi.fn>;
         persistReasoningSelection: ReturnType<typeof vi.fn>;
         setSessionReasoningSelection: ReturnType<typeof vi.fn>;
@@ -4911,6 +4933,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ) => {
         const sessionMock = {
           sessionId: createdSessionId,
+          getRecoveryStatus: vi.fn().mockReturnValue({
+            kind: 'clean',
+            canContinue: false,
+          }),
           getId: vi.fn().mockReturnValue(createdSessionId),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(createdConfig),
@@ -8491,7 +8517,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         filePath: '/disabled/SKILL.md',
       },
       {
-        name: 'gsd-audit-uat',
+        // Post-`SkillManager` shape: `name` is the registry identity and the
+        // authored spelling rides alongside, because registration qualifies
+        // extension skills unconditionally.
+        name: 'gsd-core:gsd-audit-uat',
+        authoredName: 'gsd-audit-uat',
         description: 'Cross-phase audit',
         level: 'extension',
         extensionName: 'gsd-core',
@@ -8501,7 +8531,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         filePath: '/ext/gsd-core/skills/gsd-audit-uat/SKILL.md',
       },
       {
-        name: 'gsd-display-stale',
+        name: 'gsd-core:gsd-display-stale',
+        authoredName: 'gsd-display-stale',
         description: 'Display-name stale extension skill',
         level: 'extension',
         extensionName: 'gsd-core',
@@ -8961,7 +8992,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect.objectContaining({
           kind: 'skill',
           status: 'disabled',
-          name: 'gsd-audit-uat',
+          name: 'gsd-core:gsd-audit-uat',
           description: 'Cross-phase audit',
           level: 'extension',
           extensionName: 'gsd-core',
@@ -8971,7 +9002,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect.objectContaining({
           kind: 'skill',
           status: 'disabled',
-          name: 'gsd-display-stale',
+          name: 'gsd-core:gsd-display-stale',
           description: 'Display-name stale extension skill',
           level: 'extension',
           extensionName: 'gsd-core',
@@ -8982,7 +9013,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect.objectContaining({
           kind: 'skill',
           status: 'disabled',
-          name: 'gsd-config-only',
+          name: 'gsd-core:gsd-config-only',
           description: 'Config-only extension skill',
           level: 'extension',
           extensionName: 'gsd-core',
@@ -8993,7 +9024,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect.objectContaining({
           kind: 'skill',
           status: 'disabled',
-          name: 'gsd-config-only',
+          name: 'gsd-tools:gsd-config-only',
           description: 'Colliding config-only extension skill',
           level: 'extension',
           extensionName: 'gsd-tools',
@@ -9003,14 +9034,31 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }),
       ]),
     });
+    // These two skills are in the cached registry *and* in the deactivated
+    // `gsd-core` manifest, so they must appear once. The registry row is keyed
+    // by the qualified name and the manifest row by the authored one, so the
+    // duplicate this guards against lands under a different spelling — count
+    // both, or the assertion passes on a list that emitted the skill twice.
     expect(
-      skills.skills.filter((skill) => skill.name === 'gsd-audit-uat'),
+      skills.skills.filter(
+        (skill) =>
+          skill.name === 'gsd-core:gsd-audit-uat' ||
+          skill.name === 'gsd-audit-uat',
+      ),
     ).toHaveLength(1);
     expect(
-      skills.skills.filter((skill) => skill.name === 'gsd-display-stale'),
+      skills.skills.filter(
+        (skill) =>
+          skill.name === 'gsd-core:gsd-display-stale' ||
+          skill.name === 'gsd-display-stale',
+      ),
     ).toHaveLength(1);
     expect(
-      skills.skills.filter((skill) => skill.name === 'gsd-config-only'),
+      skills.skills.filter(
+        (skill) =>
+          skill.name === 'gsd-core:gsd-config-only' ||
+          skill.name === 'gsd-tools:gsd-config-only',
+      ),
     ).toHaveLength(2);
     expect(skillsAgain).toEqual(skills);
     expect(getCachedSkills).toHaveBeenCalledTimes(2);
@@ -12403,6 +12451,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.getRecoveryStatus.mockReturnValue({
+      kind: 'interrupted_prompt',
+      canContinue: true,
+    });
     const context = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContext,
       { sessionId },
@@ -12433,6 +12485,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       v: 1,
       sessionId,
       workspaceCwd: '/tmp',
+      recovery: { kind: 'interrupted_prompt', canContinue: true },
       state: {
         models: { currentModelId: 'm(api-key)', availableModels: [] },
         modes: {
