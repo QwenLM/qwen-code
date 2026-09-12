@@ -2553,7 +2553,9 @@ function derivedTaskIdForTool(tool: ACPToolCall): string | undefined {
   const subagentName =
     typeof rawOutput?.['subagentName'] === 'string'
       ? rawOutput['subagentName']
-      : undefined;
+      : typeof tool.args?.name === 'string'
+        ? tool.args.name
+        : undefined;
   const subagentType =
     typeof tool.args?.subagent_type === 'string'
       ? tool.args.subagent_type
@@ -2637,7 +2639,9 @@ export function getEnvironmentAgentTasks(
         const subagentName =
           typeof rawOutput?.['subagentName'] === 'string'
             ? rawOutput['subagentName']
-            : undefined;
+            : typeof tool.args?.name === 'string'
+              ? tool.args.name
+              : undefined;
         const taskId = taskIdsByToolUseId.get(tool.callId);
         const derivedTaskId = derivedTaskIdForTool(tool);
         // Completed background agents can lose their toolUseId / derived-id
@@ -17524,6 +17528,11 @@ export function App({
                     closeMobileDrawer();
                     openPanel('settings');
                   }}
+                  onOpenAgents={() => {
+                    closeMobileDrawer();
+                    setAgentsCreateScope(null);
+                    openPanel('agents');
+                  }}
                   onOpenPlugins={() => {
                     closeMobileDrawer();
                     openPanel('plugins');
@@ -18131,6 +18140,13 @@ export function App({
                           closePanel();
                         }}
                         initialCreateScope={agentsCreateScope}
+                        onOpenAgentSession={(sessionId) => {
+                          // An agent is its own session, so a run opens the
+                          // ordinary session view. `loadSidebarSession`
+                          // already closes this panel on its way there.
+                          setAgentsCreateScope(null);
+                          void loadSidebarSession(sessionId);
+                        }}
                       />
                     ) : activePanel === 'plugins' ? (
                       <PluginManagerPage

@@ -221,6 +221,12 @@ export default {
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
+  'toolDisplayName.ThreadPost': '发帖到线程',
+  'toolDisplayName.ThreadWait': '等待协作方',
+  'toolDisplayName.ThreadBlock': '提出阻塞问题',
+  'toolDisplayName.ThreadReview': '提交待评审',
+  'toolDisplayName.ThreadCreate': '创建子线程',
+  'toolDisplayName.ThreadRead': '读取线程',
   // ============================================================================
   // Help / UI Components
   // ============================================================================

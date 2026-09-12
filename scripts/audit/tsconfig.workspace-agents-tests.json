@@ -1,0 +1,16 @@
+{
+  "extends": "../../packages/core/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "incremental": false,
+    "declaration": false,
+    "outDir": null,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": [
+    "../../packages/core/src/agents/workspace-agents/**/*.test.ts",
+    "../../packages/core/src/tools/thread-tools.test.ts"
+  ],
+  "exclude": []
+}

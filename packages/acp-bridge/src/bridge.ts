@@ -165,6 +165,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_AGENT_RUN_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -10573,6 +10574,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   delete meta[DAEMON_CONTINUE_META_KEY];
                   delete meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+                  // Stripped from every caller for the same reason as the
+                  // delivery above: an agent's thread tools act on whatever
+                  // this names, so a caller that could set it could make one
+                  // agent post under another's name.
+                  delete meta[DAEMON_AGENT_RUN_META_KEY];
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[SUBMITTED_PROMPT_META_KEY];
                   delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
@@ -10613,6 +10619,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
                       context.channelDelivery;
+                  }
+                  if (context?.agentRun) {
+                    meta[DAEMON_AGENT_RUN_META_KEY] = context.agentRun;
                   }
                   if (promptDisplayText !== undefined) {
                     meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] =
@@ -13875,6 +13884,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const queuedMessage: MidTurnQueueEntry = {
         messageId,
         text: trimmed,
+        ...(options?.queueOnly && !originatorClientId && context?.agentRun
+          ? { agentRun: context.agentRun }
+          : {}),
         ...(mediaBlocks.length > 0 ? { content: mediaBlocks } : {}),
         originatorClientId,
         ...(options?.queueOnly

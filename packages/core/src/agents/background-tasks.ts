@@ -450,13 +450,19 @@ export type BackgroundActivityChangeCallback = (entry: AgentTask) => void;
  */
 export type BackgroundApprovalChangeCallback = (entry: AgentTask) => void;
 
+export type ResidentAgentContinuationResult =
+  | 'continued'
+  | 'fallback'
+  | 'capacity_wait'
+  | 'not_completed';
+
 /**
  * Session-scoped handle for a background agent whose runtime remains alive
  * after a completed turn. The handle is deliberately not part of AgentTask:
  * task state is serializable, while the live runtime is process-local.
  */
 export interface ResidentBackgroundAgent {
-  continue(message: string): boolean;
+  continue(input: AgentExternalInput): ResidentAgentContinuationResult;
   dispose(): void;
 }
 
@@ -787,11 +793,20 @@ export class BackgroundTaskRegistry {
     this.residentAgents.set(agentId, resident);
   }
 
-  continueResidentAgent(agentId: string, message: string): boolean {
+  continueResidentAgent(
+    agentId: string,
+    message: string,
+    deliveryId?: string,
+  ): ResidentAgentContinuationResult {
     const entry = this.agents.get(agentId);
     const resident = this.residentAgents.get(agentId);
-    if (!resident || entry?.status !== 'completed') return false;
-    return resident.continue(message);
+    if (entry?.status !== 'completed') return 'not_completed';
+    if (!resident) return 'fallback';
+    return resident.continue(
+      deliveryId !== undefined
+        ? { kind: 'message', text: message, deliveryId }
+        : message,
+    );
   }
 
   unregisterResidentAgent(
@@ -997,6 +1012,19 @@ export class BackgroundTaskRegistry {
     this.emitStatusChange(entry);
     this.disposeResidentAgent(agentId);
     this.drainWaitQueue();
+  }
+
+  /** Remove one background body and all in-memory state without notification. */
+  forget(agentId: string): boolean {
+    const entry = this.agents.get(agentId);
+    if (!entry) return false;
+    entry.abortController.abort();
+    entry.notified = true;
+    this.rejectPendingApprovals(entry);
+    const deleted = this.deleteAgent(agentId);
+    this.emitStatusChange(entry);
+    this.drainWaitQueue();
+    return deleted;
   }
 
   // Emit the terminal cancelled notification once the agent's natural

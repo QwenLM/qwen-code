@@ -1,0 +1,153 @@
+{
+  "extends": "../../packages/cli/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "incremental": false,
+    "declaration": false,
+    "outDir": null,
+    "types": ["node"],
+    "baseUrl": "../..",
+    "paths": {
+      "@qwen-code/qwen-code-core": ["packages/core/index.ts"],
+      "@qwen-code/qwen-code-core/transcriptRecords": [
+        "packages/core/src/utils/transcript-records.ts"
+      ],
+      "@qwen-code/qwen-code-core/envVarResolver": [
+        "packages/core/src/utils/envVarResolver.ts"
+      ],
+      "@qwen-code/qwen-code-core/goalWire": [
+        "packages/core/src/goals/goal-wire.ts"
+      ],
+      "@qwen-code/qwen-code-core/memoryScopes": [
+        "packages/core/src/memory/scopes.ts"
+      ],
+      "@qwen-code/qwen-code-core/subSessionConstants": [
+        "packages/core/src/tools/sub-session-constants.ts"
+      ],
+      "@qwen-code/qwen-code-core/toolWriteOrigin": [
+        "packages/core/src/services/tool-write-origin.ts"
+      ],
+      "@qwen-code/qwen-code-core/userPromptSubmitContext": [
+        "packages/core/src/hooks/user-prompt-submit-context.ts"
+      ],
+      "@qwen-code/qwen-code-core/noFollowOpen": [
+        "packages/core/src/utils/no-follow-open.ts"
+      ],
+      "@qwen-code/qwen-code-core/storage": [
+        "packages/core/src/config/storage.ts"
+      ],
+      "@qwen-code/qwen-code-core/atomicFileWrite": [
+        "packages/core/src/utils/atomicFileWrite.ts"
+      ],
+      "@qwen-code/qwen-code-core/debugLogger": [
+        "packages/core/src/utils/debugLogger.ts"
+      ],
+      "@qwen-code/qwen-code-core/conversationsRuntimeMarker": [
+        "packages/core/src/utils/conversations-runtime-marker.ts"
+      ],
+      "@qwen-code/qwen-code-core/*": ["packages/core/src/*"],
+      "@qwen-code/acp-bridge": ["packages/acp-bridge/src/index.ts"],
+      "@qwen-code/acp-bridge/eventBus": ["packages/acp-bridge/src/eventBus.ts"],
+      "@qwen-code/acp-bridge/inMemoryChannel": [
+        "packages/acp-bridge/src/inMemoryChannel.ts"
+      ],
+      "@qwen-code/acp-bridge/channel": ["packages/acp-bridge/src/channel.ts"],
+      "@qwen-code/acp-bridge/permission": [
+        "packages/acp-bridge/src/permission.ts"
+      ],
+      "@qwen-code/acp-bridge/status": ["packages/acp-bridge/src/status.ts"],
+      "@qwen-code/acp-bridge/externalToolGuard": [
+        "packages/acp-bridge/src/externalToolGuard.ts"
+      ],
+      "@qwen-code/acp-bridge/workspacePaths": [
+        "packages/acp-bridge/src/workspacePaths.ts"
+      ],
+      "@qwen-code/acp-bridge/bridgeErrors": [
+        "packages/acp-bridge/src/bridgeErrors.ts"
+      ],
+      "@qwen-code/acp-bridge/bridgeTypes": [
+        "packages/acp-bridge/src/bridgeTypes.ts"
+      ],
+      "@qwen-code/acp-bridge/sessionArtifacts": [
+        "packages/acp-bridge/src/sessionArtifacts.ts"
+      ],
+      "@qwen-code/acp-bridge/sessionAttachments": [
+        "packages/acp-bridge/src/sessionAttachments.ts"
+      ],
+      "@qwen-code/acp-bridge/sessionSource": [
+        "packages/acp-bridge/src/session-source.ts"
+      ],
+      "@qwen-code/acp-bridge/daemonEventTypes": [
+        "packages/acp-bridge/src/daemonEventTypes.ts"
+      ],
+      "@qwen-code/acp-bridge/bridgeOptions": [
+        "packages/acp-bridge/src/bridgeOptions.ts"
+      ],
+      "@qwen-code/acp-bridge/promptLedger": [
+        "packages/acp-bridge/src/prompt-ledger.ts"
+      ],
+      "@qwen-code/acp-bridge/sessionRestoreTimeout": [
+        "packages/acp-bridge/src/session-restore-timeout.ts"
+      ],
+      "@qwen-code/acp-bridge/replayWindowLimits": [
+        "packages/acp-bridge/src/replayWindowLimits.ts"
+      ],
+      "@qwen-code/acp-bridge/spawnChannel": [
+        "packages/acp-bridge/src/spawnChannel.ts"
+      ],
+      "@qwen-code/acp-bridge/processRegistry": [
+        "packages/acp-bridge/src/process-registry.ts"
+      ],
+      "@qwen-code/acp-bridge/ndJsonStream": [
+        "packages/acp-bridge/src/ndJsonStream.ts"
+      ],
+      "@qwen-code/acp-bridge/logRedaction": [
+        "packages/acp-bridge/src/logRedaction.ts"
+      ],
+      "@qwen-code/acp-bridge/bridgeClient": [
+        "packages/acp-bridge/src/bridgeClient.ts"
+      ],
+      "@qwen-code/acp-bridge/bridge": ["packages/acp-bridge/src/bridge.ts"],
+      "@qwen-code/acp-bridge/bridgeFileSystem": [
+        "packages/acp-bridge/src/bridgeFileSystem.ts"
+      ],
+      "@qwen-code/acp-bridge/mcpTimeouts": [
+        "packages/acp-bridge/src/mcpTimeouts.ts"
+      ],
+      "@qwen-code/acp-bridge/daemonMemoryBudget": [
+        "packages/acp-bridge/src/daemon-memory-budget.ts"
+      ],
+      "@qwen-code/acp-bridge/childHeapPolicy": [
+        "packages/acp-bridge/src/child-heap-policy.ts"
+      ],
+      "@qwen-code/acp-bridge/channelControlTimeouts": [
+        "packages/acp-bridge/src/channel-control-timeouts.ts"
+      ],
+      "@qwen-code/acp-bridge/internal/testUtils": [
+        "packages/acp-bridge/src/internal/testUtils.ts"
+      ],
+      "@qwen-code/acp-bridge/compactionEngine": [
+        "packages/acp-bridge/src/compactionEngine.ts"
+      ],
+      "@qwen-code/acp-bridge/transcriptReplay": [
+        "packages/acp-bridge/src/transcript-replay.ts"
+      ],
+      "@qwen-code/acp-bridge/*": ["packages/acp-bridge/src/*"],
+      "@qwen-code/channel-base": ["packages/channels/base/src/index.ts"],
+      "@qwen-code/channel-base/*": ["packages/channels/base/src/*"],
+      "@lydell/node-pty": ["node_modules/@lydell/node-pty/node-pty.d.ts"]
+    }
+  },
+  "include": [
+    "../../packages/cli/src/serve/workspace-agents/**/*.ts",
+    "../../packages/cli/src/serve/routes/workspace-agents.ts",
+    "../../packages/cli/src/acp-integration/session/agent-run-meta.ts",
+    "../../packages/cli/src/acp-integration/acpAgent.ts",
+    "../../packages/cli/src/acp-integration/session/Session.ts",
+    "../../packages/cli/src/serve/server.ts",
+    "../../packages/cli/src/serve/capabilities.ts",
+    "../../packages/cli/src/serve/server/serve-features.ts"
+  ],
+  "exclude": ["../../packages/cli/src/**/*.test.ts"]
+}

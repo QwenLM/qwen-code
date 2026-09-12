@@ -91,6 +91,32 @@ for (const [subpath, conditions] of Object.entries(coreExports ?? {})) {
   }
 }
 
+// Shared node_modules may resolve the bridge from another checkout. Keep the
+// daemon and its ACP children on this checkout's protocol without a build.
+const bridgeDir = join(root, 'packages', 'acp-bridge');
+// `?? {}` rather than a bare read: a manifest without an `exports` map means
+// there is nothing to remap, and `Object.entries(undefined)` would throw at
+// module load — taking the launcher down for every caller, not just this
+// remapping.
+const bridgeExports =
+  JSON.parse(readFileSync(join(bridgeDir, 'package.json'), 'utf-8')).exports ??
+  {};
+for (const [subpath, conditions] of Object.entries(bridgeExports)) {
+  const entry = conditions?.import;
+  if (typeof entry !== 'string' || !entry.startsWith('./dist/')) continue;
+  const sourcePath = join(
+    bridgeDir,
+    'src',
+    entry.slice('./dist/'.length).replace(/\.js$/, '.ts'),
+  );
+  if (!existsSync(sourcePath)) continue;
+  const specifier =
+    subpath === '.'
+      ? '@qwen-code/acp-bridge'
+      : `@qwen-code/acp-bridge/${subpath.slice(2)}`;
+  coreSubpathSourceUrls[specifier] = pathToFileURL(sourcePath).href;
+}
+
 const loaderCode = `
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

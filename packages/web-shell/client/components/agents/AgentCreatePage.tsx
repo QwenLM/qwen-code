@@ -50,6 +50,19 @@ interface AgentCreatePageProps {
   agent?: DaemonWorkspaceAgentDetail;
   onCancel: () => void;
   onCreated: (name: string) => void;
+  executionHosts?: readonly {
+    id: string;
+    label: string;
+    status: 'online' | 'offline';
+  }[];
+  onSaveWorkspaceAgent?: (input: {
+    name: string;
+    description: string;
+    instructions: string;
+    model?: string;
+    maxConcurrentRuns: number;
+    execution?: { mode: 'local' } | { mode: 'managed-host'; hostIds: string[] };
+  }) => Promise<void>;
 }
 
 type Translate = ReturnType<typeof useI18n>['t'];
@@ -94,14 +107,19 @@ export function AgentCreatePage({
   agent,
   onCancel,
   onCreated,
+  executionHosts = [],
+  onSaveWorkspaceAgent,
 }: AgentCreatePageProps) {
   const { t } = useI18n();
+  const workspaceAgentMode = onSaveWorkspaceAgent !== undefined;
   const { createAgent, updateAgent, generateContent } = useAgents({
     autoLoad: false,
   });
   const toolsResource = useTools({ autoLoad: false });
   const mcpResource = useMcp({ autoLoad: false });
-  const settingsResource = useSettings({ autoLoad: true });
+  const settingsResource = useSettings({
+    autoLoad: !workspaceAgentMode,
+  });
   const loadMcpTools = mcpResource.loadTools;
   const initializeMcp = mcpResource.initialize;
   const reloadMcpConfig = mcpResource.reloadConfig;
@@ -128,6 +146,10 @@ export function AgentCreatePage({
   const selectableApprovalModes =
     approvalMode === 'bubble' ? [...approvalModes, 'bubble'] : approvalModes;
   const [maxTurns, setMaxTurns] = useState(agent?.maxTurns?.toString() ?? '');
+  const [maxConcurrentRuns, setMaxConcurrentRuns] = useState('1');
+  const [executionHostIds, setExecutionHostIds] = useState(
+    () => new Set<string>(),
+  );
   const [color, setColor] = useState(agent?.color ?? 'inherit');
   const [selectedMcpServers, setSelectedMcpServers] = useState(
     () => new Set(Object.keys(agent?.mcpServers ?? {})),
@@ -135,6 +157,9 @@ export function AgentCreatePage({
   const [hooks, setHooks] = useState(
     agent?.hooks ? JSON.stringify(agent.hooks, null, 2) : '',
   );
+  const [workspaceCreateMethod, setWorkspaceCreateMethod] = useState<
+    'model' | 'manual'
+  >();
   const [generationOpen, setGenerationOpen] = useState(false);
   const [generationPrompt, setGenerationPrompt] = useState('');
   const [generatedDescription, setGeneratedDescription] = useState('');
@@ -204,6 +229,10 @@ export function AgentCreatePage({
   );
 
   useEffect(() => {
+    if (workspaceAgentMode) {
+      setCatalogLoading(false);
+      return;
+    }
     let active = true;
     const initializeCatalogs = async () => {
       setCatalogLoading(true);
@@ -271,9 +300,18 @@ export function AgentCreatePage({
     return () => {
       active = false;
     };
-  }, [initializeMcp, preheatAcp, reloadMcp, reloadMcpConfig, reloadTools, t]);
+  }, [
+    initializeMcp,
+    preheatAcp,
+    reloadMcp,
+    reloadMcpConfig,
+    reloadTools,
+    t,
+    workspaceAgentMode,
+  ]);
 
   useEffect(() => {
+    if (workspaceAgentMode) return;
     if (catalogLoading) return;
     if (!activeMcpServerKey) {
       setMcpTools({});
@@ -319,7 +357,13 @@ export function AgentCreatePage({
     return () => {
       active = false;
     };
-  }, [activeMcpServerKey, activeMcpServerNames, catalogLoading, loadMcpTools]);
+  }, [
+    activeMcpServerKey,
+    activeMcpServerNames,
+    catalogLoading,
+    loadMcpTools,
+    workspaceAgentMode,
+  ]);
 
   function setGenerationDialogOpen(open: boolean): void {
     if (!open) {
@@ -368,8 +412,8 @@ export function AgentCreatePage({
     try {
       const suffix =
         field === 'description'
-          ? 'Return only a concise one-sentence subagent description explaining when this subagent should be used. Do not return JSON, Markdown, a label, or commentary.'
-          : 'Return only the complete subagent system prompt. Do not return JSON, a Markdown code block, a name, a description, or commentary.';
+          ? `Return only a concise one-sentence ${workspaceAgentMode ? 'persistent Agent' : 'subagent'} description explaining when this agent should be used. Do not return JSON, Markdown, a label, or commentary.`
+          : `Return only the complete ${workspaceAgentMode ? 'persistent Agent' : 'subagent'} system prompt. Do not return JSON, a Markdown code block, a name, a description, or commentary.`;
       let generated = '';
       for await (const event of generateContent(`${request}\n\n${suffix}`, {
         signal: controller.signal,
@@ -438,6 +482,34 @@ export function AgentCreatePage({
     setBusy(true);
     setError(null);
     try {
+      if (onSaveWorkspaceAgent) {
+        const concurrency = Number(maxConcurrentRuns);
+        if (
+          !Number.isInteger(concurrency) ||
+          concurrency < 1 ||
+          concurrency > 8
+        ) {
+          throw new Error('Concurrent tasks must be between 1 and 8');
+        }
+        const trimmedName = name.trim();
+        await onSaveWorkspaceAgent({
+          name: trimmedName,
+          description: description.trim(),
+          instructions: systemPrompt.trim(),
+          ...(model.trim() ? { model: model.trim() } : {}),
+          maxConcurrentRuns: concurrency,
+          ...(executionHostIds.size > 0
+            ? {
+                execution: {
+                  mode: 'managed-host' as const,
+                  hostIds: [...executionHostIds],
+                },
+              }
+            : {}),
+        });
+        onCreated(trimmedName);
+        return;
+      }
       const parsedMaxTurns = maxTurns.trim()
         ? Number(maxTurns.trim())
         : undefined;
@@ -501,11 +573,68 @@ export function AgentCreatePage({
     }
   }
 
+  if (workspaceAgentMode && !workspaceCreateMethod) {
+    return (
+      <div className="flex w-full max-w-3xl flex-col gap-6">
+        <div>
+          <h1 className="text-xl font-semibold text-balance">Create Agent</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Give this workspace a durable teammate. Each task gets its own
+            conversation while the Agent keeps the same identity.
+          </p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Button
+            type="button"
+            variant="outline"
+            className="h-auto justify-start p-5 text-left"
+            onClick={() => {
+              setWorkspaceCreateMethod('model');
+              setGenerationOpen(true);
+            }}
+          >
+            <SparklesIcon className="size-5 self-start" />
+            <span>
+              <strong className="block">Build with AI</strong>
+              <span className="mt-1 block whitespace-normal text-xs text-muted-foreground">
+                Recommended. Describe the teammate you need, then review the
+                generated role and instructions.
+              </span>
+            </span>
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            className="h-auto justify-start p-5 text-left"
+            onClick={() => setWorkspaceCreateMethod('manual')}
+          >
+            <span>
+              <strong className="block">Configure manually</strong>
+              <span className="mt-1 block whitespace-normal text-xs text-muted-foreground">
+                Set the Agent name, durable instructions, model, and task
+                concurrency yourself.
+              </span>
+            </span>
+          </Button>
+        </div>
+        <div>
+          <Button type="button" variant="outline" onClick={onCancel}>
+            {t('common.cancel')}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex w-full max-w-5xl flex-col gap-6">
       <div className="flex items-start justify-between gap-4">
         <h1 className="text-xl font-semibold text-balance">
-          {agent ? t('agent.edit') : t('agent.create')}
+          {workspaceAgentMode
+            ? 'Create persistent Agent'
+            : agent
+              ? t('agent.edit')
+              : t('agent.create')}
         </h1>
         <Button type="button" variant="outline" onClick={openGenerationDialog}>
           <SparklesIcon data-icon="inline-start" />
@@ -532,37 +661,43 @@ export function AgentCreatePage({
           <TabsTrigger value="prompt">
             {t('agent.detail.systemPrompt')}
           </TabsTrigger>
-          <TabsTrigger value="tools">{t('agent.detail.tools')}</TabsTrigger>
-          <TabsTrigger value="mcp">{t('agent.detail.mcp')}</TabsTrigger>
-          <TabsTrigger value="hooks">{t('agent.detail.hooks')}</TabsTrigger>
+          {!workspaceAgentMode ? (
+            <>
+              <TabsTrigger value="tools">{t('agent.detail.tools')}</TabsTrigger>
+              <TabsTrigger value="mcp">{t('agent.detail.mcp')}</TabsTrigger>
+              <TabsTrigger value="hooks">{t('agent.detail.hooks')}</TabsTrigger>
+            </>
+          ) : null}
         </TabsList>
 
         <TabsContent value="overview" className="pt-4">
           <FieldGroup className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-            <Field>
-              <FieldLabel htmlFor="agent-scope">
-                {t('agent.create.scope')}
-              </FieldLabel>
-              <Select
-                value={scope}
-                disabled={Boolean(agent)}
-                onValueChange={(value) =>
-                  setScope(value as 'workspace' | 'global')
-                }
-              >
-                <SelectTrigger id="agent-scope" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="workspace">
-                    {t('agent.create.project.cli')}
-                  </SelectItem>
-                  <SelectItem value="global">
-                    {t('agent.create.user.cli')}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
+            {!workspaceAgentMode ? (
+              <Field>
+                <FieldLabel htmlFor="agent-scope">
+                  {t('agent.create.scope')}
+                </FieldLabel>
+                <Select
+                  value={scope}
+                  disabled={Boolean(agent)}
+                  onValueChange={(value) =>
+                    setScope(value as 'workspace' | 'global')
+                  }
+                >
+                  <SelectTrigger id="agent-scope" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="workspace">
+                      {t('agent.create.project.cli')}
+                    </SelectItem>
+                    <SelectItem value="global">
+                      {t('agent.create.user.cli')}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            ) : null}
 
             <Field>
               <FieldLabel htmlFor="agent-name">
@@ -575,7 +710,11 @@ export function AgentCreatePage({
                 placeholder={t('agent.create.namePlaceholder')}
                 disabled={Boolean(agent)}
               />
-              <FieldDescription>{t('agent.create.nameHelp')}</FieldDescription>
+              <FieldDescription>
+                {workspaceAgentMode
+                  ? 'Name the durable identity shown in shared tasks.'
+                  : t('agent.create.nameHelp')}
+              </FieldDescription>
             </Field>
 
             <Field className="lg:col-span-2">
@@ -603,78 +742,141 @@ export function AgentCreatePage({
               />
             </Field>
 
-            <Field>
-              <FieldLabel htmlFor="agent-approval">
-                {t('agent.create.approvalMode')}
-              </FieldLabel>
-              <Select value={approvalMode} onValueChange={setApprovalMode}>
-                <SelectTrigger id="agent-approval" className="w-full">
-                  <SelectValue>
-                    {approvalModeLabel(approvalMode, t)}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {selectableApprovalModes.map((value) => (
-                    <SelectItem
-                      key={value}
-                      value={value}
-                      disabled={value === 'bubble'}
-                    >
-                      {approvalModeLabel(value, t)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <FieldDescription>
-                {approvalModeDescription(approvalMode, t)}
-              </FieldDescription>
-            </Field>
+            {workspaceAgentMode ? (
+              <>
+                <Field>
+                  <FieldLabel htmlFor="agent-concurrency">
+                    Concurrent tasks
+                  </FieldLabel>
+                  <Input
+                    id="agent-concurrency"
+                    type="number"
+                    min="1"
+                    max="8"
+                    step="1"
+                    value={maxConcurrentRuns}
+                    onChange={(event) =>
+                      setMaxConcurrentRuns(event.target.value)
+                    }
+                  />
+                </Field>
+                {executionHosts.length > 0 ? (
+                  <Field className="lg:col-span-2">
+                    <FieldLabel>Run on</FieldLabel>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {executionHosts.map((host) => (
+                        <div
+                          key={host.id}
+                          className="flex items-center gap-2 text-sm"
+                        >
+                          <Checkbox
+                            id={`agent-host-${host.id}`}
+                            checked={executionHostIds.has(host.id)}
+                            onCheckedChange={(checked) =>
+                              setExecutionHostIds((current) =>
+                                toggleSelection(
+                                  current,
+                                  host.id,
+                                  checked === true,
+                                ),
+                              )
+                            }
+                          />
+                          <label htmlFor={`agent-host-${host.id}`}>
+                            {host.label} · {host.status}
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                    <FieldDescription>
+                      Select every Host allowed to run this Agent. Select none
+                      to use this daemon.
+                    </FieldDescription>
+                  </Field>
+                ) : null}
+                <Field className="lg:col-span-2">
+                  <FieldDescription>
+                    Tools are limited to the workspace-agent read-only boundary
+                    on every selected runtime.
+                  </FieldDescription>
+                </Field>
+              </>
+            ) : (
+              <>
+                <Field>
+                  <FieldLabel htmlFor="agent-approval">
+                    {t('agent.create.approvalMode')}
+                  </FieldLabel>
+                  <Select value={approvalMode} onValueChange={setApprovalMode}>
+                    <SelectTrigger id="agent-approval" className="w-full">
+                      <SelectValue>
+                        {approvalModeLabel(approvalMode, t)}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {selectableApprovalModes.map((value) => (
+                        <SelectItem
+                          key={value}
+                          value={value}
+                          disabled={value === 'bubble'}
+                        >
+                          {approvalModeLabel(value, t)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FieldDescription>
+                    {approvalModeDescription(approvalMode, t)}
+                  </FieldDescription>
+                </Field>
 
-            <Field>
-              <FieldLabel htmlFor="agent-max-turns">
-                {t('agent.create.maxTurns')}
-              </FieldLabel>
-              <Input
-                id="agent-max-turns"
-                type="number"
-                min="1"
-                step="1"
-                value={maxTurns}
-                onChange={(event) => setMaxTurns(event.target.value)}
-              />
-              <FieldDescription>
-                {t('agent.create.maxTurnsHelp')}
-              </FieldDescription>
-            </Field>
+                <Field>
+                  <FieldLabel htmlFor="agent-max-turns">
+                    {t('agent.create.maxTurns')}
+                  </FieldLabel>
+                  <Input
+                    id="agent-max-turns"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={maxTurns}
+                    onChange={(event) => setMaxTurns(event.target.value)}
+                  />
+                  <FieldDescription>
+                    {t('agent.create.maxTurnsHelp')}
+                  </FieldDescription>
+                </Field>
 
-            <Field>
-              <FieldLabel htmlFor="agent-color">
-                {t('agent.create.color')}
-              </FieldLabel>
-              <Select value={color} onValueChange={setColor}>
-                <SelectTrigger id="agent-color" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {[
-                    'inherit',
-                    'auto',
-                    'red',
-                    'blue',
-                    'green',
-                    'yellow',
-                    'purple',
-                    'orange',
-                    'pink',
-                    'cyan',
-                  ].map((value) => (
-                    <SelectItem key={value} value={value}>
-                      {value}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
+                <Field>
+                  <FieldLabel htmlFor="agent-color">
+                    {t('agent.create.color')}
+                  </FieldLabel>
+                  <Select value={color} onValueChange={setColor}>
+                    <SelectTrigger id="agent-color" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[
+                        'inherit',
+                        'auto',
+                        'red',
+                        'blue',
+                        'green',
+                        'yellow',
+                        'purple',
+                        'orange',
+                        'pink',
+                        'cyan',
+                      ].map((value) => (
+                        <SelectItem key={value} value={value}>
+                          {value}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </>
+            )}
           </FieldGroup>
         </TabsContent>
 
@@ -689,7 +891,11 @@ export function AgentCreatePage({
               rows={16}
               className="min-h-80 max-h-[60vh] overflow-y-auto"
             />
-            <FieldDescription>{t('agent.create.promptHelp')}</FieldDescription>
+            <FieldDescription>
+              {workspaceAgentMode
+                ? "Define this Agent's durable role and collaboration behavior."
+                : t('agent.create.promptHelp')}
+            </FieldDescription>
           </Field>
         </TabsContent>
 

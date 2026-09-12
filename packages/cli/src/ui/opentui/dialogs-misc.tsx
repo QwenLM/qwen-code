@@ -22,6 +22,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
+import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
@@ -468,7 +469,10 @@ export function OpenTuiResumeDialog({
       return;
     }
     svc
-      .listSessions({ size: 10 })
+      .listSessions({
+        size: 10,
+        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+      })
       .then((res) => {
         if (!alive) return;
         setRows(res.items ?? []);

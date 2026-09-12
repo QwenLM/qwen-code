@@ -149,6 +149,10 @@ import {
   type TurnResultRecordPayload,
   qualifySkillName,
   sessionIdContext,
+  resolveAgentPersona,
+  findAgentSessionBinding,
+  resolveModelId,
+  buildModelIdContext,
   registerSession,
   SessionSourceService,
   SessionSourceError,
@@ -410,6 +414,10 @@ import {
   parseSessionSource,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge/sessionSource';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../runtime/agent-session-source.js';
 import {
   ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
@@ -5247,6 +5255,15 @@ class QwenAgent implements Agent {
       );
       initializationDeadline?.signal.throwIfAborted();
       const sessionSource = getSessionSource(params);
+      if (
+        sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
+        !this.isTrustedManagedParent()
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          '`agent-host` is reserved for daemon-owned host creation',
+        );
+      }
       const provisionalStandalone = isReservedStandaloneSessionSourceType(
         sessionSource?.sourceType,
       );
@@ -5375,6 +5392,15 @@ class QwenAgent implements Agent {
   ): Promise<LoadSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
+    if (
+      sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
+      !this.isTrustedManagedParent()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`agent-host` is reserved for daemon-owned host restore',
+      );
+    }
     const provisionalStandalone = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
     );
@@ -5860,6 +5886,15 @@ class QwenAgent implements Agent {
   ): Promise<ResumeSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
+    if (
+      sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
+      !this.isTrustedManagedParent()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`agent-host` is reserved for daemon-owned host restore',
+      );
+    }
     const provisionalStandalone = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
     );
@@ -6114,6 +6149,7 @@ class QwenAgent implements Agent {
       return sessionService.listSessions({
         cursor: numericCursor,
         size,
+        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
       });
     });
 
@@ -8796,7 +8832,7 @@ class QwenAgent implements Agent {
       ) {
         throw RequestError.invalidParams(
           undefined,
-          'Background notifications require a trusted private ACP parent',
+          'This operation requires a trusted private ACP parent',
         );
       }
       const sessionId = normalizedParams['sessionId'];
@@ -10880,6 +10916,17 @@ class QwenAgent implements Agent {
           }
         }
         const session = this.sessionOrThrow(sessionId);
+        if (
+          source.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
+          (!this.isTrustedManagedParent() ||
+            session.getConfig().getSessionSourceType() !==
+              AGENT_HOST_SESSION_SOURCE_TYPE)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            '`agent-host` is reserved for daemon-owned host creation',
+          );
+        }
         if (isCompatibleLiveSessionSource(source)) {
           await session.enableLiveScreenContext();
         }
@@ -14512,6 +14559,79 @@ class QwenAgent implements Agent {
         // (the daemon only adds SDK-type runtime servers for client MCP).
         sendSdkMcpMessage: this.buildClientMcpSender(wiredSessionId),
       });
+      // initialize() creates the definition manager. Resolve the identity
+      // afterwards, but before publishing or prompting this session.
+      if (sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE) {
+        if (!sessionSource.sourceId) {
+          throw RequestError.invalidParams(
+            undefined,
+            'An agent session must name the agent it is',
+          );
+        }
+        // Refuse, rather than silently continuing as an ordinary session. A
+        // downgrade would hand the client a session it believes is an agent's:
+        // it would carry the agent's name and be resumed as that agent later,
+        // with none of the persona or tools that make the claim true.
+        // Guarded like the other optional Config reads in this file. Absent
+        // means not enabled, which refuses — the safe direction here, since the
+        // alternative is granting an agent persona on a Config that cannot say
+        // whether the operator opted in.
+        const collaborationEnabled =
+          typeof config.isAgentCollaborationEnabled === 'function' &&
+          config.isAgentCollaborationEnabled();
+        if (!collaborationEnabled) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Agent collaboration is disabled on this daemon (experimental.agentCollaboration)',
+          );
+        }
+        // Server binding. `sourceType` and `sourceId` both arrive from the
+        // client, so on their own they are a claim, not a credential — without
+        // this check any caller with daemon access could ask for an agent's
+        // persona and its thread tools. What makes the claim true is that this
+        // workspace's store holds a live run for that agent naming this very
+        // session. Deliberately not gated on the opt-in: with collaboration on
+        // is exactly when the check has to hold.
+        const binding = await findAgentSessionBinding(
+          cwd,
+          wiredSessionId,
+          sessionSource.sourceId,
+        );
+        if (!binding) {
+          throw RequestError.invalidParams(
+            undefined,
+            'No dispatched run claims this session for that agent',
+          );
+        }
+        const persona = await resolveAgentPersona(
+          config,
+          sessionSource.sourceId,
+        );
+        if (persona.status !== 'resolved') {
+          throw RequestError.invalidParams(undefined, persona.error);
+        }
+        config.applyWorkspaceAgentPersona(
+          persona.systemPrompt,
+          persona.agent.name,
+          persona.toolConfig.executionAllowedTools,
+        );
+        const currentAuthType = config.getModelsConfig().getCurrentAuthType();
+        const model = resolveModelId(persona.model, {
+          ...buildModelIdContext(config),
+          currentModel: undefined,
+          currentAuthType,
+        });
+        if (model?.authType && model.authType !== currentAuthType) {
+          await config.switchModel(model.authType, model.modelId, {
+            requireCachedCredentials:
+              model.authType === AuthType.QWEN_OAUTH &&
+              model.authType !== currentAuthType,
+          });
+        } else if (model) {
+          await config.setModel(model.modelId, { reason: 'workspace-agent' });
+        }
+        await config.getLlmClient().refreshSystemInstruction();
+      }
       this.assertManagedSessionAdmission();
     } catch (error) {
       return this.cleanupAfterRequestFailure(error, () =>
@@ -15019,6 +15139,29 @@ class QwenAgent implements Agent {
         config
           .getChatRecordingService()
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
+      }
+
+      // An agent session belongs in the ordinary session list, so it has to be
+      // legible there. Left alone its display name would be the first prompt —
+      // a turn envelope, which is machine text no one asked to read. Write the
+      // agent's own name instead, once, and only when nothing has named this
+      // session already: a person's `/rename` outranks us, and so does the
+      // title a previous attach wrote, which is why an attach does not repeat
+      // this. `auto` rather than `manual` keeps `/rename` free to replace it.
+      // Guarded like `getWarnings`, `getSessionId` and `getFailedMcpServerNames`
+      // above: this layer is handed Config-shaped objects that are not always a
+      // full Config — derived configs, shims and test doubles among them — and
+      // an unguarded call turns a missing method into a failed session
+      // creation rather than a session with no agent title.
+      const agentSessionTitle =
+        typeof config.getWorkspaceAgentName === 'function'
+          ? config.getWorkspaceAgentName()
+          : undefined;
+      if (agentSessionTitle) {
+        const recording = config.getChatRecordingService();
+        if (recording && !recording.getCurrentCustomTitle()) {
+          await recording.recordCustomTitle(agentSessionTitle, 'auto');
+        }
       }
 
       if (options.deferWorkspaceActivation !== true) {

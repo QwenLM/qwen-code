@@ -104,6 +104,16 @@ const { mockRunManagedAutoMemoryDream, mockRunManagedRememberByAgent } =
     mockRunManagedRememberByAgent: vi.fn(),
   }));
 
+const {
+  mockLaunchWorkspaceAgent,
+  mockReadWorkspaceAgents,
+  mockReadAgentWorkspace,
+} = vi.hoisted(() => ({
+  mockLaunchWorkspaceAgent: vi.fn(),
+  mockReadWorkspaceAgents: vi.fn(),
+  mockReadAgentWorkspace: vi.fn(),
+}));
+
 const { mockExecuteGeneration } = vi.hoisted(() => ({
   mockExecuteGeneration: vi.fn(),
 }));
@@ -274,6 +284,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   stripRuntimeSnapshotPrefix: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).stripRuntimeSnapshotPrefix,
+  readWorkspaceAgents: mockReadWorkspaceAgents,
+  readAgentWorkspace: mockReadAgentWorkspace,
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   GOAL_STATE_VERSION: 2,
   // The real helper: the goal get/clear fallbacks return its exact shape and
@@ -1150,6 +1162,7 @@ import {
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import { DAEMON_OWNED_STANDALONE_CREATION_KEY } from '@qwen-code/acp-bridge/sessionSource';
+import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../runtime/agent-session-source.js';
 import type {
   Agent,
   LoadSessionResponse,
@@ -1333,6 +1346,9 @@ describe('runAcpAgent shutdown cleanup', () => {
   beforeEach(() => {
     resetAcpStartupProfilerForTesting();
     vi.clearAllMocks();
+    mockLaunchWorkspaceAgent.mockReset();
+    mockReadWorkspaceAgents.mockReset();
+    mockReadAgentWorkspace.mockReset();
     delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
     delete process.env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD'];
     delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
@@ -8152,31 +8168,36 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('rejects direct mutation to the reserved standalone source', async () => {
-    const sessionId = 'session-A';
-    const recording = {
-      recordSessionSource: vi.fn().mockResolvedValue(true),
-    };
-    const innerConfig = await setupSessionMocks(sessionId);
-    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
-    const { agent, agentPromise } = await bootAcpAgent();
+  it.each(['standalone', AGENT_HOST_SESSION_SOURCE_TYPE])(
+    'rejects direct mutation to the reserved %s source',
+    async (sourceType) => {
+      const sessionId = 'session-A';
+      const recording = {
+        recordSessionSource: vi.fn().mockResolvedValue(true),
+      };
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+      const { agent, agentPromise } = await bootAcpAgent();
 
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
-        sessionId,
-        sourceType: 'standalone',
-      }),
-    ).rejects.toThrow(
-      '`standalone` is reserved for daemon-owned session creation',
-    );
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
+          sessionId,
+          sourceType,
+        }),
+      ).rejects.toThrow(
+        sourceType === 'standalone'
+          ? '`standalone` is reserved for daemon-owned session creation'
+          : '`agent-host` is reserved for daemon-owned host creation',
+      );
 
-    expect(recording.recordSessionSource).not.toHaveBeenCalled();
-    expect(lastSessionMock?.enableLiveScreenContext).not.toHaveBeenCalled();
+      expect(recording.recordSessionSource).not.toHaveBeenCalled();
+      expect(lastSessionMock?.enableLiveScreenContext).not.toHaveBeenCalled();
 
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('rejects forged daemon-owned standalone creation from an untrusted parent', async () => {
     await setupSessionMocks('11111111-1111-4111-8111-111111111111');
@@ -8197,6 +8218,31 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     ).rejects.toThrow(
       '`standalone` is reserved for daemon-owned session creation',
+    );
+    expect(loadCliConfig).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects forged agent host creation from an untrusted parent', async () => {
+    await setupSessionMocks('11111111-1111-4111-8111-111111111111');
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+    );
+
+    await expect(
+      agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: {
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      '`agent-host` is reserved for daemon-owned host creation',
     );
     expect(loadCliConfig).not.toHaveBeenCalled();
 
@@ -24366,6 +24412,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: undefined,
+          excludeSourceType: 'agent-host',
         });
       }
     } finally {
@@ -24409,6 +24456,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: undefined,
+          excludeSourceType: 'agent-host',
         });
       }
     } finally {
@@ -24449,6 +24497,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: expected,
+          excludeSourceType: 'agent-host',
         });
       }
     } finally {
@@ -24505,6 +24554,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
       expect(listSessions).toHaveBeenCalledWith({
         cursor: 1_797_860_000_000.5,
         size: 2,
+        excludeSourceType: 'agent-host',
       });
     } finally {
       mockConnectionState.resolve();
@@ -25064,9 +25114,14 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     },
   );
 
-  it.each(['load', 'resume'] as const)(
-    '%s rejects a standalone restore without a trusted daemon parent',
-    async (action) => {
+  it.each([
+    ['load', 'standalone'],
+    ['resume', 'standalone'],
+    ['load', AGENT_HOST_SESSION_SOURCE_TYPE],
+    ['resume', AGENT_HOST_SESSION_SOURCE_TYPE],
+  ] as const)(
+    '%s rejects a %s restore without a trusted daemon parent',
+    async (action, sourceType) => {
       bindRestoreMocks({ sessionExists: true });
       const { agent, agentPromise } = await spawnAgent();
 
@@ -25077,8 +25132,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           mcpServers: [],
           _meta: {
             [SESSION_SOURCE_META_KEY]: {
-              sourceType: 'standalone',
-              [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+              sourceType,
+              ...(sourceType === 'standalone'
+                ? { [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true }
+                : {}),
             },
           },
         };
@@ -25088,7 +25145,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             ? agent.loadSession(request)
             : agent.unstable_resumeSession(request),
         ).rejects.toThrow(
-          '`standalone` is reserved for daemon-owned session restore',
+          sourceType === 'standalone'
+            ? '`standalone` is reserved for daemon-owned session restore'
+            : '`agent-host` is reserved for daemon-owned host restore',
         );
       } finally {
         mockConnectionState.resolve();

@@ -107,6 +107,29 @@ export interface KeepaliveBridge {
   ): unknown;
 }
 
+export interface KeepaliveSessionResumeRequest {
+  sessionId: string;
+  workspaceCwd: string;
+  sourceType?: string;
+  sourceId?: string;
+}
+
+export function beginKeepaliveSessionResume(
+  bridge: Pick<KeepaliveBridge, 'resumeSession'>,
+  request: KeepaliveSessionResumeRequest,
+  timeoutMs: number,
+): { completion: Promise<unknown>; deadline: Promise<unknown> } {
+  const completion = bridge.resumeSession(request);
+  return {
+    completion,
+    deadline: withTimeout(
+      completion,
+      timeoutMs,
+      `resumeSession(${request.sessionId})`,
+    ),
+  };
+}
+
 /** Default caller headroom above the bridge's 60-second restore deadline. */
 const KEEPALIVE_REVIVE_TIMEOUT_MS = 70_000;
 /** Per-task spawn timeout: a hung spawnOrAttach must not stall the sweep. */
@@ -352,11 +375,15 @@ export function startScheduledTaskKeepalive(
         const metadata = await new SessionService(
           boundWorkspace,
         ).readCreationMetadata(sessionId);
-        const resume = bridge.resumeSession({
-          sessionId,
-          workspaceCwd: boundWorkspace,
-          ...metadata,
-        });
+        const { completion: resume, deadline } = beginKeepaliveSessionResume(
+          bridge,
+          {
+            sessionId,
+            workspaceCwd: boundWorkspace,
+            ...metadata,
+          },
+          reviveTimeoutMs,
+        );
         // Clear the in-flight guard on the resume's TRUE settlement (not the
         // timeout below) so a still-running load keeps blocking a duplicate.
         void resume
@@ -365,11 +392,7 @@ export function startScheduledTaskKeepalive(
             reviving.delete(sessionId);
           });
         try {
-          await withTimeout(
-            resume,
-            reviveTimeoutMs,
-            `resumeSession(${sessionId})`,
-          );
+          await deadline;
           log.debug('keepalive: revived non-resident session', sessionId);
           reviveState.delete(sessionId);
         } catch (loadErr) {

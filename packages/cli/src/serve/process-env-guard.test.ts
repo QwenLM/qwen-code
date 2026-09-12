@@ -297,8 +297,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/server.ts',
     {
       reason:
-        'Embedded server construction keeps a process-environment compatibility fallback.',
-      accesses: { whole: 1 },
+        'Embedded server construction keeps a process-environment compatibility fallback. ' +
+        'The collaboration opt-in is read once at daemon startup and is process-scoped ' +
+        'by design: it governs work no session owns (a recovery sweep, the dispatch ' +
+        'timer, the Host transport routes), so it cannot be a per-session setting.',
+      accesses: { whole: 1, 'key:QWEN_CODE_ENABLE_AGENT_COLLABORATION': 1 },
     },
   ],
   [

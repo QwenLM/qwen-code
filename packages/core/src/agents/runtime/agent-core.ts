@@ -24,6 +24,7 @@ import {
   subagentNameContext,
 } from '../../utils/subagentNameContext.js';
 import { runWithInvocationContext } from '../../utils/invocation-context.js';
+import { isAgentRun } from '../workspace-agents/run-context.js';
 import type { Config } from '../../config/config.js';
 import {
   getCurrentAgentDepth,
@@ -230,6 +231,12 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
   ToolNames.WORKFLOW,
+  ToolNames.THREAD_POST,
+  ToolNames.THREAD_WAIT,
+  ToolNames.THREAD_BLOCK,
+  ToolNames.THREAD_REVIEW,
+  ToolNames.THREAD_CREATE,
+  ToolNames.THREAD_READ,
 ]);
 
 /**
@@ -292,19 +299,41 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // for nested agents — without WORKFLOW here, a teammate-launched
   // workflow re-arms the O(k^n) fan-out the subagent set prevents.
   ToolNames.WORKFLOW,
+  ToolNames.THREAD_POST,
+  ToolNames.THREAD_WAIT,
+  ToolNames.THREAD_BLOCK,
+  ToolNames.THREAD_REVIEW,
+  ToolNames.THREAD_CREATE,
+  ToolNames.THREAD_READ,
 ]);
+
+const THREAD_TOOLS = [
+  ToolNames.THREAD_POST,
+  ToolNames.THREAD_WAIT,
+  ToolNames.THREAD_BLOCK,
+  ToolNames.THREAD_REVIEW,
+  ToolNames.THREAD_CREATE,
+  ToolNames.THREAD_READ,
+] as const;
+
+function exposeThreadTools(excluded: ReadonlySet<string>): ReadonlySet<string> {
+  if (!isAgentRun()) return excluded;
+  const current = new Set(excluded);
+  for (const name of THREAD_TOOLS) current.delete(name);
+  return current;
+}
 
 function getExcludedToolsForCurrentContext(): ReadonlySet<string> {
   if (!isTeammate()) {
-    return EXCLUDED_TOOLS_FOR_SUBAGENTS;
+    return exposeThreadTools(EXCLUDED_TOOLS_FOR_SUBAGENTS);
   }
   if (!isPlanRequiredTeammateContext()) {
-    return EXCLUDED_TOOLS_FOR_TEAMMATES;
+    return exposeThreadTools(EXCLUDED_TOOLS_FOR_TEAMMATES);
   }
 
   const excluded = new Set(EXCLUDED_TOOLS_FOR_TEAMMATES);
   excluded.delete(ToolNames.EXIT_PLAN_MODE);
-  return excluded;
+  return exposeThreadTools(excluded);
 }
 
 /**
@@ -1302,7 +1331,7 @@ export class AgentCore {
 
         // Update token usage if available
         if (lastUsage) {
-          this.recordTokenUsage(lastUsage, turnCounter, roundStreamStart);
+          this.recordTokenUsage(lastUsage, cumulativeRounds, roundStreamStart);
         }
 
         if (functionCalls.length > 0) {
@@ -1503,6 +1532,7 @@ export class AgentCore {
         subagentId: this.subagentId,
         kind: typeof input === 'string' ? 'message' : input.kind,
         text: typeof input === 'string' ? input : input.text,
+        deliveryId: typeof input === 'string' ? undefined : input.deliveryId,
         timestamp: Date.now(),
       });
     }

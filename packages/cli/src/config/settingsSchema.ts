@@ -4129,6 +4129,16 @@ const SETTINGS_SCHEMA = {
           'Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
         showInDialog: true,
       },
+      agentCollaboration: {
+        type: 'boolean',
+        label: 'Enable Agent Collaboration',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable persistent workspace Agents collaborating on shared task threads (experimental). Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
+        showInDialog: true,
+      },
       artifact: {
         type: 'boolean',
         label: 'Enable Artifacts',

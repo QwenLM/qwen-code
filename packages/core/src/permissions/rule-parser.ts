@@ -269,6 +269,19 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   display_image: 'display_image',
   DisplayImage: 'display_image',
 
+  thread_post: 'thread_post',
+  ThreadPost: 'thread_post',
+  thread_wait: 'thread_wait',
+  ThreadWait: 'thread_wait',
+  thread_block: 'thread_block',
+  ThreadBlock: 'thread_block',
+  thread_review: 'thread_review',
+  ThreadReview: 'thread_review',
+  thread_create: 'thread_create',
+  ThreadCreate: 'thread_create',
+  thread_read: 'thread_read',
+  ThreadRead: 'thread_read',
+
   // Legacy edit tool name
   replace: 'edit',
 };

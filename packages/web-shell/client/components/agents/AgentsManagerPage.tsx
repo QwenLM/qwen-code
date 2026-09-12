@@ -12,6 +12,7 @@ import {
 import {
   DAEMON_APPROVAL_MODES,
   useAgents,
+  useWorkspace,
   type DaemonWorkspaceAgentDetail,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
@@ -25,6 +26,12 @@ import {
   type AgentLevelFilter,
 } from './agents-manager-logic';
 import { AgentCreatePage } from './AgentCreatePage';
+/**
+ * Advertised only while the daemon has the collaboration opt-in on; see
+ * `CONDITIONAL_SERVE_FEATURES` in packages/cli/src/serve/capabilities.ts.
+ */
+const AGENT_COLLABORATION_FEATURE = 'agent_collaboration_v1';
+import { ThreadsRoute } from '../workspace-agents/ThreadsRoute';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -78,6 +85,8 @@ interface AgentsManagerPageProps {
   onClose: () => void;
   embedded?: EmbeddedManagerPage;
   initialCreateScope?: 'workspace' | 'global' | null;
+  /** Opens an agent's own session in the shell's session view. */
+  onOpenAgentSession?: (sessionId: string) => void;
 }
 
 function levelLabel(level: string, t: ReturnType<typeof useI18n>['t']): string {
@@ -128,6 +137,7 @@ export function AgentsManagerPage({
   onClose,
   embedded,
   initialCreateScope,
+  onOpenAgentSession,
 }: AgentsManagerPageProps) {
   const { t } = useI18n();
   const {
@@ -150,6 +160,23 @@ export function AgentsManagerPage({
     Boolean(initialCreateScope),
   );
   const [editOpen, setEditOpen] = useState(false);
+  // Shared threads are the collaboration surface, and the daemon only mounts
+  // its routes when `experimental.agentCollaboration` is on. Read the capability
+  // rather than rendering the entry and letting every call 404: the tag is
+  // absent precisely when the routes are, so this hides the door instead of
+  // leaving one that opens onto nothing. Definition CRUD below is unaffected —
+  // it is a different, unconditional feature.
+  const workspace = useWorkspace();
+  const collaborationAvailable =
+    workspace.capabilities?.features.includes(AGENT_COLLABORATION_FEATURE) ===
+    true;
+  const [agentsOpen, setAgentsOpen] = useState(
+    () => !initialCreateScope && collaborationAvailable,
+  );
+  // The daemon can answer late, or be replaced by one with a different answer.
+  useEffect(() => {
+    if (!collaborationAvailable) setAgentsOpen(false);
+  }, [collaborationAvailable]);
   const [listNotice, setListNotice] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -171,8 +198,10 @@ export function AgentsManagerPage({
   }, [agents]);
 
   useEffect(() => {
-    embedded?.onDetailChange(Boolean(selectedName || createOpen || editOpen));
-  }, [createOpen, editOpen, embedded, selectedName]);
+    embedded?.onDetailChange(
+      Boolean(selectedName || createOpen || editOpen || agentsOpen),
+    );
+  }, [createOpen, editOpen, embedded, agentsOpen, selectedName]);
 
   useEffect(() => {
     if (!selection) {
@@ -204,10 +233,14 @@ export function AgentsManagerPage({
   }, [agentsError]);
 
   useEffect(() => {
-    if (initialCreateScope) setCreateOpen(true);
+    if (initialCreateScope) {
+      setAgentsOpen(false);
+      setCreateOpen(true);
+    }
   }, [initialCreateScope]);
 
   function returnToList(): void {
+    setAgentsOpen(false);
     setCreateOpen(false);
     setEditOpen(false);
     setSelection(null);
@@ -308,6 +341,18 @@ export function AgentsManagerPage({
   ) : (
     standaloneNavigation
   );
+
+  if (agentsOpen && collaborationAvailable) {
+    return (
+      <div className="flex w-full flex-col gap-6 pb-8">
+        {navigation}
+        <ThreadsRoute
+          {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
+          onOpenDefinitions={() => setAgentsOpen(false)}
+        />
+      </div>
+    );
+  }
 
   // ── Create view ──
   if (createOpen) {
@@ -610,10 +655,18 @@ export function AgentsManagerPage({
               {t('agents.title')}
             </h1>
             <p className="mt-1 text-sm text-muted-foreground tabular-nums">
+              {t('agents.description')}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground tabular-nums">
               {t('agent.count', { count: agents.length })}
             </p>
           </div>
           <div className="flex gap-2">
+            {collaborationAvailable ? (
+              <Button variant="outline" onClick={() => setAgentsOpen(true)}>
+                Shared threads
+              </Button>
+            ) : null}
             <Button
               variant="outline"
               disabled={loading}

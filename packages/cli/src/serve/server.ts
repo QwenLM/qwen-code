@@ -147,6 +147,8 @@ import {
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
+import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
+import { strandLocalRuns } from '@qwen-code/qwen-code-core';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   collectBoundSessionIds,
@@ -312,6 +314,8 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import { registerAgentHostTransportRoutes } from './routes/agent-hosts.js';
+import { registerA2ATransportRoutes } from './routes/a2a.js';
 import type {
   ChannelDeliveryAccepted,
   ChannelDeliveryRequest,
@@ -1026,6 +1030,13 @@ export function createServeApp(
     }
     return () => guard.assertOpen();
   };
+  // Resolved once, below, from the settings read at daemon startup — not per
+  // request and not per session. The collaboration surface includes work no
+  // session owns: a recovery scan, a 5s dispatch timer and the Host transport
+  // routes. A per-session read cannot govern those, so the setting carries
+  // `requiresRestart: true` and this value is fixed for the daemon's lifetime.
+  // `agentTeamEnabled` reads per session; this one deliberately does not.
+  let agentCollaborationEnabled = false;
   let standaloneSessionsAvailable = false;
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
@@ -1080,6 +1091,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled: () =>
         workspaceRegistry.listEntries().length > 1,
+      agentCollaborationEnabled: () => agentCollaborationEnabled,
       dynamicWorkspaceRegistrationAvailable:
         deps.createWorkspaceRuntime !== undefined,
       persistentWorkspaceRegistrationAvailable:
@@ -1436,6 +1448,14 @@ export function createServeApp(
       return undefined;
     }
   })();
+  // Read from the same boot snapshot as Live Voice. The env override matches
+  // `Config.isAgentCollaborationEnabled` so a daemon and the sessions it hosts
+  // cannot disagree about whether the feature is on.
+  agentCollaborationEnabled =
+    !opts.agentHostWorker &&
+    (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1' ||
+      liveSettingsAtBoot?.experimental?.agentCollaboration === true);
+
   const liveConfigAtBoot = liveSettingsAtBoot
     ? readLiveVoiceConfiguration(liveSettingsAtBoot)
     : undefined;
@@ -2132,6 +2152,14 @@ export function createServeApp(
       rateLimiter,
       daemonLog,
     });
+  }
+
+  // Same opt-in. These routes carry Host enrollment and heartbeat; that they
+  // authenticate is not a substitute for the experiment gate, since an
+  // enrolled Host is exactly the outbound execution path the opt-in governs.
+  if (agentCollaborationEnabled) {
+    registerAgentHostTransportRoutes(app, workspaceRegistry);
+    registerA2ATransportRoutes(app, workspaceRegistry);
   }
 
   // Credentials are a listener-scoped set, not one token: while Local Control
@@ -3171,6 +3199,54 @@ export function createServeApp(
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 
+  // Gated on the opt-in, and gated by *not registering* rather than by
+  // refusing inside the handlers: `registerWorkspaceAgentRoutes` runs a
+  // `recover()` sweep and arms a 5s interval as a side effect of registration,
+  // so a handler-level refusal would still leave the scanner reading
+  // collaboration storage and re-dispatching booked runs on a daemon whose
+  // operator never opted in. Skipping the call leaves the routes 404, which is
+  // also what the absent `agent_collaboration_v1` capability tells clients.
+  if (agentCollaborationEnabled) {
+    registerWorkspaceAgentRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      ...(deps.deliverChannelMessage
+        ? { deliverChannelMessage: deps.deliverChannelMessage }
+        : {}),
+    });
+  } else if (!opts.agentHostWorker) {
+    // Close out runs the switch left mid-flight (architecture §6). Recovery
+    // cannot tell "the daemon crashed" from "the operator turned this off"
+    // — both look like a live run whose body is gone — so if these were left
+    // as they are, opting back in would silently re-dispatch work nobody
+    // asked to resume. Marking them terminal here means recovery later finds
+    // a closed run, and a person decides whether the work happens again.
+    //
+    // A one-shot, not a scanner: no timer, no routes, nothing created in a
+    // workspace that never used collaboration, and untrusted workspaces are
+    // not touched at all. Failures are logged and dropped — this must never
+    // be able to stop a daemon whose operator opted out from starting.
+    void (async () => {
+      for (const runtime of workspaceRegistry.listAll()) {
+        if (!runtime.trusted) continue;
+        try {
+          const { runsStranded } = await strandLocalRuns(runtime.workspaceCwd);
+          if (runsStranded > 0) {
+            writeStderrLine(
+              `qwen serve: agent collaboration is off; ${runsStranded} run(s) in ${runtime.workspaceCwd} marked stranded for review`,
+            );
+          }
+        } catch (error) {
+          writeStderrLine(
+            `qwen serve: could not close stranded agent runs in ${runtime.workspaceCwd}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    })();
+  }
+
   // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
   // manages every registered project's schedule against that project's own cron
   // file (and its own session bridge) rather than always the primary's. Each
@@ -3527,10 +3603,12 @@ export function createServeApp(
         stopScheduledTaskKeepalive?: () => void;
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
+        stopWorkspaceAgentRecovery?: () => void;
       };
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);
+      stopAppResource(locals.stopWorkspaceAgentRecovery);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

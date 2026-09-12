@@ -7,7 +7,11 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Content, Part } from '@google/genai';
-import type { ApprovalModeValue, Config } from '../config/config.js';
+import {
+  deriveConfig,
+  type ApprovalModeValue,
+  type Config,
+} from '../config/config.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -84,6 +88,10 @@ import type {
   AgentBootstrapRecordPayload,
   NotificationRecordPayload,
 } from '../services/chatRecordingService.js';
+import {
+  buildAgentToolConfig,
+  createAgentToolInvocationGuard,
+} from './workspace-agents/capability.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_AGENT_RESUME');
 
@@ -149,7 +157,7 @@ interface CurrentForkRuntime {
 }
 
 interface ResumeOperation {
-  continuationMessages: string[];
+  continuationInputs: AgentExternalInput[];
   promise: Promise<AgentTask | undefined>;
 }
 
@@ -605,22 +613,23 @@ export class BackgroundAgentResumeService {
 
   async resumeBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: AgentExternalInput,
   ): Promise<AgentTask | undefined> {
-    const trimmedMessage = initialMessage?.trim();
+    const normalizedInput =
+      typeof initialInput === 'string' ? initialInput.trim() : initialInput;
     const existingOperation = this.resumeOperations.get(agentId);
     if (existingOperation) {
-      if (trimmedMessage) {
+      if (normalizedInput) {
         const registry = this.config.getBackgroundTaskRegistry();
-        if (!registry.queueMessage(agentId, trimmedMessage)) {
-          existingOperation.continuationMessages.push(trimmedMessage);
+        if (!registry.queueExternalInput(agentId, normalizedInput)) {
+          existingOperation.continuationInputs.push(normalizedInput);
         }
       }
       return existingOperation.promise;
     }
 
     const operation: ResumeOperation = {
-      continuationMessages: trimmedMessage ? [trimmedMessage] : [],
+      continuationInputs: normalizedInput ? [normalizedInput] : [],
       promise: Promise.resolve(undefined),
     };
     operation.promise = this.resumeBackgroundAgentInternal(
@@ -647,13 +656,13 @@ export class BackgroundAgentResumeService {
    */
   async reviveCompletedBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: AgentExternalInput,
   ): Promise<AgentTask | undefined> {
     // A resume/revive already in flight for this id owns the lifecycle — fold
     // into it. (The status flip below is await-free, so this guards a genuinely
     // concurrent in-flight operation, not a same-tick re-entry.)
     if (this.resumeOperations.has(agentId)) {
-      return this.resumeBackgroundAgent(agentId, initialMessage);
+      return this.resumeBackgroundAgent(agentId, initialInput);
     }
     const registry = this.config.getBackgroundTaskRegistry();
     const entry = registry.get(agentId);
@@ -740,7 +749,7 @@ export class BackgroundAgentResumeService {
       pendingApprovals: [...(entry.pendingApprovals ?? [])],
     };
     this.restorePausedEntry(agentId, { suppressRegisterCallback: true });
-    const revived = await this.resumeBackgroundAgent(agentId, initialMessage);
+    const revived = await this.resumeBackgroundAgent(agentId, initialInput);
     if (!revived) {
       const failedEntry = registry.get(agentId);
       // `??` only falls back on null/undefined, so a failed revive that left
@@ -914,7 +923,15 @@ export class BackgroundAgentResumeService {
         resolvedApprovalMode as ApprovalMode,
         { persistedCliFlags: meta.persistedCliFlags },
       );
-      const activeAgentConfig = approvalOverride.config;
+      const approvalConfig = approvalOverride.config;
+      const activeAgentConfig = meta.workspaceAgentId
+        ? deriveConfig(approvalConfig, {
+            getToolInvocationGuard: () =>
+              createAgentToolInvocationGuard(
+                approvalConfig.getToolInvocationGuard(),
+              ),
+          })
+        : approvalConfig;
       const activeRestoreParentPM = approvalOverride.cleanup;
       agentConfig = activeAgentConfig;
       restoreParentPM = activeRestoreParentPM;
@@ -957,10 +974,18 @@ export class BackgroundAgentResumeService {
             )[0],
             ...recovery.history,
           ];
-      const promptMessages = [...operation.continuationMessages];
+      const promptInputs = [...operation.continuationInputs];
       const continuationPrompt =
-        promptMessages.join('\n\n').trim() ||
-        DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE;
+        promptInputs
+          .map((input) => (typeof input === 'string' ? input : input.text))
+          .join('\n\n')
+          .trim() || DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE;
+      const initialExternalInputs = promptInputs.some(
+        (input) => typeof input !== 'string',
+      )
+        ? promptInputs
+        : undefined;
+      let pendingInitialExternalInputs = initialExternalInputs;
       const writerInitialPrompt = continuationPrompt;
       if (target.isFork && (!resumeHistory || resumeHistory.length === 0)) {
         const reason = LEGACY_FORK_RESUME_BLOCKED_REASON;
@@ -1007,6 +1032,14 @@ export class BackgroundAgentResumeService {
           launchModel && meta.persistedCliFlags?.authType
             ? { ...target.subagentConfig!, model: 'inherit' }
             : target.subagentConfig!;
+        const agentRuntimeConfig = meta.workspaceAgentId
+          ? await this.config
+              .getSubagentManager()
+              .convertToRuntimeConfig(target.subagentConfig!, activeAgentConfig)
+          : undefined;
+        const agentToolConfig = meta.workspaceAgentId
+          ? buildAgentToolConfig(agentRuntimeConfig?.toolConfig)
+          : undefined;
         const result = await this.config
           .getSubagentManager()
           .createAgentHeadless(resumeSubagentConfig, activeAgentConfig, {
@@ -1031,6 +1064,7 @@ export class BackgroundAgentResumeService {
                   },
                 }
               : {}),
+            ...(agentToolConfig ? { toolConfigOverride: agentToolConfig } : {}),
           });
         subagent = result.subagent;
         // Per-spawn cleanup from `SubagentManager.createAgentHeadless` —
@@ -1093,11 +1127,11 @@ export class BackgroundAgentResumeService {
       const entry = registry.register(registration, {
         suppressRegisterCallback: true,
       });
-      const lateContinuationMessages = operation.continuationMessages.slice(
-        promptMessages.length,
+      const lateContinuationInputs = operation.continuationInputs.slice(
+        promptInputs.length,
       );
-      for (const message of lateContinuationMessages) {
-        registry.queueMessage(meta.agentId, message);
+      for (const input of lateContinuationInputs) {
+        registry.queueExternalInput(meta.agentId, input);
       }
 
       subagent.setExternalMessageProvider(() =>
@@ -1229,7 +1263,8 @@ export class BackgroundAgentResumeService {
         fireStartHook: boolean,
       ) => {
         let keepResident = false;
-        let finishingInputs: AgentExternalInput[] | undefined;
+        let finishingInputs = pendingInitialExternalInputs;
+        pendingInitialExternalInputs = undefined;
         let shouldFireStartHook = fireStartHook;
         turnRunning = true;
         try {
@@ -1393,10 +1428,12 @@ export class BackgroundAgentResumeService {
         // Restore the persisted launch depth so a resumed nested agent keeps
         // its original nesting level (and spawn eligibility) instead of
         // recomputing to depth 0 from this top-level resume frame.
+        const body = () =>
+          runBody(turnContextState, turnAbortController, fireStartHook);
         const framedRunBody = () =>
           runWithAgentContext(
             meta.agentId,
-            () => runBody(turnContextState, turnAbortController, fireStartHook),
+            body,
             normalizeResumedAgentDepth(meta.depth),
           );
         const invocationRunBody = () =>
@@ -1415,13 +1452,17 @@ export class BackgroundAgentResumeService {
       };
 
       const residentController: ResidentBackgroundAgent = {
-        continue: (message) => {
+        continue: (input) => {
           if (!canStayResident || disposeRequested || runtimeDisposed) {
-            return false;
+            return 'fallback';
           }
           if (needsAutoPermissionLease()) {
             requestRuntimeDisposal();
-            return false;
+            return 'fallback';
+          }
+
+          if (!registry.canStartBackgroundAgent(meta.model)) {
+            return 'capacity_wait';
           }
 
           const nextAbortController = new AbortController();
@@ -1437,7 +1478,9 @@ export class BackgroundAgentResumeService {
                 meta.agentId
               }: ${error instanceof Error ? error.message : String(error)}`,
             );
-            return false;
+            return registry.canStartBackgroundAgent(meta.model)
+              ? 'fallback'
+              : 'capacity_wait';
           }
           if (
             !restarted ||
@@ -1446,7 +1489,7 @@ export class BackgroundAgentResumeService {
             registry.get(meta.agentId) !== restarted ||
             restarted.status !== 'running'
           ) {
-            return false;
+            return 'fallback';
           }
 
           liveToolCallCount = 0;
@@ -1464,7 +1507,11 @@ export class BackgroundAgentResumeService {
           });
 
           const nextContextState = new ContextState();
-          nextContextState.set('task_prompt', message);
+          if (typeof input === 'string') {
+            nextContextState.set('task_prompt', input);
+          } else {
+            nextContextState.set('external_inputs_override', [input]);
+          }
           nextContextState.set('hook_context', '');
           const previousTurn = currentTurnPromise ?? Promise.resolve();
           currentTurnPromise = previousTurn
@@ -1478,7 +1525,7 @@ export class BackgroundAgentResumeService {
               );
             });
           currentTurnPromise.catch(reportUnexpectedBackgroundError);
-          return true;
+          return 'continued';
         },
         dispose: requestRuntimeDisposal,
       };

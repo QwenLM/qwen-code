@@ -38,6 +38,7 @@ import {
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
+  DAEMON_AGENT_RUN_META_KEY,
   MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -1411,6 +1412,7 @@ export class BridgeClient implements Client {
       messageId: string;
       displayText: string;
       content: ContentBlock[];
+      _meta?: Record<string, unknown>;
       attachmentReferences?: SessionAttachmentReference[];
     }> = [];
     try {
@@ -1461,6 +1463,9 @@ export class BridgeClient implements Client {
           messageId: item.messageId,
           displayText: item.text,
           content,
+          ...(item.agentRun
+            ? { _meta: { [DAEMON_AGENT_RUN_META_KEY]: item.agentRun } }
+            : {}),
           ...(attachmentReferences.length > 0 ? { attachmentReferences } : {}),
         });
       }

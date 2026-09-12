@@ -763,6 +763,11 @@ const EXPECTED_REGISTERED_FEATURES = [
     if (feature === 'session_agent_trace') {
       return [feature, 'scheduled_task_session_reuse'];
     }
+    // Conditional, so it is absent from the stage1 baseline above but present
+    // in the registry, declared immediately after `workspace_agent_generate`.
+    if (feature === 'workspace_agent_generate') {
+      return [feature, 'agent_collaboration_v1'];
+    }
     if (feature === 'session_export') {
       return [
         feature,
@@ -3913,6 +3918,20 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),
           ).not.toContain(feature);
+          continue;
+        }
+        if (feature === 'agent_collaboration_v1') {
+          expect(predicate({ agentCollaborationEnabled: true })).toBe(true);
+          expect(predicate({ agentCollaborationEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              agentCollaborationEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
           continue;
         }
         // Future conditional tag. Authors must add a branch above with
@@ -13172,6 +13191,23 @@ describe('createServeApp', () => {
       expect(bridge.calls).toHaveLength(0);
     });
 
+    it('rejects the reserved agent host source', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sourceType: 'agent-host' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('reserved_session_source');
+      expect(bridge.calls).toHaveLength(0);
+    });
+
     it('forwards a valid UUID sessionId to the bridge', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -14847,6 +14883,44 @@ describe('createServeApp', () => {
             clientCount: 1,
             hasActivePrompt: false,
             worktree: { slug: 'task', path: '/tmp/wt', branch: 'wt-task' },
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(200);
+        expect(bridge.calls).toHaveLength(1);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('allows branch creation when only the hidden agent host shares the workspace', async () => {
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 'agent-host',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            sourceType: 'agent-host',
           },
         ],
       });
@@ -19383,6 +19457,7 @@ describe('createServeApp', () => {
           archiveState: 'active',
           size: 1,
           signal: preflightSignal,
+          excludeSourceType: 'agent-host',
         });
         catalogRequest.abort();
         await vi.waitFor(() => expect(preflightSignal?.aborted).toBe(true));
@@ -20926,6 +21001,7 @@ describe('createServeApp', () => {
           cursor: 1000123.456,
           size: 20,
           archiveState: 'active',
+          excludeSourceType: 'agent-host',
         });
       } finally {
         listSessionsSpy.mockRestore();

@@ -24,6 +24,7 @@ import type {
 import type { PermissionDecision } from '../../permissions/types.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
+import type { AgentRunContext } from '../../agents/workspace-agents/run-context.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import type {
@@ -281,6 +282,52 @@ export interface AgentParams {
    * provided, it is ignored and the caller-owned worktree is reused.
    */
   working_dir?: string;
+}
+
+export type ProgrammaticBackgroundAgentLaunchResult =
+  | { status: 'started'; backgroundAgentId: string }
+  | { status: 'capacity_wait' }
+  | { status: 'launch_failed'; error: string };
+
+interface ProgrammaticBackgroundAgentLaunchOptions {
+  agentId: string;
+  workspaceAgentId: string;
+  agentRun?: AgentRunContext;
+  subagentConfig: SubagentConfig;
+  toolConfig: ToolConfig;
+}
+
+export async function launchProgrammaticBackgroundAgent(
+  config: Config,
+  params: Pick<AgentParams, 'description' | 'prompt'>,
+  options: ProgrammaticBackgroundAgentLaunchOptions,
+): Promise<ProgrammaticBackgroundAgentLaunchResult> {
+  const invocation = new AgentToolInvocation(
+    config,
+    config.getSubagentManager(),
+    {
+      ...params,
+      subagent_type: options.subagentConfig.name,
+      run_in_background: true,
+    },
+    undefined,
+    options,
+  );
+  const result = await invocation.execute();
+  if (invocation.programmaticStatus === 'started') {
+    return { status: 'started', backgroundAgentId: options.agentId };
+  }
+  if (invocation.programmaticStatus === 'capacity_wait') {
+    return { status: 'capacity_wait' };
+  }
+  return {
+    status: 'launch_failed',
+    error:
+      result.error?.message ??
+      (typeof result.llmContent === 'string'
+        ? result.llmContent
+        : 'Failed to launch background agent.'),
+  };
 }
 
 const debugLogger = createDebugLogger('AGENT');
@@ -1395,12 +1442,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   private currentDisplay: AgentResultDisplay | null = null;
   private currentToolCalls: AgentResultDisplay['toolCalls'] = [];
   private callId?: string;
+  programmaticStatus: 'started' | 'capacity_wait' | 'launch_failed' =
+    'launch_failed';
 
   constructor(
     private readonly config: Config,
     private readonly subagentManager: SubagentManager,
     params: AgentParams,
     private readonly forkProfile?: ForkProfile,
+    private readonly programmatic?: ProgrammaticBackgroundAgentLaunchOptions,
   ) {
     super(params);
   }
@@ -2622,6 +2672,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       if (isFork) {
         subagentConfig = FORK_AGENT;
+      } else if (this.programmatic) {
+        subagentConfig = this.programmatic.subagentConfig;
       } else {
         const loadedConfig = await this.subagentManager.loadSubagent(
           effectiveSubagentType,
@@ -2768,6 +2820,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           backgroundOwnerId,
         );
         if (!backgroundSlotReservation) {
+          if (this.programmatic) {
+            this.programmaticStatus = 'capacity_wait';
+            return this.buildSpawnBlockedResult(
+              'No background-agent capacity is currently available.',
+              'Background-agent capacity is full',
+            );
+          }
           const queuedCount = registry.getQueuedCount();
           const queueText =
             queuedCount === 0
@@ -3019,7 +3078,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const agentIdSuffix = this.callId ?? randomUUID().slice(0, 8);
       const launchDepth = childLaunchDepth();
       const hookOpts = {
-        agentId: `${subagentConfig.name}-${agentIdSuffix}`,
+        agentId:
+          this.programmatic?.agentId ??
+          `${subagentConfig.name}-${agentIdSuffix}`,
         // Resolved config name, not the raw requested type. Hooks, spans, task
         // rows, and the meta sidecar all read this field.
         agentType: subagentConfig.name,
@@ -3086,11 +3147,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             ...(shouldRunInBackground && subagentRuntimeAuthOverrides
               ? { runtimeAuthOverrides: subagentRuntimeAuthOverrides }
               : {}),
+            ...(this.programmatic
+              ? { toolConfigOverride: this.programmatic.toolConfig }
+              : {}),
           },
         );
         subagent = result.subagent;
         subagentDispose = result.dispose;
         taskPrompt = this.params.prompt;
+        toolConfig = this.programmatic?.toolConfig;
       }
       const runtimeEventEmitter =
         subagent.getCore().getEventEmitter?.() ?? this.eventEmitter;
@@ -3132,6 +3197,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const contextState = new ContextState();
       contextState.set('task_prompt', taskPrompt);
+      if (this.programmatic?.agentRun) {
+        contextState.set('external_inputs_override', [
+          {
+            kind: 'message',
+            text: taskPrompt,
+            deliveryId: this.programmatic.agentRun.runId,
+          },
+        ]);
+      }
       // Always set hook_context so ${hook_context} in systemPrompt does not
       // throw when no hook is configured or the hook returns no additional context.
       contextState.set('hook_context', '');
@@ -3193,10 +3267,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
             agentName: subagentConfig.name,
             agentColor: subagentConfig.color,
-            // Seed the JSONL with the launching prompt so the transcript is
-            // self-describing — readers don't need to consult .meta.json to
-            // know what the agent was asked to do.
-            initialUserPrompt: this.params.prompt,
+            // Agent launch input is recorded by its correlated external-input
+            // event; ordinary launches still need this transcript seed.
+            ...(this.programmatic?.agentRun
+              ? {}
+              : { initialUserPrompt: this.params.prompt }),
             bootstrapHistory: isFork ? bgInitialMessages : undefined,
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           });
@@ -3302,6 +3377,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
+          ...(this.programmatic
+            ? {
+                workspaceAgentId: this.programmatic.workspaceAgentId,
+              }
+            : {}),
           agentType: hookOpts.agentType,
           description: this.params.description,
           parentSessionId: sessionId,
@@ -3317,9 +3397,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
-          ...(isFork &&
-          (this.params.fork_tools !== undefined ||
-            this.forkProfile !== undefined) &&
+          ...((this.programmatic !== undefined ||
+            (isFork &&
+              (this.params.fork_tools !== undefined ||
+                this.forkProfile !== undefined))) &&
           bgToolConfig?.executionAllowedTools !== undefined
             ? {
                 executionAllowedTools: [...bgToolConfig.executionAllowedTools],
@@ -3815,18 +3896,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 isFork ? 'fork' : 'background',
               ),
               turnAbortController.signal,
-              (recordOutcome) =>
-                runWithAgentContext(
-                  hookOpts.agentId,
-                  () =>
-                    bgBody(
-                      turnContextState,
-                      turnAbortController,
-                      recordOutcome,
-                      fireStartHook,
-                    ),
-                  launchDepth,
-                ),
+              (recordOutcome) => {
+                const body = () =>
+                  bgBody(
+                    turnContextState,
+                    turnAbortController,
+                    recordOutcome,
+                    fireStartHook,
+                  );
+                return runWithAgentContext(hookOpts.agentId, body, launchDepth);
+              },
             );
           return isFork ? runInForkContext(framedBgBody) : framedBgBody();
         };
@@ -3838,13 +3917,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
 
         const residentController: ResidentBackgroundAgent = {
-          continue: (message) => {
+          continue: (input) => {
             if (!canStayResident || disposeRequested || runtimeDisposed) {
-              return false;
+              return 'fallback';
             }
             if (needsAutoPermissionLease()) {
               requestRuntimeDisposal();
-              return false;
+              return 'fallback';
+            }
+
+            const currentEntry = registry.get(hookOpts.agentId);
+            if (!registry.canStartBackgroundAgent(currentEntry?.model)) {
+              return 'capacity_wait';
             }
 
             const nextAbortController = new AbortController();
@@ -3858,7 +3942,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               debugLogger.warn(
                 `[Agent] Could not continue resident background agent ${hookOpts.agentId}: ${error instanceof Error ? error.message : String(error)}`,
               );
-              return false;
+              return registry.canStartBackgroundAgent(currentEntry?.model)
+                ? 'fallback'
+                : 'capacity_wait';
             }
             if (
               !restarted ||
@@ -3867,7 +3953,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               registry.get(hookOpts.agentId) !== restarted ||
               restarted.status !== 'running'
             ) {
-              return false;
+              return 'fallback';
             }
 
             liveToolCallCount = 0;
@@ -3888,7 +3974,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             });
 
             const nextContextState = new ContextState();
-            nextContextState.set('task_prompt', message);
+            if (typeof input === 'string') {
+              nextContextState.set('task_prompt', input);
+            } else {
+              nextContextState.set('external_inputs_override', [input]);
+            }
             nextContextState.set('hook_context', '');
             const previousTurn = currentTurnPromise ?? Promise.resolve();
             currentTurnPromise = previousTurn
@@ -3902,7 +3992,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 );
               });
             currentTurnPromise.catch(reportUnexpectedBackgroundError);
-            return true;
+            return 'continued';
           },
           dispose: requestRuntimeDisposal,
         };
@@ -3920,6 +4010,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
         currentTurnPromise.catch(reportUnexpectedBackgroundError);
 
+        this.programmaticStatus = 'started';
         this.updateDisplay({ status: 'background' as const }, updateOutput);
         return {
           llmContent:

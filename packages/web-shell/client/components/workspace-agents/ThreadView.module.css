@@ -1,0 +1,504 @@
+/* Thread view — a ledger of outstanding obligations, with the conversation as
+   the evidence underneath it. */
+
+.page {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  margin: -16px -20px 0;
+}
+
+.pageHeader {
+  display: flex;
+  min-height: 46px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  border-block-end: 1px solid var(--border);
+}
+
+.backButton {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  color: var(--muted-foreground);
+}
+
+.parentLink {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.parentLink:hover {
+  color: var(--foreground);
+}
+
+.title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  outline: none;
+}
+
+.assigneeSelect {
+  min-height: 30px;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+}
+
+/* The live signal lives in the header, never in a body card that competes
+   with the content and scrolls away. */
+.workingChip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--status-running-bg);
+  color: var(--status-running-fg);
+  font-size: 12px;
+}
+
+.workingDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.doneButton {
+  margin-inline-start: auto;
+}
+
+.body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 24px;
+  padding: 20px 24px 32px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* The resolver's sentence. Wide enough to hold a full sentence, because it is
+   a sentence and not a badge. This is the only element allowed to change while
+   the page is open, and the only place motion is spent. */
+.reason {
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.reasonAttention {
+  border-color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
+  color: var(--status-attention-fg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .reason {
+    transition:
+      background-color 150ms ease,
+      color 150ms ease;
+  }
+}
+
+.threadBody {
+  max-width: 72ch;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.priorityChip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.priorityUrgent {
+  border-color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
+  color: var(--status-attention-fg);
+}
+
+/* The standard the work is judged against, given its own edge so it does not
+   read as more of the body. The rule sits on the inline start so it aligns
+   with the run rows below, which are marked the same way. */
+.criteria {
+  max-width: 72ch;
+  padding-inline-start: 12px;
+  border-inline-start: 2px solid var(--border);
+}
+
+.criteriaTitle {
+  margin: 0 0 4px;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.criteriaText {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.children {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.childRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: none;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.childRow span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.childRow:hover:not(:disabled) {
+  background: var(--secondary);
+}
+
+.posts {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.post {
+  display: grid;
+  grid-template-columns: 2.5em minmax(0, 1fr) auto;
+  gap: 2px 10px;
+}
+
+/* Sequence is how a person and an agent refer to the same post, and how a
+   duplicate after a replay is recognised. It is data, so it is monospaced for
+   alignment — not texture. */
+.sequence {
+  grid-row: 1 / span 2;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
+.author {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.time {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.postText {
+  grid-column: 2 / span 2;
+  max-width: 72ch;
+  color: var(--foreground);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.postOutcome {
+  grid-column: 2 / span 2;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* A system trigger is a ledger entry, not somebody talking: one verb phrase,
+   no body, quieter than a post. */
+.systemPost .author {
+  color: var(--muted-foreground);
+  font-weight: 400;
+}
+
+.sidebar {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.sectionTitle {
+  margin: 0 0 8px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.runRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1px 8px;
+  padding: 6px 8px 7px 6px;
+  border-inline-start: 2px solid var(--border);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.runRow:hover {
+  background: var(--secondary);
+}
+
+.runAgent {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* What this run is doing, or what it left behind. Sits where a task status
+   would, and carries more: the close obligation, not just the run state. */
+.runState {
+  grid-column: 2;
+  grid-row: 1;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.runStateOutstanding {
+  color: var(--status-attention-fg);
+}
+
+.runStateLive {
+  color: var(--status-running-fg);
+}
+
+/* Why this run exists. Asked first, so it is on the row rather than a tooltip. */
+.runTrigger {
+  grid-column: 1 / span 2;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runLink {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.runLink:hover {
+  color: var(--foreground);
+}
+
+.runCancel {
+  margin-inline-start: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--status-attention-fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.runError {
+  grid-column: 1 / span 2;
+  color: var(--status-attention-fg);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.transcriptPanel {
+  min-width: 0;
+  border-inline-start: 1px solid var(--border);
+  padding-inline-start: 16px;
+}
+
+.transcriptHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-block-end: 8px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.transcriptContent {
+  max-height: 70vh;
+  overflow: auto;
+  margin: 0;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pastToggle {
+  margin-top: 4px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.pastToggle:hover {
+  color: var(--foreground);
+}
+
+/* A line, not a bar: a budget is a limit you want to notice before it trips,
+   not a goal you are filling. */
+.budgetLine {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.composerInput {
+  padding: 10px 12px;
+  border: 0;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: none;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  resize: vertical;
+  min-height: 72px;
+}
+
+.composerInput:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px 10px;
+  border-block-start: 1px solid var(--border);
+}
+
+.previewLead {
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.previewLeadNobody {
+  color: var(--status-attention-fg);
+}
+
+.previewTarget {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+/* Lit means it will run; dimmed means it will not. The label beside it says
+   which, so the state is never carried by brightness alone. */
+.previewWake {
+  color: var(--foreground);
+}
+
+.previewSkip {
+  color: var(--muted-foreground);
+}
+
+.previewUnknown {
+  color: var(--status-attention-fg);
+}
+
+.previewName {
+  font-family: var(--font-mono);
+}
+
+.composerActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 12px;
+  border-block-start: 1px solid var(--border);
+}
