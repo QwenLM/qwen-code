@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import {
@@ -109,6 +110,7 @@ import {
 import { toModelVisibleSubagentResult } from '../../agents/subagent-result.js';
 import {
   ApprovalMode,
+  deriveConfig,
   deriveApprovalModeConfig,
   deriveWorktreeConfig,
   installSessionWorkflowRevisionWriteThrough,
@@ -134,6 +136,10 @@ import type {
 } from '../../agents/background-tasks.js';
 import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 import type { AuthOverrides } from '../../models/content-generator-config.js';
+import {
+  ExecutionCleanupError,
+  type ExecutionEnvironment,
+} from '../../services/execution-environment.js';
 
 const EXTERNAL_USAGE_NOTICE =
   '\n\n[External executor token usage and cost are unavailable.]';
@@ -230,6 +236,7 @@ function createLocalExternalInputQueue(): {
 }
 
 export interface AgentParams {
+  execution_backend?: 'container';
   description: string;
   prompt: string;
   /** Todo ID this top-level execution implements, when a visible plan exists. */
@@ -284,6 +291,48 @@ export interface AgentParams {
 }
 
 const debugLogger = createDebugLogger('AGENT');
+
+function getExecutionBackendError(
+  config: Config,
+  params: AgentParams,
+): string | undefined {
+  if (config.getExecutionEnvironment?.()) {
+    return 'Nested agents are unavailable inside a container execution environment.';
+  }
+  if (params.execution_backend === undefined) return undefined;
+  if (params.execution_backend !== 'container') {
+    return 'Parameter "execution_backend" must be "container" when set.';
+  }
+  if (!config.getExecutionEnvironmentFactory?.()) {
+    return 'Container execution is not enabled by this host.';
+  }
+  if (config.getCodeModeOnly?.()) {
+    return 'Container execution cannot be combined with tools.codeModeOnly.';
+  }
+  if (params.name !== undefined || !isTopLevelSession()) {
+    return 'Container execution is available only for top-level regular subagents.';
+  }
+  if (
+    typeof params.subagent_type === 'string' &&
+    params.subagent_type.toLowerCase() === FORK_SUBAGENT_TYPE
+  ) {
+    return 'Container execution cannot be combined with a fork.';
+  }
+  const hookSystem = config.getHookSystem?.();
+  if (
+    !config.getDisableAllHooks?.() &&
+    (hookSystem
+      ?.getRegistry()
+      .getAllHooks()
+      .some((entry) => entry.enabled) ||
+      hookSystem
+        ?.getSessionHooksManager()
+        .getAllSessionHooks(config.getSessionId()).length)
+  ) {
+    return 'Container execution cannot be combined with enabled host hooks.';
+  }
+  return undefined;
+}
 const resolvedForkProfiles = new WeakMap<AgentParams, ForkProfile>();
 const FORK_PROFILE_SAFE_MODE_ERROR =
   'Parameter "fork_profile" is unavailable in safe mode because project profiles are local customizations.';
@@ -521,7 +570,9 @@ export async function rebuildToolRegistryOnOverride(
     skipDiscovery: true,
     forSubAgent: true,
   });
-  agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
+  if (!override.getExecutionEnvironment?.()) {
+    agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
+  }
   ov.getToolRegistry = () => agentRegistry;
   if (options?.markRebuilt !== false) {
     ov[TOOL_REGISTRY_REBUILT] = true;
@@ -770,6 +821,16 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           description:
             "Isolation mode. 'worktree' creates a temporary git worktree under <projectRoot>/.qwen/worktrees/agent-<7hex> so the agent works on an isolated copy of the repo. The worktree is auto-removed if the agent makes no changes; otherwise the worktree path and branch are returned in the result.",
         },
+        ...(config.getExecutionEnvironmentFactory?.()
+          ? {
+              execution_backend: {
+                type: 'string',
+                enum: ['container'],
+                description:
+                  "Run this regular subagent's file and shell tools in a container. Composes with worktree isolation. Git metadata, host tools, hooks, nested agents, and task resume are unavailable. Workspace file changes persist.",
+              },
+            }
+          : {}),
         working_dir: {
           type: 'string',
           description:
@@ -987,6 +1048,8 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
   }
 
   override validateToolParams(params: AgentParams): string | null {
+    const executionBackendError = getExecutionBackendError(this.config, params);
+    if (executionBackendError) return executionBackendError;
     // Validate required fields
     if (
       !params.description ||
@@ -1887,7 +1950,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     },
   ): Promise<string | undefined> {
     const { agentId, agentType, transcriptPath, resolvedMode, signal } = opts;
-    const hookSystem = this.config.getHookSystem();
+    const hookSystem =
+      this.params.execution_backend === 'container'
+        ? undefined
+        : this.config.getHookSystem();
     if (!hookSystem) return undefined;
 
     const effectiveTranscriptPath =
@@ -2122,7 +2188,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     },
   ): Promise<string | undefined> {
     const { agentId, agentType, resolvedMode, signal, updateOutput } = opts;
-    const hookSystem = this.config.getHookSystem();
+    const hookSystem =
+      this.params.execution_backend === 'container'
+        ? undefined
+        : this.config.getHookSystem();
 
     // Always set hook_context so ${hook_context} in systemPrompt does not
     // throw when no hook is configured or the hook returns no additional context.
@@ -2275,6 +2344,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    const executionBackendError = getExecutionBackendError(
+      this.config,
+      this.params,
+    );
+    if (executionBackendError) {
+      return this.buildSpawnBlockedResult(
+        executionBackendError,
+        executionBackendError,
+      );
+    }
     const sessionWorkflowAgent =
       this.config.getSessionWorkflowPlanRevision?.() !== undefined;
     if (this.params.plan_mode_required === true) {
@@ -2422,6 +2501,38 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // lived inside the try, the catch would have no way to reach them,
     // and a provisioned worktree would leak until the 30-day startup
     // sweep — review #4073 round 2.
+    let executionEnvironment: ExecutionEnvironment | undefined;
+    let executionDisposal: Promise<void> | undefined;
+    let unregisterExecutionEnvironment: (() => void) | undefined;
+    let removeExecutionAbortListener: (() => void) | undefined;
+    const disposeExecutionEnvironment = (): Promise<void> => {
+      removeExecutionAbortListener?.();
+      removeExecutionAbortListener = undefined;
+      executionDisposal ??= Promise.resolve().then(async () => {
+        await executionEnvironment?.dispose();
+        unregisterExecutionEnvironment?.();
+      });
+      return executionDisposal;
+    };
+    const bindExecutionAbort = (abortSignal?: AbortSignal): void => {
+      removeExecutionAbortListener?.();
+      removeExecutionAbortListener = undefined;
+      if (!executionEnvironment || !abortSignal) return;
+      const onAbort = () => {
+        void disposeExecutionEnvironment().catch((error) => {
+          debugLogger.warn(
+            `[Agent] Container cleanup after cancellation failed: ${error}`,
+          );
+        });
+      };
+      if (abortSignal.aborted) {
+        onAbort();
+      } else {
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+        removeExecutionAbortListener = () =>
+          abortSignal.removeEventListener('abort', onAbort);
+      }
+    };
     let worktreeIsolation: {
       slug: string;
       path: string;
@@ -2440,6 +2551,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       preservedPath?: string;
       preservedBranch?: string;
     }> => {
+      await disposeExecutionEnvironment();
       if (!worktreeIsolation) return {};
       const isolation = worktreeIsolation;
       // Null the closure var BEFORE doing any work so any concurrent
@@ -2558,6 +2670,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
       return '';
     };
+    const formatExecutionCleanupFailure = (error: unknown): string => {
+      if (!executionEnvironment && !(error instanceof ExecutionCleanupError)) {
+        return '';
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      return (
+        `\n\n[Container cleanup failed: ${message}]` +
+        formatWorktreeSuffix(
+          worktreeIsolation
+            ? {
+                preservedPath: worktreeIsolation.path,
+                preservedBranch: worktreeIsolation.branch,
+              }
+            : {},
+        )
+      );
+    };
 
     // Hoisted so the outer catch can restore parent PermissionManager
     // state when an exception lands between `createApprovalModeOverride`
@@ -2644,6 +2773,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           return this.buildSpawnBlockedResult(notFoundMessage, notFoundMessage);
         }
         subagentConfig = loadedConfig;
+      }
+      if (this.params.execution_backend === 'container') {
+        const unsupported = [
+          ['external executor', subagentConfig.executor],
+          ['MCP servers', subagentConfig.mcpServers],
+          ['agent hooks', subagentConfig.hooks],
+        ].filter(([, value]) => value !== undefined);
+        if (unsupported.length > 0) {
+          throw new Error(
+            `Container execution does not support ${unsupported.map(([name]) => name).join(', ')}.`,
+          );
+        }
       }
       const model = this.subagentManager.resolveModelGrade(
         this.params.model,
@@ -3007,8 +3148,49 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Config (see installSessionWorkflowRevisionWriteThrough).
         installSessionWorkflowRevisionWriteThrough(worktreeConfig, this.config);
       }
+      let executionConfig = worktreeConfig;
+      if (this.params.execution_backend === 'container') {
+        executionConfig = deriveWorktreeConfig(
+          worktreeConfig,
+          await realpath(worktreeConfig.getWorkingDir()),
+          {
+            customIgnoreFiles:
+              this.config.getFileFilteringOptions().customIgnoreFiles,
+          },
+        );
+        installSessionWorkflowRevisionWriteThrough(
+          executionConfig,
+          worktreeConfig,
+        );
+        const pendingEnvironment =
+          this.config.getExecutionEnvironmentFactory()!(
+            executionConfig,
+            signal ?? new AbortController().signal,
+          );
+        unregisterExecutionEnvironment =
+          this.config.registerExecutionEnvironment?.(pendingEnvironment);
+        try {
+          executionEnvironment = await pendingEnvironment;
+        } catch (error) {
+          if (!(error instanceof ExecutionCleanupError))
+            unregisterExecutionEnvironment?.();
+          throw error;
+        }
+        bindExecutionAbort(signal);
+        signal?.throwIfAborted();
+        executionConfig = deriveConfig(executionConfig, {
+          getExecutionEnvironment: () => executionEnvironment,
+          getExecutionEnvironmentFactory: () => undefined,
+          getDisableAllHooks: () => true,
+          getHookSystem: () => undefined,
+        });
+        installSessionWorkflowRevisionWriteThrough(
+          executionConfig,
+          worktreeConfig,
+        );
+      }
       const { config: agentConfig, cleanup } = await createApprovalModeOverride(
-        worktreeConfig,
+        executionConfig,
         resolvedApprovalMode,
         { externalExecutor: subagentConfig.executor !== undefined },
       );
@@ -3137,9 +3319,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       contextState.set('hook_context', '');
 
       // ── Background (async) execution path ──────────────────────
+      if (executionEnvironment) {
+        signal?.throwIfAborted();
+        if (!this.config.getExecutionEnvironmentFactory()) {
+          throw new Error('Session shut down during container setup.');
+        }
+      }
       if (shouldRunInBackground) {
         // Fire SubagentStart hook before background launch
-        const hookSystem = this.config.getHookSystem();
+        const hookSystem = executionEnvironment
+          ? undefined
+          : this.config.getHookSystem();
         let subagentStartHookCompleted = false;
         if (hookSystem) {
           try {
@@ -3164,6 +3354,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Create an independent AbortController — background agents
         // survive ESC cancellation of the parent's current turn.
         const bgAbortController = new AbortController();
+        bindExecutionAbort(bgAbortController.signal);
 
         // Background agents have no inline UI, so a tool call that still needs
         // confirmation is by default auto-denied rather than auto-approved
@@ -3270,6 +3461,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             debugLogger.warn(
               `[Agent] Worktree cleanup after background registration failure failed: ${cleanupError}`,
             );
+            wtSuffix = formatExecutionCleanupFailure(cleanupError);
           }
 
           this.updateDisplay(
@@ -3314,7 +3506,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: 'running',
           ...(sessionWorkflowAgent ? { sessionWorkflow: true } : {}),
           isBackgrounded: true,
-          isolation: this.params.isolation,
+          isolation: executionEnvironment ? 'container' : this.params.isolation,
+          executionBackend: this.params.execution_backend,
+          workspaceIsolation: executionEnvironment
+            ? this.params.isolation
+            : undefined,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
           ...(isFork &&
@@ -3446,6 +3642,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const canStayResident =
           !bgSubagent.continuationBlockedReason &&
           !isFork &&
+          !executionEnvironment &&
           this.params.isolation !== 'worktree' &&
           (!subagentConfig.hooks ||
             Object.keys(subagentConfig.hooks).length === 0);
@@ -3591,7 +3788,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 );
               if (
                 terminateMode === AgentTerminateMode.GOAL &&
-                hadWorktreeIsolation
+                (hadWorktreeIsolation || executionEnvironment)
               ) {
                 const pending = registry.drainMessages(hookOpts.agentId);
                 if (pending.length > 0) {
@@ -3605,7 +3802,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               }
 
               const wtSuffix = formatWorktreeSuffix(
-                hadWorktreeIsolation ? await cleanupWorktreeIsolation() : {},
+                hadWorktreeIsolation || executionEnvironment
+                  ? await cleanupWorktreeIsolation()
+                  : {},
               );
               // The usage notice is a suffix, not part of the model-visible
               // text: baking it into finalText would make the `finalText ||
@@ -3751,9 +3950,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             let wtSuffix = '';
             try {
               wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
-            } catch {
+            } catch (cleanupError) {
               // Helper logs its own failures; don't mask the original
               // crash message.
+              wtSuffix = formatExecutionCleanupFailure(cleanupError);
             }
             const errorMsg = baseErrorMsg + wtSuffix;
 
@@ -4021,6 +4221,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Parent abort still propagates down (so ESC at the parent kills
       // the subagent), but child abort does NOT propagate up.
       const fgAbortController = new AbortController();
+      bindExecutionAbort(fgAbortController.signal);
       const onParentAbort = () => fgAbortController.abort();
       if (signal?.aborted) {
         fgAbortController.abort();
@@ -4210,7 +4411,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: 'running',
           ...(sessionWorkflowAgent ? { sessionWorkflow: true } : {}),
           isBackgrounded: false,
-          isolation: this.params.isolation,
+          isolation: executionEnvironment ? 'container' : this.params.isolation,
+          executionBackend: this.params.execution_backend,
+          workspaceIsolation: executionEnvironment
+            ? this.params.isolation
+            : undefined,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
           ...(isFork &&
@@ -4372,13 +4577,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // preserve it here, and surface the preserved path/branch in the
       // failure message so the user can recover it.
       let wtSuffix = '';
-      if (worktreeIsolation) {
+      if (error instanceof ExecutionCleanupError && !executionEnvironment) {
+        wtSuffix = formatExecutionCleanupFailure(error);
+      } else if (worktreeIsolation || executionEnvironment) {
         try {
           wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
         } catch (cleanupError) {
           debugLogger.warn(
             `[AgentTool] Worktree cleanup after error failed: ${cleanupError}`,
           );
+          wtSuffix = formatExecutionCleanupFailure(cleanupError);
         }
       }
 

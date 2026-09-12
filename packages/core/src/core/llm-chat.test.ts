@@ -5404,6 +5404,44 @@ describe('LlmChat', async () => {
   });
 
   describe('auto-compression integration', () => {
+    it('clears the execution environment cache before finishing compression', async () => {
+      let completeInvalidation!: () => void;
+      const invalidateReadCache = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            completeInvalidation = resolve;
+          }),
+      );
+      mockConfig.getExecutionEnvironment = () =>
+        ({ invalidateReadCache }) as unknown as ReturnType<
+          Config['getExecutionEnvironment']
+        >;
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      let finished = false;
+      const compression = chat
+        .tryCompress('container-compression', true)
+        .then(() => {
+          finished = true;
+        });
+      await vi.waitFor(() =>
+        expect(invalidateReadCache).toHaveBeenCalledOnce(),
+      );
+      expect(finished).toBe(false);
+      completeInvalidation();
+      await compression;
+      expect(finished).toBe(true);
+    });
+
     function makeStreamResponse(
       text = 'ok',
       usageMetadata?: GenerateContentResponse['usageMetadata'],

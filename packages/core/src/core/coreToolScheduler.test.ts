@@ -3765,6 +3765,60 @@ describe('CoreToolScheduler', () => {
     expect(scheduleCheck).toHaveBeenCalledTimes(1);
   });
 
+  it('releases prepared resources before completing a host-denied invocation', async () => {
+    let finishRelease!: () => void;
+    const release = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRelease = resolve;
+        }),
+    );
+    const execute = vi.fn();
+    const tool = new MockTool({
+      name: 'prepared-tool',
+      getDefaultPermission: async () => 'ask',
+      execute,
+    });
+    const build = tool.build.bind(tool);
+    vi.spyOn(tool, 'build').mockImplementation((params) =>
+      Object.assign(build(params), { release }),
+    );
+    const permissionManager = {
+      isToolEnabled: async () => true,
+      hasRelevantRules: () => true,
+      evaluate: async () => 'deny',
+      findMatchingDenyRule: () => 'prepared-tool',
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([[tool.name, tool]]),
+        permissionManager,
+      });
+    const scheduling = scheduler.schedule(
+      [
+        {
+          callId: 'prepared-denied',
+          name: tool.name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prepared-denied',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+    expect(execute).not.toHaveBeenCalled();
+    expect(onAllToolCallsComplete).not.toHaveBeenCalled();
+    finishRelease();
+    await scheduling;
+    await vi.waitFor(() =>
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+    );
+    expect(onAllToolCallsComplete.mock.calls[0][0][0].response.errorType).toBe(
+      ToolErrorType.EXECUTION_DENIED,
+    );
+  });
+
   it('applies canonical legacy tool names to the deny-list fallback', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'edited',
@@ -19125,6 +19179,7 @@ describe('CoreToolScheduler activation wiring', () => {
     // Names the mock SkillManager.listSkills will report as available. When
     // omitted, defaults to ["tsx-helper"] which satisfies the common case.
     availableSkillNames?: string[];
+    containerExecution?: boolean;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -19212,6 +19267,7 @@ describe('CoreToolScheduler activation wiring', () => {
         };
       },
       getDisabledSkillNames: () => new Set<string>(),
+      getExecutionEnvironment: () => (opts.containerExecution ? {} : undefined),
       isSkillEnabled: () => true,
       getModelInvocableCommandsProvider: () => null,
       addInlineAnnouncedSkillKeys,
@@ -19236,6 +19292,30 @@ describe('CoreToolScheduler activation wiring', () => {
     };
     return JSON.stringify(r.response?.responseParts ?? null);
   }
+
+  it('does not activate host skills from container file paths', async () => {
+    const matchAndActivateByPaths = vi.fn();
+    const { scheduler, onAllToolCallsComplete } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: true,
+        containerExecution: true,
+      });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'container-read',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/host/credentials' },
+          isClientInitiated: false,
+          prompt_id: 'container-read',
+        },
+      ],
+      new AbortController().signal,
+    );
+    expect(matchAndActivateByPaths).not.toHaveBeenCalled();
+    expect(onAllToolCallsComplete.mock.calls[0][0][0].status).toBe('success');
+  });
 
   it('invokes matchAndActivateByPaths with extracted candidates and appends the reminder when SkillTool is present', async () => {
     const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);

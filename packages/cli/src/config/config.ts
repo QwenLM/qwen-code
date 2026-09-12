@@ -53,6 +53,7 @@ import {
   type OutputStyleDefinition,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
+import { agentExecutionFactory } from './agent-execution.js';
 import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
@@ -2523,6 +2524,7 @@ export async function loadCliConfig(
         }
       : undefined,
     settingsWatcher,
+    executionEnvironmentFactory: agentExecutionFactory(),
   };
 
   const config = new Config(configParams);

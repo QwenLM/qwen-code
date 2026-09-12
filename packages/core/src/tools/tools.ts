@@ -92,6 +92,9 @@ export interface ToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<TResult>;
+
+  /** Release prepared resources when the scheduler finalizes the call. */
+  release?(): Promise<void>;
 }
 
 /**

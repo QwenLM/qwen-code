@@ -109,6 +109,8 @@ const WORKTREE_ISOLATION_BLOCKED_REASON =
   'Background task worktree isolation cannot be reconstructed after session restore.';
 const INCOMPATIBLE_ISOLATION_BLOCKED_REASON =
   'Background task isolation metadata is incompatible.';
+const CONTAINER_EXECUTION_BLOCKED_REASON =
+  'Container background tasks cannot be resumed. Start a new container agent to continue.';
 
 /**
  * Returns true when the subagent's effective tool surface will include the
@@ -521,6 +523,11 @@ export class BackgroundAgentResumeService {
         ) {
           retainedStateBlockedReason = TRANSCRIPT_IDENTITY_BLOCKED_REASON;
         } else if (
+          meta.isolation === 'container' ||
+          meta.executionBackend !== undefined
+        ) {
+          retainedStateBlockedReason = CONTAINER_EXECUTION_BLOCKED_REASON;
+        } else if (
           meta.isolation !== undefined &&
           meta.isolation !== 'worktree'
         ) {
@@ -686,10 +693,15 @@ export class BackgroundAgentResumeService {
       );
       return undefined;
     }
-    if (!readAgentMeta(entry.metaPath)) {
+    const meta = readAgentMeta(entry.metaPath);
+    if (!meta) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": metadata could not be read.`,
       );
+      return undefined;
+    }
+    if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
+      entry.resumeBlockedReason = CONTAINER_EXECUTION_BLOCKED_REASON;
       return undefined;
     }
     if (!jsonl.exists(entry.outputFile)) {
@@ -795,6 +807,12 @@ export class BackgroundAgentResumeService {
 
     const meta = readAgentMeta(metaPath);
     if (!meta) {
+      return undefined;
+    }
+    if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
+      this.restorePausedEntry(agentId, {
+        resumeBlockedReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+      });
       return undefined;
     }
 

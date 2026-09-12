@@ -20,6 +20,7 @@ import { ApprovalMode } from '../config/approval-mode.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
+import type { ExecutionEnvironment } from '../services/execution-environment.js';
 
 // Mock file system operations
 vi.mock('fs/promises');
@@ -2985,6 +2986,23 @@ bad`);
         expect(create).not.toHaveBeenCalled();
         expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
       });
+
+      it.each(['executor', 'mcpServers', 'hooks'] as const)(
+        'refuses container-incompatible %s for direct manager callers',
+        async (field) => {
+          mockConfig.getExecutionEnvironment = () =>
+            ({}) as ExecutionEnvironment;
+          const definition = {
+            ...executorConfig,
+            executor: undefined,
+            [field]: field === 'executor' ? executorConfig.executor : {},
+          };
+          await expect(
+            manager.createAgentHeadless(definition, mockConfig),
+          ).rejects.toThrow('container execution does not support');
+          expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+        },
+      );
 
       it('preserves external factory errors without AgentHeadless labeling', async () => {
         const error = new Error('spawn ENOENT');

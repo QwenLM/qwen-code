@@ -9,6 +9,7 @@ import {
   Config,
   ApprovalMode,
   deriveWorktreeConfig,
+  deriveConfig,
   installSessionWorkflowRevisionWriteThrough,
   type SessionWorkflowPlanRevision,
 } from '../../config/config.js';
@@ -25,6 +26,14 @@ import { EditTool } from '../edit.js';
 import { WriteFileTool } from '../write-file.js';
 import { ReadFileTool } from '../read-file.js';
 import { recordBlock } from '../../permissions/denialTracking.js';
+import { PermissionManager } from '../../permissions/permission-manager.js';
+import { DiscoveredTool } from '../tool-registry.js';
+import { AgentCore } from '../../agents/runtime/agent-core.js';
+import type { LlmChat } from '../../core/llm-chat.js';
+import {
+  EXECUTION_TOOL_NAMES,
+  type ExecutionEnvironment,
+} from '../../services/execution-environment.js';
 
 /**
  * Regression: Object.create(parent) is not enough to isolate a subagent's
@@ -55,8 +64,9 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     approvalMode: ApprovalMode.DEFAULT,
   };
 
-  async function createParentWithRegistry(): Promise<Config> {
-    const parent = new Config(baseParams);
+  async function createParentWithRegistry(
+    parent = new Config(baseParams),
+  ): Promise<Config> {
     const parentRegistry = await parent.createToolRegistry(undefined, {
       skipDiscovery: true,
     });
@@ -64,6 +74,239 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     (parent as any).toolRegistry = parentRegistry;
     return parent;
   }
+
+  it('registers only execution facades and delegates file access through the child environment', async () => {
+    const parent = await createParentWithRegistry();
+    const environment = {
+      prepare: vi.fn().mockResolvedValue({
+        description: 'Remote read',
+        locations: [],
+        params: { file_path: '/container-only.txt' },
+      }),
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'Remote file content',
+        returnDisplay: 'Remote file content',
+      }),
+      release: vi.fn().mockResolvedValue(undefined),
+      invalidateReadCache: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ExecutionEnvironment;
+    const base = deriveConfig(parent, {
+      getExecutionEnvironment: () => environment,
+    });
+    const { config: child } = await createApprovalModeOverride(
+      base,
+      ApprovalMode.DEFAULT,
+    );
+    const registry = child.getToolRegistry();
+    expect(registry.getAllToolNames().sort()).toEqual(
+      [...EXECUTION_TOOL_NAMES, ToolNames.TOOL_SEARCH].sort(),
+    );
+    expect(parent.getExecutionEnvironment()).toBeUndefined();
+    expect(registry).not.toBe(parent.getToolRegistry());
+    await registry.warmAll();
+    const read = registry.getTool(ToolNames.READ_FILE);
+    const result = await read!
+      .build({ file_path: '/container-only.txt' })
+      .execute(new AbortController().signal);
+    expect(result.llmContent).toBe('Remote file content');
+    expect(environment.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolName: ToolNames.READ_FILE,
+        params: { file_path: '/container-only.txt' },
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(environment.execute).toHaveBeenCalledOnce();
+    await registry.stop();
+    await parent.getToolRegistry().stop();
+  });
+
+  it('discovers deferred container tools without exposing parent tools or denied tools', async () => {
+    const parent = new Config({
+      ...baseParams,
+      eagerTools: [],
+      permissions: { deny: [ToolNames.SHELL] },
+    });
+    const permissionManager = new PermissionManager(parent);
+    permissionManager.initialize();
+    vi.spyOn(parent, 'getPermissionManager').mockReturnValue(permissionManager);
+    await createParentWithRegistry(parent);
+    const parentRegistry = parent.getToolRegistry();
+    const parentTool = new DiscoveredTool(
+      parent,
+      'parent_only_tool',
+      'A tool discovered on the host',
+      { type: 'object', properties: {} },
+    );
+    parentRegistry.registerPermissionDeferredFactory(
+      parentTool.name,
+      async () => parentTool,
+    );
+    await parentRegistry.ensureTool(parentTool.name);
+    await parentRegistry.ensureTool(ToolNames.READ_FILE);
+    const environment = {
+      prepare: vi.fn(),
+      execute: vi.fn(),
+    } as unknown as ExecutionEnvironment;
+    const base = deriveConfig(parent, {
+      getExecutionEnvironment: () => environment,
+    });
+    const { config: child, cleanup } = await createApprovalModeOverride(
+      base,
+      ApprovalMode.DEFAULT,
+    );
+    const registry = child.getToolRegistry();
+    const setTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(child, 'getLlmClient').mockReturnValue({ setTools } as never);
+
+    try {
+      await registry.warmAll();
+      expect(
+        registry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toEqual([ToolNames.TOOL_SEARCH]);
+      expect(registry.isPermissionDeferred(ToolNames.READ_FILE)).toBe(true);
+      expect(registry.isDeferredAndHidden(ToolNames.READ_FILE)).toBe(true);
+      expect(registry.getAllToolNames()).not.toContain(ToolNames.SHELL);
+      expect(registry.getAllToolNames()).not.toContain(parentTool.name);
+
+      const search = registry.getTool(ToolNames.TOOL_SEARCH);
+      const result = await search!
+        .build({
+          query: `select:${ToolNames.READ_FILE},${ToolNames.SHELL},${parentTool.name}`,
+        })
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain(`"name":"${ToolNames.READ_FILE}"`);
+      expect(result.llmContent).toContain(
+        `Not found: ${ToolNames.SHELL}, ${parentTool.name}`,
+      );
+      expect(registry.isDeferredAndHidden(ToolNames.READ_FILE)).toBe(false);
+      expect(
+        registry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toEqual([ToolNames.READ_FILE, ToolNames.TOOL_SEARCH]);
+      expect(parentRegistry.isDeferredAndHidden(ToolNames.READ_FILE)).toBe(
+        true,
+      );
+      expect(parentRegistry.isDeferredAndHidden(parentTool.name)).toBe(true);
+      expect(setTools).not.toHaveBeenCalled();
+      expect(environment.prepare).not.toHaveBeenCalled();
+      expect(environment.execute).not.toHaveBeenCalled();
+    } finally {
+      cleanup();
+      await registry.stop();
+      await parentRegistry.stop();
+    }
+  });
+
+  it('declares and executes a newly discovered worker tool on the next model round', async () => {
+    const parent = new Config({ ...baseParams, eagerTools: [] });
+    const permissions = new PermissionManager(parent);
+    permissions.initialize();
+    vi.spyOn(parent, 'getPermissionManager').mockReturnValue(permissions);
+    await createParentWithRegistry(parent);
+    await parent.getToolRegistry().ensureTool(ToolNames.READ_FILE);
+    const environment = {
+      prepare: vi.fn().mockResolvedValue({
+        description: 'Worker read',
+        params: { file_path: '/worker-only.txt' },
+        locations: [],
+      }),
+      permission: vi.fn().mockResolvedValue('allow'),
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'worker file content',
+        returnDisplay: 'worker file content',
+      }),
+      release: vi.fn().mockResolvedValue(undefined),
+      invalidateReadCache: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ExecutionEnvironment;
+    const { config: child, cleanup } = await createApprovalModeOverride(
+      deriveConfig(parent, { getExecutionEnvironment: () => environment }),
+      ApprovalMode.DEFAULT,
+    );
+    const parentClient = vi.spyOn(parent, 'getLlmClient');
+    const core = new AgentCore(
+      'contained',
+      child,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 3 },
+    );
+    const calls = [
+      {
+        id: 'discover',
+        name: ToolNames.TOOL_SEARCH,
+        args: { query: `select:${ToolNames.READ_FILE}` },
+      },
+      {
+        id: 'read',
+        name: ToolNames.READ_FILE,
+        args: { file_path: '/worker-only.txt' },
+      },
+    ];
+    let round = 0;
+    const sendMessageStream = vi.fn(async function* () {
+      const call = calls[round++];
+      yield {
+        type: 'chunk',
+        value: call
+          ? { functionCalls: [call] }
+          : { candidates: [{ content: { parts: [{ text: 'Done' }] } }] },
+      };
+    });
+    const chat = {
+      getHistoryToolCallFingerprints: () => new Map(),
+      sendMessageStream,
+    } as unknown as LlmChat;
+    try {
+      const initialTools = await core.prepareTools();
+      expect(initialTools.map((tool) => tool.name)).not.toContain(
+        ToolNames.READ_FILE,
+      );
+      const result = await core.runReasoningLoop(
+        chat,
+        [],
+        initialTools,
+        new AbortController(),
+        { maxTurns: 3 },
+      );
+      expect(result.turnsUsed).toBe(3);
+      const requests = sendMessageStream.mock.calls as unknown as Array<
+        [
+          unknown,
+          {
+            message: unknown;
+            config: {
+              tools: Array<{ functionDeclarations: Array<{ name: string }> }>;
+            };
+          },
+        ]
+      >;
+      expect(
+        requests[0][1].config.tools[0].functionDeclarations.map(
+          (tool) => tool.name,
+        ),
+      ).not.toContain(ToolNames.READ_FILE);
+      expect(
+        requests[1][1].config.tools[0].functionDeclarations.map(
+          (tool) => tool.name,
+        ),
+      ).toContain(ToolNames.READ_FILE);
+      expect(JSON.stringify(requests[2][1].message)).toContain(
+        'worker file content',
+      );
+      expect(environment.execute).toHaveBeenCalledOnce();
+      expect(parentClient).not.toHaveBeenCalled();
+      expect(
+        parent.getToolRegistry().isDeferredAndHidden(ToolNames.READ_FILE),
+      ).toBe(true);
+    } finally {
+      parentClient.mockRestore();
+      cleanup();
+      await child.getToolRegistry().stop();
+      await parent.getToolRegistry().stop();
+    }
+  });
 
   function attachFakePermissionManager(parent: Config) {
     const stripDangerousRulesForAutoMode = vi.fn();

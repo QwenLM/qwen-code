@@ -236,6 +236,8 @@ function createPreSpawnAbortedHandle(): ShellExecutionHandle {
 }
 
 export interface ShellExecutionConfig {
+  /** Emit buffered output snapshots while a non-PTY command is running. */
+  streamBufferedOutput?: boolean;
   terminalWidth?: number;
   terminalHeight?: number;
   pager?: string;
@@ -774,6 +776,7 @@ export class ShellExecutionService {
       getMaxBufferedOutputBytes(shellExecutionConfig),
       shellExecutionConfig.pager,
       options.postPromote,
+      shellExecutionConfig.streamBufferedOutput,
     );
   }
 
@@ -786,6 +789,7 @@ export class ShellExecutionService {
     maxBufferedOutputBytes: number,
     pager: string | undefined,
     postPromote?: ShellPostPromoteHandlers,
+    streamBufferedOutput = false,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
@@ -951,6 +955,15 @@ export class ShellExecutionService {
             stdout += decodedChunk;
           } else {
             stderr += decodedChunk;
+          }
+          if (streamBufferedOutput) {
+            const separator = stdout.endsWith('\n') ? '' : '\n';
+            const snapshot =
+              stdout + (stderr ? (stdout ? separator : '') + stderr : '');
+            onOutputEvent({
+              type: 'data',
+              chunk: stripAnsi(snapshot).slice(-65536),
+            });
           }
         };
 

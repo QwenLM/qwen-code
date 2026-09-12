@@ -5103,6 +5103,11 @@ export class LlmClient {
     if (meta.evictedReadPaths.length === 0) {
       return;
     }
+    const executionEnvironment = this.config.getExecutionEnvironment();
+    if (executionEnvironment) {
+      await executionEnvironment.invalidateReadCache(meta.evictedReadPaths);
+      return;
+    }
     const statResults = await Promise.all(
       meta.evictedReadPaths.map((p) =>
         fsPromises.stat(p).catch(() => undefined),

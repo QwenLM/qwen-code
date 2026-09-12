@@ -2978,6 +2978,24 @@ describe('ShellExecutionService child_process fallback', () => {
       },
     );
 
+    it('emits live snapshots before exit while retaining the buffered final result', async () => {
+      const { result } = await simulateExecutionWithConfig(
+        'live-buffered-output',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from('ready\n'));
+          expect(onOutputEventMock).toHaveBeenCalledWith({
+            type: 'data',
+            chunk: 'ready\n',
+          });
+          cp.stdout?.emit('data', Buffer.from('done\n'));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { ...shellExecutionConfig, streamBufferedOutput: true },
+      );
+      expect(result.output).toBe('ready\ndone');
+    });
+
     it('reports capture-limit notice for streaming child_process output', async () => {
       const { result } = await simulateExecutionWithConfig(
         'streaming-large-output',

@@ -134,8 +134,10 @@ export interface AgentMeta {
    * are never exposed as reusable background agents.
    */
   isBackgrounded?: boolean;
-  /** Whether the original launch used temporary worktree isolation. */
-  isolation?: 'worktree';
+  /** Container launches use this legacy field so older readers refuse resume. */
+  isolation?: 'worktree' | 'container';
+  executionBackend?: 'container';
+  workspaceIsolation?: 'worktree';
   /** ISO 8601 timestamp of the latest lifecycle transition. */
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */

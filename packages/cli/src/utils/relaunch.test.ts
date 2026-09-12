@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { trustedProcessEnv } from './container-policy.js';
 import {
   vi,
   describe,
@@ -21,6 +22,11 @@ import {
 } from './processUtils.js';
 import type { ChildProcess } from 'node:child_process';
 import { spawn } from 'node:child_process';
+import {
+  loadEnvironment,
+  isFileSourcedEnvKey,
+  resetEnvironmentTrackingForTesting,
+} from '../config/environment.js';
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -176,6 +182,26 @@ describe('relaunchAppInChildProcess', () => {
       expect(mockedSpawn).not.toHaveBeenCalled();
       expect(processExitSpy).not.toHaveBeenCalled();
     });
+  });
+
+  it('reloads file values in the child without promoting them to operator environment', async () => {
+    resetEnvironmentTrackingForTesting();
+    delete process.env['TRACK_A_FILE_VALUE'];
+    process.env['TRACK_A_OPERATOR_VALUE'] = 'operator';
+    loadEnvironment({ env: { TRACK_A_FILE_VALUE: 'repository' } });
+    const child = createMockChildProcess(0, false);
+    mockedSpawn.mockReturnValue(child);
+    const promise = relaunchAppInChildProcess([], [], {
+      filterEnvironment: (env) => trustedProcessEnv(env, isFileSourcedEnvKey),
+    });
+    await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+    const childEnv = mockedSpawn.mock.calls[0]?.[2]?.env;
+    expect(childEnv?.['TRACK_A_FILE_VALUE']).toBeUndefined();
+    expect(childEnv?.['TRACK_A_OPERATOR_VALUE']).toBe('operator');
+    expect(process.env['TRACK_A_FILE_VALUE']).toBe('repository');
+    child.emit('close', 0);
+    await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+    resetEnvironmentTrackingForTesting();
   });
 
   describe('when QWEN_CODE_NO_RELAUNCH is not set', () => {

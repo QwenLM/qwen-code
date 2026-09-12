@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { trustedProcessEnv } from './utils/container-policy.js';
+import { isFileSourcedEnvKey } from './config/environment.js';
 import {
   AuthType,
   type ChatRecord,
@@ -731,6 +733,7 @@ export async function main() {
       // Relaunch app so we always have a child process that can be internally
       // restarted if needed.
       await relaunchAppInChildProcess(memoryArgs, [], {
+        filterEnvironment: (env) => trustedProcessEnv(env, isFileSourcedEnvKey),
         afterSpawn: clearCorruptionEnvVars,
         childEnv: privateAcpChildEnv,
         onUpdateRelaunch,

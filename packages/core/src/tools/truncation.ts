@@ -281,7 +281,8 @@ export async function truncateToolOutput(
   const result = await truncateAndSaveToFile(
     content,
     fileName,
-    config.storage.getProjectTempDir(),
+    config.getExecutionEnvironment?.()?.outputDirectory ??
+      config.storage.getProjectTempDir(),
     threshold,
     lines,
     keep,
@@ -472,7 +473,9 @@ export async function persistAndTruncateToolResult(
     };
   }
   try {
-    const toolResultsDir = config.storage.getToolResultsDir();
+    const toolResultsDir =
+      config.getExecutionEnvironment?.()?.outputDirectory ??
+      config.storage.getToolResultsDir();
     const outputFile = path.join(toolResultsDir, `${safeCallId}.txt`);
     await fs.mkdir(toolResultsDir, { recursive: true });
     await atomicWriteFile(outputFile, content, {
@@ -493,7 +496,8 @@ export async function persistAndTruncateToolResult(
       const fallback = await truncateAndSaveToFile(
         content,
         `${toolName}_${crypto.randomBytes(6).toString('hex')}`,
-        config.storage.getProjectTempDir(),
+        config.getExecutionEnvironment?.()?.outputDirectory ??
+          config.storage.getProjectTempDir(),
         config.getTruncateToolOutputThreshold(),
         config.getTruncateToolOutputLines(),
       );

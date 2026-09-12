@@ -665,6 +665,7 @@ describe('Gemini Client (client.ts)', () => {
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getJsonSchema: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getExecutionEnvironment: vi.fn().mockReturnValue(undefined),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -3773,6 +3774,32 @@ describe('Gemini Client (client.ts)', () => {
       // Exactly the one blanked file (oldest of 6, keepRecent=5) had its
       // fast-path disarmed.
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends evicted paths to the execution environment instead of the host cache', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const invalidateReadCache = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getExecutionEnvironment).mockReturnValue({
+        invalidateReadCache,
+      } as unknown as ReturnType<Config['getExecutionEnvironment']>);
+      const { history, paths } = await makeReadFileResponses(6);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: () => history,
+        setHistory: vi.fn(),
+      } as unknown as LlmChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+      for await (const _ of client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'container-compaction',
+        { type: SendMessageType.UserQuery },
+      )) {
+        /* drain */
+      }
+      expect(invalidateReadCache).toHaveBeenCalledWith([paths[0]]);
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
 
     it('does not abort the turn when microcompaction cleanup fails', async () => {

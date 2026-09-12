@@ -388,6 +388,71 @@ describe('BackgroundAgentResumeService', () => {
     expect(subagentManager.loadSubagent).not.toHaveBeenCalled();
   });
 
+  it.each(['discovery', 'resume', 'revive'] as const)(
+    'refuses container task %s without creating a local runtime',
+    async (operation) => {
+      const agentId = `container-${operation}`;
+      const sessionId = 'session-container';
+      const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+      const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+      writeAgentMeta(metaPath, {
+        agentId,
+        agentType: 'researcher',
+        subagentName: 'researcher',
+        description: 'Container task',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: operation === 'resume' ? 'paused' : 'completed',
+        isBackgrounded: true,
+        isolation: 'container',
+        executionBackend: 'container',
+        workspaceIsolation: 'worktree',
+      });
+      fs.writeFileSync(
+        outputFile,
+        JSON.stringify({
+          uuid: 'container-message',
+          parentUuid: null,
+          sessionId,
+          agentId,
+          cwd: tempDir,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Continue contained work' }],
+          },
+        }) + '\n',
+      );
+      const { service, subagentManager } = createService();
+      if (operation === 'discovery') {
+        await service.loadPausedBackgroundAgents(sessionId);
+      } else {
+        registry.register({
+          agentId,
+          description: 'Container task',
+          subagentType: 'researcher',
+          isBackgrounded: true,
+          status: operation === 'resume' ? 'paused' : 'completed',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+          outputFile,
+          metaPath,
+        });
+        const result =
+          operation === 'resume'
+            ? await service.resumeBackgroundAgent(agentId, 'Continue')
+            : await service.reviveCompletedBackgroundAgent(agentId, 'Continue');
+        expect(result).toBeUndefined();
+      }
+      expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+        'Container background tasks cannot be resumed',
+      );
+      expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    },
+  );
+
   it('keeps damaged and unsafe retained entries visible but non-continuable', async () => {
     const sessionId = 'session-unsafe';
     const missingId = 'missing-transcript';

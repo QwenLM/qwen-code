@@ -918,6 +918,18 @@ export class SubagentManager {
     };
 
     try {
+      if (
+        runtimeContext.getExecutionEnvironment?.() &&
+        (config.executor !== undefined ||
+          config.mcpServers !== undefined ||
+          config.hooks !== undefined)
+      ) {
+        throw new SubagentError(
+          `Subagent "${config.name}": container execution does not support external executors, MCP servers, or agent hooks.`,
+          SubagentErrorCode.INVALID_CONFIG,
+          config.name,
+        );
+      }
       if (config.executor !== undefined) {
         // Safe mode promises that only built-in subagents are available and
         // that no repo-supplied execution surface runs. Discovery filtering is
