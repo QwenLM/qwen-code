@@ -497,7 +497,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // A malformed --deadline is a usage error, and it must fail here, before
   // the tree is captured and planned, not at the plan write after that work
   // is done. The same parse runs again inside `captureDeadline`; it is pure.
-  parseDeadlineOption(process.env, args.deadline);
+  parseDeadlineOption(args.deadline);
   // DERIVED here when a file review does not name one, rather than recomputed
   // by whoever calls this. `qwen review run` pins the artifact name it polls
   // for from the same repo-relative path put through the same `safeTarget`,

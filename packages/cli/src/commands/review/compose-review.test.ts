@@ -1883,9 +1883,11 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // marker with zero reverse-audit records must not suppress the not-built
     // gap the way a time-budget stop does: the cap gate refuses only
     // `round > cap`, so the gap's FIX (rebuild `--round 1`) is admitted, and
-    // a local run has no deadline to refuse it at all. Reading the marker
-    // cause-blind would silently drop both the gap and its rebuild
-    // remediation for a run that audited nothing.
+    // a run whose wall still holds — this one has no wall at all — has
+    // nothing to refuse it either. Reading the marker cause-blind would
+    // silently drop both the gap and its rebuild remediation for a run that
+    // audited nothing. (The sibling below is the one exception: a wall that
+    // has since closed refuses the rebuild too.)
     const plan = coveredPlan([]); // no reverse-audit ran — the not-built shape
     writeRoundCapStop(plan, 3, 4);
     const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
@@ -1894,6 +1896,31 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(r.body).toContain('reverse-audit round cap of 3');
     // …but the not-built gap and its rebuild remediation are still owed.
     expect(r.remediation.join(' ')).toContain('reverse audit:');
+  });
+
+  it('a round-cap stop DOES suppress the not-built gap once the plan’s wall has closed — the rebuild it names would be refused', () => {
+    // Same shape, but the plan carries a wall that ran out: the remediation
+    // `--round 1` would meet the budget gate's refusal as deterministically
+    // as a time-budget stop's, so naming it is a FIX that cannot run.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    // Captured two hours ago: the hour-long wall is spent. Backdating the
+    // plan keeps every record and the marker below newer than it.
+    const captured = new Date(Date.now() - 2 * 3600 * 1000);
+    utimesSync(plan, captured, captured);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
   });
 
   it('renders the budget stop bilingually on a Han-description PR', () => {

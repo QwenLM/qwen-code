@@ -1214,7 +1214,7 @@ describe('cappedRoundTier — the operator ceiling may only lower a tier', () =>
   });
 });
 
-describe('the huge reduction applies only where there is a wall to fit inside', () => {
+describe('the huge reduction applies only under an explicit clock — a ceiling to fit inside', () => {
   const HUGE = { srcDiffLines: 5000, diffLines: 5000 };
   const LARGE = { srcDiffLines: 900, diffLines: 900 };
   const SMALL = { srcDiffLines: 100, diffLines: 100 };

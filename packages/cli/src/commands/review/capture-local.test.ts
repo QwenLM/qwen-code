@@ -383,9 +383,9 @@ describe('capture-local — the --deadline flag the handler records', () => {
       delete process.env[DEADLINE_ENV];
       hugeTree();
       const out = join(dir, 'flag.json');
-      run(out, { deadline: '90' });
+      run(out, { deadline: '120' });
       const a = JSON.parse(readFileSync(out, 'utf8'));
-      expect(a.deadlineSeconds).toBe(5400);
+      expect(a.deadlineSeconds).toBe(7200);
       expect(a.deadlineSource).toBe('flag');
       expect(a.budget.reverseAuditRounds).toBe(3);
     } finally {

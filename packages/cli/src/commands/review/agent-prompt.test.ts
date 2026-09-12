@@ -1146,8 +1146,8 @@ describe('--round — the CLI bakes the round into the identity line and the key
   it('takes the round cap from the CLOCK as well, on a sized huge plan', () => {
     // Every other cap test here uses the unsized `PLAN` fixture, whose tier is
     // the LARGE fallback whatever the clock says, or forces a cap by storing
-    // one — so the `hasReviewDeadline(process.env)` argument at all four call
-    // sites was mutation-invisible: hardcoding it to either constant left the
+    // one — so the `hasReviewDeadline(process.env, plan, report)` argument at
+    // the cap sites was mutation-invisible: hardcoding it to either constant left the
     // whole suite green. A SIZED huge plan is the only shape where the flag
     // decides anything.
     const dir = mkdtempSync(join(tmpdir(), 'ap-clock-tier-'));
@@ -7614,7 +7614,7 @@ describe('the verify gate — compose survives a budget stop', () => {
     expect(readRecordedPrompts(plan).size).toBe(1);
   });
 
-  it('builds the verifier when there is no deadline at all — every local run', () => {
+  it('builds the verifier when no clock resolves at all — no env epoch and no plan wall', () => {
     verifyCall();
     expect(process.exitCode).toBeUndefined();
     expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);

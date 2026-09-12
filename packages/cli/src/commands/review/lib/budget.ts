@@ -153,8 +153,8 @@ export interface ReviewBudget {
    * round that will not fit; this static cap is the belt it works under.
    * A local run has a wall too — the plan's default (`lib/deadline.ts`) —
    * but that wall is a liveness bound sized ABOVE what a healthy run at this
-   * cap spends, so on such a run the cap is still the bound that ends a
-   * converging loop and the huge tier's reduction does not apply: the
+   * cap spends, so on such a run the cap is still what ends a loop that has
+   * NOT converged by the cap round, and the huge tier's reduction does not apply: the
    * reduction answers a ceiling the run must fit inside, and a default wall
    * is not one, so a huge diff without an explicit clock reads the 3B tier.
    * Where an explicit deadline does exist the huge tier is reduced to

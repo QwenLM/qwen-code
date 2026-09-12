@@ -899,8 +899,8 @@ describe('fetch-pr report assembly', () => {
     try {
       delete process.env[DEADLINE_ENV];
       producerMocks.writeFileSync.mockClear();
-      const flagged = await reportFor({ deadline: '90' });
-      expect(flagged.deadlineSeconds).toBe(5400);
+      const flagged = await reportFor({ deadline: '120' });
+      expect(flagged.deadlineSeconds).toBe(7200);
       expect(flagged.deadlineSource).toBe('flag');
       // The flag is an explicit clock: it flips the huge tier like the env.
       expect(flagged.budget.reverseAuditRounds).toBe(3);
@@ -919,7 +919,11 @@ describe('fetch-pr report assembly', () => {
     await expect(reportFor({ deadline: 'soon' })).rejects.toThrow(
       /--deadline must be a whole number of minutes or `none`, got "soon"/,
     );
+    // All three legs the production comment names: detection/auth (gh),
+    // git, and the worktree lease — the destructive one (#9205).
+    expect(producerMocks.gh).not.toHaveBeenCalled();
     expect(producerMocks.git).not.toHaveBeenCalled();
+    expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
   });
 
   // The lease is also a lock (#9205): a concurrent same-PR fetch-pr used to
@@ -4371,13 +4375,38 @@ describe('fetch-pr --resume', () => {
   });
 
   it('says so when a --deadline rides a resume — the plan is not rewritten, so the flag cannot land', async () => {
+    // The fixture plan records no wall (it predates the field, or was
+    // captured with `--deadline none`): the note must say so, not assert a
+    // wall the plan does not hold.
     producerMocks.writeStderrLine.mockClear();
-    await run({ deadline: '90' });
+    await run({ deadline: '120' });
     expect(reportWritten()).toBe(false);
     const err = producerMocks.writeStderrLine.mock.calls
       .map((c) => String(c[0]))
       .join('\n');
     expect(err).toContain('--deadline is ignored on a resumed run');
+    expect(err).toContain('the plan recorded no wall');
+    expect(err).not.toContain('keeps the');
+
+    // A plan that DID record a wall names it, in minutes.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT)
+        return prevReport({
+          deadlineSeconds: 28_800,
+          deadlineSource: 'default',
+        });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.writeStderrLine.mockClear();
+    await run({ deadline: '120' });
+    expect(
+      producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n'),
+    ).toContain('the plan keeps the 480-minute wall it recorded at capture');
 
     // The default carries no such note: there is nothing being dropped.
     producerMocks.writeStderrLine.mockClear();

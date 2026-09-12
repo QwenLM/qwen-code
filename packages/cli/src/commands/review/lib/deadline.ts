@@ -10,8 +10,9 @@
 // is open-ended: each round is a fan-out (one auditor per chunk on a 3B plan),
 // each round's findings go back through verification, and the loop runs until
 // two consecutive dry rounds or the plan's round cap (one value per topology:
-// 10 on a 3A diff, 5 on a 3B one, and 3 when huge — but only where a deadline
-// exists, since that reduction answers a ceiling; 5 when huge without one). On a PR where every round
+// 10 on a 3A diff, 5 on a 3B one, and 3 when huge — but only under an EXPLICIT
+// clock, CI's epoch or `--deadline`, since that reduction answers a ceiling;
+// 5 when huge under the plan's default wall). On a PR where every round
 // finds something, that is the whole budget. Measured on a real CI run
 // (#8368, +1699 lines): the audit loop ran to the 5-round cap, consumed 3.5 of
 // the job's 4 budgeted hours, and the outer GNU-timeout kill arrived while
@@ -83,7 +84,8 @@ export const DEADLINE_ENV = 'QWEN_REVIEW_DEADLINE_EPOCH';
  *   3A    un-gated runs (6h budget) posted at 106–293 min; the 3h budget
  *         stopped runs "before round 3" at 142–196 min, so it is below a
  *         healthy 3A run, and 6h is a thin margin over 293. 8h admits
- *         rounds until ~6.5h elapsed.
+ *         rounds until ~6.2h elapsed (the reserve plus the 30-minute
+ *         round estimate must still remain at admission).
  *   3B    every POSTED run past ~4.5h was gate-stopped between rounds 3
  *         and 5 (270–337 min), two more were killed at the 6h wall with
  *         nothing posted, and the two that ran the cap of 5 out posted at
@@ -93,8 +95,9 @@ export const DEADLINE_ENV = 'QWEN_REVIEW_DEADLINE_EPOCH';
  *         explicit clock the cap is 5 and a round is ~90 min, so a healthy
  *         run is ~10h or more. 16h.
  *
- * — roughly twice each tier's CI budget, in whole hours a reader can hold
- * in their head. Calibrated against the wall, not the round: the gate prices
+ * — 1.5–2× the longest healthy run each tier measured (3A has no single
+ * CI budget: its PRs straddle the 300-line band), in whole hours a reader
+ * can hold in their head. Calibrated against the wall, not the round: the gate prices
  * rounds itself (#9243 is the size-aware first-round estimate that is still
  * open). An operator who knows better passes `--deadline`.
  */
@@ -110,20 +113,35 @@ export const DEFAULT_DEADLINE_SECONDS: Readonly<Record<SizeTier, number>> = {
  * so a wall the plan carries and one the environment carries price their
  * tails alike. The floor differs on purpose: the workflow floors at 600, but
  * `verifyBudgetExhausted` rests on the compose floor never exceeding the
- * reserve, and a reserve under 1200 would invert that — so a plan wall
- * floors AT the compose floor (equal at the floor, inside above it; the
- * round gate still fires first either way, because it prices the round on
- * top of the reserve). A wall under about fifty minutes cannot admit round
- * 1 at all (the round-1 estimate is `DEFAULT_ROUND_SECONDS` and the reserve
- * at least this floor), and `parseDeadlineOption` refuses such a flag up
- * front. Only for a plan-sourced deadline: an environment
- * deadline keeps `RESERVE_ENV` / `DEFAULT_RESERVE_SECONDS`, which the
- * workflow already scales.
+ * reserve, so a plan wall floors at the EFFECTIVE compose floor — the
+ * `COMPOSE_FLOOR_ENV` override when it raises the floor, else the 1200
+ * default (a disabled or lowered floor never shrinks the reserve below
+ * 1200). Equal at the floor, inside above it; the round gate still fires
+ * first either way, because it prices the round on top of the reserve.
+ * Only for a plan-sourced deadline: an environment deadline keeps
+ * `RESERVE_ENV` / `DEFAULT_RESERVE_SECONDS`, which the workflow already
+ * scales. Without `env` the default floor applies — the up-front
+ * `--deadline` check prices that way, so a capture's ruling does not move
+ * with the shell it happens to run in.
  */
-export function planReserveSeconds(deadlineSeconds: number): number {
-  return Math.min(
-    DEFAULT_RESERVE_SECONDS,
-    Math.max(DEFAULT_COMPOSE_FLOOR_SECONDS, Math.floor(deadlineSeconds / 3)),
+export function planReserveSeconds(
+  deadlineSeconds: number,
+  env: NodeJS.ProcessEnv = {},
+): number {
+  const floor = Math.max(
+    DEFAULT_COMPOSE_FLOOR_SECONDS,
+    readNonNegativeSeconds(
+      env,
+      COMPOSE_FLOOR_ENV,
+      DEFAULT_COMPOSE_FLOOR_SECONDS,
+    ),
+  );
+  return Math.max(
+    floor,
+    Math.min(
+      DEFAULT_RESERVE_SECONDS,
+      Math.max(DEFAULT_COMPOSE_FLOOR_SECONDS, Math.floor(deadlineSeconds / 3)),
+    ),
   );
 }
 
@@ -484,10 +502,7 @@ export type DeadlineOption = { seconds: number } | 'none' | 'default';
  * — a wall that silently became the default because a value did not parse
  * is a wall the operator does not know they have.
  */
-export function parseDeadlineOption(
-  env: NodeJS.ProcessEnv,
-  raw: unknown,
-): DeadlineOption {
+export function parseDeadlineOption(raw: unknown): DeadlineOption {
   if (raw === undefined) return 'default';
   const usage = () =>
     new TypeError(
@@ -506,35 +521,37 @@ export function parseDeadlineOption(
   const minutes = /^\d+$/.test(text) ? Number(text) : Number.NaN;
   if (!Number.isSafeInteger(minutes) || minutes <= 0) throw usage();
   const seconds = minutes * 60;
-  // A wall that provably cannot admit round 1 is refused here, not
-  // discovered at round 1 after the capture: the gate needs the round-1
-  // estimate plus the reserve the wall implies (or the environment's
-  // override) to fit.
-  const floor = minimumDeadlineSeconds(env, seconds);
-  if (seconds < floor) {
+  // A wall that provably cannot hold a convergence is refused here, not
+  // discovered after the capture has spent the fan-out: the loop's shortest
+  // finish is two consecutive dry rounds, and the gate admits a round only
+  // while the round's estimate plus the reserve still remain — STRICTLY
+  // more than the sum, since the wall is spent from the moment of capture.
+  // Priced from the default reserve rule, not the shell's overrides, so the
+  // ruling is the same in every environment.
+  const floor = minimumDeadlineSeconds(seconds);
+  if (seconds <= floor) {
     throw new TypeError(
-      `--deadline ${minutes} cannot admit even round 1: the round-1 ` +
-        `estimate (${DEFAULT_ROUND_SECONDS / 60} min) plus the tail reserve ` +
-        `it would keep need at least ${Math.ceil(floor / 60)} minutes`,
+      `--deadline ${minutes} cannot hold a convergence: the two rounds it ` +
+        `needs (2 × ${DEFAULT_ROUND_SECONDS / 60} min at the round estimate) ` +
+        `plus the tail reserve it would keep need MORE than ` +
+        `${Math.floor(floor / 60)} minutes — and the fan-out before round 1 ` +
+        `spends the wall too`,
     );
   }
   return { seconds };
 }
 
 /**
- * The shortest wall under which round 1 is admissible: the round-1 estimate
- * plus the reserve the wall implies — `RESERVE_ENV` when set, else
- * `planReserveSeconds` — which is exactly the sum `reverseAuditBudgetExhausted`
- * requires to remain at admission.
+ * The wall a `--deadline` must strictly exceed: two rounds at the round
+ * estimate (a convergence needs two consecutive dry rounds, and the
+ * convergence pair's second member can be priced at both) plus the reserve
+ * the wall implies under the default rule. Deliberately env-free — see
+ * `parseDeadlineOption`. Not a promise of admission: the fan-out and
+ * verification before round 1 spend the wall as well, and the gate prices
+ * rounds from what it measures.
  */
-export function minimumDeadlineSeconds(
-  env: NodeJS.ProcessEnv,
-  wallSeconds: number,
-): number {
-  return (
-    readNonNegativeSeconds(env, RESERVE_ENV, planReserveSeconds(wallSeconds)) +
-    DEFAULT_ROUND_SECONDS
-  );
+export function minimumDeadlineSeconds(wallSeconds: number): number {
+  return planReserveSeconds(wallSeconds) + 2 * DEFAULT_ROUND_SECONDS;
 }
 
 /** The plan fields a capture writes for its wall — empty for `none`. */
@@ -559,7 +576,7 @@ export function captureDeadline(
   raw: string | undefined,
   size: DiffSize,
 ): { fields: PlanDeadlineFields; explicit: boolean } {
-  const option = parseDeadlineOption(env, raw);
+  const option = parseDeadlineOption(raw);
   const envExplicit = readEnvDeadlineSeconds(env) !== null;
   if (option === 'none') return { fields: {}, explicit: envExplicit };
   if (option === 'default') {
@@ -587,6 +604,18 @@ function readEnvDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
 }
 
 /** The plan's recorded wall, well-formed, or null — read fail-open. */
+/**
+ * The wall the plan itself recorded, if any — what a capture wrote, read
+ * back without the environment and without an attempt start. For messages
+ * about the plan's own state (the resume note); the gates use
+ * `resolveReviewDeadline`.
+ */
+export function recordedPlanDeadline(
+  planPath: string,
+): { seconds: number; source: 'flag' | 'default' } | null {
+  return readPlanDeadline(planPath, undefined);
+}
+
 function readPlanDeadline(
   planPath: string | undefined,
   plan: unknown,
@@ -645,17 +674,9 @@ function attemptStartMs(
 }
 
 /** Where a resolved deadline came from. */
-export type DeadlineSource = 'env' | 'flag' | 'default';
-
 export interface ResolvedDeadline {
   /** Unix seconds at which the wall stands. */
   epochSeconds: number;
-  /**
-   * Whether this is an EXPLICIT clock — the environment's, or a
-   * `--deadline <minutes>`. The huge round tier reduces only under one.
-   */
-  explicit: boolean;
-  source: DeadlineSource;
   /** The wall's length, when the plan recorded it; absent for an env epoch. */
   deadlineSeconds?: number;
 }
@@ -678,7 +699,7 @@ export function resolveReviewDeadline(
 ): ResolvedDeadline | null {
   const fromEnv = readEnvDeadlineSeconds(env);
   if (fromEnv !== null) {
-    return { epochSeconds: fromEnv, explicit: true, source: 'env' };
+    return { epochSeconds: fromEnv };
   }
   if (planPath === undefined && plan === undefined) return null;
   const recorded = readPlanDeadline(planPath, plan);
@@ -687,8 +708,6 @@ export function resolveReviewDeadline(
   if (start === null) return null;
   return {
     epochSeconds: start / 1000 + recorded.seconds,
-    explicit: recorded.source === 'flag',
-    source: recorded.source,
     deadlineSeconds: recorded.seconds,
   };
 }
@@ -785,7 +804,7 @@ export function reverseAuditBudgetExhausted(
     RESERVE_ENV,
     resolved.deadlineSeconds === undefined
       ? DEFAULT_RESERVE_SECONDS
-      : planReserveSeconds(resolved.deadlineSeconds),
+      : planReserveSeconds(resolved.deadlineSeconds, env),
   );
 
   const remainingSeconds = Math.floor(deadline - nowMs / 1000);

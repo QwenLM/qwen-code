@@ -271,6 +271,36 @@ const CASES: Case[] = [
     },
   },
   {
+    name: '--deadline is a capture-command option: consumed with its value, never a target',
+    raw: '--deadline 90',
+    expect: {
+      targetType: 'local',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline beside a real target leaves the target alone',
+    raw: '6711 --deadline 90',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline=none is consumed whole; a following flag is not its value',
+    raw: '--deadline=none --deadline --comment 6711',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: true, effective: true },
+      unknownFlags: ['--deadline', '--deadline'],
+      warningCount: 2,
+    },
+  },
+  {
     name: '--commentary is not --comment (substring guard)',
     raw: '6711 --commentary',
     expect: {

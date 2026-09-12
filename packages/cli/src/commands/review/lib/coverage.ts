@@ -81,7 +81,11 @@ import {
 import { BRIEFS } from './agent-briefs.js';
 import { labelFromLaunchPrompt } from './agent-identity.js';
 import { chunkIdsProblem } from './diff-plan.js';
-import { readBudgetStop } from './deadline.js';
+import {
+  DEFAULT_ROUND_SECONDS,
+  readBudgetStop,
+  reverseAuditBudgetExhausted,
+} from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
 import { shellQuotePath } from './shell-quote.js';
 
@@ -1711,11 +1715,25 @@ export function verificationGaps(
   // NOT: the cap gate refuses only `round > cap`, so the not-built gap's FIX
   // (rebuild `--round 1`) is admitted, and a run whose wall still holds —
   // every healthy local run — has nothing to refuse it either: the
-  // monotone-refusal premise fails twice. So a
-  // round-cap marker leaves the not-built gap and its rebuild remediation
-  // owed, exactly as if no marker were present.
+  // monotone-refusal premise fails twice. So a round-cap marker leaves the
+  // not-built gap and its rebuild remediation owed, exactly as if no marker
+  // were present — UNLESS the wall has since closed: then the rebuild the
+  // remediation names is refused as deterministically as a budget stop's,
+  // and a FIX that cannot run is not owed. The wall is asked directly, at
+  // the round-1 estimate the rebuild would be priced at.
   const stop = readBudgetStop(planPath);
-  const budgetStopped = stop !== null && stop.cause !== 'round-cap';
+  const wallRefuses =
+    stop !== null &&
+    stop.cause === 'round-cap' &&
+    reverseAuditBudgetExhausted(
+      env,
+      DEFAULT_ROUND_SECONDS,
+      Date.now(),
+      planPath,
+      plan,
+    ) !== null;
+  const budgetStopped =
+    stop !== null && (stop.cause !== 'round-cap' || wallRefuses);
   const reverseByDesign = budgetStopped && reverse === 'not-built';
   // A repairable reverse-audit gap only at high: medium is complete without it.
   const reverseGap =

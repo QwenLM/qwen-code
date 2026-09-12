@@ -57,7 +57,7 @@ describe('plan-diff — the round cap the handler actually records', () => {
   // real env and reads the number out of the file it wrote.
   const hugeDiff = () => makeDiff('src/huge.ts', 9000);
 
-  it('records the huge tier only when the environment has a deadline', () => {
+  it('records the huge tier only under an explicit clock — here the environment’s', () => {
     const diffPath = join(dir, 'huge.diff');
     writeFileSync(diffPath, hugeDiff());
     const before = process.env[DEADLINE_ENV];
@@ -99,9 +99,9 @@ describe('plan-diff — the round cap the handler actually records', () => {
     try {
       delete process.env[DEADLINE_ENV];
       const out = join(dir, 'flag.json');
-      runWith(out, '90');
+      runWith(out, '120');
       const a = JSON.parse(readFileSync(out, 'utf8'));
-      expect(a.deadlineSeconds).toBe(5400);
+      expect(a.deadlineSeconds).toBe(7200);
       expect(a.deadlineSource).toBe('flag');
       expect(a.budget.reverseAuditRounds).toBe(3);
 

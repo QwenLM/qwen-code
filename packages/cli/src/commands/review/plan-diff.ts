@@ -80,7 +80,7 @@ function runPlanDiff(args: PlanDiffArgs): void {
   // it must fail here, before the diff is read and planned, not at the plan
   // write after that work is done. The same parse runs again inside
   // `captureDeadline`; it is pure.
-  parseDeadlineOption(process.env, args.deadline);
+  parseDeadlineOption(args.deadline);
 
   let diffText: string;
   try {

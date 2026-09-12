@@ -51,6 +51,7 @@ import {
   budgetStopEntry,
   captureDeadline,
   hasReviewDeadline,
+  minimumDeadlineSeconds,
   parseDeadlineOption,
   planReserveSeconds,
   resolveReviewDeadline,
@@ -1066,19 +1067,19 @@ describe('parseDeadlineOption — the flag grammar', () => {
   it('reads an absent flag as the default — and a BLANK one as a usage error', () => {
     // `--deadline "$UNSET"` in a script must not quietly take the default it
     // was trying to override.
-    expect(parseDeadlineOption({}, undefined)).toBe('default');
-    expect(() => parseDeadlineOption({}, '')).toThrow(TypeError);
-    expect(() => parseDeadlineOption({}, '   ')).toThrow(TypeError);
+    expect(parseDeadlineOption(undefined)).toBe('default');
+    expect(() => parseDeadlineOption('')).toThrow(TypeError);
+    expect(() => parseDeadlineOption('   ')).toThrow(TypeError);
   });
 
   it('reads `none` in any case as no wall', () => {
-    expect(parseDeadlineOption({}, 'none')).toBe('none');
-    expect(parseDeadlineOption({}, ' NONE ')).toBe('none');
+    expect(parseDeadlineOption('none')).toBe('none');
+    expect(parseDeadlineOption(' NONE ')).toBe('none');
   });
 
   it('reads whole positive minutes as seconds', () => {
-    expect(parseDeadlineOption({}, '90')).toEqual({ seconds: 5400 });
-    expect(parseDeadlineOption({}, ' 50 ')).toEqual({ seconds: 3000 });
+    expect(parseDeadlineOption('91')).toEqual({ seconds: 5460 });
+    expect(parseDeadlineOption(' 120 ')).toEqual({ seconds: 7200 });
   });
 
   it('refuses anything else as a USAGE error — a TypeError, the class the handlers give their argument errors', () => {
@@ -1088,8 +1089,8 @@ describe('parseDeadlineOption — the flag grammar', () => {
     // plan-diff maps a TypeError to exit 2; fetch-pr and capture-local
     // surface it the way they surface their other argument errors.
     for (const bad of ['0', '-5', '1.5', '90m', 'soon', '1e3', 'none ish']) {
-      expect(() => parseDeadlineOption({}, bad)).toThrow(TypeError);
-      expect(() => parseDeadlineOption({}, bad)).toThrow(
+      expect(() => parseDeadlineOption(bad)).toThrow(TypeError);
+      expect(() => parseDeadlineOption(bad)).toThrow(
         /--deadline must be a whole number of minutes or `none`/,
       );
     }
@@ -1101,44 +1102,32 @@ describe('parseDeadlineOption — the flag grammar', () => {
     // explicitly clocked. Safe integers only, and the usage message, not a
     // `.trim is not a function` crash, for the boolean yargs hands over.
     for (const bad of [false, true, 90, null, {}, '9'.repeat(310)]) {
-      expect(() => parseDeadlineOption({}, bad)).toThrow(
+      expect(() => parseDeadlineOption(bad)).toThrow(
         /--deadline must be a whole number of minutes or `none`/,
       );
     }
-    expect(() => parseDeadlineOption({}, '9007199254740992')).toThrow(
-      TypeError,
-    );
-    expect(parseDeadlineOption({}, '9007199254740991')).toEqual({
+    expect(() => parseDeadlineOption('9007199254740992')).toThrow(TypeError);
+    expect(parseDeadlineOption('9007199254740991')).toEqual({
       seconds: 9007199254740991 * 60,
     });
   });
 
-  it('refuses a wall that provably cannot admit round 1 — up front, not at round 1', () => {
-    // The gate needs round 1's estimate plus the reserve the wall implies:
-    // 1800 + 1200 at the floor, so 50 minutes is the shortest admissible
-    // default-reserve wall and 49 is refused with the arithmetic spelled out.
-    expect(parseDeadlineOption({}, '50')).toEqual({ seconds: 3000 });
-    expect(() => parseDeadlineOption({}, '49')).toThrow(
-      /--deadline 49 cannot admit even round 1: .*need at least 50 minutes/,
+  it('refuses a wall that cannot hold a convergence — up front, strictly, and the same in every shell', () => {
+    // Two rounds at the estimate plus the reserve the wall implies: at the
+    // 1200s floor that is 6000s, so a 90-minute wall (reserve 1800 → 5400)
+    // is exactly the floor and is refused — the wall is spent from capture,
+    // so equality never admits — while 91 minutes clears it. Priced from the
+    // default reserve rule: the shell's overrides do not move the ruling.
+    expect(minimumDeadlineSeconds(5400)).toBe(5400);
+    expect(() => parseDeadlineOption('90')).toThrow(
+      /--deadline 90 cannot hold a convergence: .*MORE than 90 minutes/,
     );
-    expect(() => parseDeadlineOption({}, '1')).toThrow(TypeError);
-    // The environment's reserve override moves the floor with it.
-    expect(parseDeadlineOption({ [RESERVE_ENV]: '0' }, '30')).toEqual({
-      seconds: 1800,
-    });
-    expect(() => parseDeadlineOption({ [RESERVE_ENV]: '0' }, '29')).toThrow(
-      /need at least 30 minutes/,
-    );
-    expect(() => parseDeadlineOption({ [RESERVE_ENV]: '3000' }, '79')).toThrow(
-      /need at least 80 minutes/,
-    );
+    expect(parseDeadlineOption('91')).toEqual({ seconds: 5460 });
+    expect(() => parseDeadlineOption('50')).toThrow(TypeError);
+    expect(() => parseDeadlineOption('1')).toThrow(TypeError);
     // `none` and the default are never too short: there is nothing to check.
-    expect(parseDeadlineOption({ [RESERVE_ENV]: '99999' }, 'none')).toBe(
-      'none',
-    );
-    expect(parseDeadlineOption({ [RESERVE_ENV]: '99999' }, undefined)).toBe(
-      'default',
-    );
+    expect(parseDeadlineOption('none')).toBe('none');
+    expect(parseDeadlineOption(undefined)).toBe('default');
   });
 });
 
@@ -1182,12 +1171,12 @@ describe('captureDeadline — what a capture records, and whether the clock is e
   });
 
   it('records the flag, and the flag IS explicit — with or without an env clock', () => {
-    expect(captureDeadline({}, '90', HUGE)).toEqual({
-      fields: { deadlineSeconds: 5400, deadlineSource: 'flag' },
+    expect(captureDeadline({}, '120', HUGE)).toEqual({
+      fields: { deadlineSeconds: 7200, deadlineSource: 'flag' },
       explicit: true,
     });
-    expect(captureDeadline({ [DEADLINE_ENV]: 'soon' }, '90', HUGE)).toEqual({
-      fields: { deadlineSeconds: 5400, deadlineSource: 'flag' },
+    expect(captureDeadline({ [DEADLINE_ENV]: 'soon' }, '120', HUGE)).toEqual({
+      fields: { deadlineSeconds: 7200, deadlineSource: 'flag' },
       explicit: true,
     });
   });
@@ -1204,9 +1193,22 @@ describe('captureDeadline — what a capture records, and whether the clock is e
 
   it('an environment clock makes the default capture explicit; a malformed one does not', () => {
     expect(
-      captureDeadline({ [DEADLINE_ENV]: String(NOW_S + 7200) }, undefined, HUGE)
-        .explicit,
-    ).toBe(true);
+      captureDeadline(
+        { [DEADLINE_ENV]: String(NOW_S + 7200) },
+        undefined,
+        HUGE,
+      ),
+    ).toEqual({
+      // The default wall is STILL written under an env clock: the env wins
+      // at read time, but a plan that outlives its environment (a resume in
+      // a shell that no longer exports it) needs a bound to fall back on —
+      // and it is the default, so it never flips the huge tier.
+      fields: {
+        deadlineSeconds: DEFAULT_DEADLINE_SECONDS.huge,
+        deadlineSource: 'default',
+      },
+      explicit: true,
+    });
     for (const bad of ['', '  ', 'soon', '0', '-5', 'NaN']) {
       expect(
         captureDeadline({ [DEADLINE_ENV]: bad }, undefined, HUGE).explicit,
@@ -1219,7 +1221,7 @@ describe('captureDeadline — what a capture records, and whether the clock is e
   it('a malformed or too-short flag throws — the capture must not record a wall it cannot honour', () => {
     expect(() => captureDeadline({}, 'soon', HUGE)).toThrow(TypeError);
     expect(() => captureDeadline({}, '10', HUGE)).toThrow(
-      /cannot admit even round 1/,
+      /cannot hold a convergence/,
     );
   });
 });
@@ -1264,15 +1266,17 @@ describe('resolveReviewDeadline — env, else the plan’s wall from the attempt
     const p = planAt({ deadlineSeconds: 3600, deadlineSource: 'flag' });
     expect(
       resolveReviewDeadline({ [DEADLINE_ENV]: String(NOW_S + 99) }, p),
-    ).toEqual({ epochSeconds: NOW_S + 99, explicit: true, source: 'env' });
+    ).toEqual({ epochSeconds: NOW_S + 99 });
+    // …and "has a deadline" is answered by the reader that owns it.
+    expect(hasReviewDeadline({ [DEADLINE_ENV]: String(NOW_S + 99) }, p)).toBe(
+      true,
+    );
   });
 
   it('a default wall resolves from the plan’s mtime and is NOT explicit', () => {
     const p = planAt({ deadlineSeconds: 28_800, deadlineSource: 'default' });
     expect(resolveReviewDeadline({}, p)).toEqual({
       epochSeconds: PLAN_CAPTURED_MS / 1000 + 28_800,
-      explicit: false,
-      source: 'default',
       deadlineSeconds: 28_800,
     });
     expect(hasReviewDeadline({}, p)).toBe(false);
@@ -1282,8 +1286,6 @@ describe('resolveReviewDeadline — env, else the plan’s wall from the attempt
     const p = planAt({ deadlineSeconds: 5400, deadlineSource: 'flag' });
     expect(resolveReviewDeadline({}, p)).toEqual({
       epochSeconds: PLAN_CAPTURED_MS / 1000 + 5400,
-      explicit: true,
-      source: 'flag',
       deadlineSeconds: 5400,
     });
     expect(hasReviewDeadline({}, p)).toBe(true);
@@ -1317,8 +1319,7 @@ describe('resolveReviewDeadline — env, else the plan’s wall from the attempt
     // A source the reader does not know is the SAFE reading: a wall that
     // does not flip the huge tier.
     const odd = planAt({ deadlineSeconds: 3600, deadlineSource: 'operator' });
-    expect(resolveReviewDeadline({}, odd)?.explicit).toBe(false);
-    expect(resolveReviewDeadline({}, odd)?.source).toBe('default');
+    expect(resolveReviewDeadline({}, odd)?.deadlineSeconds).toBe(3600);
     expect(hasReviewDeadline({}, odd)).toBe(false);
   });
 
@@ -1431,12 +1432,20 @@ describe('the gates read a plan-recorded wall, with the reserve the wall implies
   });
 
   it('reverse-audit: a short `--deadline` scales its reserve down instead of spending the wall on it', () => {
-    // 60 minutes of wall captured 10,000s ago: the wall is 13,600s and its
-    // reserve a third of that, 4,533 — not the flat 4,800 the CI path
-    // assumes for a six-hour attempt.
-    const { path, wallSeconds } = planWithRemaining(3600, 'flag');
+    // A real `--deadline 120` (7200s, the shortest band above the floor)
+    // captured an hour ago: its reserve is a third of the wall, 2400 — not
+    // the flat 4800 the CI path assumes for a six-hour attempt.
+    const dir = mkdtempSync(join(tmpdir(), 'deadline-gate-'));
+    dirs.push(dir);
+    const path = join(dir, 'plan.json');
+    const wallSeconds = 7200;
+    writeFileSync(
+      path,
+      JSON.stringify({ deadlineSeconds: wallSeconds, deadlineSource: 'flag' }),
+    );
+    backdatePlan(path, NOW_MS - 3600 * 1000);
     const reserve = planReserveSeconds(wallSeconds);
-    expect(reserve).toBe(Math.floor(wallSeconds / 3));
+    expect(reserve).toBe(2400);
     expect(reserve).toBeLessThan(DEFAULT_RESERVE_SECONDS);
     const spent = reverseAuditBudgetExhausted(
       {},
@@ -1466,6 +1475,42 @@ describe('the gates read a plan-recorded wall, with the reserve the wall implies
         path,
       )?.reserveSeconds,
     ).toBe(3000);
+  });
+
+  it('reverse-audit: the reserve floors at the EFFECTIVE compose floor, so the round gate refuses whenever the verify gate would', () => {
+    // An operator raising the compose floor to an hour for a security
+    // review: a wall whose third is below it must still keep the floor
+    // inside its reserve, or round 2 would be admitted while every verify
+    // build was refused. A disabled or lowered floor never shrinks it.
+    const raised = { [COMPOSE_FLOOR_ENV]: '3600' };
+    expect(planReserveSeconds(5400, raised)).toBe(3600);
+    expect(planReserveSeconds(5400, { [COMPOSE_FLOOR_ENV]: '0' })).toBe(1800);
+    expect(planReserveSeconds(5400, { [COMPOSE_FLOOR_ENV]: '300' })).toBe(1800);
+    expect(planReserveSeconds(5400)).toBe(1800);
+    const dir = mkdtempSync(join(tmpdir(), 'deadline-gate-'));
+    dirs.push(dir);
+    const path = join(dir, 'plan.json');
+    writeFileSync(
+      path,
+      JSON.stringify({ deadlineSeconds: 5400, deadlineSource: 'flag' }),
+    );
+    // 3,601s remain: the verify gate admits (above its 3,600 floor) and
+    // the round gate must refuse (3,601 < 3,600 + 1,800).
+    backdatePlan(path, NOW_MS - (5400 - 3601) * 1000);
+    expect(verifyBudgetExhausted(raised, NOW_MS, path)).toBeNull();
+    expect(
+      reverseAuditBudgetExhausted(raised, DEFAULT_ROUND_SECONDS, NOW_MS, path),
+    ).toEqual({
+      remainingSeconds: 3601,
+      reserveSeconds: 3600,
+      expectedRoundSeconds: DEFAULT_ROUND_SECONDS,
+    });
+    // At 3,600s the verify gate refuses too — never the other way round.
+    backdatePlan(path, NOW_MS - (5400 - 3600) * 1000);
+    expect(verifyBudgetExhausted(raised, NOW_MS, path)).not.toBeNull();
+    expect(
+      reverseAuditBudgetExhausted(raised, DEFAULT_ROUND_SECONDS, NOW_MS, path),
+    ).not.toBeNull();
   });
 
   it('reverse-audit: the env clock, when present, is the one enforced — with the env reserve', () => {
