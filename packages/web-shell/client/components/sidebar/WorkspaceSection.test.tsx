@@ -1252,6 +1252,40 @@ describe('WorkspaceSection Git summary', () => {
     vi.useRealTimers();
   });
 
+  it('keeps a Git read that settles after the hover details close', async () => {
+    let resolveRead!: (status: { branch: string }) => void;
+    workspaceGit.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    renderSection({ client: makeOverviewClient(), overviewEnabled: true });
+    const dialog = await openDetailsDialog(true);
+    // Close before the blocking read settles.
+    await act(async () => {
+      dialog.dispatchEvent(new Event('pointerout', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    await act(async () => {
+      resolveRead({ branch: 'late-branch' });
+    });
+    // The next open repaints the retained snapshot while its own read is
+    // still in flight.
+    workspaceGit.mockReturnValueOnce(new Promise(() => {}));
+    const headerRow = container.querySelector<HTMLElement>(
+      '[class*="headerRow"]',
+    );
+    await act(async () => {
+      headerRow?.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+      await Promise.resolve();
+    });
+    const reopened = document.querySelector<HTMLElement>('[role="dialog"]');
+    expect(reopened).not.toBeNull();
+    expect(reopened!.textContent).toContain('late-branch');
+    vi.useRealTimers();
+  });
+
   it('keeps the newer Git snapshot when hover and focus reads overlap', async () => {
     let resolveOlder!: (status: { branch: string }) => void;
     workspaceGit
@@ -2192,11 +2226,20 @@ describe('WorkspaceSection overview plumbing', () => {
       overviewEnabled: true,
       headerActions,
     });
-    await openDetailsDialog();
-    await flush();
+    const dialog = await openDetailsDialog(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
     expect(
       headerActions.mock.calls.some(([, context]) => Boolean(context.overview)),
     ).toBe(true);
+    // Close the hover details so only the retained snapshot — not the live
+    // hook state — can feed the collapsed header actions.
+    await act(async () => {
+      dialog.dispatchEvent(new Event('pointerout', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    vi.useRealTimers();
     headerActions.mockClear();
     renderSection({
       client,
@@ -2207,7 +2250,7 @@ describe('WorkspaceSection overview plumbing', () => {
     await flush();
     const lastCall = headerActions.mock.calls.at(-1);
     expect(lastCall?.[1].overview).toBeDefined();
-    // Collapsing does not restart an already open overview.
+    // Collapsing with closed consumers does not restart the overview.
     expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
   });
 

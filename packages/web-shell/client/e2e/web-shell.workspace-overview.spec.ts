@@ -254,8 +254,8 @@ test('shows workspace details on hover and no counts in the header', async ({
   await expect(secondaryDetails).toBeHidden();
 
   // Each opened details popover requests exactly the default facet set
-  // (hooks stay opt-in). The dev build runs effects twice under StrictMode,
-  // so count distinct facets rather than requests.
+  // (hooks stay opt-in). The section owns the fetch and it is gated on open
+  // state, so one open is one round and raw request counts are exact.
   const facets = (cwd: string) =>
     [...new Set(overviewRequests(daemon, cwd))].sort();
   await expect

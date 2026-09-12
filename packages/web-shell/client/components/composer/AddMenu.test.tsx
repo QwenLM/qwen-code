@@ -728,6 +728,22 @@ describe('AddMenu', () => {
       expect(onSkillsOpenChange).toHaveBeenLastCalledWith(true);
     });
 
+    it('shows no empty-state text before the catalog is requested', async () => {
+      const props = baseProps({
+        onSkillsOpenChange: vi.fn(),
+        skills: [],
+        skillsLoaded: false,
+      });
+      renderWith(props);
+      await openMenu();
+      await openSubmenu('composer-add-menu-skills');
+      await settle();
+      expect(portalRoot!.querySelector('[role="status"]')).toBeNull();
+      rerenderWith({ ...props, skillsLoaded: true });
+      await settle();
+      expect(portalRoot?.textContent).toContain('No results');
+    });
+
     it('lists skills and prepends the invocation on select', async () => {
       const props = baseProps({
         skills: [

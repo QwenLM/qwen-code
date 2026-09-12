@@ -7717,7 +7717,10 @@ export function App({
             const status = await target.workspaceConfigSkills();
             if (request !== loadedSkillsRequestRef.current) return;
             if (status.initialized === false)
-              throw new Error('Skills configuration is unavailable');
+              throw new Error(
+                status.errors?.[0]?.error ??
+                  'Skills configuration is unavailable',
+              );
             setLoadedSkills(availableSkillInfos(status));
             setLoadedSkillsReady(true);
             const runtime = await target.ensureRuntime();
@@ -7743,7 +7746,9 @@ export function App({
               : await workspaceActions.loadSkillsStatus();
           if (request !== loadedSkillsRequestRef.current) return;
           if (status.initialized === false)
-            throw new Error('Skills catalog is unavailable');
+            throw new Error(
+              status.errors?.[0]?.error ?? 'Skills catalog is unavailable',
+            );
           setLoadedSkills(availableSkillInfos(status));
           setLoadedSkillsReady(true);
           if (
@@ -7760,7 +7765,9 @@ export function App({
               .workspaceSkills();
             if (request !== loadedSkillsRequestRef.current) return;
             if (refreshed.initialized === false)
-              throw new Error('Skills catalog is unavailable');
+              throw new Error(
+                refreshed.errors?.[0]?.error ?? 'Skills catalog is unavailable',
+              );
             setLoadedSkills(availableSkillInfos(refreshed));
             return refreshed;
           }

@@ -461,6 +461,7 @@ export function createDaemonSessionActions({
     session: DaemonSessionClient,
     text: string,
     hasAttachments: boolean,
+    signal?: AbortSignal,
   ): boolean | Promise<boolean> {
     const trimmed = text.trim();
     if (!trimmed.startsWith('/')) return false;
@@ -481,9 +482,16 @@ export function createDaemonSessionActions({
       !command &&
       !commands?.some((candidate) => candidate.source === 'builtin-command')
     ) {
-      return withActionTimeout(
+      // The classification read bounds below the default action timeout and
+      // races the caller's abort so a cancelled prompt settles immediately
+      // instead of after the round trip.
+      const request = withActionTimeout(
         session.supportedCommands(),
         'Loading commands timed out',
+        5_000,
+      );
+      return (
+        signal ? Promise.race([request, rejectOnAbort(signal)]) : request
       ).then((status) => {
         if (sessionRef.current !== session)
           throw new Error('Session changed before prompt submission');
@@ -1095,6 +1103,7 @@ export function createDaemonSessionActions({
           session,
           text,
           normalizedImages.length > 0 || normalizedFiles.length > 0,
+          ctrl.signal,
         );
         const discardAttachments =
           typeof classification === 'boolean'
@@ -1292,6 +1301,7 @@ export function createDaemonSessionActions({
         session,
         text,
         normalizedImages.length > 0 || normalizedFiles.length > 0,
+        options?.signal,
       );
       const discardAttachments =
         typeof classification === 'boolean'
@@ -3284,6 +3294,21 @@ function isTransientActionError(error: unknown): boolean {
     message.includes('network error') ||
     message.includes('networkerror')
   );
+}
+
+function rejectOnAbort(signal: AbortSignal): Promise<never> {
+  if (signal.aborted) {
+    return Promise.reject(
+      signal.reason ?? new DOMException('Aborted', 'AbortError'),
+    );
+  }
+  return new Promise<never>((_resolve, reject) => {
+    signal.addEventListener(
+      'abort',
+      () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError')),
+      { once: true },
+    );
+  });
 }
 
 function isAbortError(error: unknown): boolean {

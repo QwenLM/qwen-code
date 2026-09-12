@@ -3042,6 +3042,47 @@ describe('createDaemonSessionActions', () => {
   );
 
   it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'cancelling %s settles a pending command classification immediately',
+    async (method) => {
+      const session = createMockSession('session-a');
+      const pendingCommands =
+        createDeferred<ReturnType<typeof supportedCommandsStatus>>();
+      session.supportedCommands.mockReturnValueOnce(pendingCommands.promise);
+      const { actions } = createActionsHarness({ session });
+      const controller = new AbortController();
+      const submission = actions[method]('/review this diff', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+        ...(method === 'submitPrompt' ? { signal: controller.signal } : {}),
+      });
+      let settled = false;
+      void submission.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      // Let the submission reach the pending classification read.
+      for (let tick = 0; tick < 5; tick++) await Promise.resolve();
+      if (method === 'sendPrompt') {
+        await actions.cancel();
+      } else {
+        controller.abort();
+      }
+      for (let tick = 0; tick < 20; tick++) await Promise.resolve();
+      // The read never settles, so only the abort race can end the wait.
+      expect(settled).toBe(true);
+      const outcome = await submission.catch((error: unknown) => error);
+      if (method === 'sendPrompt') {
+        expect(outcome).toMatchObject({ stopReason: 'cancelled' });
+      } else {
+        expect(outcome).toMatchObject({ name: 'AbortError' });
+      }
+    },
+  );
+
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
     'rejects %s when attachment classification belongs to a replaced session',
     async (method) => {
       const session = createMockSession('session-a');

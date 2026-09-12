@@ -36,6 +36,9 @@ function Harness({
   disableLegacyHistoryFallback,
   commands,
   allowEmptySlashMenu,
+  cycleModeOnTab,
+  onCycleMode,
+  onFocusFooter,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
@@ -58,6 +61,9 @@ function Harness({
   disableLegacyHistoryFallback?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   allowEmptySlashMenu?: boolean;
+  cycleModeOnTab?: boolean;
+  onCycleMode?: UseComposerCoreOptions['onCycleMode'];
+  onFocusFooter?: UseComposerCoreOptions['onFocusFooter'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
@@ -67,6 +73,9 @@ function Harness({
     onSubmit,
     commands: commands ?? [],
     allowEmptySlashMenu,
+    cycleModeOnTab,
+    onCycleMode,
+    onFocusFooter,
     editorTheme: {},
     renderComposerTag,
     renderComposerTagTooltip,
@@ -107,6 +116,9 @@ async function mount({
   disableLegacyHistoryFallback,
   commands,
   allowEmptySlashMenu,
+  cycleModeOnTab,
+  onCycleMode,
+  onFocusFooter,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
@@ -129,6 +141,9 @@ async function mount({
   disableLegacyHistoryFallback?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   allowEmptySlashMenu?: boolean;
+  cycleModeOnTab?: boolean;
+  onCycleMode?: UseComposerCoreOptions['onCycleMode'];
+  onFocusFooter?: UseComposerCoreOptions['onFocusFooter'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
@@ -162,6 +177,9 @@ async function mount({
             disableLegacyHistoryFallback={disableLegacyHistoryFallback}
             commands={currentCommands}
             allowEmptySlashMenu={currentAllowEmptySlashMenu}
+            cycleModeOnTab={cycleModeOnTab}
+            onCycleMode={onCycleMode}
+            onFocusFooter={onFocusFooter}
             onImageIngestionNotice={onImageIngestionNotice}
             workspaceUploadBusy={workspaceUploadBusy}
             fileDragEnabled={fileDragEnabled}
@@ -354,6 +372,57 @@ describe('useComposerCore history and drafts', () => {
       expect(event.defaultPrevented).toBe(prevented);
     },
   );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'empty menu owns %s instead of recalling history',
+    async (key) => {
+      const workspaceCwd = '/workspace/empty-menu-arrows';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(workspaceCwd),
+        JSON.stringify(['previous prompt']),
+      );
+      // ArrowDown's no-menu fall-through is the footer focus handoff.
+      const onFocusFooter = vi.fn(() => true);
+      await mount({
+        allowEmptySlashMenu: true,
+        atWorkspaceCwd: workspaceCwd,
+        onFocusFooter,
+      });
+      act(() => latest!.insertText('/zzz'));
+      expect(latest!.slashMenu?.items).toEqual([]);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        code: key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(true);
+      expect(latest!.viewRef.current!.state.doc.toString()).toBe('/zzz');
+      expect(onFocusFooter).not.toHaveBeenCalled();
+    },
+  );
+
+  it('empty menu owns Tab on a cycle-mode host', async () => {
+    const onCycleMode = vi.fn();
+    await mount({
+      allowEmptySlashMenu: true,
+      cycleModeOnTab: true,
+      onCycleMode,
+    });
+    act(() => latest!.insertText('/zzz'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      code: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(true);
+    expect(onCycleMode).not.toHaveBeenCalled();
+    expect(latest!.viewRef.current!.state.doc.toString()).toBe('/zzz');
+  });
 
   it('closes an unmatched menu when catalog loading completes without new commands', async () => {
     const mounted = await mount({ allowEmptySlashMenu: true });

@@ -50,6 +50,7 @@ export interface AddMenuProps {
   onSkillsOpenChange?: (open: boolean) => void;
   skillsLoading?: boolean;
   skillsLoadError?: boolean;
+  skillsLoaded?: boolean;
 }
 
 const ADD_MENU_SEARCH_DEBOUNCE_MS = 150;
@@ -219,6 +220,7 @@ export function AddMenu({
   onSkillsOpenChange,
   skillsLoading,
   skillsLoadError,
+  skillsLoaded = false,
 }: AddMenuProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -539,7 +541,7 @@ export function AddMenu({
                 >
                   {(skillsLoading ||
                     skillsLoadError ||
-                    skills.length === 0) && (
+                    (skillsLoaded && skills.length === 0)) && (
                     <div
                       role="status"
                       className="px-2 py-1.5 text-xs text-muted-foreground"

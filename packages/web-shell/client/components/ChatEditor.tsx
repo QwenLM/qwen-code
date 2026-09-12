@@ -1176,7 +1176,6 @@ function ModelReasoningControls({
 function SlashCommandPanel({
   menu,
   loading,
-  loaded,
   loadError,
   anchorRef,
   panelRef,
@@ -1188,7 +1187,6 @@ function SlashCommandPanel({
 }: {
   menu: SlashMenuState;
   loading?: boolean;
-  loaded?: boolean;
   loadError?: boolean;
   anchorRef: RefObject<HTMLElement | null>;
   panelRef: RefObject<HTMLDivElement | null>;
@@ -1306,18 +1304,12 @@ function SlashCommandPanel({
           }}
         >
           <div className={styles.slashPanel}>
-            {menu.items.length === 0 && (loading || loadError || loaded) && (
+            {menu.items.length === 0 && (loading || loadError) && (
               <div
                 role="status"
                 className="px-3 py-2 text-xs text-muted-foreground"
               >
-                {t(
-                  loading
-                    ? 'common.loading'
-                    : loadError
-                      ? 'composerAdd.loadError'
-                      : 'composerAdd.noResults',
-                )}
+                {t(loading ? 'common.loading' : 'composerAdd.loadError')}
               </div>
             )}
             <div className={styles.slashPanelBody}>
@@ -3191,7 +3183,6 @@ export const ChatEditor = memo(
               <SlashCommandPanel
                 menu={core.slashMenu}
                 loading={skillsLoading}
-                loaded={skillsLoaded}
                 loadError={skillsLoadError}
                 anchorRef={containerRef}
                 panelRef={slashPanelRef}
@@ -3311,6 +3302,7 @@ export const ChatEditor = memo(
                       }
                       skillsLoading={skillsLoading}
                       skillsLoadError={skillsLoadError}
+                      skillsLoaded={skillsLoaded}
                     />
                   )}
                   {workspaceSelectVisible &&

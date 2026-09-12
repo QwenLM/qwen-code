@@ -461,9 +461,34 @@ export function WorkspaceSection({
   // 60s/focus tick, so an unreachable workspace doesn't spam a long-lived tab.
   const gitPollFailed = useRef(false);
   const gitPollGeneration = useRef(0);
+  // In-flight reads are discarded only when the poll target changes. A
+  // consumer closing keeps the read alive so its snapshot is retained for the
+  // next open instead of being thrown away mid-flight.
+  const gitPollTargetRef = useRef<{
+    client: DaemonClient;
+    cwd: string | undefined;
+    trusted: boolean;
+  }>();
+  useEffect(() => {
+    gitPollTargetRef.current = {
+      client,
+      cwd: gitPollCwd,
+      trusted: workspace.trusted,
+    };
+  }, [client, gitPollCwd, workspace.trusted]);
   const loadGitStatus = useCallback(async () => {
     if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) return;
     const generation = ++gitPollGeneration.current;
+    const target = { client, cwd: gitPollCwd, trusted: workspace.trusted };
+    const isCurrent = () => {
+      const latest = gitPollTargetRef.current;
+      return (
+        generation === gitPollGeneration.current &&
+        latest?.client === target.client &&
+        latest?.cwd === target.cwd &&
+        latest?.trusted === target.trusted
+      );
+    };
     try {
       // wait: the hover summary shows the enriched counters and has no SSE
       // fill-in path, so it keeps the blocking semantics instead of the
@@ -471,11 +496,11 @@ export function WorkspaceSection({
       const status = await client
         .workspaceByCwd(gitPollCwd)
         .workspaceGit({ wait: true });
-      if (generation !== gitPollGeneration.current) return;
+      if (!isCurrent()) return;
       gitPollFailed.current = false;
       setGitStatus(status);
     } catch (err) {
-      if (generation !== gitPollGeneration.current) return;
+      if (!isCurrent()) return;
       // Keep the last known status on a transient failure so a brief network
       // or daemon blip doesn't blank the summary for a whole poll interval; log
       // only on the success→failure transition.
@@ -500,7 +525,6 @@ export function WorkspaceSection({
       if (document.visibilityState === 'visible') void loadGitStatus();
     }, 60_000);
     return () => {
-      gitPollGeneration.current += 1;
       window.removeEventListener('focus', onFocus);
       window.clearInterval(timer);
     };

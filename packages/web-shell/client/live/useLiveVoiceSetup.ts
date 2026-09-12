@@ -13,6 +13,10 @@ import type {
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 
 const POLL_INTERVAL_MS = 1_000;
+// After an install/launch the host app needs a few seconds to say hello; stop
+// waiting after a bounded window so a host that never runs does not poll
+// forever — the focus/visibility refresh remains as the recovery path.
+const HOST_READY_WAIT_MS = 30_000;
 
 export const INSTALLING_STATES: ReadonlySet<DaemonLiveHostInstallState> =
   new Set(['checking', 'downloading', 'verifying', 'installing', 'launching']);
@@ -118,13 +122,29 @@ export function useLiveVoiceSetup(
     };
   }, [refresh, supported, active, workspace.client]);
 
+  const hostWaiting = Boolean(
+    status?.enabled &&
+      status.install.state === 'installed' &&
+      status.live.requirements?.host !== 'ready',
+  );
+  const [hostWaitExpired, setHostWaitExpired] = useState(false);
+  useEffect(() => {
+    if (!hostWaiting) {
+      setHostWaitExpired(false);
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setHostWaitExpired(true),
+      HOST_READY_WAIT_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [hostWaiting]);
+
   const statusPending =
     !status ||
     Boolean(refreshError) ||
     INSTALLING_STATES.has(status.install.state) ||
-    (status.enabled &&
-      status.install.state === 'installed' &&
-      status.live.requirements?.host !== 'ready');
+    (hostWaiting && !hostWaitExpired);
   useEffect(() => {
     if (!supported || !active || !statusPending) return;
     const timer = window.setInterval(() => {

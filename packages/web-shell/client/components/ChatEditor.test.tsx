@@ -2381,10 +2381,13 @@ describe('ChatEditor slash command popovers', () => {
     expect(
       document.querySelector('[data-web-shell-slash-menu] [role="status"]'),
     ).toBeNull();
+    // A settled catalog renders no status row: the composed app closes an
+    // empty panel via allowEmptySlashMenu, so a "no results" arm would only
+    // ever flash for one frame.
     rerenderChatEditor(container, { onSkillsOpenChange, skillsLoaded: true });
     expect(
-      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
-    ).toContain('No results');
+      document.querySelector('[data-web-shell-slash-menu] [role="status"]'),
+    ).toBeNull();
     composerCoreState.slashMenu = null;
     rerenderChatEditor(container, props);
     expect(onSkillsOpenChange).toHaveBeenLastCalledWith(false);

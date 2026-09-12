@@ -154,6 +154,44 @@ describe('useLiveVoiceSetup', () => {
     },
   );
 
+  it('stops polling when an installed host never becomes ready', async () => {
+    vi.useFakeTimers();
+    mocks.client.liveSetupStatus.mockResolvedValue({
+      ...status(true),
+      live: {
+        ...status(true).live,
+        requirements: { host: 'missing' as const },
+      },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    function Harness() {
+      useLiveVoiceSetup(true);
+      return null;
+    }
+    await act(async () => root.render(<Harness />));
+    expect(mocks.client.liveSetupStatus).toHaveBeenCalledOnce();
+
+    // The host wait polls while it is young.
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(mocks.client.liveSetupStatus.mock.calls.length).toBeGreaterThan(1);
+
+    // Once the wait budget is spent the poll stops even though the daemon
+    // keeps reporting the host as missing.
+    await act(async () => vi.advanceTimersByTimeAsync(31_000));
+    const settledCalls = mocks.client.liveSetupStatus.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(mocks.client.liveSetupStatus.mock.calls.length).toBe(settledCalls);
+
+    // A focus refresh still works as the recovery path.
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    expect(mocks.client.liveSetupStatus.mock.calls.length).toBe(
+      settledCalls + 1,
+    );
+    act(() => root.unmount());
+  });
+
   it('does not let an older status poll overwrite a completed mutation', async () => {
     let resolveStatus: ((value: DaemonLiveSetupStatus) => void) | undefined;
     mocks.client.liveSetupStatus.mockReturnValue(
