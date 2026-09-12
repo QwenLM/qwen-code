@@ -779,11 +779,8 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         // itself, so an operator whose first-party non-qwen sessions still need
         // sessionId/promptId correlation can force the field back on.
         const generator = new DashScopeOpenAICompatibleProvider(
-          mockContentGeneratorConfig,
-          {
-            ...mockCliConfig,
-            getContentGeneratorConfig: () => ({ enableRequestMetadata: true }),
-          } as unknown as Config,
+          { ...mockContentGeneratorConfig, enableRequestMetadata: true },
+          mockCliConfig,
         );
 
         const result = generator.buildRequest(
@@ -800,11 +797,8 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
     it('omits metadata even for a qwen model when enableRequestMetadata is false', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
-        mockContentGeneratorConfig,
-        {
-          ...mockCliConfig,
-          getContentGeneratorConfig: () => ({ enableRequestMetadata: false }),
-        } as unknown as Config,
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        mockCliConfig,
       );
 
       const result = generator.buildRequest(
@@ -834,11 +828,8 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
     it('omits metadata on the vision path when enableRequestMetadata is false', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
-        mockContentGeneratorConfig,
-        {
-          ...mockCliConfig,
-          getContentGeneratorConfig: () => ({ enableRequestMetadata: false }),
-        } as unknown as Config,
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        mockCliConfig,
       );
 
       const result = generator.buildRequest(
@@ -874,8 +865,9 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     });
 
     // A side-model generator is built with its own per-model config but shares
-    // the session Config, so the provider's own value has to win over the
-    // session's or a per-model opt-out never reaches the gate.
+    // the session Config, so the gate reads only the provider's own value. The
+    // session's value must neither override a per-model opt-out nor fill in a
+    // value the cross-provider agent config deliberately cleared.
     it('prefers the provider config enableRequestMetadata over the session value', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
         { ...mockContentGeneratorConfig, enableRequestMetadata: false },
@@ -911,6 +903,26 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         sessionId: 'test-session-id',
         promptId: 'test-prompt-id',
       });
+    });
+
+    it('ignores the session enableRequestMetadata when the provider config has none', () => {
+      // buildAgentContentGeneratorConfig clears every generation field for a
+      // cross-provider agent, so undefined here is deliberate and the ambient
+      // session value must not fill it in for a vendor-forwarded model.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: undefined },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: true }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
     });
 
     it.each([
