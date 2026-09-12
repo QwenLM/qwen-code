@@ -1,173 +1,127 @@
-name: 'Update ECS Runner Qwen'
-
+name: 'HK2 Read-only Incident Diagnostic'
+run-name: 'HK2 read-only incident diagnostic 20260912'
 on:
-  push:
-    branches: ['main']
-    paths: ['.github/workflows/update-ecs-runner-qwen.yml']
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Optional. Empty means latest from npm.'
-        required: false
-        default: ''
-        type: 'string'
-  repository_dispatch:
-    types: ['npm-published']
-
-permissions:
-  contents: 'read'
-
+permissions: {}
 jobs:
-  # Resolving on a hosted runner, once, keeps the registry wait below off the
-  # ECS pools (which queue behind real review/triage work) and guarantees every
-  # pool installs the SAME version even when their jobs start hours apart.
-  resolve:
-    name: 'Resolve version'
-    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: 'ubuntu-latest'
-    timeout-minutes: 100
-    outputs:
-      version: '${{ steps.version.outputs.version }}'
-    steps:
-      - name: 'Resolve version'
-        id: 'version'
-        env:
-          INPUT_VERSION: '${{ inputs.version || github.event.client_payload.version }}'
-          # npm publishes asynchronously: `npm publish --provenance` returns
-          # "Your package is being processed and may take a few minutes to
-          # become available", and release.yml dispatches this workflow as soon
-          # as it returns. v0.23.0 took 55m22s to become resolvable, so the
-          # previous 25-minute budget expired while the package was still in
-          # flight. Wait up to 90 minutes and treat anything longer as an
-          # anomalous publish.
-          RESOLVE_TIMEOUT_SECONDS: '5400'
-          RESOLVE_INTERVAL_SECONDS: '30'
-        run: |-
-          set -euo pipefail
-          specifier="@qwen-code/qwen-code@${INPUT_VERSION#v}"
-          if [[ "${specifier}" == '@qwen-code/qwen-code@' ]]; then
-            specifier='@qwen-code/qwen-code@latest'
-          fi
-          # Per-attempt stderr is held back so ~50 identical 404 blocks do not
-          # bury the log; the last one is replayed when the wait gives up.
-          err_log="$(mktemp)"
-          deadline=$(( SECONDS + RESOLVE_TIMEOUT_SECONDS ))
-          while :; do
-            version="$(npm view "${specifier}" version 2>"${err_log}" | tail -n 1)" || true
-            if [[ -n "${version}" ]]; then
-              break
-            fi
-            if (( SECONDS >= deadline )); then
-              cat "${err_log}" >&2
-              echo "::error::No published qwen version matches '${INPUT_VERSION:-latest}' after ${RESOLVE_TIMEOUT_SECONDS}s."
-              exit 1
-            fi
-            echo "'${specifier}' is not on the registry yet; retrying in ${RESOLVE_INTERVAL_SECONDS}s."
-            sleep "${RESOLVE_INTERVAL_SECONDS}"
-          done
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "Resolved qwen version: ${version}"
-
-  update:
-    name: 'Update Qwen on ${{ matrix.runner }}'
-    needs: 'resolve'
-    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    strategy:
-      matrix:
-        runner:
-          [
-            'ecs-update-hk-1',
-            'ecs-update-hk-2',
-            'ecs-update-hk-3',
-            'ecs-update-hk-4',
-            'ecs-update-hk-5',
-          ]
-      fail-fast: false
-    runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
-    concurrency:
-      group: 'update-ecs-runner-qwen-${{ matrix.runner }}'
-      cancel-in-progress: false
-    timeout-minutes: 10
-    steps:
-      - name: 'Update qwen'
-        env:
-          VERSION: '${{ needs.resolve.outputs.version }}'
-        run: |-
-          set -euo pipefail
-          # The runner service resolves the system-wide qwen binary. Do not
-          # carry a runner user's custom npm prefix into the sudo install.
-          (
-            cd "${RUNNER_TEMP:?}"
-            # All runner processes of a region share one machine, so another
-            # job's concurrent `npm install -g` can race npm's rename of the
-            # package dir (ENOTEMPTY). Clear trash left by crashed installs
-            # and retry through the seconds-long race window.
-            PKG_DIR='/usr/local/lib/node_modules/@qwen-code'
-            for attempt in 1 2 3; do
-              sudo rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
-              # --prefix pins the install to /usr/local: on the hk-4/hk-5
-              # machines root's npm global prefix is a custom Node directory
-              if sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
-                exit 0
-              fi
-              if [[ "${attempt}" -lt 3 ]]; then
-                echo "::warning::npm install attempt ${attempt} failed; retrying"
-                sleep $((attempt * 10))
-              else
-                echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"
-              fi
-            done
-            exit 1
-          )
-
-      - name: 'Verify version'
-        env:
-          VERSION: '${{ needs.resolve.outputs.version }}'
-        run: |-
-          set -euo pipefail
-          qwen_path="$(command -v qwen)"
-          actual="$("${qwen_path}" --version)"
-          echo "qwen path: ${qwen_path}"
-          echo "qwen version: ${actual}"
-          test "${actual}" = "${VERSION}"
-
-  # A failed fleet update is otherwise invisible. `qwen-code-pr-review.yml` and
-  # `qwen-triage.yml` install the CLI only when it is absent, and on a
-  # self-hosted runner it never is, so a pool that misses an update keeps
-  # serving PRs on the old version indefinitely with nothing to distinguish it
-  # from a healthy one — on v0.22.3 that went unnoticed for a full day.
-  # `main-ci-failure-issue.yml` cannot cover this: it watches test suites on
-  # `main`, and this workflow runs off `repository_dispatch`.
-  report_failure:
-    name: 'Report a stale fleet'
-    needs: ['resolve', 'update']
-    # `cancelled` is deliberately not a failure: a newer dispatch supersedes an
-    # older one's still-pending legs through the per-pool concurrency group,
-    # which is routine and says nothing about the fleet's state.
-    if: "${{ always() && github.repository == 'QwenLM/qwen-code' && (needs.resolve.result == 'failure' || needs.update.result == 'failure') }}"
-    # Hosted, not the ECS pool: this job reports that the pools are broken, and
-    # queueing the report behind them would be the same trap it documents.
-    runs-on: 'ubuntu-latest'
+  inspect:
+    runs-on: [self-hosted, linux, x64, hk2-diag-20260912]
     timeout-minutes: 5
-    permissions:
-      # A job-level block replaces the workflow's, so checkout needs contents
-      # spelled out here even though the job only files an issue.
-      contents: 'read'
-      # Read this run's per-pool job conclusions.
-      actions: 'read'
-      issues: 'write'
     steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
-        with:
-          persist-credentials: false
-
-      - name: 'File or update the stale-fleet issue'
-        env:
-          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          REPO: '${{ github.repository }}'
-          RUN_ID: '${{ github.run_id }}'
-          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
-          VERSION: '${{ needs.resolve.outputs.version }}'
-          DEDUP_LABEL: 'scope/ci-cd'
-        run: 'bash .github/scripts/ecs-fleet-update-failure-issue.sh'
+      - name: Collect encrypted host evidence
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d "${RUNNER_TEMP:?}/hk2-diag.XXXXXX")
+          trap 'rm -rf -- "$work"' EXIT
+          chmod 700 "$work"
+          cat > "$work/public.pem" <<'HK2_CERT'
+          -----BEGIN CERTIFICATE-----
+          MIIDHzCCAgegAwIBAgIUOx9Zj7hn6hp6vKCr+qpM8ItsIZYwDQYJKoZIhvcNAQEL
+          BQAwHzEdMBsGA1UEAwwUaGsyLWxvY2FsLWRpYWdub3N0aWMwHhcNMjYwOTEyMDcz
+          MTA2WhcNMjYwOTE0MDczMTA2WjAfMR0wGwYDVQQDDBRoazItbG9jYWwtZGlhZ25v
+          c3RpYzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAJyWybYcbhmeR5g/
+          7KcH7/Et9fWvpKlCQCIJKSQFDywftITGbK9ZmD7WCM23MCw8oXZPPELyrSDUWjyE
+          u3lsgrA4c5VIHg3NqYmS0OUPqypDMJjQsaPyrq720CuY6V57Ampw/9rK5qPHX+eo
+          F+BGdaNl3Hz0YBbhaXzSMNQzeBHxskffHI85yKYznr3HhsnIhM0heGIrwyV3jfPX
+          eSUEVpMM1xaT6nAKQZJsgZHodWp+rwl6/MHztZAC5uhOJVk8IE3o3NK9EWdwp4IX
+          bJcFKgtZIcFEm2oL1MFLps8bRephZ4XLVEZwp91bA67Wv1qPM9nAYxTNzOxkJxkL
+          +UVA6nkCAwEAAaNTMFEwHQYDVR0OBBYEFJIqL1LCNRNkzjBeyYp3bB2GVO+2MB8G
+          A1UdIwQYMBaAFJIqL1LCNRNkzjBeyYp3bB2GVO+2MA8GA1UdEwEB/wQFMAMBAf8w
+          DQYJKoZIhvcNAQELBQADggEBAIXl8iU0gTpwPGrtTs95GHFidrzwEawKKIyhMb+Z
+          Yf8juI7/pyVe6v8qhWPnMaz3z7aMJHXxpYFzZD4wVKoHjQHo6cBynl7KmgwzeGXk
+          RhgR/VG967KKllwvo+61q7WpbW72VwhaRu2FqwxNZYWziI/+J3/+12UKNFn5yh+T
+          1lN7m4h55bSCirMVmqX08KS7qPMgjO1PP2oH2dAsaIfclIKYqqm+ZghnkAxA83Rx
+          d1N6hfQJg0qzNqvkWoMnvD+FPtt7BNAfcL5n5C6PRAMilNBEXm3PmUlwAUR5baPg
+          j/jzlPHCMsdDdJHwazH/BBflKW49ne02g59W9TY+22ZEGq4=
+          -----END CERTIFICATE-----
+          HK2_CERT
+          cat > "$work/collect.sh" <<'HK2_SCRIPT'
+          #!/usr/bin/env bash
+          set -u
+          export LC_ALL=C
+          since='2026-09-10 18:00:00 UTC'
+          
+          section() { printf '\n===== %s =====\n' "$1"; }
+          section identity
+          date -Is
+          hostname
+          uptime
+          who -b
+          id
+          last -x -n 20
+          journalctl --list-boots --no-pager | tail -8
+          
+          section runner-service-state
+          for n in $(seq 1 32); do
+            systemctl show "actions.runner.QwenLM-qwen-code.ecs-qwen-hk2-${n}.service" \
+              -p Id -p ActiveState -p SubState -p Result -p MainPID -p Restart \
+              -p ExecMainStartTimestamp -p ExecMainExitTimestamp -p ExecMainStatus \
+              -p ActiveEnterTimestamp -p InactiveEnterTimestamp --no-pager
+          done
+          section offline-runners
+          for n in 1 7; do
+            journalctl -u "actions.runner.QwenLM-qwen-code.ecs-qwen-hk2-${n}.service" \
+              --since "$since" -n 150 --no-pager -o short-iso
+          done
+          section runner-transitions
+          journalctl -u 'actions.runner.QwenLM-qwen-code.ecs-qwen-hk2-*.service' \
+            --since "$since" --no-pager -o short-iso |
+            grep -Ei 'Stopping|Stopped|Started|Starting|Shutting|Sending SIG|listener.*exit|Listening for Jobs|re-launch|Connected to GitHub|error|failed' | tail -2500
+          section systemd-transitions
+          journalctl _PID=1 --since "$since" --no-pager -o short-iso | tail -2000
+          section kernel
+          journalctl _TRANSPORT=kernel --since "$since" --no-pager -o short-iso |
+            grep -Ei 'oom|out of memory|killed process|lockup|watchdog|I/O error|segfault|shutdown|reboot|Linux version' | tail -200
+          section sudo-history
+          journalctl _COMM=sudo --since "$since" --no-pager -o short-iso |
+            grep -Ei 'systemctl|service |kill|pkill|shutdown|reboot|cloudmonitor|argus|runsvc|runner' | tail -500
+          
+          section scheduled-maintenance
+          systemctl list-timers --all --no-pager
+          systemctl cat qwen-docker-cleanup.service qwen-docker-cleanup.timer --no-pager
+          crontab -l
+          for f in /etc/crontab /etc/cron.d/*; do
+            [ -f "$f" ] || continue
+            printf '\n--- %s ---\n' "$f"
+            sed -n '1,160p' "$f"
+          done
+          section monitoring-services
+          systemctl list-units --all --type=service --no-pager |
+            grep -Ei 'cloudmonitor|argus|aliyun|assist|audit|ssh'
+          for f in /usr/local/cloudmonitor/local_data/logs/argusagentd.log /usr/local/cloudmonitor/local_data/logs/argusagent.log; do
+            [ -f "$f" ] || continue
+            stat "$f"
+            tail -700 "$f"
+          done
+          journalctl -u argusagent.service -u cloudmonitor.service -u aliyun.service -u aliyun-service.service \
+            --since "$since" -n 500 --no-pager -o short-iso
+          section audit-status
+          systemctl status auditd --no-pager
+          if command -v auditctl >/dev/null; then auditctl -l; fi
+          section resources
+          free -h
+          df -h
+          df -i
+          ps -eo pid,ppid,user,etimes,stat,pcpu,pmem,comm --sort=-pcpu | head -60
+          section historical-memory
+          if command -v sar >/dev/null; then
+            for f in /var/log/sysstat/sa11 /var/log/sa/sa11 /var/log/sysstat/sa12 /var/log/sa/sa12; do
+              [ -f "$f" ] && sar -r -f "$f"
+            done
+          fi
+          exit 0
+          HK2_SCRIPT
+          chmod 600 "$work/collect.sh"
+          if sudo -n true 2>/dev/null; then
+            timeout 180 sudo -n bash "$work/collect.sh" > "$work/report.txt" 2>&1 || true
+          else
+            printf "sudo unavailable; collecting as runner user\n" > "$work/report.txt"
+            timeout 180 bash "$work/collect.sh" >> "$work/report.txt" 2>&1 || true
+          fi
+          gzip -c "$work/report.txt" > "$work/report.gz"
+          openssl cms -encrypt -aes256 -binary -in "$work/report.gz" -outform DER -out "$work/report.cms" "$work/public.pem"
+          echo HK2_ENCRYPTED_BEGIN
+          base64 -w 120 "$work/report.cms"
+          echo
+          echo HK2_ENCRYPTED_END
