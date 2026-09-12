@@ -219,13 +219,19 @@ describe('OpenTuiTranscriptView', () => {
     expect(text).not.toContain('... last');
   });
 
-  it("keeps the active card's payload while siblings split the allowance (R3-1, R4-1)", () => {
+  it('bounds the pending cards’ sum so the one dialog stays answerable (R3-1)', () => {
     // The one rendered dialog belongs to the FIRST parked call
     // (waitingToolCalls[0], pushed in transcript order), and an mcp dialog
-    // shows only the server and tool names: an even split windows BOTH
-    // cards, hiding the arguments of exactly the call being approved. The
-    // first card keeps the full allowance; its siblings divide it, and the
-    // allowance rotates as each call settles.
+    // shows only the server and tool names, so the card is the only
+    // surface carrying the arguments — but two wide cards cannot both
+    // paint in full AND leave that dialog on an 80-row viewport. The
+    // first-parked exemption granted the active card its whole lone-card
+    // allowance on top of the sibling's divided share (34 + 17 budget rows
+    // against the 34 the reserve leaves), painting the outcome list below
+    // the fold while Enter still activated it. The active card now takes
+    // only the remainder of the collapsed allowance, so BOTH wide cards
+    // window and the dialog stays answerable; when the sibling needs
+    // nothing the active card keeps its payload instead (R4-1, below).
     const description = (marker: string) =>
       '{"path":"/x","content":"' + 'x'.repeat(3000) + marker + '"}';
     const { container } = render(
@@ -249,9 +255,10 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     const text = container.textContent ?? '';
-    expect(text).toContain('FIRST_TAIL');
+    expect(text).not.toContain('FIRST_TAIL');
     expect(text).not.toContain('SECOND_TAIL');
     expect(text).toContain('... last');
+    expect(text).toContain('awaiting approval');
   });
 
   it('keeps the active payload when a parked sibling needs nothing (R4-1)', () => {

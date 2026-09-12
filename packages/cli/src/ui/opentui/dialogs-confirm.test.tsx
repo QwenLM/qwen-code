@@ -79,8 +79,11 @@ import {
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
 import {
+  CARD_DESC_WRAP_RATIO,
+  DIALOG_ABOVE_CARD_RESERVE_ROWS,
   DIALOG_CHROME_RESERVE_ROWS,
   PENDING_CARD_VIEWPORT_RESERVE_ROWS,
+  TOOL_CARD_DESCRIPTION_ROWS,
 } from './messages.js';
 
 const onConfirmNoop = async () => {};
@@ -276,6 +279,20 @@ describe('OpenTuiToolConfirmation', () => {
     mocks.state.dimensions = { width: 110, height: 40 };
   });
 
+  // Structural row count for the jsdom harness: one row per span, with each
+  // DialogSelect row's three spans counting once. The harness drops layout
+  // props, so INVISIBLE_CHROME_ROWS adds the chrome it cannot show: the
+  // frame's border and padding (4), the body box's margins (2), and the
+  // footer's margin (1).
+  const INVISIBLE_CHROME_ROWS = 7;
+  const countRows = (container: HTMLElement): number => {
+    const spans = [...container.querySelectorAll('span')];
+    const optionNumbers = spans.filter((span) =>
+      /^\d+\.$/.test(span.textContent ?? ''),
+    ).length;
+    return spans.length - 2 * optionNumbers;
+  };
+
   it('settles Cancel on Esc exactly once, whatever arrives afterwards', () => {
     const onConfirm = vi.fn(async () => {});
     const onSettled = vi.fn();
@@ -443,10 +460,14 @@ describe('OpenTuiToolConfirmation', () => {
   });
 
   it('keeps the head of a long info body and expands it on ctrl-s', () => {
+    // Height 80: the expanded tail window is terminal height minus the
+    // derived expanded reserve, so expansion only exists where it still
+    // fits the viewport (R5-1).
+    mocks.state.dimensions = { width: 110, height: 80 };
     const lines = [
       'BODY_TOP',
       ...Array.from(
-        { length: 24 },
+        { length: 48 },
         (_, index) => `body-line-${index.toString().padStart(2, '0')}`,
       ),
       'BODY_TAIL',
@@ -469,15 +490,15 @@ describe('OpenTuiToolConfirmation', () => {
     );
     const collapsed = container.textContent ?? '';
     expect(collapsed).toContain('BODY_TOP');
-    expect(collapsed).toContain('... last 7 lines hidden ...');
+    expect(collapsed).toContain('... last 31 lines hidden ...');
     expect(collapsed).toContain('Press ctrl-s to show more lines');
     expect(collapsed).not.toContain('BODY_TAIL');
 
     press({ name: 's', ctrl: true });
     const expanded = container.textContent ?? '';
     expect(expanded).toContain('BODY_TAIL');
-    // The expanded tail window (20 rows at height 40) still drops 6 of the
-    // 26 rows, and the label is the only trace of them on the alt screen.
+    // The expanded tail window (44 rows at height 80) still drops 6 of the
+    // 50 rows, and the label is the only trace of them on the alt screen.
     // A tail window hides the HEAD rows, so the label says "first" (R5-1).
     expect(expanded).toContain('... first 6 lines hidden ...');
     expect(expanded).not.toContain('Press ctrl-s to show more lines');
@@ -516,9 +537,10 @@ describe('OpenTuiToolConfirmation', () => {
   });
 
   it('caps a single-line JSON payload by its wrapped height', () => {
+    mocks.state.dimensions = { width: 110, height: 80 };
     const prompt =
       'Save this exact content to the bound Mem0 repository memory?\n' +
-      JSON.stringify(`CONFIRM_TOP ${'x'.repeat(3000)} CONFIRM_TAIL`);
+      JSON.stringify(`CONFIRM_TOP ${'x'.repeat(5000)} CONFIRM_TAIL`);
     const { container } = render(
       <OpenTuiToolConfirmation
         call={{
@@ -643,14 +665,6 @@ describe('OpenTuiToolConfirmation', () => {
     // whole sum would hand the chrome 13 rows of slack it does not have:
     // chrome growth would push the outcome list off the viewport while this
     // case stayed green.
-    const INVISIBLE_CHROME_ROWS = 7;
-    const countRows = (container: HTMLElement): number => {
-      const spans = [...container.querySelectorAll('span')];
-      const optionNumbers = spans.filter((span) =>
-        /^\d+\.$/.test(span.textContent ?? ''),
-      ).length;
-      return spans.length - 2 * optionNumbers;
-    };
     const renderInfoDialog = (prompt: string): number => {
       const { container, unmount } = render(
         <OpenTuiToolConfirmation
@@ -686,5 +700,72 @@ describe('OpenTuiToolConfirmation', () => {
     // The chrome is the whole dialog minus its one-row body.
     const chromeRows = renderInfoDialog('fits') - 1 + INVISIBLE_CHROME_ROWS;
     expect(chromeRows).toBeLessThanOrEqual(DIALOG_CHROME_RESERVE_ROWS);
+  });
+
+  it('bounds an expanded info body so the dialog stays inside the viewport (R5-1)', () => {
+    // The expanded window used to budget from a private 20-row reserve
+    // while the card module charges 27 rows around the dialog plus the
+    // floored card's painted rows: from ~46 body rows up, the outcome list
+    // painted below an 80-row viewport while Enter still activated it. The
+    // window now derives from the card module's accounting, so the whole
+    // dialog stays inside the rows the accounting leaves it.
+    mocks.state.dimensions = { width: 110, height: 80 };
+    const prompt = Array.from(
+      { length: 60 },
+      (_, i) => `row-${i.toString().padStart(2, '0')}`,
+    ).join('\n');
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'hook_gate',
+          confirmationDetails: {
+            type: 'info',
+            title: 'Save this content?',
+            prompt,
+            onConfirm: onConfirmNoop,
+          },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    press({ name: 's', ctrl: true });
+    expect(container.textContent).toContain('... first 16 lines hidden ...');
+    expect(countRows(container) + INVISIBLE_CHROME_ROWS).toBeLessThanOrEqual(
+      80 -
+        DIALOG_ABOVE_CARD_RESERVE_ROWS -
+        Math.ceil(TOOL_CARD_DESCRIPTION_ROWS / CARD_DESC_WRAP_RATIO),
+    );
+  });
+
+  it('windows an exec command body so the dialog stays inside the viewport (R5-1)', () => {
+    // The exec body rendered its command uncapped: a 50-line command
+    // painted the question row and outcome list off an 80-row viewport. It
+    // now gets the same window the expanded text body gets.
+    mocks.state.dimensions = { width: 110, height: 80 };
+    const command = Array.from(
+      { length: 50 },
+      (_, i) => `echo line-${i.toString().padStart(2, '0')}`,
+    ).join('\n');
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { ...execDetails(), command },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('... first 6 lines hidden ...');
+    expect(text).toContain('echo line-49');
+    expect(countRows(container) + INVISIBLE_CHROME_ROWS).toBeLessThanOrEqual(
+      80 -
+        DIALOG_ABOVE_CARD_RESERVE_ROWS -
+        Math.ceil(TOOL_CARD_DESCRIPTION_ROWS / CARD_DESC_WRAP_RATIO),
+    );
   });
 });

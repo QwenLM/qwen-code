@@ -23,6 +23,7 @@ vi.mock('@opentui/core', () => ({
 import {
   GENERIC_TOOL_SUMMARIES,
   MAX_RESULT_DISPLAY_CHARACTERS,
+  PENDING_CARD_VIEWPORT_RESERVE_ROWS,
   TOOL_CARD_DESCRIPTION_ROWS,
   assistantMessageMeta,
   capToolCardDescription,
@@ -30,6 +31,7 @@ import {
   hiddenLinesLabel,
   hiddenTailLinesLabel,
   maxHistoryItemRows,
+  pendingCardBudgets,
   pendingCardMaxRows,
   tailWindow,
   tailWindowPhysical,
@@ -230,10 +232,9 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     // past the settled floor.
     const heredoc = Array.from({ length: 40 }, () => 'echo hi').join('\n');
     expect(pendingCardMaxRows(80, heredoc, 106, 2)).toBeLessThan(9);
-    // A sibling's share still bottoms out at the settled floor. The card
-    // whose dialog is on screen never rides the split — the transcript view
-    // passes 1 for the first pending item (R4-1), so this floor is the
-    // sibling minimum, and it rotates as each call settles.
+    // A sibling's share still bottoms out at the settled floor, and the
+    // first parked card's remainder never goes below it either
+    // (pendingCardBudgets), so this floor is every pending card's minimum.
     expect(pendingCardMaxRows(80, undefined, 106, 8)).toBe(
       TOOL_CARD_DESCRIPTION_ROWS,
     );
@@ -359,6 +360,99 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     const truncated = truncateResultDisplayChars(long);
     expect(truncated.length).toBe(MAX_RESULT_DISPLAY_CHARACTERS + 3);
     expect(truncated.startsWith('...')).toBe(true);
+  });
+});
+
+describe('pendingCardBudgets (pending sibling budget distribution)', () => {
+  // The scheduler parks every confirmation in a batch before anything
+  // executes, and one confirmation dialog renders below the whole
+  // transcript, belonging to the FIRST parked call.
+  const pendingCard = (
+    id: string,
+    overrides: Partial<LiveToolItem> = {},
+  ): LiveToolItem => ({
+    kind: 'tool',
+    id,
+    tool: 'mcp__fs__write_file',
+    title: 'mcp__fs__write_file',
+    output: '',
+    done: false,
+    confirm: 'pending',
+    description: `{"path":"/x","content":"${'x'.repeat(3000)}TAIL"}`,
+    ...overrides,
+  });
+
+  it('bounds the pending cards’ budget sum inside the collapsed allowance (R3-1)', () => {
+    // Granting the first parked card the whole lone-card allowance ON TOP
+    // of the siblings' divided shares gave two wide mcp cards 34 + 17 = 51
+    // budget rows against the 34 the reserve leaves for the cards plus the
+    // one rendered dialog — its outcome list painted off an 80-row
+    // viewport while Enter still activated the first option. The active
+    // card now takes only the remainder after the siblings' charges, and
+    // the sum stays inside the allowance.
+    const two = pendingCardBudgets(
+      [pendingCard('t1'), pendingCard('t2')],
+      80,
+      106,
+    );
+    expect(two.get('t1')).toBe(17);
+    expect(two.get('t2')).toBe(17);
+    expect(
+      [...two.values()].reduce((sum, rows) => sum + rows, 0),
+    ).toBeLessThanOrEqual(80 - PENDING_CARD_VIEWPORT_RESERVE_ROWS);
+    // A lone pending card keeps the full allowance (R4-1), and the
+    // allowance rotates to the next sibling as each call settles.
+    expect(pendingCardBudgets([pendingCard('t1')], 80, 106).get('t1')).toBe(34);
+    expect(pendingCardBudgets([pendingCard('t2')], 80, 106).get('t2')).toBe(34);
+  });
+
+  it('charges the active card only for rows a sibling actually paints (R4-1)', () => {
+    // A one-line `ls` parked beside a wide mcp payload must not cost the
+    // active card a divided share the sibling never renders: the sibling
+    // keeps its granted share as a cap but is CHARGED the one row it
+    // paints, so the active card keeps its payload.
+    const budgets = pendingCardBudgets(
+      [
+        pendingCard('t1'),
+        pendingCard('t2', { tool: 'run_shell_command', description: 'ls' }),
+      ],
+      80,
+      106,
+    );
+    expect(budgets.get('t2')).toBe(17);
+    expect(budgets.get('t1')).toBe(33);
+  });
+
+  it('keeps the active card’s own dialog bound under the remainder (R3-1)', () => {
+    // The active card's own payload dialog still binds it below the
+    // remainder: a 40-row heredoc command leaves it the 9 its dialog needs.
+    const heredoc = Array.from({ length: 40 }, () => 'echo hi').join('\n');
+    const budgets = pendingCardBudgets(
+      [
+        pendingCard('t1', {
+          tool: 'run_shell_command',
+          confirmBody: heredoc,
+        }),
+        pendingCard('t2'),
+      ],
+      80,
+      106,
+    );
+    expect(budgets.get('t1')).toBe(9);
+  });
+
+  it('lets the settled floor win once the allowance is exhausted (R3-1)', () => {
+    // Seven siblings charged the 5-row floor each already exhaust the
+    // 34-row allowance, so the active card rides the floor too — the
+    // documented degenerate case; the sum bound cannot hold past it.
+    const budgets = pendingCardBudgets(
+      Array.from({ length: 8 }, (_, i) => pendingCard(`t${i}`)),
+      80,
+      106,
+    );
+    expect([...budgets.values()]).toEqual(
+      Array.from({ length: 8 }, () => TOOL_CARD_DESCRIPTION_ROWS),
+    );
   });
 });
 

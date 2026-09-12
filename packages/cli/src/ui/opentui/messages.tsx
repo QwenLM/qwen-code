@@ -278,7 +278,22 @@ export const CONFIRMATION_BODY_MAX_ROWS = 20;
  * B / 0.73 rows. Budgeting at 0.7 keeps the estimate on the safe side of
  * that inflation across plausible name lengths.
  */
-const CARD_DESC_WRAP_RATIO = 0.7;
+export const CARD_DESC_WRAP_RATIO = 0.7;
+
+/**
+ * Rows a confirmation dialog budgets around its body when the body is
+ * windowed against the viewport: the rows above the card plus the dialog's
+ * chrome (DIALOG_EXPANDED_RESERVE_ROWS), the pending card's floor converted
+ * to painted rows — the card can yield no further once it bottoms out — and
+ * the hidden-lines label a windowed body paints. The dialog's expanded text
+ * window and the exec body window are terminal height minus this, so the
+ * card plus the dialog never exceed the viewport however tall the payload
+ * (R5-1).
+ */
+export const DIALOG_EXPANDED_BODY_RESERVE_ROWS =
+  DIALOG_EXPANDED_RESERVE_ROWS +
+  Math.ceil(TOOL_CARD_DESCRIPTION_ROWS / CARD_DESC_WRAP_RATIO) +
+  1;
 
 /**
  * Description budget for a pending tool card, bounded three ways: never
@@ -301,13 +316,13 @@ const CARD_DESC_WRAP_RATIO = 0.7;
  * the rows a lone card would get — the collapsed allowance divided so the
  * cards' sum is charged against that dialog, and the dialog bound divided
  * so the converted operand does not silently stop binding exactly where
- * the split matters (R3-1). The split is a no-op at 1, and the transcript
- * view passes 1 for the FIRST pending card: the rendered dialog belongs
- * to it (waitingToolCalls[0], pushed in transcript order), so it keeps
- * the full allowance — for an mcp call that card is the only surface
- * carrying the arguments being approved (R4-1), and the allowance rotates
- * to the next sibling as each call settles. Short terminals fall back to
- * the settled cap.
+ * the split matters (R3-1). The split is a no-op at 1. Which rows the
+ * FIRST parked card — the one whose dialog is on screen
+ * (waitingToolCalls[0], pushed in transcript order) — actually gets is
+ * decided by pendingCardBudgets: it takes the remainder of the collapsed
+ * allowance after the siblings' charges, so the cards' sum stays inside
+ * the reserve (R3-1) while a sibling whose card paints nothing costs it
+ * nothing (R4-1). Short terminals fall back to the settled cap.
  */
 export function pendingCardMaxRows(
   terminalHeight: number,
@@ -350,6 +365,69 @@ export function pendingCardMaxRows(
       dialogBound,
     ),
   );
+}
+
+/**
+ * Per-card description budgets for the pending tool calls on screen. One
+ * confirmation dialog renders below the whole transcript and belongs to the
+ * FIRST parked call (waitingToolCalls[0], pushed in transcript order), so
+ * the cards' budgets are charged against that one dialog together: each
+ * sibling takes its divided share (pendingCardMaxRows at the full count),
+ * charged at most the rows its description actually paints — a one-line
+ * `ls` parked beside a wide payload must not cost rows it never renders
+ * (R4-1) — and the first card takes the remainder of the collapsed
+ * allowance. Granting it the whole lone-card allowance on top of the
+ * siblings' shares gave two wide cards 34 + 17 = 51 budget rows against
+ * the 34 the reserve leaves and pushed the dialog's outcome list off an
+ * 80-row viewport (R3-1). The remainder rotates to the next sibling as
+ * each call settles; once the per-card floor exhausts the allowance
+ * (seven or more parked cards) every card rides the floor and the sum
+ * bound no longer holds.
+ */
+export function pendingCardBudgets(
+  pending: readonly LiveToolItem[],
+  terminalHeight: number,
+  width: number,
+): ReadonlyMap<string, number> {
+  const budgets = new Map<string, number>();
+  const [active, ...siblings] = pending;
+  let charged = 0;
+  for (const sibling of siblings) {
+    const budget = pendingCardMaxRows(
+      terminalHeight,
+      sibling.confirmBody,
+      width,
+      pending.length,
+    );
+    budgets.set(sibling.id, budget);
+    // The charge mirrors capToolCardDescription's measurement: the rows the
+    // card's flex line wraps name + folded description to.
+    const description =
+      sibling.description ?? toolCardDescription(sibling.tool, sibling.args);
+    const cols = Math.max(width - STATUS_INDICATOR_WIDTH, 10);
+    const required = Math.ceil(
+      (getCachedStringWidth(toolCardName(sibling.tool)) +
+        1 +
+        getCachedStringWidth(toolCardText(description))) /
+        cols,
+    );
+    charged += Math.min(budget, required);
+  }
+  if (active) {
+    budgets.set(
+      active.id,
+      Math.max(
+        TOOL_CARD_DESCRIPTION_ROWS,
+        Math.min(
+          pendingCardMaxRows(terminalHeight, active.confirmBody, width, 1),
+          Math.floor(terminalHeight) -
+            PENDING_CARD_VIEWPORT_RESERVE_ROWS -
+            charged,
+        ),
+      ),
+    );
+  }
+  return budgets;
 }
 
 /**

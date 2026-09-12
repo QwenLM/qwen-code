@@ -28,7 +28,7 @@ import {
   hiddenLinesLabel,
   hiddenTailLinesLabel,
   maxHistoryItemRows,
-  pendingCardMaxRows,
+  pendingCardBudgets,
   selectionProps,
   STATUS_INDICATOR_WIDTH,
   tailWindow,
@@ -104,18 +104,23 @@ export function OpenTuiTranscriptView({
   thoughtsExpanded = false,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
-  // Sibling pending cards split one dialog's allowance: it renders below
-  // the whole transcript and belongs to the FIRST parked call
-  // (waitingToolCalls[0]; the confirm events push in this same order). That
-  // card keeps the full allowance — for an mcp call it is the only surface
-  // carrying the arguments being approved (R4-1) — while the remaining
-  // siblings divide it (R3-1); as each call settles the next pending card
-  // becomes first and the allowance rotates to it.
+  // Sibling pending cards share ONE dialog's rows: it renders below the
+  // whole transcript and belongs to the FIRST parked call
+  // (waitingToolCalls[0]; the confirm events push in this same order).
+  // pendingCardBudgets charges each sibling its divided share — capped at
+  // the rows its description actually paints (R4-1) — and gives the first
+  // card the remainder of the collapsed allowance, so the cards' sum stays
+  // inside the reserve and the dialog's outcome list stays on screen
+  // (R3-1); the remainder rotates to the next sibling as each call settles.
   const pendingItems = items.filter(
-    (item) => item.kind === 'tool' && item.confirm === 'pending' && !item.done,
+    (item): item is LiveToolItem =>
+      item.kind === 'tool' && item.confirm === 'pending' && !item.done,
   );
-  const pendingCount = pendingItems.length;
-  const activePendingId = pendingItems[0]?.id;
+  const pendingBudgets = pendingCardBudgets(
+    pendingItems,
+    availableTerminalHeight,
+    availableWidth,
+  );
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
@@ -127,10 +132,9 @@ export function OpenTuiTranscriptView({
           <TranscriptItem
             item={item}
             maxRows={maxRows}
-            terminalHeight={availableTerminalHeight}
             width={availableWidth}
             thoughtsExpanded={thoughtsExpanded}
-            pendingCount={item.id === activePendingId ? 1 : pendingCount}
+            pendingMaxRows={pendingBudgets.get(item.id)}
           />
         </box>
       ))}
@@ -141,17 +145,15 @@ export function OpenTuiTranscriptView({
 function TranscriptItem({
   item,
   maxRows,
-  terminalHeight,
   width,
   thoughtsExpanded,
-  pendingCount,
+  pendingMaxRows,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
-  terminalHeight: number;
   width: number;
   thoughtsExpanded: boolean;
-  pendingCount: number;
+  pendingMaxRows?: number;
 }) {
   switch (item.kind) {
     case 'user':
@@ -165,9 +167,8 @@ function TranscriptItem({
         <ToolCard
           item={item}
           maxRows={maxRows}
-          terminalHeight={terminalHeight}
           width={width}
-          pendingCount={pendingCount}
+          pendingMaxRows={pendingMaxRows}
         />
       );
     case 'task':
@@ -307,15 +308,13 @@ function ThinkingRow({
 function ToolCard({
   item,
   maxRows,
-  terminalHeight,
   width,
-  pendingCount,
+  pendingMaxRows,
 }: {
   item: LiveToolItem;
   maxRows: number;
-  terminalHeight: number;
   width: number;
-  pendingCount: number;
+  pendingMaxRows?: number;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
@@ -330,25 +329,19 @@ function ToolCard({
   // confirmation dialog shows only the server and tool names, so the card
   // is the only surface carrying the arguments (R5-9) — the settled 5-row
   // cap would hide the tail of exactly the payload being approved. The
-  // pending budget stays viewport- and payload-aware (pendingCardMaxRows):
-  // the dialog renders in flow below the transcript, and when its payload
-  // body (threaded onto the item as confirmBody — a hook reason, plan, or
-  // command) is tall enough to hide rows, the card yields so the dialog
-  // plus its chrome stays on screen. Sibling pending cards split the
-  // allowance (pendingCount): the one dialog renders below all of them and
-  // belongs to the first parked call, so that card arrives here with the
-  // undivided allowance (R4-1).
+  // pending budget is viewport- and payload-aware (pendingCardBudgets): the
+  // one dialog renders in flow below the whole transcript and belongs to
+  // the first parked call, so that card arrives here with the remainder of
+  // the collapsed allowance after its siblings' charges (R3-1, R4-1), and a
+  // payload body tall enough to hide rows (threaded onto the item as
+  // confirmBody — a hook reason, plan, or command) shrinks the budget so
+  // the dialog plus its chrome stays on screen.
   const cap = capToolCardDescription(
     text,
     name,
     width,
     item.confirm === 'pending' && !item.done
-      ? pendingCardMaxRows(
-          terminalHeight,
-          item.confirmBody,
-          width,
-          pendingCount,
-        )
+      ? (pendingMaxRows ?? TOOL_CARD_DESCRIPTION_ROWS)
       : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
