@@ -54,8 +54,11 @@ menu supplies its own context, including nested and disabled commands.
 Normal actions do not emit another full tree or image.
 
 Call `getState()` after a dialog, sheet or menu opens or closes before acting
-on its IDs. A process/window/session change invalidates prior IDs. Coordinates
-require a current screenshot from `getState({ includeScreenshot: true })`.
+on its IDs. A process/window/session change invalidates prior IDs. Every App
+observation captures a current screenshot internally so a later AX-only
+diff/no-change does not discard the coordinate frame. The default return omits
+that image; use `getState({ includeScreenshot: true })` when the caller needs to
+inspect it.
 
 Native code selects semantic or synthesized input after checking the target.
 App clicks and keyboard input use the native background path. Native drag input
@@ -63,7 +66,9 @@ selects its supported foreground route before dispatch and restores the prior
 app afterward. There is no foreground retry. Failed,
 partial, unverifiable and cancelled dispatched actions are never replayed.
 Errors request fresh observation before another action; they do not ask the
-model to choose a delivery mode.
+model to choose a delivery mode. Argument errors detected before native dispatch
+retain their specific correction; uncertain post-dispatch failures retain the
+cautious observe-before-retry message.
 
 ## macOS text operations
 

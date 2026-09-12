@@ -67,6 +67,14 @@ Pruning must not depend on enabled state alone. Compact rendering and its
 revision lineage are separated from legacy full-tree output. Unknown
 application-specific Codex transforms are not guessed from their names.
 
+Each App observation requests the screenshot and AX state together, matching the
+reference service's single app-state capture. The handle retains that current
+frame for coordinate validation while omitting the image from the default public
+result; `includeScreenshot: true` only controls whether the caller receives it.
+Local validation errors that have not dispatched retain their corrective message.
+Errors after a possible dispatch remain sanitized and require observation before
+retry, without exposing process, window or delivery choices.
+
 App keyboard actions use native background focus preparation and PID delivery. The facade
 no longer chooses a mode from cached capability/role heuristics or retries
 after a refusal. Native code chooses semantic versus synthesized input using
