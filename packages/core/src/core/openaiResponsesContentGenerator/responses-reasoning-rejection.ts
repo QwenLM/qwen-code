@@ -5,6 +5,8 @@
  */
 
 import type {
+  ResponsesApiFunctionCallItem,
+  ResponsesApiFunctionCallOutputItem,
   ResponsesApiInputItem,
   ResponsesApiReasoningItem,
 } from './types.js';
@@ -189,7 +191,21 @@ export function downgradeRejectedReasoningItems(
 
   const rewritten: ResponsesApiInputItem[] = [];
   let changed = false;
-  for (const item of items) {
+  // call_ids of function_calls removed together with their dropped reasoning;
+  // their outputs must follow or the retry leaves an orphan output (#11665).
+  const droppedCallIds = new Set<string>();
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (
+      typeof item === 'object' &&
+      item !== null &&
+      item.type === 'function_call_output' &&
+      'call_id' in item &&
+      droppedCallIds.has((item as ResponsesApiFunctionCallOutputItem).call_id)
+    ) {
+      changed = true;
+      continue;
+    }
     if (!isReasoningItem(item) || !exceedsMax(item, maxLength)) {
       rewritten.push(item);
       continue;
@@ -198,7 +214,23 @@ export function downgradeRejectedReasoningItems(
     const summary = readSummaryTexts(item);
     // A signature-only item has nothing human-readable to preserve; keeping
     // it as an empty assistant message would add a blank turn.
-    if (summary.length === 0) continue;
+    if (summary.length === 0) {
+      // The endpoint pairs a replayed reasoning item with the function_call
+      // that follows it, so a dropped reasoning takes its call unit with it;
+      // otherwise the retry fails as function_call without its required
+      // reasoning item and every later send repeats the failure (#11665).
+      const next = items[i + 1];
+      if (
+        typeof next === 'object' &&
+        next !== null &&
+        next.type === 'function_call' &&
+        'call_id' in next
+      ) {
+        droppedCallIds.add((next as ResponsesApiFunctionCallItem).call_id);
+        i++;
+      }
+      continue;
+    }
     rewritten.push({
       type: 'message',
       role: 'assistant',
