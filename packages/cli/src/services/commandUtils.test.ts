@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  commandRestrictionNames,
   getEffectiveSupportedModes,
   filterCommandsForMode,
 } from './commandUtils.js';
@@ -174,5 +175,33 @@ describe('filterCommandsForMode', () => {
       makeCmd({ name: 'model', supportedModes: ['interactive'] }),
     ];
     expect(filterCommandsForMode(jsxOnly, 'non_interactive')).toEqual([]);
+  });
+});
+
+describe('commandRestrictionNames', () => {
+  it('returns both spellings of a prefixed skill command', () => {
+    expect(
+      commandRestrictionNames(
+        makeCmd({
+          name: 'rust:pdf',
+          kind: CommandKind.SKILL,
+          skillDetail: { name: 'rust:pdf', authoredName: 'pdf' },
+        }),
+      ),
+    ).toEqual(['rust:pdf', 'pdf']);
+  });
+
+  it('includes aliases and normalizes every name', () => {
+    expect(
+      commandRestrictionNames(
+        makeCmd({ name: ' Review ', altNames: ['REV', ' r2 '] }),
+      ),
+    ).toEqual(['review', 'rev', 'r2']);
+  });
+
+  it('gives a non-skill command one spelling', () => {
+    expect(commandRestrictionNames(makeCmd({ name: 'auth' }))).toEqual([
+      'auth',
+    ]);
   });
 });
