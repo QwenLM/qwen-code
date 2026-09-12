@@ -3689,6 +3689,14 @@ export const ChatEditor = memo(
                                   {contextWindow.toLocaleString()}{' '}
                                   {t('contextUsage.tokens')}
                                 </dd>
+                                <dt>{t('contextUsage.remaining')}</dt>
+                                <dd>
+                                  {Math.max(
+                                    0,
+                                    contextWindow - tokenCount,
+                                  ).toLocaleString()}{' '}
+                                  {t('contextUsage.tokens')}
+                                </dd>
                               </dl>
                             </>
                           )}

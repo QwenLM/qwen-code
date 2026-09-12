@@ -9,6 +9,7 @@ import {
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
+import type { RegisterContextUsageControls } from './hooks/useContextUsageControls';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import * as browserNotifications from './browser-turn-notifications';
 import {
@@ -696,6 +697,7 @@ const {
         settings: DaemonSettingDescriptor[];
       } | null,
       latestSplitViewProps: null as {
+        registerContextUsageControls?: RegisterContextUsageControls;
         onPendingPanesChange?: (ids: string[]) => void;
         showSessionDetails?: boolean;
         includeOtherWorkspaces?: boolean;
@@ -29383,6 +29385,44 @@ describe('App session callbacks', () => {
     });
     expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain('pane-only-model');
+    const compressionButton = () =>
+      Array.from(document.body.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Compress context',
+      )!;
+    expect(compressionButton().disabled).toBe(true);
+    const compress = vi.fn().mockResolvedValue(undefined);
+    const controls = {
+      sessionId: 's1',
+      canCompress: true,
+      compressing: false,
+      compress,
+      getContextUsage: mockPaneSessionActions.getContextUsage,
+    };
+    let unregister!: () => void;
+    act(() => {
+      unregister =
+        testState.latestSplitViewProps!.registerContextUsageControls!(controls);
+    });
+    expect(compressionButton().disabled).toBe(false);
+    await act(async () => compressionButton().click());
+    expect(compress).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    const replacementCompress = vi.fn().mockResolvedValue(undefined);
+    let unregisterReplacement!: () => void;
+    act(() => {
+      unregisterReplacement = testState.latestSplitViewProps!
+        .registerContextUsageControls!({
+        ...controls,
+        compress: replacementCompress,
+      });
+    });
+    act(() => unregister());
+    expect(compressionButton().disabled).toBe(false);
+    await act(async () => compressionButton().click());
+    expect(replacementCompress).toHaveBeenCalledOnce();
+    act(() => unregisterReplacement());
+    expect(compressionButton().disabled).toBe(true);
+
     expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
       expect.objectContaining({
@@ -29414,6 +29454,129 @@ describe('App session callbacks', () => {
     expect(
       document.body.querySelector('button[aria-label="Close Context Usage"]'),
     ).toBeNull();
+  });
+
+  it('does not retry the previous prompt after context compression fails', async () => {
+    mockConnection.commands = [
+      { name: 'compress', description: '', source: 'builtin-command' },
+    ];
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'session-1',
+    });
+    mockSessionActions.sendPrompt.mockResolvedValue({ stopReason: 'end_turn' });
+    const props: React.ComponentProps<typeof App> = {
+      header: { items: ['contextUsage'] },
+    };
+    const { container, rerender } = renderApp(props);
+    await flush();
+    const images = [{ data: 'Ym1w', media_type: 'image/bmp' }];
+    const files = [{ name: 'app.log', media_type: 'text/plain', text: 'log' }];
+    await act(async () => {
+      testState.latestChatEditorProps!.onSubmit(
+        'previous successful prompt',
+        images,
+        files,
+        editorCommit,
+      );
+    });
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'previous successful prompt',
+      expect.objectContaining({ images, files }),
+    );
+    testState.prompt = 'Keep this draft';
+    editorClear.mockClear();
+    editorCommit.mockClear();
+    mockFollowup.clear.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+        )!
+        .click();
+    });
+    await flush();
+    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+      Object.assign(new Error('compression failed'), {
+        _daemonTurnError: true,
+      }),
+    );
+    const compress = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Compress context',
+    )!;
+    expect(compress.disabled).toBe(false);
+    await act(async () => compress.click());
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith('/compress');
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'compression-error',
+          errorKind: 'internal_error',
+          text: 'compression failed',
+        },
+      ];
+      rerender(props);
+    });
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+    expect(mockFollowup.clear).toHaveBeenCalledOnce();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('Keep this draft');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the primary context owner when split panes contain other sessions', async () => {
+    mockPaneSessionActions.getContextUsage.mockClear();
+    mockConnection.commands = [
+      { name: 'compress', description: '', source: 'builtin-command' },
+    ];
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'session-1',
+    });
+    mockSessionActions.sendPrompt.mockResolvedValue({ stopReason: 'end_turn' });
+    const props: React.ComponentProps<typeof App> = {
+      header: { items: ['contextUsage'] },
+    };
+    const { container, rerender } = renderApp(props);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+        )!
+        .click();
+    });
+    await flush();
+    rerender({ ...props, splitSessionIds: ['s1', 's2'] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2');
+    const compress = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Compress context',
+    )!;
+    expect(compress.disabled).toBe(false);
+    await act(async () => compress.click());
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledExactlyOnceWith(
+      '/compress',
+    );
+    expect(mockSessionActions.getContextUsage).toHaveBeenLastCalledWith({
+      detail: true,
+      silent: true,
+      syncCounters: true,
+    });
+    expect(mockPaneSessionActions.getContextUsage).not.toHaveBeenCalled();
+    rerender({ ...props, splitSessionIds: ['session-1'] });
+    await flush();
+    expect(
+      Array.from(document.body.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Compress context',
+      )!.disabled,
+    ).toBe(true);
   });
 
   it('replaces a header-opened context tab with the pane-bound binding', async () => {

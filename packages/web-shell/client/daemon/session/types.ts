@@ -543,6 +543,8 @@ export interface DaemonSessionActions {
   getContext(): Promise<DaemonSessionContextStatus>;
   getContextUsage(opts?: {
     detail?: boolean;
+    /** Reconcile composer counters after compression, without changing billing usage. */
+    syncCounters?: boolean;
     /** Rethrow transient failures raw instead of recording a notice; for
      * surfaces that re-collect automatically and report failures inline. */
     silent?: boolean;

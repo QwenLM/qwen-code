@@ -993,6 +993,7 @@ describe('ChatEditor context usage ring', () => {
     expect(tooltip.textContent).toContain('5.4%');
     expect(tooltip.textContent).toContain('53,600 tokens');
     expect(tooltip.textContent).toContain('1,000,000 tokens');
+    expect(tooltip.textContent).toContain('Remaining946,400 tokens');
     expect(tooltip.textContent).toContain(
       'Click to view the breakdown in the conversation.',
     );
@@ -1014,6 +1015,20 @@ describe('ChatEditor context usage ring', () => {
     expect(
       arrow?.closest('[data-slot="tooltip-content"]')?.getAttribute('class'),
     ).toContain('[--floating-arrow-offset:-1px]');
+  });
+
+  it('shows zero remaining capacity when usage exceeds the context window', async () => {
+    const container = renderChatEditor({
+      tokenCount: 120_000,
+      contextWindow: 100_000,
+      onShowContextUsage: vi.fn(),
+    });
+    await act(async () => {
+      ring(container)!.focus();
+    });
+    expect(
+      document.querySelector('[data-slot="tooltip-content"]')?.textContent,
+    ).toContain('Remaining0 tokens');
   });
 
   it.each([

@@ -7,6 +7,7 @@ import type {
   DaemonSessionContextUsageStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
+import type { ContextUsageControls } from '../../hooks/useContextUsageControls';
 import { ContextUsagePanel } from './ContextUsagePanel';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -59,7 +60,10 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function renderPanel(getContextUsage?: ReturnType<typeof vi.fn>) {
+function renderPanel(
+  getContextUsage?: ReturnType<typeof vi.fn>,
+  controls?: ContextUsageControls,
+) {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -67,13 +71,18 @@ function renderPanel(getContextUsage?: ReturnType<typeof vi.fn>) {
   const actions = getContextUsage
     ? ({ getContextUsage } as unknown as DaemonSessionActions)
     : undefined;
-  const rerender = (sessionActions = actions, sessionId = 's-1') => {
+  const rerender = (
+    sessionActions = actions,
+    sessionId = 's-1',
+    nextControls = controls,
+  ) => {
     act(() =>
       root.render(
         <I18nProvider language="en">
           <ContextUsagePanel
             sessionActions={sessionActions}
             sessionId={sessionId}
+            controls={nextControls}
           />
         </I18nProvider>,
       ),
@@ -88,6 +97,216 @@ function refresh(container: HTMLElement) {
 }
 
 describe('ContextUsagePanel', () => {
+  it('never borrows mutation authority from a read-only or foreign tab', async () => {
+    const compress = vi.fn();
+    for (const controls of [
+      undefined,
+      {
+        sessionId: 'foreign',
+        canCompress: true,
+        compressing: false,
+        compress,
+        getContextUsage: vi.fn(),
+      },
+    ]) {
+      const { container } = renderPanel(
+        vi.fn().mockResolvedValue(fixture()),
+        controls,
+      );
+      await act(async () => {});
+      const button = Array.from(container.querySelectorAll('button')).find(
+        (node) => node.textContent === 'Compress context',
+      )!;
+      expect(button.disabled).toBe(true);
+      act(() => button.click());
+    }
+    expect(compress).not.toHaveBeenCalled();
+  });
+
+  it('uses explicit live controls and shows completion with the new reading', async () => {
+    const compress = vi.fn().mockResolvedValue(undefined);
+    const get = vi.fn().mockResolvedValue(fixture());
+    const controls = {
+      sessionId: 's-1',
+      canCompress: true,
+      compressing: false,
+      compress,
+      getContextUsage: get,
+    };
+    const { container, rerender } = renderPanel(get, controls);
+    await act(async () => {});
+    expect(get).toHaveBeenCalledWith({
+      detail: true,
+      silent: true,
+    });
+    const button = Array.from(container.querySelectorAll('button')).find(
+      (node) => node.textContent === 'Compress context',
+    )!;
+    await act(async () => button.click());
+    expect(compress).toHaveBeenCalledTimes(1);
+    rerender(undefined, 's-1', {
+      ...controls,
+      canCompress: false,
+      compressing: true,
+    });
+    expect(button.disabled).toBe(true);
+    expect(refresh(container).disabled).toBe(true);
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'Compressing…',
+    );
+    const updated = fixture();
+    updated.usage.totalTokens = 30;
+    updated.usage.breakdown.freeSpace = 60;
+    rerender(undefined, 's-1', {
+      ...controls,
+      result: { kind: 'completed', usage: updated },
+    });
+    expect(container.textContent).toContain(
+      'Compression completed. Context usage refreshed.',
+    );
+    expect(container.querySelector('[class*="percentage"]')?.textContent).toBe(
+      '30.0%',
+    );
+  });
+
+  it('offers a read-only retry after compression succeeded but its reading failed', async () => {
+    const compress = vi.fn();
+    const get = vi.fn().mockResolvedValue(fixture());
+    const controls = {
+      sessionId: 's-1',
+      canCompress: true,
+      compressing: false,
+      compress,
+      getContextUsage: get,
+    };
+    const { container, rerender } = renderPanel(get, controls);
+    await act(async () => {});
+    rerender(undefined, 's-1', {
+      ...controls,
+      result: { kind: 'refreshFailed' },
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Compression completed, but usage could not be refreshed.',
+    );
+    await act(async () => refresh(container).click());
+    expect(compress).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenLastCalledWith({
+      detail: true,
+      silent: true,
+      syncCounters: true,
+    });
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('retries through the live owner when a restored tab has a read-only adapter', async () => {
+    const restoredRead = vi.fn().mockResolvedValue(fixture());
+    const ownerRead = vi.fn().mockResolvedValue(fixture());
+    const { container } = renderPanel(restoredRead, {
+      sessionId: 's-1',
+      canCompress: true,
+      compressing: false,
+      compress: vi.fn(),
+      getContextUsage: ownerRead,
+      result: { kind: 'refreshFailed' },
+    });
+    await act(async () => {});
+    await act(async () => refresh(container).click());
+    expect(ownerRead).toHaveBeenLastCalledWith({
+      detail: true,
+      silent: true,
+      syncCounters: true,
+    });
+    expect(restoredRead).not.toHaveBeenCalled();
+  });
+
+  it('does not reannounce a previous result when the panel remounts', async () => {
+    const get = vi.fn().mockResolvedValue(fixture());
+    const { container } = renderPanel(get, {
+      sessionId: 's-1',
+      canCompress: true,
+      compressing: false,
+      compress: vi.fn(),
+      getContextUsage: get,
+      result: { kind: 'failed' },
+    });
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => {});
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector('[class*="percentage"]')?.textContent).toBe(
+      '60.0%',
+    );
+  });
+
+  it('acknowledges cancellation and reconciles late completion when refreshed', async () => {
+    const get = vi.fn().mockResolvedValue(fixture());
+    const controls: ContextUsageControls = {
+      sessionId: 's-1',
+      canCompress: true,
+      compressing: false,
+      compress: vi.fn(),
+      getContextUsage: get,
+    };
+    const { container, rerender } = renderPanel(get, controls);
+    await act(async () => {});
+    rerender(undefined, 's-1', {
+      ...controls,
+      result: { kind: 'cancelled' },
+    });
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'Cancellation requested. Refresh to check current usage.',
+    );
+    expect(get).toHaveBeenCalledTimes(1);
+    const updated = fixture();
+    updated.usage.totalTokens = 30;
+    updated.usage.breakdown.freeSpace = 60;
+    get.mockResolvedValueOnce(updated);
+    await act(async () => refresh(container).click());
+    expect(get).toHaveBeenLastCalledWith({
+      detail: true,
+      silent: true,
+      syncCounters: true,
+    });
+    expect(container.querySelector('[class*="percentage"]')?.textContent).toBe(
+      '30.0%',
+    );
+    expect(controls.compress).not.toHaveBeenCalled();
+  });
+
+  it.each(['resolve', 'reject'] as const)(
+    'keeps the completed compression reading when an older panel read %ss',
+    async (settlement) => {
+      const request = deferred();
+      const get = vi.fn().mockReturnValue(request.promise);
+      const controls: ContextUsageControls = {
+        sessionId: 's-1',
+        canCompress: false,
+        compressing: true,
+        compress: vi.fn(),
+        getContextUsage: get,
+      };
+      const { container, rerender } = renderPanel(get, controls);
+      const updated = fixture();
+      updated.usage.totalTokens = 30;
+      updated.usage.breakdown.freeSpace = 60;
+      rerender(undefined, 's-1', {
+        ...controls,
+        canCompress: true,
+        compressing: false,
+        result: { kind: 'completed', usage: updated },
+      });
+      await act(async () => {
+        if (settlement === 'resolve') request.resolve(fixture());
+        else request.reject(new Error('older read failed'));
+      });
+      expect(
+        container.querySelector('[class*="percentage"]')?.textContent,
+      ).toBe('30.0%');
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(refresh(container).disabled).toBe(false);
+    },
+  );
+
   it('reuses the in-flight request across a StrictMode-replayed mount', async () => {
     const request = deferred();
     const get = vi.fn().mockReturnValue(request.promise);

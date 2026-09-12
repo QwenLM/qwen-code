@@ -73,6 +73,49 @@ function render(
 }
 
 describe('ContextUsageMessage', () => {
+  it('separates remaining capacity from free space and clamps exhausted capacity', () => {
+    const container = render(makeStatus(60, false));
+    expect(container.querySelector('[class*="remaining"]')?.textContent).toBe(
+      'Remaining 40',
+    );
+    expect(container.textContent).toContain('Free 30 (30.0%)');
+    expect(
+      render(makeStatus(150, false)).querySelector('[class*="remaining"]')
+        ?.textContent,
+    ).toBe('Remaining 0');
+  });
+
+  it('keeps category totals and details together without repeated labels', () => {
+    const status = makeStatus(60, false);
+    status.usage.showDetails = true;
+    status.usage.builtinTools = [{ name: 'read_file', tokens: 10 }];
+    const container = render(status, true);
+    const advanced = container.querySelector('details')!;
+    expect(advanced.open).toBe(false);
+    const category = advanced.querySelector('details')!;
+    expect(category.querySelector('summary')?.textContent).toContain(
+      '10 (10.0%)',
+    );
+    expect(category.textContent).toContain('read_file');
+    expect(container.textContent?.match(/Built-in tools/g)).toHaveLength(1);
+  });
+
+  it('labels historical readings and lets a detailed snapshot request current context', () => {
+    const status = makeStatus(60, false);
+    status.usage.showDetails = true;
+    const read = vi.fn();
+    const container = render(status, false, read);
+    expect(container.textContent).toContain('Snapshot');
+    const button = container.querySelector('button')!;
+    expect(button.textContent).toBe('View current context');
+    act(() => button.click());
+    expect(read).toHaveBeenCalledOnce();
+    expect(status.usage.totalTokens).toBe(60);
+    expect(container.querySelector('[class*="remaining"]')?.textContent).toBe(
+      'Remaining 40',
+    );
+  });
+
   it('keeps numeric usage visible when the provider count is estimated', () => {
     const container = render(makeStatus(120, true));
 
@@ -117,11 +160,7 @@ describe('ContextUsageMessage', () => {
           container.querySelectorAll('[class*="row"] [class*="value"]'),
           (node) => node.textContent,
         ).slice(0, 3),
-      ).toEqual([
-        '60 tokens (60.0%)',
-        '30 tokens (30.0%)',
-        '10 tokens (10.0%)',
-      ]);
+      ).toEqual(['60 (60.0%)', '30 (30.0%)', '10 (10.0%)']);
       const first = (root: HTMLElement) =>
         (
           root.querySelector(
@@ -197,10 +236,10 @@ describe('ContextUsageMessage', () => {
     for (const compact of [true, false]) {
       const container = render(status, compact);
       expect(container.textContent).toContain(longName);
-      const group = container.querySelector('details')!;
+      const group = container.querySelector('details details')!;
       expect(group.open).toBe(!compact);
       expect(group.querySelector('summary')?.textContent).toBe(
-        'Built-in tools (1)',
+        'Built-in tools 10 (10.0%)',
       );
       expect(container.querySelector('[title]')?.getAttribute('title')).toBe(
         longName,

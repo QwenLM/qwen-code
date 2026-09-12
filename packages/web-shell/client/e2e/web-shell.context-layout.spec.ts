@@ -209,7 +209,8 @@ for (const theme of ['light', 'dark']) {
     await usage.hover();
     await expect(tooltip).toContainText('60,000 tokens');
     await expect(tooltip).toContainText('100,000 tokens');
-    await expect(tooltip.locator('dt')).toHaveCount(2);
+    await expect(tooltip.locator('dt')).toHaveCount(3);
+    await expect(tooltip).toContainText('Remaining40,000 tokens');
     for (const label of await tooltip.locator('dt').all()) {
       await expect(label).toHaveCSS('color', secondaryColor);
     }
@@ -241,12 +242,12 @@ for (const theme of ['light', 'dark']) {
     ).toHaveCount(0);
     expect(contextRequests).toEqual([false, true]);
     const detailCard = cards.last();
-    await expect(detailCard.locator('details[open]')).toHaveCount(4);
+    await expect(detailCard.locator('details[open]')).toHaveCount(5);
     await expect(
       detailCard
         .locator('summary')
         .filter({ hasText: 'Built-in tools' })
-        .locator('span'),
+        .locator('[class*="ratio"]'),
     ).toHaveCSS('color', secondaryColor);
     await expect(detailCard.getByText(longName, { exact: true })).toBeVisible();
     await expect(detailCard.getByText(longName, { exact: true })).toHaveCSS(
@@ -278,12 +279,24 @@ for (const theme of ['light', 'dark']) {
       .click();
 
     const panel = page.locator('[class*="panel"][aria-busy]');
-    await expect(panel).toContainText('60.0k tokens (60.0%)');
+    await expect(panel).toContainText('60.0k (60.0%)');
+    await panel.locator('details > summary').first().click();
     const tools = panel
-      .locator('details')
+      .locator('details details')
       .filter({ hasText: 'Built-in tools' });
-    await expect(tools.locator('summary')).toHaveText('Built-in tools (2)');
-    await expect(tools.locator('summary span')).toHaveCSS(
+    await expect(tools.locator('summary')).toHaveText(
+      'Built-in tools 10.0k (10.0%)',
+    );
+    const plainCategoryLabel = await panel
+      .getByText('System prompt', { exact: true })
+      .boundingBox();
+    const expandableCategoryLabel = await tools
+      .getByText('Built-in tools', { exact: true })
+      .boundingBox();
+    expect(plainCategoryLabel).not.toBeNull();
+    expect(expandableCategoryLabel).not.toBeNull();
+    expect(expandableCategoryLabel!.x).toBe(plainCategoryLabel!.x);
+    await expect(tools.locator('summary [class*="ratio"]')).toHaveCSS(
       'color',
       secondaryColor,
     );
@@ -303,7 +316,9 @@ for (const theme of ['light', 'dark']) {
     await expect(
       panel.getByText('run_shell_command', { exact: true }),
     ).toBeHidden();
-    for (const summary of await panel.locator('summary').all()) {
+    for (const summary of await panel
+      .locator('details details > summary')
+      .all()) {
       await summary.click();
     }
     await expect(panel.getByText(longName, { exact: true })).toBeVisible();
@@ -391,7 +406,7 @@ for (const theme of ['light', 'dark']) {
           .locator('[class*="row"]')
           .filter({ has: page.getByText('Used', { exact: true }) })
           .locator('[class*="value"]');
-        await expect(usedValue).toHaveText('120.0k tokens (>100%)');
+        await expect(usedValue).toHaveText('120.0k (>100%)');
         await expect(usedValue).toHaveCSS('color', errorColor);
         await expect(usedValue).toHaveCSS('text-align', 'right');
       }

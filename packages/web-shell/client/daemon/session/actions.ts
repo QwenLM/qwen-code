@@ -2373,11 +2373,41 @@ export function createDaemonSessionActions({
       // Mirrors getStats: a missing session rethrows raw without a notice.
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');
+      const before = getConnection();
+      const modelGeneration = modelMutationGeneration;
+      const { syncCounters, ...requestOptions } = opts ?? {};
       try {
-        return await withActionTimeout(
-          session.contextUsage(opts),
+        const snapshot = await withActionTimeout(
+          session.contextUsage(opts ? requestOptions : undefined),
           'Load context usage timed out',
         );
+        if (
+          syncCounters &&
+          snapshot.sessionId === session.sessionId &&
+          snapshot.usage.totalTokens > 0 &&
+          snapshot.usage.contextWindowSize > 0
+        ) {
+          setConnection((current) =>
+            sessionRef.current === session &&
+            current.sessionId === session.sessionId &&
+            current.workspaceCwd === before.workspaceCwd &&
+            current.status === 'connected' &&
+            !current.loadingTranscript &&
+            !current.catchingUp &&
+            modelMutationGeneration === modelGeneration &&
+            current.currentModel === before.currentModel &&
+            current.tokenCount === before.tokenCount &&
+            current.contextWindow === before.contextWindow &&
+            current.tokenUsage === before.tokenUsage
+              ? {
+                  ...current,
+                  tokenCount: snapshot.usage.totalTokens,
+                  contextWindow: snapshot.usage.contextWindowSize,
+                }
+              : current,
+          );
+        }
+        return snapshot;
       } catch (error) {
         // Opt-in silence for surfaces that re-collect automatically (the
         // context panel): notifying there would stack identical notices for

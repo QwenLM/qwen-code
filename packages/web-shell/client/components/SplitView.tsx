@@ -23,6 +23,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellSlashCommandHandler } from '../App';
+import type { RegisterContextUsageControls } from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
 import { ChatPane, type PaneHeaderActionsRenderer } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -79,6 +80,7 @@ export interface SplitViewProps {
     sessionId: string,
     sessionActions: DaemonSessionActions,
   ) => void;
+  registerContextUsageControls?: RegisterContextUsageControls;
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
@@ -124,6 +126,7 @@ export function SplitView({
   onRightPanelOpen,
   onOpenMonitor,
   onPaneArtifactsChange,
+  registerContextUsageControls,
   messageTurnOutputs,
   renderPaneHeaderActions,
   includeOtherWorkspaces = true,
@@ -654,6 +657,9 @@ export function SplitView({
                       onRightPanelOpen={onRightPanelOpen}
                       onOpenMonitor={onOpenMonitor}
                       onPaneArtifactsChange={onPaneArtifactsChange}
+                      registerContextUsageControls={
+                        registerContextUsageControls
+                      }
                       messageTurnOutputs={messageTurnOutputs}
                       sessionWorkflowEnabled={sessionWorkflowEnabled}
                       planControlVisible={planControlVisible}
