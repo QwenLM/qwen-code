@@ -59,6 +59,7 @@ describePOSIX('_daemon-harness descendant counting', () => {
           ['--acp', '--extra-flag'],
           ['--acp-foo'],
           ['--experimental-acp'],
+          ['--legacy--acp'],
         ]),
       ],
       {
@@ -143,21 +144,36 @@ describePOSIX('_daemon-harness descendant counting', () => {
       });
 
       const { pids } = JSON.parse(readyLine) as {
-        pids: Array<number | undefined>;
+        pids: Array<number | null>;
       };
 
-      const [acpPid, acpWithArgsPid, acpFooPid, experimentalAcpPid] = pids;
+      const [
+        acpPid,
+        acpWithArgsPid,
+        acpFooPid,
+        experimentalAcpPid,
+        legacyAcpPid,
+      ] = pids;
 
       if (
-        acpPid === undefined ||
-        acpWithArgsPid === undefined ||
-        acpFooPid === undefined ||
-        experimentalAcpPid === undefined
+        typeof acpPid !== 'number' ||
+        typeof acpWithArgsPid !== 'number' ||
+        typeof acpFooPid !== 'number' ||
+        typeof experimentalAcpPid !== 'number' ||
+        typeof legacyAcpPid !== 'number'
       ) {
-        throw new Error('test child processes did not expose PIDs');
+        throw new Error(
+          `test child processes did not expose PIDs: ${readyLine}`,
+        );
       }
 
-      childPids.push(acpPid, acpWithArgsPid, acpFooPid, experimentalAcpPid);
+      childPids.push(
+        acpPid,
+        acpWithArgsPid,
+        acpFooPid,
+        experimentalAcpPid,
+        legacyAcpPid,
+      );
 
       // Give the child processes a moment to become visible to pgrep.
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -170,6 +186,7 @@ describePOSIX('_daemon-harness descendant counting', () => {
 
       expect(acpChildren).not.toContain(acpFooPid);
       expect(acpChildren).not.toContain(experimentalAcpPid);
+      expect(acpChildren).not.toContain(legacyAcpPid);
     } finally {
       cleanup();
 
