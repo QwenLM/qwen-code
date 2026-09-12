@@ -12,7 +12,11 @@ import { parse as parseYaml } from 'yaml';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Tests point the gate at a fixture root; the default stays the repository.
-const root = process.env.CHECK_LOCKFILE_ROOT ?? join(__dirname, '..');
+// Truthiness, not `??`: an exported-but-empty variable would otherwise make
+// every path below cwd-relative, and the gate would report on whatever
+// lockfiles happen to sit in that directory as if they were the repository's.
+const envRoot = process.env.CHECK_LOCKFILE_ROOT?.trim();
+const root = envRoot ? envRoot : join(__dirname, '..');
 const lockfilePath = join(root, 'package-lock.json');
 
 function readJsonFile(filePath) {
@@ -320,7 +324,7 @@ const staleNpmLockGaps = [...knownNpmLockGaps].filter(
 
 if (unlockedPnpmVersions.length > 0) {
   console.error(
-    '\nError: pnpm-lock.yaml resolves versions that package-lock.json does not lock. Regenerate it from package-lock.json with `corepack pnpm import`:',
+    '\nError: pnpm-lock.yaml resolves versions that package-lock.json does not lock. Regenerate it from package-lock.json with `corepack pnpm import`. If the divergence survives that, a pnpm-workspace.yaml `overrides:` entry is deciding the version (three pin typescript today) and no npm-side regeneration can match it:',
   );
   unlockedPnpmVersions.forEach((key) => console.error(`- ${key}`));
   process.exitCode = 1;
