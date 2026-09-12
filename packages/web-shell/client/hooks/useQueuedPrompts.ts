@@ -941,12 +941,14 @@ export function useQueuedPrompts({
       // attachment-only message as its text. That placeholder is not user
       // content, so it never becomes a caption: the attachments it stands for
       // speak for it, and with none of them left there is nothing to echo.
-      // Only a row that actually carries media can have got the text from the
-      // daemon — for any other row it is what the user typed.
-      const hasMedia =
-        (prompt.images?.length ?? 0) > 0 || (prompt.files?.length ?? 0) > 0;
+      // Only a row that actually carries an image can have got that text from
+      // the daemon, which renders an image-only message this way and nothing
+      // else — for any other row it is what the user typed.
       const caption =
-        hasMedia && prompt.text === IMAGE_ONLY_PROMPT_TEXT ? '' : prompt.text;
+        (prompt.images?.length ?? 0) > 0 &&
+        prompt.text === IMAGE_ONLY_PROMPT_TEXT
+          ? ''
+          : prompt.text;
       if (
         displayedServerPromptIdsRef.current.has(promptId) ||
         prompt.payloadCompleteness === 'summary-only' ||
