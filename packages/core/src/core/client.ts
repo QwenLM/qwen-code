@@ -91,7 +91,7 @@ import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { ToolMode } from '../tools/code-mode.js';
 
 // Telemetry
@@ -1146,6 +1146,10 @@ export class LlmClient {
     // exist in the new history.
     debugLogger.debug('[FILE_READ_CACHE] clear after setHistory');
     this.config.getFileReadCache().clear();
+    // The active-todo reminder describes the discarded timeline: clear it and
+    // its chain so the next turn cannot continue work the restore removed.
+    this.activeTodoWorkChainPromptId = undefined;
+    this.config.clearActiveTodoReminders();
     this.forceFullIdeContext = true;
   }
 
@@ -1167,6 +1171,11 @@ export class LlmClient {
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
       this.config.getFileReadCache().clear();
+      // A rewind discards the timeline the active-todo reminder described:
+      // clear it and its chain so the next turn starts fresh instead of
+      // continuing work that was rewound away.
+      this.activeTodoWorkChainPromptId = undefined;
+      this.config.clearActiveTodoReminders();
     }
     this.forceFullIdeContext = true;
   }
@@ -3570,7 +3579,20 @@ export class LlmClient {
     // LoopDetected early on the notification turn.
     if (messageType === SendMessageType.UserQuery) {
       this.activeAutomaticTodoWorkChainPromptIds.clear();
-      this.config.startActiveTodoWorkChain(prompt_id);
+      // A registered reminder means the previous chain's plan still has
+      // unfinished items (todo_write deletes it on completion): continue
+      // that chain instead of discarding its context with the very turn
+      // that may be asking about it (#10953).
+      const continuedFrom =
+        this.activeTodoWorkChainPromptId !== undefined &&
+        this.config.getActiveTodoReminder(this.activeTodoWorkChainPromptId) !==
+          undefined &&
+        this.config.getActiveTodoWorkChainOwner(
+          this.activeTodoWorkChainPromptId,
+        ) === this.config.getActiveTodoPlanWriterOwner()
+          ? this.activeTodoWorkChainPromptId
+          : undefined;
+      this.config.startActiveTodoWorkChain(prompt_id, continuedFrom);
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
       this.config.startActiveTodoWorkChain(
@@ -4098,8 +4120,20 @@ export class LlmClient {
           // text as a separate user message after the tool messages.
           requestToSend = [...requestToSend, toolResultMemory.prompt];
         }
-        const activeTodoReminder =
-          this.config.takeActiveTodoReminder(prompt_id);
+        // A top-level Agent tool result means a delegated execution just
+        // returned (#10953): real work advanced while the parent earned a
+        // single tool turn, so the turn budget cannot come due on its own.
+        // Force the reminder exactly where the progress information arrives.
+        const carriesAgentToolResult = requestToSend.some(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            canonicalToolName(part.functionResponse?.name ?? '') ===
+              ToolNames.AGENT,
+        );
+        const activeTodoReminder = carriesAgentToolResult
+          ? this.config.takeActiveTodoReminder(prompt_id, true)
+          : this.config.takeActiveTodoReminder(prompt_id);
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>

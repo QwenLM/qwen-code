@@ -591,10 +591,13 @@ describe('Gemini Client (client.ts)', () => {
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      getActiveTodoPlanWriterOwner: vi.fn().mockReturnValue(undefined),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
       endAutomaticActiveTodoWorkChain: vi.fn(),
+      clearActiveTodoReminders: vi.fn(),
       getProxy: vi.fn().mockReturnValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
       getFileService: vi.fn().mockReturnValue(fileService),
@@ -2309,8 +2312,11 @@ describe('Gemini Client (client.ts)', () => {
 
       await runTurn(SendMessageType.UserQuery);
 
+      // No reminder is registered here (getActiveTodoReminder returns
+      // undefined), so the ordinary user turn still starts a fresh chain.
       expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
         'prompt-userQuery',
+        undefined,
       );
 
       await runTurn(SendMessageType.Cron);
@@ -2328,6 +2334,154 @@ describe('Gemini Client (client.ts)', () => {
       expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
         'prompt-retry',
         'prompt-userQuery',
+      );
+    });
+
+    it.each(['agent', 'task'])(
+      'forces the active todo reminder due when a %s tool result returns',
+      async (agentToolName) => {
+        const reminder =
+          '<system-reminder>unfinished todo: follow up on the delegated node</system-reminder>';
+        vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'response' };
+          })(),
+        );
+
+        const stream = client.sendMessageStream(
+          [
+            {
+              functionResponse: {
+                name: agentToolName,
+                response: { ok: true },
+              },
+            },
+          ],
+          new AbortController().signal,
+          'prompt-agent-result',
+          { type: SendMessageType.ToolResult },
+        );
+        for await (const _ of stream) {
+          // drain
+        }
+
+        // A delegated execution returning is the progress signal the
+        // turn budget cannot see (#10953): the reminder must be due now,
+        // not after three parent tool turns that never come.
+        expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+          'prompt-agent-result',
+          true,
+        );
+        const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+        expect(request).toContain(reminder);
+      },
+    );
+
+    it('keeps the turn budget for tool results without an Agent execution', async () => {
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(undefined);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ functionResponse: { name: 'shell', response: { ok: true } } }],
+        new AbortController().signal,
+        'prompt-plain-result',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+        'prompt-plain-result',
+      );
+    });
+
+    it('continues the todo work chain on a user turn while a reminder is registered', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      await runTurn(SendMessageType.UserQuery);
+      // A registered reminder means the plan still has unfinished items
+      // (todo_write deletes it on completion).
+      const reminder =
+        '<system-reminder>unfinished todo: delegated node</system-reminder>';
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+      // The reminder comes back only when the caller forces it, so the
+      // absence assertion below is what discriminates the turn-start gate.
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+        (_promptId, force = false) => (force ? reminder : undefined),
+      );
+      // The foreground head still owns the session plan file, so the
+      // continuation guard's owner-equality conjunct holds.
+      vi.mocked(mockConfig.getActiveTodoPlanWriterOwner).mockReturnValue(
+        'prompt-userQuery',
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'how is progress going?' }],
+        new AbortController().signal,
+        'prompt-user-followup',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      // The follow-up turn must continue the previous chain instead of
+      // discarding the plan context it asks about (#10953).
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+        'prompt-user-followup',
+        'prompt-userQuery',
+      );
+
+      // Carrying the chain must not splice the plan ahead of the user's own
+      // text: turn-start injection stays reserved for machine continuations
+      // (the Retry | Cron | Notification | Teammate gate), so an ordinary
+      // UserQuery turn's request must not carry it.
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      expect(request).not.toContain(reminder);
+
+      // Once the plan completes (todo_write deleted the reminder), the next
+      // ordinary turn must start a fresh chain — the cleared-reminder branch
+      // of the continuation guard must not keep carrying the previous chain.
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(undefined);
+      await runTurn(SendMessageType.UserQuery);
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+        'prompt-userQuery',
+        undefined,
+      );
+    });
+
+    it('does not continue the todo work chain when the plan was last written by a foreign owner', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      await runTurn(SendMessageType.UserQuery);
+      // A reminder is registered, but an isolated cron/notification turn last
+      // wrote the session plan under its own owner — the foreground head no
+      // longer owns the authoritative plan, so the continuation guard must
+      // not carry (and must not re-deliver the stale foreground snapshot).
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(
+        '<system-reminder>unfinished todo: delegated node</system-reminder>',
+      );
+      vi.mocked(mockConfig.getActiveTodoPlanWriterOwner).mockReturnValue(
+        'prompt-cron',
+      );
+
+      await runTurn(SendMessageType.UserQuery);
+
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+        'prompt-userQuery',
+        undefined,
       );
     });
 
@@ -3523,6 +3677,40 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(getHistoryLength).toHaveBeenCalled();
       expect(getHistory).not.toHaveBeenCalled();
+    });
+
+    it('setHistory clears active-todo reminder state', () => {
+      mockFileReadCacheClear();
+      client['chat'] = { setHistory: vi.fn() } as unknown as LlmChat;
+      // Pretend a chain is active so the reset is observable.
+      client['activeTodoWorkChainPromptId'] = 'prompt-old';
+
+      client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
+
+      expect(mockConfig.clearActiveTodoReminders).toHaveBeenCalled();
+      expect(client['activeTodoWorkChainPromptId']).toBeUndefined();
+    });
+
+    it('truncateHistory clears active-todo reminder state when entries are actually removed', () => {
+      mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(3, 2);
+      client['activeTodoWorkChainPromptId'] = 'prompt-old';
+
+      client.truncateHistory(2);
+
+      expect(mockConfig.clearActiveTodoReminders).toHaveBeenCalled();
+      expect(client['activeTodoWorkChainPromptId']).toBeUndefined();
+    });
+
+    it('truncateHistory does NOT clear active-todo reminder state when nothing was removed', () => {
+      mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(2, 2);
+      client['activeTodoWorkChainPromptId'] = 'prompt-old';
+
+      client.truncateHistory(2);
+
+      expect(mockConfig.clearActiveTodoReminders).not.toHaveBeenCalled();
+      expect(client['activeTodoWorkChainPromptId']).toBe('prompt-old');
     });
 
     it('stripOrphanedUserEntriesFromHistory forces full IDE context only when entries were removed', async () => {
