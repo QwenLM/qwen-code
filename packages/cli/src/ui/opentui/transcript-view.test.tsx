@@ -219,6 +219,39 @@ describe('OpenTuiTranscriptView', () => {
     expect(text).not.toContain('... last');
   });
 
+  it('splits the pending budget across sibling pending cards (R3-1)', () => {
+    // Two wide-payload mcp cards awaiting approval at once must share the
+    // collapsed allowance a lone card would get, or their painted rows push
+    // the confirmation dialog below the transcript off the viewport — each
+    // card windows its tail instead.
+    const description = (marker: string) =>
+      '{"path":"/x","content":"' + 'x'.repeat(3000) + marker + '"}';
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            id: 't1',
+            tool: 'mcp__fs__write_file',
+            description: description('FIRST_TAIL'),
+            confirm: 'pending',
+          }),
+          toolItem({
+            id: 't2',
+            tool: 'mcp__fs__write_file',
+            description: description('SECOND_TAIL'),
+            confirm: 'pending',
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('... last');
+    expect(text).not.toContain('FIRST_TAIL');
+    expect(text).not.toContain('SECOND_TAIL');
+  });
+
   it('folds newlines in a live description before the cap measures it (R6-2)', () => {
     // A live shell command can carry embedded newlines: each renders a
     // physical row while costing zero columns in capToolCardDescription's

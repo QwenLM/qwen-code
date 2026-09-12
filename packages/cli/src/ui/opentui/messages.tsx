@@ -236,8 +236,11 @@ export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
  * charged to the pending card above it: the banner (≈ 6), the startup
  * notices a fresh session shows (≈ 3), the prompt echo with its turn margin
  * (2), and the card's own hidden-tail and awaiting rows (2). A session
- * without a banner or notices over-reserves, which only shrinks a card
- * whose payload the dialog is already rendering — the safe direction.
+ * without a banner or notices over-reserves. While the collapsed bound
+ * binds that only shrinks a card whose payload the dialog is already
+ * rendering — the safe direction; above roughly 90 rows the converted
+ * empty-body bound binds instead and the over-reserve costs every pending
+ * card, payload or not (R3-3).
  */
 export const DIALOG_ABOVE_CARD_RESERVE_ROWS = 13;
 
@@ -261,9 +264,10 @@ export const DIALOG_EXPANDED_RESERVE_ROWS =
   DIALOG_ABOVE_CARD_RESERVE_ROWS + DIALOG_CHROME_RESERVE_ROWS;
 
 /**
- * The confirmation dialog's collapsed body cap (dialogs-confirm TextBody and
- * DiffBody); past it the dialog windows the body and offers ctrl-s
- * expansion.
+ * The confirmation dialog's collapsed body cap. TextBody caps PAINTED rows
+ * (headWindowPhysical) and offers ctrl-s expansion; DiffBody caps LOGICAL
+ * diff lines (tailWindow) and offers none, so a wide-lined diff paints
+ * several times this many rows.
  */
 export const CONFIRMATION_BODY_MAX_ROWS = 20;
 
@@ -287,14 +291,22 @@ const CARD_DESC_WRAP_RATIO = 0.7;
  * exec command, threaded onto the live item as `confirmBody`); it is
  * undefined for the types whose dialog carries no payload text — an mcp
  * dialog shows only the server and tool names, an edit dialog windows its
- * diff, ask_user_question runs its own flow — and those cards keep the
- * collapsed budget because the card is the only surface carrying the
- * arguments (R5-9). Short terminals fall back to the settled cap.
+ * diff, ask_user_question runs its own flow — so those cards are charged no
+ * body rows. At ordinary terminal heights that leaves them the collapsed
+ * budget, which the card needs as the only surface carrying the arguments
+ * (R5-9); above roughly 90 rows the converted empty-body bound is the
+ * tighter one and they yield rows their dialog never paints (R3-3).
+ * `pendingCount` splits the collapsed allowance across the pending
+ * siblings: one dialog renders below the whole transcript, so N parked
+ * confirmations share the rows a lone card would get instead of pushing
+ * that dialog off the viewport (R3-1); at 1 the split is a no-op. Short
+ * terminals fall back to the settled cap.
  */
 export function pendingCardMaxRows(
   terminalHeight: number,
   dialogBody: string | undefined,
   width: number,
+  pendingCount = 1,
 ): number {
   const h = Math.floor(terminalHeight);
   // Measure on the dialog's own basis: the dialog body counts WRAPPED rows
@@ -324,7 +336,7 @@ export function pendingCardMaxRows(
     TOOL_CARD_DESCRIPTION_ROWS,
     Math.min(
       maxHistoryItemRows(terminalHeight),
-      h - PENDING_CARD_VIEWPORT_RESERVE_ROWS,
+      Math.floor((h - PENDING_CARD_VIEWPORT_RESERVE_ROWS) / pendingCount),
       dialogBound,
     ),
   );

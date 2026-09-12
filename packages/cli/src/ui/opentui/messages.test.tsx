@@ -210,6 +210,22 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(pendingCardMaxRows(80, heredoc, 106)).toBe(9);
   });
 
+  it('splits the collapsed allowance across pending siblings (R3-1)', () => {
+    // The scheduler parks every confirmation in a batch before anything
+    // executes, and one dialog renders below the whole transcript: two
+    // wide-payload mcp cards granted the full per-card budget each paint
+    // ~1.5x their budget rows and push that dialog off an 80-row viewport.
+    // The collapsed allowance is divided across the pending siblings; at
+    // one pending card the split is a no-op.
+    expect(pendingCardMaxRows(80, undefined, 106, 1)).toBe(34);
+    expect(pendingCardMaxRows(80, undefined, 106, 2)).toBe(17);
+    expect(pendingCardMaxRows(80, undefined, 106, 3)).toBe(11);
+    // The settled floor still holds when the share runs out.
+    expect(pendingCardMaxRows(80, undefined, 106, 8)).toBe(
+      TOOL_CARD_DESCRIPTION_ROWS,
+    );
+  });
+
   it('falls back to the settled cap on short terminals', () => {
     expect(pendingCardMaxRows(24, 'x'.repeat(3900), 110)).toBe(
       TOOL_CARD_DESCRIPTION_ROWS,

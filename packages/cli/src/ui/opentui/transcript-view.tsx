@@ -104,6 +104,11 @@ export function OpenTuiTranscriptView({
   thoughtsExpanded = false,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
+  // Sibling pending cards split one dialog's collapsed allowance: the
+  // dialog renders below the whole transcript (R3-1).
+  const pendingCount = items.filter(
+    (item) => item.kind === 'tool' && item.confirm === 'pending' && !item.done,
+  ).length;
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
@@ -118,6 +123,7 @@ export function OpenTuiTranscriptView({
             terminalHeight={availableTerminalHeight}
             width={availableWidth}
             thoughtsExpanded={thoughtsExpanded}
+            pendingCount={pendingCount}
           />
         </box>
       ))}
@@ -131,12 +137,14 @@ function TranscriptItem({
   terminalHeight,
   width,
   thoughtsExpanded,
+  pendingCount,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
   thoughtsExpanded: boolean;
+  pendingCount: number;
 }) {
   switch (item.kind) {
     case 'user':
@@ -152,6 +160,7 @@ function TranscriptItem({
           maxRows={maxRows}
           terminalHeight={terminalHeight}
           width={width}
+          pendingCount={pendingCount}
         />
       );
     case 'task':
@@ -293,11 +302,13 @@ function ToolCard({
   maxRows,
   terminalHeight,
   width,
+  pendingCount,
 }: {
   item: LiveToolItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  pendingCount: number;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
@@ -316,13 +327,20 @@ function ToolCard({
   // the dialog renders in flow below the transcript, and when its payload
   // body (threaded onto the item as confirmBody — a hook reason, plan, or
   // command) is tall enough to hide rows, the card yields so the dialog
-  // plus its chrome stays on screen.
+  // plus its chrome stays on screen. Sibling pending cards split the
+  // collapsed allowance (pendingCount): the one dialog renders below all
+  // of them.
   const cap = capToolCardDescription(
     text,
     name,
     width,
     item.confirm === 'pending' && !item.done
-      ? pendingCardMaxRows(terminalHeight, item.confirmBody, width)
+      ? pendingCardMaxRows(
+          terminalHeight,
+          item.confirmBody,
+          width,
+          pendingCount,
+        )
       : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
