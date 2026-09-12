@@ -55,12 +55,14 @@ import {
   gitOpt,
   gitProbe,
   gitRaw,
+  gitRawReport,
   gitWithEnv,
   gitWithEnvRaw,
   gitWithEnvReport,
   gitWithInputRaw,
 } from './lib/git.js';
-import { redirectedAncestor } from './lib/worktree.js';
+import { repoRelativeOf } from './lib/paths.js';
+import { filterBlankEnv, screenForTree } from './lib/worktree.js';
 import { hasVerifiableInode } from '../../utils/conversation-directory-identity.js';
 
 /** What `--snapshot` writes and `--since` reads back. */
@@ -160,6 +162,52 @@ export const FIX_DELTA_EXCLUDES = [
 ] as const;
 
 /**
+ * The names the flow itself writes under those families between the two
+ * states — Step 6B's ledger/artifact/hunks chain and the other steps'
+ * reports. The family re-inclusion (user content the index holds under a
+ * family name) must not extend to them: a `git add -A` the user ran in a
+ * checkout that does not ignore `.qwen` stages them into the user's
+ * index, and re-including their two moments puts the flow's own
+ * bookkeeping in the hunks as an edit no outcome owns — the exact harm
+ * the exclusion exists to prevent, arriving through the index instead
+ * of the tree. Keyed on the flow's own SUFFIXES inside the family: a
+ * user file named `qwen-review-notes.md` matches none.
+ */
+const FLOW_BOOKKEEPING_SUFFIXES = [
+  '-findings-in.json',
+  '-outcomes.json',
+  '-findings.json',
+  '-test-delta.json',
+  '-fix-audit-manifest.json',
+  '-fix-snapshot.json',
+  '-fix-hunks.diff',
+  '-diff.txt',
+  '-diff-full.txt',
+  '-fetch.json',
+  '-prebuild.json',
+  '-stop.json',
+  '-submit-receipt.json',
+  '-cache-candidate.json',
+] as const;
+
+/** The target-less reports the flow writes under the same prefix. */
+const FLOW_BOOKKEEPING_NAMES = new Set([
+  'qwen-review-build-test.json',
+  'qwen-review-ledger-dedup.json',
+  'qwen-review-script-lint.json',
+]);
+
+/** True when a family-matched path (bytes, `/`-joined) names the flow's own bookkeeping. */
+function isFlowBookkeeping(path: Buffer): boolean {
+  const base = path.subarray(path.lastIndexOf(0x2f) + 1).toString('latin1');
+  if (FLOW_BOOKKEEPING_NAMES.has(base)) return true;
+  return (
+    base.startsWith('qwen-review-') &&
+    FLOW_BOOKKEEPING_SUFFIXES.some((suffix) => base.endsWith(suffix))
+  );
+}
+
+/**
  * The command's own side paths — the `--out` file, and in `--since` mode the
  * `--since` snapshot itself — relative to `root` when they fall inside it.
  * The name families above are keyed on what the REVIEW flow writes; but
@@ -176,13 +224,19 @@ function inRepoSidePaths(
   const rels = new Set<string>();
   for (const candidate of candidates) {
     if (candidate === undefined) continue;
-    const rel = relative(root, resolve(candidate));
-    if (
-      rel === '' ||
-      rel === '..' ||
-      rel.startsWith(`..${sep}`) ||
-      isAbsolute(rel)
-    ) {
+    // Canonical, not lexical: `root` is `rev-parse --show-toplevel`'s
+    // CANONICAL answer, while bare `resolve` keeps the spelling the
+    // caller typed — a path spelled through a symlinked prefix (macOS
+    // `/tmp` → `/private/tmp`, a link at the repo's parent) lexicalises
+    // to a `..` walk and was DROPPED here: nothing excluded the side
+    // file, and the redirect guard's ancestor walk stood down over the
+    // same spelling. `repoRelativeOf` resolves the deepest ancestor
+    // that exists, so a not-yet-created side file still measures.
+    const { rel, escapes } = repoRelativeOf(root, candidate);
+    // The root itself is "inside" to `repoRelativeOf` but names no file
+    // to exclude — keep skipping it, or `:(exclude,literal)` with an
+    // empty path rides the capture's pathspec.
+    if (rel === '' || escapes) {
       continue;
     }
     rels.add(rel);
@@ -279,15 +333,17 @@ function inTreeGitDirBytes(root: string): Buffer | null {
  * side file stays allowed — Step 6B re-runs with the same name every round.
  *
  * Run at entry AND again immediately before each side-file write: the
- * capture between the two runs executes the repository's own filters
- * (disclosed, never refused), and a filter child can replace the
- * deterministic side path with a link after the entry check ran. Nothing
+ * capture between the two runs executes the repository's own GLOBAL
+ * filters (repo-local ones are blanked — see `snapshotWorkingTree`), and
+ * a filter child can replace the deterministic side path with a link
+ * after the entry check ran. Nothing
  * executes code after the capture, so the pre-write check is the one that
  * holds. A side path INSIDE the repository is checked along its whole
- * ancestor chain up to the root — a link planted at any component
- * redirects the write the same way — bounded by the checkout as
- * `redirectedAncestor` is, because components above the repository are
- * the user's own layout (`/var` is a link on every macOS box).
+ * ancestor chain — a link planted at any component redirects the write
+ * the same way — while a link whose parent sits OUTSIDE the checkout is
+ * the user's own layout (`/var` is a link on every macOS box, and a
+ * link beside the checkout naming it is how a symlinked-prefix spelling
+ * reaches it at all).
  */
 function assertNoRedirectedExcludes(
   root: string,
@@ -330,30 +386,57 @@ function assertNoRedirectedExcludes(
           'the redirect.',
       );
     }
-    if (inRepoSidePaths(root, [p]).length > 0) {
-      // From the nearest component that EXISTS: the side path's directory
-      // is created after this check, and a walk started at a path that
-      // is not there yet answers nothing about the links above it.
-      let dir = dirname(resolve(p));
-      for (;;) {
+    // The ancestor walk judges each symlink component by where its PARENT
+    // canonically sits: a link whose parent is inside the checkout must
+    // resolve inside it, or the write is redirected out of the tree. A
+    // link whose parent is outside is the user's own layout — a prefix
+    // INTO the repository (`/var` on every macOS box, a link beside the
+    // checkout naming it) — and the write lands inside all the same.
+    // Containment for the EXCLUSION is canonical (`inRepoSidePaths`), so
+    // the side path spelled through such a prefix is excluded by its real
+    // location while this walk rules on the spelling's own components.
+    let dir = dirname(resolve(p));
+    for (;;) {
+      let isLink = false;
+      try {
+        isLink = lstatSync(dir).isSymbolicLink();
+      } catch {
+        // Not there yet — created after this check; keep walking up.
+      }
+      if (isLink) {
+        let parentReal: string | null = null;
         try {
-          lstatSync(dir);
-          break;
+          parentReal = realpathSync(dirname(dir));
         } catch {
-          const up = dirname(dir);
-          if (up === dir) break;
-          dir = up;
+          // Unresolvable parent: nothing below it can be claimed inside.
+        }
+        if (parentReal !== null && isInside(parentReal, root)) {
+          let targetReal: string | null = null;
+          try {
+            targetReal = realpathSync(dir);
+          } catch {
+            // A link whose target cannot resolve redirects to nowhere
+            // honest — refused like one that leaves.
+          }
+          if (targetReal === null || !isInside(targetReal, root)) {
+            throw new Error(
+              `fix-delta: ${dir} is a symlink above the side path ${p}; ` +
+                'refusing to write through the redirect.',
+            );
+          }
         }
       }
-      const redirected = redirectedAncestor(dir, root);
-      if (redirected !== null) {
-        throw new Error(
-          `fix-delta: ${redirected} is a symlink above the side path ${p}; ` +
-            'refusing to write through the redirect.',
-        );
-      }
+      const up = dirname(dir);
+      if (up === dir) break;
+      dir = up;
     }
   }
+}
+
+/** True when `path` is `root` or inside it (both canonical here). */
+function isInside(path: string, root: string): boolean {
+  const rel = relative(root, path);
+  return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
 /**
@@ -363,7 +446,6 @@ function assertNoRedirectedExcludes(
 export function snapshotWorkingTree(
   root: string,
   sidePaths: readonly string[] = [],
-  filtersConfigured = false,
 ): string {
   // The scratch index must live OUTSIDE anything the snapshot can capture:
   // os.tmpdir() honours TMPDIR, and a hermetic sandbox pointing it inside the
@@ -374,7 +456,21 @@ export function snapshotWorkingTree(
   // `excludePathspec`, which keeps the scratch dir out of the trees with it.
   const gitDir = git('-C', root, 'rev-parse', '--absolute-git-dir');
   const scratch = mkdtempSync(join(gitDir, 'qwen-fix-delta-'));
-  const env = { GIT_INDEX_FILE: join(scratch, 'index') };
+  // Blank the repo-LOCAL content filters for the capture's spawns: a
+  // `filter.<name>.clean|process` in `.git/config` (or an include it
+  // reaches) is a command the reviewed tree got to plant, and `add -A`
+  // would EXECUTE it as the reviewing user — with `GIT_INDEX_FILE`
+  // pointing at the throwaway index, the same channel the hooksPath pin
+  // exists to close. The env pair carries any name the config parser
+  // accepts (a `-c` cannot blank a name containing `=`). Global filters
+  // are the user's own contract and stay (git-lfs installs `filter.lfs.*`
+  // globally). A screen that could not be read to the bottom blanks
+  // nothing — the steering disclosure and the strict capture ruling
+  // already stand for it.
+  const blankFilters = filterBlankEnv(
+    screenForTree(root)?.filters ?? [],
+  ) as Record<string, string>;
+  const env = { GIT_INDEX_FILE: join(scratch, 'index'), ...blankFilters };
   try {
     // An unborn HEAD (a repo with no commit yet) has no tree to seed from —
     // start empty, and `add -A` records everything as added.
@@ -434,7 +530,7 @@ export function snapshotWorkingTree(
       ],
       capturePathspecBytes(root, capturableSidePaths(root, sidePaths)),
     );
-    assertCompleteCapture(add, filtersConfigured);
+    assertCompleteCapture(add);
     // The families are excluded above because the flow WRITES them between
     // the two states — as untracked files. A path the repository TRACKS
     // under a family name is not that: the flow never tracks its side
@@ -473,6 +569,22 @@ export function snapshotWorkingTree(
         }
       },
     );
+    // …and disclose every path that re-inclusion actually admits: keyed
+    // on the family name alone it is indistinguishable from the flow's
+    // own bookkeeping arriving through the user's index, so what rides
+    // the capture this way is named, never silent.
+    const reincluded = [...tracked, ...stagedOnly];
+    if (reincluded.length > 0) {
+      writeStderrLine(
+        `fix-delta: re-included ${reincluded.length} tracked/staged ` +
+          'path(s) under a review name family: ' +
+          reincluded
+            .map((path) => escapeNoteToken(decodePath(path)))
+            .join(', ') +
+          " — the flow's own bookkeeping names are excluded by name, so " +
+          'these are treated as user content.',
+      );
+    }
     if (stagedOnly.length > 0) {
       const staged = gitWithEnvReport(
         env,
@@ -491,7 +603,7 @@ export function snapshotWorkingTree(
         ],
         Buffer.concat(stagedOnly.flatMap((path) => [path, Buffer.from([0])])),
       );
-      assertCompleteCapture(staged, filtersConfigured);
+      assertCompleteCapture(staged);
     }
     if (tracked.length > 0) {
       const update = gitWithEnvReport(
@@ -513,7 +625,7 @@ export function snapshotWorkingTree(
         ],
         Buffer.concat(tracked.flatMap((path) => [path, Buffer.from([0])])),
       );
-      assertCompleteCapture(update, filtersConfigured);
+      assertCompleteCapture(update);
     }
     return gitWithEnv(env, ['-C', root, ...capturePins(root), 'write-tree']);
   } finally {
@@ -582,7 +694,9 @@ function trackedFamilyPaths(
     ...specs,
     ...literalExcludes(root, sidePaths),
   ]);
-  return splitNul(raw).filter((path) => path.length > 0);
+  return splitNul(raw).filter(
+    (path) => path.length > 0 && !isFlowBookkeeping(path),
+  );
 }
 
 /**
@@ -611,7 +725,10 @@ function stagedFamilyPaths(
   );
   const seen = new Set(inHeadTree.map((path) => path.toString('latin1')));
   return splitNul(raw).filter(
-    (path) => path.length > 0 && !seen.has(path.toString('latin1')),
+    (path) =>
+      path.length > 0 &&
+      !seen.has(path.toString('latin1')) &&
+      !isFlowBookkeeping(path),
   );
 }
 
@@ -654,45 +771,6 @@ const UNABLE_TO_INDEX_START = "error: unable to index file '";
 const UNABLE_TO_INDEX_END = "'";
 
 /**
- * The zero-commit note — and the "unable to index file" note newer gits
- * pair it with — embed the raw, unquoted path: a nested repository whose
- * directory NAME contains a newline splits the note across lines, neither
- * of which matches line-by-line, and the shape the tolerance exists for
- * becomes a hard refusal. Reassemble those two notes at line boundaries
- * before matching; every other note stays strict per line. A note that
- * starts but never ends is pushed as found — unexplained, and the capture
- * fails closed on it.
- */
-function reassembleZeroCommitNotes(lines: string[]): string[] {
-  const shapes = [
-    { start: ZERO_COMMIT_NOTE_START, end: ZERO_COMMIT_NOTE_END },
-    { start: UNABLE_TO_INDEX_START, end: UNABLE_TO_INDEX_END },
-  ];
-  const notes: string[] = [];
-  let pending: { text: string; end: string } | null = null;
-  for (const line of lines) {
-    if (pending === null) {
-      const shape = shapes.find(
-        (s) => line.startsWith(s.start) && !line.endsWith(s.end),
-      );
-      if (shape !== undefined) {
-        pending = { text: line, end: shape.end };
-        continue;
-      }
-      notes.push(line);
-      continue;
-    }
-    pending.text = `${pending.text}\n${line}`;
-    if (pending.text.endsWith(pending.end)) {
-      notes.push(pending.text);
-      pending = null;
-    }
-  }
-  if (pending !== null) notes.push(pending.text);
-  return notes;
-}
-
-/**
  * The paths the zero-commit notes name, so the paired "unable to index
  * file" note is tolerated for exactly those and no other.
  */
@@ -715,34 +793,32 @@ function zeroCommitPaths(notes: readonly string[]): Set<string> {
 }
 
 /**
- * Rule on `add`'s notes. `filtersConfigured` is the one fact that changes
- * the ruling: a `filter.<name>.clean` / `.process` child runs INSIDE the
- * capture and writes to the same stderr git does, so once one is
- * configured the stream can no longer be attributed to git alone. A
- * planted filter (the module's threat model — the reviewed code has run)
- * can then forge the tolerated shapes: an unterminated opener (`error: '`)
- * absorbs git's real failure notes until a genuine zero-commit note closes
- * the blob, and the reassembly folds all of it into one tolerated note
- * over a path the capture silently skipped. So with a filter configured
- * every note is ruled on its own LINE — no reassembly — and anything git
- * did not print in exactly that shape refuses the capture, naming the
- * filter. The zero-commit pairing survives on single-line notes: git never
+ * Rule on `add`'s notes. Every note is ruled on its own LINE — no
+ * reassembly: the tolerated shapes embed the raw, unquoted path, and a
+ * nested repository whose directory NAME carries the bytes of a note
+ * opener (`A'error: 'B`) prints them into the stream through git's own
+ * `warning: adding embedded git repository: …` note — an unterminated
+ * `error: '` opener then absorbed git's REAL failure notes behind a
+ * reassembled blob until a genuine zero-commit note closed it, and the
+ * capture certified a tree it never recorded. The filter child shares
+ * the same fd and forges the same opener with even less effort. Both
+ * reach the stream the same way, so the ruling no longer asks whether a
+ * filter is configured: the strict per-line rule is unconditional. A
+ * genuine zero-commit note survives it on single-line notes: git never
  * skips a path on an "unable to index file" note alone (the specific
  * failure — `open()`, the zero-commit refusal — is printed first, and
  * every shape but the zero-commit one is unexplained), so a filter that
  * forges the pairing note gains nothing, while a Git-LFS user — whose
  * `filter.lfs.*` keys are global — keeps the audit in a tree that holds
- * a freshly initialised repository. Filter-less repositories keep the
- * reassembly too: there, only git writes the stream.
+ * a freshly initialised repository. A note the tree's own name splits
+ * across lines (a newline in a repository's name) refuses instead — the
+ * failure direction over-warns, it never silences a blind spot.
  */
-export function assertCompleteCapture(
-  add: {
-    stderr: string;
-    status: number;
-    completed: boolean;
-  },
-  filtersConfigured = false,
-): void {
+export function assertCompleteCapture(add: {
+  stderr: string;
+  status: number;
+  completed: boolean;
+}): void {
   // Tolerance belongs to genuine exits alone: a child killed mid-`add`
   // (timeout, buffer overflow) or never spawned leaves the scratch index at
   // its seeded state, and ruling on its notes would record HEAD's tree as
@@ -759,15 +835,14 @@ export function assertCompleteCapture(
     // merges its bytes with git's next note — `hint: chattererror:
     // unable to index file '…'` is ONE line, and the /^hint:/ tolerance
     // would absorb the very note that proves a path was skipped. The
-    // lookahead never JOINS lines, so this is a split, not the
-    // reassembly the strict ruling forbids — a note opener always starts
-    // a line, whoever failed to terminate the previous one.
+    // lookahead never JOINS lines, so this is a split, not a
+    // reassembly — a note opener always starts a line, whoever failed
+    // to terminate the previous one.
     .split(/\n|(?=(?:error|fatal|warning|hint): )/)
     .map((line) => line.trim())
     .filter((line) => line !== '');
-  const notes = filtersConfigured ? lines : reassembleZeroCommitNotes(lines);
-  const zeroCommit = zeroCommitPaths(notes);
-  const unexplained = notes.filter((line) => {
+  const zeroCommit = zeroCommitPaths(lines);
+  const unexplained = lines.filter((line) => {
     if (TOLERATED_ADD_NOTES.some((note) => note.test(line))) return false;
     // The paired note, for a path the zero-commit note already explained.
     return !(
@@ -781,15 +856,10 @@ export function assertCompleteCapture(
       )
     );
   });
-  if (unexplained.length > 0 || (add.status !== 0 && notes.length === 0)) {
+  if (unexplained.length > 0 || (add.status !== 0 && lines.length === 0)) {
     throw new Error(
       `fix-delta: git add could not capture the whole tree (exit ${add.status}): ` +
-        (unexplained.join(' | ') || add.stderr.trim()) +
-        (filtersConfigured
-          ? ' — a clean/process filter is configured, so these notes cannot ' +
-            'be told from the filter’s own output and each is ruled on its ' +
-            'own line'
-          : ''),
+        (unexplained.join(' | ') || add.stderr.trim()),
     );
   }
 }
@@ -945,8 +1015,11 @@ function hasActiveExcludeRule(path: string): boolean {
  * every user who has one. The module's direction — over-warn, never silence
  * a blind spot — is what the note serves. The sibling measurement in
  * `worktree.ts` de-steers the ONE command it can (`-c core.fsmonitor=`);
- * these surfaces have no equivalent override, so what cannot be neutralised
- * is named.
+ * the repo-local filter COMMANDS are neutralised at the capture and the
+ * discovery status (`filterBlankEnv`, see `snapshotWorkingTree`) — the
+ * surfaces above that remain are the ones no override reaches (the
+ * attribute wiring and the exclude rules decide what the capture sees at
+ * all), so what cannot be neutralised is named.
  */
 function captureSteeringSurfaces(root: string): string[] {
   const surfaces: string[] = [];
@@ -972,7 +1045,7 @@ function captureSteeringSurfaces(root: string): string[] {
   for (const entry of (filters.out ?? '').split('\0')) {
     if (entry === '') continue;
     const key = entry.split('\n')[0];
-    if (key !== undefined && key !== '') surfaces.push(key);
+    if (key !== undefined && key !== '') surfaces.push(escapeNoteToken(key));
   }
   const attributesFile = gitOpt(
     '-C',
@@ -982,7 +1055,7 @@ function captureSteeringSurfaces(root: string): string[] {
     'core.attributesFile',
   );
   if (attributesFile !== null && attributesFile !== '') {
-    surfaces.push(`core.attributesFile (${attributesFile})`);
+    surfaces.push(`core.attributesFile (${escapeNoteToken(attributesFile)})`);
   }
   const common = commonGitDir(root);
   if (common !== null) {
@@ -1010,7 +1083,7 @@ function captureSteeringSurfaces(root: string): string[] {
     excludesFile !== '' &&
     hasActiveExcludeRule(resolve(root, excludesFile))
   ) {
-    surfaces.push(`core.excludesFile (${excludesFile})`);
+    surfaces.push(`core.excludesFile (${escapeNoteToken(excludesFile)})`);
   }
   return surfaces;
 }
@@ -1186,19 +1259,30 @@ function outOfRootNote(paths: string[], fresh: boolean): string {
  * pays for in proportion to the store.
  */
 function hiddenIgnoredPaths(root: string): string[] {
-  const raw = gitRaw(
-    '-C',
-    root,
-    ...probePins(root),
-    'ls-files',
-    '--others',
-    '--ignored',
-    '--exclude-standard',
-    '-z',
-  );
-  return splitNul(raw)
-    .filter((name) => name.length > 0)
-    .map((name) => name.toString('latin1'));
+  // `--others` alone misses the index-resident half: a staged-but-never-
+  // committed ignored file is in the USER's index, so it is not "other" —
+  // yet the capture's throwaway index (seeded from HEAD) never held it,
+  // so a rule's removal admits it as an addition the classifier must
+  // recognise. Union the two enumerations; a `--cached --ignored` entry
+  // that is also in HEAD sits in both trees and never produces an `A`
+  // record for the classifier to rule on.
+  const hidden: string[] = [];
+  for (const selector of ['--others', '--cached'] as const) {
+    const raw = gitRaw(
+      '-C',
+      root,
+      ...probePins(root),
+      'ls-files',
+      selector,
+      '--ignored',
+      '--exclude-standard',
+      '-z',
+    );
+    for (const name of splitNul(raw)) {
+      if (name.length > 0) hidden.push(name.toString('latin1'));
+    }
+  }
+  return hidden;
 }
 
 /**
@@ -1515,6 +1599,13 @@ function probePins(path: string): string[] {
     // submodule's dirt flags, which read that repository's config.
     '-c',
     'core.trustctime=true',
+    // `core.checkStat=minimal` is the same surface one knob over: the
+    // change check compares fewer stat fields, so a same-size edit whose
+    // mtime was restored answers clean with ctime unread. Pinned to the
+    // default the same way — git's own default, so a no-op where nothing
+    // is planted.
+    '-c',
+    'core.checkStat=default',
     // Hooks are steering the tree carries as surely as config is. The
     // capture hands git a throwaway `GIT_INDEX_FILE`, and a
     // `post-index-change` hook the repository ships inherits it: one
@@ -1973,9 +2064,19 @@ function indexBitsHideEntries(path: string, state: ProbeState): boolean {
       return true;
     }
     if (state.budget-- <= 0) return true;
-    // A checkout that does not exist (or has no git dir of its own)
-    // holds no index a bit could hide an entry in.
-    if (!existsSync(joinBytes(subPath, DOT_GIT))) continue;
+    // A checkout that does not exist holds no index a bit could hide an
+    // entry in. One the probe cannot SEE — an unreadable directory, a
+    // name too long to stat, a stale handle — is unanswerable, and
+    // `existsSync` folds that into the same false: ask directly and keep
+    // only ENOENT on the "nothing there" side, the module's standing
+    // idiom.
+    if (!existsSync(subPath)) continue;
+    try {
+      statSync(joinBytes(subPath, DOT_GIT));
+    } catch (err) {
+      if (errnoOf(err) === 'ENOENT') continue;
+      return true;
+    }
     if (!markVisited(subPath, state)) continue;
     try {
       if (indexBitsHideEntries(subPath.toString('utf8'), state)) {
@@ -2899,21 +3000,44 @@ function probeBlindSpotState(
   // The exclusion pathspec: capture and the tree comparisons apply it, so the
   // probe must too — otherwise the review's own worktrees and side files
   // under `.qwen/tmp` would be classified as blind-spot submodule dirt.
-  const raw = gitRaw(
-    '-C',
-    root,
-    ...probePins(root),
-    '-c',
-    'status.showUntrackedFiles=all',
-    '--no-optional-locks',
-    'status',
-    '--porcelain=v2',
-    '--ignore-submodules=none',
-    '--ignored=matching',
-    '-z',
-    '--',
-    ...literalPathspec(sidePaths),
+  // The discovery spawn is ruled on its stderr too, exactly like the
+  // interior probe's: an exit-0 `warning: could not open directory '…'`
+  // over a subtree nobody read is a PARTIAL enumeration — no entry names
+  // what it hides — and stdout plus the exit code certified it as clean.
+  // The byte contract stands: stdout is the `-z` listing, never decoded.
+  const statusRun = gitRawReport(
+    [
+      '-C',
+      root,
+      ...probePins(root),
+      '-c',
+      'status.showUntrackedFiles=all',
+      '--no-optional-locks',
+      'status',
+      '--porcelain=v2',
+      '--ignore-submodules=none',
+      '--ignored=matching',
+      '-z',
+      '--',
+      ...literalPathspec(sidePaths),
+    ],
+    // The audited repository's own repo-local filters would EXECUTE under
+    // this spawn's change checks — the plant surface the capture blanks
+    // identically (see `snapshotWorkingTree`).
+    filterBlankEnv(screenForTree(root)?.filters ?? []) as Record<
+      string,
+      string
+    >,
   );
+  if (!statusRun.completed || statusRun.status !== 0) {
+    throw new Error(
+      `fix-delta: the discovery status could not run (exit ${statusRun.status})` +
+        (statusRun.stderr.length > 0
+          ? `: ${statusRun.stderr.toString('utf8').trim()}`
+          : ''),
+    );
+  }
+  const raw = statusRun.stdout;
   const rootBuf = Buffer.from(root);
   const ctx = exclusionContext(root, reviewWorktrees);
   const dirty = new Set<string>();
@@ -2947,6 +3071,19 @@ function probeBlindSpotState(
   const rootKey = identityOf(Buffer.from(ctx.root));
   if (rootKey !== null) {
     state.visited.add(rootKey);
+  }
+  // A status that answered over a warning is a PARTIAL enumeration: an
+  // unopenable directory emits no `?`/`!` entry for what it holds, so the
+  // entries below never name it. Name it from the note instead — the
+  // path the note carries, byte-exact — and a note whose shape this
+  // decoder does not know leaves the probe's own ROOT unresolved: the
+  // answer is unconfirmable either way, never clean.
+  for (const note of splitNul(statusRun.stderr)) {
+    for (const line of note.toString('latin1').split('\n')) {
+      if (line === '') continue;
+      const m = /^warning: could not open directory '(.*)'/.exec(line);
+      unresolved.add(m === null ? '.' : m[1].replace(/\/+$/, ''));
+    }
   }
   const entries = splitNul(raw);
   for (let i = 0; i < entries.length; i++) {
@@ -3281,12 +3418,33 @@ function cleanedSubmoduleNote(cleaned: string[]): string {
 }
 
 /**
+ * A tree-controlled string about to ride a single-line `fix-delta:`
+ * protocol note: path bytes and config values may legally hold `\n` and
+ * other control characters, and rendered raw they forge standalone
+ * protocol lines — a `core.attributesFile` value carrying
+ * `\nfix-delta: snapshot … — fingerprint <forged>` lands BEFORE the real
+ * receipt, and a directory named `x\nfix-delta: <all-clear>` prints a
+ * disclosure the run never made. Escaped at the RENDER boundary only:
+ * the identity keys and byte comparisons elsewhere stay bytes.
+ */
+function escapeNoteToken(s: string): string {
+  return s.replace(
+    // eslint-disable-next-line no-control-regex -- control bytes are exactly what must not reach a protocol line
+    /[\x00-\x1f\x7f]/g,
+    (c) => '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'),
+  );
+}
+
+/**
  * Identity byte keys back to display names for the notes above: latin1
- * re-yields the exact bytes, and `decodePath` renders them the same way
- * it rendered them at discovery time.
+ * re-yields the exact bytes, `decodePath` renders them the same way it
+ * rendered them at discovery time, and `escapeNoteToken` keeps a
+ * control byte in a name from forging a protocol line.
  */
 function displayNames(keys: string[]): string[] {
-  return keys.map((key) => decodePath(Buffer.from(key, 'latin1')));
+  return keys.map((key) =>
+    escapeNoteToken(decodePath(Buffer.from(key, 'latin1'))),
+  );
 }
 
 /**
@@ -3402,6 +3560,41 @@ function assertRootHoldsCwd(root: string): void {
       }
     }
   }
+  // Nor is that test the whole of it: a planted gitfile naming ANOTHER
+  // git dir (an `init`'d one under `.git/modules/`, say) narrows every
+  // reading to the subtree identically, and no enclosing checkout
+  // answers for that other dir, so the comparison above stands down
+  // over it. What separates a legitimate narrowing from the plant is
+  // REGISTRATION from the other side: a submodule checkout is recorded
+  // as a mode-160000 gitlink in the enclosing index, and a linked
+  // worktree's `<common>/worktrees/<name>/gitdir` names this checkout's
+  // `.git` file. A planted gitfile is registered from nowhere. The gate
+  // applies only to the gitfile shape — a `.git` DIRECTORY cannot
+  // narrow anything (git's discovery stops there honestly) — and only
+  // when an enclosing checkout exists at all.
+  let rootIsGitfile = false;
+  try {
+    rootIsGitfile = statSync(join(top, '.git')).isFile();
+  } catch {
+    // No `.git` at the derived root — the earlier gates answered already.
+  }
+  if (rootIsGitfile) {
+    const enclosings = enclosingGitDirs(top);
+    if (
+      enclosings.length > 0 &&
+      !enclosings.some((enclosing) => registersNestedCheckout(enclosing, top))
+    ) {
+      throw new Error(
+        `fix-delta: ${root} narrows every reading to itself through a ` +
+          '`.git` gitfile no enclosing checkout registers — not a gitlink ' +
+          'in its index (a submodule), not a `worktrees/<name>/gitdir` ' +
+          'entry (a linked worktree) — the shape a planted gitfile ' +
+          'leaves. The capture would record this subtree and miss every ' +
+          'edit outside it. Remove the `.git` entry, or run from the ' +
+          'repository root, and re-run.',
+      );
+    }
+  }
   const fromCwd = git('rev-parse', '--absolute-git-dir');
   const fromRoot = git('-C', root, 'rev-parse', '--absolute-git-dir');
   if (!samePath(fromCwd, fromRoot)) {
@@ -3414,6 +3607,60 @@ function assertRootHoldsCwd(root: string): void {
         'core.worktree`) and re-run.',
     );
   }
+}
+
+/**
+ * True when the enclosing checkout REGISTERS `nested` as its own: a
+ * mode-160000 gitlink at the nested path in its index (a submodule), or
+ * a `<common>/worktrees/<name>/gitdir` entry naming the nested `.git`
+ * file (a linked worktree). The reciprocal fact a planted gitfile
+ * cannot produce: the plant writes the pointer in one direction only.
+ */
+function registersNestedCheckout(enclosing: string, nested: string): boolean {
+  const rel = relative(enclosing, nested);
+  if (
+    rel !== '' &&
+    rel !== '..' &&
+    !rel.startsWith(`..${sep}`) &&
+    !isAbsolute(rel)
+  ) {
+    const link = gitOpt(
+      '-C',
+      enclosing,
+      ...probePins(enclosing),
+      'ls-files',
+      '-s',
+      '--',
+      rel.split(sep).join('/'),
+    );
+    if (link !== null && link.startsWith('160000 ')) return true;
+  }
+  const common = gitOpt('-C', enclosing, 'rev-parse', '--git-common-dir');
+  if (common === null) return false;
+  // `--git-common-dir` answers RELATIVE to the queried tree in a standard
+  // layout (`.git`) — resolve it before reading the registry.
+  const commonDir = resolve(enclosing, common);
+  const nestedGitfile = join(nested, '.git');
+  let names: string[];
+  try {
+    names = readdirSync(join(commonDir, 'worktrees'));
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    try {
+      const registered = readFileSync(
+        join(commonDir, 'worktrees', name, 'gitdir'),
+        'utf8',
+      ).trim();
+      if (registered !== '' && samePath(registered, nestedGitfile)) {
+        return true;
+      }
+    } catch {
+      // A registration with no readable gitdir file registers nothing.
+    }
+  }
+  return false;
 }
 
 /**
@@ -3513,11 +3760,6 @@ function writeSideFile(path: string, data: Buffer): void {
   }
 }
 
-/** True when the steering surfaces name a clean/process filter. */
-function hasFilter(surfaces: readonly string[]): boolean {
-  return surfaces.some((surface) => surface.startsWith('filter.'));
-}
-
 /** The fingerprint of a snapshot record: the SHA-256 of its exact bytes. */
 function snapshotFingerprint(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
@@ -3557,7 +3799,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
     // the disclosure is only useful ahead of the bytes it qualifies.
     const steering = captureSteeringSurfaces(root);
     if (steering.length > 0) writeStderrLine(captureSteeringNote(steering));
-    const tree = snapshotWorkingTree(root, sidePaths, hasFilter(steering));
+    const tree = snapshotWorkingTree(root, sidePaths);
     const probe = probeBlindSpotState(root, sidePaths, reviewWorktrees);
     const snapshot: FixSnapshot = {
       root,
@@ -3592,7 +3834,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
     // `--since`, which is the only thing that anchors the baseline outside
     // the tree's own write surface.
     writeStderrLine(
-      `fix-delta: snapshot ${tree} of ${root} — fingerprint ` +
+      `fix-delta: snapshot ${tree} of ${escapeNoteToken(root)} — fingerprint ` +
         `${snapshotFingerprint(record)}; pass it back as --fingerprint on --since`,
     );
     return;
@@ -3696,7 +3938,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // moments, and this run takes its own `add -A` capture below.
   const steering = captureSteeringSurfaces(root);
   if (steering.length > 0) writeStderrLine(captureSteeringNote(steering));
-  const now = snapshotWorkingTree(root, sidePaths, hasFilter(steering));
+  const now = snapshotWorkingTree(root, sidePaths);
   // A deletion the capture invented is not an edit — and neither is an
   // addition: both are dropped from the hunks and from the count, and
   // disclosed on their own lines.
@@ -3881,11 +4123,17 @@ export function runFixDelta(args: FixDeltaArgs): void {
     ),
   ];
   if (ghosts.length > 0) {
-    writeStderrLine(ghostDeletionNote(ghosts.map((name) => decodePath(name))));
+    writeStderrLine(
+      ghostDeletionNote(
+        ghosts.map((name) => escapeNoteToken(decodePath(name))),
+      ),
+    );
   }
   if (ghostAdds.length > 0) {
     writeStderrLine(
-      ghostAdditionNote(ghostAdds.map((name) => decodePath(name))),
+      ghostAdditionNote(
+        ghostAdds.map((name) => escapeNoteToken(decodePath(name))),
+      ),
     );
   }
   if ((ghosts.length > 0 || ghostAdds.length > 0) && diff.length === 0) {
@@ -3953,10 +4201,12 @@ export function runFixDelta(args: FixDeltaArgs): void {
   ]);
   if (steeredRendering.length > 0) {
     writeStderrLine(
-      renderSteeringNote(steeredRendering.map((name) => decodePath(name))),
+      renderSteeringNote(
+        steeredRendering.map((name) => escapeNoteToken(decodePath(name))),
+      ),
     );
   }
-  const names = files.map((name) => decodePath(name));
+  const names = files.map((name) => escapeNoteToken(decodePath(name)));
   const shown = names.slice(0, 8).join(', ');
   writeStderrLine(
     `fix-delta: ${names.length} file(s) changed since the snapshot — ${shown}` +
@@ -3965,7 +4215,9 @@ export function runFixDelta(args: FixDeltaArgs): void {
   const familyDeleted = deletedFamilyPaths(root, snapshot.tree, now, diffPaths);
   if (familyDeleted.length > 0) {
     writeStderrLine(
-      familyDeletionNote(familyDeleted.map((name) => decodePath(name))),
+      familyDeletionNote(
+        familyDeleted.map((name) => escapeNoteToken(decodePath(name))),
+      ),
     );
   }
   if (preExisting.length > 0) {

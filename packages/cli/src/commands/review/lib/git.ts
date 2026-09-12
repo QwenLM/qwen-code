@@ -698,6 +698,45 @@ function refusalError(refusal: string | null): Error | undefined {
 }
 
 /**
+ * `gitRaw`'s byte contract — stdout is a `-z` listing, and the string
+ * decode would rewrite every non-UTF-8 name byte to U+FFFD — with stderr
+ * captured and the exit status KEPT, the same need `gitWithEnvReport`
+ * answers for the string form. The caller is `fix-delta`'s discovery
+ * status: an exit-0 `warning: could not open directory …` over a subtree
+ * nobody read is a partial enumeration, and stdout plus the exit code
+ * cannot tell it from a clean one.
+ */
+export function gitRawReport(
+  args: string[],
+  extraEnv?: Record<string, string>,
+): {
+  stdout: Buffer;
+  stderr: Buffer;
+  status: number;
+  completed: boolean;
+} {
+  const opts = gitOpts();
+  // Same refusal shape as `gitRaw` — the launch-dir gate throws with the
+  // reason, the one case with a reason a caller can hand to a user.
+  assertTrustedLaunchDir();
+  const result = spawnSync('git', args, {
+    ...opts,
+    env: { ...opts.env, ...extraEnv },
+    maxBuffer: 512 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return {
+    stdout: result.stdout ?? Buffer.alloc(0),
+    stderr: result.stderr ?? Buffer.alloc(0),
+    status: result.status ?? -1,
+    completed:
+      result.status !== null &&
+      result.signal === null &&
+      result.error === undefined,
+  };
+}
+
+/**
  * Run `git` and return stdout as raw bytes.
  *
  * `git` above is wrong for diffs on two counts: it CRLF-normalises (which
