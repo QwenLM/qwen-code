@@ -49,6 +49,7 @@ import {
 } from './constants.js';
 import {
   logApiRequest,
+  logApiCancel,
   logApiResponse,
   logStartSession,
   logSessionEnd,
@@ -84,6 +85,7 @@ import * as tokenUsageService from '../services/tokenUsageService.js';
 import { ToolCallDecision } from './tool-call-decision.js';
 import {
   ApiRequestEvent,
+  ApiCancelEvent,
   ApiResponseEvent,
   FlashFallbackEvent,
   StartSessionEvent,
@@ -131,6 +133,10 @@ describe('loggers', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(
+      tokenUsageService,
+      'recordTokenUsageOutcomeBestEffort',
+    ).mockImplementation(() => undefined);
     vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(true);
     vi.spyOn(logs, 'getLogger').mockReturnValue(mockLogger);
     vi.spyOn(uiTelemetry.uiTelemetryService, 'addEvent').mockImplementation(
@@ -794,6 +800,9 @@ describe('loggers', () => {
           }),
         }),
       );
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).toHaveBeenCalledWith(mockConfig, event, 'request-session-id');
     });
 
     it('keeps task identity local to UI telemetry', () => {
@@ -833,7 +842,7 @@ describe('loggers', () => {
       'forked_query',
       'speculation',
       'side-query:session-title',
-    ])('does not record token usage for internal prompt_id %s', (promptId) => {
+    ])('records token usage for internal prompt_id %s', (promptId) => {
       const event = new ApiResponseEvent(
         'test-response-id',
         'test-model',
@@ -850,7 +859,7 @@ describe('loggers', () => {
 
       expect(
         tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
-      ).not.toHaveBeenCalled();
+      ).toHaveBeenCalledWith(mockConfig, event);
     });
 
     it('does not record token usage when usage statistics are disabled', () => {
@@ -976,6 +985,43 @@ describe('loggers', () => {
       expect(mockRecordUiTelemetryEvent).not.toHaveBeenCalled();
       expect(mockUiEvent.addEvent).toHaveBeenCalled();
     });
+  });
+
+  it('records error and cancellation outcomes only when usage statistics are enabled', () => {
+    const config = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getTelemetryEnabled: () => true,
+      getTelemetryLogPromptsEnabled: () => true,
+      getChatRecordingService: () => undefined,
+    } as unknown as Config;
+    const event = new ApiErrorEvent({
+      model: 'test-model',
+      durationMs: 100,
+      promptId: 'user_query',
+      errorMessage: 'test error',
+    });
+    const cancel = new ApiCancelEvent('test-model', 'user_query');
+
+    logApiError(config, event, 'request-session-id');
+    logApiCancel(config, cancel);
+
+    expect(
+      tokenUsageService.recordTokenUsageOutcomeBestEffort,
+    ).toHaveBeenNthCalledWith(1, config, event, 'error', 'request-session-id');
+    expect(
+      tokenUsageService.recordTokenUsageOutcomeBestEffort,
+    ).toHaveBeenNthCalledWith(2, config, cancel, 'cancelled');
+
+    const disabledConfig = {
+      ...config,
+      getUsageStatisticsEnabled: () => false,
+    } as unknown as Config;
+    logApiError(disabledConfig, event);
+    logApiCancel(disabledConfig, cancel);
+    expect(
+      tokenUsageService.recordTokenUsageOutcomeBestEffort,
+    ).toHaveBeenCalledTimes(2);
   });
 
   describe('logApiError skips chatRecordingService for internal prompt IDs', () => {
