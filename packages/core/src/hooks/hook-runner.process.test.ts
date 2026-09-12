@@ -85,6 +85,43 @@ const isRunning = (pid: number): boolean => {
 describe.skipIf(process.platform === 'win32')(
   'HookRunner process tree cancellation',
   () => {
+    it('reads a small command hook timeout as seconds for a real process', async () => {
+      const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-seconds-'));
+      try {
+        const runner = new HookRunner();
+        const input: HookInput = {
+          session_id: 'seconds-timeout-test',
+          transcript_path: join(tempDir, 'transcript.jsonl'),
+          cwd: tempDir,
+          hook_event_name: HookEventName.PreToolUse,
+          timestamp: new Date().toISOString(),
+        };
+        const startedAt = Date.now();
+        const result = await runner.executeHook(
+          {
+            type: HookType.Command,
+            command: `exec ${JSON.stringify(process.execPath)} -e "setInterval(() => {}, 1000)"`,
+            source: HooksConfigSource.Project,
+            shell: 'bash',
+            timeout: 1,
+          },
+          HookEventName.PreToolUse,
+          input,
+        );
+        const elapsedMs = Date.now() - startedAt;
+
+        expect(result).toMatchObject({
+          success: false,
+          error: { message: 'Hook timed out after 1s' },
+        });
+        // One second, not one millisecond and not a thousand seconds.
+        expect(elapsedMs).toBeGreaterThanOrEqual(900);
+        expect(elapsedMs).toBeLessThan(PROCESS_REAP_TIMEOUT_MS);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    }, 30_000);
+
     it('reaps a descendant that ignores SIGTERM before returning', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-tree-'));
       const fixturePath = join(tempDir, 'hook-tree.mjs');
@@ -937,7 +974,9 @@ setInterval(() => {}, 1000);
         expect(descendantPid).toBeDefined();
         expect(result).toMatchObject({
           success: false,
-          error: { message: `Hook timed out after ${HOOK_GROUP_TIMEOUT_MS}ms` },
+          error: {
+            message: `Hook timed out after ${HOOK_GROUP_TIMEOUT_MS / 1000}s`,
+          },
         });
         await waitFor(
           () => !isRunning(descendantPid as number),

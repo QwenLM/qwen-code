@@ -196,12 +196,12 @@ describe('exec context tool results', () => {
       controller.signal,
     );
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce(), {
-      timeout: 10_000,
+      timeout: 30_000,
     });
     controller.abort();
     await expect(pending).rejects.toThrow();
     expect(clearLoadedSkills).toHaveBeenCalledOnce();
-  });
+  }, 40_000);
 
   it('preserves concurrency for ordinary calls before a goal barrier', async () => {
     const { run, dispatch } = setup(

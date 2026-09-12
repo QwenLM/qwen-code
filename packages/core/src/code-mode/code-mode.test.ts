@@ -459,6 +459,35 @@ describe('isolated code mode host', () => {
     ).rejects.toThrow(/interrupted|timed out/);
   });
 
+  it('names the full wall budget when the host never frames a response', async () => {
+    // A guest parked in an idle await burns no CPU, so the host-side
+    // interrupt handler never fires and no response frame ever arrives; the
+    // parent's wall backstop is the only timeout left. It must name the
+    // budget that actually applied — the guest budget plus the host startup
+    // grace — not the guest budget alone.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const pending = executeCodeMode(
+        'await new Promise(() => {})',
+        plan(),
+        runtime(async () => {
+          throw new Error('unused');
+        }),
+        new AbortController().signal,
+        { timeoutMs: 1 },
+      );
+      // Keep the rejection handled while fake time advances; it is asserted
+      // after the wall timer fires.
+      void pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(31_000);
+      await expect(pending).rejects.toThrow(
+        'JavaScript execution timed out after 30001ms (guest budget 1ms; the code-mode host may not have finished starting).',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('calls a deferred MCP-style tool through its normalized JavaScript name', async () => {
     const dispatch = vi.fn(async (name: string) => ({
       callId: 'mcp-call',
