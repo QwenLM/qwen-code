@@ -167,4 +167,49 @@ describe('operation error classification', () => {
       code: 'OPERATION_TIMEOUT',
     });
   });
+
+  it('does not let a page-thrown primitive pick the code on the evaluate channel', () => {
+    // A page-thrown primitive string crosses CDP verbatim behind the
+    // evaluate apiName, with no "Error: " wrapper, so on that channel the
+    // first line is page-controlled and must not match Playwright's own
+    // crash/close phrases.
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error('locator.evaluate: Target crashed'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'playwright.evaluate',
+        new Error('page.evaluate: Page crashed'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error('locator.evaluate: frame was detached'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'locator.type',
+        new Error('locator.evaluateHandle: no tab with id 7'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    // The same phrases stay classified on channels that never run page code.
+    expect(
+      sanitizeOperationError('locator.click', new Error('Target crashed ')),
+    ).toMatchObject({ code: 'STALE_TAB' });
+  });
+
+  it('ignores error-code tokens that no internal producer emits as text', () => {
+    for (const token of ['STALE_TAB', 'LOCATOR_NOT_UNIQUE', 'INVALID_LOCATOR'])
+      expect(
+        sanitizeOperationError(
+          'locator.click',
+          new Error(`locator.click: ${token}`),
+        ),
+      ).toMatchObject({ code: 'OPERATION_FAILED' });
+  });
 });

@@ -56,7 +56,8 @@ export function sanitizeOperationError(
     : `${method} failed`;
   // Playwright prefixes every client error with the API name
   // ("locator.fill: ..."); classify on the failure text, not the call site.
-  const failure = rawMessage.replace(/^[a-zA-Z][\w$]*(?:\.[\w$]+)*:\s/, '');
+  const apiName = /^[a-zA-Z][\w$]*(?:\.[\w$]+)*:\s/.exec(rawMessage)?.[0];
+  const failure = rawMessage.slice(apiName?.length ?? 0);
   // Playwright's structured error name survives the client boundary and is
   // the only page-independent signal; it decides before any text is read.
   const name = error instanceof Error ? error.name : '';
@@ -66,31 +67,35 @@ export function sanitizeOperationError(
     return new BrowserRuntimeError('OPERATION_TIMEOUT', message);
   // Playwright renders its own failure as the first line of the message.
   // Later lines quote page content (appended log tails, selectors), and a
-  // page-thrown value arrives behind an "Error: " wrapper — neither may pick
+  // page-thrown Error arrives behind an "Error: " wrapper — neither may pick
   // the code, so text phrases match only at the start of the first line.
   const firstLine = failure.split('\n', 1)[0] ?? '';
-  if (/^(?:target|page) crashed/i.test(firstLine))
+  // Page code runs only on Playwright's evaluate channel, so a page-thrown
+  // primitive string arrives verbatim — behind no wrapper — only under an
+  // evaluate apiName. Crash/close/detach phrases from that channel are
+  // page-controlled text, so they fail closed to OPERATION_FAILED there.
+  const pageChannel = apiName !== undefined && /evaluate/i.test(apiName);
+  if (!pageChannel && /^(?:target|page) crashed/i.test(firstLine))
     return new BrowserRuntimeError('STALE_TAB', message);
   // A genuine strict-mode failure crosses CDP as the raw exception
   // description, so Playwright's own phrase sits behind an "Error: " layer;
   // requiring the element count keeps a page-thrown lookalike from matching.
   if (
-    /^(?:LOCATOR_NOT_UNIQUE|(?:Error: )?strict mode violation: .* resolved to \d+ elements:)/i.test(
+    /^(?:Error: )?strict mode violation: .* resolved to \d+ elements:/i.test(
       firstLine,
     )
   ) {
     return new BrowserRuntimeError('LOCATOR_NOT_UNIQUE', message);
   }
   if (
-    /^(?:STALE_TAB|target (?:page|context|browser).*closed|page has been closed|no tab with id)/i.test(
+    !pageChannel &&
+    /^(?:target (?:page|context|browser).*closed|page has been closed|no tab with id)/i.test(
       firstLine,
     )
-  ) {
+  )
     return new BrowserRuntimeError('STALE_TAB', message);
-  }
-  if (/^(?:INVALID_LOCATOR|frame was detached)/i.test(firstLine)) {
+  if (!pageChannel && /^frame was detached/i.test(firstLine))
     return new BrowserRuntimeError('INVALID_LOCATOR', message);
-  }
   return new BrowserRuntimeError('OPERATION_FAILED', message);
 }
 

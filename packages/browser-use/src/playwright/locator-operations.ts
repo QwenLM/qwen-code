@@ -116,9 +116,18 @@ export async function executeLocatorOperation(
             };
             const readSrcset = (node: Element): string | null => {
               const srcset = readString(node, 'srcset');
-              // 'hero.webp 1x, hero@2x.webp 2x' — the first candidate URL.
-              const first = srcset?.split(',')[0]?.trim().split(/\s+/)[0];
-              return first ? first : null;
+              if (srcset === null) return null;
+              // First candidate per the HTML srcset grammar: the URL runs to
+              // ASCII whitespace and may itself contain commas; a trailing
+              // comma closes it. Unlike the IDL properties above, the srcset
+              // reflection is raw attribute text, so resolve it against the
+              // document base before the scheme gate sees it.
+              const candidate = /^[\s,]*(\S+)/
+                .exec(srcset)?.[1]
+                ?.replace(/,+$/, '');
+              return candidate
+                ? new URL(candidate, document.baseURI).href
+                : null;
             };
             let url: string | null = null;
             for (const candidate of candidates) {
@@ -436,6 +445,16 @@ async function evaluateLocator(
   timeout: number,
 ): Promise<unknown> {
   if (all) {
+    // evaluateAll takes no options and never waits, so honor the caller's
+    // budget with an attach wait on the first match, mirroring
+    // allTextContents; a locator that never attaches still evaluates [].
+    await locator
+      .first()
+      .waitFor({ state: 'attached', timeout })
+      .catch((error: unknown) => {
+        if (error instanceof Error && error.name === 'TimeoutError') return;
+        throw error;
+      });
     return JSON.parse(
       await withTimeout(
         locator.evaluateAll(async (elements, source) => {

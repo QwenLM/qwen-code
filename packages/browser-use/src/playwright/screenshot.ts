@@ -144,8 +144,9 @@ async function capture(
     );
 
   let data: string | undefined;
-  if (!constrained && devicePixelRatio >= 1)
-    data = await viewportFrame(
+  let frameOrigin: { x: number; y: number } | undefined;
+  if (!constrained && devicePixelRatio >= 1) {
+    const frame = await viewportFrame(
       tab.providerTabId,
       bridge,
       send,
@@ -153,6 +154,11 @@ async function capture(
       height,
       origin,
     );
+    if (frame !== undefined) {
+      data = frame.data;
+      frameOrigin = frame.origin;
+    }
+  }
   if (data === undefined) {
     data = await captureRegion(
       send,
@@ -223,7 +229,7 @@ async function capture(
     viewport: { width: viewportWidth, height: viewportHeight },
     devicePixelRatio,
     coordinateSpace: 'css-pixels',
-    origin,
+    origin: frameOrigin ?? origin,
   };
 }
 
@@ -249,6 +255,12 @@ async function captureRegion(
   return result.data;
 }
 
+interface ViewportFrame {
+  data: string;
+  sessionId: number;
+  origin: { x: number; y: number };
+}
+
 async function viewportFrame(
   tabId: number,
   bridge: ChromeBridge,
@@ -256,10 +268,9 @@ async function viewportFrame(
   width: number,
   height: number,
   origin: { x: number; y: number },
-): Promise<string | undefined> {
-  type Frame = { data: string; sessionId: number };
-  let settle: (frame: Frame | undefined) => void = () => undefined;
-  const nextFrame = new Promise<Frame | undefined>((resolve) => {
+): Promise<ViewportFrame | undefined> {
+  let settle: (frame: ViewportFrame | undefined) => void = () => undefined;
+  const nextFrame = new Promise<ViewportFrame | undefined>((resolve) => {
     settle = resolve;
   });
   const timer = setTimeout(() => settle(undefined), FRAME_TIMEOUT_MS);
@@ -283,21 +294,18 @@ async function viewportFrame(
       typeof timestamp === 'number' &&
       Number.isFinite(timestamp) &&
       timestamp >= startedAt;
-    // The origin was measured before this frame existed; a frame whose
-    // scroll offsets disagree with it depicts a different document region,
-    // so fall back to a capture whose clip pins the published region.
-    const moved =
-      (typeof metadata.scrollOffsetX === 'number' &&
-        Math.abs(metadata.scrollOffsetX - origin.x) > 1) ||
-      (typeof metadata.scrollOffsetY === 'number' &&
-        Math.abs(metadata.scrollOffsetY - origin.y) > 1);
-    if (
-      fresh &&
-      !moved &&
-      typeof params.data === 'string' &&
-      params.data.length > 0
-    ) {
-      settle({ data: params.data, sessionId });
+    if (fresh && typeof params.data === 'string' && params.data.length > 0) {
+      // The frame's scroll offsets describe the frame's own pixels, so they
+      // — not the origin measured before the capture — are what the envelope
+      // may publish for it; a frame without offsets keeps the measured one.
+      settle({
+        data: params.data,
+        sessionId,
+        origin: {
+          x: scrollOffset(metadata.scrollOffsetX, origin.x),
+          y: scrollOffset(metadata.scrollOffsetY, origin.y),
+        },
+      });
       return;
     }
     void send(
@@ -305,9 +313,8 @@ async function viewportFrame(
       { sessionId },
       CLEANUP_TIMEOUT_MS,
     ).catch(() => undefined);
-    if (fresh && moved) settle(undefined);
   });
-  let frame: Frame | undefined;
+  let frame: ViewportFrame | undefined;
   try {
     await send(
       'Page.startScreencast',
@@ -326,7 +333,7 @@ async function viewportFrame(
     // A resized viewport or a non-default zoom must not change CUA coordinates.
     return dimensions.width === Math.round(width) &&
       dimensions.height === Math.round(height)
-      ? frame.data
+      ? frame
       : undefined;
   } catch {
     return undefined;
@@ -344,4 +351,8 @@ async function viewportFrame(
         CLEANUP_TIMEOUT_MS,
       ).catch(() => undefined);
   }
+}
+
+function scrollOffset(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }

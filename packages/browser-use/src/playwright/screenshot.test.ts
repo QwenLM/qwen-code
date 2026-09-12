@@ -213,7 +213,7 @@ describe('Chrome screenshot acquisition', () => {
     ).toEqual([{ sessionId: 2 }, { sessionId: 3 }]);
   });
 
-  it('falls back when a fresh frame disagrees with the measured origin', async () => {
+  it('publishes the frame scroll origin when it disagrees with the measured origin', async () => {
     const bridge = new ScreenshotBridge();
     bridge.viewport.pageY = 700;
     bridge.onStart = () =>
@@ -221,11 +221,12 @@ describe('Chrome screenshot acquisition', () => {
         metadata: { timestamp: Date.now() / 1000, scrollOffsetY: 200 },
       });
     const image = await captureTabScreenshot(tab(), {}, bridge);
-    // The scrolled frame is acknowledged, not published: the fallback
-    // capture pins the document region the envelope reports.
+    // The frame's pixels and its scroll offsets are a matched pair, so the
+    // envelope describes the accepted frame; a fallback capture clipped to
+    // the stale pre-scroll origin would certify pixels it does not contain.
+    expect(bridge.methods()).not.toContain('Page.captureScreenshot');
     expect(bridge.methods()).toContain('Page.screencastFrameAck');
-    expect(bridge.methods()).toContain('Page.captureScreenshot');
-    expect(image.origin).toEqual({ x: 0, y: 700 });
+    expect(image.origin).toEqual({ x: 0, y: 200 });
     expect(bridge.listeners.size).toBe(0);
   });
 

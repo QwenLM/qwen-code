@@ -97,13 +97,19 @@ function parseSnapshot(text: string): SnapshotNode[] {
   return roots;
 }
 
-const QUOTED_KEY = /^'(.*)'$/;
+// A YAML-quoted key ends at its closing quote ('' escapes a quote); an
+// unquoted key ends at the colon that introduces children or inline text.
+// Either way the attribute list — [ref=…] and the cursor marker — lives
+// inside the key, so a suffix test must run on the extracted key, not the
+// rendered line.
+const QUOTED_KEY = /^'((?:[^']|'')*)'(?::(?:\s.*)?)?$/;
 
-// Playwright wraps the whole key in single quotes when the name needs YAML
-// quoting ('' escapes a quote); a suffix test must see the unwrapped key.
 function nodeKey(line: string): string {
   const body = line.trimEnd().replace(/^\s*-\s+/, '');
-  return QUOTED_KEY.test(body) ? body.slice(1, -1).replace(/''/g, "'") : body;
+  const quoted = QUOTED_KEY.exec(body);
+  if (quoted !== null) return (quoted[1] ?? '').replace(/''/g, "'");
+  const separator = /:(?=\s|$)/.exec(body);
+  return separator === null ? body : body.slice(0, separator.index);
 }
 
 function selectInteractiveNodes(

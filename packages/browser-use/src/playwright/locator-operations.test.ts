@@ -289,6 +289,53 @@ describe('locator.allTextContents', () => {
   });
 });
 
+describe('locator.evaluateAll', () => {
+  function evaluateAllFixture() {
+    const handle = { waitFor: vi.fn(async () => undefined) };
+    const locator = {
+      first: vi.fn(() => handle),
+      evaluateAll: vi.fn(async () => '["a"]'),
+    };
+    const tab = { page: { locator: () => locator } } as unknown as TabState;
+    const args = {
+      steps: [{ kind: 'locator', selector: '.row' }],
+      script: 'return elements.length;',
+      timeoutMs: 50,
+    };
+    return { handle, locator, tab, args };
+  }
+
+  it('waits for the first match within the caller budget before evaluating', async () => {
+    const f = evaluateAllFixture();
+    await expect(
+      executeLocatorOperation('locator.evaluateAll', f.args, f.tab),
+    ).resolves.toEqual(['a']);
+    expect(f.handle.waitFor).toHaveBeenCalledExactlyOnceWith({
+      state: 'attached',
+      timeout: 50,
+    });
+  });
+
+  it('still evaluates when nothing attaches in time', async () => {
+    const f = evaluateAllFixture();
+    const timeout = new Error('Timeout 50ms exceeded');
+    timeout.name = 'TimeoutError';
+    f.handle.waitFor.mockRejectedValue(timeout);
+    f.locator.evaluateAll.mockResolvedValue('[]');
+    await expect(
+      executeLocatorOperation('locator.evaluateAll', f.args, f.tab),
+    ).resolves.toEqual([]);
+  });
+
+  it('propagates a wait failure that is not a timeout', async () => {
+    const f = evaluateAllFixture();
+    f.handle.waitFor.mockRejectedValue(new Error('Target crashed'));
+    await expect(
+      executeLocatorOperation('locator.evaluateAll', f.args, f.tab),
+    ).rejects.toThrow('Target crashed');
+  });
+});
+
 describe('locator.downloadMedia', () => {
   function downloadFixture(media: Record<string, unknown>) {
     const anchor = {
@@ -315,6 +362,7 @@ describe('locator.downloadMedia', () => {
     vi.stubGlobal('document', {
       createElement: () => anchor,
       body: { append: vi.fn() },
+      baseURI: 'https://site.example/',
     });
     vi.stubGlobal(
       'setTimeout',
@@ -407,6 +455,38 @@ describe('locator.downloadMedia', () => {
     ).resolves.toBeNull();
     expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
       'https://cdn.example.com/hero.webp',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('resolves a relative srcset candidate against the document base', async () => {
+    const f = downloadFixture({});
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ srcset: '/images/hero.webp 1x, /images/hero@2x.webp 2x' }]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://site.example/images/hero.webp',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('keeps a srcset URL that itself contains a comma whole', async () => {
+    const f = downloadFixture({});
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ srcset: '/c_fill,w_400/hero.jpg 1x' }]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://site.example/c_fill,w_400/hero.jpg',
       { signal: expect.any(AbortSignal) },
     );
   });
