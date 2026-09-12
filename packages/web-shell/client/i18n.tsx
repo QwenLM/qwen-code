@@ -1489,6 +1489,7 @@ const EN: Messages = {
   'localFiles.status.needsGesture': 'Reconnect to continue',
   'localFiles.status.failed': 'Failed',
   'localFiles.status.unavailable': 'Unavailable here',
+  'localFiles.status.resolving': 'Resolving…',
   'localFiles.needsSessionHint':
     'Start a session first. The bridge binds to exactly one session, so no other session can reach your files.',
   'localFiles.blocker.insecureContext':
@@ -1499,6 +1500,10 @@ const EN: Messages = {
     'This browser has no File System Access API. Use Chrome or Edge to connect a local directory.',
   'localFiles.blocker.workspaceIneligible':
     "This conversation's workspace cannot host a local directory (untrusted or live workspace).",
+  'localFiles.blocker.workspaceResolving':
+    'Which workspace this conversation belongs to is not known yet.',
+  'localFiles.blocker.unsupportedDaemon':
+    'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -5135,6 +5140,7 @@ const ZH: Messages = {
   'localFiles.status.needsGesture': '需要重新连接',
   'localFiles.status.failed': '连接失败',
   'localFiles.status.unavailable': '当前环境不可用',
+  'localFiles.status.resolving': '解析中…',
   'localFiles.needsSessionHint':
     '请先创建一个会话。桥只绑定一个会话，因此其他会话无法访问你的文件。',
   'localFiles.blocker.insecureContext':
@@ -5145,6 +5151,9 @@ const ZH: Messages = {
     '当前浏览器没有 File System Access API。请使用 Chrome 或 Edge 连接本地目录。',
   'localFiles.blocker.workspaceIneligible':
     '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。',
+  'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
+  'localFiles.blocker.unsupportedDaemon':
+    '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
