@@ -12243,19 +12243,16 @@ describe('LlmChat', async () => {
       });
 
       it('retries a quiet tool-result close rather than persisting the delivered prefix', async () => {
-        // The other arm of the acceptance gate's
-        // `lacksVisibleToolResultProgress` term, and the reason declining there
-        // strands no completed answer. On a tool-result send an attempt that
+        // The no-error arm of the quiet tool-result close. An attempt that
         // closes carrying only a thought part made no visible progress, which
-        // #7039 owns: it retries, and the prose an earlier attempt delivered is
-        // discarded either way. The closing attempt here carries NO trailing
-        // error — only attempt 1 is cut — so the discard is the
-        // quiet-tool-result policy's doing and not the gate's: the asymmetry
-        // that made the non-continuation case a defect (there, the identical
-        // attempt without the error is accepted and persisted) does not hold on
-        // this shape. With a trailing status-less frame the same shape keeps
-        // that frame on the transport arm instead of reclassifying it onto the
-        // invalid-stream budget; see the tool-result veto witness below.
+        // #7039 owns: it rides the invalid-stream retry and recovers on the
+        // third attempt, and the fresh restart discards the prose attempt 1
+        // delivered — that discard is this policy's doing, not the acceptance
+        // gate's. The with-error sibling below is why the gate's progress term
+        // is turn-scoped: a trailing frame used to leave the same shape owned
+        // by no arm at all, so the turn died on a transport artefact where the
+        // identical attempt one frame earlier recovered. Both arms now end
+        // here.
         vi.useFakeTimers();
         try {
           const recordAssistantTurn = vi.fn();
@@ -12325,6 +12322,94 @@ describe('LlmChat', async () => {
         }
       });
 
+      it('hands a trailing failure on a quiet tool-result close to the retry that owns it', async () => {
+        // R15-2, and the with-error sibling of the no-error case above. Any
+        // agentic tool-loop turn is exposed: the history tail carries a
+        // functionResponse, so every attempt of the send is a tool-result
+        // continuation. Attempt 2 is the quiet post-tool-result close that
+        // #7039 exists to retry — thought only, plus STOP — and the gateway
+        // then pushes a status-less frame in the usage tail. Three things line
+        // up: the acceptance gate declines on a progress term measured against
+        // the *attempt's* empty text rather than the turn's delivered prefix;
+        // the validation block that would throw NO_TOOL_RESULT_PROGRESS and
+        // ride the #7039 budget is guarded on `streamError === null`, so it is
+        // skipped; and the veto reads the close off the mirror and refuses the
+        // continuation. Replay is shut by the delivered prose, so no arm owns
+        // the turn: it dies on a transport artefact, leaving a dangling
+        // functionResponse with no model turn — which is what `--resume`
+        // rehydrates. Without the trailing error the identical attempt
+        // recovers on the third call, so the frame alone decides the outcome.
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              cutAfter([textChunk('Let me read that file. ')]),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        role: 'model',
+                        parts: [{ text: 'Reconsidering.', thought: true }],
+                      },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+                throw upstreamError;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('the recovered answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            {
+              message: [
+                {
+                  functionResponse: {
+                    id: 'call_quiet_close_with_frame',
+                    name: 'read_file',
+                    response: { output: 'file contents' },
+                  },
+                },
+              ],
+            },
+            'prompt-quiet-tool-result-close-with-frame',
+          );
+
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(60_000);
+          const { caughtError } = await collecting;
+
+          // The trailing frame no longer decides the turn's fate: #7039 owns
+          // the quiet close exactly as it does one frame earlier.
+          expect(caughtError).toBeUndefined();
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe(
+            'the recovered answer',
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('does not schedule a continuation over a closed finish reason on a tool-result send', async () => {
         // With a user[functionResponse] history tail every attempt is a
         // tool-result continuation, so processStreamResponse defers the
@@ -12353,6 +12438,16 @@ describe('LlmChat', async () => {
               code: 'KeyError',
               requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
             });
+          // A 5xx sits outside the acceptance gate's allow-list, so the gate
+          // declines and this veto is the operative cause — the shape this
+          // witness exists for. A socket cut or a traced status-less frame on a
+          // tool-result send is owned elsewhere now: the gate accepts it and
+          // #7039 retries the quiet close (see the two siblings above).
+          const serverError = () =>
+            Object.assign(new Error('Upstream inference unavailable'), {
+              status: 500,
+              code: 'server_error',
+            });
 
           vi.mocked(mockContentGenerator.generateContentStream)
             // Attempt 1 delivers prose and is cut, arming a continuation.
@@ -12362,22 +12457,12 @@ describe('LlmChat', async () => {
                 throw upstreamError();
               })(),
             )
-            // Attempt 2 closes the answer — STOP on a thought-only chunk —
-            // and is cut again where the usage tail belonged.
+            // Attempt 2 closes the answer with output of its own — visible text
+            // beside STOP — and the server then fails in the usage tail.
             .mockResolvedValueOnce(
               (async function* () {
-                yield {
-                  candidates: [
-                    {
-                      content: {
-                        role: 'model',
-                        parts: [{ text: 'Reconsidering.', thought: true }],
-                      },
-                      finishReason: 'STOP',
-                    },
-                  ],
-                } as unknown as GenerateContentResponse;
-                throw upstreamError();
+                yield textChunk('The file is empty.', 'STOP');
+                throw serverError();
               })(),
             )
             // Tripwire: consumed only by a wrongly scheduled third attempt.
@@ -12413,9 +12498,12 @@ describe('LlmChat', async () => {
             'fabricated tail',
           );
           // The not-taken log can only attribute the stop to the closed
-          // finish reason if the veto actually saw the close.
+          // finish reason if the veto actually saw the close — and on a
+          // tool-result send it can only see it through the observed-close
+          // mirror, because the deferral strips the reason off every chunk
+          // this loop receives.
           expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
-            'Transport stream retry not taken',
+            'Server stream retry not taken',
             expect.objectContaining({
               retryDecision: 'skipped_terminal_finish_reason',
             }),
@@ -12951,17 +13039,88 @@ describe('LlmChat', async () => {
         }
       });
 
-      it('propagates a trailing failure from a continuation attempt that delivered nothing at all', async () => {
-        // The other side of the R11-1 conjunct. The turn does have delivered
-        // text and this attempt did close, so a turn-scoped reading of
-        // completeness would accept it — but the attempt contributed nothing
-        // of its own, and accepting hands the turn to the empty-response
-        // validation below, which throws `InvalidStreamError` and so moves the
-        // failure onto the invalid-stream retry budget: a different error and a
-        // further attempt for what is still the same status-less frame. The
-        // gate declines instead and the frame propagates as itself.
+      it('continues when a continuation attempt closes without contributing parts', async () => {
+        // R15-1. Asked to resume an answer it considers complete, a model
+        // returns a bare finish chunk with no parts, and the attempt then dies
+        // in the usage tail. Two changes in this diff combine on that shape:
+        // the pipeline's error-path flush now delivers the parked empty finish
+        // (pre-diff it was dropped), so `lastFinishReason` reads `STOP`, and
+        // the closed-finish veto then refuses the continuation. The acceptance
+        // gate cannot take the turn either — its `hasAnyContent` conjunct is
+        // attempt-local and this attempt produced nothing — so every arm falls
+        // through, the error rethrows, and the prose attempt 1 already
+        // delivered reaches neither durable layer. The veto exists to stop a
+        // *fabricated tail* on an answer that completed with output; an attempt
+        // that contributed no output has nothing to fabricate onto, and the
+        // continuation is the arm that can still save the turn.
         vi.useFakeTimers();
         try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('Here is the game: ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                // A bare finish chunk: the close, with no parts of its own.
+                yield {
+                  candidates: [{ finishReason: 'STOP' }],
+                } as unknown as GenerateContentResponse;
+                throw socketCut();
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('the completed game', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'write a game' },
+            'prompt-continuation-closes-with-no-parts',
+          );
+
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(60_000);
+          const { caughtError } = await collecting;
+
+          expect(caughtError).toBeUndefined();
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          // The turn completes, and the prose the caller watched stream is in
+          // both durable layers rather than stranded.
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe(
+            'Here is the game: the completed game',
+          );
+          expect(chatWithRecording.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'Here is the game: the completed game' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('keeps an attempt that delivered nothing at all off the invalid-stream budget', async () => {
+        // The other side of the R11-1 `hasAnyContent` conjunct, and the
+        // status-less sibling of the socket-cut case above. The turn does have
+        // delivered text and this attempt did close, so a turn-scoped reading
+        // of completeness alone would accept it — but the attempt contributed
+        // nothing of its own, and accepting hands the turn to the
+        // empty-response validation, which throws `InvalidStreamError` and
+        // re-sends the *original* prompt on the invalid-stream budget, losing
+        // the prefix the caller already watched stream. Declining leaves the
+        // shape with the continuation arm, which resumes from that prefix: the
+        // same third attempt, but the delivered prose survives into both
+        // durable layers.
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
           const upstreamError = Object.assign(new Error("'id'"), {
             code: 'KeyError',
             requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
@@ -12978,15 +13137,13 @@ describe('LlmChat', async () => {
                 throw upstreamError;
               })(),
             )
-            // Tripwire: consumed only if the failure is reclassified onto the
-            // invalid-stream budget and re-sent.
             .mockResolvedValueOnce(
               (async function* () {
-                yield textChunk('a regenerated answer', 'STOP');
+                yield textChunk('the completed game', 'STOP');
               })(),
             );
 
-          const stream = await chat.sendMessageStream(
+          const stream = await chatWithRecording.sendMessageStream(
             'test-model',
             { message: 'write a game' },
             'prompt-continuation-attempt-delivered-nothing',
@@ -12997,17 +13154,15 @@ describe('LlmChat', async () => {
           await vi.advanceTimersByTimeAsync(60_000);
           const { caughtError } = await collecting;
 
+          expect(caughtError).toBeUndefined();
           expect(
             mockContentGenerator.generateContentStream,
-          ).toHaveBeenCalledTimes(2);
-          // The frame itself, not `Model stream ended with empty response
-          // text.` out of the validation block.
-          expect((caughtError as Error)?.message).toBe("'id'");
-          expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
-            'Transport stream retry not taken',
-            expect.objectContaining({
-              retryDecision: 'skipped_terminal_finish_reason',
-            }),
+          ).toHaveBeenCalledTimes(3);
+          // Resumed from the prefix rather than re-sent from the original
+          // prompt: the recorded turn carries both halves.
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe(
+            'Here is the game: the completed game',
           );
         } finally {
           vi.useRealTimers();

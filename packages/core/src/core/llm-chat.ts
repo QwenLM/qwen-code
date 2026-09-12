@@ -3895,23 +3895,33 @@ export class LlmChat {
             // produces a sequence providers reject (the same constraint the
             // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
             // check), and the scheduler's repair path already covers it.
-            // A closed finish reason means the attempt's answer already
-            // completed (or was definitively blocked) — the failure landed
-            // while the SDK was absorbing trailing metadata, so there is
-            // nothing to resume and a continuation would only fabricate a
-            // tail into durable history. MAX_TOKENS stays continuable: it
-            // marks a *truncated* answer, the exact shape this arm exists
-            // for.
+            // A closed finish reason on an attempt that produced output of its
+            // own means that answer already completed (or was definitively
+            // blocked) — the failure landed while the SDK was absorbing
+            // trailing metadata, so there is nothing to resume and a
+            // continuation would only fabricate a tail into durable history.
+            // MAX_TOKENS stays continuable: it marks a *truncated* answer, the
+            // exact shape this arm exists for.
             // The yielded finish reason governs when one reached the
             // caller; when the tool-result deferral stripped it from the
             // yielded chunks, the close survives only in what
             // processStreamResponse observed.
             const attemptFinishReason =
               lastFinishReason ?? self.lastObservedClosedFinishReason;
+            // Scoped to an attempt that closed *with output of its own*. The
+            // fabricated tail this veto exists to prevent needs something to
+            // fabricate onto: an attempt that contributed no visible part —
+            // a bare finish chunk, which is what a model returns when asked to
+            // resume an answer it considers complete — leaves the turn with
+            // nothing persisted and every other arm shut, so refusing the
+            // continuation there strands prose an earlier attempt delivered.
+            const attemptClosedWithOwnOutput =
+              attemptFinishReason !== undefined &&
+              CLOSED_FINISH_REASONS.has(attemptFinishReason) &&
+              streamYieldedContentChunk;
             const canContinueAfterTransportCut =
               isContinuableStreamCut &&
-              (attemptFinishReason === undefined ||
-                !CLOSED_FINISH_REASONS.has(attemptFinishReason)) &&
+              !attemptClosedWithOwnOutput &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
@@ -3964,14 +3974,12 @@ export class LlmChat {
                   : 'Transport stream retry not taken',
                 {
                   retryPath: 'stream',
-                  retryDecision:
-                    attemptFinishReason !== undefined &&
-                    CLOSED_FINISH_REASONS.has(attemptFinishReason)
-                      ? 'skipped_terminal_finish_reason'
-                      : streamYieldedContentChunk ||
-                          transportContinuationText.trim().length > 0
-                        ? 'skipped_after_content'
-                        : 'exhausted',
+                  retryDecision: attemptClosedWithOwnOutput
+                    ? 'skipped_terminal_finish_reason'
+                    : streamYieldedContentChunk ||
+                        transportContinuationText.trim().length > 0
+                      ? 'skipped_after_content'
+                      : 'exhausted',
                   attempts: streamReplayRetryCount,
                   maxRetries: STREAM_RETRY_CONFIG.maxRetries,
                   continuationAttempts: transportContinuationCount,
@@ -6050,9 +6058,11 @@ export class LlmChat {
     // caller watched stream then reached neither history nor the JSONL record.
     //
     // The attempt must still have contributed something of its own. One that
-    // delivered nothing at all keeps the path it has today, where the error
-    // propagates instead of being accepted into the empty-response validation
-    // below. With no prefix the conjuncts reduce to `contentText`, so every
+    // delivered nothing at all is left to the continuation arm, which resumes
+    // from the prefix; accepting it here would route it to the empty-response
+    // validation instead, and the fresh restart that follows re-sends the
+    // original prompt and loses the prose the caller already watched stream.
+    // With no prefix the conjuncts reduce to `contentText`, so every
     // non-continuation shape is decided exactly as before.
     //
     // Guarded on `streamError` because only the gate below reads this, and the
@@ -6067,10 +6077,12 @@ export class LlmChat {
             contentText,
           )
         : contentText;
-    // Shared with the stream-validation block below, and hoisted rather than
-    // duplicated: this gate nulls `streamError`, which is what lets that block
-    // run, so accepting a turn it would then reject only swaps the error class
-    // and the retry budget it rides, without saving the turn. `contentText`
+    // `hasAnyContent` is shared with the stream-validation block below, hoisted
+    // rather than duplicated so the two reads cannot drift.
+    // `lacksVisibleToolResultProgress` is deliberately not what the acceptance
+    // gate reads: it must stay attempt-local, because it is what makes a quiet
+    // post-tool-result close an invalid stream. The gate uses the turn-scoped
+    // sibling declared below, whose comment gives the reasoning. `contentText`
     // cannot change between the two reads on any path where that block still
     // runs — its only reassignment below sits inside the XML tool-call
     // recovery, which sets `hasToolCall` and so skips the block.
@@ -6078,6 +6090,20 @@ export class LlmChat {
     const lacksVisibleToolResultProgress =
       isToolResultContinuation &&
       (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
+    // This gate's own progress term is turn-scoped, unlike the binding above
+    // that the validation block reads. A continuation attempt closing quietly
+    // after a tool result has no text of its own, but the turn does have
+    // delivered text, and declining on the attempt's measure leaves that shape
+    // owned by nothing: the validation block which would throw
+    // NO_TOOL_RESULT_PROGRESS and ride the #7039 retry is guarded on
+    // `streamError === null`, so it is skipped while the error stands, and
+    // replay is shut by the delivered prose. Accepting hands the turn to that
+    // block — the same outcome as one frame earlier, when no trailing error
+    // arrives. The hoisted binding must stay attempt-local: it is what makes
+    // the quiet close an invalid stream in the first place.
+    const lacksVisibleToolResultProgressForTrailingGate =
+      isToolResultContinuation &&
+      (!completedText || completedText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
 
     // A failure that lands after the model already closed its answer —
     // typically a gateway error frame pushed into an already-200 stream
@@ -6095,7 +6121,7 @@ export class LlmChat {
       closedFinishReason !== undefined &&
       completedText &&
       hasAnyContent &&
-      !lacksVisibleToolResultProgress
+      !lacksVisibleToolResultProgressForTrailingGate
     ) {
       // Two failure classes can be swallowed here: a curated socket-level cut,
       // and a status-less upstream frame the provider traced with its own
