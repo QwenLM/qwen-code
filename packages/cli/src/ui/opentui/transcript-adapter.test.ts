@@ -96,6 +96,71 @@ describe('transcriptToEvents subtyped user records', () => {
     ]);
   });
 
+  it('strips an injected system-reminder envelope from replayed user text', () => {
+    // The Ink resume path strips the one-shot envelope; the OpenTUI twin
+    // replays the same session file and must agree on the row.
+    const line = JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\nmy prompt',
+          },
+        ],
+      },
+    });
+    const events = transcriptToEvents(
+      [line, JSON.stringify({ type: 'done' })].join('\n'),
+    );
+    expect(events).toEqual([
+      { type: 'user', text: 'my prompt' },
+      { type: 'done' },
+    ]);
+  });
+
+  it('strips the envelope when displayText wins the resolution chain', () => {
+    // When provenance was unavailable at submit time the persisted
+    // displayText IS the enveloped text, and displayText resolves ahead of
+    // the parts — narrowing the strip to the parts fallback must not leave
+    // this branch uncovered.
+    const line = JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        parts: [{ text: 'DIFFERENTLY WORDED PARTS TEXT' }],
+      },
+      systemPayload: {
+        displayText:
+          '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\nmy prompt',
+      },
+    });
+    const events = transcriptToEvents(
+      [line, JSON.stringify({ type: 'done' })].join('\n'),
+    );
+    expect(events).toEqual([
+      { type: 'user', text: 'my prompt' },
+      { type: 'done' },
+    ]);
+  });
+
+  it('keeps a user-authored leading envelope the record parts also carry', () => {
+    // Same gate as Ink's resume path: when the record's model-facing parts
+    // carry the displayText's leading run, the record cannot prove the run
+    // was injected, so both renderers keep the user's text verbatim.
+    const text =
+      '<system-reminder>\nuser pasted note\n</system-reminder>\n\nmy prompt';
+    const line = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', parts: [{ text }] },
+      systemPayload: { displayText: text },
+    });
+    const events = transcriptToEvents(
+      [line, JSON.stringify({ type: 'done' })].join('\n'),
+    );
+    expect(events).toEqual([{ type: 'user', text }, { type: 'done' }]);
+  });
+
   it('still skips side-band subtyped user records', () => {
     const events = transcriptToEvents(
       [

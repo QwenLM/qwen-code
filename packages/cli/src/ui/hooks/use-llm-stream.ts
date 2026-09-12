@@ -99,7 +99,12 @@ import {
   isBtwCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
-import { findLastUserItemIndex } from '../utils/historyUtils.js';
+import {
+  findLastUserItemIndex,
+  isOnlyLeadingSystemReminders,
+  omitSystemReminderBlocks,
+  stripLeadingSystemReminders,
+} from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -518,6 +523,23 @@ export interface CancelSubmitInfo {
   lastTurnUserItem: {
     id: number;
     text: string;
+    /**
+     * The submit-time model-bound text of the turn — injected one-shot
+     * envelopes plus the typed prompt — while `text` is the display form
+     * with the envelopes stripped. The cancel handler re-arms the envelope
+     * from this for the restored prompt's next submit when the cancelled
+     * turn's API-side copy was dropped — edited or not; delivery is not
+     * tied to buffer identity (see pendingRestoredRemindersRef in
+     * AppContainer).
+     */
+    modelText: string;
+    /**
+     * The producer's envelope decomposition, carried when the adoption
+     * gate used it (a mid-aggregate envelope): the cancel restore's
+     * suffix arithmetic cannot recover a mid-string envelope from
+     * `modelText`/`text` alone.
+     */
+    reminders?: string;
     submittedPrompt?: string;
   } | null;
   /**
@@ -534,6 +556,15 @@ export interface CancelSubmitInfo {
    * when the consumer's React history snapshot is still stale.
    */
   turnProducedMeaningfulContent: boolean;
+  /**
+   * True once the turn's request was handed to the model
+   * (`sendMessageStream` called). The cancel handler's preserve-output
+   * branches keep the turn's API-side copy, so a one-shot reminder
+   * envelope on it was already delivered; a turn cancelled before
+   * dispatch holds no API-side copy, so its envelope must be re-armed
+   * for the resubmit instead of dropped.
+   */
+  turnDispatchedToApi: boolean;
   /**
    * True when the cancelled turn was a Goal continuation turn. Such a turn
    * appends a synthetic continuation prompt to the chat history but, unlike a
@@ -819,6 +850,8 @@ export const useLlmStream = (
   const lastTurnUserItemRef = useRef<{
     id: number;
     text: string;
+    modelText: string;
+    reminders?: string;
     submittedPrompt?: string;
   } | null>(null);
   const canUndoLastLoggedUserMessageRef = useRef(false);
@@ -829,6 +862,7 @@ export const useLlmStream = (
   // committed text alongside the cancelled prompt. Reset at turn start
   // alongside lastTurnUserItemRef.
   const turnSawContentEventRef = useRef(false);
+  const turnDispatchedToApiRef = useRef(false);
   const lastPromptErroredRef = useRef(false);
   const goalTerminalErrorRef = useRef(false);
   // Envelope parts stripped from `lastPromptRef` when their drained
@@ -1469,6 +1503,7 @@ export const useLlmStream = (
         lastTurnUserItem: lastTurnUserItemRef.current,
         canUndoLastLoggedUserMessage: canUndoLastLoggedUserMessageRef.current,
         turnProducedMeaningfulContent: turnSawContentEventRef.current,
+        turnDispatchedToApi: turnDispatchedToApiRef.current,
         wasGoalTurn: activeGoalTurnRef.current !== null,
       });
     } finally {
@@ -1582,6 +1617,7 @@ export const useLlmStream = (
       prompt_id: string,
       submitType: SendMessageType,
       submittedPrompt: string | undefined,
+      producerReminders: string | undefined,
       preserveTurnOwnership: boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
@@ -1607,6 +1643,45 @@ export const useLlmStream = (
 
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
+        // `trimmedQuery` is the model text and may carry an injected
+        // one-shot reminder envelope; everything the user reads back
+        // (transcript, ↑-recall, cancel-restore) must use the typed text
+        // instead. Adopt the producer-carried provenance only when it is a
+        // display form of the model text: identical to it (nothing was
+        // injected, so a user-authored leading envelope survives as
+        // content) or differing from it by a pure leading-envelope prefix.
+        // A collapsed large-paste placeholder or an attachment `@ref`
+        // prefix is neither and would displace the real prompt on every
+        // read-back surface, so those fall back to the shape strip — which
+        // never returns empty for non-empty input, so an envelope-only
+        // prompt stays visible as-is.
+        const trimmedSubmittedPrompt = submittedPrompt?.trim() || undefined;
+        const strippedQuery = stripLeadingSystemReminders(trimmedQuery);
+        // A queue aggregate's injected envelope can sit mid-string (a
+        // non-first member), where suffix arithmetic fails: adopt the
+        // projection when removing exactly the producer-decomposed blocks
+        // from the model text yields it, and keep the decomposition so the
+        // cancel restore can re-arm what the display form hides.
+        const adoptedReminders =
+          trimmedSubmittedPrompt !== undefined &&
+          producerReminders !== undefined &&
+          omitSystemReminderBlocks(trimmedQuery, producerReminders) ===
+            trimmedSubmittedPrompt
+            ? producerReminders
+            : undefined;
+        const userVisibleQuery =
+          trimmedSubmittedPrompt !== undefined &&
+          (trimmedSubmittedPrompt === trimmedQuery ||
+            (trimmedQuery.endsWith(trimmedSubmittedPrompt) &&
+              isOnlyLeadingSystemReminders(
+                trimmedQuery.slice(
+                  0,
+                  trimmedQuery.length - trimmedSubmittedPrompt.length,
+                ),
+              )) ||
+            adoptedReminders !== undefined)
+            ? trimmedSubmittedPrompt
+            : strippedQuery;
 
         // Notification messages (e.g. background agent completions) are
         // pre-processed by the notification drain loop which already
@@ -1635,7 +1710,7 @@ export const useLlmStream = (
         }
 
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
-        await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
+        await logger?.logMessage(MessageSenderType.USER, userVisibleQuery);
         canUndoLastLoggedUserMessageRef.current =
           !preserveTurnOwnership && logger != null;
 
@@ -1740,7 +1815,26 @@ export const useLlmStream = (
           const insertedId = addItem(
             {
               type: MessageType.USER,
-              text: trimmedQuery,
+              text: userVisibleQuery,
+              // Every prompt reaching this point is sent to the model — the
+              // slash/shell/cron paths returned above — so stamp the
+              // provenance instead of leaving isRealUserTurn to the lexical
+              // fallback, which misclassifies a '?'-leading prompt once the
+              // envelope strip removed its '<system-reminder>' first char.
+              sentToModel: true,
+              // Keep the model-bound text on the item when it differs: the
+              // rewind restore re-arms the consumed one-shot envelope from
+              // it (the composer refill only has `text`).
+              ...(userVisibleQuery === trimmedQuery
+                ? {}
+                : { modelText: trimmedQuery }),
+              // The producer's per-member envelope decomposition, carried
+              // when the adoption gate verified it: a mid-aggregate
+              // envelope is invisible to the rewind restore's leading-only
+              // split of `modelText`, so the item keeps the run itself.
+              ...(adoptedReminders === undefined
+                ? {}
+                : { reminders: adoptedReminders }),
               promptId: prompt_id,
             } as HistoryItemWithoutId,
             userMessageTimestamp,
@@ -1750,10 +1844,18 @@ export const useLlmStream = (
           // skipped insertion (consecutive-duplicate user); the older
           // matching USER in history carries a DIFFERENT id, so the
           // mismatch makes auto-restore bail correctly in that case.
+          // The text must stay identical to the history item's: the
+          // cancel handler compares the two, and it is also what gets
+          // restored into the composer. `modelText` keeps the enveloped
+          // original so an unedited resubmit can replay it.
           if (!preserveTurnOwnership) {
             lastTurnUserItemRef.current = {
               id: insertedId,
-              text: trimmedQuery,
+              text: userVisibleQuery,
+              modelText: trimmedQuery,
+              ...(adoptedReminders === undefined
+                ? {}
+                : { reminders: adoptedReminders }),
               ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
             };
           }
@@ -3434,7 +3536,11 @@ export const useLlmStream = (
             addItem(
               {
                 type: MessageType.USER,
-                text: message,
+                // The persisted record above keeps the raw model-facing
+                // text; the transcript row drops an injected one-shot
+                // envelope the queue drain carried, matching the strip
+                // both resume paths apply to the same record.
+                text: stripLeadingSystemReminders(message),
                 // Intentionally false: preserves isRealUserTurn/rewind semantics (steer is not a standalone user turn).
                 sentToModel: false,
               },
@@ -3519,9 +3625,25 @@ export const useLlmStream = (
         onDeliveryFailed?: () => void;
         onAdmissionFailed?: () => void;
         onGoalClaimDeferred?: () => void;
+        /**
+         * Fired when the turn aborts after admission but BEFORE its
+         * request reached the model (a failed at-command read, a deferred
+         * goal-claim): unlike `onDeliveryFailed`, it never fires for a
+         * dispatched turn, so a caller may safely re-arm a one-shot
+         * envelope the consumed submit text carried.
+         */
+        onUndispatchedAbort?: () => void;
         onRequestStarted?: () => void;
         steerInput?: SteerInput;
         submittedPrompt?: string;
+        /**
+         * The queue producer's per-member decomposition of the injected
+         * `<system-reminder>` envelopes inside `query` (see
+         * aggregateUserMessages). Lets the display-text adoption gate
+         * recognize a projection whose envelope sits mid-string (a
+         * non-first aggregate member), where suffix arithmetic cannot.
+         */
+        reminders?: string;
         goal?: QueuedGoalTurn;
         claimGoalTurn?: () => QueuedGoalTurn | undefined;
         userAdmission?: DirectUserAdmission;
@@ -3561,6 +3683,10 @@ export const useLlmStream = (
       const submittedPrompt =
         submitType === SendMessageType.UserQuery
           ? metadata?.submittedPrompt
+          : undefined;
+      const producerReminders =
+        submitType === SendMessageType.UserQuery
+          ? metadata?.reminders
           : undefined;
 
       // Prevent concurrent executions of submitQuery, but allow continuations
@@ -3616,6 +3742,7 @@ export const useLlmStream = (
         lastTurnUserItemRef.current = null;
         canUndoLastLoggedUserMessageRef.current = false;
         turnSawContentEventRef.current = false;
+        turnDispatchedToApiRef.current = false;
         handledToolCallFingerprintsRef.current.clear();
         duplicateProviderToolCallResponseIdsRef.current.clear();
         pendingDuplicateToolResponsesRef.current = [];
@@ -3783,6 +3910,7 @@ export const useLlmStream = (
                     prompt_id!,
                     submitType,
                     submittedPrompt,
+                    producerReminders,
                     allowConcurrentBtwDuringResponse ||
                       isDetachedToolContinuation,
                   );
@@ -3808,6 +3936,7 @@ export const useLlmStream = (
         if (!shouldProceed || queryToSend === null) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
           releaseSubmissionLease();
+          metadata?.onUndispatchedAbort?.();
           metadata?.onDeliveryFailed?.();
           return;
         }
@@ -3818,6 +3947,7 @@ export const useLlmStream = (
           queuedGoal = metadata.claimGoalTurn();
           if (!queuedGoal) {
             releaseSubmissionLease();
+            metadata?.onUndispatchedAbort?.();
             metadata.onGoalClaimDeferred?.();
             return;
           }
@@ -4016,6 +4146,9 @@ export const useLlmStream = (
           const providerSignal = inheritedToolContinuationOwner
             ? processingSignal
             : abortSignal;
+          // Mark dispatch before the request leaves: a cancel racing the
+          // stream setup must still know the turn reached the API.
+          turnDispatchedToApiRef.current = true;
           const stream = llmClient.sendMessageStream(
             finalQueryToSend,
             providerSignal,

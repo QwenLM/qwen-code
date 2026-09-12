@@ -12,6 +12,7 @@ import type {
   GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
+import { isOnlyLeadingSystemReminders } from '../utils/historyUtils.js';
 import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
 export interface QueuedGoalTurn extends GoalContinuationTurn {
@@ -24,6 +25,16 @@ export interface QueuedUserSubmission {
   kind: 'user';
   modelText: string;
   submittedPrompt?: string;
+  /**
+   * The members' injected leading `<system-reminder>` envelope runs,
+   * joined in queue order. The aggregate's model text can carry a
+   * member's envelope mid-string (only the first member's envelope is
+   * leading), where the restore path's leading-only split cannot see
+   * it — carrying the producer's per-member decomposition lets the
+   * restore re-arm those consumed one-shot notices instead of dropping
+   * them.
+   */
+  reminders?: string;
   turnKey: string;
 }
 
@@ -118,18 +129,38 @@ function aggregateUserMessages(
   messages: readonly QueuedMessage[],
 ): QueuedUserSubmission {
   const text = messages.map((message) => message.text).join('\n\n');
-  // Every member contributes a projection — its own when it has one, its
-  // model text otherwise — so a single projection-less member cannot drop
-  // a peer message's one-liner and surface the raw envelope as the
-  // user's prompt instead.
-  const submittedPrompt = messages
-    .map((message) => message.submittedPrompt ?? message.text)
-    .join('\n\n');
+  // Every member contributes a projection — its producer-carried one when
+  // it has one, its own text verbatim otherwise. A shape-stripped fallback
+  // is not producer provenance: a projection-less member (a vim submit, a
+  // legacy restore) keeps its text untouched rather than having a
+  // user-authored leading block classified as an injected envelope, and a
+  // single projection-less member still cannot drop a peer message's
+  // one-liner.
+  const projections = messages.map(
+    (message) => message.submittedPrompt ?? message.text,
+  );
+  // Each member's injected envelope run: the difference between its model
+  // text and its projection when that difference is a pure leading
+  // envelope prefix. A user-authored leading block (projection carried
+  // verbatim) contributes nothing — and neither does a projection-less
+  // member, whose verbatim projection leaves no difference to arm.
+  const reminders = messages
+    .map((message, index) => {
+      const projection = projections[index];
+      if (!message.text.endsWith(projection)) return '';
+      const prefix = message.text.slice(
+        0,
+        message.text.length - projection.length,
+      );
+      return isOnlyLeadingSystemReminders(prefix) ? prefix : '';
+    })
+    .join('');
   return {
     kind: 'user',
     modelText: text,
     turnKey: messages[0].key,
-    submittedPrompt,
+    submittedPrompt: projections.join('\n\n'),
+    ...(reminders === '' ? {} : { reminders }),
   };
 }
 
@@ -404,7 +435,16 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   return {
-    messageQueue: queuedMessages.map(({ text }) => text),
+    // Preview rows are display forms, not model text: the entry's
+    // producer projection verbatim when it has one (it is where a
+    // user-authored leading envelope survives as content), its own text
+    // otherwise — a projection-less entry (a vim submit, a legacy restore)
+    // has no provenance to strip by, so the preview shows exactly what a
+    // pop would restore. Peer entries always carry their displayText as
+    // the projection.
+    messageQueue: queuedMessages.map(
+      ({ text, submittedPrompt }) => submittedPrompt ?? text,
+    ),
     pendingSubmissionCount: queuedMessages.length + queuedGoalTurns.length,
     addMessage,
     addPeerMessage,

@@ -52,6 +52,7 @@ import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
 import { MessageType, StreamingState, ToolCallStatus } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import { isRealUserTurn } from '../utils/historyMapping.js';
 import {
   MAX_INLINE_IMAGE_ENCODED_LENGTH,
   MAX_INLINE_IMAGES_PER_ITEM,
@@ -829,6 +830,473 @@ describe('useLlmStream', () => {
 
     expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
       'submittedPrompt',
+    );
+  });
+
+  it('keeps an injected system-reminder envelope out of everything the user reads back', async () => {
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const modelText =
+      '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\nreview this';
+
+    await act(async () => {
+      await result.current.submitQuery(modelText, SendMessageType.UserQuery);
+    });
+
+    // The envelope is model context: the request must still carry it.
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+    // The transcript shows what the user typed, and the ↑-recall log that
+    // seeds the next session's composer must not resurrect the envelope.
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe('review this');
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      'review this',
+    );
+  });
+
+  it('strips stacked envelopes but never hides user-authored text', async () => {
+    const { result } = renderTestHook();
+    const lastUserText = () =>
+      mockAddItem.mock.calls
+        .filter((call) => call[0].type === MessageType.USER)
+        .at(-1)?.[0].text;
+
+    await act(async () => {
+      await result.current.submitQuery(
+        '<system-reminder>one</system-reminder>\n\n' +
+          '<system-reminder>two</system-reminder>\n\nreview this',
+        SendMessageType.UserQuery,
+      );
+    });
+    expect(lastUserText()).toBe('review this');
+
+    // An envelope the user pasted themselves is content, not injected
+    // context — mid-message and unterminated envelopes stay visible.
+    for (const pasted of [
+      'review <system-reminder>pasted</system-reminder> this',
+      '<system-reminder>never closed\nreview this',
+    ]) {
+      mockAddItem.mockClear();
+      await act(async () => {
+        await result.current.submitQuery(pasted, SendMessageType.UserQuery);
+      });
+      expect(lastUserText()).toBe(pasted);
+    }
+  });
+
+  it('keeps an envelope-only submission visible on every read-back surface', async () => {
+    const mockLogMessage = vi.fn();
+    const cancelSubmitSpy = vi.fn();
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {});
+      })(),
+    );
+    const { result } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      cancelSubmitSpy,
+      { logMessage: mockLogMessage } as any,
+    );
+    const modelText =
+      '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>';
+
+    await act(async () => {
+      result.current.submitQuery(modelText, SendMessageType.UserQuery);
+    });
+
+    // Stripping would leave nothing, so the raw text stands: no surface may
+    // hide the submission by turning it into an empty string.
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(modelText);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      modelText,
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+
+    // The cancel-restore handoff keeps the raw text too.
+    act(() => {
+      result.current.cancelOngoingRequest();
+    });
+    expect(cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem).toEqual({
+      id: expect.any(Number),
+      text: modelText,
+      modelText,
+    });
+  });
+
+  it('keeps a user-authored leading envelope when provenance says the user typed it', async () => {
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const typedText =
+      '<system-reminder>\nuser pasted note\n</system-reminder>\n\nreview this';
+    const modelText =
+      '<system-reminder>\nmanaged context\n</system-reminder>\n\n' + typedText;
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: typedText },
+      );
+    });
+
+    // The model request carries both envelopes…
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+    // …while every read-back surface keeps the user's own leading block:
+    // provenance says they typed it, so it is content, not injected context.
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(typedText);
+    // The model-bound text rides on the item so a rewind restore can
+    // re-arm the consumed envelope (the composer refill only has `text`).
+    expect(userItems[0][0].modelText).toBe(modelText);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      typedText,
+    );
+  });
+
+  it('adopts the queue projection when the producer decomposition places the envelope mid-string', async () => {
+    // A drained two-member aggregate whose SECOND member carried the
+    // injected envelope: the projection is no suffix of the model text, so
+    // only the producer-carried `reminders` decomposition can prove the
+    // adoption. The model request keeps the envelope; the transcript row
+    // and the ↑-recall log show the projection.
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const envelope =
+      '<system-reminder>\nmanaged context\n</system-reminder>\n\n';
+    const modelText = `first message\n\n${envelope}second message`;
+    const projection = 'first message\n\nsecond message';
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: projection, reminders: envelope },
+      );
+    });
+
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(projection);
+    expect(userItems[0][0].modelText).toBe(modelText);
+    // The producer decomposition rides the committed item too: a rewind
+    // restore re-arms a mid-aggregate envelope from it, which the
+    // leading-only split of `modelText` cannot recover.
+    expect(userItems[0][0].reminders).toBe(envelope);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      projection,
+    );
+  });
+
+  it('carries the producer envelope decomposition onto the cancel handoff for a mid-aggregate turn', async () => {
+    // The cancelled aggregate's envelope sits mid-string: the restore
+    // path's suffix arithmetic cannot recover it from modelText/text
+    // alone, so the adopted decomposition rides the cancel handoff.
+    const cancelSubmitSpy = vi.fn();
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {});
+      })(),
+    );
+    const { result } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      cancelSubmitSpy,
+    );
+    const envelope =
+      '<system-reminder>\nmanaged context\n</system-reminder>\n\n';
+    const modelText = `first message\n\n${envelope}second message`;
+    const projection = 'first message\n\nsecond message';
+
+    await act(async () => {
+      result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: projection, reminders: envelope },
+      );
+    });
+    act(() => {
+      result.current.cancelOngoingRequest();
+    });
+
+    expect(cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem).toEqual({
+      id: expect.any(Number),
+      text: projection,
+      modelText,
+      reminders: envelope,
+      submittedPrompt: projection,
+    });
+  });
+
+  it('fires onUndispatchedAbort only when the turn never reaches the model', async () => {
+    // A failed at-command read exits after the armed envelope was consumed
+    // into the submit text but before any request went out: the caller
+    // re-arms the notice from this callback. A dispatched-then-failed turn
+    // must NOT fire it — its API-side copy already delivered the envelope.
+    handleAtCommandSpy.mockResolvedValue({
+      shouldProceed: false,
+      processedQuery: null,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    const onUndispatchedAbort = vi.fn();
+    const onDeliveryFailed = vi.fn();
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'read @/tmp/missing.png',
+        SendMessageType.UserQuery,
+        undefined,
+        {
+          submittedPrompt: 'read @/tmp/missing.png',
+          onUndispatchedAbort,
+          onDeliveryFailed,
+        },
+      );
+    });
+
+    expect(onUndispatchedAbort).toHaveBeenCalledTimes(1);
+    expect(onDeliveryFailed).toHaveBeenCalledTimes(1);
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+    // A dispatched turn that then fails fires onDeliveryFailed alone.
+    handleAtCommandSpy.mockResolvedValue({
+      shouldProceed: true,
+      processedQuery: [{ text: 'second turn' }],
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.Error,
+          value: { error: { message: 'boom' } },
+        };
+        yield {
+          type: ServerLlmEventType.Finished,
+          value: { reason: 'STOP', usageMetadata: undefined },
+        };
+      })(),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'second @turn',
+        SendMessageType.UserQuery,
+        undefined,
+        {
+          submittedPrompt: 'second @turn',
+          onUndispatchedAbort,
+          onDeliveryFailed,
+        },
+      );
+    });
+
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    expect(onDeliveryFailed).toHaveBeenCalledTimes(2);
+    expect(onUndispatchedAbort).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires onUndispatchedAbort when the goal-claim check defers the turn', async () => {
+    // The goal-claim exit is the other post-admission pre-dispatch abort:
+    // the consumed envelope was never delivered, so the caller re-arms it.
+    const onUndispatchedAbort = vi.fn();
+    const onGoalClaimDeferred = vi.fn();
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'a goal-bound prompt',
+        SendMessageType.UserQuery,
+        undefined,
+        {
+          claimGoalTurn: () => undefined,
+          onUndispatchedAbort,
+          onGoalClaimDeferred,
+        },
+      );
+    });
+
+    expect(onGoalClaimDeferred).toHaveBeenCalledTimes(1);
+    expect(onUndispatchedAbort).toHaveBeenCalledTimes(1);
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('shows the expanded paste text, not the collapsed placeholder, as the visible prompt', async () => {
+    // InputPrompt hands the raw buffer capture as submittedPrompt: for a
+    // large paste that is the collapsed placeholder, which is no suffix of
+    // the expanded model text. Adopting it verbatim would bury the real
+    // prompt on every read-back surface.
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const expanded = 'line1\nline2\nline3';
+    const placeholder = '[Pasted Content 3 lines]';
+
+    await act(async () => {
+      await result.current.submitQuery(
+        expanded,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: placeholder },
+      );
+    });
+
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(expanded);
+    expect(userItems[0][0].modelText).toBeUndefined();
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      expanded,
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(expanded);
+  });
+
+  it('keeps an attachment @ref prefix visible when provenance holds only the typed text', async () => {
+    // '@src/a.ts\n\nexplain this file' is the model text; submittedPrompt
+    // is 'explain this file'. Their difference is an attachment reference,
+    // not an injected envelope, so the display text keeps the reference.
+    const mockLogMessage = vi.fn();
+    const { result } = renderTestHook([], undefined, undefined, () => {}, {
+      logMessage: mockLogMessage,
+    } as any);
+    const modelText = '@src/a.ts\n\nexplain this file';
+    handleAtCommandSpy.mockResolvedValue({
+      shouldProceed: true,
+      processedQuery: [{ text: modelText }],
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: 'explain this file' },
+      );
+    });
+
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(modelText);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      modelText,
+    );
+  });
+
+  it('adopts queue-drain provenance that differs only by an injected envelope prefix', async () => {
+    // The queue drain submits the enveloped model text with the stripped
+    // aggregate projection as submittedPrompt: the row shows the projection
+    // and the item keeps the model text for the rewind re-arm.
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const modelText =
+      '<system-reminder>\nmanaged context\n</system-reminder>\n\nreview this';
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: 'review this' },
+      );
+    });
+
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe('review this');
+    expect(userItems[0][0].modelText).toBe(modelText);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      'review this',
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+  });
+
+  it('stamps a "?"-leading prompt as a real user turn once its envelope is stripped', async () => {
+    // The strip removes the '<system-reminder>' first char, so the lexical
+    // fallback in isRealUserTurn would misread a '?'-leading prompt as
+    // non-model text; the write site stamps the provenance instead.
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery(
+        '<system-reminder>\nnotice\n</system-reminder>\n\n?what does this do',
+        SendMessageType.UserQuery,
+      );
+    });
+
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe('?what does this do');
+    expect(userItems[0][0].sentToModel).toBe(true);
+    expect(isRealUserTurn(userItems[0][0] as unknown as HistoryItem)).toBe(
+      true,
     );
   });
 
@@ -6823,6 +7291,114 @@ describe('useLlmStream', () => {
     expect(mockSendMessageStream).toHaveBeenCalledOnce();
   });
 
+  it('strips an injected envelope from the live steer row while recording the raw text', async () => {
+    // A steer drained from the queue can carry a one-shot reminder envelope
+    // in its model text. The persisted record keeps the raw text (the API
+    // rebuild replays it), but the transcript row must show the user-visible
+    // form, matching the strip both resume paths apply to the same record.
+    const envelope =
+      '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\n';
+    const queuedPrompt = `${envelope}my steer text`;
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-envelope',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    // The recorder keeps the raw model-facing message…
+    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
+      [{ text: queuedPrompt }],
+      queuedPrompt,
+    );
+    // …while the transcript row shows only the user-visible text.
+    expect(mockAddItem).toHaveBeenCalledWith(
+      { type: MessageType.USER, text: 'my steer text', sentToModel: false },
+      expect.any(Number),
+    );
+  });
+
   it('records mid-turn queued user messages after tool results accept them', async () => {
     const queuedPrompt = 'save the logs locally first';
     const recordMidTurnUserMessage = vi.fn();
@@ -12487,9 +13063,14 @@ describe('useLlmStream', () => {
       // consecutive-duplicate user message. (Whether the content flag
       // ended up true depends on whether the stream's mock yielded
       // content before cancel; that's covered by a separate test below.)
+      // `text` mirrors the history item, so it drops the injected
+      // `<system-reminder>` envelope; `modelText` keeps the enveloped
+      // original so an unedited resubmit can replay it.
       expect(info?.lastTurnUserItem).toEqual({
         id: expect.any(Number),
-        text: '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
+        text: 'what time is it?',
+        modelText:
+          '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
         submittedPrompt: 'what time is it?',
       });
       expect(info?.canUndoLastLoggedUserMessage).toBe(true);
@@ -12609,6 +13190,7 @@ describe('useLlmStream', () => {
       expect(firstCall?.lastTurnUserItem).toEqual({
         id: expect.any(Number),
         text: 'first prompt',
+        modelText: 'first prompt',
       });
 
       // Retry the same prompt. Retry bypasses prepareQueryForLlm's
@@ -16557,6 +17139,7 @@ describe('useLlmStream', () => {
       {
         type: MessageType.USER,
         text: rawQuery,
+        sentToModel: true,
         promptId: expect.any(String),
       },
       userMessageTimestamp,
@@ -18154,7 +18737,9 @@ describe('useLlmStream', () => {
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
         ).toEqual({
           id: expect.any(Number),
-          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          text: 'First query',
+          modelText:
+            '<system-reminder>managed</system-reminder>\n\nFirst query',
           submittedPrompt: 'First query',
         });
         expect(
@@ -18248,7 +18833,9 @@ describe('useLlmStream', () => {
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
         ).toEqual({
           id: expect.any(Number),
-          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          text: 'First query',
+          modelText:
+            '<system-reminder>managed</system-reminder>\n\nFirst query',
           submittedPrompt: 'First query',
         });
       } finally {

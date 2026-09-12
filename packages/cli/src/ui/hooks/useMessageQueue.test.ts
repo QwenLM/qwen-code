@@ -572,6 +572,92 @@ describe('useMessageQueue', () => {
       expect(result.current.messageQueue).toEqual([]);
     });
 
+    it('carries each member’s injected envelope prefix as producer reminders', () => {
+      // A queued member whose envelope sits mid-aggregate is invisible to
+      // the restore path's leading-only split; the aggregate must carry
+      // the per-member envelope run so the restore can re-arm it.
+      const { result } = renderHook(() => useMessageQueue());
+      const envelope = '<system-reminder>\nnotice\n</system-reminder>\n\n';
+
+      act(() => {
+        result.current.addMessage('first message', false, 'first message');
+        result.current.addMessage(
+          `${envelope}second message`,
+          false,
+          'second message',
+        );
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText: `first message\n\n${envelope}second message`,
+        submittedPrompt: 'first message\n\nsecond message',
+        reminders: envelope,
+      });
+    });
+
+    it('arms no reminders for a user-authored leading envelope carried as its own projection', () => {
+      // The projection equals the model text, so nothing was injected —
+      // the user's own <system-reminder> block is content, not a reminder.
+      const { result } = renderHook(() => useMessageQueue());
+      const text =
+        '<system-reminder>\nuser pasted note\n</system-reminder>\n\nreview this';
+
+      act(() => {
+        result.current.addMessage(text, false, text);
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      // Exact shape: a `reminders` key would mean the user's own block was
+      // mis-classified as an injected prefix.
+      expect(popped).toEqual({
+        kind: 'user',
+        modelText: text,
+        submittedPrompt: text,
+        turnKey: expect.any(String),
+      });
+    });
+
+    it('arms no reminders and keeps the text for a projection-less member with a user-authored leading block', () => {
+      // A vim submit queues without a submittedPrompt, so the member has
+      // no producer provenance: the aggregate must not shape-strip its
+      // leading block into a projection (which would delete it from a
+      // restore and re-arm it onto a later unrelated prompt). The text is
+      // kept verbatim and no `reminders` key is produced.
+      const { result } = renderHook(() => useMessageQueue());
+      const text =
+        '<system-reminder>\nuser pasted note\n</system-reminder>\n\nreview this';
+
+      act(() => {
+        result.current.addMessage(text);
+      });
+
+      expect(result.current.messageQueue).toEqual([text]);
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      // Exact shape: a `reminders` key would mean the user's own block was
+      // mis-classified as an injected prefix.
+      expect(popped).toEqual({
+        kind: 'user',
+        modelText: text,
+        submittedPrompt: text,
+        turnKey: expect.any(String),
+      });
+    });
+
     it('reports the exact removed turn keys for Goal reservation release', () => {
       const { result } = renderHook(() => useMessageQueue());
       act(() => result.current.addMessage('queued user'));
@@ -670,7 +756,9 @@ describe('useMessageQueue', () => {
       });
 
       expect(popped).toBeNull();
-      expect(result.current.messageQueue).toEqual(['<envelope>']);
+      // The preview row shows the peer's display-text projection, not the
+      // model-bound envelope.
+      expect(result.current.messageQueue).toEqual(['A: one']);
     });
 
     it('counts only peer entries still waiting in the queue', () => {
@@ -1231,7 +1319,65 @@ describe('useMessageQueue', () => {
         drained = result.current.drainQueue();
       });
       expect(drained).toEqual([]);
-      expect(result.current.messageQueue).toEqual(['<envelope one>']);
+      expect(result.current.messageQueue).toEqual(['Session A: one']);
+    });
+  });
+
+  describe('preview projections (messageQueue)', () => {
+    it('returns the entry submittedPrompt verbatim when it has one', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      const typed =
+        '<system-reminder>\nuser note\n</system-reminder>\n\nreview this';
+      act(() => {
+        result.current.addMessage(
+          `<system-reminder>\ninjected notice\n</system-reminder>\n\n${typed}`,
+          false,
+          typed,
+        );
+      });
+      // A user-authored leading envelope survives as content: the preview
+      // shows the producer projection, not a shape-stripped text.
+      expect(result.current.messageQueue).toEqual([typed]);
+    });
+
+    it('keeps the text verbatim in the preview of a projection-less entry', () => {
+      // A projection-less entry (a vim submit, a legacy restore) has no
+      // producer provenance, so a leading <system-reminder> block cannot
+      // be told apart from user-authored content by shape. The safe
+      // direction keeps the text: the preview shows exactly what a pop
+      // would restore, and nothing is armed for re-injection.
+      const { result } = renderHook(() => useMessageQueue());
+      const text =
+        '<system-reminder>\n1 background agent was restored.\n</system-reminder>\n\nreview this';
+      act(() => {
+        result.current.addMessage(text);
+      });
+      expect(result.current.messageQueue).toEqual([text]);
+    });
+
+    it('keeps the aggregate projection verbatim for projection-less members', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      const enveloped =
+        '<system-reminder>\nnotice\n</system-reminder>\n\nfirst';
+      act(() => {
+        result.current.addMessage(enveloped);
+        result.current.addMessage('second', false, 'second');
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      // The projection-less member's text is its own projection, so the
+      // aggregate projection equals the model text and no `reminders` key
+      // is produced from a shape-derived difference.
+      expect(popped).toEqual({
+        kind: 'user',
+        modelText: `${enveloped}\n\nsecond`,
+        submittedPrompt: `${enveloped}\n\nsecond`,
+        turnKey: expect.any(String),
+      });
     });
   });
 });
