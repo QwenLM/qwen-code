@@ -199,12 +199,18 @@ function findRun(haystack: string[], needle: string[]): number {
  * the answer before the handler runs, and the reply is silently dropped.
  */
 export function insertAnswerTextSeparator(argv: string[]): string[] {
-  if (argv[0] !== 'sessions' || argv[1] !== 'answer') return argv;
-  const session = argv[2];
+  // Anchored on the command token *run*, not on a fixed offset: this runs on
+  // the raw argv, so a root-level global in front of the subcommand
+  // (`qwen --debug sessions answer …`) shifts the chain without changing it.
+  // Without the separator yargs consumes a help token out of the answer and
+  // the reply is dropped.
+  const at = findRun(argv, ['sessions', 'answer']);
+  if (at === -1) return argv;
+  const session = argv[at + 2];
   // A missing session (`sessions answer --help`) or one that is itself a
   // flag must fall through to yargs (help / demandOption), not be shielded.
   if (session === undefined || session.startsWith('-')) return argv;
-  const tail = argv.slice(3);
+  const tail = argv.slice(at + 3);
   // Already verbatim (`answer <id> -- ...`): do not double the separator.
   if (tail[0] === '--') return argv;
   // The documented carve-out: a bare `--help`/`-h` shows help instead of
@@ -215,7 +221,7 @@ export function insertAnswerTextSeparator(argv: string[]): string[] {
   // No answer text yet: let the empty-answer refusal happen without a
   // separator.
   if (tail.length === 0) return argv;
-  return [...argv.slice(0, 3), '--', ...tail];
+  return [...argv.slice(0, at + 3), '--', ...tail];
 }
 
 export const peekCommand: CommandModule<unknown, SessionIdArgs> = {

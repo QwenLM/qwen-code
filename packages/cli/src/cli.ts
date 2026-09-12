@@ -281,8 +281,6 @@ function hasFlag(
 // keeps the fail-closed intercept (demoting to the full parser EXECUTES
 // subcommands).
 function versionTokenIndex(argv: readonly string[]): number {
-  let positionals = 0;
-  let firstPositional = '';
   let inSessionsAnswerTail = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -294,14 +292,12 @@ function versionTokenIndex(argv: readonly string[]): number {
       continue;
     }
     if (!arg.startsWith('-')) {
-      positionals++;
-      if (positionals === 1) {
-        firstPositional = arg;
-      } else if (
-        positionals === 2 &&
-        firstPositional === 'sessions' &&
-        arg === 'answer'
-      ) {
+      // The chain is recognised by its adjacent token pair, not by an
+      // ordinal: a root global in front of the subcommand shifts it off
+      // argv[0], and a value-taking global outside BASE_VALUE_FLAGS
+      // contributes its value as a positional of its own, so an ordinal
+      // count never reached the pair and the answer's `-v` was intercepted.
+      if (arg === 'sessions' && argv[i + 1] === 'answer') {
         inSessionsAnswerTail = true;
       }
       continue;

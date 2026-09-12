@@ -444,6 +444,49 @@ describe('resolveBootstrapRoute', () => {
     ).toBe('version');
   });
 
+  it('exempts the sessions answer chain behind a root global prefix', () => {
+    // The chain is recognised by its token run, not by counting positionals:
+    // a root global in front of the subcommand moves the chain off argv[0],
+    // and a value-taking global outside BASE_VALUE_FLAGS (--proxy, ...)
+    // contributes its own value as positional #1, so the positional count
+    // never matched the pair. Both shapes handed the answer's `-v` back to
+    // the intercept, which printed the version and dropped the reply.
+    expect(
+      resolveBootstrapRoute([
+        '--debug',
+        'sessions',
+        'answer',
+        '0f8e1c42',
+        'rerun',
+        '-v',
+        'now',
+      ]),
+    ).not.toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        '--proxy',
+        'http://127.0.0.1:1',
+        'sessions',
+        'answer',
+        '0f8e1c42',
+        'rerun',
+        '-v',
+        'now',
+      ]),
+    ).not.toBe('version');
+    // A version token before the chain still wins.
+    expect(
+      resolveBootstrapRoute([
+        '-v',
+        '--debug',
+        'sessions',
+        'answer',
+        '0f8e1c42',
+        'x',
+      ]),
+    ).toBe('version');
+  });
+
   it('prints the version instead of persisting version-bearing mcp add argv (base parity)', () => {
     // Base printed the version and persisted NOTHING for every probed
     // version-bearing `mcp add` shape — including the variadic tail

@@ -283,6 +283,44 @@ describe('answer command parsing with the root options registered', () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it('delivers an answer when a root global precedes the subcommand', async () => {
+    // config.ts inserts the separator into the raw argv, so the subcommand
+    // can sit behind a root global (`qwen --debug sessions answer …`).
+    // Without the separator yargs consumes the `--help` out of the answer
+    // and the reply is dropped.
+    const answer = mockDelivered();
+    await parse([
+      '--debug',
+      'sessions',
+      'answer',
+      SESSION,
+      'please',
+      '--help',
+      'me',
+    ]);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'please --help me');
+    expect(stdout).toEqual(['Answer delivered.']);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('delivers an answer behind a value-taking root global', async () => {
+    // Same shape class for a global whose value is a token of its own.
+    const answer = mockDelivered();
+    await parse([
+      '--proxy',
+      'http://127.0.0.1:1',
+      'sessions',
+      'answer',
+      SESSION,
+      'rerun',
+      '--help',
+      'now',
+    ]);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'rerun --help now');
+    expect(stdout).toEqual(['Answer delivered.']);
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it('delivers an answer whose last token is the bare word help', async () => {
     // The root instance's help command pops a trailing bare `help`, so it
     // too must be shielded by the inserted `--`.
