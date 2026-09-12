@@ -429,6 +429,9 @@ describe('serve rate limit env parsing', () => {
     );
 
     await startServeHandlerWithArgs('--open-with-auth');
+    // Wait out the fire-and-forget handler's browser-open phase so its
+    // openBrowserSecurely call cannot land in the next test.
+    await vi.waitFor(() => expect(mockOpenBrowserSecurely).toHaveBeenCalled());
 
     expect(mockApplyOpenWithAuth).toHaveBeenCalledWith(expect.any(Object));
     expect(tokenAtBoot).toBe('generated-token');

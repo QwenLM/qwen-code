@@ -870,13 +870,15 @@ Body`);
       });
 
       expect(skills.map((skill) => skill.name)).toEqual([
-        'bad-priority',
-        'high-priority',
+        'test-extension:bad-priority',
+        'test-extension:high-priority',
       ]);
       // The non-number priority should still be normalized on the skill
       // itself so downstream consumers (the /skills display sort) see a
       // clean value.
-      const badSkill = skills.find((s) => s.name === 'bad-priority');
+      const badSkill = skills.find(
+        (s) => s.name === 'test-extension:bad-priority',
+      );
       expect(badSkill?.priority).toBe(0);
     });
 
@@ -995,6 +997,164 @@ Body`);
       const skills = await manager.listSkills({ force: true });
 
       expect(skills).toHaveLength(0);
+    });
+  });
+
+  describe('extension skill qualified names', () => {
+    const userQwenSkillsDir = path.join(TEST_HOME, '.qwen', 'skills');
+    const bundledDirSegment = path.join('skills', 'bundled');
+
+    type ActiveExtension = ReturnType<Config['getActiveExtensions']>[number];
+
+    function fakeExtension(name: string, authoredNames: string[]) {
+      return {
+        id: name,
+        name,
+        version: '1.0.0',
+        isActive: true,
+        path: `/extensions/${name}`,
+        config: { name, version: '1.0.0' },
+        contextFiles: [],
+        skills: authoredNames.map((authoredName) => ({
+          name: authoredName,
+          description: `${authoredName} from ${name}`,
+          body: 'Body',
+          filePath: `/extensions/${name}/skills/${authoredName}/SKILL.md`,
+          level: 'extension' as const,
+        })),
+      } as ActiveExtension;
+    }
+
+    const dirEntry = (name: string) => ({
+      name,
+      isDirectory: () => true,
+      isFile: () => false,
+      isSymbolicLink: () => false,
+    });
+
+    const emptyDir = [] as unknown as Awaited<ReturnType<typeof fs.readdir>>;
+
+    const workspaceSkillMarkdown = (name: string) =>
+      `---\nname: ${name}\ndescription: ${name} description\n---\n${name} body`;
+
+    /** Names of the user-level skills discoverable on the mocked filesystem. */
+    let userSkillNames: string[];
+
+    beforeEach(() => {
+      userSkillNames = ['my-user-skill'];
+
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        fakeExtension('rust', ['functions', 'pdf']),
+        fakeExtension('docs', ['pdf']),
+      ]);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockImplementation((dirPath: any) => {
+        const pathStr = String(dirPath);
+        if (pathStr === userQwenSkillsDir) {
+          return Promise.resolve(
+            userSkillNames.map(dirEntry) as unknown as Awaited<
+              ReturnType<typeof fs.readdir>
+            >,
+          );
+        }
+        if (pathStr.endsWith(bundledDirSegment)) {
+          return Promise.resolve([
+            dirEntry('my-bundled-skill'),
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(emptyDir);
+      });
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+
+      vi.mocked(fs.readFile).mockImplementation((filePath) => {
+        const pathStr = String(filePath);
+        const names = [...userSkillNames, 'my-bundled-skill'];
+        for (const name of names) {
+          if (pathStr.includes(name)) {
+            return Promise.resolve(workspaceSkillMarkdown(name));
+          }
+        }
+        return Promise.reject(new Error('File not found'));
+      });
+
+      mockParseYaml.mockImplementation((yamlString: string) =>
+        yaml.parse(yamlString),
+      );
+    });
+
+    it('registers every extension skill under its extension name', async () => {
+      // Goal A: a 100-skill extension must not contribute 100 unattributable
+      // global names.
+      const names = (await manager.listSkills()).map((s) => s.name);
+      expect(names).toContain('rust:functions');
+      expect(names).not.toContain('functions');
+    });
+
+    it('keeps the authored name for the manifest-side lookups', async () => {
+      const [skill] = (await manager.listSkills()).filter(
+        (s) => s.name === 'rust:functions',
+      );
+      expect(skill?.authoredName).toBe('functions');
+      expect(skill?.extensionName).toBe('rust');
+    });
+
+    it('registers both skills when two extensions author the same name', async () => {
+      // Goal B: the collision is resolved by the naming rule, not by
+      // precedence, so neither extension silently loses its skill. Asserted at
+      // the extension level: `listSkills()` dedups across levels, so a
+      // shadowing fixture elsewhere would hide one of the two.
+      const names = (
+        await manager.listSkills({ level: 'extension', force: true })
+      ).map((s) => s.name);
+      expect(names).toEqual(['docs:pdf', 'rust:functions', 'rust:pdf']);
+    });
+
+    it('leaves the manifest spellings untouched so the two-view bridge holds', async () => {
+      // The registry copy carries the prefix; `extension.skills[].name` must
+      // stay authored, because `Config.isSkillEnabled` matches the registry
+      // view against the manifest through it and
+      // `inactiveExtensionSkillRefs` builds its set from it. Qualifying the
+      // manifest in place would flip `isInactiveExtensionSkill` from
+      // fail-closed to fail-open.
+      await manager.listSkills({ force: true });
+
+      // Literals, not a snapshot taken before the refresh: a before/after
+      // comparison only catches in-place mutation while `getActiveExtensions`
+      // hands back one fixed object graph. A per-call clone would pass it while
+      // the mutation stayed.
+      expect(
+        mockConfig
+          .getActiveExtensions()
+          .flatMap((extension) => extension.skills?.map((s) => s.name) ?? []),
+      ).toEqual(['functions', 'pdf', 'pdf']);
+    });
+
+    it('leaves user, project and bundled skills at their single spelling', async () => {
+      const names = (await manager.listSkills()).map((s) => s.name);
+      expect(names).toContain('my-user-skill');
+      expect(names).toContain('my-bundled-skill');
+    });
+
+    it('resolves the qualified name and not the authored one at runtime', async () => {
+      await expect(
+        manager.loadSkillForRuntime('rust:pdf'),
+      ).resolves.toMatchObject({ name: 'rust:pdf' });
+      // The bare spelling no longer names an extension skill.
+      await expect(manager.loadSkillForRuntime('pdf')).resolves.toBeNull();
+    });
+
+    it('lets a user skill named with a colon keep precedence over an extension skill', async () => {
+      // Precedence is project > user > extension > bundled and dedup is exact
+      // match (`collectCachedSkills`), so a user skill literally named
+      // `rust:pdf` wins the name.
+      userSkillNames.push('rust:pdf');
+
+      const [skill] = (await manager.listSkills({ force: true })).filter(
+        (s) => s.name === 'rust:pdf',
+      );
+      expect(skill?.level).toBe('user');
     });
   });
 
