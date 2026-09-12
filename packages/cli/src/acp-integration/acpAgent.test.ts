@@ -17469,7 +17469,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
 
     // The bootstrap Config stays at the project root (`mockConfig`); the
-    // requesting session's own Config points at a worktree.
+    // requesting session's own Config points at a worktree. Its live cwd has
+    // moved into a subdirectory (post `session/cd`), but its bound storage
+    // still resolves the admission worktree root — that stable root, not the
+    // live cwd, is what the handlers must load settings for.
     const worktreeRoot = '/work/project/.qwen/worktrees/slug-a';
     (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
       'worktree-session',
@@ -17477,7 +17480,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getId: () => 'worktree-session',
         getConfig: () => ({
           ...mockConfig,
-          getTargetDir: vi.fn().mockReturnValue(worktreeRoot),
+          getTargetDir: vi
+            .fn()
+            .mockReturnValue(`${worktreeRoot}/packages/core`),
+          storage: { getProjectRoot: () => worktreeRoot },
         }),
       },
     );
@@ -17561,6 +17567,100 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         skipLoadEnvironment: true,
       }),
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not repoint the process-wide settings cache for a session-scoped read', async () => {
+    const bootstrapSettings = makeCoreSettings();
+    const worktreeSettings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(bootstrapSettings);
+
+    const worktreeRoot = '/work/project/.qwen/worktrees/slug-a';
+    vi.mocked(loadSettings).mockImplementation(
+      (cwd) =>
+        (path.resolve(cwd ?? '') === path.resolve(worktreeRoot)
+          ? worktreeSettings
+          : bootstrapSettings) as LoadedSettings,
+    );
+
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'worktree-session',
+      {
+        getId: () => 'worktree-session',
+        getConfig: () => ({
+          ...mockConfig,
+          getTargetDir: vi.fn().mockReturnValue(worktreeRoot),
+          storage: { getProjectRoot: () => worktreeRoot },
+        }),
+      },
+    );
+
+    await agent.extMethod('qwen/settings/getCore', {
+      sessionId: 'worktree-session',
+    });
+
+    // A bare sessionId read must stay request-local: the process-wide cache
+    // (read by workspaceReload / getPath / workspace status) must still hold
+    // the bootstrap workspace's instance, not the worktree's.
+    expect(
+      (agent as unknown as { settings: LoadedSettings }).settings,
+    ).toBe(bootstrapSettings);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not fan out a workspace-scoped setRules delta to sessions in other workspaces', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const worktreeRoot = '/work/project/.qwen/worktrees/slug-a';
+    const otherRoot = '/work/project';
+    const requestingPm = {
+      addPersistentRule: vi.fn(),
+      removePersistentRule: vi.fn(),
+    };
+    const otherPm = {
+      addPersistentRule: vi.fn(),
+      removePersistentRule: vi.fn(),
+    };
+    const sessions = (agent as unknown as { sessions: Map<string, unknown> })
+      .sessions;
+    sessions.set('worktree-session', {
+      getId: () => 'worktree-session',
+      getConfig: () => ({
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue(worktreeRoot),
+        storage: { getProjectRoot: () => worktreeRoot },
+        getPermissionManager: () => requestingPm,
+      }),
+    });
+    sessions.set('other-session', {
+      getId: () => 'other-session',
+      getConfig: () => ({
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue(otherRoot),
+        storage: { getProjectRoot: () => otherRoot },
+        getPermissionManager: () => otherPm,
+      }),
+    });
+
+    await agent.extMethod('qwen/permissions/setRules', {
+      sessionId: 'worktree-session',
+      scope: 'workspace',
+      ruleType: 'allow',
+      rules: ['Bash(git push:*)'],
+    });
+
+    // The requesting session's manager is synced; the other workspace's is not.
+    expect(requestingPm.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(git push:*)',
+      'allow',
+    );
+    expect(otherPm.addPersistentRule).not.toHaveBeenCalled();
+    expect(otherPm.removePersistentRule).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

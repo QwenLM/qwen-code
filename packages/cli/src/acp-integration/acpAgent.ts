@@ -6459,8 +6459,28 @@ class QwenAgent implements Agent {
   }
 
   private loadPermissionSettings(cwd: string): LoadedSettings {
-    this.settings = this.loadRequestSettings(cwd);
-    return this.settings;
+    return this.adoptRequestSettings(this.loadRequestSettings(cwd), cwd);
+  }
+
+  /**
+   * Publish a freshly loaded `LoadedSettings` into the process-wide
+   * `this.settings` cache only when it was loaded for the daemon's own
+   * workspace. `this.settings` is the "latest loaded" cache read by the
+   * daemon-global control handlers (`workspaceReload`,
+   * `workspaceModelProvidersReload`, `qwen/settings/getPath`, workspace
+   * status): a session-scoped load for a foreign workspace (worktree) must
+   * stay request-local, or that workspace's settings, approval mode, MCP
+   * servers, hooks and permission rules would bleed into every other live
+   * session. The load still returns the caller's instance either way.
+   */
+  private adoptRequestSettings(
+    settings: LoadedSettings,
+    settingsCwd: string,
+  ): LoadedSettings {
+    if (path.resolve(settingsCwd) === path.resolve(this.config.getTargetDir())) {
+      this.settings = settings;
+    }
+    return settings;
   }
 
   /**
@@ -6504,7 +6524,14 @@ class QwenAgent implements Agent {
           sessionId,
         });
       }
-      return requestedCwd || session.getConfig().getTargetDir();
+      // Resolve the session's stable workspace root, not its live cwd:
+      // `session/cd` relocates `config.targetDir` into a subdirectory that
+      // carries no `.qwen/settings.json`, while `storage` stays bound to the
+      // admission workspace (`relocateWorkingDirectory` runs with
+      // `skipArtifactMigration: true`, so it never replaces `storage`). The
+      // live cwd would make all twelve handlers read/write a stray
+      // `<subdir>/.qwen/settings.json` after a single cd.
+      return requestedCwd || session.getConfig().storage.getProjectRoot();
     }
     return requestedCwd || this.config.getTargetDir();
   }
@@ -6661,6 +6688,8 @@ class QwenAgent implements Agent {
   private syncLivePermissionManagers(
     before: PermissionRuleSet,
     after: PermissionRuleSet,
+    settingScope: SettingScope,
+    settingsCwd: string,
   ): void {
     for (const ruleType of PERMISSION_RULE_TYPES) {
       const oldRules = new Set(before[ruleType]);
@@ -6671,6 +6700,19 @@ class QwenAgent implements Agent {
       if (removed.length === 0 && added.length === 0) continue;
 
       for (const session of this.sessions.values()) {
+        if (settingScope === SettingScope.Workspace) {
+          // A workspace-scoped write only applies to sessions bound to the
+          // workspace it landed in. `settingsCwd` is the requesting session's
+          // stable workspace root; skip sessions in other workspaces so a
+          // worktree's grant/deny doesn't fan out to every live session with
+          // no record in their own settings files.
+          const sessionWorkspace = session
+            .getConfig()
+            .storage.getProjectRoot();
+          if (path.resolve(sessionWorkspace) !== path.resolve(settingsCwd)) {
+            continue;
+          }
+        }
         const pm = session.getConfig().getPermissionManager?.();
         if (!pm) continue;
         // Isolate per-session failures: a stale/broken permission manager for
@@ -8989,7 +9031,7 @@ class QwenAgent implements Agent {
       case 'qwen/settings/getMemory': {
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const settings = this.loadRequestSettings(settingsCwd);
-        this.settings = settings;
+        this.adoptRequestSettings(settings, settingsCwd);
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),
         };
@@ -9011,7 +9053,7 @@ class QwenAgent implements Agent {
           }
           settings.setValue(SettingScope.User, `memory.${key}`, updates[key]);
         }
-        this.settings = settings;
+        this.adoptRequestSettings(settings, settingsCwd);
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),
         };
@@ -13400,7 +13442,7 @@ class QwenAgent implements Agent {
       case 'qwen/settings/getCore': {
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const settings = this.loadRequestSettings(settingsCwd);
-        this.settings = settings;
+        this.adoptRequestSettings(settings, settingsCwd);
         return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setCoreValue': {
@@ -13444,7 +13486,7 @@ class QwenAgent implements Agent {
         }
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
-        this.settings = settings;
+        this.adoptRequestSettings(settings, settingsCwd);
         return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setMcpServer': {
@@ -13474,7 +13516,7 @@ class QwenAgent implements Agent {
         settings.setValue(settingScope, 'mcpServers', mcpServers);
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
-        this.settings = settings;
+        this.adoptRequestSettings(settings, settingsCwd);
         return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/removeMcpServer': {
@@ -13496,7 +13538,7 @@ class QwenAgent implements Agent {
         settings.setValue(settingScope, 'mcpServers', mcpServers);
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
-        this.settings = settings;
+        this.adoptRequestSettings(settings, settingsCwd);
         return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setHook': {
@@ -13544,7 +13586,7 @@ class QwenAgent implements Agent {
         settings.setValue(settingScope, 'hooks', hooksRoot);
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
-        this.settings = settings;
+        this.adoptRequestSettings(settings, settingsCwd);
         return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/removeHook': {
@@ -13581,7 +13623,7 @@ class QwenAgent implements Agent {
         settings.setValue(settingScope, 'hooks', hooksRoot);
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
-        this.settings = settings;
+        this.adoptRequestSettings(settings, settingsCwd);
         return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setExtensionSetting': {
@@ -13630,7 +13672,7 @@ class QwenAgent implements Agent {
         // `updateSetting` (extension settings store), not `settings.setValue`,
         // so `settings` here is just the snapshot loaded above and is reused to
         // build the response.
-        this.settings = settings;
+        this.adoptRequestSettings(settings, settingsCwd);
         return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/permissions/getSettings': {
@@ -13685,7 +13727,7 @@ class QwenAgent implements Agent {
         // (avoids redundant I/O and a concurrency window where another handler
         // could mutate settings between the two loads).
         const after = readPermissionRuleSet(settings.merged);
-        this.syncLivePermissionManagers(before, after);
+        this.syncLivePermissionManagers(before, after, settingScope, settingsCwd);
         return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
