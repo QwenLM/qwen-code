@@ -1227,6 +1227,20 @@ describe('loadCliConfig', () => {
     expect(typeof factory?.create).toBe('function');
   });
 
+  it('wires experimental.sessionIndex through to the session index backend', async () => {
+    ServerConfig.resetSessionIndexingForTest();
+    try {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({ experimental: { sessionIndex: 'sqlite' } }, argv);
+      expect(ServerConfig.getSessionIndexMode()).toBe('sqlite');
+      await loadCliConfig({}, argv);
+      expect(ServerConfig.getSessionIndexMode()).toBe('file');
+    } finally {
+      ServerConfig.resetSessionIndexingForTest();
+    }
+  });
+
   it('enables debug file logging for --debug when QWEN_DEBUG_LOG_FILE is unset', async () => {
     delete process.env['QWEN_DEBUG_LOG_FILE'];
     process.argv = ['node', 'script.js', '--debug'];

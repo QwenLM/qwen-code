@@ -32,6 +32,7 @@ import {
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
   ApprovalMode,
+  configureSessionIndexing,
   MCP_BUDGET_WARN_FRACTION,
   MEMORY_PROJECT_SCOPES,
   openBrowserSecurely,
@@ -775,6 +776,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         primaryWorkspaceArg(argv.workspace) ?? process.cwd(),
       );
       const merged = loaded.merged;
+
+      // Session-index sidecar backend for daemon routes (experimental). The
+      // daemon loads settings directly (never via loadCliConfig), so the
+      // mode must be applied here as well.
+      configureSessionIndexing({
+        mode: merged.experimental?.sessionIndex ?? 'file',
+      });
+
       const approvalMode = merged.tools?.approvalMode;
       const sandbox = merged.tools?.sandbox;
       const sandboxEnv = process.env['SANDBOX'];

@@ -391,6 +391,19 @@ export * from './ipc/uds-inbox.js';
 export * from './services/session-registry.js';
 export * from './services/sessionService.js';
 export {
+  configureSessionIndexing,
+  getSessionIndexMode,
+  resetSessionIndexingForTest,
+  setSessionIndexDriverForTest,
+} from './services/session-index/config.js';
+export type {
+  SessionIndexCatalogRow,
+  SessionIndexMode,
+  SessionIndexRecordRow,
+  SessionIndexSessionRow,
+  SessionIndexStore,
+} from './services/session-index/types.js';
+export {
   collectSessionTurnState,
   computeInitialTurnFromHistory,
 } from './services/session-turn-state.js';
