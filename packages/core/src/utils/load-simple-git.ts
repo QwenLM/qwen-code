@@ -37,11 +37,15 @@ let simpleGitModulePromise: Promise<SimpleGitModule> | undefined;
  * unmodified simple-git client. What turning it off costs is real, though:
  * config from this option is emitted before the subcommand, so a `-c
  * core.fsmonitor=` that a caller put in *command* argv lands after ours and
- * wins (measured). Every simple-git argv in this repository begins with a
- * literal subcommand, which is the position that decides it — git only reads
- * `-c` before the subcommand, so today no caller value can reach it. A call
- * site must keep it that way: no caller-derived entry before the subcommand,
- * and, as on the extension git client, no user- or extension-derived config.
+ * wins (measured). The position that decides it is the subcommand — git only
+ * reads `-c` before the subcommand, so no caller value can reach the guard as
+ * long as nothing caller-derived precedes the subcommand. A leading *literal*
+ * global flag (e.g. `--no-optional-locks` on the `worktreeCleanup` status
+ * probe) is safe for the same reason: it is a fixed token, not a
+ * caller-supplied entry, so it can neither carry a `-c` nor push one ahead of
+ * the subcommand. A call site must keep it that way: no caller-derived entry
+ * before the subcommand, and, as on the extension git client, no user- or
+ * extension-derived config.
  */
 function guardFsmonitor(factory: SimpleGitFactory): SimpleGitFactory {
   const guarded = (

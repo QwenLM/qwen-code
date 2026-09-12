@@ -259,6 +259,36 @@ describe('a planted git program reaches no automatic git call', () => {
   );
 
   itWherePlantRuns(
+    'the exit-tool probes inherit the environment and read the global excludesFile',
+    async () => {
+      const { repo } = planted('post-index-change');
+      // A clean tracked tree plus one untracked `*.log` that a global
+      // `core.excludesFile` ignores. If the probe clobbered the child
+      // environment (`.env('GIT_OPTIONAL_LOCKS', '0')` replaces it outright),
+      // git would never read this config and would report the file untracked.
+      // The config and ignore files live OUTSIDE the repo so they do not
+      // themselves show up as untracked entries.
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+      writeFileSync(join(repo, 'x.log'), 'ignored noise\n');
+      const outside = mkdtempSync(join(tmpdir(), 'qwen-globalcfg-'));
+      made.push(outside);
+      const ignoreFile = join(outside, 'global-ignore');
+      writeFileSync(ignoreFile, '*.log\n');
+      const globalConfig = join(outside, 'global-config');
+      writeFileSync(globalConfig, `[core]\n  excludesFile = ${ignoreFile}\n`);
+      vi.stubEnv('GIT_CONFIG_GLOBAL', globalConfig);
+
+      const service = new GitWorktreeService(repo);
+      expect(await service.hasWorktreeChanges(repo)).toBe(false);
+      expect(await service.countWorktreeChanges(repo)).toEqual({
+        tracked: 0,
+        untracked: 0,
+      });
+    },
+    PLANT_TIMEOUT_MS,
+  );
+
+  itWherePlantRuns(
     'the post-index-change fixture is a live attack: an ungated status runs it',
     () => {
       const { repo, fired } = planted('post-index-change');
