@@ -33,8 +33,9 @@ function makeSession(
 
 const mounted: Array<{ container: HTMLElement; root: Root }> = [];
 
-async function renderDropdown() {
+async function renderDropdown(editable = true) {
   const onClose = vi.fn();
+  const onSourceChange = vi.fn();
   const onSelect = vi.fn();
   const onRename = vi.fn(async () => {});
   const container = document.createElement('div');
@@ -47,9 +48,12 @@ async function renderDropdown() {
         sessions={[makeSession('s1', 'First'), makeSession('s2', 'Second')]}
         currentSessionId="s1"
         searchQuery=""
+        source={editable ? 'vscode' : 'default'}
+        editable={editable}
         loading={false}
         hasMore={false}
         onSearchChange={() => {}}
+        onSourceChange={onSourceChange}
         onSelect={onSelect}
         onRename={onRename}
         onDelete={async () => {}}
@@ -60,7 +64,7 @@ async function renderDropdown() {
     await Promise.resolve();
   });
   mounted.push({ container, root });
-  return { container, onClose };
+  return { container, onClose, onSourceChange };
 }
 
 afterEach(() => {
@@ -161,85 +165,29 @@ describe('SessionHistoryDropdown focus management', () => {
   });
 });
 
-describe('SessionHistoryDropdown load-more control', () => {
-  it('renders a focusable load-more control when hasMore is true and the list is too short to scroll', async () => {
-    const onLoadMore = vi.fn();
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    mounted.push({ container, root });
-
-    await act(async () => {
-      root.render(
-        <SessionHistoryDropdown
-          t={t}
-          sessions={[makeSession('s1', 'Only')]}
-          currentSessionId="s1"
-          searchQuery=""
-          loading={false}
-          hasMore={true}
-          onSearchChange={() => {}}
-          onSelect={() => {}}
-          onRename={async () => {}}
-          onDelete={async () => {}}
-          onLoadMore={onLoadMore}
-          onClose={() => {}}
-        />,
-      );
-      await Promise.resolve();
-    });
-
-    const loadMore = container.querySelector(
-      'button[data-load-more]',
+describe('SessionHistoryDropdown sources', () => {
+  it('switches sources from the source buttons', async () => {
+    const { container, onSourceChange } = await renderDropdown();
+    const terminalSource = container.querySelector(
+      '[data-session-source="default"]',
     ) as HTMLButtonElement;
-    expect(loadMore).not.toBeNull();
-    expect(loadMore.disabled).toBe(false);
 
     await act(async () => {
-      loadMore.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      terminalSource.click();
       await Promise.resolve();
     });
-    expect(onLoadMore).toHaveBeenCalledTimes(1);
+
+    expect(onSourceChange).toHaveBeenCalledWith('default');
   });
 
-  it('shows a truncation notice when truncated and omits load-more when hasMore is false', async () => {
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    mounted.push({ container, root });
+  it('does not expose rename or delete for non-VS Code sessions', async () => {
+    const { container } = await renderDropdown(false);
 
-    await act(async () => {
-      root.render(
-        <SessionHistoryDropdown
-          t={t}
-          sessions={[makeSession('s1', 'Only')]}
-          currentSessionId="s1"
-          searchQuery=""
-          loading={false}
-          hasMore={false}
-          truncated
-          onSearchChange={() => {}}
-          onSelect={() => {}}
-          onRename={async () => {}}
-          onDelete={async () => {}}
-          onLoadMore={() => {}}
-          onClose={() => {}}
-        />,
-      );
-      await Promise.resolve();
-    });
-
-    expect(container.textContent).toContain(
-      'Some conversations may not be shown.',
-    );
-    expect(container.querySelector('button[data-load-more]')).toBeNull();
-    // The notice is the only disclosure that the list is incomplete, so it
-    // must be announced to screen readers like the sibling error/loading rows.
-    const statusEl = Array.from(
-      container.querySelectorAll<HTMLElement>('[role="status"]'),
-    ).find((element) =>
-      element.textContent?.includes('Some conversations may not be shown.'),
-    );
-    expect(statusEl).toBeDefined();
+    expect(
+      container.querySelector(`[aria-label="${t('session.renameLabel')}"]`),
+    ).toBeNull();
+    expect(
+      container.querySelector(`[aria-label="${t('session.deleteLabel')}"]`),
+    ).toBeNull();
   });
 });

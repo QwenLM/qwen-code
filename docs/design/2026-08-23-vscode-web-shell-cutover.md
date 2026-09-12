@@ -59,15 +59,8 @@ Consequences worth stating plainly:
   and the daemon for the conversation.
 - The daemon is shared with the CLI and the browser Web Shell for that
   workspace, so sessions the companion creates carry the `vscode` source type
-  for creator attribution. The panel's history no longer scopes to that
-  source: it lists every workspace session so an upgrade never loses the
-  user's pre-attribution or terminal/browser history (#11574). Listing is
-  paged through the daemon's `SessionService.listSessions` strict `mtime <`
-  cursor, which can stop at a group of transcripts sharing an mtime; the panel
-  surfaces a truncation notice when the daemon reports that the strict cursor
-  dropped such a tie group, rather than presenting a short list as complete.
-  The stamp still keeps companion-created sessions out of the browser Web
-  Shell's `default`-scoped lists.
+  and its history is scoped to that source. Without it the panel would list
+  conversations the user started in a terminal.
 - A daemon is bound to one workspace at spawn, so a multi-root window respawns
   it when the active root changes.
 - Turn-lifecycle features that were driven by ACP agent events — the editor tab
@@ -210,10 +203,8 @@ VS Code host or daemon side effect was observed end to end.
 ## Completion criteria
 
 - VS Code mounts Web Shell for the entire chat flow.
-- Companion-created sessions are attributable to the `vscode` source; the
-  panel's history lists every workspace session, not only companion-created
-  ones (reversing the earlier source-scoped criterion in #11574), subject to
-  the strict-`mtime`-cursor limitation recorded above.
+- Companion-created sessions are attributable to the `vscode` source and the
+  panel's history lists only them.
 - Web Shell and VS Code contain no production import of `@qwen-code/webui`.
 - The Web Shell package has no peer, development, build, or Vite dependency on
   `@qwen-code/webui`.

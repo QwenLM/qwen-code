@@ -987,49 +987,6 @@ describe('SessionService', () => {
       expect(result.items).toHaveLength(1);
       expect(result.items[0].sessionId).toBe(sessionIdA);
       expect(result.hasMore).toBe(false);
-      // Distinct mtimes: the boundary file that minted the cursor was already
-      // served, so no tie group is dropped and `truncated` must stay absent.
-      expect(result.truncated).toBeUndefined();
-    });
-
-    it('flags a tie group dropped by the strict mtime cursor as truncated', async () => {
-      const tieMtime = Date.now();
-      // Three sessions sharing one mtime: a coarse-granularity filesystem or
-      // a bulk-copied chats dir. Page 1 (size 2) returns A and B and mints a
-      // cursor equal to the shared mtime; the next unprocessed file (C) shares
-      // that mtime, so page 1 must report `truncated` — the strict
-      // `mtime < cursor` boundary on page 2 can never re-reach C.
-      readdirSyncSpy.mockReturnValue([
-        `${sessionIdA}.jsonl`,
-        `${sessionIdB}.jsonl`,
-        `${sessionIdC}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
-      statSyncSpy.mockImplementation((_filePath: fs.PathLike) => ({
-        mtimeMs: tieMtime,
-        isFile: () => true,
-      } as fs.Stats));
-      vi.mocked(jsonl.readLines).mockImplementation(
-        async (filePath: string) => {
-          if (filePath.includes(sessionIdC)) {
-            return [{ ...recordA1, sessionId: sessionIdC }];
-          }
-          if (filePath.includes(sessionIdB)) return [recordB1];
-          return [recordA1];
-        },
-      );
-
-      const page1 = await sessionService.listSessions({ size: 2 });
-      expect(page1.items).toHaveLength(2);
-      expect(page1.nextCursor).toBe(tieMtime);
-      expect(page1.truncated).toBe(true);
-
-      const page2 = await sessionService.listSessions({
-        size: 2,
-        cursor: tieMtime,
-      });
-      expect(page2.items).toHaveLength(0);
-      expect(page2.nextCursor).toBeUndefined();
-      expect(page2.truncated).toBeUndefined();
     });
 
     it('should skip files from different projects', async () => {

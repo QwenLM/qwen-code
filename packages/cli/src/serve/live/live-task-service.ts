@@ -1045,16 +1045,9 @@ export class LiveTaskService {
     runtime: WorkspaceRuntime,
     prompt: string,
   ): Promise<Record<string, unknown>> {
-    // A Live task's working thread is daemon-owned, not a user conversation.
-    // Stamp it so catalog consumers that deny-list `qwen-live` (the history
-    // panel, the browser Web Shell's `default`-scoped lists) never render it
-    // as an ordinary chat with rename/permanent-delete. Left unattributed it
-    // is byte-identical to an unattributed CLI session in the catalog row and
-    // passes every client-side source filter.
     const session = await runtime.bridge.spawnOrAttach({
       workspaceCwd: runtime.workspaceCwd,
       sessionScope: 'thread',
-      sourceType: 'qwen-live',
     });
     let admitted = false;
     try {

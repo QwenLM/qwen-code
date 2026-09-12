@@ -1221,11 +1221,10 @@ export interface WebShellProps {
   /** Cycle the approval mode when an otherwise-unhandled Tab is pressed. */
   cycleModeOnTab?: boolean;
   /**
-   * Creator attribution recorded on sessions this shell creates. Defaults to
-   * the browser Web Shell's `'default'`; the VS Code companion overrides it so
-   * its sessions stay distinguishable from CLI and browser ones. It is not a
-   * listing filter — a host that scopes its history by this value hides every
-   * conversation the other surfaces created in the same workspace.
+   * Creator attribution recorded on sessions this shell creates, and the
+   * source filter embedded hosts use to list only their own sessions. Defaults
+   * to the browser Web Shell's `'default'`; the VS Code companion overrides it
+   * so its sessions stay distinguishable from CLI and browser ones.
    */
   sessionSourceType?: string;
   /** Built-in actions appended to the context-sensitive default toolbar. */

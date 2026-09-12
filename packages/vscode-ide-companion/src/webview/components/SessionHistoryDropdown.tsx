@@ -14,11 +14,13 @@ interface SessionHistoryDropdownProps {
   sessions: readonly DaemonSessionSummary[];
   currentSessionId?: string;
   searchQuery: string;
+  source: 'vscode' | 'default';
+  editable: boolean;
   loading: boolean;
   hasMore: boolean;
   error?: string;
-  truncated?: boolean;
   onSearchChange: (query: string) => void;
+  onSourceChange: (source: 'vscode' | 'default') => void;
   onSelect: (session: DaemonSessionSummary) => void;
   onRename: (session: DaemonSessionSummary, title: string) => Promise<void>;
   onDelete: (session: DaemonSessionSummary) => Promise<void>;
@@ -92,6 +94,7 @@ const DROPDOWN_CSS = `
   .qwen-session-row-actions[data-confirming] { visibility: visible; }
   .qwen-session-row:focus-visible,
   .qwen-session-search:focus-visible,
+  .qwen-session-source-button:focus-visible,
   .qwen-session-icon-button:focus-visible {
     outline: 1px solid var(--vscode-focusBorder);
     outline-offset: -1px;
@@ -106,11 +109,13 @@ export function SessionHistoryDropdown({
   sessions,
   currentSessionId,
   searchQuery,
+  source,
+  editable,
   loading,
   hasMore,
   error,
-  truncated,
   onSearchChange,
+  onSourceChange,
   onSelect,
   onRename,
   onDelete,
@@ -266,6 +271,41 @@ export function SessionHistoryDropdown({
       >
         <style>{DROPDOWN_CSS}</style>
         <div
+          role="group"
+          aria-label={t('session.sourceLabel')}
+          style={{ display: 'flex', gap: 4, padding: '8px 10px 0' }}
+        >
+          {(['vscode', 'default'] as const).map((value) => {
+            const active = source === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                className="qwen-session-source-button"
+                aria-pressed={active}
+                data-session-source={value}
+                onClick={() => onSourceChange(value)}
+                style={{
+                  flex: 1,
+                  padding: '4px 8px',
+                  border: 0,
+                  borderRadius: 4,
+                  background: active
+                    ? 'var(--vscode-list-activeSelectionBackground)'
+                    : 'transparent',
+                  color: active
+                    ? 'var(--vscode-list-activeSelectionForeground)'
+                    : 'inherit',
+                  font: 'inherit',
+                  cursor: 'pointer',
+                }}
+              >
+                {t(`session.source.${value}`)}
+              </button>
+            );
+          })}
+        </div>
+        <div
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -369,15 +409,6 @@ export function SessionHistoryDropdown({
               </div>
               {group.sessions.map((session) => {
                 const active = session.sessionId === currentSessionId;
-                // A row another surface is actively using (a browser Web Shell
-                // window, a Live voice thread) must not offer permanent delete:
-                // the daemon's delete route has no liveness bail for a
-                // non-Live session, so it would force-close a live
-                // conversation and unlink its transcript with no undo.
-                const liveElsewhere =
-                  !active &&
-                  ((session.clientCount ?? 0) > 0 ||
-                    session.hasActivePrompt === true);
                 const hovered = session.sessionId === hoveredId;
                 const renaming = session.sessionId === renamingId;
                 return (
@@ -508,7 +539,7 @@ export function SessionHistoryDropdown({
                       </span>
                     )}
 
-                    {!renaming && (
+                    {!renaming && editable && (
                       <span
                         className="qwen-session-row-actions"
                         {...(confirmDeleteId === session.sessionId
@@ -535,7 +566,7 @@ export function SessionHistoryDropdown({
                         >
                           <Pencil size={13} aria-hidden="true" />
                         </button>
-                        {!active && !liveElsewhere &&
+                        {!active &&
                           (confirmDeleteId === session.sessionId ? (
                             <button
                               type="button"
@@ -621,39 +652,6 @@ export function SessionHistoryDropdown({
             </div>
           )}
         </div>
-        {truncated && !loading && (
-          <div
-            role="status"
-            style={{
-              padding: '6px 10px',
-              borderTop: '1px solid var(--vscode-panel-border)',
-              color: 'var(--vscode-descriptionForeground)',
-              fontSize: 12,
-            }}
-          >
-            {t('session.historyTruncated')}
-          </div>
-        )}
-        {hasMore && !loading && (
-          <button
-            type="button"
-            data-load-more
-            onClick={onLoadMore}
-            style={{
-              padding: '6px 10px',
-              border: 0,
-              borderTop:
-                '1px solid var(--vscode-menu-separatorBackground, var(--vscode-panel-border))',
-              background: 'transparent',
-              color:
-                'var(--vscode-textLink-foreground, var(--vscode-focusBorder))',
-              cursor: 'pointer',
-              font: 'inherit',
-            }}
-          >
-            {t('session.loadMore')}
-          </button>
-        )}
       </div>
     </>
   );

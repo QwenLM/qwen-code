@@ -181,12 +181,200 @@ afterEach(() => {
 });
 
 describe('EmbeddedApp host wiring', () => {
-  it('attributes its sessions to the VS Code channel', async () => {
-    const props = await renderApp();
-    // The stamp records creator attribution only; the panel's history list
-    // does not filter on it. The stamp still keeps panel-created sessions out
-    // of the browser Web Shell's 'default'-scoped lists.
-    expect(props['sessionSourceType']).toBe('vscode');
+  it('attributes new sessions to the VS Code channel', async () => {
+    const initialSessionId = document.body.dataset.qwenSessionId;
+    delete document.body.dataset.qwenSessionId;
+    try {
+      const props = await renderApp();
+      expect(props['sessionSourceType']).toBe('vscode');
+    } finally {
+      document.body.dataset.qwenSessionId = initialSessionId;
+    }
+  });
+
+  it('does not claim a persisted foreign session after re-bootstrap', async () => {
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [],
+      nextCursor: undefined,
+    });
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              workspaceCwd: '/workspace',
+              sessionId: 'cli-1',
+              sessionHistorySource: 'default',
+              hostKind: 'view',
+            },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
+    ).toBeUndefined();
+
+    await act(async () => {
+      (
+        container.querySelector(
+          'button[aria-haspopup="dialog"]',
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledWith(
+        expect.objectContaining({ sourceType: 'vscode' }),
+      );
+    });
+    expect(document.querySelector('[data-session-id="cli-1"]')).toBeNull();
+
+    await act(async () => {
+      (
+        document.querySelector(
+          '[data-session-source="default"]',
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-session-id="cli-1"]'),
+      ).not.toBeNull();
+    });
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              workspaceCwd: '/workspace',
+              sessionId: 'legacy-1',
+              hostKind: 'view',
+              legacyConversationIds: ['legacy-1'],
+            },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
+    ).toBe('vscode');
+  });
+
+  it('keeps a persisted VS Code current session visible outside the first page', async () => {
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [],
+      nextCursor: 'next-page',
+    });
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              workspaceCwd: '/workspace',
+              sessionId: 'vscode-current',
+              sessionHistorySource: 'vscode',
+              hostKind: 'view',
+            },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
+    ).toBe('vscode');
+    await act(async () => {
+      (
+        container.querySelector(
+          'button[aria-haspopup="dialog"]',
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-session-id="vscode-current"]'),
+      ).not.toBeNull();
+    });
+  });
+
+  it('updates attribution before creating a new session', async () => {
+    let frame: FrameRequestCallback | undefined;
+    const requestAnimationFrame = vi
+      .spyOn(globalThis, 'requestAnimationFrame')
+      .mockImplementation((callback) => {
+        frame = callback;
+        return 1;
+      });
+    try {
+      await renderApp();
+      const { container } = mounted[mounted.length - 1];
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: {
+              type: 'webShellBootstrap',
+              data: {
+                baseUrl: 'http://localhost:4141',
+                workspaceCwd: '/workspace',
+                sessionId: 'cli-1',
+                sessionHistorySource: 'default',
+                hostKind: 'view',
+              },
+            },
+          }),
+        );
+        await Promise.resolve();
+      });
+      const createNewSession = vi.fn(async () => true);
+      const shellRef = (mocks.embeddedProps.current as CapturedProps)[
+        'shellRef'
+      ] as { current: { createNewSession: () => Promise<boolean> } | null };
+      shellRef.current = { createNewSession };
+
+      await act(async () => {
+        (
+          container.querySelector(
+            'button[aria-label="New session"]',
+          ) as HTMLButtonElement
+        ).click();
+        await Promise.resolve();
+      });
+
+      expect(
+        (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
+      ).toBe('vscode');
+      expect(createNewSession).not.toHaveBeenCalled();
+
+      await act(async () => {
+        frame?.(0);
+        await Promise.resolve();
+      });
+      expect(createNewSession).toHaveBeenCalledOnce();
+    } finally {
+      requestAnimationFrame.mockRestore();
+    }
   });
 
   it('injects the active editor reference into prepared submissions', async () => {
@@ -719,7 +907,11 @@ describe('EmbeddedApp host wiring', () => {
     expect(postMessagesOfType('getAccountInfo')).toHaveLength(1);
     expect(postMessagesOfType('webShellSessionChanged').at(-1)).toEqual({
       type: 'webShellSessionChanged',
-      data: { sessionId: 'session-2', workspaceCwd: '/workspace' },
+      data: {
+        sessionId: 'session-2',
+        workspaceCwd: '/workspace',
+        historySource: 'vscode',
+      },
     });
     expect(postMessagesOfType('updatePanelTitle').at(-1)).toEqual({
       type: 'updatePanelTitle',
@@ -830,84 +1022,81 @@ describe('EmbeddedApp host wiring', () => {
     }
   });
 
-  it('lists every workspace session in history regardless of source', async () => {
-    // The daemon is shared: CLI terminal sessions, browser Web Shell
-    // sessions, and pre-attribution conversations all persist under the same
-    // workspace. Scoping the history query to the vscode source hid
-    // everything else, including the entire pre-upgrade history (#11574).
-    // Rows another surface owns — channel conversations, Live voice threads,
-    // scheduled-task keepalives, side-task branches, and sub-agent children —
-    // must be dropped from the rendered list so they are never offered the
-    // panel's rename/permanent-delete actions.
-    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
-      sessions: [
-        {
-          sessionId: 'vscode-1',
-          workspaceCwd: '/workspace',
-          displayName: 'Current chat',
-          sourceType: 'vscode',
-          updatedAt: '2026-09-09T12:00:00.000Z',
-        },
-        {
-          sessionId: 'legacy-1',
-          workspaceCwd: '/workspace',
-          displayName: 'Pre-upgrade chat',
-          updatedAt: '2026-08-01T12:00:00.000Z',
-        },
-        {
-          sessionId: 'cli-1',
-          workspaceCwd: '/workspace',
-          displayName: 'Terminal chat',
-          updatedAt: '2026-08-02T12:00:00.000Z',
-        },
-        {
-          sessionId: 'web-1',
-          workspaceCwd: '/workspace',
-          displayName: 'Browser chat',
-          sourceType: 'default',
-          updatedAt: '2026-08-03T12:00:00.000Z',
-        },
-        {
-          sessionId: 'channel-1',
-          workspaceCwd: '/workspace',
-          displayName: 'DingTalk channel',
-          sourceType: 'channel',
-          updatedAt: '2026-09-08T12:00:00.000Z',
-        },
-        {
-          sessionId: 'scheduled-1',
-          workspaceCwd: '/workspace',
-          displayName: 'Scheduled task',
-          sourceType: 'scheduled_task',
-          updatedAt: '2026-09-07T12:00:00.000Z',
-        },
-        {
-          sessionId: 'sidetask-1',
-          workspaceCwd: '/workspace',
-          displayName: 'Side task branch',
-          sourceType: 'side_task',
-          updatedAt: '2026-09-06T18:00:00.000Z',
-        },
-        {
-          sessionId: 'live-1',
-          workspaceCwd: '/workspace',
-          displayName: 'Live voice thread',
-          sourceType: 'qwen-live',
-          updatedAt: '2026-09-06T15:00:00.000Z',
-        },
-        {
-          sessionId: 'subagent-1',
-          workspaceCwd: '/workspace',
-          displayName: 'Sub-agent child',
-          parentSessionId: 'cli-1',
-          updatedAt: '2026-09-06T12:00:00.000Z',
-        },
-      ],
-      nextCursor: undefined,
-    });
+  it('merges allowlisted pre-cutover sessions into the history list', async () => {
+    // v0.21-era conversations were recorded without source attribution, so
+    // the vscode-scoped catalog query cannot return them. The host ships the
+    // legacy ids it still has in globalState; the panel then claims exactly
+    // those sessions back from the daemon's default catalog — without
+    // surfacing unattributed CLI sessions or browser-stamped ones.
+    sdkMocks.listWorkspaceSessionsPage.mockImplementation(
+      (options?: { sourceType?: string }) => {
+        if (options?.sourceType === 'vscode') {
+          return Promise.resolve({
+            sessions: [
+              {
+                sessionId: 'vscode-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Current chat',
+                sourceType: 'vscode',
+                updatedAt: '2026-09-09T12:00:00.000Z',
+              },
+            ],
+            nextCursor: undefined,
+          });
+        }
+        if (options?.sourceType === 'default') {
+          return Promise.resolve({
+            sessions: [
+              {
+                sessionId: 'legacy-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Pre-upgrade chat',
+                updatedAt: '2026-08-01T12:00:00.000Z',
+              },
+              {
+                sessionId: 'cli-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Terminal chat',
+                updatedAt: '2026-08-02T12:00:00.000Z',
+              },
+              {
+                sessionId: 'web-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Browser chat',
+                sourceType: 'default',
+                updatedAt: '2026-08-03T12:00:00.000Z',
+              },
+            ],
+            nextCursor: undefined,
+          });
+        }
+        return Promise.resolve({ sessions: [], nextCursor: undefined });
+      },
+    );
 
     await renderApp();
     const { container } = mounted[mounted.length - 1];
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              clientId: 'client-1',
+              workspaceCwd: '/workspace',
+              sessionId: 'session-1',
+              hostKind: 'panel',
+              legacyConversationIds: ['legacy-1', 'never-recorded'],
+            },
+          },
+        }),
+      );
+      // The remount effect refetches the vscode page, then pages the default
+      // catalog for allowlisted ids — both are sequential awaits.
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
 
     const historyButton = container.querySelector(
       'button[aria-haspopup="dialog"]',
@@ -917,6 +1106,8 @@ describe('EmbeddedApp host wiring', () => {
       historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       await Promise.resolve();
     });
+    // Opening the dropdown triggers the first-page load, which now includes
+    // the legacy-catalog scan; wait for its rows instead of fixed flushes.
     await vi.waitFor(() => {
       expect(
         document.querySelector('[data-session-id="legacy-1"]'),
@@ -926,496 +1117,172 @@ describe('EmbeddedApp host wiring', () => {
     expect(
       document.querySelector('[data-session-id="vscode-1"]'),
     ).not.toBeNull();
+    // Neither the unattributed CLI session nor the browser-stamped one is
+    // allowlisted, so the panel must not claim them.
+    expect(document.querySelector('[data-session-id="cli-1"]')).toBeNull();
+    expect(document.querySelector('[data-session-id="web-1"]')).toBeNull();
+
+    const defaultCatalogCalls = sdkMocks.listWorkspaceSessionsPage.mock.calls
+      .map(([options]) => options)
+      .filter(
+        (options) =>
+          (options as { sourceType?: string })?.sourceType === 'default',
+      );
+    expect(defaultCatalogCalls.length).toBeGreaterThan(0);
+    expect(defaultCatalogCalls[0]).toMatchObject({
+      archiveState: 'active',
+    });
+
+    // The scan converges after its first successful run: ids that never
+    // match (other workspaces, deleted transcripts, since-stamped sessions)
+    // must not re-page the default catalog on every dropdown open.
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      const vscodeCalls = sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
+        ([options]) =>
+          (options as { sourceType?: string })?.sourceType === 'vscode',
+      );
+      expect(vscodeCalls.length).toBeGreaterThanOrEqual(2);
+    });
+    expect(
+      sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
+        ([options]) =>
+          (options as { sourceType?: string })?.sourceType === 'default',
+      ),
+    ).toHaveLength(1);
+    expect(
+      document.querySelector('[data-session-id="legacy-1"]'),
+    ).not.toBeNull();
+
+    const terminalSource = document.querySelector(
+      '[data-session-source="default"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      terminalSource.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-session-id="cli-1"]'),
+      ).not.toBeNull();
+      expect(
+        document.querySelector('[data-session-id="web-1"]'),
+      ).not.toBeNull();
+    });
+    expect(document.querySelector('[data-session-id="legacy-1"]')).toBeNull();
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ pageSize: 20, sourceType: 'default' }),
+    );
+
+    await act(async () => {
+      (
+        document.querySelector('[data-session-id="cli-1"]') as HTMLDivElement
+      ).click();
+      await Promise.resolve();
+    });
+    expect(
+      (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
+    ).toBeUndefined();
+    callback<(sessionId: string | undefined) => void>(
+      mocks.embeddedProps.current as CapturedProps,
+      'onSessionIdChange',
+    )('cli-1');
+    expect(postMessagesOfType('webShellSessionChanged').at(-1)).toEqual({
+      type: 'webShellSessionChanged',
+      data: {
+        sessionId: 'cli-1',
+        workspaceCwd: '/workspace',
+        historySource: 'default',
+      },
+    });
+  });
+
+  it('ignores a stale page after switching session sources', async () => {
+    let resolveVsCodePage!: (value: {
+      sessions: Array<{
+        sessionId: string;
+        workspaceCwd: string;
+        displayName: string;
+        sourceType: string;
+      }>;
+      nextCursor: undefined;
+    }) => void;
+    const vsCodePage = new Promise<{
+      sessions: Array<{
+        sessionId: string;
+        workspaceCwd: string;
+        displayName: string;
+        sourceType: string;
+      }>;
+      nextCursor: undefined;
+    }>((resolve) => {
+      resolveVsCodePage = resolve;
+    });
+    sdkMocks.listWorkspaceSessionsPage.mockImplementation(
+      (options?: { sourceType?: string }) =>
+        options?.sourceType === 'vscode'
+          ? vsCodePage
+          : Promise.resolve({
+              sessions: [
+                {
+                  sessionId: 'cli-1',
+                  workspaceCwd: '/workspace',
+                  displayName: 'Terminal chat',
+                  sourceType: 'default',
+                },
+              ],
+              nextCursor: undefined,
+            }),
+    );
+
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    await act(async () => {
+      (
+        container.querySelector(
+          'button[aria-haspopup="dialog"]',
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      (
+        document.querySelector(
+          '[data-session-source="default"]',
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-session-id="cli-1"]'),
+      ).not.toBeNull();
+    });
+
+    await act(async () => {
+      resolveVsCodePage({
+        sessions: [
+          {
+            sessionId: 'vscode-1',
+            workspaceCwd: '/workspace',
+            displayName: 'VS Code chat',
+            sourceType: 'vscode',
+          },
+        ],
+        nextCursor: undefined,
+      });
+      await vsCodePage;
+    });
+
     expect(document.querySelector('[data-session-id="cli-1"]')).not.toBeNull();
-    expect(document.querySelector('[data-session-id="web-1"]')).not.toBeNull();
-
-    // Rows another surface owns must never render as ordinary chats.
-    expect(document.querySelector('[data-session-id="channel-1"]')).toBeNull();
-    expect(
-      document.querySelector('[data-session-id="scheduled-1"]'),
-    ).toBeNull();
-    expect(document.querySelector('[data-session-id="sidetask-1"]')).toBeNull();
-    expect(document.querySelector('[data-session-id="live-1"]')).toBeNull();
-    expect(document.querySelector('[data-session-id="subagent-1"]')).toBeNull();
-
-    // The request itself must not scope by source — that filter is what hid
-    // the CLI and pre-attribution sessions.
-    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalled();
-    for (const [options] of sdkMocks.listWorkspaceSessionsPage.mock.calls) {
-      expect((options as { sourceType?: string }).sourceType).toBeUndefined();
-      expect(options).toMatchObject({ archiveState: 'active' });
-    }
-  });
-
-  it('ignores a legacy conversation allowlist without re-scoping the query', async () => {
-    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
-      sessions: [],
-      nextCursor: undefined,
-    });
-    await renderApp();
-    // A pre-#11574 host shipped `legacyConversationIds` on bootstrap and the
-    // panel scanned them with a source-scoped (`sourceType: 'default'`)
-    // query. That machinery is removed; even a bootstrap that still carries
-    // the field must not re-wire a source-scoped scan.
-    await act(async () => {
-      window.dispatchEvent(
-        new MessageEvent('message', {
-          data: {
-            type: 'webShellBootstrap',
-            data: {
-              baseUrl: 'http://localhost:4141',
-              workspaceCwd: '/workspace',
-              sessionId: 'session-1',
-              hostKind: 'panel',
-              legacyConversationIds: ['conversation-legacy-1'],
-            },
-          },
-        }),
-      );
-      await Promise.resolve();
-    });
-    const { container } = mounted[mounted.length - 1];
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    // Open/close three times: a reverted once-per-bootstrap scan guard would
-    // only fire the source-scoped query on the first open, so assert across
-    // all three.
-    for (let i = 0; i < 3; i += 1) {
-      await act(async () => {
-        historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        await Promise.resolve();
-      });
-      await act(async () => {
-        historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        await Promise.resolve();
-      });
-    }
-    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalled();
-    for (const [options] of sdkMocks.listWorkspaceSessionsPage.mock.calls) {
-      expect((options as { sourceType?: string }).sourceType).toBeUndefined();
-    }
-  });
-
-  it('caps the history scan at MAX_HISTORY_SCAN_PAGES', async () => {
-    // A workspace dominated by machine-owned rows (channel workers,
-    // scheduled-task fires) must not walk the entire catalog on every
-    // dropdown open. The scan caps at 10 pages so the worst case is
-    // bounded; the residual cursor stays reachable through the explicit
-    // load-more control, and a capped short page surfaces a truncation
-    // notice instead of looking like a complete, short history.
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async () => ({
-      sessions: [
-        {
-          sessionId: 'channel-1',
-          workspaceCwd: '/workspace',
-          displayName: 'Channel worker',
-          sourceType: 'channel',
-          updatedAt: '2026-09-08T12:00:00.000Z',
-        },
-      ],
-      nextCursor: 'c1',
-    }));
-
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalled();
-    });
-
-    // Must stop at 10 pages, not walk forever.
-    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(10);
-
-    // The capped scan left a live cursor and a short (empty) page: the rest
-    // of the history is reachable only through an explicit control, and the
-    // panel must not present that as a complete list.
-    await vi.waitFor(() => {
-      expect(container.textContent).toContain(
-        'Some conversations may not be shown.',
-      );
-    });
-    expect(container.querySelector('button[data-load-more]')).not.toBeNull();
-  });
-
-  it('advances the scan cursor across pages and accumulates presentable rows', async () => {
-    // A machine-owned-only first page must not stop the scan: the cursor has
-    // to advance so the next page is requested and its presentable rows land
-    // in the list.
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async ({ cursor }) =>
-      cursor === undefined
-        ? {
-            sessions: [
-              {
-                sessionId: 'machine-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Channel worker',
-                sourceType: 'channel',
-                updatedAt: '2026-09-08T12:00:00.000Z',
-              },
-            ],
-            nextCursor: 'c1',
-          }
-        : {
-            sessions: [
-              {
-                sessionId: 'chat-1',
-                workspaceCwd: '/workspace',
-                displayName: 'My chat',
-                updatedAt: '2026-09-09T12:00:00.000Z',
-              },
-            ],
-            nextCursor: undefined,
-          },
-    );
-
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="chat-1"]'),
-      ).not.toBeNull();
-    });
-
-    // The second page was requested with the cursor the first page returned.
-    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
-    expect(
-      (
-        sdkMocks.listWorkspaceSessionsPage.mock.calls[1][0] as {
-          cursor?: string;
-        }
-      ).cursor,
-    ).toBe('c1');
-    // Machine-owned rows stay filtered, presentable rows render.
-    expect(document.querySelector('[data-session-id="machine-1"]')).toBeNull();
-    expect(document.querySelector('[data-session-id="chat-1"]')).not.toBeNull();
-  });
-
-  it('stops after one page when it is full and reuses the cursor on load-more', async () => {
-    const presentable = Array.from({ length: 20 }, (_, index) => ({
-      sessionId: `sess-${index}`,
-      workspaceCwd: '/workspace',
-      displayName: `Session ${index}`,
-      updatedAt: new Date(2026, 0, 1, 0, 0, index).toISOString(),
-    }));
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async ({ cursor }) =>
-      cursor === undefined
-        ? { sessions: presentable, nextCursor: 'c2' }
-        : {
-            sessions: [
-              {
-                sessionId: 'sess-extra',
-                workspaceCwd: '/workspace',
-                displayName: 'Extra',
-                updatedAt: '2026-09-09T12:00:00.000Z',
-              },
-            ],
-            nextCursor: undefined,
-          },
-    );
-
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
-    });
-
-    // A full first page stops the scan without walking further pages.
-    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
-
-    // The residual cursor is reachable via the explicit load-more control.
-    const loadMore = document.querySelector(
-      'button[data-load-more]',
-    ) as HTMLButtonElement;
-    expect(loadMore).not.toBeNull();
-    await act(async () => {
-      loadMore.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
-    });
-    expect(
-      (
-        sdkMocks.listWorkspaceSessionsPage.mock.calls[1][0] as {
-          cursor?: string;
-        }
-      ).cursor,
-    ).toBe('c2');
-    expect(
-      document.querySelector('[data-session-id="sess-extra"]'),
-    ).not.toBeNull();
-  });
-
-  it('flags an empty cursor page as truncation instead of exhaustion', async () => {
-    const presentable = Array.from({ length: 20 }, (_, index) => ({
-      sessionId: `sess-${index}`,
-      workspaceCwd: '/workspace',
-      displayName: `Session ${index}`,
-      updatedAt: new Date(2026, 0, 1, 0, 0, index).toISOString(),
-    }));
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async ({ cursor }) =>
-      cursor === undefined
-        ? { sessions: presentable, nextCursor: 'c1' }
-        : { sessions: [], nextCursor: undefined, truncated: true },
-    );
-
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
-    });
-
-    const loadMore = document.querySelector(
-      'button[data-load-more]',
-    ) as HTMLButtonElement;
-    expect(loadMore).not.toBeNull();
-    await act(async () => {
-      loadMore.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-
-    // A page the daemon flags `truncated` (a strict-cursor tie drop) must
-    // surface the notice rather than silently truncating.
-    await vi.waitFor(() => {
-      expect(container.textContent).toContain(
-        'Some conversations may not be shown.',
-      );
-    });
-  });
-
-  it('does not flag an empty cursor page without a server truncation signal', async () => {
-    const presentable = Array.from({ length: 20 }, (_, index) => ({
-      sessionId: `sess-${index}`,
-      workspaceCwd: '/workspace',
-      displayName: `Session ${index}`,
-      updatedAt: new Date(2026, 0, 1, 0, 0, index).toISOString(),
-    }));
-    // Ordinary exhaustion: page 1 fills, a trailing empty/foreign file makes
-    // page 2 come back empty with no cursor and no `truncated` flag. Nothing
-    // was lost, so the panel must not claim truncation.
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async ({ cursor }) =>
-      cursor === undefined
-        ? { sessions: presentable, nextCursor: 'c1' }
-        : { sessions: [], nextCursor: undefined },
-    );
-
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
-    });
-
-    const loadMore = document.querySelector(
-      'button[data-load-more]',
-    ) as HTMLButtonElement;
-    expect(loadMore).not.toBeNull();
-    await act(async () => {
-      loadMore.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-
-    await vi.waitFor(() => {
-      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
-    });
-    expect(container.textContent).not.toContain(
-      'Some conversations may not be shown.',
-    );
-  });
-
-  it('keeps the truncation notice when a later load-more page is clean', async () => {
-    const presentable = Array.from({ length: 20 }, (_, index) => ({
-      sessionId: `sess-${index}`,
-      workspaceCwd: '/workspace',
-      displayName: `Session ${index}`,
-      updatedAt: new Date(2026, 0, 1, 0, 0, index).toISOString(),
-    }));
-    // Page 1 mints a cursor that drops a tie group (truncated). A load-more
-    // returns a clean page, but the dropped rows are unreachable forever, so
-    // the notice must survive the clean page.
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async ({ cursor }) =>
-      cursor === undefined
-        ? { sessions: presentable, nextCursor: 'c1', truncated: true }
-        : {
-            sessions: [
-              {
-                sessionId: 'sess-extra',
-                workspaceCwd: '/workspace',
-                displayName: 'Extra',
-                updatedAt: '2026-09-09T12:00:00.000Z',
-              },
-            ],
-            nextCursor: undefined,
-          },
-    );
-
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(container.textContent).toContain(
-        'Some conversations may not be shown.',
-      );
-    });
-
-    const loadMore = document.querySelector(
-      'button[data-load-more]',
-    ) as HTMLButtonElement;
-    expect(loadMore).not.toBeNull();
-    await act(async () => {
-      loadMore.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-
-    await vi.waitFor(() => {
-      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
-    });
-    // The clean page must not retract the notice.
-    expect(container.textContent).toContain(
-      'Some conversations may not be shown.',
-    );
-  });
-
-  it('hides permanent delete for a session another surface is using', async () => {
-    // The panel lists every workspace session, including a live browser Web
-    // Shell conversation (clientCount > 0). It must still render, but must
-    // not offer the panel's irreversible delete.
-    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
-      sessions: [
-        {
-          sessionId: 'web-live',
-          workspaceCwd: '/workspace',
-          displayName: 'Browser chat in another window',
-          sourceType: 'default',
-          clientCount: 1,
-          updatedAt: '2026-09-09T12:00:00.000Z',
-        },
-        {
-          sessionId: 'dead-cli',
-          workspaceCwd: '/workspace',
-          displayName: 'Terminal chat',
-          updatedAt: '2026-09-08T12:00:00.000Z',
-        },
-      ],
-      nextCursor: undefined,
-    });
-
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="web-live"]'),
-      ).not.toBeNull();
-    });
-
-    const liveRow = document.querySelector(
-      '[data-session-id="web-live"]',
-    ) as HTMLElement;
-    const deadRow = document.querySelector(
-      '[data-session-id="dead-cli"]',
-    ) as HTMLElement;
-    expect(liveRow).not.toBeNull();
-    expect(deadRow).not.toBeNull();
-
-    // The live row drops the delete control (but keeps rename).
-    expect(
-      liveRow.querySelector('button[aria-label="Delete conversation"]'),
-    ).toBeNull();
-    expect(
-      liveRow.querySelector('button[aria-label="Rename conversation"]'),
-    ).not.toBeNull();
-    // A dead transcript still offers delete.
-    expect(
-      deadRow.querySelector('button[aria-label="Delete conversation"]'),
-    ).not.toBeNull();
-  });
-
-  it('keeps rows fetched before a later page rejects', async () => {
-    let calls = 0;
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async () => {
-      calls += 1;
-      if (calls === 1) {
-        return {
-          sessions: [
-            {
-              sessionId: 'page-1-row',
-              workspaceCwd: '/workspace',
-              displayName: 'First page row',
-              updatedAt: '2026-09-09T12:00:00.000Z',
-            },
-          ],
-          nextCursor: 'c1',
-        };
-      }
-      throw new Error('daemon gone');
-    });
-
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-
-    // Rows from the successful first page survive the rejection on page 2.
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="page-1-row"]'),
-      ).not.toBeNull();
-    });
-    expect(container.textContent).toContain('daemon gone');
+    expect(document.querySelector('[data-session-id="vscode-1"]')).toBeNull();
   });
 });
 

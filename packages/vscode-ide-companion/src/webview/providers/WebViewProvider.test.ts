@@ -2304,12 +2304,12 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
    * A view-host context whose Memento only answers the keys it is seeded with,
    * and writes through — so a migration that retires an entry is observable.
    */
-  function createSessionStateContext(entries: Record<string, string>) {
+  function createSessionStateContext(entries: Record<string, unknown>) {
     return {
       subscriptions: [],
       workspaceState: {
         get: vi.fn((key: string) => entries[key]),
-        update: vi.fn((key: string, value: string | undefined) => {
+        update: vi.fn((key: string, value: unknown) => {
           if (value === undefined) {
             delete entries[key];
           } else {
@@ -2349,6 +2349,8 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
+    conversationStoreMocks.getAllConversations.mockReset();
+    conversationStoreMocks.getAllConversations.mockResolvedValue([]);
     mockConfigGet.mockImplementation(
       (_key: string, defaultValue: unknown) => defaultValue,
     );
@@ -2396,14 +2398,147 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     });
   });
 
-  it('ships a bootstrap payload without the removed legacy allowlist', async () => {
+  it('persists history ownership beside the view session id', async () => {
+    const context = createSessionStateContext({});
     const setup = await setupAttachedProvider({
       captureMessageHandler: true,
-      context: createSharedContext(),
+      context,
     });
-    // Scope the assertion to the bootstrap itself: any store read that a
-    // reverted #11495 scan would perform must not fire on `webShellReady`.
-    conversationStoreMocks.getAllConversations.mockClear();
+
+    await setup.messageHandler?.({
+      type: 'webShellSessionChanged',
+      data: {
+        sessionId: 'terminal-session',
+        workspaceCwd: '/workspace-a',
+        historySource: 'default',
+      },
+    });
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(
+      context.workspaceState.get(`${WEB_SHELL_SESSION_KEY_PREFIX}/workspace-a`),
+    ).toBe('terminal-session');
+    expect(
+      context.workspaceState.get(
+        'qwenCode.webShellSessionSource:/workspace-a:terminal-session',
+      ),
+    ).toBe('default');
+    expect(setup.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({
+          sessionId: 'terminal-session',
+          sessionHistorySource: 'default',
+        }),
+      }),
+    );
+  });
+
+  it('restores history ownership only when it matches the view session', async () => {
+    const context = createSessionStateContext({
+      [`${WEB_SHELL_SESSION_KEY_PREFIX}/workspace-a`]: 'terminal-session',
+      'qwenCode.webShellSessionSource:/workspace-a:terminal-session': 'default',
+      'qwenCode.webShellSessionSource:/workspace-a:new-vscode-session':
+        'vscode',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(setup.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({
+          sessionId: 'terminal-session',
+          sessionHistorySource: 'default',
+        }),
+      }),
+    );
+  });
+
+  it('ignores stale history ownership for a different view session', async () => {
+    const context = createSessionStateContext({
+      [`${WEB_SHELL_SESSION_KEY_PREFIX}/workspace-a`]: 'vscode-session',
+      'qwenCode.webShellSessionSource:/workspace-a:old-terminal-session':
+        'default',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(setup.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({
+          sessionId: 'vscode-session',
+          sessionHistorySource: 'vscode',
+        }),
+      }),
+    );
+  });
+
+  it('ships restorable legacy conversation ids in the bootstrap payload', async () => {
+    // Pre-cutover conversations whose prompts reached the daemon were renamed
+    // to the ACP session id; entries that never left the panel keep their
+    // conv_*/temp* id and have no daemon transcript to restore.
+    conversationStoreMocks.getAllConversations.mockResolvedValue([
+      {
+        id: 'conv_1757000000000_abc123',
+        title: 'Empty draft',
+        messages: [],
+      },
+      {
+        id: '550e8400-e29b-41d4-a716-446655440201',
+        title: 'Pre-upgrade chat',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+      {
+        id: 'temp-scratch',
+        title: 'Scratch',
+        messages: [],
+      },
+    ]);
+    const context = createSessionStateContext({});
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(setup.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({
+          legacyConversationIds: ['550e8400-e29b-41d4-a716-446655440201'],
+        }),
+      }),
+    );
+    // The legacy store doubles as the downgrade/recovery path; the bootstrap
+    // must stay read-only against it.
+    expect(conversationStoreMocks.getAllConversations).toHaveBeenCalled();
+  });
+
+  it('omits the legacy allowlist when no restorable conversation exists', async () => {
+    conversationStoreMocks.getAllConversations.mockResolvedValue([
+      {
+        id: 'conv_1757000000000_abc123',
+        title: 'Empty draft',
+        messages: [],
+      },
+    ]);
+    const context = createSessionStateContext({});
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
     await setup.messageHandler?.({ type: 'webShellReady' });
 
     const bootstrap = setup.postMessage.mock.calls
@@ -2411,16 +2546,12 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         ([message]) =>
           message as {
             type?: string;
-            data?: Record<string, unknown>;
+            data?: { legacyConversationIds?: string[] };
           },
       )
       .find((message) => message.type === 'webShellBootstrap');
     expect(bootstrap).toBeDefined();
-    // The #11495 legacy allowlist was removed; the payload must not re-ship
-    // the ids that no consumer reads.
     expect(bootstrap?.data?.legacyConversationIds).toBeUndefined();
-    // And the bootstrap must not re-read the host's local conversation store.
-    expect(conversationStoreMocks.getAllConversations).not.toHaveBeenCalled();
   });
 
   it('restores a session id persisted under the pre-canonicalization key', async () => {
