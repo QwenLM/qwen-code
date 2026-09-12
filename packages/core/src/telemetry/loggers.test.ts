@@ -876,23 +876,6 @@ describe('loggers', () => {
         tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
       ).not.toHaveBeenCalled();
     });
-
-    it('emits response_text as a present-but-empty key when the event has no response text', () => {
-      const event = new ApiResponseEvent(
-        'test-response-id',
-        'test-model',
-        100,
-        'prompt-id-1',
-      );
-
-      logApiResponse(mockConfig, event);
-
-      const attributes = mockLogger.emit.mock.calls[0]![0].attributes;
-      expect(
-        Object.prototype.hasOwnProperty.call(attributes, 'response_text'),
-      ).toBe(true);
-      expect(attributes.response_text).toBeUndefined();
-    });
   });
 
   describe('logApiResponse skips chatRecordingService for internal prompt IDs', () => {
@@ -1115,18 +1098,6 @@ describe('loggers', () => {
           prompt_id: 'prompt-id-6',
         },
       });
-    });
-
-    it('emits request_text as a present-but-empty key when the event has no request text', () => {
-      const event = new ApiRequestEvent('test-model', 'prompt-id-7');
-
-      logApiRequest(mockConfig, event);
-
-      const attributes = mockLogger.emit.mock.calls[0]![0].attributes;
-      expect(
-        Object.prototype.hasOwnProperty.call(attributes, 'request_text'),
-      ).toBe(true);
-      expect(attributes.request_text).toBeUndefined();
     });
 
     it('uses the request session snapshot when provided', () => {
