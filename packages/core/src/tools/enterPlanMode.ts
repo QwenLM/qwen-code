@@ -183,7 +183,10 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
     }
 
     return {
-      llmContent: getPlanModeSystemReminder(this.config.getSdkMode()),
+      llmContent: getPlanModeSystemReminder(
+        this.config.getSdkMode(),
+        this.config,
+      ),
       returnDisplay: 'Entered plan mode.',
     };
   }

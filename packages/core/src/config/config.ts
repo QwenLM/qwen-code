@@ -88,6 +88,10 @@ import {
 } from '../tools/mcp-client.js';
 import { setMemoryFilename } from '../utils/memory-constants.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import {
+  isBashSearchAvailable,
+  resolveBashSearchAvailability,
+} from '../utils/bash-search-tools.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
@@ -10189,12 +10193,9 @@ export class Config {
     return this.onPersistPermissionRuleCallback;
   }
 
-  // Check permission then register a lazy factory; its import runs on first use.
-  private async registerLazyTool(
-    registry: ToolRegistry,
+  private async getToolRegistrationStatus(
     toolName: ToolName,
-    factory: ToolFactory,
-  ): Promise<void> {
+  ): Promise<ToolRegistrationStatus | null> {
     // PermissionManager handles the coreTools allowlist, deny rules, and
     // the `tools.eager` allowlist in a single check. A tool the active
     // eager allowlist omits comes back `deferred`, not `disabled`: it is
@@ -10220,8 +10221,19 @@ export class Config {
         `Failed to check permissions for tool "${toolName}", skipping registration:`,
         error,
       );
-      return;
+      return null;
     }
+
+    return status;
+  }
+
+  // Check permission then register a lazy factory; its import runs on first use.
+  private async registerLazyTool(
+    registry: ToolRegistry,
+    toolName: ToolName,
+    factory: ToolFactory,
+  ): Promise<void> {
+    const status = await this.getToolRegistrationStatus(toolName);
     if (status === 'deferred') {
       registry.registerPermissionDeferredFactory(toolName, factory);
     } else if (status === 'registered') {
@@ -10328,6 +10340,11 @@ export class Config {
       this.eventEmitter,
       sendSdkMcpMessage,
     );
+
+    const getRegistrationStatus = (
+      toolName: ToolName,
+    ): Promise<ToolRegistrationStatus | null> =>
+      this.getToolRegistrationStatus(toolName);
 
     const registerLazy = (
       toolName: ToolName,
@@ -10473,49 +10490,102 @@ export class Config {
       return new ZoomImageTool(this);
     });
 
-    // --- Grep / RipGrep (conditional) ---
-    if (this.getUseRipgrep()) {
-      let useRipgrep = false;
-      let errorString: undefined | string = undefined;
-      recordStartupEvent('config_initialize_ripgrep_probe_start');
-      try {
-        useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
-      } catch (error: unknown) {
-        errorString = getErrorMessage(error);
-      }
-      recordStartupEvent('config_initialize_ripgrep_probe_end');
-      if (useRipgrep) {
-        await registerLazy(ToolNames.GREP, async () => {
-          const { RipGrepTool } = await import('../tools/ripGrep.js');
-          return new RipGrepTool(this);
-        });
+    // A subagent registry keeps the dedicated search tools even when Bash hosts
+    // them. A restricted teammate is launched with an explicit tool list built
+    // from READ_ONLY_INSPECTION_TOOLS, which grants no shell on purpose, and
+    // `getFunctionDeclarationsFiltered` silently drops names the registry never
+    // registered — gating them here would leave that agent unable to search at
+    // all.
+    const shellRegistrationStatus = await getRegistrationStatus(
+      ToolNames.SHELL,
+    );
+    let dedicatedSearchIsEager = false;
+    if (this.getEagerTools() !== undefined) {
+      const [grepStatus, globStatus] = await Promise.all([
+        getRegistrationStatus(ToolNames.GREP),
+        getRegistrationStatus(ToolNames.GLOB),
+      ]);
+      dedicatedSearchIsEager =
+        grepStatus === 'registered' || globStatus === 'registered';
+    }
+    const bashHostsSearch =
+      !options?.forSubAgent &&
+      (await resolveBashSearchAvailability(
+        this,
+        shellRegistrationStatus === 'registered' &&
+          !this.getDisabledTools().has(ToolNames.SHELL) &&
+          !dedicatedSearchIsEager,
+      ));
+
+    if (bashHostsSearch) {
+      const registerDeferredSearch = async (
+        toolName: ToolName,
+        factory: ToolFactory,
+      ): Promise<void> => {
+        const status = await getRegistrationStatus(toolName);
+        if (status === 'registered' || status === 'deferred') {
+          registry.registerPermissionDeferredFactory(toolName, factory);
+        }
+      };
+      await registerDeferredSearch(ToolNames.GREP, async () => {
+        const { RipGrepTool } = await import('../tools/ripGrep.js');
+        return new RipGrepTool(this);
+      });
+      await registerDeferredSearch(ToolNames.GLOB, async () => {
+        const { GlobTool } = await import('../tools/glob.js');
+        return new GlobTool(this);
+      });
+      this.getWorkspaceContext().onDirectoriesChanged(() => {
+        if (!isBashSearchAvailable(this)) {
+          registry.revealDeferredTool(ToolNames.GREP);
+          registry.revealDeferredTool(ToolNames.GLOB);
+        }
+      });
+    } else {
+      // --- Grep / RipGrep (conditional) ---
+      if (this.getUseRipgrep()) {
+        let useRipgrep = false;
+        let errorString: undefined | string = undefined;
+        recordStartupEvent('config_initialize_ripgrep_probe_start');
+        try {
+          useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
+        } catch (error: unknown) {
+          errorString = getErrorMessage(error);
+        }
+        recordStartupEvent('config_initialize_ripgrep_probe_end');
+        if (useRipgrep) {
+          await registerLazy(ToolNames.GREP, async () => {
+            const { RipGrepTool } = await import('../tools/ripGrep.js');
+            return new RipGrepTool(this);
+          });
+        } else {
+          logRipgrepFallback(
+            this,
+            new RipgrepFallbackEvent(
+              this.getUseRipgrep(),
+              this.getUseBuiltinRipgrep(),
+              errorString || 'ripgrep is not available',
+            ),
+          );
+          await registerLazy(ToolNames.GREP, async () => {
+            const { GrepTool } = await import('../tools/grep.js');
+            return new GrepTool(this);
+          });
+        }
       } else {
-        logRipgrepFallback(
-          this,
-          new RipgrepFallbackEvent(
-            this.getUseRipgrep(),
-            this.getUseBuiltinRipgrep(),
-            errorString || 'ripgrep is not available',
-          ),
-        );
+        recordStartupEvent('config_initialize_ripgrep_probe_start');
+        recordStartupEvent('config_initialize_ripgrep_probe_end');
         await registerLazy(ToolNames.GREP, async () => {
           const { GrepTool } = await import('../tools/grep.js');
           return new GrepTool(this);
         });
       }
-    } else {
-      recordStartupEvent('config_initialize_ripgrep_probe_start');
-      recordStartupEvent('config_initialize_ripgrep_probe_end');
-      await registerLazy(ToolNames.GREP, async () => {
-        const { GrepTool } = await import('../tools/grep.js');
-        return new GrepTool(this);
+
+      await registerLazy(ToolNames.GLOB, async () => {
+        const { GlobTool } = await import('../tools/glob.js');
+        return new GlobTool(this);
       });
     }
-
-    await registerLazy(ToolNames.GLOB, async () => {
-      const { GlobTool } = await import('../tools/glob.js');
-      return new GlobTool(this);
-    });
     await registerLazy(ToolNames.EDIT, async () => {
       const { EditTool } = await import('../tools/edit.js');
       return new EditTool(this);

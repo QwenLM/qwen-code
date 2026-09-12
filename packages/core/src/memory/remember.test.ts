@@ -205,6 +205,32 @@ describe('remember memory helper', () => {
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
   });
 
+  it('keeps the search tool without granting Shell', async () => {
+    const memoryFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'saved.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [memoryFile],
+      filesWritten: [memoryFile],
+    } satisfies ForkedAgentResult);
+
+    await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Remember the project uses vitest.',
+      contextMode: 'clean',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: ['read_file', 'grep_search', 'write_file', 'edit'],
+      }),
+    );
+  });
+
   it('enforces an explicit project target at the permission boundary', async () => {
     const projectFile = path.join(
       getAutoMemoryRoot(projectRoot),
