@@ -419,6 +419,7 @@ export function EmbeddedApp() {
   // The allowlist is fixed for one bootstrap, so one successful scan is
   // enough until the host supplies a fresh list.
   const legacyScanDoneRef = useRef(false);
+  const legacySessionsRef = useRef<DaemonSessionSummary[]>([]);
   const sessionHistoryRequestRef = useRef(0);
   const sessionSwitchTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
@@ -461,6 +462,7 @@ export function EmbeddedApp() {
   // A re-bootstrap delivers a fresh allowlist — reopen the scan for it.
   useEffect(() => {
     legacyScanDoneRef.current = false;
+    legacySessionsRef.current = [];
   }, [runtime?.legacyConversationIds]);
 
   useEffect(
@@ -540,7 +542,10 @@ export function EmbeddedApp() {
         // restore), so later loads surface it through the ordinary query
         // above. A scan failure must not take the ordinary history list down
         // with it — fail open and retry on a later open.
-        let legacySessions: DaemonSessionSummary[] = [];
+        let legacySessions =
+          source === VSCODE_SESSION_SOURCE_TYPE
+            ? legacySessionsRef.current
+            : [];
         if (
           cursor === undefined &&
           source === VSCODE_SESSION_SOURCE_TYPE &&
@@ -555,6 +560,7 @@ export function EmbeddedApp() {
               legacyIds,
             );
             if (requestId !== sessionHistoryRequestRef.current) return;
+            legacySessionsRef.current = legacySessions;
             legacyScanDoneRef.current = true;
           } catch {
             legacySessions = [];
@@ -1174,6 +1180,12 @@ export function EmbeddedApp() {
                   displayName: title,
                 });
               const displayName = result.displayName || title;
+              legacySessionsRef.current = legacySessionsRef.current.map(
+                (entry) =>
+                  entry.sessionId === session.sessionId
+                    ? { ...entry, displayName }
+                    : entry,
+              );
               setSessions((current) =>
                 current.map((entry) =>
                   entry.sessionId === session.sessionId
@@ -1213,6 +1225,9 @@ export function EmbeddedApp() {
               await daemonClient
                 .workspaceByCwd(runtime.workspaceCwd)
                 .deleteSessionsData([session.sessionId]);
+              legacySessionsRef.current = legacySessionsRef.current.filter(
+                (entry) => entry.sessionId !== session.sessionId,
+              );
               setSessions((current) =>
                 current.filter(
                   (entry) => entry.sessionId !== session.sessionId,
@@ -1325,33 +1340,30 @@ export function EmbeddedApp() {
             clearInsight();
             const createNewSession = shellRef.current?.createNewSession;
             if (!createNewSession) return;
-            setActiveSessionHistorySource(VSCODE_SESSION_SOURCE_TYPE);
             setEditingMessage(undefined);
             composerRef.current?.clear({ text: true, tags: true });
             setCreatingSession(true);
-            requestAnimationFrame(() => {
-              void createNewSession()
-                .then((created) => {
-                  if (created) {
-                    setSessionTitle(t('session.new'));
-                    return;
-                  }
-                  setHostNotice({
-                    tone: 'error',
-                    text: t('session.createFailed'),
-                  });
-                })
-                .catch((error) => {
-                  setHostNotice({
-                    tone: 'error',
-                    text:
-                      error instanceof Error
-                        ? error.message
-                        : t('session.createFailed'),
-                  });
-                })
-                .finally(() => setCreatingSession(false));
-            });
+            void createNewSession()
+              .then((created) => {
+                if (created) {
+                  setSessionTitle(t('session.new'));
+                  return;
+                }
+                setHostNotice({
+                  tone: 'error',
+                  text: t('session.createFailed'),
+                });
+              })
+              .catch((error) => {
+                setHostNotice({
+                  tone: 'error',
+                  text:
+                    error instanceof Error
+                      ? error.message
+                      : t('session.createFailed'),
+                });
+              })
+              .finally(() => setCreatingSession(false));
           }}
           style={{
             display: 'inline-flex',
@@ -1575,6 +1587,9 @@ export function EmbeddedApp() {
           header={{ items: [] }}
           onSessionIdChange={(sessionId) => {
             if (switchingSessionId && sessionId !== switchingSessionId) return;
+            if (sessionId === undefined) {
+              setActiveSessionHistorySource(VSCODE_SESSION_SOURCE_TYPE);
+            }
             webShellPermissionRequestIdRef.current = undefined;
             clearInsight();
             setEditingMessage(undefined);
