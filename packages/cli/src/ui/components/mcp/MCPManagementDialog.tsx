@@ -44,7 +44,10 @@ import { DiscoveredMCPTool } from '@qwen-code/qwen-code-core/tools/mcp-tool.js';
 import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
-import { loadMcpApprovals } from '../../../config/mcpApprovals.js';
+import {
+  isMcpApprovalGateArmed,
+  loadMcpApprovals,
+} from '../../../config/mcpApprovals.js';
 import { isToolValid, getToolInvalidReasons } from './utils.js';
 
 const debugLogger = createDebugLogger('MCP_DIALOG');
@@ -80,7 +83,14 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     // Approval state is keyed by the same project root the approval dialog
     // writes under — `getWorkingDir()` (see useMcpApproval) — so the lookup
     // matches what discovery gated on.
-    const approvals = loadMcpApprovals();
+    // Not readable from a gate-off session (literal-form digest).
+    const approvals = isMcpApprovalGateArmed(
+      config.getBareMode(),
+      config.isSafeMode(),
+      config.getApprovalMode(),
+    )
+      ? loadMcpApprovals()
+      : undefined;
     const approvalRoot = config.getWorkingDir();
 
     const serverInfos: MCPServerDisplayInfo[] = [];
@@ -149,7 +159,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       // a first/renewed approval) or `rejected`. Only gated scopes carry this;
       // `approved` (and all non-gated scopes) leave it undefined.
       let approvalState: 'pending' | 'rejected' | undefined;
-      if (isGatedMcpScope(serverConfig.scope)) {
+      if (approvals && isGatedMcpScope(serverConfig.scope)) {
         const state = approvals.getState(approvalRoot, name, serverConfig);
         if (state !== 'approved') {
           approvalState = state;
@@ -434,6 +444,16 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
 
   const handleApprove = useCallback(async () => {
     if (!config || !selectedServer) return;
+    // Never write the store from a gate-off session.
+    if (
+      !isMcpApprovalGateArmed(
+        config.getBareMode(),
+        config.isSafeMode(),
+        config.getApprovalMode(),
+      )
+    ) {
+      return;
+    }
 
     try {
       setIsLoading(true);

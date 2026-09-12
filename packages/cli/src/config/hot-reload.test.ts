@@ -580,6 +580,53 @@ describe('registerMcpHotReload', () => {
       appEvents.off(AppEvent.McpPendingApprovalChanged, spy);
     }
   });
+
+  // With the approval gate off nothing shows the user a repository-supplied
+  // server before it connects, so the reload must not turn a `.mcp.json`
+  // placeholder into the real value. Asserted on what reaches
+  // reinitializeMcpServers, through the real loader.
+  it.each([
+    [ApprovalMode.YOLO, 'Bearer ${HOTRELOAD_TOKEN}'],
+    [ApprovalMode.DEFAULT, 'Bearer real-secret'],
+  ])(
+    'expands .mcp.json placeholders only while the approval gate is armed (%s)',
+    async (approvalMode, expectedHeader) => {
+      fs.writeFileSync(
+        path.join(cwd, '.mcp.json'),
+        JSON.stringify({
+          mcpServers: {
+            proj: {
+              httpUrl: 'https://proj.example/mcp',
+              headers: { Authorization: 'Bearer ${HOTRELOAD_TOKEN}' },
+            },
+          },
+        }),
+      );
+      process.env['HOTRELOAD_TOKEN'] = 'real-secret';
+      try {
+        const fc = makeFakeConfig(cwd, {
+          settingsMcp: {},
+          gating: {},
+          approvalMode,
+        });
+        registerMcpHotReload(watcher, settings, fc.config, undefined);
+        await listener([]);
+
+        expect(fc.reinitializeMcpServers).toHaveBeenCalledOnce();
+        const next = (
+          fc.reinitializeMcpServers.mock.calls[0] as unknown[]
+        )[0] as Record<string, MCPServerConfig>;
+        expect(next['proj'].scope).toBe('project');
+        expect(next['proj'].headers).toEqual({ Authorization: expectedHeader });
+        // One gate value feeds expansion and `pending` alike.
+        expect(fc.setPendingMcpServers).toHaveBeenCalledWith(
+          approvalMode === ApprovalMode.YOLO ? undefined : ['proj'],
+        );
+      } finally {
+        delete process.env['HOTRELOAD_TOKEN'];
+      }
+    },
+  );
 });
 
 // ── modelProviders hot-reload (#10568) ────────────────────────────────

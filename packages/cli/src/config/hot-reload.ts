@@ -7,17 +7,17 @@
 import equal from 'fast-deep-equal';
 import {
   createDebugLogger,
-  ApprovalMode,
   type Config,
   getMCPServerStatus,
   type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './settings.js';
 import type { SettingsWatcher } from './settingsWatcher.js';
-import { assembleMcpServers } from './mcpServers.js';
+import { assembleMcpServers, mcpExpansionOptions } from './mcpServers.js';
 import {
   getPendingGatedMcpServers,
   getPromptableMcpServers,
+  isMcpApprovalGateArmed,
 } from './mcpApprovals.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 
@@ -95,7 +95,7 @@ export function recomputeMcpGating(
   assembled: Record<string, MCPServerConfig>,
   cwd: string,
   bootAllowed: readonly string[] | undefined,
-  isYolo: boolean,
+  gateOff: boolean,
 ): McpGating {
   // Preserve `[]` (deny-all); only an absent key yields `undefined` (allow-all).
   const settingsAllowed = settings.merged.mcp?.allowed?.filter(Boolean);
@@ -109,7 +109,7 @@ export function recomputeMcpGating(
   return {
     allowed,
     excluded: excluded && excluded.length > 0 ? excluded : undefined,
-    pending: isYolo ? undefined : getPendingGatedMcpServers(assembled, cwd),
+    pending: gateOff ? undefined : getPendingGatedMcpServers(assembled, cwd),
   };
 }
 
@@ -148,6 +148,12 @@ export function registerMcpHotReload(
     // already-running bare/safe-mode session; only the top-tier servers this
     // session started with (explicit, per-invocation, not ambient state)
     // survive.
+    // One value for both expansion and `pending`, as in loadCliConfig.
+    const gateArmed = isMcpApprovalGateArmed(
+      config.getBareMode(),
+      config.isSafeMode(),
+      config.getApprovalMode(),
+    );
     const next =
       config.getBareMode() || config.isSafeMode()
         ? { ...topTierMcpServers }
@@ -155,8 +161,8 @@ export function registerMcpHotReload(
             settings.merged.mcpServers,
             cwd,
             topTierMcpServers,
+            mcpExpansionOptions(settings.merged, cwd, gateArmed),
           );
-    const isYolo = config.getApprovalMode() === ApprovalMode.YOLO;
     // Same bare/safe guard as `next` above, applied to the admission lists:
     // `recomputeMcpGating` reads settings.merged.mcp.allowed/excluded
     // unconditionally, with no bare/safe check of its own — a live
@@ -173,7 +179,7 @@ export function registerMcpHotReload(
     const nextGating: McpGating =
       config.getBareMode() || config.isSafeMode()
         ? { allowed: bootAllowed ? [...bootAllowed] : undefined }
-        : recomputeMcpGating(settings, next, cwd, bootAllowed, isYolo);
+        : recomputeMcpGating(settings, next, cwd, bootAllowed, !gateArmed);
 
     const prevServers = config.getSettingsMcpServers();
     const prevGating = config.getMcpGating();
@@ -254,7 +260,7 @@ export function registerMcpHotReload(
     // Prompt for approval AFTER reconcile, so `config.getMcpServers()` (which
     // the dialog reads) already reflects the new map. Emit regardless of
     // reconcile success — a server left pending still needs the user's decision.
-    if (!isYolo && promptable.length > 0) {
+    if (gateArmed && promptable.length > 0) {
       debugLogger.debug(
         `gated servers awaiting approval → emitting ${AppEvent.McpPendingApprovalChanged}: [${promptable.join(
           ', ',

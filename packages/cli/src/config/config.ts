@@ -69,6 +69,8 @@ import * as path from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import stripJsonComments from 'strip-json-comments';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
+import { exceedsMaxDepth, MAX_MCP_SERVER_CONFIG_DEPTH } from './mcpJson.js';
 
 import { resolvePath } from '../utils/resolvePath.js';
 import {
@@ -95,8 +97,11 @@ import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 export { isValidSessionId } from './session-id.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
-import { assembleMcpServers } from './mcpServers.js';
-import { getPendingGatedMcpServers } from './mcpApprovals.js';
+import { assembleMcpServers, mcpExpansionOptions } from './mcpServers.js';
+import {
+  getPendingGatedMcpServers,
+  isMcpApprovalGateArmed,
+} from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
@@ -1277,7 +1282,22 @@ function parseMcpConfig(
     debugLogger.debug(
       `Loaded ${Object.keys(servers).length} MCP server(s) from --mcp-config`,
     );
-    return servers as Record<string, MCPServerConfig>;
+    // Bound nesting before the recursive resolver sees it, so a pathological
+    // document fails with a deterministic message naming the server rather than
+    // a stack-dependent `RangeError`.
+    for (const [name, server] of Object.entries(servers)) {
+      if (exceedsMaxDepth(server, MAX_MCP_SERVER_CONFIG_DEPTH)) {
+        throw new Error(
+          `server "${name}" nests deeper than ${MAX_MCP_SERVER_CONFIG_DEPTH} levels`,
+        );
+      }
+    }
+
+    // Expand placeholders as every settings scope does (#11499: a literal
+    // placeholder reaches the server as an auth header and surfaces as a 401).
+    // Unlike `.mcp.json` this resolves the WHOLE object, metadata included, and
+    // is not gated by approval — `--mcp-config` servers never are.
+    return resolveEnvVarsInObject(servers) as Record<string, MCPServerConfig>;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     throw new FatalConfigError(
@@ -2156,20 +2176,29 @@ export async function loadCliConfig(
   // ambient, file-sourced state they're meant to distrust) — but top-tier
   // servers are an explicit, per-invocation argument from the caller (ACP
   // `session/new`, `--mcp-config`), not ambient local state, so they survive.
+  const mcpApprovalGateArmed = isMcpApprovalGateArmed(
+    bareMode,
+    safeMode,
+    approvalMode,
+  );
   const mcpServers =
     bareMode || safeMode
       ? { ...topTierMcpServers }
-      : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+      : assembleMcpServers(
+          settings.mcpServers,
+          cwd,
+          topTierMcpServers,
+          mcpExpansionOptions(settings, cwd, mcpApprovalGateArmed),
+        );
   // Top-tier servers are never gated (#4615, see the comment above), so this
   // is a no-op for them either way today. Skipped under safe mode anyway
   // (Copilot review, PR #7827): getPendingGatedMcpServers reads the local
   // mcpApprovals.json file, and safe mode shouldn't touch local/ambient
   // state at all, not even a read with no behavioral effect. Revisit if a
   // future gated top-tier source needs this to run under safe mode too.
-  const pendingMcpServers =
-    bareMode || safeMode || approvalMode === ApprovalMode.YOLO
-      ? undefined
-      : getPendingGatedMcpServers(mcpServers, cwd);
+  const pendingMcpServers = !mcpApprovalGateArmed
+    ? undefined
+    : getPendingGatedMcpServers(mcpServers, cwd);
 
   const configParams: ConfigParameters = {
     sessionId,

@@ -10,10 +10,109 @@ import {
   type MCPServerConfig,
   normalizeClaudeMcpServer,
 } from '@qwen-code/qwen-code-core';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import stripJsonComments from 'strip-json-comments';
 
 /** Project-scoped MCP config filename, read from the workspace root. */
 export const PROJECT_MCP_FILENAME = '.mcp.json';
+
+/**
+ * Fields expanded for `$VAR` / `${VAR}`. An allowlist, not a denylist: metadata
+ * (`description`, `extensionName`, `includeTools`, …) is left verbatim.
+ * `authProviderType` is excluded on purpose — it selects a provider from a
+ * fixed enum (`google_credentials`, …), a constant rather than a per-environment
+ * value, so a placeholder there gains nothing.
+ */
+const ENV_EXPANDED_TRANSPORT_FIELDS = [
+  'command',
+  'args',
+  'env',
+  'cwd',
+  'url',
+  'httpUrl',
+  'headers',
+  'tcp',
+  'oauth',
+  'targetAudience',
+  'targetServiceAccount',
+] as const satisfies ReadonlyArray<keyof MCPServerConfig>;
+
+const ENV_PLACEHOLDER = /\$(?:\w+|\{[^}]+\})/;
+
+/** Whether any allowlisted field of `config` still carries `$VAR` / `${VAR}`. */
+function hasEnvPlaceholder(config: MCPServerConfig): boolean {
+  const source = config as unknown as Record<string, unknown>;
+  return ENV_EXPANDED_TRANSPORT_FIELDS.some(
+    (field) =>
+      Object.prototype.hasOwnProperty.call(source, field) &&
+      ENV_PLACEHOLDER.test(JSON.stringify(source[field])),
+  );
+}
+
+/**
+ * Nesting cap for one server entry. `resolveEnvVarsInObject` and the
+ * `JSON.stringify` in `hashMcpServerConfig` both recurse, and overflow well
+ * below this on hostile input. Depth is counted from the server entry itself
+ * (entry = 1), so each consumer's recursion is bounded relative to where it
+ * starts: `parseMcpConfig` hands the resolver the whole map of servers, one
+ * level above the entry, so cap + 1; `hashMcpServerConfig` stringifies the
+ * entry, so cap; `resolveTransportEnvVars` hands the resolver one field of the
+ * entry, so cap − 1.
+ */
+export const MAX_MCP_SERVER_CONFIG_DEPTH = 64;
+
+/**
+ * Whether `root` nests objects/arrays deeper than `maxDepth`. Input is always
+ * `JSON.parse` output, i.e. a finite tree. Iterative because a recursive probe
+ * would overflow on the input it exists to reject; a cycle, were one ever
+ * passed, terminates by exceeding `maxDepth`.
+ */
+export function exceedsMaxDepth(root: unknown, maxDepth: number): boolean {
+  const stack: Array<{ value: unknown; depth: number }> = [
+    { value: root, depth: 1 },
+  ];
+  while (stack.length > 0) {
+    const { value, depth } = stack.pop()!;
+    if (value === null || typeof value !== 'object') {
+      continue;
+    }
+    if (depth > maxDepth) {
+      return true;
+    }
+    const children = Array.isArray(value) ? value : Object.values(value);
+    for (const child of children) {
+      stack.push({ value: child, depth: depth + 1 });
+    }
+  }
+  return false;
+}
+
+/**
+ * Expand `$VAR` / `${VAR}` in the transport fields of one entry, leaving every
+ * other field byte-identical. Returns the input unchanged when nothing expanded.
+ */
+function resolveTransportEnvVars(
+  config: MCPServerConfig,
+  env: Readonly<NodeJS.ProcessEnv>,
+): MCPServerConfig {
+  const source = config as unknown as Record<string, unknown>;
+  let resolved: Record<string, unknown> | undefined;
+  for (const field of ENV_EXPANDED_TRANSPORT_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(source, field)) {
+      continue;
+    }
+    const original = source[field];
+    const value = resolveEnvVarsInObject(original, env, {
+      processEnvFallback: false,
+    });
+    if (value === original) {
+      continue;
+    }
+    resolved ??= { ...source };
+    resolved[field] = value;
+  }
+  return (resolved ?? config) as unknown as MCPServerConfig;
+}
 
 export interface LoadProjectMcpServersResult {
   /**
@@ -30,17 +129,37 @@ export interface LoadProjectMcpServersResult {
 }
 
 /**
- * Load project-scoped MCP servers from `<projectRoot>/.mcp.json`.
+ * Options for {@link loadProjectMcpServers}. Expanding needs the workspace's
+ * own environment (`buildWorkspaceEnvSnapshot`), never `process.env`, which in
+ * a process hosting several workspaces carries the other ones' `.env` values —
+ * so the snapshot is required by the type whenever `expandEnv` is true. Pass
+ * `expandEnv: false` when the approval gate is off (`--yolo`): then nothing
+ * stands between a checked-in `.mcp.json` and a live connection, and the
+ * placeholder travels as the literal text it is.
+ */
+export type LoadProjectMcpServersOptions =
+  | { expandEnv: false }
+  | { expandEnv: true; env: Readonly<NodeJS.ProcessEnv> };
+
+/**
+ * Load project-scoped MCP servers from `<projectRoot>/.mcp.json`, each tagged
+ * `scope: 'project'` so the discovery layer can gate it behind approval.
  *
- * This is a pure read: it parses JSON and tags each server with
- * `scope: 'project'` so the discovery layer can gate it behind approval. It
- * never spawns a process, opens a transport, or runs a health check. A missing
- * file is normal (returns empty); a malformed file is reported via `errors` and
- * otherwise ignored so it can never crash startup.
+ * A pure read: never spawns a process, opens a transport or runs a health check
+ * (#4615). Never throws — a missing file returns empty, and anything malformed,
+ * over-deep or otherwise unusable is reported via `errors` and skipped, per
+ * entry, so one bad server cannot cost the session.
+ *
+ * Note `getHomeEnvFallbackVars()` is deliberately NOT merged into the snapshot:
+ * the only keys it would add are the ones `loadEnvironment` refused to apply
+ * (loader-affecting keys such as `NODE_OPTIONS`, private provenance markers),
+ * and a repository-supplied file must not be able to read those (#8653).
  */
 export function loadProjectMcpServers(
   projectRoot: string,
+  options: LoadProjectMcpServersOptions,
 ): LoadProjectMcpServersResult {
+  const expandEnv = options.expandEnv;
   const filePath = path.join(projectRoot, PROJECT_MCP_FILENAME);
 
   let raw: string;
@@ -84,12 +203,39 @@ export function loadProjectMcpServers(
       errors.push(`${filePath}: server "${name}" is not an object — skipped`);
       continue;
     }
-    // `.mcp.json` is the Claude Code convention, so entries may use Claude's
-    // `type`-based transport shape; normalize them to Qwen's field-based shape.
-    servers[name] = {
-      ...normalizeClaudeMcpServer(value as MCPServerConfig),
-      scope: 'project',
-    };
+    if (exceedsMaxDepth(value, MAX_MCP_SERVER_CONFIG_DEPTH)) {
+      errors.push(
+        `${filePath}: server "${name}" nests deeper than ` +
+          `${MAX_MCP_SERVER_CONFIG_DEPTH} levels — skipped`,
+      );
+      continue;
+    }
+    try {
+      if (!expandEnv && hasEnvPlaceholder(value as MCPServerConfig)) {
+        // Loaded as written; say so, or the only symptom is the 401 (#11499).
+        errors.push(
+          `${filePath}: server "${name}" keeps its literal $ placeholders: ` +
+            `the MCP approval gate is off (--yolo), ` +
+            `so environment variables were not expanded`,
+        );
+      }
+      // `.mcp.json` is the Claude Code convention, so entries may use Claude's
+      // `type`-based transport shape; normalize them to Qwen's field-based shape.
+      servers[name] = {
+        ...normalizeClaudeMcpServer(
+          options.expandEnv
+            ? resolveTransportEnvVars(value as MCPServerConfig, options.env)
+            : (value as MCPServerConfig),
+        ),
+        scope: 'project',
+      };
+    } catch (e) {
+      // Keeps the "never throws" contract total, per entry.
+      errors.push(
+        `${filePath}: server "${name}" could not be processed: ` +
+          `${(e as Error).message} — skipped`,
+      );
+    }
   }
 
   return { servers, path: filePath, errors };

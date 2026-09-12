@@ -224,8 +224,14 @@ import {
   normalizeSessionIdForLookup,
   parseCallerSuppliedSessionId,
 } from '../config/session-id.js';
-import { loadMcpApprovals } from '../config/mcpApprovals.js';
-import { assembleMcpServers } from '../config/mcpServers.js';
+import {
+  isMcpApprovalGateArmed,
+  loadMcpApprovals,
+} from '../config/mcpApprovals.js';
+import {
+  assembleMcpServers,
+  mcpExpansionOptions,
+} from '../config/mcpServers.js';
 import { recomputeMcpGating } from '../config/hot-reload.js';
 import {
   REDACTED_MCP_SECRET,
@@ -4070,7 +4076,8 @@ class QwenAgent implements Agent {
     accepted: boolean;
   } {
     return this.enqueueWorkspaceMcpDiscovery('reload', async () => {
-      const settings = loadSettings(this.config.getTargetDir());
+      const bootstrapCwd = this.config.getTargetDir();
+      const settings = loadSettings(bootstrapCwd);
       const discoveryConfig = this.workspaceMcpDiscoveryConfig;
       const liveConfigs = new Set([
         this.config,
@@ -4081,24 +4088,27 @@ class QwenAgent implements Agent {
       for (const config of liveConfigs) {
         try {
           const cwd = config.getTargetDir();
-          // Same bare/safe guard as registerMcpHotReload (config/hot-reload.ts)
-          // — each live Config in this Set may independently be bare/safe or
-          // not, so the check is per-config, not hoisted outside the loop.
-          // Without it, this control-endpoint reload path (workspaceMcpReload)
-          // would fold settings.merged.mcpServers/mcp.allowed/excluded — LOCAL
-          // state safe/bare mode is supposed to distrust — back into an
-          // already-running safe/bare session, silently stranding or
-          // filtering out the caller's own top-tier server. Same bug class as
-          // the loadCliConfig (boot) and registerMcpHotReload (settings-file
-          // watcher) fixes earlier in this PR, found here in the third
-          // reload path.
+          // Per-Config, as in registerMcpHotReload: a bare/safe Config in this
+          // set must not receive settings.mcpServers / mcp.allowed / excluded.
           const isBareOrSafe = config.getBareMode() || config.isSafeMode();
+          // One value for both expansion and `pending`.
+          const gateArmed = isMcpApprovalGateArmed(
+            config.getBareMode(),
+            config.isSafeMode(),
+            config.getApprovalMode(),
+          );
+          // The env snapshot comes from THIS workspace's settings (its
+          // `settings.env`, `excludedEnvVars`); the server map and admission
+          // lists keep the bootstrap settings, as before.
+          const workspaceSettings =
+            cwd === bootstrapCwd ? settings : loadSettingsCached(cwd);
           const mcpServers = isBareOrSafe
             ? { ...config.getTopTierMcpServers() }
             : assembleMcpServers(
                 settings.merged.mcpServers,
                 cwd,
                 config.getTopTierMcpServers(),
+                mcpExpansionOptions(workspaceSettings.merged, cwd, gateArmed),
               );
           const bootAllowed = config.getCliAllowedMcpServerNames();
           const gating = isBareOrSafe
@@ -4108,7 +4118,7 @@ class QwenAgent implements Agent {
                 mcpServers,
                 cwd,
                 bootAllowed,
-                config.getApprovalMode() === ApprovalMode.YOLO,
+                !gateArmed,
               );
           config.setExcludedMcpServers(gating.excluded ?? []);
           config.setAllowedMcpServers(gating.allowed);
@@ -6782,7 +6792,14 @@ class QwenAgent implements Agent {
       const systemDefaultServers =
         settings.systemDefaults?.settings.mcpServers ?? {};
       const servers = config.getMcpServers() ?? {};
-      const approvals = loadMcpApprovals();
+      // Gate-off Configs hold `.mcp.json` unexpanded: their digest cannot match the store.
+      const approvals = isMcpApprovalGateArmed(
+        config.getBareMode(),
+        config.isSafeMode(),
+        config.getApprovalMode(),
+      )
+        ? loadMcpApprovals()
+        : undefined;
 
       // Pool snapshot for per-server `entryCount` + `entrySummary`.
       // Captured once outside the per-server loop. Absent when the
@@ -6909,7 +6926,7 @@ class QwenAgent implements Agent {
               ...(hasOAuthTokens !== undefined ? { hasOAuthTokens } : {}),
               ...(requiresAuth ? { requiresAuth: true } : {}),
             };
-            if (isGatedMcpScope(server.scope)) {
+            if (approvals && isGatedMcpScope(server.scope)) {
               const approvalState = approvals.getState(
                 config.getWorkingDir(),
                 name,
@@ -10278,6 +10295,20 @@ class QwenAgent implements Agent {
             throw RequestError.invalidParams(
               undefined,
               `MCP server is not approval-gated: ${serverName}`,
+            );
+          }
+          if (
+            !isMcpApprovalGateArmed(
+              config.getBareMode(),
+              config.isSafeMode(),
+              config.getApprovalMode(),
+            )
+          ) {
+            // Gate-off: the digest would be of the literal form.
+            throw RequestError.invalidParams(
+              undefined,
+              `MCP approval is off for this session; ${serverName} was not approved — ` +
+                `use \`qwen mcp approve\``,
             );
           }
           const approvals = loadMcpApprovals();

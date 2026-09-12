@@ -562,6 +562,37 @@ export function buildRuntimeEnvironment(
 }
 
 /**
+ * `process.env` minus every key a `.env` file or `settings.env` wrote into it:
+ * what one workspace's files added must not reach another workspace's snapshot.
+ */
+export function launchBaseEnv(): NodeJS.ProcessEnv {
+  const base: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!isFileSourcedEnvKey(key)) base[key] = value;
+  }
+  return base;
+}
+
+/**
+ * One workspace's environment for resolving its repository-supplied files:
+ * the launch environment plus this workspace's `.env` files and `settings.env`,
+ * never touching `process.env`. Equals `process.env` in a single-workspace CLI;
+ * in a process hosting several workspaces it omits the other ones' files.
+ */
+export function buildWorkspaceEnvSnapshot(
+  settings: Settings,
+  cwd: string,
+  workspaceTrusted?: boolean,
+): Readonly<NodeJS.ProcessEnv> {
+  return buildRuntimeEnvironment(
+    settings,
+    cwd,
+    launchBaseEnv(),
+    workspaceTrusted,
+  ).effectiveEnv;
+}
+
+/**
  * Loads environment variables from .env files and settings.env.
  *
  * Priority order (highest to lowest):
