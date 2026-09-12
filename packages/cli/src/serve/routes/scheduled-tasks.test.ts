@@ -711,6 +711,7 @@ describe('scheduled-tasks routes', () => {
     expect(unsafeGroup.status).toBe(400);
     expect(unsafeGroup.body.code).toBe('invalid_group_id');
 
+    h.bridge.markSessionCatalogChanged.mockClear();
     const persistent = await request(h.app)
       .patch(`/scheduled-tasks/${created.body.id}`)
       .send({ sessionMode: 'persistent' });
@@ -720,6 +721,24 @@ describe('scheduled-tasks routes', () => {
       modelServiceId: null,
       groupId: null,
     });
+    expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+
+    h.bridge.markSessionCatalogChanged.mockClear();
+    const perRun = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ sessionMode: 'per_run' });
+    expect(perRun.status).toBe(200);
+    expect(perRun.body.sessionMode).toBe('per_run');
+    expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+
+    // A PATCH that cannot change default-catalog membership (a rename) must
+    // not mark the catalog at all.
+    h.bridge.markSessionCatalogChanged.mockClear();
+    const renamed = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ name: 'Renamed' });
+    expect(renamed.status).toBe(200);
+    expect(h.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
   });
 
   it('restores a per-run one-shot when fresh-session admission fails', async () => {
@@ -3101,6 +3120,25 @@ describe('scheduledTaskSessionName', () => {
       }
     }
     expect(name.endsWith('…')).toBe(true);
+  });
+
+  it('names sentinel-prompt tasks after what they run, not the raw marker', () => {
+    // A tool-created /loop task is stored unnamed, so its controller session
+    // would otherwise appear in the session list as a literal `<<loop.md>>`.
+    expect(scheduledTaskSessionName('<<loop.md>>')).toBe('Loop (loop.md)');
+    expect(scheduledTaskSessionName('<<loop.md-dynamic>>')).toBe(
+      'Loop (loop.md)',
+    );
+    expect(scheduledTaskSessionName('<<autonomous-loop>>')).toBe(
+      'Autonomous loop',
+    );
+    expect(scheduledTaskSessionName('<<autonomous-loop-dynamic>>')).toBe(
+      'Autonomous loop',
+    );
+    // A prompt merely mentioning a sentinel is still an ordinary label.
+    expect(scheduledTaskSessionName('check <<loop.md>> hourly')).toBe(
+      'check <<loop.md>> hourly',
+    );
   });
 
   it('strips Unicode bidi override/isolate chars (Trojan-Source reordering defense)', () => {

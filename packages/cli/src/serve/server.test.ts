@@ -23860,10 +23860,11 @@ describe('createServeApp', () => {
     });
 
     describe('session source filter', () => {
-      it('includes legacy sessions in the default source filter', async () => {
+      it('includes legacy and fixed scheduled-task sessions in the default source filter', async () => {
         const legacyId = '550e8400-e29b-41d4-a716-446655440201';
         const defaultId = '550e8400-e29b-41d4-a716-446655440202';
         const scheduledId = '550e8400-e29b-41d4-a716-446655440203';
+        const perRunControllerId = '550e8400-e29b-41d4-a716-446655440204';
         await writeStoredSession({
           sessionId: legacyId,
           cwd: WS_BOUND,
@@ -23889,6 +23890,39 @@ describe('createServeApp', () => {
           sourceType: 'scheduled_task',
           sourceId: 'task-1',
         });
+        await writeStoredSession({
+          sessionId: perRunControllerId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:03:00.000Z',
+          prompt: 'per-run controller',
+          mtime: new Date('2026-05-17T12:03:00.000Z'),
+          sourceType: 'scheduled_task',
+          sourceId: 'task-2',
+        });
+        await qwenCore.updateCronTasks(WS_BOUND, () => [
+          {
+            id: 'task-1',
+            cron: '0 9 * * *',
+            prompt: 'scheduled session',
+            recurring: true,
+            createdAt: 1,
+            lastFiredAt: null,
+            enabled: true,
+            sessionMode: 'persistent',
+            sessionId: scheduledId,
+          },
+          {
+            id: 'task-2',
+            cron: '0 * * * *',
+            prompt: 'per-run controller',
+            recurring: true,
+            createdAt: 2,
+            lastFiredAt: null,
+            enabled: true,
+            sessionMode: 'per_run',
+            sessionId: perRunControllerId,
+          },
+        ]);
         const app = createServeApp(
           { ...baseOpts, workspace: WS_BOUND },
           undefined,
@@ -23905,7 +23939,7 @@ describe('createServeApp', () => {
           defaultResult.body.sessions.map(
             (session: { sessionId: string }) => session.sessionId,
           ),
-        ).toEqual([defaultId, legacyId]);
+        ).toEqual([scheduledId, defaultId, legacyId]);
 
         const organizedFirstPage = await get(
           'view=organized&group=all&sourceType=default&size=1',
@@ -23915,7 +23949,7 @@ describe('createServeApp', () => {
           organizedFirstPage.body.sessions.map(
             (session: { sessionId: string }) => session.sessionId,
           ),
-        ).toEqual([defaultId]);
+        ).toEqual([scheduledId]);
         const organizedSecondPage = await get(
           `view=organized&group=all&sourceType=default&size=1&cursor=${encodeURIComponent(
             organizedFirstPage.body.nextCursor,
@@ -23924,6 +23958,17 @@ describe('createServeApp', () => {
         expect(organizedSecondPage.status).toBe(200);
         expect(
           organizedSecondPage.body.sessions.map(
+            (session: { sessionId: string }) => session.sessionId,
+          ),
+        ).toEqual([defaultId]);
+        const organizedThirdPage = await get(
+          `view=organized&group=all&sourceType=default&size=1&cursor=${encodeURIComponent(
+            organizedSecondPage.body.nextCursor,
+          )}`,
+        );
+        expect(organizedThirdPage.status).toBe(200);
+        expect(
+          organizedThirdPage.body.sessions.map(
             (session: { sessionId: string }) => session.sessionId,
           ),
         ).toEqual([legacyId]);
@@ -23949,6 +23994,88 @@ describe('createServeApp', () => {
         expect(organizedSourceIdResult.status).toBe(200);
         expect(
           organizedSourceIdResult.body.sessions.map(
+            (session: { sessionId: string }) => session.sessionId,
+          ),
+        ).toEqual([defaultId]);
+      });
+
+      it('includes a legacy fixed-session task controller in the default source filter', async () => {
+        // A task created before `sessionMode` existed carries only a stored
+        // `sessionId`; the absent mode means historical fixed-session
+        // behaviour, so its controller must stay in the default catalog.
+        const legacyBoundId = '550e8400-e29b-41d4-a716-446655440205';
+        await writeStoredSession({
+          sessionId: legacyBoundId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'legacy fixed task controller',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          sourceType: 'scheduled_task',
+          sourceId: 'task-legacy',
+        });
+        await qwenCore.updateCronTasks(WS_BOUND, () => [
+          {
+            id: 'task-legacy',
+            cron: '0 9 * * *',
+            prompt: 'legacy fixed task',
+            recurring: true,
+            createdAt: 1,
+            lastFiredAt: null,
+            enabled: true,
+            sessionId: legacyBoundId,
+          },
+        ]);
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+        );
+
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?sourceType=default`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(
+          res.body.sessions.map(
+            (session: { sessionId: string }) => session.sessionId,
+          ),
+        ).toEqual([legacyBoundId]);
+      });
+
+      it('still serves the default catalog when the cron task store is unreadable', async () => {
+        const defaultId = '550e8400-e29b-41d4-a716-446655440206';
+        await writeStoredSession({
+          sessionId: defaultId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'default web shell session',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          sourceType: 'default',
+          sourceId: 'web-1',
+        });
+        const cronFile = qwenCore.getCronFilePath(WS_BOUND);
+        await fsp.mkdir(path.dirname(cronFile), { recursive: true });
+        await fsp.writeFile(cronFile, 'CORRUPT {{{', 'utf8');
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+        );
+
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?sourceType=default`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        // A corrupt task store hides the fixed controllers but must not fail
+        // the whole catalog.
+        expect(res.status).toBe(200);
+        expect(
+          res.body.sessions.map(
             (session: { sessionId: string }) => session.sessionId,
           ),
         ).toEqual([defaultId]);

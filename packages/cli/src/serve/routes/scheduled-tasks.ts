@@ -48,6 +48,8 @@ import {
   SessionService,
   Storage,
   stripTerminalControlSequences,
+  detectLoopSentinel,
+  detectAutonomousSentinel,
   isValidCronTaskRoutingId,
   MAX_JOBS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
@@ -155,6 +157,11 @@ const MAX_SESSION_NAME_LENGTH = 60;
  * the session list — and truncates on a code-point boundary so slicing can't
  * leave a lone surrogate rendered as `�`. */
 export function scheduledTaskSessionName(label: string): string {
+  // A tool-created /loop task's prompt is a sentinel marker, not a readable
+  // label — name the session after what the sentinel runs instead of showing
+  // a literal `<<loop.md>>` row in the session list.
+  if (detectLoopSentinel(label)) return 'Loop (loop.md)';
+  if (detectAutonomousSentinel(label)) return 'Autonomous loop';
   const cleaned = stripTerminalControlSequences(label)
     // Unicode Bidi_Control marks: ALM (U+061C), LRM/RLM (U+200E/200F), the
     // embedding/override set (U+202A..U+202E), and the isolates (U+2066..U+2069).
@@ -1497,6 +1504,7 @@ function registerScheduledTaskCrudRoutes(
       let blockedSessionModeUnavailable = false;
       let blockedSessionModeUnbound = false;
       let blockedGroupNotFound = false;
+      let sessionCatalogMembershipChanged = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
       try {
@@ -1573,6 +1581,9 @@ function registerScheduledTaskCrudRoutes(
                 blockedSessionModeDelivery = true;
                 return tasks;
               }
+              sessionCatalogMembershipChanged =
+                (current.sessionMode !== 'per_run') !==
+                (next.sessionMode !== 'per_run');
               // Re-seat the task's schedule anchor to "now" whenever an edit would
               // otherwise let the scheduler retroactively fire an already-past slot.
               const justReEnabled =
@@ -1727,6 +1738,9 @@ function registerScheduledTaskCrudRoutes(
           .status(404)
           .json({ error: 'Task not found', code: 'task_not_found' });
         return;
+      }
+      if (sessionCatalogMembershipChanged) {
+        bridge?.markSessionCatalogChanged?.();
       }
       // Keep the bound session's display name in sync with the task's effective
       // label (its name, or its prompt when unnamed) — the session was named

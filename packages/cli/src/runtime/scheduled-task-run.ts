@@ -67,6 +67,7 @@ export function buildScheduledTaskRunPrompt(input: {
   prompt: string;
   triggeredAt: number;
   trigger: 'scheduled' | 'manual';
+  sessionMode?: 'persistent' | 'per_run';
 }): string {
   const name = cleanMetadataLine(input.name ?? input.id) || input.id;
   const cron = cleanMetadataLine(input.cron);
@@ -76,7 +77,9 @@ export function buildScheduledTaskRunPrompt(input: {
     `Schedule: ${cron}`,
     `Triggered at: ${new Date(input.triggeredAt).toISOString()}`,
     `Trigger: ${input.trigger}`,
-    'Session: new chat for this run',
+    input.sessionMode === 'persistent'
+      ? 'Session: reuse the task conversation'
+      : 'Session: new chat for this run',
     '',
     SCHEDULED_TASK_RUN_INSTRUCTION,
     '',

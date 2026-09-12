@@ -76,6 +76,14 @@
   gap: 14px;
 }
 
+.compactForm {
+  gap: 10px;
+}
+
+.compactForm .field {
+  gap: 4px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -102,6 +110,115 @@
   font-size: 11px;
   line-height: 1.4;
   color: var(--muted-foreground);
+}
+
+.runDestinationField {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.runDestinationGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.runDestinationOption {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--background);
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.runDestinationOption:hover {
+  border-color: color-mix(in srgb, var(--foreground) 28%, var(--border));
+  background: color-mix(in srgb, var(--muted) 32%, var(--background));
+}
+
+.runDestinationOption[data-selected='true'] {
+  border-color: color-mix(in srgb, var(--primary) 72%, var(--border));
+  background: color-mix(in srgb, var(--primary) 7%, var(--background));
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--primary) 18%, transparent);
+}
+
+.runDestinationOption:has(:focus-visible) {
+  outline: 2px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  outline-offset: 2px;
+}
+
+.runDestinationRadio {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+}
+
+.runDestinationLabel {
+  display: flex;
+  gap: 10px;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.runDestinationIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted) 72%, transparent);
+  color: var(--muted-foreground);
+}
+
+.runDestinationIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.runDestinationOption[data-selected='true'] .runDestinationIcon {
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary);
+}
+
+.runDestinationCopy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.runDestinationTitle {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.runDestinationDescription {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.compactForm .runDestinationField > .fieldLabel {
+  margin-bottom: 5px;
+}
+
+.compactForm .runDestinationLabel {
+  align-items: center;
+  min-height: 64px;
+  padding: 10px 38px 10px 10px;
 }
 
 .input,
@@ -147,6 +264,11 @@
   white-space: pre-wrap;
   word-break: break-word;
   cursor: text;
+}
+
+.compactForm .promptEditor {
+  min-height: 60px;
+  max-height: 160px;
 }
 
 .input:focus,
@@ -354,6 +476,15 @@
   background: color-mix(in srgb, var(--muted) 35%, transparent);
 }
 
+.compactForm .routingFields,
+.compactForm .newGroupFields {
+  gap: 10px;
+}
+
+.compactForm .routingFields {
+  padding: 10px;
+}
+
 .newGroupFields {
   display: grid;
   grid-column: 1 / -1;
@@ -368,6 +499,7 @@
 }
 
 @media (max-width: 640px) {
+  .runDestinationGrid,
   .routingFields,
   .newGroupFields {
     grid-template-columns: 1fr;

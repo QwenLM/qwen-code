@@ -140,6 +140,8 @@ export interface SessionCard {
   gitBranch?: string;
   /** The workspace the session lives in. */
   workspaceCwd: string;
+  /** Creator attribution; a `scheduled_task` controller is coupled to its task. */
+  sourceType?: string;
 }
 
 type SessionStatusFilter = 'all' | 'attention' | 'running' | 'idle';
@@ -161,6 +163,13 @@ function matchesStatus(
       ? card.status === 'needsApproval' || card.status === 'askUserQuestion'
       : card.status === filter)
   );
+}
+
+// Archiving or deleting a scheduled-task controller silently disables or
+// deletes its coupled task daemon-side; the pause that names the task lives
+// on the sidebar row and the Tasks surface.
+function isScheduledTaskController(card: SessionCard): boolean {
+  return card.sourceType === 'scheduled_task';
 }
 
 type SessionIdentity = Pick<SessionCard, 'sessionId' | 'workspaceCwd'>;
@@ -235,6 +244,7 @@ export function deriveSessionCards(
       prs: session.prs,
       gitBranch: session.worktree?.branch ?? session.branch?.name,
       workspaceCwd: session.workspaceCwd,
+      sourceType: session.sourceType,
     };
   });
   cards.sort((a, b) => {
@@ -613,12 +623,15 @@ function SessionOverviewPanelInner({
     (card: SessionCard) =>
       sessionArchiveEnabled &&
       card.status === 'idle' &&
+      !isScheduledTaskController(card) &&
       canUseSessionMutation(card),
     [canUseSessionMutation, sessionArchiveEnabled],
   );
   const canDeleteCard = useCallback(
     (card: SessionCard) =>
-      card.status === 'idle' && canUseSessionMutation(card),
+      card.status === 'idle' &&
+      !isScheduledTaskController(card) &&
+      canUseSessionMutation(card),
     [canUseSessionMutation],
   );
   const canRenameCard = useCallback(

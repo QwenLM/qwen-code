@@ -1215,25 +1215,6 @@ const EN: Messages = {
     'Help me set up a recurring scheduled task (keep it long-term). What I want: ',
   'scheduledTasks.name': 'Name',
   'scheduledTasks.workspace': 'Workspace',
-  'scheduledTasks.session.label': 'Conversation',
-  'scheduledTasks.session.dedicated': 'Dedicated task conversation',
-  'scheduledTasks.session.current': 'Current conversation',
-  'scheduledTasks.session.dedicatedHint':
-    'Runs are kept in a separate conversation created for this task.',
-  'scheduledTasks.session.currentHint':
-    'Future runs continue in the conversation that is open now.',
-  'scheduledTasks.session.currentUnsupported':
-    'Current-conversation scheduling is unavailable on this daemon.',
-  'scheduledTasks.session.currentUnavailable':
-    'Open an existing conversation before selecting the current conversation.',
-  'scheduledTasks.session.currentBusy':
-    'Wait for the current turn or pending interaction to finish.',
-  'scheduledTasks.session.currentIneligible':
-    'This conversation type cannot own a scheduled task.',
-  'scheduledTasks.session.currentWorkspaceMismatch':
-    'The current conversation belongs to a different workspace.',
-  'scheduledTasks.session.currentAlreadyBound':
-    'The current conversation is already bound to a scheduled task.',
   'scheduledTasks.taskId': 'Task ID',
   'scheduledTasks.schedule': 'Schedule',
   'scheduledTasks.type': 'Type',
@@ -1317,7 +1298,7 @@ const EN: Messages = {
   'scheduledTasks.delete': 'Delete',
   'scheduledTasks.deleteConfirmTitle': 'Delete scheduled task',
   'scheduledTasks.deleteConfirm': (v) =>
-    `Delete scheduled task "${v?.name ?? ''}"?`,
+    `“${v?.name ?? ''}” will stop running and be removed from the task list. This action cannot be undone.`,
   'scheduledTasks.deletedSnapshot':
     'This scheduled task has been deleted. Showing the snapshot from when it was created.',
   'scheduledTasks.sessionScopedSnapshot':
@@ -1374,6 +1355,10 @@ const EN: Messages = {
     'Each run gets a clean context and its own conversation.',
   'scheduledTasks.sessionMode.persistent.hint':
     'All runs continue in the same task conversation.',
+  'scheduledTasks.sessionMode.perRun.description':
+    'Starts clean and stays independent.',
+  'scheduledTasks.sessionMode.persistent.description':
+    'Keeps context across every run.',
   'scheduledTasks.model': 'Model',
   'scheduledTasks.model.workspaceDefault': 'Workspace default',
   'scheduledTasks.model.hint':
@@ -1705,6 +1690,10 @@ const EN: Messages = {
   'sidebar.currentDeleteDisabled': 'Current session cannot be deleted',
   'sidebar.deleteConfirmDescription': (v) =>
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
+  'sidebar.deleteScheduledTaskConfirmDescription': (v) =>
+    `Delete "${v?.name ?? ''}"? Its scheduled task will also be deleted and stop running. This cannot be undone.`,
+  'sidebar.unarchiveScheduledTaskConfirmDescription': (v) =>
+    `Restore "${v?.name ?? ''}"? Its scheduled task will start running again.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.activeWork': 'Active work',
@@ -4886,20 +4875,6 @@ const ZH: Messages = {
   'scheduledTasks.chatStarter': '帮我创建一个长期保留的定时任务，我想：',
   'scheduledTasks.name': '名称',
   'scheduledTasks.workspace': '工作区',
-  'scheduledTasks.session.label': '会话',
-  'scheduledTasks.session.dedicated': '独立任务会话',
-  'scheduledTasks.session.current': '当前会话',
-  'scheduledTasks.session.dedicatedHint':
-    '任务运行记录保存在单独创建的会话中。',
-  'scheduledTasks.session.currentHint': '后续运行继续在当前打开的会话中。',
-  'scheduledTasks.session.currentUnsupported':
-    '当前 daemon 不支持绑定当前会话。',
-  'scheduledTasks.session.currentUnavailable': '请先打开一个已有会话。',
-  'scheduledTasks.session.currentBusy': '请等待当前执行或待处理交互结束。',
-  'scheduledTasks.session.currentIneligible': '此类会话不能绑定定时任务。',
-  'scheduledTasks.session.currentWorkspaceMismatch':
-    '当前会话属于另一个工作区。',
-  'scheduledTasks.session.currentAlreadyBound': '当前会话已绑定其他定时任务。',
   'scheduledTasks.taskId': '任务 ID',
   'scheduledTasks.schedule': '计划',
   'scheduledTasks.type': '类型',
@@ -4977,7 +4952,7 @@ const ZH: Messages = {
   'scheduledTasks.delete': '删除',
   'scheduledTasks.deleteConfirmTitle': '删除定时任务',
   'scheduledTasks.deleteConfirm': (v) =>
-    `确定删除定时任务「${v?.name ?? ''}」？`,
+    `“${v?.name ?? ''}”将停止运行并从任务列表中移除。此操作无法撤销。`,
   'scheduledTasks.deletedSnapshot':
     '这个定时任务已被删除，下面显示的是创建时的快照。',
   'scheduledTasks.sessionScopedSnapshot':
@@ -5031,6 +5006,9 @@ const ZH: Messages = {
     '每次运行都创建独立会话，使用干净的上下文。',
   'scheduledTasks.sessionMode.persistent.hint':
     '所有运行都继续使用同一个任务会话。',
+  'scheduledTasks.sessionMode.perRun.description': '每次独立运行，互不影响。',
+  'scheduledTasks.sessionMode.persistent.description':
+    '持续积累上下文，适合连续任务。',
   'scheduledTasks.model': '模型',
   'scheduledTasks.model.workspaceDefault': '工作区默认模型',
   'scheduledTasks.model.hint': '创建每次运行的新会话时应用所选模型。',
@@ -5340,6 +5318,10 @@ const ZH: Messages = {
   'sidebar.currentDeleteDisabled': '不能删除当前会话',
   'sidebar.deleteConfirmDescription': (v) =>
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
+  'sidebar.deleteScheduledTaskConfirmDescription': (v) =>
+    `确定删除“${v?.name ?? ''}”吗？其定时任务也会被删除并停止运行，删除后不可恢复。`,
+  'sidebar.unarchiveScheduledTaskConfirmDescription': (v) =>
+    `确定恢复“${v?.name ?? ''}”吗？其定时任务将重新开始运行。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.activeWork': '有活动任务',

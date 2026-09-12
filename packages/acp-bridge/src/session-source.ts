@@ -19,10 +19,11 @@ export function isReservedStandaloneSessionSourceType(
 /**
  * Creator attribution of the fresh child session a per-run scheduled task
  * dispatches each fire into. The child keeps the `default` source type so it
- * lists alongside ordinary conversations (a task's bound controller session is
- * `scheduled_task`, which the default session list filters out); the id prefix
- * is what marks it as a task run. The web-shell sidebar mirrors the prefix
- * literally — it cannot import this package.
+ * lists alongside ordinary conversations. A task's bound controller session
+ * is `scheduled_task`; the default Tasks catalog also includes fixed-session
+ * controllers, while this id prefix distinguishes an individual per-run task
+ * execution. The web-shell sidebar mirrors the prefix literally — it cannot
+ * import this package.
  */
 export const SCHEDULED_TASK_RUN_SOURCE_TYPE = 'default';
 export const SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX = 'scheduled_task_run:';

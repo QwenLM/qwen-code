@@ -225,6 +225,39 @@ describe('DialogShell', () => {
     expect(panel.className).not.toContain('w-max');
   });
 
+  it('allows a dialog to use the viewport height without changing the default', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ThemeProvider value="dark">
+            <DialogShell title="Default" onClose={vi.fn()}>
+              default
+            </DialogShell>
+            <DialogShell
+              title="Viewport"
+              maxHeight="viewport"
+              onClose={vi.fn()}
+            >
+              viewport
+            </DialogShell>
+          </ThemeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const panels = document.querySelectorAll<HTMLElement>(
+      '[data-web-shell-dialog]',
+    );
+    expect(panels[0]?.className).toContain(
+      'max-h-[min(80vh,calc(100vh-48px))]',
+    );
+    expect(panels[1]?.className).toContain('max-h-[calc(100vh-32px)]');
+  });
+
   it('uses expand and shrink icons for fullscreen', () => {
     container = document.createElement('div');
     document.body.appendChild(container);

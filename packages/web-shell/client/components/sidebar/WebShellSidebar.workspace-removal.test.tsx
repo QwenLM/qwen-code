@@ -4662,17 +4662,134 @@ describe('WebShellSidebar session source switch', () => {
         workspaceCwd: '/tmp/project',
         sourceType: 'channel',
       },
+      {
+        sessionId: 'scheduled-task-session',
+        displayName: 'Daily restart',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      },
     );
     renderSidebar();
     await ensureWorkspaceExpanded('project');
 
     expect(container.textContent).toContain('Task session');
+    expect(container.textContent).toContain('Daily restart');
     expect(container.textContent).not.toContain('Channel session');
+    const scheduledTaskTitle = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).find((title) => title.textContent === 'Daily restart');
+    const scheduledTaskRow = scheduledTaskTitle?.closest('[role="button"]');
+    expect(scheduledTaskRow).toBeTruthy();
+    expect(
+      scheduledTaskRow?.querySelector(
+        '[data-web-shell-scheduled-task-session]',
+      ),
+    ).not.toBeNull();
 
     await switchSessionSource('Channels');
 
     expect(container.textContent).not.toContain('Task session');
+    expect(container.textContent).not.toContain('Daily restart');
     expect(container.textContent).toContain('Channel session');
+  });
+
+  it('names the coupled task when deleting its session and offers no archive for it', async () => {
+    active.sessions.push(
+      {
+        sessionId: 'ordinary-session',
+        displayName: 'Ordinary chat',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+      {
+        sessionId: 'task-session',
+        displayName: 'Daily digest',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    // Archiving a task-bound controller silently disables its task, so the
+    // row does not offer it; an ordinary row still does.
+    const taskItems = await openSessionMenuItems('Daily digest');
+    expect(taskItems.some((item) => item.includes('Archive'))).toBe(false);
+    const ordinaryItems = await openSessionMenuItems('Ordinary chat');
+    expect(ordinaryItems.some((item) => item.includes('Archive'))).toBe(true);
+
+    // Delete stays, but the confirm says the scheduled task goes with it.
+    await selectSessionMenuItem('Daily digest', 'Delete');
+    const taskDialog = document.querySelector('[role="dialog"]');
+    expect(taskDialog?.textContent).toContain(
+      'Its scheduled task will also be deleted and stop running.',
+    );
+    const taskCancel = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent === 'cancel',
+    );
+    expect(taskCancel).toBeDefined();
+    await act(async () => {
+      click(taskCancel!);
+      await Promise.resolve();
+    });
+
+    await selectSessionMenuItem('Ordinary chat', 'Delete');
+    const ordinaryDialog = document.querySelector('[role="dialog"]');
+    expect(ordinaryDialog?.textContent).toContain(
+      'Delete "Ordinary chat"? This cannot be undone.',
+    );
+    expect(ordinaryDialog?.textContent).not.toContain('scheduled task');
+  });
+
+  it('confirms before restoring an archived scheduled-task controller', async () => {
+    // Restoring the controller re-enables its recurring task daemon-side
+    // (enableTasksForSessions), so the row names the task and waits for a
+    // confirm instead of resuming an unattended schedule on one menu click.
+    archived.sessions.push(
+      {
+        sessionId: 'archived-controller',
+        displayName: 'Archived digest',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+        isArchived: true,
+      },
+      {
+        sessionId: 'archived-ordinary',
+        displayName: 'Archived ordinary',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+        isArchived: true,
+      },
+    );
+    renderSidebar();
+    await expandArchived();
+
+    await selectSessionMenuItem('Archived digest', 'Restore');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain(
+      'Its scheduled task will start running again.',
+    );
+    expect(archived.unarchiveSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      click(dialogButton('Restore'));
+      await Promise.resolve();
+      await archived.unarchiveSession.mock.results.at(-1)?.value;
+    });
+    expect(archived.unarchiveSession).toHaveBeenCalledWith(
+      'archived-controller',
+    );
+
+    // An ordinary archived row still restores with no dialog.
+    await selectSessionMenuItem('Archived ordinary', 'Restore');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    await act(async () => {
+      await archived.unarchiveSession.mock.results.at(-1)?.value;
+    });
+    expect(archived.unarchiveSession).toHaveBeenCalledWith('archived-ordinary');
   });
 
   it('groups scheduled-task runs under the task title and source icon', async () => {
