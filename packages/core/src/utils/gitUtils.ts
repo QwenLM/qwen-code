@@ -311,7 +311,16 @@ export function getRecentGitStatus(cwd: string): string | null {
 
     const log = execFileSync(
       'git',
-      [...NO_EXEC_CONFIG, '--no-optional-locks', 'log', '--oneline', '-n', '5'],
+      [
+        ...NO_EXEC_CONFIG,
+        '-c',
+        'log.showSignature=false',
+        '--no-optional-locks',
+        'log',
+        '--oneline',
+        '-n',
+        '5',
+      ],
       {
         cwd,
         encoding: 'utf8',

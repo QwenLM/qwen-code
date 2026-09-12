@@ -2754,7 +2754,7 @@ export class GitWorktreeService {
   async hasWorktreeChanges(worktreePath: string): Promise<boolean> {
     try {
       const { simpleGit } = await loadSimpleGit();
-      const wtGit = simpleGit(worktreePath);
+      const wtGit = simpleGit(worktreePath).env('GIT_OPTIONAL_LOCKS', '0');
       const status = await wtGit.status();
       // Defensive: `status.isClean()` reads several status arrays, but
       // we OR with `conflicted.length` explicitly so future simple-git
@@ -2778,7 +2778,7 @@ export class GitWorktreeService {
   ): Promise<{ tracked: number; untracked: number } | null> {
     try {
       const { simpleGit } = await loadSimpleGit();
-      const wtGit = simpleGit(worktreePath);
+      const wtGit = simpleGit(worktreePath).env('GIT_OPTIONAL_LOCKS', '0');
       const status = await wtGit.status();
       // `conflicted` is mutually exclusive with the other arrays in
       // simple-git's status — a worktree mid-merge with no other

@@ -112,6 +112,8 @@ describe('getRecentGitStatus', () => {
       [
         '-c',
         'core.fsmonitor=',
+        '-c',
+        'log.showSignature=false',
         '--no-optional-locks',
         'log',
         '--oneline',

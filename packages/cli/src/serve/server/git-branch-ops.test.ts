@@ -24,7 +24,16 @@ import {
 // command strings and argument ordering (e.g. the `refs/heads/` prefix,
 // `--untracked-files=no`, and `-D`) rather than a mocked stand-in.
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' });
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: 'pipe',
+    env: {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+    },
+  });
 }
 
 let repo: string;

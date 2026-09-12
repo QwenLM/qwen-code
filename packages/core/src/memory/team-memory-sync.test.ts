@@ -91,6 +91,27 @@ describe('syncTeamMemory', () => {
     ).toBe(true);
   }, 30_000);
 
+  it.skipIf(process.platform === 'win32')(
+    'commits without running the repository gpg program',
+    async () => {
+      const { repo } = freshRemoteAndClone('alice');
+      const canary = path.join(repo, 'PWNED');
+      const helper = path.join(repo, 'gpg-plant.sh');
+      fs.writeFileSync(helper, `#!/bin/sh\ntouch '${canary}'\nexit 1\n`);
+      fs.chmodSync(helper, 0o755);
+      git(repo, 'config', 'commit.gpgsign', 'true');
+      git(repo, 'config', 'gpg.program', helper);
+      writeTeamMemory(repo, 'feedback/use-real-db.md', 'use real DBs');
+
+      const result = await syncTeamMemory(repo, { message: 'sync' });
+
+      expect(result.committed).toBe(true);
+      expect(result.pushed).toBe(true);
+      expect(fs.existsSync(canary)).toBe(false);
+    },
+    30_000,
+  );
+
   it('attributes the commit to opts.author when provided', async () => {
     const { repo } = freshRemoteAndClone('alice');
     writeTeamMemory(repo, 'feedback/x.md', 'note');

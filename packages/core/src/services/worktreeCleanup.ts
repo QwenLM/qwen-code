@@ -169,6 +169,7 @@ async function hasTrackedChanges(worktreePath: string): Promise<boolean> {
     // simple-git), so a worktree mid-merge looked "clean" and would
     // be swept.
     const out = await wtGit.raw([
+      '--no-optional-locks',
       'status',
       '--porcelain',
       '--untracked-files=no',

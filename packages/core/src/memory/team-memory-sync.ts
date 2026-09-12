@@ -209,7 +209,7 @@ export async function syncTeamMemory(
   ]);
   if (status && status.trim().length > 0) {
     const staged = (await tryGit(gitRoot, ['add', '--', relPath])) !== null;
-    const commitArgs = ['commit', '-m', opts.message];
+    const commitArgs = ['commit', '--no-gpg-sign', '-m', opts.message];
     if (opts.author) {
       const email = opts.author.email ?? `${opts.author.name}@users.noreply`;
       commitArgs.push('--author', `${opts.author.name} <${email}>`);
