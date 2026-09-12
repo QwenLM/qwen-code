@@ -47,7 +47,10 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
-import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
+import {
+  getRuntimeContentGenerator,
+  isTopLevelSession,
+} from '../agents/runtime/agent-context.js';
 import type { ExternalAgentExecutor } from '../agents/runtime/subagent-executor.js';
 import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
 import {
@@ -89,6 +92,10 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  ToolMode,
+  type ToolMode as ToolModeValue,
+} from '../tools/code-mode.js';
 import type {
   ArtifactHostConfig,
   ArtifactOssConfig,
@@ -108,7 +115,11 @@ import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
-import type { SkillLevel } from '../skills/types.js';
+import {
+  authoredSkillName,
+  skillRestrictionNames,
+  type SkillLevel,
+} from '../skills/types.js';
 import {
   PermissionManager,
   type ToolRegistrationStatus,
@@ -173,6 +184,16 @@ import {
   type HookEventName,
   type HookDefinition,
   type PostToolBatchToolCall,
+  type AgentType,
+  type HookPhase,
+  type InstructionMemoryType,
+  type PostCompactTrigger,
+  type PreCompactTrigger,
+  type SessionEndReason,
+  type SessionStartSource,
+  type StopFailureErrorType,
+  type TodoItem,
+  type TodoStatus,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import {
@@ -933,6 +954,12 @@ export interface ConfigParameters {
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
   enabledSkillNamesProvider?: () => ReadonlySet<string>;
+  /**
+   * Raw normalized skills lists, as written, for the startup migration
+   * warnings: unlike the resolved disablement set, the raw lists let the
+   * warnings tell load-bearing entries (a bare opt-in pair) from stale ones.
+   */
+  skillSettingsListsProvider?: () => SkillSettingsLists;
   terminalImageRenderSupportProvider?: () => Promise<TerminalImageRenderSupport>;
   /**
    * Skill discovery levels that should not be loaded. Sourced from
@@ -978,6 +1005,8 @@ export interface ConfigParameters {
    * auto-approval and never affects registration (#10075).
    */
   eagerTools?: string[];
+  /** Replace ordinary model-facing tools with the isolated exec bridge. */
+  codeModeOnly?: boolean;
   /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
@@ -1066,6 +1095,19 @@ export interface ConfigParameters {
    * `GOAL_DEFAULT_TOKEN_BUDGET`. See `normalizeGoalTokenBudget`.
    */
   goalTokenBudget?: number;
+  /**
+   * Goal-turn window armed on each new Goal, in finished Goal turns including
+   * user-driven turns. Absent runs Goals with no turn ceiling, and `-1` says
+   * so explicitly. See `normalizeGoalMaxTurns`.
+   */
+  goalMaxTurns?: number;
+  /**
+   * Active-time window armed on each new Goal, in minutes of wall time while
+   * the Goal stays `active` in this process, including waits and idle time.
+   * Absent runs Goals with no time ceiling, and `-1` says so explicitly. See
+   * `normalizeGoalMaxActiveMinutes`.
+   */
+  goalMaxActiveMinutes?: number;
   /**
    * Ceiling on one Goal evidence-checkpoint verifier call, in seconds.
    * Absent or invalid falls back to
@@ -1536,6 +1578,78 @@ export function isValidGoalTokenBudget(value: unknown): value is number {
 }
 
 /**
+ * Largest accepted `model.goalMaxTurns`.
+ *
+ * A typo guard on the same reasoning as `GOAL_TOKEN_BUDGET_CAP`, sized well
+ * above any cadence a user would ask for by hand: a Goal that genuinely
+ * wants more turns than this wants no turn ceiling, which is the default.
+ */
+export const GOAL_MAX_TURNS_CAP = 10_000;
+
+/**
+ * Largest accepted `model.goalMaxActiveMinutes`: one week of active time.
+ *
+ * Active time accrues while the Goal stays active in a running process, so a
+ * week of it is already far past any single authorization a user would grant
+ * deliberately.
+ */
+export const GOAL_MAX_ACTIVE_MINUTES_CAP = 7 * 24 * 60;
+
+/**
+ * True for the values `normalizeGoalMaxTurns` honours: `0` and its alias `-1`
+ * for no ceiling, or a positive integer up to `GOAL_MAX_TURNS_CAP`.
+ */
+export function isValidGoalMaxTurns(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === -1 || (value >= 0 && value <= GOAL_MAX_TURNS_CAP))
+  );
+}
+
+/**
+ * Resolves the operator's Goal turn budget to the grant the runtime arms.
+ *
+ * Unlike the token budget, the default is no ceiling: a turn budget is a
+ * cadence a user asks for, not a runaway-spend guard every Goal needs, so an
+ * absent or invalid setting arms nothing rather than falling back to a
+ * number nobody chose. Direct Config embedders may use `0` or `-1` as an
+ * opt-out; the CLI rejects `0` as a likely typo before this layer. The runtime
+ * spells "arm nothing" as a non-finite grant.
+ */
+export function normalizeGoalMaxTurns(value: unknown): number {
+  if (!isValidGoalMaxTurns(value) || value === -1 || value === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return value;
+}
+
+/**
+ * True for the values `normalizeGoalMaxActiveMinutes` honours: `0` and its
+ * alias `-1` for no ceiling, or a positive integer up to
+ * `GOAL_MAX_ACTIVE_MINUTES_CAP`.
+ */
+export function isValidGoalMaxActiveMinutes(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === -1 || (value >= 0 && value <= GOAL_MAX_ACTIVE_MINUTES_CAP))
+  );
+}
+
+/**
+ * Resolves the host's Goal active-time budget to the grant the runtime arms,
+ * in milliseconds. Defaults to no ceiling, exactly like
+ * `normalizeGoalMaxTurns`.
+ */
+export function normalizeGoalMaxActiveMinutes(value: unknown): number {
+  if (!isValidGoalMaxActiveMinutes(value) || value === -1 || value === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return value * 60_000;
+}
+
+/**
  * Largest accepted `model.goalCheckpointTimeoutSeconds`, in seconds.
  *
  * Derived from the stream lifetime cap rather than picked as a round number,
@@ -1617,6 +1731,221 @@ function normalizeModelFallbacks(raw: string[] | undefined): string[] {
     if (result.length >= MAX_MODEL_FALLBACKS) break;
   }
   return result;
+}
+
+/**
+ * Startup warnings for `skills.enabled` entries written before extension
+ * skills carried their owner: a bare entry that matches an extension skill's
+ * authored name — but no registry identity — enables nothing, and the user
+ * editing settings.json has no other surface that names the qualified
+ * replacement.
+ */
+export interface SkillSettingsLists {
+  enabled: ReadonlySet<string>;
+  defaultDisabled: ReadonlySet<string>;
+  hardDisabled: ReadonlySet<string>;
+}
+
+export function bareEnabledGrantWarnings(
+  lists: SkillSettingsLists,
+  skills: ReadonlyArray<{ name: string; authoredName?: string }>,
+  defaultOffNames: ReadonlySet<string> = new Set(),
+): string[] {
+  if (lists.enabled.size === 0) return [];
+  const registry = new Set(
+    skills.map((skill) => skill.name.trim().toLowerCase()),
+  );
+  // One bare entry names every same-authored extension skill, and editing
+  // it acts on all of them at once, so advise per entry: a per-skill warning
+  // for a shared entry goes silent for the siblings the moment one piece of
+  // advice is applied.
+  const registryNamesByAuthored = new Map<string, string[]>();
+  for (const skill of skills) {
+    const authored = authoredSkillName(skill).trim().toLowerCase();
+    const registryName = skill.name.trim().toLowerCase();
+    if (authored === registryName) continue;
+    const group = registryNamesByAuthored.get(authored) ?? [];
+    group.push(registryName);
+    registryNamesByAuthored.set(authored, group);
+  }
+  const warnings: string[] = [];
+  for (const [authored, registryNames] of registryNamesByAuthored) {
+    // A bare entry that IS some registry identity enables that skill; the
+    // shadowing is a separate, pre-existing concern, not a stale grant.
+    if (registry.has(authored)) continue;
+    if (!lists.enabled.has(authored)) continue;
+    const plural = registryNames.length > 1;
+    const names = registryNames.map((name) => `'${name}'`).join(', ');
+    const skillWord = plural ? 'skills' : 'skill';
+    const hardNote = lists.hardDisabled.has(authored)
+      ? ` A bare '${authored}' in skills.disabled also blocks ` +
+        `${plural ? 'them' : 'it'} under either spelling, so replacing the ` +
+        `grant alone will not enable anything: remove that entry too.`
+      : '';
+    // A bare entry identical to a defaultDisabled entry is load-bearing: it
+    // cancels that entry, so the pair is a working opt-in, not a stale grant.
+    if (lists.defaultDisabled.has(authored)) {
+      // For a default-off extension skill the pair no longer enables
+      // anything: pre-rename the enable beat the defaultDisabled entry, now
+      // the bare grant is void and the declared default decides. Name only
+      // the members that really default off: a default-on sibling stays
+      // enabled under the cancelled pair, and naming it would send the user
+      // to rewrite a grant that sibling never needed.
+      const offNames = registryNames.filter((name) =>
+        defaultOffNames.has(name),
+      );
+      // A qualified grant in skills.enabled already enables its skill (the
+      // pair cancels the bare disablement) unless a hard entry blocks it
+      // under either spelling: calling such a skill default-off would
+      // contradict the panel on the same boot, so advise cleanup only.
+      const onNames = offNames.filter(
+        (name) =>
+          lists.enabled.has(name) &&
+          !lists.hardDisabled.has(name) &&
+          !lists.hardDisabled.has(authored),
+      );
+      const stillOff = offNames.filter((name) => !onNames.includes(name));
+      if (stillOff.length) {
+        const offPlural = stillOff.length > 1;
+        const offList = stillOff.map((name) => `'${name}'`).join(', ');
+        // A qualified hard entry blocks only its own member, so the bare
+        // note above cannot see it: name it per blocked member or the
+        // replacement advice promises an enable the entry silently vetoes.
+        const hardQualified = stillOff.filter((name) =>
+          lists.hardDisabled.has(name),
+        );
+        const qualifiedNote = hardQualified.length
+          ? ` ${hardQualified.map((name) => `'${name}'`).join(', ')} in ` +
+            `skills.disabled also blocks ` +
+            `${hardQualified.length > 1 ? 'them' : 'it'} under either ` +
+            `spelling, so replacing the grant alone will not enable ` +
+            `anything: remove ` +
+            `${hardQualified.length > 1 ? 'those entries' : 'that entry'} too.`
+          : '';
+        warnings.push(
+          `Warning: skills.enabled and skills.defaultDisabled both list ` +
+            `'${authored}' by bare name. The pair cancels the disablement ` +
+            `but no longer enables the extension ` +
+            `${offPlural ? 'skills' : 'skill'} ${offList}, which ` +
+            `${offPlural ? 'default' : 'defaults'} off. Replace the bare ` +
+            `'${authored}' with ${offList} in both skills.enabled and ` +
+            `skills.defaultDisabled to enable ` +
+            `${offPlural ? 'them' : 'it'}.` +
+            hardNote +
+            qualifiedNote,
+        );
+      }
+      if (onNames.length) {
+        const onPlural = onNames.length > 1;
+        const onList = onNames.map((name) => `'${name}'`).join(', ');
+        warnings.push(
+          `Warning: skills.enabled and skills.defaultDisabled both list ` +
+            `'${authored}' by bare name, but the qualified ` +
+            `${onPlural ? 'grants' : 'grant'} ` +
+            `${onList} in skills.enabled already ` +
+            `${onPlural ? 'enable' : 'enables'} ` +
+            `${onPlural ? 'them' : 'it'}, so the bare pair changes ` +
+            `nothing. Replace the bare '${authored}' with ${onList} in ` +
+            `both skills.enabled and skills.defaultDisabled to drop ` +
+            `the dead entries.`,
+        );
+      }
+      continue;
+    }
+    warnings.push(
+      `Warning: skills.enabled lists '${authored}' by bare name, which no ` +
+        `longer enables the extension ${skillWord} ${names}. Replace it ` +
+        `with ${names}.` +
+        hardNote,
+    );
+  }
+  return warnings;
+}
+
+/**
+ * Startup warnings for the mirror trap: a qualified opt-in that a bare
+ * disable entry still blocks. Disable entries match a skill under either
+ * spelling, so `skills.enabled: ['rust:pdf']` does not get past a bare `pdf`
+ * in `skills.disabled` or `skills.defaultDisabled`; a defaultDisabled entry
+ * is cancelled only by the identical spelling, a disabled entry never. Left
+ * unwarned, the pair reads as if the enable wins.
+ */
+export function bareDisablementBlocksQualifiedGrantWarnings(
+  lists: SkillSettingsLists,
+  disabledNames: ReadonlySet<string>,
+  skills: ReadonlyArray<{ name: string; authoredName?: string }>,
+): string[] {
+  if (lists.enabled.size === 0 || disabledNames.size === 0) return [];
+  const warnings: string[] = [];
+  for (const skill of skills) {
+    const authored = authoredSkillName(skill).trim().toLowerCase();
+    const registryName = skill.name.trim().toLowerCase();
+    if (authored === registryName) continue;
+    if (!lists.enabled.has(registryName)) continue;
+    if (!disabledNames.has(authored)) continue;
+    // The advice follows the block's reason: a hard entry can only be
+    // removed (rewriting it to the qualified spelling would keep blocking
+    // and silence this warning), a defaultDisabled entry is cancelled by
+    // the identical spelling.
+    if (lists.hardDisabled.has(authored)) {
+      // Removing the bare entry re-enables every skill it blocks. Only a
+      // skill whose registry name differs from the bare entry can be
+      // re-blocked on its own afterwards; a skill whose registry identity
+      // IS the bare entry shares every matching entry with the opt-in, so
+      // advising the user to add it back would re-block the opt-in too and
+      // reprint this same warning, a fixed point.
+      const unlocked = [
+        ...new Set(
+          skills
+            .filter((other) => {
+              const name = other.name.trim().toLowerCase();
+              return (
+                name !== registryName &&
+                (name === authored ||
+                  authoredSkillName(other).trim().toLowerCase() === authored)
+              );
+            })
+            .map((other) => other.name.trim().toLowerCase()),
+        ),
+      ];
+      const names = (list: string[]) =>
+        list.map((name) => `'${name}'`).join(', ');
+      const reBlockable = unlocked.filter((name) => name !== authored);
+      const notAlone = unlocked.filter((name) => name === authored);
+      let sideEffect = '';
+      if (unlocked.length) {
+        sideEffect = ` The removal also re-enables ${names(unlocked)}.`;
+        if (reBlockable.length) {
+          sideEffect +=
+            ` Add ${names(reBlockable)} to skills.disabled to ` +
+            `keep ${reBlockable.length > 1 ? 'them' : 'it'} blocked.`;
+        }
+        if (notAlone.length) {
+          sideEffect +=
+            ` ${names(notAlone)} cannot be blocked on ` +
+            `${notAlone.length > 1 ? 'their' : 'its'} own while ` +
+            `'${registryName}' stays enabled, because any entry matching ` +
+            `${names(notAlone)} also matches '${registryName}'.`;
+        }
+      }
+      warnings.push(
+        `Warning: skills.enabled opts in '${registryName}' but ` +
+          `'${authored}' in skills.disabled still blocks it — hard entries ` +
+          `are never cancelled by skills.enabled. Remove '${authored}' ` +
+          `from skills.disabled to enable the skill.` +
+          sideEffect,
+      );
+      continue;
+    }
+    warnings.push(
+      `Warning: skills.enabled opts in '${registryName}' but a bare ` +
+        `'${authored}' entry still blocks it — disable entries match ` +
+        `under either spelling; a skills.defaultDisabled entry is ` +
+        `cancelled only by the identical spelling. Write ` +
+        `'${registryName}' in both lists, or remove '${authored}'.`,
+    );
+  }
+  return warnings;
 }
 
 function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
@@ -2252,6 +2581,9 @@ export class Config {
   private readonly enabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly skillSettingsListsProvider:
+    | (() => SkillSettingsLists)
+    | null;
   private readonly terminalImageRenderSupportProvider:
     | (() => Promise<TerminalImageRenderSupport>)
     | null;
@@ -2269,6 +2601,7 @@ export class Config {
   private readonly visibleTools: ReadonlySet<string>;
   private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
+  private readonly toolMode: ToolModeValue;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -2379,6 +2712,7 @@ export class Config {
   private goalRuntimeReady: Promise<GoalRuntime> | undefined;
   /** A `propose_goal` approval waiting for its turn to end; see PendingGoalProposal. */
   private pendingGoalProposal: PendingGoalProposal | undefined;
+  private goalProposalApprovalController: AbortController | undefined;
   /**
    * A Goal restore held back because the session writer is not accepting
    * writes yet. Settled by {@link startPendingGoalRestore} once the
@@ -2414,6 +2748,8 @@ export class Config {
 
   private readonly maxSessionTurns: number;
   private readonly goalTokenBudgetGrant: number;
+  private readonly goalTurnBudgetGrant: number;
+  private readonly goalActiveTimeBudgetGrantMs: number;
   private readonly goalCheckpointTimeoutMs: number;
   private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
@@ -2453,11 +2789,12 @@ export class Config {
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
+  private artifactSnapshotsEnabled = false;
   private readonly artifactAutoOpen: boolean = true;
   private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
   private readonly artifactHost?: ArtifactHostConfig;
   private readonly artifactOss?: ArtifactOssConfig;
-  private workflowsEnabled = false;
+  private workflowsEnabled: boolean | undefined;
   private readonly sessionWorkflowEnabled: boolean;
   private sessionWorkflowEnabledProvider?: () => boolean;
   private sessionWorkflowPlanRevision?: SessionWorkflowPlanRevision;
@@ -2468,6 +2805,8 @@ export class Config {
    */
   private externalAgentExecutor?: ExternalAgentExecutor;
   private readonly modelProposedGoals: ModelProposedGoalsMode;
+  private goalProposalHostSupported = false;
+  private goalProposalTurnKey: string | undefined;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -2630,6 +2969,7 @@ export class Config {
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
     this.enabledSkillNamesProvider = params.enabledSkillNamesProvider ?? null;
+    this.skillSettingsListsProvider = params.skillSettingsListsProvider ?? null;
     this.terminalImageRenderSupportProvider =
       params.terminalImageRenderSupportProvider ?? null;
     this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
@@ -2750,6 +3090,26 @@ export class Config {
         `Ignoring invalid goalTokenBudget ${String(params.goalTokenBudget)}: expected a non-negative integer or -1 (no budget); using the default of ${GOAL_DEFAULT_TOKEN_BUDGET}.`,
       );
     }
+    this.goalTurnBudgetGrant = normalizeGoalMaxTurns(params.goalMaxTurns);
+    if (
+      params.goalMaxTurns !== undefined &&
+      !isValidGoalMaxTurns(params.goalMaxTurns)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalMaxTurns ${String(params.goalMaxTurns)}: expected an integer between 1 and ${GOAL_MAX_TURNS_CAP}, or -1 for no turn ceiling; Goals will run with no turn ceiling.`,
+      );
+    }
+    this.goalActiveTimeBudgetGrantMs = normalizeGoalMaxActiveMinutes(
+      params.goalMaxActiveMinutes,
+    );
+    if (
+      params.goalMaxActiveMinutes !== undefined &&
+      !isValidGoalMaxActiveMinutes(params.goalMaxActiveMinutes)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalMaxActiveMinutes ${String(params.goalMaxActiveMinutes)}: expected an integer between 1 and ${GOAL_MAX_ACTIVE_MINUTES_CAP}, or -1 for no time ceiling; Goals will run with no time ceiling.`,
+      );
+    }
     this.goalCheckpointTimeoutMs = normalizeGoalCheckpointTimeoutSeconds(
       params.goalCheckpointTimeoutSeconds,
     );
@@ -2796,7 +3156,7 @@ export class Config {
     this.artifactPublisher = params.artifactPublisher ?? 'local';
     this.artifactHost = params.artifactHost;
     this.artifactOss = params.artifactOss;
-    this.workflowsEnabled = params.workflowsEnabled ?? false;
+    this.workflowsEnabled = params.workflowsEnabled;
     this.sessionWorkflowEnabled = params.sessionWorkflowEnabled ?? false;
     this.modelProposedGoals = params.modelProposedGoals ?? 'alwaysAsk';
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
@@ -2830,6 +3190,10 @@ export class Config {
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
+    this.toolMode =
+      params.codeModeOnly && !this.bareMode && !this.safeMode
+        ? ToolMode.CodeModeOnly
+        : ToolMode.Direct;
     if (this.safeMode) {
       this.debugLogger.info(
         'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
@@ -3374,6 +3738,9 @@ export class Config {
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
                   (input['tool_call_id'] as string) || undefined,
+                  typeof input['duration_ms'] === 'number'
+                    ? input['duration_ms']
+                    : undefined,
                 );
                 break;
               case 'PostToolUseFailure':
@@ -3386,6 +3753,9 @@ export class Config {
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
                   (input['tool_call_id'] as string) || undefined,
+                  typeof input['duration_ms'] === 'number'
+                    ? input['duration_ms']
+                    : undefined,
                 );
                 break;
               case 'PostToolBatch':
@@ -3447,6 +3817,100 @@ export class Config {
                     PermissionMode.Default,
                   signal,
                 );
+                break;
+              case 'SessionStart':
+                result = await hookSystem.fireSessionStartEvent(
+                  input['source'] as SessionStartSource,
+                  (input['model'] as string) || '',
+                  (input['permission_mode'] as PermissionMode) || undefined,
+                  input['agent_type'] as AgentType | undefined,
+                  signal,
+                );
+                break;
+              case 'SessionEnd':
+                result = await hookSystem.fireSessionEndEvent(
+                  input['reason'] as SessionEndReason,
+                  signal,
+                );
+                break;
+              case 'SessionDelete':
+                result = await hookSystem.fireSessionDeleteEvent(
+                  (input['deleted_session_id'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'PreCompact':
+                result = await hookSystem.firePreCompactEvent(
+                  input['trigger'] as PreCompactTrigger,
+                  (input['custom_instructions'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'PostCompact':
+                result = await hookSystem.firePostCompactEvent(
+                  input['trigger'] as PostCompactTrigger,
+                  (input['compact_summary'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'InstructionsLoaded':
+                result = await hookSystem.fireInstructionsLoadedEvent(
+                  (input['file_path'] as string) || '',
+                  input['memory_type'] as InstructionMemoryType,
+                  input['load_reason'] as InstructionLoadReason,
+                  {
+                    triggerFilePath: input['trigger_file_path'] as
+                      | string
+                      | undefined,
+                    parentFilePath: input['parent_file_path'] as
+                      | string
+                      | undefined,
+                  },
+                  signal,
+                );
+                break;
+              // These three return the aggregated result, and the bus replies
+              // with its final output as is. For TodoCreated and TodoCompleted
+              // that is what direct callers read (todoWrite checks
+              // `finalOutput.decision`). StopFailure is fire-and-forget: the
+              // aggregator hard-codes its `finalOutput` to undefined and every
+              // direct caller detaches without reading the result, so its arm
+              // always replies with no output and awaits only so the hooks run.
+              // Stop and MessageDisplay instead wrap theirs with
+              // createHookOutput.
+              case 'StopFailure':
+                result = (
+                  await hookSystem.fireStopFailureEvent(
+                    input['error'] as StopFailureErrorType,
+                    input['error_details'] as string | undefined,
+                    input['last_assistant_message'] as string | undefined,
+                    signal,
+                  )
+                ).finalOutput;
+                break;
+              case 'TodoCreated':
+                result = (
+                  await hookSystem.fireTodoCreatedEvent(
+                    (input['todo_id'] as string) || '',
+                    (input['todo_content'] as string) || '',
+                    input['todo_status'] as TodoStatus,
+                    (input['all_todos'] as TodoItem[]) || [],
+                    input['phase'] as HookPhase,
+                    signal,
+                  )
+                ).finalOutput;
+                break;
+              case 'TodoCompleted':
+                result = (
+                  await hookSystem.fireTodoCompletedEvent(
+                    (input['todo_id'] as string) || '',
+                    (input['todo_content'] as string) || '',
+                    input['previous_status'] as 'pending' | 'in_progress',
+                    (input['all_todos'] as TodoItem[]) || [],
+                    input['phase'] as HookPhase,
+                    signal,
+                  )
+                ).finalOutput;
                 break;
               default:
                 this.debugLogger.warn(
@@ -3513,6 +3977,44 @@ export class Config {
         await this.skillManager.startWatching();
       }
       this.debugLogger.debug('Skill manager initialized');
+      if (this.skillSettingsListsProvider) {
+        try {
+          const lists = this.skillSettingsListsProvider();
+          const skills = await this.skillManager.listSkills();
+          const extensionIdByName = new Map(
+            this.getExtensions().map((extension) => [
+              extension.name,
+              extension.id,
+            ]),
+          );
+          const defaultOffNames = new Set<string>();
+          for (const skill of skills) {
+            const extensionId = skill.extensionName
+              ? extensionIdByName.get(skill.extensionName)
+              : undefined;
+            if (skill.level !== 'extension' || !extensionId) continue;
+            const state = this.extensionManager.getExtensionSkillState(
+              extensionId,
+              authoredSkillName(skill),
+            );
+            if (state.defaultEnabled === false && !state.workspaceEnabled) {
+              defaultOffNames.add(skill.name.trim().toLowerCase());
+            }
+          }
+          this.warnings.push(
+            ...bareEnabledGrantWarnings(lists, skills, defaultOffNames),
+            ...bareDisablementBlocksQualifiedGrantWarnings(
+              lists,
+              this.getDisabledSkillNames(),
+              skills,
+            ),
+          );
+        } catch (error) {
+          this.debugLogger.warn(
+            `Skill settings migration warning skipped: ${getErrorMessage(error)}`,
+          );
+        }
+      }
     } else {
       this.skillManager = null;
       this.debugLogger.debug('Skill manager skipped');
@@ -5733,6 +6235,24 @@ export class Config {
   }
 
   /**
+   * The Goal-turn window armed on each new Goal, as the runtime's
+   * `turnBudgetGrant`: a positive integer, or `Infinity` when no ceiling is
+   * configured (the default).
+   */
+  getGoalTurnBudgetGrant(): number {
+    return this.goalTurnBudgetGrant;
+  }
+
+  /**
+   * The active-time window armed on each new Goal, in milliseconds, as the
+   * runtime's `activeTimeBudgetGrantMs`: a positive number, or `Infinity`
+   * when no ceiling is configured (the default).
+   */
+  getGoalActiveTimeBudgetGrantMs(): number {
+    return this.goalActiveTimeBudgetGrantMs;
+  }
+
+  /**
    * Ceiling on one Goal evidence-checkpoint verifier call, in milliseconds:
    * `goalCheckpointTimeoutSeconds` when it was valid, else the built-in
    * default.
@@ -6345,13 +6865,25 @@ export class Config {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
   }
 
+  /** True when a startup migration-warning provider was attached. */
+  hasSkillSettingsListsProvider(): boolean {
+    return this.skillSettingsListsProvider !== null;
+  }
+
   isSkillEnabled(skill: {
     name: string;
+    authoredName?: string;
     level?: string;
     filePath?: string;
     extensionName?: string;
   }): boolean {
-    const name = skill.name.trim().toLowerCase();
+    // Two spellings of one skill: `name` is the registry identity, which for
+    // an extension skill carries its owner (`rust:pdf`). The manifest and the
+    // workspace extension-skill store both key on the authored spelling, so
+    // that is what the ownership lookup and the stored state are asked for.
+    // `authoredName` is absent whenever the two spellings are the same.
+    const registryName = skill.name.trim().toLowerCase();
+    const authoredName = authoredSkillName(skill).trim().toLowerCase();
     const extension =
       skill.level === 'extension'
         ? this.getExtensions().find(
@@ -6359,17 +6891,28 @@ export class Config {
               candidate.name === skill.extensionName &&
               candidate.skills?.some(
                 (owned) =>
-                  owned.name.trim().toLowerCase() === name &&
+                  owned.name.trim().toLowerCase() === authoredName &&
                   owned.filePath === skill.filePath,
               ),
           )
         : undefined;
     if (skill.level === 'extension' && !extension?.isActive) return false;
-    if (this.getDisabledSkillNames().has(name)) return false;
-    if (!extension || this.enabledSkillNamesProvider?.().has(name)) return true;
+    // A restriction blocks under either spelling, so renaming a skill cannot
+    // un-block it. `skills.enabled` is a grant and matches the registry
+    // identity only: a bare `enabled: ['pdf']` opens nothing once `pdf` is
+    // registered as `rust:pdf`.
+    const disabledNames = this.getDisabledSkillNames();
+    if (
+      skillRestrictionNames(skill).some((entry) => disabledNames.has(entry))
+    ) {
+      return false;
+    }
+    if (!extension || this.enabledSkillNamesProvider?.().has(registryName)) {
+      return true;
+    }
     const state = this.extensionManager.getExtensionSkillState(
       extension.id,
-      skill.name,
+      authoredSkillName(skill),
     );
     return state.workspaceEnabled ?? state.defaultEnabled;
   }
@@ -6436,6 +6979,14 @@ export class Config {
    */
   getToolSearchThreshold(): number {
     return this.toolSearchThreshold;
+  }
+
+  getCodeModeOnly(): boolean {
+    return this.toolMode === ToolMode.CodeModeOnly;
+  }
+
+  getToolMode(): ToolModeValue {
+    return this.toolMode;
   }
 
   /**
@@ -7181,6 +7732,13 @@ export class Config {
     return this.approvalMode;
   }
 
+  getSessionApprovalMode(): ApprovalMode {
+    if (isDerivedConfig(this)) {
+      return (Object.getPrototypeOf(this) as Config).getSessionApprovalMode();
+    }
+    return this.getApprovalMode();
+  }
+
   /**
    * Returns the AUTO approval mode classifier settings (hints + environment).
    * Returns an empty object when no settings are configured.
@@ -7326,6 +7884,9 @@ export class Config {
       this.manualPlanExitNoticeEventState = noticeEvent;
     }
     if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
+      if (!isDerivedConfig(this)) {
+        this.goalProposalApprovalController?.abort();
+      }
       this.prePlanMode = fromMode;
       noticeEvent.version++;
       noticeEvent.kind = 'clear';
@@ -7894,12 +8455,14 @@ export class Config {
 
   isArtifactEnabled(): boolean {
     // Publishing writes outside the project and opens a browser, so it is
-    // limited to interactive, non-SDK sessions. QWEN_CODE_DISABLE_ARTIFACT
+    // limited to interactive or managed preview sessions, excluding SDK use.
+    // Managed previews render in Web Shell instead of opening a host browser.
+    // QWEN_CODE_DISABLE_ARTIFACT
     // hard-disables both artifact tools; QWEN_CODE_ENABLE_ARTIFACT remains as
     // a compatibility override for old configs that explicitly disabled them.
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
-    if (!this.interactive) return false;
+    if (!this.interactive && !this.isArtifactSnapshotsEnabled()) return false;
     if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
     return this.artifactEnabled;
   }
@@ -7927,6 +8490,14 @@ export class Config {
 
   getArtifactPublisherKind(): 'local' | 'host' | 'oss' {
     return this.artifactPublisher;
+  }
+
+  isArtifactSnapshotsEnabled(): boolean {
+    return this.artifactSnapshotsEnabled && this.chatRecordingEnabled;
+  }
+
+  setArtifactSnapshotsEnabled(enabled: boolean): void {
+    this.artifactSnapshotsEnabled = enabled;
   }
 
   getArtifactHostConfig(): ArtifactHostConfig | undefined {
@@ -7989,21 +8560,38 @@ export class Config {
   }
 
   shouldAutoOpenArtifact(): boolean {
+    if (this.isArtifactSnapshotsEnabled()) return false;
     if (process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] === '1') return false;
     return this.artifactAutoOpen && !this.isBrowserLaunchSuppressed();
   }
 
   isWorkflowsEnabled(): boolean {
     if (this.provisionalWorkspace) return false;
-    // Workflows are experimental and opt-in: enabled via settings or env var
+    // Workflows are opt-in via settings, env, or the bundled review skill.
     // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
     if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
     if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
-    return this.workflowsEnabled;
+    return this.workflowsEnabled ?? false;
   }
 
-  setWorkflowsEnabled(enabled: boolean): void {
+  setWorkflowsEnabled(enabled: boolean | undefined): void {
     this.workflowsEnabled = enabled;
+  }
+
+  async enableReviewWorkflow(): Promise<void> {
+    if (
+      this.workflowsEnabled === false ||
+      !isTopLevelSession() ||
+      this.getBareMode() ||
+      this.provisionalWorkspace ||
+      process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1'
+    ) {
+      return;
+    }
+    if (await this.registerWorkflowTool(this.getToolRegistry())) {
+      this.setWorkflowsEnabled(true);
+      await this.getLlmClient().setTools();
+    }
   }
 
   /**
@@ -8118,6 +8706,27 @@ export class Config {
     return this.modelProposedGoals;
   }
 
+  setGoalProposalHostSupported(supported: boolean): void {
+    this.goalProposalHostSupported = supported;
+  }
+
+  getGoalProposalHostSupported(): boolean {
+    return this.goalProposalHostSupported;
+  }
+
+  setGoalProposalTurnKey(turnKey: string | undefined): boolean {
+    if (this.goalProposalTurnKey === turnKey) return false;
+    this.goalProposalTurnKey = turnKey;
+    return true;
+  }
+
+  isGoalProposalAvailable(): boolean {
+    return (
+      resolveInteractionMode(this) === 'interactive' ||
+      (this.goalProposalHostSupported && this.goalProposalTurnKey !== undefined)
+    );
+  }
+
   hasPendingGoalProposal(): boolean {
     return this.pendingGoalProposal !== undefined;
   }
@@ -8125,7 +8734,14 @@ export class Config {
   /** Parks a `propose_goal` approval until the proposing turn ends. */
   setPendingGoalProposal(proposal: PendingGoalProposal): boolean {
     if (this.pendingGoalProposal) return false;
-    this.pendingGoalProposal = proposal;
+    this.goalProposalApprovalController = new AbortController();
+    if (this.approvalMode === ApprovalMode.PLAN) {
+      this.goalProposalApprovalController.abort();
+    }
+    this.pendingGoalProposal = {
+      ...proposal,
+      approvalSignal: this.goalProposalApprovalController.signal,
+    };
     return true;
   }
 
@@ -8966,6 +9582,8 @@ export class Config {
       ),
     );
     // An approval belongs to the session that produced it.
+    this.goalProposalApprovalController?.abort();
+    this.goalProposalApprovalController = undefined;
     this.pendingGoalProposal = undefined;
     if (!this.chatRecordingService) {
       this.goalRuntime = undefined;
@@ -8986,6 +9604,8 @@ export class Config {
         timeoutMs: this.goalCheckpointTimeoutMs,
       }),
       tokenBudgetGrant: this.goalTokenBudgetGrant,
+      turnBudgetGrant: this.goalTurnBudgetGrant,
+      activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {
@@ -9507,6 +10127,55 @@ export class Config {
     return this.onPersistPermissionRuleCallback;
   }
 
+  // Check permission then register a lazy factory; its import runs on first use.
+  private async registerLazyTool(
+    registry: ToolRegistry,
+    toolName: ToolName,
+    factory: ToolFactory,
+  ): Promise<void> {
+    // PermissionManager handles the coreTools allowlist, deny rules, and
+    // the `tools.eager` allowlist in a single check. A tool the active
+    // eager allowlist omits comes back `deferred`, not `disabled`: it is
+    // still registered — listed in `/tools` and loadable via ToolSearch —
+    // but its schema stays out of the eager model request (#9827) without
+    // the tool silently disappearing (#10075).
+    let status: ToolRegistrationStatus = 'registered';
+    try {
+      // Resolve through the getter, not the `permissionManager` field: on
+      // a Config derived via Object.create (e.g. the skill-review and
+      // managed-memory agent shims installed with deriveConfig), the field
+      // resolves through the prototype chain to the base manager and
+      // would silently bypass the scoped override — demoting the shim's
+      // promised tools under an active `tools.eager` allowlist and letting
+      // prepareTools strip them from the forked agent's explicit tool list
+      // (#10075).
+      const permissionManager = this.getPermissionManager();
+      status = permissionManager
+        ? await permissionManager.getToolRegistrationStatus(toolName)
+        : 'registered'; // Should never reach here after initialize(), but safe default.
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to check permissions for tool "${toolName}", skipping registration:`,
+        error,
+      );
+      return;
+    }
+    if (status === 'deferred') {
+      registry.registerPermissionDeferredFactory(toolName, factory);
+    } else if (status === 'registered') {
+      registry.registerFactory(toolName, factory);
+    }
+  }
+
+  private async registerWorkflowTool(registry: ToolRegistry): Promise<boolean> {
+    if (registry.getAllToolNames().includes(ToolNames.WORKFLOW)) return true;
+    await this.registerLazyTool(registry, ToolNames.WORKFLOW, async () => {
+      const { WorkflowTool } = await import('../tools/workflow/workflow.js');
+      return new WorkflowTool(this);
+    });
+    return registry.getAllToolNames().includes(ToolNames.WORKFLOW);
+  }
+
   private async registerImageGenerationTool(
     registry: ToolRegistry,
   ): Promise<void> {
@@ -9598,46 +10267,10 @@ export class Config {
       sendSdkMcpMessage,
     );
 
-    // Helper: check permission then register a lazy factory (no module import
-    // happens here — the dynamic import() only runs when the tool is first used).
-    const registerLazy = async (
+    const registerLazy = (
       toolName: ToolName,
       factory: ToolFactory,
-    ): Promise<void> => {
-      // PermissionManager handles the coreTools allowlist, deny rules, and
-      // the `tools.eager` allowlist in a single check. A tool the active
-      // eager allowlist omits comes back `deferred`, not `disabled`: it is
-      // still registered — listed in `/tools` and loadable via ToolSearch —
-      // but its schema stays out of the eager model request (#9827) without
-      // the tool silently disappearing (#10075).
-      let status: ToolRegistrationStatus = 'registered';
-      try {
-        // Resolve through the getter, not the `permissionManager` field: on
-        // a Config derived via Object.create (e.g. the skill-review and
-        // managed-memory agent shims installed with deriveConfig), the field
-        // resolves through the prototype chain to the base manager and
-        // would silently bypass the scoped override — demoting the shim's
-        // promised tools under an active `tools.eager` allowlist and letting
-        // prepareTools strip them from the forked agent's explicit tool list
-        // (#10075).
-        const permissionManager = this.getPermissionManager();
-        status = permissionManager
-          ? await permissionManager.getToolRegistrationStatus(toolName)
-          : 'registered'; // Should never reach here after initialize(), but safe default.
-      } catch (error) {
-        this.debugLogger.warn(
-          `Failed to check permissions for tool "${toolName}", skipping registration:`,
-          error,
-        );
-        return;
-      }
-
-      if (status === 'deferred') {
-        registry.registerPermissionDeferredFactory(toolName, factory);
-      } else if (status === 'registered') {
-        registry.registerFactory(toolName, factory);
-      }
-    };
+    ): Promise<void> => this.registerLazyTool(registry, toolName, factory);
 
     // The synthetic structured_output tool is the terminal contract for
     // --json-schema runs. It must be registered in BOTH the bare-mode
@@ -9683,13 +10316,22 @@ export class Config {
       // keep the text hand-off (`/goal set …`) that /goal-draft prints.
       if (
         this.getModelProposedGoals() !== 'disabled' &&
-        resolveInteractionMode(this) === 'interactive'
+        (resolveInteractionMode(this) === 'interactive' ||
+          this.goalProposalHostSupported)
       ) {
         await registerLazy(ToolNames.PROPOSE_GOAL, async () => {
           const { ProposeGoalTool } = await import('../goals/goal-tools.js');
           return new ProposeGoalTool(this);
         });
       }
+    };
+
+    const registerExecIfEnabled = async (): Promise<void> => {
+      if (this.getToolMode() !== ToolMode.CodeModeOnly) return;
+      await registerLazy(ToolNames.EXEC, async () => {
+        const { ExecTool } = await import('../tools/exec.js');
+        return new ExecTool(this);
+      });
     };
 
     if (this.getBareMode()) {
@@ -9711,6 +10353,7 @@ export class Config {
       });
       await registerGoalWorkerTools();
       await registerStructuredOutputIfRequested();
+      await registerExecIfEnabled();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
       );
@@ -9718,6 +10361,7 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerExecIfEnabled();
     await registerGoalWorkerTools();
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
@@ -10038,10 +10682,7 @@ export class Config {
 
     // Register workflow tool when enabled
     if (this.isWorkflowsEnabled()) {
-      await registerLazy(ToolNames.WORKFLOW, async () => {
-        const { WorkflowTool } = await import('../tools/workflow/workflow.js');
-        return new WorkflowTool(this);
-      });
+      await this.registerWorkflowTool(registry);
     }
 
     // Register monitor tool

@@ -1018,6 +1018,9 @@ export function transcriptBlocksToDaemonMessages(
           content: promptCancelledText,
           variant: 'info',
           source: 'prompt_cancelled',
+          ...(block.elapsedMs !== undefined
+            ? { data: { elapsedMs: block.elapsedMs } }
+            : {}),
           timestamp: blockTime,
           sourceBlockIds: [block.id],
         });
@@ -1754,7 +1757,7 @@ function extractJsonObject(text: string, start: number): string | null {
   return null;
 }
 
-function splitInsightSegments(text: string): InsightSegment[] | null {
+export function splitInsightSegments(text: string): InsightSegment[] | null {
   const segments: InsightSegment[] = [];
   let lastIndex = 0;
   let pos = 0;
