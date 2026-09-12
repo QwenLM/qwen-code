@@ -89,6 +89,25 @@ describe('Playwright AI snapshots', () => {
     );
   });
 
+  it('keeps clickable nodes when the name forces YAML quoting of the key', async () => {
+    const fixture = fakePage(
+      [
+        '- generic [ref=e1]:',
+        `  - 'generic "Total: 3 items" [ref=e2] [cursor=pointer]'`,
+        '  - button "Save" [ref=e3]',
+      ].join('\n'),
+    );
+
+    await expect(
+      snapshotTab(tab(fixture.page), { interactiveOnly: true }),
+    ).resolves.toBe(
+      [
+        `- 'generic "Total: 3 items" [ref=e2] [cursor=pointer]'`,
+        '- button "Save" [ref=e3]',
+      ].join('\n'),
+    );
+  });
+
   it('does not treat multiline text as accessibility nodes', async () => {
     const fixture = fakePage(
       [

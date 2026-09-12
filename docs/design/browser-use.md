@@ -331,9 +331,10 @@ remains connected and focused with the same value. Navigation, replacement,
 or a non-editable keyboard target cannot turn successful input into this
 error. The handle is disposed after both successful and failed input.
 
-Modifier cleanup attempts to release every attempted key even after a failed
-keydown or keyup. Cleanup preserves the original action error; a cleanup
-failure after a successful action is still reported.
+Modifier cleanup attempts to release every attempted key in reverse order even
+after a failed keydown or keyup, and cleanup failures are discarded. Cleanup
+never rewrites a completed action into a failure; only the action's own error
+propagates.
 
 ## Attachment and session shutdown
 

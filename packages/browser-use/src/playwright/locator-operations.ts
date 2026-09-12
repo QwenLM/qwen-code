@@ -11,6 +11,7 @@ import type { DispatchResult, LocatorStep } from '../core/primitives.js';
 import type { SupportedCommand } from '../core/schemas.js';
 import { serializeJson } from '../core/serialize-json.js';
 import {
+  chordTokens,
   clickOptions,
   jsonResult,
   matcher,
@@ -97,25 +98,37 @@ export async function executeLocatorOperation(
         locator.evaluate(
           async (element, budgetMs) => {
             element.scrollIntoView({ block: 'center', inline: 'nearest' });
-            const mediaSelector = 'img, video, source, a[href]';
-            // A located wrapper (picture/figure) must resolve to the media
-            // it contains, not to an ancestor link; the located element
-            // itself still wins when it is the media or the link.
-            const media =
-              (element.matches(mediaSelector) ? element : null) ??
-              element.querySelector(mediaSelector) ??
-              element.closest(mediaSelector) ??
-              element;
-            const readString = (name: string): string | null => {
-              const value = Reflect.get(media, name);
+            // A located wrapper (picture/figure) must resolve to the media it
+            // contains: document order puts a wrapping anchor before its
+            // image, so try media elements before anchors and keep the first
+            // candidate that actually exposes a URL.
+            const candidates = [
+              element,
+              ...element.querySelectorAll('img, video, source'),
+              ...element.querySelectorAll('a[href]'),
+              element.closest('img, video, source, a[href]'),
+            ].filter((node): node is Element => node !== null);
+            const readString = (node: Element, name: string): string | null => {
+              const value = Reflect.get(node, name);
               // An unloaded element exposes '' for these IDL properties, and
               // '' must fall through to the next source.
               return typeof value === 'string' && value !== '' ? value : null;
             };
-            const url =
-              readString('currentSrc') ??
-              readString('src') ??
-              readString('href');
+            const readSrcset = (node: Element): string | null => {
+              const srcset = readString(node, 'srcset');
+              // 'hero.webp 1x, hero@2x.webp 2x' — the first candidate URL.
+              const first = srcset?.split(',')[0]?.trim().split(/\s+/)[0];
+              return first ? first : null;
+            };
+            let url: string | null = null;
+            for (const candidate of candidates) {
+              url =
+                readString(candidate, 'currentSrc') ??
+                readString(candidate, 'src') ??
+                readString(candidate, 'href') ??
+                readSrcset(candidate);
+              if (url !== null) break;
+            }
             if (url === null)
               throw new Error(
                 'Matched element does not expose a downloadable URL',
@@ -189,7 +202,7 @@ export async function executeLocatorOperation(
         });
       } catch (error) {
         // An invalid later chord token leaves the earlier tokens held.
-        await releaseChordKeys(tab.page, value.split('+'));
+        await releaseChordKeys(tab.page, chordTokens(value));
         throw error;
       }
       return null;

@@ -59,10 +59,22 @@ describe('operation error classification', () => {
     expect(sanitizeOperationError('locator.click', timeout)).toMatchObject({
       code: 'OPERATION_TIMEOUT',
     });
+    // A genuine strict-mode violation crosses CDP as the raw exception
+    // description, so Playwright's phrase sits behind an "Error: " layer.
     expect(
       sanitizeOperationError(
         'locator.click',
-        new Error('locator.click: strict mode violation: two buttons'),
+        new Error(
+          "locator.click: Error: strict mode violation: locator('button') resolved to 2 elements:",
+        ),
+      ),
+    ).toMatchObject({ code: 'LOCATOR_NOT_UNIQUE' });
+    expect(
+      sanitizeOperationError(
+        'locator.click',
+        new Error(
+          "strict mode violation: locator('button') resolved to 2 elements:",
+        ),
       ),
     ).toMatchObject({ code: 'LOCATOR_NOT_UNIQUE' });
   });
@@ -122,6 +134,16 @@ describe('operation error classification', () => {
       sanitizeOperationError(
         'locator.evaluate',
         new Error('locator.evaluate: Error: strict mode violation'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    // A page-thrown strict-mode lookalike lacks the element count Playwright
+    // always appends, so it must not pick the code either.
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error(
+          'locator.evaluate: Error: strict mode violation: resolved to elements',
+        ),
       ),
     ).toMatchObject({ code: 'OPERATION_FAILED' });
     expect(

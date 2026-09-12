@@ -97,6 +97,15 @@ function parseSnapshot(text: string): SnapshotNode[] {
   return roots;
 }
 
+const QUOTED_KEY = /^'(.*)'$/;
+
+// Playwright wraps the whole key in single quotes when the name needs YAML
+// quoting ('' escapes a quote); a suffix test must see the unwrapped key.
+function nodeKey(line: string): string {
+  const body = line.trimEnd().replace(/^\s*-\s+/, '');
+  return QUOTED_KEY.test(body) ? body.slice(1, -1).replace(/''/g, "'") : body;
+}
+
 function selectInteractiveNodes(
   nodes: readonly SnapshotNode[],
   parentSelected = false,
@@ -109,7 +118,7 @@ function selectInteractiveNodes(
     const cursorPointer =
       node.role !== undefined &&
       node.role !== 'text' &&
-      node.line.trimEnd().endsWith(' [cursor=pointer]');
+      nodeKey(node.line).endsWith(' [cursor=pointer]');
     const keep =
       node.role === 'iframe' ||
       (node.role !== undefined && INTERACTIVE_ROLES.has(node.role)) ||

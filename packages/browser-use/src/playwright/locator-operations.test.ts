@@ -216,6 +216,20 @@ describe('locator.press', () => {
     expect(f.keyboard.up.mock.calls).toEqual([['Esc'], ['Control']]);
   });
 
+  it('releases the tokens Playwright derives, not a naive split of the chord', async () => {
+    const f = pressFixture();
+    f.args.value = 'Control+++Bogus';
+    f.locator.press.mockRejectedValue(new Error('Unknown key: "Bogus"'));
+    await expect(
+      executeLocatorOperation('locator.press', f.args, f.tab),
+    ).rejects.toThrow('Unknown key');
+    expect(f.locator.press).toHaveBeenCalledExactlyOnceWith('Control+++Bogus', {
+      timeout: 5_000,
+      noWaitAfter: true,
+    });
+    expect(f.keyboard.up.mock.calls).toEqual([['Bogus'], ['+'], ['Control']]);
+  });
+
   it('leaves the keyboard alone when the press succeeds', async () => {
     const f = pressFixture();
     await expect(
@@ -308,9 +322,8 @@ describe('locator.downloadMedia', () => {
     );
     const element = {
       scrollIntoView: vi.fn(),
-      matches: vi.fn(() => false),
       closest: vi.fn((): unknown => media),
-      querySelector: vi.fn((): unknown => null),
+      querySelectorAll: vi.fn((_selector: string): unknown[] => []),
     };
     const locator = {
       evaluate: vi.fn(
@@ -346,15 +359,71 @@ describe('locator.downloadMedia', () => {
 
   it('prefers media contained in a located wrapper over an ancestor link', async () => {
     const f = downloadFixture({ href: '/product' });
-    f.element.closest.mockReturnValue({ href: '/product' });
-    f.element.querySelector.mockReturnValue({
-      currentSrc: 'https://cdn.example.com/inner.webp',
-    });
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ currentSrc: 'https://cdn.example.com/inner.webp' }]
+        : [],
+    );
     await expect(
       executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
     ).resolves.toBeNull();
     expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
       'https://cdn.example.com/inner.webp',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('prefers a contained image over an anchor that precedes it in document order', async () => {
+    const f = downloadFixture({});
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ currentSrc: 'https://cdn.example.com/photo.jpg' }]
+        : [{ href: 'https://example.com/product' }],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/photo.jpg',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('reads the first srcset URL when a matched source exposes no src', async () => {
+    const f = downloadFixture({});
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [
+            {
+              srcset:
+                'https://cdn.example.com/hero.webp 1x, https://cdn.example.com/hero@2x.webp 2x',
+            },
+            { src: 'https://cdn.example.com/hero.png' },
+          ]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/hero.webp',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('falls back to a source child when the located video has not loaded', async () => {
+    const f = downloadFixture({});
+    Object.assign(f.element, { currentSrc: '', src: '' });
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ src: 'https://cdn.example.com/movie.mp4' }]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/movie.mp4',
       { signal: expect.any(AbortSignal) },
     );
   });

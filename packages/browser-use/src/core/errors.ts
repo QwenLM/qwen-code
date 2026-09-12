@@ -71,7 +71,14 @@ export function sanitizeOperationError(
   const firstLine = failure.split('\n', 1)[0] ?? '';
   if (/^(?:target|page) crashed/i.test(firstLine))
     return new BrowserRuntimeError('STALE_TAB', message);
-  if (/^(?:LOCATOR_NOT_UNIQUE|strict mode violation)/i.test(firstLine)) {
+  // A genuine strict-mode failure crosses CDP as the raw exception
+  // description, so Playwright's own phrase sits behind an "Error: " layer;
+  // requiring the element count keeps a page-thrown lookalike from matching.
+  if (
+    /^(?:LOCATOR_NOT_UNIQUE|(?:Error: )?strict mode violation: .* resolved to \d+ elements:)/i.test(
+      firstLine,
+    )
+  ) {
     return new BrowserRuntimeError('LOCATOR_NOT_UNIQUE', message);
   }
   if (

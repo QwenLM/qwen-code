@@ -180,12 +180,32 @@ export async function withModifiers(
 
 export async function pressKeyChord(page: Page, value: unknown): Promise<void> {
   const keys = stringArray(value);
+  const chord = keys.join('+');
   try {
-    await page.keyboard.press(keys.join('+'));
+    await page.keyboard.press(chord);
   } catch (error) {
-    await releaseChordKeys(page, keys);
+    await releaseChordKeys(page, chordTokens(chord));
     throw error;
   }
+}
+
+// Playwright's Keyboard.press splits the chord itself: '+' separates only
+// after a non-empty token, so a standalone '+' is a literal key. The derived
+// tokens are the keys it actually holds, so the recovery must release these
+// rather than the caller's array elements.
+export function chordTokens(chord: string): string[] {
+  const tokens: string[] = [];
+  let building = '';
+  for (const char of chord) {
+    if (char === '+' && building !== '') {
+      tokens.push(building);
+      building = '';
+    } else {
+      building += char;
+    }
+  }
+  tokens.push(building);
+  return tokens;
 }
 
 // Playwright presses chord tokens left to right and never releases them when

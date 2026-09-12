@@ -109,6 +109,36 @@ describe('key chord press', () => {
     expect(keyboard.up.mock.calls).toEqual([['Bogus'], ['a'], ['Control']]);
   });
 
+  it('releases the tokens Playwright derives when one element embeds a separator', async () => {
+    const keyboard = {
+      up: vi.fn(async (_key: string) => undefined),
+      press: vi.fn(async (_chord: string) => {
+        throw new Error('Unknown key: "Del"');
+      }),
+    };
+    const page = { keyboard } as unknown as Page;
+    await expect(pressKeyChord(page, ['Control+Alt+Del'])).rejects.toThrow(
+      'Unknown key',
+    );
+    expect(keyboard.press).toHaveBeenCalledExactlyOnceWith('Control+Alt+Del');
+    expect(keyboard.up.mock.calls).toEqual([['Del'], ['Alt'], ['Control']]);
+  });
+
+  it('treats a standalone separator as the literal plus key, as Playwright does', async () => {
+    const keyboard = {
+      up: vi.fn(async (_key: string) => undefined),
+      press: vi.fn(async (_chord: string) => {
+        throw new Error('Unknown key: "Bogus"');
+      }),
+    };
+    const page = { keyboard } as unknown as Page;
+    await expect(
+      pressKeyChord(page, ['Control', '+', 'Bogus']),
+    ).rejects.toThrow('Unknown key');
+    expect(keyboard.press).toHaveBeenCalledExactlyOnceWith('Control+++Bogus');
+    expect(keyboard.up.mock.calls).toEqual([['Bogus'], ['+'], ['Control']]);
+  });
+
   it('leaves the keyboard untouched after a successful chord', async () => {
     const keyboard = {
       up: vi.fn(async (_key: string) => undefined),
