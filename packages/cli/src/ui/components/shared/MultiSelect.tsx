@@ -21,7 +21,7 @@ export interface MultiSelectProps<T> {
   items: Array<MultiSelectItem<T>>;
   initialIndex?: number;
   selectedKeys?: string[];
-  onConfirm: (selectedValues: T[]) => void;
+  onConfirm: (selectedValues: T[], activeValue: T) => void;
   onChange?: (selectedValues: T[]) => void;
   onSelectedKeysChange?: (selectedKeys: string[]) => void;
   onHighlight?: (value: T) => void;
@@ -34,6 +34,7 @@ export interface MultiSelectProps<T> {
   checkedText?: string;
   uncheckedText?: string;
   showActiveMarker?: boolean;
+  truncateLabels?: boolean;
 }
 
 const EMPTY_SELECTED_KEYS: string[] = [];
@@ -63,6 +64,7 @@ export function MultiSelect<T>({
   checkedText = '[✓]',
   uncheckedText = '[ ]',
   showActiveMarker = false,
+  truncateLabels = false,
 }: MultiSelectProps<T>): React.JSX.Element {
   const [scrollOffset, setScrollOffset] = useState(0);
   const selectedKeySet = useMemo(() => new Set(selectedKeys), [selectedKeys]);
@@ -78,8 +80,8 @@ export function MultiSelect<T>({
     // Numbers are still rendered visually via the showNumbers prop below.
     showNumbers: false,
     onHighlight,
-    onSelect: () => {
-      onConfirm(getSelectedValues(items, selectedKeySet));
+    onSelect: (activeValue) => {
+      onConfirm(getSelectedValues(items, selectedKeySet), activeValue);
     },
   });
 
@@ -179,7 +181,12 @@ export function MultiSelect<T>({
                 <Text> </Text>
               </Box>
               <Box flexGrow={1}>
-                <Text color={theme.text.secondary}>{item.label}</Text>
+                <Text
+                  color={theme.text.secondary}
+                  wrap={truncateLabels ? 'truncate' : 'wrap'}
+                >
+                  {item.label}
+                </Text>
               </Box>
             </Box>
           );
@@ -201,7 +208,12 @@ export function MultiSelect<T>({
               </Box>
             )}
             <Box flexGrow={1}>
-              <Text color={textColor}>{item.label}</Text>
+              <Text
+                color={textColor}
+                wrap={truncateLabels ? 'truncate' : 'wrap'}
+              >
+                {item.label}
+              </Text>
             </Box>
           </Box>
         );

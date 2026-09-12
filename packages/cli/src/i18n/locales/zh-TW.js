@@ -337,11 +337,10 @@ export default {
   'Search:': '搜尋：',
   'type to filter…': '輸入以篩選…',
   'No skills are currently available.': '目前沒有可用的技能。',
-  'All available skills are locked at a higher scope (see below).':
-    '所有可用技能都被更高範圍鎖定（詳見下方）。',
   'No skills match the search.': '沒有符合搜尋條件的技能。',
   'Locked by settings entries you cannot toggle here:':
     '被無法在此切換的設定條目鎖定：',
+  '{{count}} locked not shown': '{{count}} 個已鎖定技能未顯示',
   'higher scope': '更高範圍',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已鎖定：{{scope}}]',

@@ -137,11 +137,10 @@ export default {
   'type to filter…': 'escriviu per filtrar…',
   'No skills are currently available.':
     'No hi ha habilitats disponibles actualment.',
-  'All available skills are locked at a higher scope (see below).':
-    'Totes les habilitats disponibles estan bloquejades en un àmbit superior (veure a sota).',
   'No skills match the search.': 'Cap habilitat coincideix amb la cerca.',
   'Locked by settings entries you cannot toggle here:':
     'Bloquejades per entrades de paràmetres (aquí no es poden commutar):',
+  '{{count}} locked not shown': '{{count}} habilitats bloquejades no mostrades',
   'higher scope': 'àmbit superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [bloquejada: {{scope}}]',
