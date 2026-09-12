@@ -14093,12 +14093,12 @@ describe('Model Switching and Config Updates', () => {
 
     // The old head must no longer resolve to the shared owner; it falls back
     // to itself so the owners map does not grow one entry per continuation.
-    expect(
-      config.getActiveTodoWorkChainOwner('prompt-user-2', 'stale'),
-    ).toBe('prompt-user-1');
-    expect(
-      config.getActiveTodoWorkChainOwner('prompt-user-1', 'stale'),
-    ).toBe('stale');
+    expect(config.getActiveTodoWorkChainOwner('prompt-user-2', 'stale')).toBe(
+      'prompt-user-1',
+    );
+    expect(config.getActiveTodoWorkChainOwner('prompt-user-1', 'stale')).toBe(
+      'stale',
+    );
   });
 
   it('clearActiveTodoReminders clears reminders, owners, and cadence counters', () => {
