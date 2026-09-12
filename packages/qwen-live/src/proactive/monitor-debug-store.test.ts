@@ -503,19 +503,22 @@ describe('MonitorDebugStore', () => {
       'proactive.monitor_debug_pruned',
       expect.objectContaining({ directory: owned[1] }),
     );
-    // maxRetries rides out a transient handle (AV scanner/indexer) on Windows.
-    expect(
-      rmCalls.find((call) => call.path === join(owned[1]!, 'requests'))
-        ?.options,
-    ).toEqual(
-      expect.objectContaining({ recursive: true, force: true, maxRetries: 3 }),
-    );
     // Once the handle clears, the next prune retries and removes the archive.
     expect(await store.initialize()).toBe(true);
     await expect(lstat(owned[1]!)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(log).toHaveBeenCalledWith('proactive.monitor_debug_pruned', {
       directory: owned[1],
     });
+    // maxRetries rides out a transient handle (AV scanner/indexer) on Windows;
+    // the budget must ride on both removals, not just the media subtree.
+    for (const path of [join(owned[1]!, 'requests'), owned[1]!])
+      expect(rmCalls.find((call) => call.path === path)?.options).toEqual(
+        expect.objectContaining({
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+        }),
+      );
     const recorder = store.create(INFO);
     expect(recorder).toBeDefined();
     await recorder!.start();

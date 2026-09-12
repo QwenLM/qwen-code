@@ -414,7 +414,10 @@ that cannot be removed (for example a file held open by another process on
 Windows) is kept past this cap and reported as
 `proactive.monitor_debug_prune_failed` with the failure reason, and later
 prunes retry it until it can be removed; a persistent reason such as `EACCES`
-or `unsafe_directory` needs manual cleanup. An evicted Monitor keeps running
+from the deletion itself needs manual cleanup. An archive that fails the
+ownership scan is skipped silently rather than reported, is not counted
+against this cap, and must be found and removed by hand. An evicted Monitor
+keeps running
 but stops recording and logs skipped requests. Disk/permission failures or
 exceeding the 32 MiB pending-write budget disable that recorder and log an
 incomplete recording without stopping the call.
