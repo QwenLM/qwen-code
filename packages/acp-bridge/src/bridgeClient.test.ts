@@ -3764,7 +3764,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         sessionId: 'sess:drain',
         promptId,
       });
-      if (promptId === 'new-rpc' || promptId === 'old-auto') {
+      if (promptId === 'new-rpc') {
         expect(result['messages']).toEqual(['Check the result']);
         expect(queue).toHaveLength(0);
         expect(publish).toHaveBeenCalledWith(
@@ -3782,6 +3782,43 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       }
     },
   );
+
+  it('lets a background-only execution drain and claim its continuation', async () => {
+    const queue = [{ messageId: 'mid-1', text: 'Check the result' }];
+    const settledMidTurnMessageIds: string[] = [];
+    const client = makeClientWithEntry('sess:drain', {
+      sessionId: 'sess:drain',
+      promptActive: false,
+      backgroundTurn: {
+        turnId: 'old-auto',
+        taskId: 'task',
+        kind: 'agent',
+        startedAt: 1,
+      },
+      midTurnMessageQueue: queue,
+      settledMidTurnMessageIds,
+      pendingPromptList: [],
+      events: { publish: vi.fn().mockReturnValue(true) },
+    });
+    await expect(
+      client.extMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 'sess:drain',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+    await expect(
+      client.extMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 'sess:drain',
+        promptId: 'old-auto',
+      }),
+    ).resolves.toEqual({ claimed: true, hasQueuedPrompt: false });
+    const result = await client.extMethod('craft/drainMidTurnQueue', {
+      sessionId: 'sess:drain',
+      promptId: 'old-auto',
+    });
+    expect(result['messages']).toEqual(['Check the result']);
+    expect(queue).toEqual([]);
+    expect(settledMidTurnMessageIds).toEqual(['mid-1']);
+  });
 
   it('drains the queue, returns the messages, and publishes one injected frame', async () => {
     const publish = vi.fn().mockReturnValue(true);
@@ -5024,6 +5061,47 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
 });
 
 describe('background execution ownership', () => {
+  it.each(['rpc', 'background', 'ordinary'] as const)(
+    'keeps terminal sequence ownership during %s execution',
+    async (owner) => {
+      const publish = vi.fn();
+      const entry = {
+        sessionId: 'session',
+        promptActive: owner !== 'background',
+        activePromptId: 'P',
+        activePromptOriginatorClientId: 'C',
+        backgroundTurn:
+          owner === 'ordinary'
+            ? undefined
+            : {
+                turnId: 'B',
+                taskId: 'task',
+                kind: 'agent',
+                startedAt: 1,
+              },
+        events: { publish },
+      };
+      const client = new BridgeClient(
+        (() => entry) as never,
+        vi.fn(),
+        { request: vi.fn() },
+        0,
+        Infinity,
+      );
+      await client.extNotification('qwen/notify/session/terminal-sequence', {
+        v: 1,
+        sessionId: 'session',
+        sequence: '\u001b]0;title\u0007',
+      });
+      expect(publish).toHaveBeenCalledExactlyOnceWith({
+        type: 'terminal_sequence',
+        data: { sequence: '\u001b]0;title\u0007' },
+        promptId: owner === 'background' ? 'B' : 'P',
+        ...(owner === 'background' ? {} : { originatorClientId: 'C' }),
+      });
+    },
+  );
+
   it('rejects malformed background descriptors before resolving a session', async () => {
     const client = makeClient();
     await expect(

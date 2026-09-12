@@ -46959,6 +46959,83 @@ describe('Session', () => {
       );
     });
 
+    it('automatic guard claims its actual background execution owner', async () => {
+      rebuildSessionWithGuard();
+      installPendingTodoTool();
+      queuePendingTodoThenNaturalStops();
+      mockGuardBridge(async () => ({ messages: [], hasQueuedPrompt: false }));
+      const callback =
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void;
+      callback('background done', '<task-notification />', {
+        agentId: 'automatic-agent',
+        status: 'completed',
+      });
+      await vi.waitFor(() =>
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/end_turn',
+          expect.objectContaining({ source: 'background_notification' }),
+        ),
+      );
+      const start = vi
+        .mocked(mockClient.extMethod)
+        .mock.calls.find(([method]) => method === '_qwencode/start_turn');
+      const claims = vi
+        .mocked(mockClient.extMethod)
+        .mock.calls.filter(
+          ([method]) => method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+        );
+      expect(start?.[1]?.['turnId']).toEqual(expect.any(String));
+      expect(claims.length).toBeGreaterThan(0);
+      for (const [, params] of claims) {
+        expect(params).toMatchObject({
+          sessionId: 'test-session-id',
+          promptId: start?.[1]?.['turnId'],
+        });
+      }
+    });
+
+    it.each(['inactive', 'foreign'] as const)(
+      'rejects %s background context when claiming ordinary guard',
+      async (scope) => {
+        rebuildSessionWithGuard();
+        installPendingTodoTool();
+        queuePendingTodoThenNaturalStops();
+        mockGuardBridge(async () => ({ messages: [], hasQueuedPrompt: false }));
+        await core.backgroundTurnContext.run(
+          {
+            sessionId:
+              scope === 'foreign' ? 'another-session' : 'test-session-id',
+            active: scope !== 'inactive',
+            turn: {
+              turnId: 'must-not-leak',
+              taskId: 'task',
+              kind: 'agent',
+              startedAt: 1,
+            },
+          },
+          runGuardPrompt,
+        );
+        const claims = vi
+          .mocked(mockClient.extMethod)
+          .mock.calls.filter(
+            ([method]) => method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+          );
+        expect(claims.length).toBeGreaterThan(0);
+        for (const [, params] of claims) {
+          expect(params).toMatchObject({
+            sessionId: 'test-session-id',
+            promptId: lastGuardPromptId,
+          });
+        }
+      },
+    );
+
     it('lets an independent background notification arm its own guard', async () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();

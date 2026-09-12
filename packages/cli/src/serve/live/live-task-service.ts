@@ -467,6 +467,11 @@ function eventWakeReason(
 ): 'turnCompleted' | 'needsAttention' | undefined {
   if (event.type === 'permission_request') return 'needsAttention';
   if (
+    event.type === 'turn_complete' &&
+    (event.data as { backgroundTurn?: unknown } | null)?.backgroundTurn
+  )
+    return undefined;
+  if (
     event.type === 'turn_complete' ||
     event.type === 'turn_error' ||
     event.type === 'session_closed'

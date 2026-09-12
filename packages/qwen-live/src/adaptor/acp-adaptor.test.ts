@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 import type { ChildProcess } from 'node:child_process';
-import type { Client } from '@agentclientprotocol/sdk';
+import { RequestError, type Client } from '@agentclientprotocol/sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LiveLogger } from '../logger.js';
 import {
@@ -652,6 +652,68 @@ describe('AcpAdaptor sessions and receipts', () => {
     ]);
     expect(freshReceipt).toMatchObject({ status: 'accepted' });
   });
+
+  it('keeps background status out of the main answer', async () => {
+    const connection = new FakeConnection();
+    const adaptor = makeAdaptor(connection);
+    adaptors.push(adaptor);
+    const handle = await adaptor.createSession();
+    const collector = eventCollector(adaptor, handle.id);
+    const receipt = await adaptor.prompt(handle, [
+      { type: 'text', text: 'work' },
+    ]);
+    connection.update(handle.id, {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'answer' },
+    });
+    for (const source of [
+      'background_task_completed',
+      'background_notification',
+      'background_notification_turn_started',
+    ]) {
+      connection.update(handle.id, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'background status' },
+        _meta: { source },
+      });
+    }
+    connection.update(handle.id, {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: ' tail' },
+    });
+    connection.settle();
+    const events = await collector.waitFor((items) =>
+      items.some((item) => item.type === 'turn_complete'),
+    );
+    expect(events).toContainEqual({
+      type: 'turn_complete',
+      jobRef: receipt.jobRef,
+      summary: 'answer tail',
+      detail: 'answer tail',
+    });
+    expect(
+      events.flatMap((event) =>
+        event.type === 'activity' && event.kind === 'message'
+          ? [event.text]
+          : [],
+      ),
+    ).toEqual(['answer', ' tail']);
+  });
+
+  it.each(['_qwencode/start_turn', '_probe/unknown'])(
+    'preserves method-not-found for %s',
+    async (method) => {
+      const connection = new FakeConnection();
+      const adaptor = makeAdaptor(connection);
+      adaptors.push(adaptor);
+      const handle = await adaptor.createSession();
+      const error = await connection.client.extMethod!(method, {
+        sessionId: handle.id,
+      }).catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(RequestError);
+      expect(error).toMatchObject({ code: -32601 });
+    },
+  );
 
   it('responds to speak-to-user and ignores unknown ext methods', async () => {
     const connection = new FakeConnection();

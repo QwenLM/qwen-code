@@ -2022,6 +2022,56 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('does not release the main turn barrier for a background terminal', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    let resolvePrompt!: () => void;
+    session.prompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePrompt = () => resolve({ stopReason: 'end_turn' });
+        }),
+    );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    await bridge.start();
+    await bridge.newSession('/repo');
+    let finished = false;
+    const prompt = bridge.prompt('session-1', 'work').then((result) => {
+      finished = true;
+      return result;
+    });
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    events.push({
+      v: 1,
+      type: 'turn_complete',
+      data: {
+        promptId: 'background-1',
+        backgroundTurn: { turnId: 'background-1' },
+      },
+    });
+    await drainMicrotasks();
+    resolvePrompt();
+    await drainMicrotasks();
+    expect(finished).toBe(false);
+    events.push({
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'answer' },
+        },
+      },
+    });
+    events.push(turnCompleteEvent());
+    await expect(prompt).resolves.toBe('answer');
+    events.close();
+    bridge.stop();
+  });
+
   it('resolves the turn barrier when a session is cancelled during prompt drain', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

@@ -41012,3 +41012,55 @@ describe('background admission ownership boundaries', () => {
     }
   });
 });
+
+describe('background handoff cancellation', () => {
+  it('cancels only the admitted RPC during background handoff', async () => {
+    const response = deferred<PromptResponse>();
+    const handle = makeChannel({ promptImpl: () => response.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const peerAbort = new AbortController();
+    const events: BridgeEvent[] = [];
+    const collecting = (async () => {
+      for await (const event of bridge.subscribeEvents(session.sessionId, {
+        signal: peerAbort.signal,
+      })) {
+        if (event.type === 'prompt_cancelled') events.push(event);
+      }
+    })();
+    try {
+      expect(
+        await handle.agentConnection.extMethod('_qwencode/start_turn', {
+          sessionId: session.sessionId,
+          source: 'background_notification',
+          turnId: 'old-auto',
+          taskId: 'task',
+          kind: 'agent',
+          startedAt: 100,
+        }),
+      ).toEqual({ accepted: true });
+      const prompt = bridge
+        .sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'next' }],
+          },
+          undefined,
+          { promptId: 'new-rpc' },
+        )
+        .catch(() => {});
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      await bridge.cancelSession(session.sessionId);
+      response.resolve({ stopReason: 'cancelled' });
+      await prompt;
+      peerAbort.abort();
+      await collecting;
+      expect(events.map((event) => event.promptId)).toEqual(['new-rpc']);
+    } finally {
+      response.resolve({ stopReason: 'cancelled' });
+      peerAbort.abort();
+      await bridge.shutdown();
+    }
+  });
+});

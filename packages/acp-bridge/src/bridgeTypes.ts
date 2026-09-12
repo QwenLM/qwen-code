@@ -1169,7 +1169,8 @@ export const MID_TURN_RECONCILIATION_RING_SIZE = 200;
 /**
  * Child-to-parent request that atomically assigns the next Todo Stop Guard
  * model send to the current daemon FIFO owner. `promptId`, when present, is
- * the trusted bridge invocation id rather than the provider-facing prompt id.
+ * the trusted bridge invocation id or admitted background execution id,
+ * rather than the provider-facing prompt id.
  */
 export const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
   'craft/claimTodoStopGuardContinuation';

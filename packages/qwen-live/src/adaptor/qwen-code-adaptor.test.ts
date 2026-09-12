@@ -793,6 +793,95 @@ describe('QwenCodeAdaptor.events', () => {
     expect(end.done).toBe(true);
   });
 
+  it('keeps background status out of the main answer', async () => {
+    const text = (value: string, source?: string) =>
+      envelope('session_update', {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: value },
+          ...(source ? { _meta: { source } } : {}),
+        },
+      });
+    const client = makeClient({
+      subscribeEvents: vi.fn(() =>
+        envelopeStream([
+          envelope('pending_prompt_started', {}, { promptId: 'p1' }),
+          text('answer'),
+          ...[
+            'background_task_completed',
+            'background_notification',
+            'background_notification_turn_started',
+          ].map((source) => text('background status', source)),
+          text(' tail'),
+          envelope('turn_complete', {}, { promptId: 'p1' }),
+        ]),
+      ),
+    });
+    const events = await collect(makeAdaptor(client), handleFor());
+    expect(events).toContainEqual({
+      type: 'turn_complete',
+      jobRef: 'p1',
+      summary: 'answer tail',
+      detail: 'answer tail',
+    });
+    expect(
+      events.flatMap((event) =>
+        event.type === 'activity' && event.kind === 'message'
+          ? [event.text]
+          : [],
+      ),
+    ).toEqual(['answer', ' tail']);
+  });
+
+  it('ignores a background terminal and keeps the main job active', async () => {
+    const client = makeClient({
+      subscribeEvents: vi.fn(() =>
+        envelopeStream([
+          envelope('pending_prompt_started', {}, { promptId: 'p1' }),
+          envelope(
+            'turn_complete',
+            {
+              promptId: 'background-1',
+              backgroundTurn: { turnId: 'background-1' },
+            },
+            { promptId: 'background-1' },
+          ),
+          envelope(
+            'session_update',
+            {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'main answer' },
+              },
+            },
+            { promptId: 'p1' },
+          ),
+          envelope('turn_complete', {}, { promptId: 'p1' }),
+        ]),
+      ),
+    });
+    const adaptor = makeAdaptor(client);
+    const handle = handleFor();
+    const iterator = adaptor.events(handle)[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toEqual({
+      type: 'turn_started',
+      jobRef: 'p1',
+    });
+    expect((await iterator.next()).value).toMatchObject({
+      type: 'activity',
+      jobRef: 'p1',
+      text: 'main answer',
+    });
+    expect(adaptor.isBusy(handle)).toBe(true);
+    expect((await iterator.next()).value).toMatchObject({
+      type: 'turn_complete',
+      jobRef: 'p1',
+      detail: 'main answer',
+    });
+    expect(adaptor.isBusy(handle)).toBe(false);
+    expect((await iterator.next()).done).toBe(true);
+  });
+
   it('maps turn_error to a turn_error event carrying the message', async () => {
     const client = makeClient({
       subscribeEvents: vi.fn(() =>

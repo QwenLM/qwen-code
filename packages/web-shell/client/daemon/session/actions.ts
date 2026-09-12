@@ -1138,7 +1138,10 @@ export function createDaemonSessionActions({
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       setPromptStatus('waiting');
       const ctrl = new AbortController();
-      activePromptsRef.current.set(sessionId, { controller: ctrl });
+      activePromptsRef.current.set(sessionId, {
+        controller: ctrl,
+        replayedTurnEvents: new Map(),
+      });
       try {
         // Normalize images once and pass the same array to both calls
         const normalizedImages: Array<{ data: string; mimeType: string }> = (
@@ -1260,6 +1263,8 @@ export function createDaemonSessionActions({
             optimisticBlockId = store.getSnapshot().blocks.at(-1)?.id;
           }
         }
+        const active = activePromptsRef.current.get(sessionId);
+        if (active?.controller === ctrl) active.promptId = accepted.promptId;
         onPromptAdmitted?.(session, {
           promptId: accepted.promptId,
           label: text,

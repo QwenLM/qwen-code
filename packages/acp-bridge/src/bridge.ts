@@ -11131,8 +11131,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       broadcastPromptCancelledOnce(
         entry,
         sessionId,
-        entry.backgroundTurn?.turnId ??
-          entry.activePromptId ??
+        entry.activePromptId ??
+          entry.backgroundTurn?.turnId ??
           runningPrompt?.promptId,
         cancelOriginatorClientId,
       );

@@ -760,6 +760,19 @@ interface PreparedSessionUpdateFrames {
   turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>;
 }
 
+function currentTurnMetadata(
+  entry?: BridgeClientSessionEntry,
+): Pick<BridgeEvent, 'promptId' | 'originatorClientId'> {
+  const background = entry?.promptActive ? undefined : entry?.backgroundTurn;
+  const promptId = background?.turnId ?? entry?.activePromptId;
+  return {
+    ...(promptId ? { promptId } : {}),
+    ...(!background && entry?.activePromptOriginatorClientId
+      ? { originatorClientId: entry.activePromptOriginatorClientId }
+      : {}),
+  };
+}
+
 function ownsActivePrompt(
   entry: BridgeClientSessionEntry,
   promptId: string,
@@ -1527,14 +1540,15 @@ export class BridgeClient implements Client {
     if (
       requestedPromptId !== undefined &&
       (typeof requestedPromptId !== 'string' ||
-        !ownsActivePrompt(entry, requestedPromptId))
+        !ownsActivePrompt(entry, requestedPromptId) ||
+        (entry.promptActive === true &&
+          requestedPromptId !== entry.activePromptId))
     ) {
       return { messages: [], items: [], hasQueuedPrompt: false };
     }
     // The child knows which execution is draining during a prompt handoff.
     // Capture ownership before attachment I/O can yield to the next turn.
-    const promptId =
-      requestedPromptId ?? entry.backgroundTurn?.turnId ?? entry.activePromptId;
+    const promptId = requestedPromptId ?? currentTurnMetadata(entry).promptId;
     const drained = entry.midTurnMessageQueue.splice(0);
     if (drained.length > 0) {
       // Claim the ids before media I/O yields so retries and removals cannot
@@ -2820,14 +2834,7 @@ export class BridgeClient implements Client {
         toolCallId,
       }),
     );
-    const turn = {
-      ...((entry.backgroundTurn?.turnId ?? entry.activePromptId)
-        ? { promptId: entry.backgroundTurn?.turnId ?? entry.activePromptId }
-        : {}),
-      ...(!entry.backgroundTurn && entry.activePromptOriginatorClientId
-        ? { originatorClientId: entry.activePromptOriginatorClientId }
-        : {}),
-    };
+    const turn = currentTurnMetadata(entry);
     await this.upsertAndPublishArtifacts(entry, artifacts, undefined, turn);
   }
 
@@ -2940,15 +2947,12 @@ export class BridgeClient implements Client {
       return;
     }
     const entry = this.resolveEntry(sessionId);
+    const { promptId, ...originator } = currentTurnMetadata(entry);
     const frame: Omit<BridgeEvent, 'id' | 'v'> = {
       type,
       data,
-      ...(turnScoped && (entry?.backgroundTurn?.turnId ?? entry?.activePromptId)
-        ? { promptId: entry?.backgroundTurn?.turnId ?? entry?.activePromptId }
-        : {}),
-      ...(!entry?.backgroundTurn && entry?.activePromptOriginatorClientId
-        ? { originatorClientId: entry.activePromptOriginatorClientId }
-        : {}),
+      ...originator,
+      ...(turnScoped && promptId ? { promptId } : {}),
     };
     if (entry) {
       entry.events.publish(frame);
@@ -3002,13 +3006,8 @@ export class BridgeClient implements Client {
       // its documented contract we don't wrap it.
       entry.events.publish({
         type: 'model_switched',
-        ...((entry.backgroundTurn?.turnId ?? entry.activePromptId)
-          ? { promptId: entry.backgroundTurn?.turnId ?? entry.activePromptId }
-          : {}),
+        ...currentTurnMetadata(entry),
         data: { sessionId, modelId: currentModelId },
-        ...(!entry.backgroundTurn && entry.activePromptOriginatorClientId
-          ? { originatorClientId: entry.activePromptOriginatorClientId }
-          : {}),
       });
     }
     writeStderrLine(
@@ -3091,9 +3090,7 @@ export class BridgeClient implements Client {
       // per its documented contract we don't wrap it in try/catch.
       entry.events.publish({
         type: 'approval_mode_changed',
-        ...((entry.backgroundTurn?.turnId ?? entry.activePromptId)
-          ? { promptId: entry.backgroundTurn?.turnId ?? entry.activePromptId }
-          : {}),
+        ...currentTurnMetadata(entry),
         data: {
           sessionId,
           previous: 'default',
@@ -3101,9 +3098,6 @@ export class BridgeClient implements Client {
           persisted: false,
           ...(planExecutionMode ? { planExecutionMode } : {}),
         },
-        ...(!entry.backgroundTurn && entry.activePromptOriginatorClientId
-          ? { originatorClientId: entry.activePromptOriginatorClientId }
-          : {}),
       });
     }
     // TODO(dual-emit-removal): also emit the legacy generic
@@ -3138,9 +3132,7 @@ export class BridgeClient implements Client {
     // documented contract we don't wrap it in try/catch.
     entry.events.publish({
       type: 'session_update',
-      ...((entry.backgroundTurn?.turnId ?? entry.activePromptId)
-        ? { promptId: entry.backgroundTurn?.turnId ?? entry.activePromptId }
-        : {}),
+      ...currentTurnMetadata(entry),
       data: {
         sessionId,
         update: {
@@ -3148,9 +3140,6 @@ export class BridgeClient implements Client {
           currentModeId,
         },
       },
-      ...(!entry.backgroundTurn && entry.activePromptOriginatorClientId
-        ? { originatorClientId: entry.activePromptOriginatorClientId }
-        : {}),
     });
     writeStderrLine(
       `[demux] session=${sessionId} type=current_mode_update action=promoted mode=${currentModeId}`,

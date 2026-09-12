@@ -3124,8 +3124,13 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
   ): Promise<TodoStopGuardClaimResult> {
     const context = getInvocationContext();
+    const background = backgroundTurnContext.getStore();
     const ownerPromptId =
-      context?.sessionId === this.sessionId ? context.promptId : undefined;
+      background?.active && background.sessionId === this.sessionId
+        ? background.turn.turnId
+        : context?.sessionId === this.sessionId
+          ? context.promptId
+          : undefined;
     if (ownerPromptId) {
       this.todoStopGuardClaimOwnerCounts.set(
         ownerPromptId,

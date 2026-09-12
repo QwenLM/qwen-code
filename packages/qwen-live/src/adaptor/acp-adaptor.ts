@@ -46,6 +46,7 @@ import {
   ClientSideConnection,
   ndJsonStream,
   PROTOCOL_VERSION,
+  RequestError,
 } from '@agentclientprotocol/sdk';
 import type { Client } from '@agentclientprotocol/sdk';
 import { LiveLogger } from '../logger.js';
@@ -893,7 +894,7 @@ export class AcpAdaptor implements BackendAdaptor {
     if (kind === 'agent_message_chunk') {
       const content = isRecord(update['content']) ? update['content'] : {};
       const text = content['text'];
-      if (typeof text === 'string') {
+      if (typeof text === 'string' && activity?.kind === 'message') {
         state.turnBuffer = `${state.turnBuffer}${stripControlSequences(text)}`;
         if (state.turnBuffer.length > MAX_DETAIL_CHARS) {
           state.turnBuffer = tailSlice(state.turnBuffer, MAX_DETAIL_CHARS);
@@ -998,9 +999,7 @@ export class AcpAdaptor implements BackendAdaptor {
       }
       return {};
     }
-    throw Object.assign(new Error(`method not found: ${method}`), {
-      code: -32601,
-    });
+    throw RequestError.methodNotFound(method);
   }
 }
 
