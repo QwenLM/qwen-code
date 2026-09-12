@@ -7,6 +7,11 @@ const MANAGED_OPTIONS = new Set([
   "deliveryMode", "delivery_mode", "foreground", "background", "appContext",
 ]);
 
+const INPUT_REFUSAL_REASONS = new Map([
+  ["off_space_or_ax_unresolved", "the target window could not be verified on the current desktop"],
+  ["same_pid_keyboard_ambiguity", "the keyboard target could not be confirmed among the app's windows"],
+]);
+
 function optionsForApp(options = {}) {
   for (const key of Object.keys(options)) {
     if (MANAGED_OPTIONS.has(key)) {
@@ -207,8 +212,11 @@ export class ComputerUseApp {
           (operation === undefined && error.details === undefined))) {
       return error;
     }
+    const refusalReason = !observing && error?.details?.effect === "refused"
+      ? INPUT_REFUSAL_REASONS.get(error?.code) : undefined;
     return new ComputerUseError(
       observing ? "The app state could not be read. Check that its window is available, then call app.getState() again." :
+        (refusalReason ? `Native input refused (${error.code}): ${refusalReason}. ` : "") +
         "The app action could not be completed or confirmed. It may already have affected the app. " +
         "Call app.getState() before deciding whether to retry.",
       { code: error?.code, details: { operation: error?.details?.operation } },
