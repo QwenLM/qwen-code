@@ -3245,7 +3245,7 @@ describe('DingtalkChannel status cards', () => {
         senderId: 'owner-1',
         isInAtList: true,
         atUsers: [{ dingtalkId: 'bot-user' }, { dingtalkId: 'other-user' }],
-        text: { content: '@qwen-code What changed?' },
+        text: { content: 'What changed?' },
       }),
       headers: { messageId: 'message-quote' },
     } as unknown as DWClientDownStream;
@@ -3284,7 +3284,7 @@ describe('DingtalkChannel status cards', () => {
         senderId: 'owner-1',
         isInAtList: true,
         atUsers: [{ dingtalkId: 'bot-user' }, { dingtalkId: 'other-user' }],
-        text: { content: '@qwen-code What changed?' },
+        text: { content: 'What changed?' },
       }),
       headers: { messageId: 'message-quote' },
     } as unknown as DWClientDownStream;
@@ -4312,7 +4312,7 @@ describe('DingtalkChannel parsed-message logging', () => {
         senderStaffId: 'staff-1',
         senderId: 'sender-1',
         isInAtList: true,
-        text: { content: '@qwen-code hello' },
+        text: { content: 'hello' },
       }),
       headers: { messageId: 'group-name-m1' },
     } as unknown as DWClientDownStream;
@@ -4343,7 +4343,7 @@ describe('DingtalkChannel parsed-message logging', () => {
         senderStaffId: 'staff-1',
         senderId: 'sender-1',
         isInAtList: true,
-        text: { content: '@qwen-code hello' },
+        text: { content: 'hello' },
       }),
       headers: { messageId: 'thread-fallback-m1' },
     } as unknown as DWClientDownStream;
@@ -4378,7 +4378,7 @@ describe('DingtalkChannel parsed-message logging', () => {
         atUsers: [
           { dingtalkId: 'private-dingtalk-id', staffId: 'private-staff-id' },
         ],
-        text: { content: '@qwen-code hello' },
+        text: { content: 'hello' },
       }),
       headers: { messageId: 'debug-m1' },
     } as unknown as DWClientDownStream;
@@ -4424,7 +4424,7 @@ describe('DingtalkChannel parsed-message logging', () => {
         senderStaffId: 'staff-1',
         senderId: 'sender-1',
         isInAtList: true,
-        text: { content: '@qwen-code hello' },
+        text: { content: 'hello' },
       }),
       headers: { messageId: 'm1' },
     } as unknown as DWClientDownStream;
@@ -4461,7 +4461,7 @@ describe('DingtalkChannel chat records', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: '@DingTalkTest can you see this?',
+          content: 'can you see this?',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'forwarded-record-m1',
@@ -5457,7 +5457,7 @@ describe('DingtalkChannel chat records', () => {
           chatbotUserId: 'bot-1',
           isInAtList: true,
           text: {
-            content: '@DingTalkTest what was that?',
+            content: 'what was that?',
             isReplyMsg: true,
             repliedMsg: {
               msgId: 'forwarded-record-empty',
@@ -5508,7 +5508,7 @@ describe('DingtalkChannel chat records', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: '@DingTalkTest what was that?',
+          content: 'what was that?',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'forwarded-record-entries',
@@ -5560,7 +5560,7 @@ describe('DingtalkChannel chat records', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: '@DingTalkTest what was that?',
+          content: 'what was that?',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'forwarded-record-big',
@@ -5629,7 +5629,7 @@ describe('DingtalkChannel chat records', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: '@DingTalkTest what was that?',
+          content: 'what was that?',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'forwarded-record-astral',
@@ -5685,7 +5685,7 @@ describe('DingtalkChannel chat records', () => {
           chatbotUserId: 'bot-1',
           isInAtList: true,
           text: {
-            content: '@DingTalkTest what was that?',
+            content: 'what was that?',
             isReplyMsg: true,
             repliedMsg: {
               msgId: 'forwarded-record-dropped',
@@ -5802,7 +5802,7 @@ describe('DingtalkChannel quoted media', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: `@DingTalkTest ${replyText}`,
+          content: replyText,
           isReplyMsg: true,
           repliedMsg: {
             msgId: `media-${msgType}`,
@@ -5882,6 +5882,60 @@ describe('DingtalkChannel quoted media', () => {
     const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
     expect(envelope.text).toBe('/review inspect this');
     expect(envelope.syntheticText).toBeUndefined();
+  });
+
+  it('preserves ordered text around an image in a rich-text group callback', async () => {
+    const downloadCodes = mockMediaDownload(
+      'image/png',
+      new Uint8Array([1, 2, 3]),
+    );
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'rich-text-image',
+        msgtype: 'richText',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        content: {
+          richText: [
+            { text: '@QQQ ' },
+            { text: '输出1' },
+            { type: 'picture', downloadCode: 'picture-1' },
+            { text: '\n' },
+            { text: '输出2' },
+          ],
+        },
+      }),
+      headers: { messageId: 'rich-text-image' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(downloadCodes).toEqual(['picture-1']);
+    expect(envelope).toMatchObject({
+      text: '@QQQ 输出1\n输出2',
+      isGroup: true,
+      isMentioned: true,
+      attachments: [
+        {
+          type: 'image',
+          data: Buffer.from([1, 2, 3]).toString('base64'),
+          mimeType: 'image/png',
+        },
+      ],
+    });
   });
 
   it('marks captionless DingTalk media text as synthetic', async () => {
@@ -6210,7 +6264,7 @@ describe('DingtalkChannel quoted media', () => {
         msgtype: 'picture',
         content: { downloadCode: 'own-picture-code' },
         text: {
-          content: '@DingTalkTest inspect both',
+          content: 'inspect both',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'media-file',
@@ -6271,7 +6325,7 @@ describe('DingtalkChannel quoted media', () => {
         msgtype: 'picture',
         content: { downloadCode: 'own-picture-code' },
         text: {
-          content: '@DingTalkTest inspect both',
+          content: 'inspect both',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'media-picture',
@@ -6376,7 +6430,8 @@ describe('DingtalkChannel quoted media', () => {
   // where `extractContent` generates `(audio)` / `(file: name)` itself. On the
   // quoted path `envelope.text` is the user's own reply, so a reply reading
   // exactly like a placeholder was blanked and the agent got an attachment
-  // with no prompt. A group `@Bot (audio)` arrives here as exactly `(audio)`.
+  // with no prompt. DingTalk's plain callback already omits the routing
+  // mention, so a group reply can arrive here as exactly `(audio)`.
   it.each([
     ['audio', {}, '(audio)'],
     ['video', {}, '(video)'],
@@ -6879,7 +6934,7 @@ describe('DingtalkChannel sender attribution', () => {
         senderStaffId: 'staff-1',
         senderId: 'sender-1',
         isInAtList: true,
-        text: { content: '@qwen-code hello' },
+        text: { content: 'hello' },
       }),
       headers: { messageId: 'm1' },
     } as unknown as DWClientDownStream;
@@ -6906,7 +6961,7 @@ describe('DingtalkChannel sender attribution', () => {
     );
   });
 
-  it('passes mention-stripped text with platform format characters to base', () => {
+  it('keeps DingTalk-normalized plain commands command-ready', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -6919,7 +6974,7 @@ describe('DingtalkChannel sender attribution', () => {
         senderStaffId: 'staff-1',
         senderId: 'sender-1',
         isInAtList: true,
-        text: { content: '@qwen-code 查看记忆\u200b' },
+        text: { content: ' /clear ' },
       }),
       headers: { messageId: 'm1' },
     } as unknown as DWClientDownStream;
@@ -6940,18 +6995,19 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '查看记忆\u200b',
+        text: '/clear',
         isGroup: true,
         isMentioned: true,
       }),
     );
   });
 
-  it('does not consume text after a mention followed by a format character', () => {
+  it('preserves repeated mentions before a rich-text command', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
-        msgId: 'm1',
+        msgId: 'rich-command',
+        msgtype: 'richText',
         conversationType: '2',
         conversationId: 'cid123',
         sessionWebhook:
@@ -6960,77 +7016,32 @@ describe('DingtalkChannel sender attribution', () => {
         senderStaffId: 'staff-1',
         senderId: 'sender-1',
         isInAtList: true,
-        text: { content: '@qwen-code\u200b查看记忆' },
-      }),
-      headers: { messageId: 'm1' },
-    } as unknown as DWClientDownStream;
-
-    const writeSpy = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
-    (
-      channel as unknown as { onMessage(d: DWClientDownStream): void }
-    ).onMessage(downstream);
-    writeSpy.mockRestore();
-
-    const handleInbound = (
-      channel as unknown as {
-        handleInbound: ReturnType<typeof vi.fn>;
-      }
-    ).handleInbound;
-
-    expect(handleInbound).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: '\u200b查看记忆',
-        isGroup: true,
-        isMentioned: true,
-      }),
-    );
-  });
-
-  it('preserves @ in git URLs and emails when stripping bot mention (#7402)', () => {
-    const channel = createChannel();
-    const downstream = {
-      data: JSON.stringify({
-        msgId: 'm1',
-        conversationType: '2',
-        conversationId: 'cid123',
-        sessionWebhook:
-          'https://oapi.dingtalk.com/robot/send?access_token=token',
-        senderNick: 'Alice',
-        senderStaffId: 'staff-1',
-        senderId: 'sender-1',
-        isInAtList: true,
-        text: {
-          content: '@qwen-code 重复： git@example.com:group/repo.git',
+        content: {
+          richText: [
+            { text: '@QQQ ' },
+            { text: '@QQQ ' },
+            { text: '@QwenBot ' },
+            { text: '/clear' },
+          ],
         },
       }),
-      headers: { messageId: 'm1' },
+      headers: { messageId: 'rich-command' },
     } as unknown as DWClientDownStream;
 
-    const writeSpy = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
     (
       channel as unknown as { onMessage(d: DWClientDownStream): void }
     ).onMessage(downstream);
-    writeSpy.mockRestore();
 
-    const handleInbound = (
-      channel as unknown as {
-        handleInbound: ReturnType<typeof vi.fn>;
-      }
-    ).handleInbound;
-
-    expect(handleInbound).toHaveBeenCalledWith(
+    expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '重复： git@example.com:group/repo.git',
+        text: '@QQQ @QQQ @QwenBot /clear',
+        isGroup: true,
         isMentioned: true,
       }),
     );
   });
 
-  it('does not strip @ in URLs when bot mention is absent from text (#7402)', () => {
+  it('preserves @ in DingTalk-normalized plain text (#7402)', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -7064,8 +7075,6 @@ describe('DingtalkChannel sender attribution', () => {
       }
     ).handleInbound;
 
-    // When the bot @mention is not in the text (DingTalk already stripped it),
-    // the regex must NOT eat the @ in the git URL.
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
         text: '重复： git@example.com:group/repo.git',
@@ -7241,7 +7250,7 @@ describe('DingtalkChannel sender attribution', () => {
     expect(envelope).not.toHaveProperty('mentionedMemberIds');
   });
 
-  it('returns context only when text is empty after mention stripping', () => {
+  it('preserves structured mention context when plain text is empty', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -7287,7 +7296,7 @@ describe('DingtalkChannel sender attribution', () => {
         senderStaffId: ['staff-1'],
         senderId: 123,
         isInAtList: true,
-        text: { content: '@qwen-code hello' },
+        text: { content: 'hello' },
       }),
       headers: { messageId: 'header-m1' },
     } as unknown as DWClientDownStream;

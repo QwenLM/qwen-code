@@ -336,7 +336,7 @@ interface Envelope {
   senderName: string; // display name
   chatId: string; // distinguishes DMs from groups
   chatName?: string; // inbound group display name, when provided
-  text: string; // message text (@mentions stripped)
+  text: string; // adapter-normalized message text
   messageId?: string; // platform message ID
   threadId?: string; // for thread-scoped sessions
   isGroup: boolean; // true for group chats
@@ -356,6 +356,8 @@ interface Attachment {
   fileName?: string; // original file name from the platform
 }
 ```
+
+The same `text` value drives start-anchored local controls and the agent prompt. Mention normalization is platform-specific: retaining a leading mention prevents slash and `!` controls from matching at the start of the message. Other classifiers may still inspect the full text.
 
 `handleInbound()` automatically resolves attachments: images with `data` are sent to the model as vision input, files with `filePath` get their path appended to the prompt text so the agent can read them with its tools.
 
