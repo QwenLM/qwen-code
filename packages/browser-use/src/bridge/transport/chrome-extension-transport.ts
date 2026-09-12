@@ -7,14 +7,12 @@
 import {
   chmod,
   lstat,
-  mkdir,
   open,
   readFile,
   unlink,
   type FileHandle,
 } from 'node:fs/promises';
 import { connect, createServer, type Server, type Socket } from 'node:net';
-import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { clearTimeout, setTimeout } from 'node:timers';
 
@@ -29,6 +27,7 @@ import {
 } from '../protocol.js';
 import { BrowserRuntimeError, type RuntimeErrorCode } from '../errors.js';
 import { encodeFrame, FrameDecoder } from './framing.js';
+import { prepareSocketDirectory } from '../socket-path.js';
 
 export type BridgeEventListener = (event: BridgeEvent) => void;
 export type BridgeConnectionListener = (connected: boolean) => void;
@@ -79,13 +78,13 @@ const RECOVERY_LOCK_STALE_MS = 60_000;
 export class ChromeExtensionTransport implements ChromeBridge {
   readonly socketPath: string;
 
-  private readonly derivedSocketDirectory: string | undefined;
-
   private readonly connectTimeoutMs: number;
   private readonly requestTimeoutMs: number;
   private server: Server | undefined;
   private socket: Socket | undefined;
   private hello: BridgeHello | undefined;
+  private selectedExtensionInstanceId: string | undefined;
+  private incompatibleExtensionError: BrowserRuntimeError | undefined;
   private socketIdentity: SocketIdentity | undefined;
   private startPromise: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
@@ -101,15 +100,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
 
   constructor(options: ChromeExtensionTransportOptions = {}) {
     this.socketPath = options.socketPath ?? defaultChromeBridgeSocketPath();
-    // Only the derived default path gets its private parent directory
-    // created and verified; a configured path's parent stays the caller's.
-    this.derivedSocketDirectory =
-      options.socketPath === undefined &&
-      !process.env.QWEN_BROWSER_USE_SOCKET_PATH?.trim() &&
-      process.platform !== 'win32'
-        ? dirname(this.socketPath)
-        : undefined;
-    this.connectTimeoutMs = options.connectTimeoutMs ?? 5_000;
+    this.connectTimeoutMs = options.connectTimeoutMs ?? 35_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   }
 
@@ -149,13 +140,21 @@ export class ChromeExtensionTransport implements ChromeBridge {
   async request(
     method: string,
     params: Record<string, unknown> = {},
-    timeoutMs = method === 'cdp.send'
-      ? CDP_REQUEST_TIMEOUT_MS
-      : this.requestTimeoutMs,
+    timeoutMs?: number,
   ): Promise<unknown> {
     if (this.stopPromise !== undefined || !this.server?.listening)
       throw disconnectedError();
-    await this.waitForConnection(Math.min(this.connectTimeoutMs, timeoutMs));
+    // A CDP command carries an operation deadline up to the 120s schema
+    // ceiling, so its default response budget must outlive that and let the
+    // caller's own deadline report first. The connection wait stays capped
+    // only by an explicit caller budget: with none, discovery may legitimately
+    // take the whole connect timeout.
+    const budget =
+      timeoutMs ??
+      (method === 'cdp.send' ? CDP_REQUEST_TIMEOUT_MS : this.requestTimeoutMs);
+    await this.waitForConnection(
+      Math.min(this.connectTimeoutMs, timeoutMs ?? this.connectTimeoutMs),
+    );
     const socket = this.socket;
     if (socket === undefined || socket.destroyed) {
       throw disconnectedError();
@@ -177,7 +176,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
             `Chrome bridge request timed out: ${method}`,
           ),
         );
-      }, timeoutMs);
+      }, budget);
       this.pending.set(id, {
         resolve,
         reject,
@@ -224,8 +223,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
     const server = createServer((socket) => this.accept(socket));
     this.server = server;
     try {
-      if (this.derivedSocketDirectory !== undefined)
-        await ensureSocketDirectory(this.derivedSocketDirectory);
+      await prepareSocketDirectory(this.socketPath);
       try {
         await listen(server, this.socketPath);
       } catch (error) {
@@ -278,8 +276,28 @@ export class ChromeExtensionTransport implements ChromeBridge {
           if (!validated) {
             if (!isObject(message) || message.type !== 'hello') continue;
             if (
+              message.extensionId === CHROME_EXTENSION_ID &&
+              typeof message.protocolVersion === 'number' &&
+              Number.isInteger(message.protocolVersion) &&
+              message.protocolVersion > 0 &&
+              message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION &&
+              !this.isConnected() &&
+              (this.selectedExtensionInstanceId === undefined ||
+                message.extensionInstanceId ===
+                  this.selectedExtensionInstanceId)
+            ) {
+              this.incompatibleExtensionError = disconnectedError(
+                message.protocolVersion < CHROME_BRIDGE_PROTOCOL_VERSION
+                  ? 'The Qwen Code Chrome extension is out of date. Update or reload it at chrome://extensions to match this Qwen Code version, then retry Browser Use.'
+                  : 'This Qwen Code version is older than the Chrome extension. Update Qwen Code to match the installed extension, then retry Browser Use.',
+              );
+            }
+            if (
               message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION ||
-              message.extensionId !== CHROME_EXTENSION_ID
+              message.extensionId !== CHROME_EXTENSION_ID ||
+              typeof message.extensionInstanceId !== 'string' ||
+              message.extensionInstanceId.trim() === '' ||
+              message.extensionInstanceId.length > 128
             ) {
               socket.destroy(
                 new Error(
@@ -309,7 +327,12 @@ export class ChromeExtensionTransport implements ChromeBridge {
   }
 
   private promote(socket: Socket, hello: BridgeHello): void {
+    this.selectedExtensionInstanceId ??= hello.extensionInstanceId;
+    // Keep other profiles connected but idle so they cannot evict this session
+    // or enter a disconnect/reconnect loop. Ownership survives a disconnect.
+    if (hello.extensionInstanceId !== this.selectedExtensionInstanceId) return;
     this.disconnect(disconnectedError('Chrome extension reconnected'));
+    this.incompatibleExtensionError = undefined;
     this.socket = socket;
     this.hello = hello;
     this.notifyConnectionChange(true);
@@ -396,9 +419,10 @@ export class ChromeExtensionTransport implements ChromeBridge {
         timer: setTimeout(() => {
           this.connectionWaiters.delete(waiter);
           reject(
-            disconnectedError(
-              'Chrome extension is not connected. Load the extension and verify the Native Messaging host installation.',
-            ),
+            this.incompatibleExtensionError ??
+              disconnectedError(
+                'Chrome extension is not connected. Load the extension and verify the Native Messaging host installation.',
+              ),
           );
         }, timeoutMs),
       };
@@ -447,91 +471,8 @@ export class ChromeExtensionTransport implements ChromeBridge {
     if (server !== undefined) await closeServer(server);
     await unlinkOwnedSocket(this.socketPath, this.socketIdentity);
     this.socketIdentity = undefined;
-  }
-}
-
-// The derived socket directory lives under a world-writable temp root, so
-// bind only into a directory this user owns alone: a foreign-owned or
-// symlinked entry means a co-tenant is squatting the rendezvous.
-export async function ensureSocketDirectory(directory: string): Promise<void> {
-  const owner =
-    typeof process.getuid === 'function' ? process.getuid() : undefined;
-  const info = await lstat(directory).catch(() => undefined);
-  if (info !== undefined) {
-    await assertOwnedSocketDirectory(directory, info, owner, true);
-    await assertUsableAncestors(directory, owner);
-    return;
-  }
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  // mkdir(recursive) neither fails on an entry that already exists nor
-  // tightens its mode, so a co-tenant who won the lstat/mkdir window must
-  // not silently inherit the socket directory: re-verify what the create
-  // actually landed on. A strict check (no tightening) keeps the create
-  // branch fail-closed — a fresh mkdir(0o700) never needs a chmod.
-  const created = await lstat(directory).catch(() => undefined);
-  if (created === undefined)
-    throw new Error(
-      `Chrome bridge socket directory is not usable: ${directory}`,
-    );
-  await assertOwnedSocketDirectory(directory, created, owner, false);
-  await assertUsableAncestors(directory, owner);
-}
-
-async function assertOwnedSocketDirectory(
-  directory: string,
-  info: {
-    isDirectory(): boolean;
-    isSymbolicLink(): boolean;
-    uid: number;
-    mode: number;
-  },
-  owner: number | undefined,
-  tighten: boolean,
-): Promise<void> {
-  if (
-    !info.isDirectory() ||
-    info.isSymbolicLink() ||
-    (owner !== undefined && info.uid !== owner)
-  )
-    throw new Error(
-      `Chrome bridge socket directory is not usable: ${directory}`,
-    );
-  if ((info.mode & 0o077) !== 0) {
-    if (!tighten)
-      throw new Error(
-        `Chrome bridge socket directory is not usable: ${directory}`,
-      );
-    await chmod(directory, 0o700);
-  }
-}
-
-// Every ancestor up to the sticky world-writable temp root must be owned by
-// this user or root and not writable by anyone else; a writable or symlinked
-// ancestor lets a co-tenant swap the socket directory out from under us.
-async function assertUsableAncestors(
-  directory: string,
-  owner: number | undefined,
-): Promise<void> {
-  if (owner === undefined) return;
-  let current = dirname(directory);
-  for (;;) {
-    const info = await lstat(current).catch(() => undefined);
-    if (info === undefined || !info.isDirectory() || info.isSymbolicLink())
-      throw new Error(
-        `Chrome bridge socket directory is not usable: ${directory}`,
-      );
-    const mode = info.mode & 0o1777;
-    // A sticky world-writable root (/tmp, /private/tmp) is the trust
-    // boundary: every tenant may create entries there, but the sticky bit
-    // keeps anyone from renaming another tenant's entries.
-    if ((mode & 0o002) !== 0 && (mode & 0o1000) !== 0) return;
-    if ((info.uid !== owner && info.uid !== 0) || (mode & 0o022) !== 0)
-      throw new Error(
-        `Chrome bridge socket directory is not usable: ${directory}`,
-      );
-    const parent = dirname(current);
-    if (parent === current) return;
-    current = parent;
+    this.selectedExtensionInstanceId = undefined;
+    this.incompatibleExtensionError = undefined;
   }
 }
 
@@ -740,6 +681,8 @@ function bridgeRuntimeErrorCode(code: string | undefined): RuntimeErrorCode {
       return 'UNSUPPORTED_TAB';
     case 'PERMISSION_REQUIRED':
       return 'PERMISSION_REQUIRED';
+    case 'TAB_DEBUGGER_CONFLICT':
+      return 'TAB_DEBUGGER_CONFLICT';
     default:
       return 'OPERATION_FAILED';
   }

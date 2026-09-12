@@ -11,20 +11,29 @@ import { fileURLToPath } from 'node:url';
 
 const {
   spawnMock,
+  execSyncMock,
   platformMock,
   existsSyncMock,
   readFileSyncMock,
   writeFileSyncMock,
+  copyBrowserUseAssetsMock,
 } = vi.hoisted(() => ({
   spawnMock: vi.fn(() => ({ on: vi.fn() })),
+  execSyncMock: vi.fn(),
   platformMock: vi.fn(() => 'darwin'),
   existsSyncMock: vi.fn(() => false),
   readFileSyncMock: vi.fn(() => JSON.stringify({ version: '0.0.0-test' })),
   writeFileSyncMock: vi.fn(),
+  copyBrowserUseAssetsMock: vi.fn(),
+}));
+
+vi.mock('../copy-browser-use-assets.js', () => ({
+  copyBrowserUseAssets: copyBrowserUseAssetsMock,
 }));
 
 vi.mock('node:child_process', () => ({
   spawn: spawnMock,
+  execSync: execSyncMock,
 }));
 
 vi.mock('node:os', async (importOriginal) => {
@@ -92,6 +101,20 @@ describe('scripts/dev.js launcher', () => {
     ]);
     expect(options).toEqual(expect.objectContaining({ shell: false }));
   });
+
+  it.each(['--version', '--help'])(
+    'launches %s without building or staging Browser Use',
+    async (flag) => {
+      process.argv = ['node', 'scripts/dev.js', flag];
+
+      await import('../dev.js?browser-use');
+
+      expect(execSyncMock).not.toHaveBeenCalled();
+      expect(copyBrowserUseAssetsMock).not.toHaveBeenCalled();
+      expect(spawnMock).toHaveBeenCalledOnce();
+      expect(spawnMock.mock.calls[0][1]).toContain(flag);
+    },
+  );
 
   it('keeps shell fallback for Windows tsx.cmd resolution', async () => {
     platformMock.mockReturnValue('win32');

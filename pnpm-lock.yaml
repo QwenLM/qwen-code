@@ -978,6 +978,9 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
     devDependencies:
+      '@qwen-code/browser-use':
+        specifier: workspace:*
+        version: link:../browser-use
       '@types/diff':
         specifier: ^7.0.2
         version: 7.0.2

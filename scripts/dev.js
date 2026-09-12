@@ -8,7 +8,7 @@
 /**
  * Development entry point for Qwen Code CLI.
  *
- * Runs the CLI directly from TypeScript source files without requiring a build step.
+ * Runs the CLI from TypeScript source with prebuilt workspace dependencies.
  * Changes to packages/core or packages/cli are reflected immediately.
  *
  * Usage: npm run dev -- [args]

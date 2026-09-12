@@ -55,10 +55,13 @@ describe('side panel capability status assets', () => {
 
     expect(manifest.permissions).toEqual([
       'tabs',
+      'tabGroups',
       'storage',
       'debugger',
+      'history',
       'alarms',
       'sidePanel',
+      'nativeMessaging',
     ]);
   });
 

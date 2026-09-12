@@ -32,4 +32,5 @@ export interface TabState {
   dialog?: Dialog;
   fileChoosers: Map<string, FileChooser>;
   navigationWaiters: Map<string, Promise<unknown>>;
+  ownership: 'created' | 'claimed';
 }

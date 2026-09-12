@@ -10,7 +10,7 @@ Chrome from Qwen Code.
 - The Browser SDK runs as a library inside the persistent Node Kernel exposed
   by the Node REPL MCP server.
 - `playwright-core` provides standard browser automation semantics.
-- The Qwen extension and `chrome.debugger` connect the runtime to Chrome.
+- The Qwen Chrome extension and `chrome.debugger` connect the runtime to Chrome.
 - The first release supports one active Browser Use session.
 
 ## Architecture
@@ -44,6 +44,58 @@ Playwright's browser-level CDP adapter.
 `playwright-core@1.62.1` accepts a public custom CDP transport through
 `chromium.connectOverCDP(transport)`. Qwen therefore keeps Native Messaging and
 does not add a local WebSocket server.
+
+Browser Use ships with Qwen Code as a bundled skill and its runtime resources.
+No separate Qwen extension installation is required. The skill's `runtime/`
+directory contains the Browser SDK, Native Host, and pinned Playwright
+dependency. The skill registers `runtime/node_modules` with the existing Node
+REPL and imports `runtime/index.js`; the CLI does not execute browser logic.
+Source development, transpiled builds, and the published CLI use this same
+layout. The generic Node REPL MCP server must be configured, and the Qwen
+Chrome extension must be installed in the browser. Bundling does not connect
+to Chrome at CLI startup; the SDK connects when first used.
+
+The Browser Use package build stages this runtime for source development after
+compilation succeeds. The normal installation `prepare` hook runs that build.
+After changing Browser Use sources or dependencies, run
+`npm run build --workspace=@qwen-code/browser-use` to refresh the runtime.
+`npm run dev` reuses these artifacts without building or copying them. CLI and
+Core continue to run directly from TypeScript source. If the runtime is missing,
+the skill's existing setup check reports the incomplete runtime when invoked.
+
+Browser Use is available to the model by default and is selected according to
+the user's task. Users can disable it through `/skills` or `skills.disabled`,
+using the same controls as Computer Use. Disabled skills are excluded
+from model discovery and skill invocation. This is the existing generic skill
+mechanism used by Computer Use, not a browser permission boundary: disabling
+the skill does not unload instructions already in a conversation or disconnect
+an existing SDK session.
+
+Native Host registration is native-side product setup, not a Chrome-extension
+operation. On macOS and Linux, the first Browser runtime initialization
+checks Google Chrome, Chrome for Testing, and Chromium's standard `Default`
+and `Profile N` profiles for the Qwen extension. It reads the extension's
+registration in `Secure Preferences` or `Preferences` and confirms that its
+manifest exists, supporting both packaged and unpacked installations. Leftover
+extension directories alone do not count as an installed extension. If the
+extension is not found, initialization reports how to install it without
+writing Native Host files. After detection, initialization idempotently
+installs the launcher and manifests for existing browser roots. A configured
+`QWEN_BROWSER_USE_SOCKET_PATH` keeps using its externally managed setup.
+
+Installing the Qwen Chrome extension opts into this automatic local setup on
+first use. The launcher and Native Messaging registrations persist after
+Qwen exits. The installer refuses to overwrite
+foreign files: a conflicting launcher aborts initialization, while a
+conflicting browser manifest is skipped. Running
+`node <skill-base>/runtime/scripts/native-host-setup.js uninstall` removes
+files owned by Browser Use; `status` checks them and `install` explicitly
+registers them. To prevent automatic registration on a later Browser Use
+initialization, also uninstall the Chrome extension. Only a missing file is
+treated as absent; other
+read failures abort the operation without overwriting the unreadable file. The
+Chrome extension only opens the registered host
+through `connectNative()`.
 
 ## Responsibilities
 
@@ -94,6 +146,15 @@ styles:
 `tab.playwright` is used when an element can be described semantically.
 `tab.dom_cua` is used when the model identifies an element in a DOM snapshot.
 `tab.cua` is used when the target is identified visually in a screenshot.
+The extension renders a transient pointer overlay for coordinate mouse input,
+but that decoration is best-effort and never delays the input command itself.
+Its DOM node is created on mouse input and removed when the pointer expires;
+read-only inspection does not create an overlay node.
+
+Browser operations run in the background. New tabs do not replace the user's
+active tab, and input actions do not bring Chrome to the foreground. Page focus
+emulation keeps background rendering and input active without changing desktop
+focus.
 
 Page and locator evaluation accept functions or strings. Functions are invoked
 with their documented arguments; strings return their JavaScript `eval`
@@ -147,13 +208,21 @@ Snapshot truncation, screenshot encoding and budgets, stale-session detection,
 and the JSON transport envelope remain runtime implementation details rather
 than model-facing options.
 
-Viewport screenshots return an image object accepted by `nodeRepl.emitImage()`.
-Its metadata carries the original JPEG dimensions, viewport, device pixel ratio,
-and CSS-pixel coordinate space so visual coordinates remain usable when a model
-client resizes the preview. Viewport screenshots are limited by their encoded
-byte size rather than rejected from viewport dimensions alone. Explicit clips
-and full-page captures retain a pixel budget because their dimensions are
-caller-controlled or potentially unbounded.
+Viewport screenshots return JPEG bytes, a MIME type, and metadata carrying the
+original image dimensions, viewport, device pixel ratio, and CSS-pixel coordinate
+space so visual coordinates remain usable when a model client resizes the
+preview. The skill passes the complete screenshot to `nodeRepl.emitImage()`.
+Metadata travels on the image event and is returned immediately before each
+retained image, independently of the ordinary text output budget. Rejected or
+omitted images do not leave metadata behind. There is no metadata-specific size
+cap; the existing protocol-frame and client output limits still apply.
+Node REPL distribution/version synchronization is deferred to a follow-up that
+will consider bundling the MCP server with Qwen Code. This protocol support is
+not available in the published 0.1.2 and 0.1.3 packages verified for this change.
+Viewport screenshots are limited by their encoded byte size rather than rejected
+from viewport dimensions alone. Explicit clips and full-page captures retain a
+pixel budget because their dimensions are caller-controlled or potentially
+unbounded.
 
 Screenshot acquisition follows the Codex Browser Use strategy independently of
 Playwright's screenshot preparation. A short, bounded rendering synchronization
@@ -215,6 +284,10 @@ does not maintain a separate download state machine.
 The Qwen control plane retains operations that are not CDP, including
 `openTabs`, `claimTab`, `session.name`, and `history.query`.
 
+Native Host messages sent to Chrome are limited to 1 MiB. Larger
+backend-to-extension messages are split into bounded protocol chunks and
+reassembled by the extension before dispatch.
+
 ## Session model
 
 The Node Kernel directly owns the local Chrome extension transport:
@@ -222,18 +295,64 @@ The Node Kernel directly owns the local Chrome extension transport:
 - one Browser Use session may be active for the current OS user;
 - one session may control multiple tabs;
 - a second session fails with `BROWSER_USE_BUSY`;
-- closing the session detaches its tabs and releases the local socket;
+- closing the session closes still-controlled agent-created tabs, including
+  handoffs, releases claimed tabs, and then releases the local socket;
 - a transport disconnect invalidates the current Playwright connection;
 - tab-scoped objects from the disconnected connection fail with
   `STALE_BROWSER_SESSION` and are never silently rebound.
 - closing and reinitializing Browser Use creates a new SDK object generation;
   handles retained from the closed generation remain stale.
 
-When the backend session disappears, Native Host socket loss is reported to the
-extension even if the Chrome Native Messaging port remains connected for
-retry. The extension detaches the session's controlled tabs, removes Browser
-Use overlays, clears ownership and derived-tab state, and ungroups managed tabs
-without closing them.
+On Unix, both endpoints use `/tmp/qwen-browser-use-<uid>/bridge.sock`. The
+backend creates a user-owned directory with mode `0700` and a socket with mode
+`0600`. Both endpoints reject unsafe ownership, permissions, and replaceable
+ancestors; the Native Host also rejects socket symlinks before forwarding any
+traffic. An explicit socket override must use the same private-directory
+boundary. Same-user processes remain inside the trust boundary.
+
+When no backend is listening, the Native Host exits. The extension schedules
+one retry using a 30-second Chrome alarm, which survives worker suspension;
+it does not run a one-second retry loop or rewrite empty session state on
+failed discovery. Initial backend discovery can wait up to 35 seconds, with
+the normal request execution timeout starting after connection. Browser
+listing and selection both allow this discovery window; explicit short
+transport request timeouts still cap discovery.
+The active `runtime.connectNative()` port keeps the worker alive on Chrome 105
+and later, and an active `chrome.debugger` session provides an additional
+keepalive on Chrome 118 and later. This differs from the separate `/cdp`
+WebSocket bridge and follows Chrome's documented extension service-worker
+lifecycle. A real-Chrome session must remain usable after more than 60 seconds
+without Browser Use traffic.
+
+When the backend socket disappears after connecting, the Native Host exits and
+Chrome closes its Native Messaging port. The extension handles that port
+disconnect by detaching the session's controlled tabs, removing Browser Use
+overlays, clearing ownership and derived-tab state, ungrouping managed tabs
+without closing them, and scheduling Native Host discovery for a future backend.
+Debugger attach and detach operations are serialized per tab. A successful
+release waits for Chrome to complete detach; a timeout in disconnect cleanup
+does not discard an unfinished per-tab operation. If new-tab initialization
+fails, the extension removes that newly created tab. Explicit user cancellation
+of debugging releases ownership and the derived relationship, persists that
+state, and ungroups the tab on a best-effort basis.
+
+At the end of a browser turn, `tabs.finalize()` treats `keep` as the complete
+set for that call: it closes unlisted agent-created tabs and releases unlisted
+claimed tabs. Deliverable tabs remain open but are released; handoff tabs
+remain open and controlled until the next finalization or runtime close. A
+handoff that is still needed must be included again in the next turn. An
+agent-created popup keeps that ownership if its opener closes before
+finalization. The extension is the source of browser-side ownership, while the
+runtime keeps the corresponding session projection; agent-created ownership
+takes precedence if a derived tab is observed through both paths.
+
+`tabs.finalize()` validates the complete `keep` set before closing anything. An
+unknown, stale, or duplicate entry aborts finalization so a malformed keep list
+cannot accidentally close a page the model intended to preserve.
+Derived-tab synchronization attempts each attachment independently. If one
+attachment or the discovery query fails, finalization still cleans up the other
+known tabs according to their dispositions, then reports the failure. A failed
+attachment does not authorize closing an unregistered tab.
 
 The first release adds no separate Browser Use authorization or process
 authentication layer.
@@ -274,29 +393,43 @@ that takes an AI snapshot and acts on one of its returned refs. Existing
 workspace consumers remain on their current Playwright versions; this feature
 does not require a repository-wide upgrade.
 
+The managed preflight validates screenshot MIME type and decoded JPEG clip
+dimensions. The SauceDemo smoke checks checkout state and prices; source-code
+mentions of input or finalization methods are not evidence that those actions
+ran, so its result does not claim to verify trusted input or tab finalization.
+
 ## Product decisions
 
 For the first release:
 
 - installing the Qwen Chrome extension authorizes Browser Use;
+- first use on macOS or Linux automatically registers the Native Host without
+  a separate prompt;
 - Browser Use may enumerate and claim top-level HTTP(S) tabs by default;
 - History is declared with the other required extension permissions; there is
   no Browser Use permission-management UI;
 - there is no Browser Use-specific origin allowlist, upload-root allowlist, or
   snapshot redaction in this release;
 - the existing Qwen toolbar action and side panel remain;
-- there is no separate Browser Use enable/disable switch yet.
+- the model can discover Browser Use by default; users can disable it through
+  the existing `/skills` controls.
 
 ## Current boundaries and future work
 
 - **Sessions:** One Browser Use session may be active per OS user, and that
   session may control multiple tabs. Future support for concurrent sessions
   must isolate tab ownership, event routing, cleanup, and reconnect behavior.
+- **Turn cleanup:** Finalization is an explicit final browser action. Closing
+  the runtime provides a fallback, but interrupting a model turn does not close
+  the persistent runtime; still-controlled tabs remain managed until a later
+  finalization or runtime close. A transport disconnect releases them without
+  closing their pages. A future Qwen turn-lifecycle hook should invoke
+  finalization independently of model behavior.
 - **Browser backends:** The Qwen extension currently connects the SDK to
   Chrome. Other browser families or an in-app browser should be added together
   with capability discovery when products need them.
-- **Product control:** Add Qwen-owned opt-in and authenticate the local
-  connection.
+- **Product control:** Authenticate the local connection. Skill enablement
+  controls availability, not direct SDK access or active browser sessions.
 - **History:** Make Chrome History optional through a Qwen-owned grant and
   revoke flow outside the side panel.
 - **Platform and optional APIs:** Native Host installation currently supports
@@ -345,10 +478,13 @@ Explicit CDP session detach emits the parent-scoped target-detached event that
 Playwright uses to dispose its session listeners.
 
 Stopping the runtime unsubscribes session listeners, drains tab registration,
-and awaits transport cleanup before stopping the bridge. Page close and crash
-release through the transport that registered the page. Reconnecting waits for
-the previous transport cleanup so old releases cannot detach newly claimed
-tabs. A request cannot implicitly restart a stopped bridge.
+finalizes controlled tabs, and awaits transport cleanup before stopping the
+bridge. Shutdown closes extension-reported derived tabs without admitting new
+debugger attachments. Page close and crash release through the transport that
+registered the page; a crashed tab retains its ownership until it is closed or
+finalized. Reconnecting waits for the previous transport cleanup so old releases
+cannot detach newly claimed tabs. A request cannot implicitly restart a stopped
+bridge.
 
 The adapter supplies a stable default-context id when CDP omits its optional
 browserContextId, preserving supplied ids and rejecting malformed values

@@ -367,7 +367,13 @@ function resolveImagePayload(payload) {
       );
     }
   }
-  return { data: buffer.toString('base64'), mimeType: sniffed };
+  return {
+    data: buffer.toString('base64'),
+    mimeType: sniffed,
+    ...(typeof payload.metadata === 'string'
+      ? { metadata: payload.metadata }
+      : {}),
+  };
 }
 
 function scheduleTimer(callback, delay, repeat) {
@@ -542,6 +548,7 @@ const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const intrinsicObjectDefineProperties = Object.defineProperties;
 const intrinsicArrayBufferIsView = ArrayBuffer.isView;
 const intrinsicJSONParse = JSON.parse;
+const intrinsicJSONStringify = JSON.stringify;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicWeakSetHas = WeakSet.prototype.has;
 const intrinsicWeakSetAdd = WeakSet.prototype.add;
@@ -595,12 +602,20 @@ const runtime = {
       };
     } else if (image && typeof image === 'object' && 'bytes' in image) {
       const bytes = image.bytes;
+      let metadata = null;
+      if ('metadata' in image && image.metadata !== undefined) {
+        metadata = intrinsicJSONStringify(image.metadata);
+        if (typeof metadata !== 'string') {
+          throw new TypeError('emitImage metadata must be JSON-serializable');
+        }
+      }
       payload = {
         kind: 'bytes',
         bytes: intrinsicArrayBufferIsView(bytes)
           ? bytes
           : new intrinsicUint8Array(bytes),
         mimeType: typeof image.mimeType === 'string' ? image.mimeType : null,
+        metadata,
       };
     } else {
       throw new TypeError('unsupported emitImage input');
