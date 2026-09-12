@@ -183,6 +183,18 @@ describe('parseChannelConfig', () => {
     expect(result.memoryScope).toBeUndefined();
   });
 
+  it.each(['  /review  ', false])(
+    'treats an old messagePrefix value as unknown configuration data: %s',
+    async (messagePrefix) => {
+      const result = await parseChannelConfig('bot', {
+        type: 'bare',
+        messagePrefix,
+      });
+
+      expect(result).toMatchObject({ type: 'bare', messagePrefix });
+    },
+  );
+
   it('resolves env vars in token, clientId, clientSecret', async () => {
     process.env['TEST_TOKEN'] = 'tok123';
     process.env['TEST_CID'] = 'cid456';

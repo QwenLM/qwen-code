@@ -483,6 +483,7 @@ function applyDaemonTranscriptEvent(
       break;
     case 'session.metadata.changed':
     case 'session.artifact.changed':
+    case 'session.source.changed':
     case 'session.available_commands':
       // Intentional no-op against `blocks[]`.
       break;
@@ -1006,6 +1007,10 @@ function upsertToolBlock(
   const bytesBefore = retainedBefore ? estimateBlockBytes(retainedBefore) : 0;
   const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'tool') {
+    if (event.subagentSessionReady !== undefined) {
+      existing.subagentSessionReady =
+        existing.subagentSessionReady === true || event.subagentSessionReady;
+    }
     if (event.title !== undefined) existing.title = event.title;
     if (event.status !== undefined) existing.status = event.status;
     if (event.rawInput !== undefined) {
@@ -1148,6 +1153,9 @@ function upsertToolBlock(
     }),
     ...(resultPreview ? { resultPreview } : {}),
     ...(isBackgroundToolOutput(rawOutput) ? { background: true } : {}),
+    ...(event.subagentSessionReady !== undefined
+      ? { subagentSessionReady: event.subagentSessionReady }
+      : {}),
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
@@ -1238,7 +1246,7 @@ function discardToolBlock(
  * The task-display projection carries exactly these two `executionMode`
  * literals. Fail closed: any other value (corrupted recording, future runtime
  * mode) must fall back to the legacy argument/status heuristic instead of
- * forcing a classification. Both consumer-side whitelists — webui's
+ * forcing a classification. Both consumer-side whitelists — Web Shell's
  * `projectSubagentToolUpdate` and web-shell's `daemonToolBlockToToolCall` —
  * call this single guard so live-summary and recorded-transcript clients
  * accept the same literal set; when a third mode lands, extend it here once.
@@ -1267,6 +1275,7 @@ function compactTaskExecutionOutput(
     'taskDescription',
     'status',
     'executionMode',
+    'subagentSessionReady',
     'terminateReason',
     'tokenCount',
     'executionSummary',
@@ -1660,12 +1669,38 @@ function appendPromptCancelledBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'prompt.cancelled' }>,
 ): void {
+  const existing = event.promptId
+    ? state.blocks.find(
+        (block) =>
+          block.kind === 'prompt_cancelled' &&
+          block.promptId === event.promptId,
+      )
+    : undefined;
+  if (existing) {
+    if (event.elapsedMs === undefined) return;
+    const block = getWritableBlockById(state, existing.id);
+    if (block?.kind !== 'prompt_cancelled') return;
+    const bytesBefore = estimateBlockBytes(block);
+    block.elapsedMs = event.elapsedMs;
+    if (event.serverTimestamp !== undefined) {
+      block.serverTimestamp = event.serverTimestamp;
+    }
+    if (event.sourceRecordIds) block.sourceRecordIds = event.sourceRecordIds;
+    block.updatedAt = state.now;
+    state.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+    return;
+  }
   const block: DaemonPromptCancelledTranscriptBlock = {
     id: allocateBlockId(state, 'prompt_cancelled'),
     kind: 'prompt_cancelled',
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
+    ...(event.promptId ? { promptId: event.promptId } : {}),
+    ...(event.elapsedMs !== undefined ? { elapsedMs: event.elapsedMs } : {}),
+    ...(event.sourceRecordIds
+      ? { sourceRecordIds: event.sourceRecordIds }
+      : {}),
     ...(event.reason ? { reason: event.reason } : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
     ...(event.serverTimestamp !== undefined
@@ -2017,7 +2052,13 @@ function rewindTranscriptToUserTurn(
   let lastUserIndex = -1;
 
   for (let index = 0; index < state.blocks.length; index += 1) {
-    if (state.blocks[index]?.kind !== 'user') continue;
+    const block = state.blocks[index];
+    if (
+      block?.kind !== 'user' ||
+      block.meta?.['source'] === 'background_notification'
+    ) {
+      continue;
+    }
     lastUserIndex = index;
     if (userTurnIndex === targetTurnIndex) {
       truncateTranscriptBeforeBlock(state, index);

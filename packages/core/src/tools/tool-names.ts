@@ -18,6 +18,7 @@
  * per-declaration `pathFields?: string[]` annotation on the tool class.)
  */
 export const ToolNames = {
+  EXEC: 'exec',
   EDIT: 'edit',
   WRITE_FILE: 'write_file',
   READ_FILE: 'read_file',
@@ -62,6 +63,7 @@ export const ToolNames = {
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
   RECORD_ARTIFACT: 'record_artifact',
+  RECORD_SOURCE: 'record_source',
   REPORT_FINDINGS: 'report_findings',
   GET_GOAL: 'get_goal',
   UPDATE_GOAL: 'update_goal',
@@ -75,6 +77,7 @@ export const ToolNames = {
  * with the actual tool display names.
  */
 export const ToolDisplayNames = {
+  EXEC: 'Exec',
   EDIT: 'Edit',
   WRITE_FILE: 'WriteFile',
   READ_FILE: 'ReadFile',
@@ -119,6 +122,7 @@ export const ToolDisplayNames = {
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
   RECORD_ARTIFACT: 'RecordArtifact',
+  RECORD_SOURCE: 'RecordSource',
   REPORT_FINDINGS: 'ReportFindings',
   GET_GOAL: 'Goal',
   UPDATE_GOAL: 'UpdateGoal',

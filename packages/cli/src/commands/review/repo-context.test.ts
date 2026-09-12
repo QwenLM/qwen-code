@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import {
   MAX_IDENTITY_BYTES,
   type RepositoryContextProvider,
@@ -33,7 +34,7 @@ import {
   runRepoContext,
 } from './repo-context.js';
 import { stringifyPlanReport } from './lib/report.js';
-import { isolateHostGitConfig } from './lib/test-utils.js';
+import { isolateHostGitConfig, plantAdminEntry } from './lib/test-utils.js';
 import {
   appendRunSession,
   priorSessionIds,
@@ -165,6 +166,52 @@ function run(
 }
 
 describe('repo-context providers and trust boundary', () => {
+  it.each([
+    { requiredAgents: [], effort: 'high', revoke: false },
+    { requiredAgents: ['6c'] as const, effort: 'high', revoke: true },
+    { requiredAgents: ['test-matrix'] as const, effort: 'high', revoke: false },
+    { requiredAgents: ['6c'] as const, effort: 'medium', revoke: false },
+  ])(
+    'applies roster policy before revoking the profile: %j',
+    ({ requiredAgents, effort, revoke }) => {
+      const root = temp();
+      const worktree = join(root, 'worktree');
+      mkdirSync(worktree);
+      const { planPath } = run(
+        root,
+        worktree,
+        {
+          files: [{ path: 'docs/_meta.ts' }],
+          reviewProfile: DOCS_NAV_PROFILE,
+          prNumber: '11426',
+          ownerRepo: 'QwenLM/qwen-code',
+          worktreePath: worktree,
+          effort,
+          srcDiffLines: 0,
+          diffLines: 13,
+        },
+        [
+          {
+            provide: () => ({
+              ...context(),
+              requiredAgents: [...requiredAgents],
+            }),
+          },
+        ],
+      );
+      expect(readJson(planPath)).toMatchObject({
+        repositoryContext: { provider: 'fake-provider' },
+      });
+      if (revoke)
+        expect(readJson(planPath)).not.toHaveProperty('reviewProfile');
+      else
+        expect(readJson(planPath)).toHaveProperty(
+          'reviewProfile',
+          DOCS_NAV_PROFILE,
+        );
+    },
+  );
+
   it('writes null and clears stale context when no provider matches', () => {
     const root = temp();
     const worktree = join(root, 'worktree');
@@ -743,6 +790,94 @@ describe('repo-context providers and trust boundary', () => {
     expect(readJson(outPath)).toEqual(context());
     expect(readJson(planPath)).toHaveProperty('repositoryContext', context());
   });
+
+  // On Windows `mountRootFor` refuses every absolute path (a drive letter is a
+  // colon), so containment cannot exist there and this pair of cases has no
+  // answer to assert.
+  const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
+
+  itWhereContainmentExists(
+    'refuses to read identity files through a rewritten review-worktree gitfile',
+    () => {
+      // This command's whole point is that the identity files come from the
+      // MERGE BASE rather than from the PR head — and every read it makes
+      // (`--git-common-dir`, `cat-file -e`, `ls-tree`, `show <base>:<path>`)
+      // resolves the repository through the review worktree's own `.git`,
+      // which sits inside the directory the sandbox hands the reviewed code
+      // read-write. Read through a rewritten pointer, the "merge base"
+      // identity is whatever the PR author committed into a repository they
+      // planted, and the boundary is decoration.
+      const root = temp();
+      const repository = join(root, 'repository');
+      initGit(repository);
+      write(join(repository, 'src', 'change.ts'), 'base\n');
+      const base = commitAll(repository);
+      const worktree = join(repository, '.qwen', 'tmp', 'review-pr-1');
+      mkdirSync(dirname(worktree), { recursive: true });
+      execFileSync('git', [
+        '-C',
+        repository,
+        'worktree',
+        'add',
+        '-q',
+        '--detach',
+        worktree,
+        'HEAD',
+      ]);
+      // The plant: an admin entry copied beside the tree, inside the same
+      // temp dir, with git's own BARE backpointer so the round-trip gates
+      // this command inherits all agree with it.
+      plantAdminEntry(
+        join(repository, '.qwen', 'tmp', '.evil-git'),
+        join(repository, '.git', 'worktrees', 'review-pr-1'),
+        worktree,
+        join(repository, '.git'),
+      );
+
+      expect(() =>
+        run(root, worktree, {
+          files: [{ path: 'src/change.ts' }],
+          mergeBaseSha: base,
+        }),
+      ).toThrow(/refusing to read the repository context/);
+    },
+  );
+
+  itWhereContainmentExists(
+    'still reads a review worktree whose pointer is the one the pipeline wrote',
+    () => {
+      // The admit arm: the geometry the gate above refuses is the SAME
+      // geometry every PR review runs in, so a gate that refused on location
+      // alone would refuse every review.
+      const root = temp();
+      const repository = join(root, 'repository');
+      initGit(repository);
+      // Committed, because the identity read this command makes is
+      // `git show <mergeBase>:<path>` — a manifest that exists only in the
+      // working tree is the HEAD-side one the trust boundary refuses.
+      writeManifest(repository);
+      write(join(repository, 'src', 'change.ts'), 'base\n');
+      const base = commitAll(repository);
+      const worktree = join(repository, '.qwen', 'tmp', 'review-pr-1');
+      mkdirSync(dirname(worktree), { recursive: true });
+      execFileSync('git', [
+        '-C',
+        repository,
+        'worktree',
+        'add',
+        '-q',
+        '--detach',
+        worktree,
+        'HEAD',
+      ]);
+
+      const { outPath } = run(root, worktree, {
+        files: [{ path: 'src/change.ts' }],
+        mergeBaseSha: base,
+      });
+      expect(readJson(outPath)).toEqual(manifestContext());
+    },
+  );
 
   it('rejects a recorded worktree path that matches no checkout', () => {
     // The guard's rejection branch: a plan recorded for one checkout must

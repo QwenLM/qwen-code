@@ -572,6 +572,8 @@ export interface WorkflowOrchestratorEmitter {
    * `WorkflowRunRequest.budget`.
    */
   budgetUpdated?(spent: number, total: number | null): void;
+  /** A resume ran a journaled call live again; `line` is also sandbox-logged. */
+  resumeRespawn?(line: string): void;
 }
 
 export interface SandboxOptions {
@@ -587,12 +589,15 @@ export interface SandboxOptions {
   runId?: string;
   /**
    * Function called by the script's `agent(prompt, opts)` global. Returns the
-   * agent's final text. Injected so tests can mock without spawning an LLM.
+   * agent's final text, or `null` when that agent failed on its own terms
+   * (turn/time cap, model error, stall, or no structured result) —
+   * the same value a fan-out slot has always carried for a missing agent.
+   * Injected so tests can mock without spawning an LLM.
    */
   dispatch: (
     prompt: string,
     opts: WorkflowAgentOpts,
-  ) => Promise<WorkflowAgentResult>;
+  ) => Promise<WorkflowAgentResult | null>;
   /**
    * Forward-compatibility injection seams for P2 (parallel / pipeline) and
    * P5 (budget). When omitted the sandbox falls back to throwing stubs.
@@ -690,6 +695,13 @@ export interface SandboxOptions {
  * concurrency would already exceed 30 min).
  */
 const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
+
+/**
+ * How long the script's synchronous code may run before its first `await`
+ * returns control. Exported so the authoring reference's statement of it is
+ * pinned to this value.
+ */
+export const WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS = 30_000;
 
 function resolveMaxWallClockMs(opts: SandboxOptions): number {
   if (typeof opts.maxWallClockMs === 'number' && opts.maxWallClockMs > 0) {
@@ -1171,6 +1183,17 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           isAbort = false;
         }
         if (isAbort || __b.isRunAborted()) vmErr.__wfAbort = true;
+        var isRunFailure = false;
+        try {
+          isRunFailure = !!(hostErr && (
+            hostErr.__wfRunFailure === true ||
+            hostErr.name === 'WorkflowBudgetExceededError' ||
+            hostErr.name === 'WorkflowAgentCapExceededError'
+          ));
+        } catch (e) {
+          isRunFailure = false;
+        }
+        if (isRunFailure) vmErr.__wfRunFailure = true;
         vmErr.__wfDispatchFailed = true;
         return vmErr;
       }
@@ -1897,7 +1920,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // synchronous loops only. Once the IIFE hits its first `await`,
         // `runInContext` returns and this timer is disarmed.
         const runOpts: vm.RunningScriptOptions = {
-          timeout: 30_000,
+          timeout: WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS,
         };
         const result = script.runInContext(ctx, runOpts) as Promise<unknown>;
 

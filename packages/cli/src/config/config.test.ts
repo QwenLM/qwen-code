@@ -8,17 +8,22 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_DEFAULT_TOKEN_BUDGET,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
   GOAL_TOKEN_BUDGET_CAP,
   ToolNames,
   DEFAULT_QWEN_MODEL,
   OutputFormat,
   NativeLspService,
+  AuthType,
   Storage,
   SessionIdCaseConflictError,
 } from '@qwen-code/qwen-code-core';
 import { normalizeModelProposedGoals } from './config.js';
 import {
+  buildSkillSettingsListsProvider,
   isValidSessionId,
   loadCliConfig,
   parseArguments,
@@ -375,6 +380,19 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.prompt).toBe('test prompt');
     expect(argv.promptInteractive).toBeUndefined();
+  });
+
+  it('accepts OpenAI Responses as an auth type', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      AuthType.USE_OPENAI_RESPONSES,
+    ];
+
+    const argv = await parseArguments();
+
+    expect(argv.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
   });
 
   it('registers update as an exiting subcommand', async () => {
@@ -1193,6 +1211,22 @@ describe('loadCliConfig', () => {
     ]);
   });
 
+  it('registers the external agent executor factory so executor definitions dispatch (R1-7)', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({}, argv);
+
+    // This single host-side registration is what the whole external-subagent
+    // feature dispatches through. Every dispatch test mocks
+    // getExternalAgentExecutor, so without this assertion deleting the
+    // injection would regress every valid executor definition to "registered no
+    // external agent executor" with the whole suite still green.
+    const factory = config.getExternalAgentExecutor();
+    expect(factory).toBeDefined();
+    expect(typeof factory?.create).toBe('function');
+  });
+
   it('enables debug file logging for --debug when QWEN_DEBUG_LOG_FILE is unset', async () => {
     delete process.env['QWEN_DEBUG_LOG_FILE'];
     process.argv = ['node', 'script.js', '--debug'];
@@ -1227,6 +1261,40 @@ describe('loadCliConfig', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv);
     expect(config.getRestoreAskUserQuestion()).toBe(false);
+  });
+
+  it('wires the skill settings lists provider outside bare and safe mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({ skills: { enabled: ['pdf'] } }, argv);
+
+    expect(config.hasSkillSettingsListsProvider()).toBe(true);
+  });
+
+  it.each(['--bare', '--safe-mode'])(
+    'omits the skill settings lists provider in %s mode',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { skills: { enabled: ['pdf'] } },
+        argv,
+      );
+
+      expect(config.hasSkillSettingsListsProvider()).toBe(false);
+    },
+  );
+
+  it('maps the settings lists into normalized provider sets', () => {
+    const lists = buildSkillSettingsListsProvider({
+      skills: { enabled: [' A '], defaultDisabled: ['B'], disabled: ['C'] },
+    })();
+
+    expect([...lists.enabled]).toEqual(['a']);
+    expect([...lists.defaultDisabled]).toEqual(['b']);
+    expect([...lists.hardDisabled]).toEqual(['c']);
   });
 
   it('preserves explicit opt-out when --debug is used', async () => {
@@ -1319,6 +1387,115 @@ describe('loadCliConfig', () => {
       const config = await loadCliConfig({}, argv);
 
       expect(config.getGoalTokenBudgetGrant()).toBe(GOAL_DEFAULT_TOKEN_BUDGET);
+    });
+  });
+
+  describe('model.goalMaxTurns and model.goalMaxActiveMinutes', () => {
+    it('carries the settings into the Goal cadence grants', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalMaxTurns: 20, goalMaxActiveMinutes: 30 } },
+        argv,
+      );
+
+      expect(config.getGoalTurnBudgetGrant()).toBe(20);
+      expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(1_800_000);
+    });
+
+    it('runs Goals with no cadence ceiling when the settings are unset', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig({}, argv);
+
+      expect(config.getGoalTurnBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+      expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(
+        Number.POSITIVE_INFINITY,
+      );
+    });
+
+    it.each([-1, 20])(
+      'accepts %s as an explicit turn ceiling or opt-out',
+      async (value) => {
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        const config = await loadCliConfig(
+          { model: { goalMaxTurns: value } },
+          argv,
+        );
+
+        expect(config.getGoalTurnBudgetGrant()).toBe(
+          value === -1 ? Number.POSITIVE_INFINITY : value,
+        );
+      },
+    );
+
+    it.each([0, -2, 1.5, GOAL_MAX_TURNS_CAP + 1, '20' as unknown as number])(
+      'rejects invalid goalMaxTurns %s at startup',
+      async (value) => {
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await expect(
+          loadCliConfig({ model: { goalMaxTurns: value } }, argv),
+        ).rejects.toThrow(/settings\.json: model\.goalMaxTurns/);
+      },
+    );
+
+    it.each([
+      0,
+      -2,
+      0.5,
+      GOAL_MAX_ACTIVE_MINUTES_CAP + 1,
+      '30' as unknown as number,
+    ])('rejects invalid goalMaxActiveMinutes %s at startup', async (value) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await expect(
+        loadCliConfig({ model: { goalMaxActiveMinutes: value } }, argv),
+      ).rejects.toThrow(/settings\.json: model\.goalMaxActiveMinutes/);
+    });
+  });
+
+  describe('model.goalCheckpointTimeoutSeconds', () => {
+    it('carries the setting into the checkpoint verifier timeout', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalCheckpointTimeoutSeconds: 45 } },
+        argv,
+      );
+
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
+    });
+
+    it.each([
+      0,
+      -1,
+      1.5,
+      GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+      '30' as unknown as number,
+    ])('rejects invalid settings value %s at startup', async (value) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await expect(
+        loadCliConfig({ model: { goalCheckpointTimeoutSeconds: value } }, argv),
+      ).rejects.toThrow(/settings\.json: model\.goalCheckpointTimeoutSeconds/);
+    });
+
+    it('uses the built-in default when the setting is unset', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig({}, argv);
+
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(180_000);
     });
   });
 
@@ -2831,6 +3008,8 @@ describe('loadCliConfig', () => {
     };
 
     it('returns undefined when neither settings nor env configure web search', async () => {
+      // `undefined` means "derive the backend from the active provider" —
+      // it must not be confused with an explicit opt-out.
       const config = await loadWithSettings({});
       expect(config.getWebSearchSettings()).toBeUndefined();
     });
@@ -2912,6 +3091,8 @@ describe('loadCliConfig', () => {
       );
     });
 
+    // Both modes must turn the tool off explicitly: leaving the settings
+    // undefined would let the registry derive a backend from the provider.
     it('disables web search in safe mode', async () => {
       process.argv = ['node', 'script.js', '--safe-mode'];
       const argv = await parseArguments();
@@ -2919,7 +3100,14 @@ describe('loadCliConfig', () => {
         { tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } } },
         argv,
       );
-      expect(config.getWebSearchSettings()).toBeUndefined();
+      expect(config.getWebSearchSettings()).toEqual({ enabled: false });
+    });
+
+    it('disables web search in safe mode even when nothing is configured', async () => {
+      process.argv = ['node', 'script.js', '--safe-mode'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getWebSearchSettings()).toEqual({ enabled: false });
     });
 
     it('disables web search in bare mode', async () => {
@@ -2929,7 +3117,14 @@ describe('loadCliConfig', () => {
         { tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } } },
         argv,
       );
-      expect(config.getWebSearchSettings()).toBeUndefined();
+      expect(config.getWebSearchSettings()).toEqual({ enabled: false });
+    });
+
+    it('disables web search in bare mode even when nothing is configured', async () => {
+      process.argv = ['node', 'script.js', '--bare'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getWebSearchSettings()).toEqual({ enabled: false });
     });
   });
 });
@@ -3362,6 +3557,40 @@ describe('mergeExcludeTools', () => {
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getToolSearchThreshold()).toBe(10);
   });
+
+  it('should enable CodeModeOnly only when explicitly configured', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const direct = await loadCliConfig({}, argv, undefined, []);
+    const codeMode = await loadCliConfig(
+      { tools: { codeModeOnly: true } },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(direct.getCodeModeOnly()).toBe(false);
+    expect(codeMode.getCodeModeOnly()).toBe(true);
+    expect(direct.getToolMode()).toBe('direct');
+    expect(codeMode.getToolMode()).toBe('code_mode_only');
+  });
+
+  it.each(['--safe-mode', '--bare'])(
+    'should disable CodeModeOnly in %s mode',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { tools: { codeModeOnly: true } },
+        argv,
+        undefined,
+        [],
+      );
+
+      expect(config.getCodeModeOnly()).toBe(false);
+    },
+  );
 
   it('should default tools.listDirectory.enabled to false', async () => {
     process.argv = ['node', 'script.js'];

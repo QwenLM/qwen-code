@@ -39,13 +39,17 @@ export interface TranscriptCursor {
  * `lastReason` — that stays the human-readable half, this is the half a client
  * may key behavior off. Resuming an evidence-limited Goal restarts its evidence
  * window: the objective and revision carry over, but evidence recorded before
- * the resume is no longer citable. `token_budget` marks a spent autonomous-spend
- * authorization that a resume re-arms.
+ * the resume is no longer citable. The three budget kinds each mark a spent
+ * autonomous authorization that a resume re-arms: `token_budget` for model
+ * spend, `turn_budget` for finished turns, `time_budget` for active wall time.
+ * Older daemons never send the last two.
  */
 export type GoalLimitKind =
   | 'evidence_catalog'
   | 'checkpoint_request'
-  | 'token_budget';
+  | 'token_budget'
+  | 'turn_budget'
+  | 'time_budget';
 
 export interface GoalRecord {
   goalId: string;
@@ -55,8 +59,50 @@ export interface GoalRecord {
   evidenceCursor: TranscriptCursor;
   turnCount: number;
   activeTimeMs: number;
+  /**
+   * Model tokens billed to this Goal's own turns, as the daemon's Goal meter
+   * counts them: subagent work and the verifier's own checks are not
+   * included. Optional because a daemon older than the field sends a snapshot
+   * without it.
+   */
+  tokensUsed?: number;
+  /**
+   * The ceiling `tokensUsed` may reach before the Goal stops and waits for
+   * the user. Absent means the Goal is unbounded, which is also what an older
+   * daemon's snapshot looks like.
+   */
+  tokenBudget?: number;
+  /**
+   * The count `turnCount` may reach before the Goal stops and waits for the
+   * user. Absent means no turn ceiling, which is both the default and what an
+   * older daemon's snapshot looks like.
+   */
+  turnBudget?: number;
+  /**
+   * The ceiling on `activeTimeMs` -- wall time spent running -- before the
+   * Goal stops and waits for the user, in milliseconds. Absent means no time
+   * ceiling, which is both the default and what an older daemon sends.
+   */
+  activeTimeBudgetMs?: number;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Consecutive evidence checkpoints that failed to relieve an overflowing
+   * window; the Goal stops when this reaches three. Absent means zero, which
+   * is also what an older daemon's snapshot looks like.
+   */
+  checkpointStalls?: number;
+  /**
+   * A one-line diagnostic for the most recent checkpoint check that gave no
+   * relief: `ErrorName: message` for a check that failed, or the runtime's own
+   * phrase for one that answered with a full claim list while the window
+   * overflowed, so it does not always mean the check threw. Cleared by a check
+   * that finds room or writes a checkpoint without stalling, by every control
+   * action that clears `checkpointStalls`, and by a checkpoint stop whose cause
+   * is not itself a check, so it can be absent while `checkpointStalls` is
+   * still non-zero. Also absent when the daemon predates the field.
+   */
+  lastCheckpointFailure?: string;
   lastReason?: string;
   limitKind?: GoalLimitKind;
 }
@@ -72,6 +118,22 @@ export interface GoalSnapshotV2 {
   };
 }
 
+/**
+ * The reason a `/goal pause` records, duplicated here for the same reason the
+ * Goal wire types are: the SDK stays independent of Core. It must match
+ * `GOAL_PAUSE_REASON_COMMAND` in
+ * `packages/core/src/goals/goal-protocol.ts`, and stay within that file's
+ * `GOAL_PAUSE_REASON_MAX_CHARACTERS`, or the daemon rejects the request.
+ */
+export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
+
+/**
+ * How many consecutive stalled evidence checkpoints stop a Goal, duplicated so
+ * a client can show `checkpointStalls` against it. It must match
+ * `GOAL_CHECKPOINT_STALL_LIMIT` in `packages/core/src/goals/goal-protocol.ts`.
+ */
+export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
+
 export type GoalControlRequest =
   | { action: 'create'; objective: string }
   | {
@@ -81,7 +143,18 @@ export type GoalControlRequest =
       expectedRevision: number;
     }
   | {
-      action: 'pause' | 'resume' | 'clear';
+      action: 'pause';
+      expectedGoalId: string;
+      expectedRevision: number;
+      /**
+       * Why the Goal is being paused, in the user's words. Accepted on
+       * `pause` alone: the daemon rejects any other key on `resume`/`clear`,
+       * so this must not be folded back into a shared union member.
+       */
+      reason?: string;
+    }
+  | {
+      action: 'resume' | 'clear';
       expectedGoalId: string;
       expectedRevision: number;
     };
@@ -96,6 +169,8 @@ export interface DaemonProtocolVersions {
 }
 
 export interface DaemonCapabilitiesLimits {
+  maxRegisteredWorkspaces?: number;
+  maxChannelControlWorkspaces?: number;
   maxPendingPromptsPerSession?: number | null;
   maxSessionsPerWorkspace?: number | null;
   maxTotalSessions?: number | null;
@@ -428,6 +503,23 @@ export interface DaemonGitHubPullRequestCreateResult {
   number: number | null;
 }
 
+/**
+ * Web Shell product branding returned from `GET /brand`, resolved from the
+ * operator settings scopes only (system defaults, user, system). Every field is
+ * optional and an empty object is a valid response meaning "use the client's
+ * built-in brand".
+ */
+export interface DaemonBrand {
+  /** Product name. Absent means the client's built-in name. */
+  name?: string;
+  /**
+   * Logo as a `data:image/svg+xml` URI, ready for an `img` src or a favicon
+   * href. Absent means the client's built-in logo. Clients must render this as
+   * an image, never as injected markup.
+   */
+  logoDataUri?: string;
+}
+
 /** Capabilities envelope returned from `GET /capabilities`. */
 export interface DaemonCapabilities {
   v: 1;
@@ -441,6 +533,11 @@ export interface DaemonCapabilities {
    * additive to v=1; older v=1 daemons omit it.
    */
   qwenCodeVersion?: string;
+  /**
+   * Process-wide live-state polling interval in milliseconds. Older daemons
+   * omit it; polling consumers should default to 5000 ms.
+   */
+  sessionLiveStatePollIntervalMs?: number;
   mode: DaemonMode;
   /**
    * Feature tags the client should gate UI off (e.g. `permission_vote`,
@@ -594,6 +691,8 @@ export interface DaemonStatusReportSession {
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
+  /** Selected execution policy while the session is in Plan. */
+  planExecutionMode?: string;
   /**
    * Effective live-journal caps right now — the baseline, or higher when
    * adaptive growth raised them mid-turn. Absent on older daemons.
@@ -725,6 +824,8 @@ export interface DaemonStatusReport {
     sessionShellCommandEnabled: boolean;
   };
   limits: {
+    maxRegisteredWorkspaces?: number;
+    maxChannelControlWorkspaces?: number;
     maxSessions: number | null;
     maxTotalSessions: number | null;
     maxPendingPromptsPerSession: number | null;
@@ -1132,6 +1233,24 @@ export interface DaemonSession {
   worktree?: DaemonWorktreeInfo;
   /** Durable worktree metadata/ownership attestation from the daemon. */
   worktreeState?: 'persisted-v1';
+  /**
+   * Present on a worktree-reset response when the superseded session survived
+   * the sever step because its child refused the conditional idle close (it
+   * holds work — a background shell inside the worktree, for example). The
+   * transfer itself committed and `worktreeState` still attests the
+   * replacement, but the old session is still live inside that checkout, so
+   * the daemon keeps its reset barrier armed: prompts and the other writers
+   * that reach the checkout keep failing with `worktree_reset_active` until
+   * the survivor is discarded.
+   *
+   * Diagnostic only: no first-party caller reads it, and nothing depends
+   * on one doing so. The channel worker reports the same success message
+   * either way, and what actually keeps the survivor out of the checkout is
+   * the armed barrier plus the on-disk sidecar link, not this flag. An
+   * external caller that needs to tell "the old id is gone" from "still
+   * live but fenced" should read it, since a `200` alone does not say which.
+   */
+  supersededSessionLive?: boolean;
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
 }
@@ -1224,6 +1343,7 @@ export interface DaemonBranchPoint {
 }
 
 export interface DaemonPersistedBranchedSession {
+  sourceWarnings?: string[];
   sessionId: string;
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
@@ -1242,6 +1362,7 @@ export interface SideTaskSessionRequest {
 }
 
 export interface DaemonSideTaskSession extends DaemonRestoredSession {
+  sourceWarnings?: string[];
   displayName: string;
   parentSessionId: string;
 }
@@ -1322,6 +1443,8 @@ export interface DaemonSessionSummary {
   sourceId?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
+  /** Per-session active-work observation from the owning runtime. */
+  activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   isWaitingForPermission?: boolean;
   isWaitingForUserQuestion?: boolean;
   pendingInteractionCount?: number;
@@ -1546,6 +1669,8 @@ export interface DaemonSessionLiveState {
   sessionId: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  /** Absent when talking to an older daemon. */
+  activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   isWaitingForPermission: boolean;
   isWaitingForUserQuestion: boolean;
   /**
@@ -1599,6 +1724,45 @@ export interface SessionMetadataResult {
 type OpenStringUnion<T extends string> = T | (string & {});
 
 /** Known artifact kinds mirrored from the daemon/core contract. */
+export type SessionSourceLocator =
+  | { type: 'workspace_file'; workspacePath: string }
+  | { type: 'attachment'; attachmentId: string }
+  | { type: 'url'; url: string };
+
+export interface SessionSourceInput {
+  title: string;
+  locator: SessionSourceLocator;
+  description?: string;
+}
+
+export interface SessionSource extends SessionSourceInput {
+  id: string;
+  kind: 'file' | 'link';
+  workspaceCwd?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SessionSourcesResult {
+  revision: number;
+  sources: SessionSource[];
+}
+
+export interface SessionSourcesSnapshot extends SessionSourcesResult {
+  version: 1;
+}
+
+export interface SessionSourceUpsertResult {
+  revision: number;
+  source: SessionSource;
+  change: 'created' | 'updated' | 'unchanged';
+}
+
+export interface SessionSourceRemoveResult {
+  revision: number;
+  removed: boolean;
+}
+
 export type KnownDaemonSessionArtifactKind =
   | 'file'
   | 'link'
@@ -2035,6 +2199,7 @@ export interface DaemonWorkspaceSkillsStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   skills: DaemonWorkspaceSkillStatus[];
   errors?: DaemonStatusCell[];
 }
@@ -2076,6 +2241,12 @@ export interface DaemonWorkspaceRuntimeStatus {
   runtimeEpoch: number;
   capabilities?: {
     mcp?: {
+      state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+      revision: number;
+      runtimeEpoch?: number;
+      error?: { code: string; message: string };
+    };
+    skills?: {
       state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
       revision: number;
       runtimeEpoch?: number;
@@ -2628,7 +2799,28 @@ export interface DaemonSessionContextStatus {
   sessionId: string;
   workspaceCwd: string;
   state: DaemonSessionState;
+  recovery?: {
+    kind:
+      | 'clean'
+      | 'interrupted_prompt'
+      | 'interrupted_turn'
+      | 'degraded_history';
+    canContinue: boolean;
+  };
 }
+
+export type DaemonContinueSessionResult =
+  | {
+      accepted: true;
+      interruption: 'interrupted_prompt' | 'interrupted_turn';
+      promptId: string;
+      lastEventId: number;
+      eventEpoch?: string;
+    }
+  | {
+      accepted: false;
+      interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    };
 
 export interface DaemonContextCategoryBreakdown {
   systemPrompt: number;
@@ -2927,6 +3119,8 @@ export interface DaemonSessionWorkflowTaskStatus {
   dispatches: DaemonWorkflowDispatchStatusEntry[];
   agentsDispatched: number;
   agentsCompleted: number;
+  /** Calls re-run from a prior failed or interrupted attempt. */
+  agentsRespawned?: number;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   recentLogs: string[];
@@ -3243,6 +3437,7 @@ export type DaemonApprovalMode = PermissionMode;
  */
 export interface DaemonApprovalModeResult {
   sessionId: string;
+  planExecutionMode?: string;
   mode: string;
   previous: string;
   persisted: boolean;
@@ -3260,7 +3455,11 @@ export interface DaemonToolToggleResult {
   enabled: boolean;
 }
 
-export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+export type DaemonSkillToggleActivation =
+  | 'applied'
+  | 'deferred'
+  | 'reconciling'
+  | 'partial';
 
 export interface DaemonSkillToggleMutationSkill {
   name: string;
@@ -3332,6 +3531,7 @@ export interface DaemonSkillMutationResult {
   scope: DaemonSkillScope;
   installedPath?: string;
   deleted?: boolean;
+  activation?: DaemonSkillToggleActivation;
 }
 
 export interface DaemonSettingDescriptor {
@@ -3971,6 +4171,8 @@ export interface DaemonChannelConfigValueFieldDescriptor
   kind: 'string' | 'secret';
   required?: boolean;
   envResolvable?: boolean;
+  /** Render the field as a multi-line text area in management UIs. */
+  multiline?: boolean;
   properties?: never;
 }
 
@@ -3979,6 +4181,7 @@ export interface DaemonChannelConfigPlainValueFieldDescriptor
   kind: 'boolean' | 'string-list' | 'record';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   properties?: never;
 }
 
@@ -3987,6 +4190,7 @@ export interface DaemonChannelConfigEnumFieldDescriptor
   kind: 'enum';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   options: ReadonlyArray<{ value: string; label: string }>;
   properties?: never;
 }
@@ -3996,6 +4200,7 @@ export interface DaemonChannelConfigNumberFieldDescriptor
   kind: 'number';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   exclusiveMinimum?: number;
   properties?: never;
 }
@@ -4005,16 +4210,21 @@ export interface DaemonChannelConfigObjectFieldDescriptor
   kind: 'object';
   required?: false;
   envResolvable?: never;
+  multiline?: never;
   properties: readonly DaemonChannelConfigNestedFieldDescriptor[];
 }
 
 export type DaemonChannelConfigNestedFieldDescriptor =
-  | (Omit<DaemonChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+  | (Omit<
+      DaemonChannelConfigValueFieldDescriptor,
+      'kind' | 'envResolvable' | 'multiline'
+    > & {
       kind: Exclude<
         DaemonChannelConfigFieldKind,
         'secret' | 'enum' | 'number' | 'object'
       >;
       envResolvable?: never;
+      multiline?: never;
     })
   | (Omit<DaemonChannelConfigEnumFieldDescriptor, 'kind' | 'envResolvable'> & {
       kind: 'enum';
@@ -4503,6 +4713,8 @@ export type PermissionOutcome =
   | PermissionOutcomeSelected;
 
 export interface PermissionResponse {
+  /** Execution permission displayed when approving a DAC plan. */
+  expectedPlanExecutionMode?: string;
   outcome: PermissionOutcome;
   /** Answers to ask_user_question, keyed by its `answerKey`. */
   answers?: Record<string, string>;

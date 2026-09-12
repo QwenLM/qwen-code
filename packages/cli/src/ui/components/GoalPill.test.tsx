@@ -127,6 +127,40 @@ describe('GoalPill', () => {
     unmount();
   });
 
+  it('warns about stalled checkpoints before the stall breaker stops the Goal', () => {
+    vi.setSystemTime(NOW);
+    const { lastFrame, unmount } = renderPill({
+      snapshot: snapshot('active', 'running', {
+        checkpointStalls: 2,
+        lastCheckpointFailure: 'Error: provider failed',
+      }),
+    });
+
+    expect(lastFrame()).toContain('! /goal checkpoint 2/3 stalled');
+    // The footer has no room for the failure itself; the status card has it.
+    expect(lastFrame()).not.toContain('provider failed');
+    unmount();
+  });
+
+  it('keeps the plain labels when no checkpoint has stalled', () => {
+    vi.setSystemTime(NOW);
+    // A failure on a window with room spends no stall and is the card's to
+    // show; the footer stays quiet until the streak starts.
+    const quiet = renderPill({
+      snapshot: snapshot('active', 'running', {
+        lastCheckpointFailure: 'Error: provider failed',
+      }),
+    });
+    expect(quiet.lastFrame()).toContain('/goal active');
+    quiet.unmount();
+
+    const checking = renderPill({
+      snapshot: snapshot('active', 'verifying', { checkpointStalls: 1 }),
+    });
+    expect(checking.lastFrame()).toContain('/goal checking');
+    checking.unmount();
+  });
+
   it('adds the current active span to persisted active time', () => {
     vi.setSystemTime(NOW);
     const { lastFrame, unmount } = renderPill({
@@ -134,6 +168,55 @@ describe('GoalPill', () => {
     });
 
     expect(lastFrame()).toContain('(5s)');
+    unmount();
+  });
+
+  it('shows spend against the budget once a turn has billed', () => {
+    vi.setSystemTime(NOW);
+    const { lastFrame, unmount } = renderPill({
+      snapshot: snapshot('active', 'running', {
+        tokensUsed: 1_234,
+        tokenBudget: 30_000_000,
+      }),
+    });
+
+    expect(lastFrame()).toContain('(5s · 1.2k/30.0m)');
+    unmount();
+  });
+
+  it('shows spend alone when the Goal has no budget', () => {
+    vi.setSystemTime(NOW);
+    const { lastFrame, unmount } = renderPill({
+      snapshot: snapshot('active', 'running', { tokensUsed: 1_234 }),
+    });
+
+    expect(lastFrame()).toContain('(5s · 1.2k)');
+    unmount();
+  });
+
+  it('shows no figures for a Goal that has not billed a turn', () => {
+    // A fresh Goal reading `0/30.0m` says nothing the status has not, and
+    // the pill sits in a footer with little room to say it.
+    vi.setSystemTime(NOW);
+    const { lastFrame, unmount } = renderPill({
+      snapshot: snapshot('active', 'running', { tokenBudget: 30_000_000 }),
+    });
+
+    expect(lastFrame()).toContain('(5s)');
+    expect(lastFrame()).not.toContain('30.0m');
+    unmount();
+  });
+
+  it('keeps showing what a stopped Goal spent', () => {
+    vi.setSystemTime(NOW);
+    const { lastFrame, unmount } = renderPill({
+      snapshot: snapshot('paused', 'idle', {
+        tokensUsed: 2_500_000,
+        tokenBudget: 30_000_000,
+      }),
+    });
+
+    expect(lastFrame()).toContain('(2s · 2.5m/30.0m)');
     unmount();
   });
 
