@@ -301,7 +301,9 @@ export class ModelRegistry {
     }
     const models = this.modelsByAuthType.get(authType);
     if (!models || models.size === 0) return undefined;
-    return Array.from(models.values()).find((model) => !model.imageOnly);
+    return Array.from(models.values()).find(
+      (model) => !model.imageOnly && !model.voiceOnly,
+    );
   }
 
   /**
@@ -385,5 +387,9 @@ export class ModelRegistry {
   /** The raw providers config this registry was last built from. */
   getModelProvidersConfig(): ModelProvidersConfig | undefined {
     return this.modelProvidersConfig;
+  }
+
+  getProviderProtocolConfig(): ProviderProtocolConfig {
+    return this.providerProtocolConfig;
   }
 }
