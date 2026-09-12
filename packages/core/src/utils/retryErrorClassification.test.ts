@@ -203,6 +203,151 @@ describe('classifyRetryError', () => {
     });
   });
 
+  it('classifies a 4xx wrapping a low-level network failure (EOF) as retryable', () => {
+    // Mirrors "400 network error for request to ...: EOF" — a peer closing the
+    // connection wrapped in a 4xx with no provider error body. Channel/daemon
+    // paths have no manual retry, so this must be auto-retried (bounded).
+    // Real SDK failures are Error instances (so `message` is not treated as a
+    // provider field), unlike a genuine client-error payload.
+    const err = Object.assign(
+      new Error(
+        'network error for request to http://11.0.0.1:8080/v1/chat/completions: Post "http://11.0.0.1:8080/v1/chat/completions": EOF',
+      ),
+      { status: 400 },
+    );
+    expect(classifyRetryError(err)).toMatchObject({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      statusCode: 400,
+      reason: 'network-error',
+    });
+  });
+
+  it('keeps a 4xx with provider fields fail-fast even if the message mentions EOF', () => {
+    // A genuine client error carries provider fields; the network-failure
+    // exception must not relabel it as retryable.
+    expect(
+      classifyRetryError({
+        status: 400,
+        code: 'invalid_request_error',
+        message: 'bad request EOF',
+      }),
+    ).toMatchObject({
+      kind: 'http',
+      diagnosis: 'fail-fast',
+      statusCode: 400,
+      reason: 'client-error',
+    });
+  });
+
+  it('keeps a bare-EOF 4xx message fail-fast without the wrapper marker', () => {
+    // The exception is scoped to the demonstrated wrapper shape ('network
+    // error for request ...'); a standalone EOF mention in a gateway's
+    // permanent client error must not trigger bounded retries.
+    expect(
+      classifyRetryError(
+        Object.assign(new Error('unexpected EOF while parsing request body'), {
+          status: 400,
+        }),
+      ),
+    ).toMatchObject({
+      kind: 'http',
+      diagnosis: 'fail-fast',
+      statusCode: 400,
+      reason: 'client-error',
+    });
+  });
+
+  it('finds the network-failure marker in a nested cause message', () => {
+    const err = Object.assign(new Error('request failed'), {
+      status: 400,
+      cause: new Error(
+        'network error for request to http://h:8080/v1/chat/completions: EOF',
+      ),
+    });
+    expect(classifyRetryError(err)).toMatchObject({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      statusCode: 400,
+      reason: 'network-error',
+    });
+  });
+
+  it('keeps a plain-object 4xx fail-fast even with the marker message', () => {
+    // A non-Error payload's `message` is a provider field, i.e. a provider
+    // error body — a genuine client error, not a wrapped network failure.
+    expect(
+      classifyRetryError({
+        status: 400,
+        message: 'network error for request to http://h: EOF',
+      }),
+    ).toMatchObject({
+      kind: 'http',
+      diagnosis: 'fail-fast',
+      statusCode: 400,
+      reason: 'client-error',
+    });
+  });
+
+  it('keeps a request-id-bearing 4xx fail-fast even with the marker message', () => {
+    // With a request id present the Error message counts as a provider
+    // field, so the payload is a provider response, not a wrapped failure.
+    expect(
+      classifyRetryError(
+        Object.assign(new Error('network error for request to http://h: EOF'), {
+          status: 400,
+          request_id: 'req-1',
+        }),
+      ),
+    ).toMatchObject({
+      kind: 'http',
+      diagnosis: 'fail-fast',
+      statusCode: 400,
+      reason: 'client-error',
+    });
+  });
+
+  it('keeps a 4xx with a cause-nested transport code fail-fast', () => {
+    // A socket code in the cause chain does not relabel a definitive 4xx;
+    // only the message marker does.
+    expect(
+      classifyRetryError(
+        Object.assign(new Error('terminated'), {
+          status: 400,
+          cause: Object.assign(new Error('socket reset'), {
+            code: 'ECONNRESET',
+          }),
+        }),
+      ),
+    ).toMatchObject({
+      kind: 'http',
+      diagnosis: 'fail-fast',
+      statusCode: 400,
+      reason: 'client-error',
+    });
+  });
+
+  it('leaves transportCode unset on a marker-matched 4xx that also carries a code', () => {
+    // The omission keeps 4xx-wrapped failures out of the transportCode-keyed
+    // stream replay/continuation gates (see llm-chat.test.ts).
+    const err = Object.assign(
+      new Error('network error for request to http://h: EOF'),
+      {
+        status: 400,
+        cause: Object.assign(new Error('socket reset'), {
+          code: 'ECONNRESET',
+        }),
+      },
+    );
+    expect(classifyRetryError(err)).toMatchObject({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      statusCode: 400,
+      reason: 'network-error',
+    });
+    expect(classifyRetryError(err).transportCode).toBeUndefined();
+  });
+
   it('marks auth errors as fail-fast', () => {
     expect(
       classifyRetryError({ status: 401, message: 'Unauthorized' }),

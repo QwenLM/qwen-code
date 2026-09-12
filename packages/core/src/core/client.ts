@@ -96,7 +96,7 @@ import {
 } from '../memory/tree.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { ToolMode } from '../tools/code-mode.js';
 
 // Telemetry
@@ -1175,6 +1175,10 @@ export class LlmClient {
     // suppress its re-delivery for the rest of the session. Re-delivery is
     // idempotent — the router header states it replaces any older tree.
     this.lastDeliveredMemoryTreeRevision = undefined;
+    // The active-todo reminder describes the discarded timeline: clear it and
+    // its chain so the next turn cannot continue work the restore removed.
+    this.activeTodoWorkChainPromptId = undefined;
+    this.config.clearActiveTodoReminders();
     this.forceFullIdeContext = true;
   }
 
@@ -1204,6 +1208,11 @@ export class LlmClient {
       // Same rewind hazard as setHistory: the truncated entries may have
       // carried the complete-tree router prompt.
       this.lastDeliveredMemoryTreeRevision = undefined;
+      // A rewind discards the timeline the active-todo reminder described:
+      // clear it and its chain so the next turn starts fresh instead of
+      // continuing work that was rewound away.
+      this.activeTodoWorkChainPromptId = undefined;
+      this.config.clearActiveTodoReminders();
     }
     this.forceFullIdeContext = true;
   }
@@ -3825,7 +3834,20 @@ export class LlmClient {
     // LoopDetected early on the notification turn.
     if (messageType === SendMessageType.UserQuery) {
       this.activeAutomaticTodoWorkChainPromptIds.clear();
-      this.config.startActiveTodoWorkChain(prompt_id);
+      // A registered reminder means the previous chain's plan still has
+      // unfinished items (todo_write deletes it on completion): continue
+      // that chain instead of discarding its context with the very turn
+      // that may be asking about it (#10953).
+      const continuedFrom =
+        this.activeTodoWorkChainPromptId !== undefined &&
+        this.config.getActiveTodoReminder(this.activeTodoWorkChainPromptId) !==
+          undefined &&
+        this.config.getActiveTodoWorkChainOwner(
+          this.activeTodoWorkChainPromptId,
+        ) === this.config.getActiveTodoPlanWriterOwner()
+          ? this.activeTodoWorkChainPromptId
+          : undefined;
+      this.config.startActiveTodoWorkChain(prompt_id, continuedFrom);
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
       this.config.startActiveTodoWorkChain(
@@ -4348,8 +4370,20 @@ export class LlmClient {
             return turn;
           }
         }
-        const activeTodoReminder =
-          this.config.takeActiveTodoReminder(prompt_id);
+        // A top-level Agent tool result means a delegated execution just
+        // returned (#10953): real work advanced while the parent earned a
+        // single tool turn, so the turn budget cannot come due on its own.
+        // Force the reminder exactly where the progress information arrives.
+        const carriesAgentToolResult = requestToSend.some(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            canonicalToolName(part.functionResponse?.name ?? '') ===
+              ToolNames.AGENT,
+        );
+        const activeTodoReminder = carriesAgentToolResult
+          ? this.config.takeActiveTodoReminder(prompt_id, true)
+          : this.config.takeActiveTodoReminder(prompt_id);
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -4367,6 +4401,9 @@ export class LlmClient {
           sizeOnly: true,
           pendingContent: createUserContent(requestToSend),
         });
+        // Memory recall is consumed only after microcompaction has settled
+        // history, so the committed delivery reflects the post-eviction
+        // residency state.
         const toolResultMemory =
           await this.consumeManagedAutoMemoryRecall('tool_result');
         if (toolResultMemory?.prompt) {

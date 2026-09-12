@@ -157,6 +157,7 @@ export async function executeCodeMode(
   let wallRemainingMs = CODE_MODE_HOST_BOOT_TIMEOUT_MS;
   let wallDeadline = Date.now() + wallRemainingMs;
   let wallPaused = false;
+  let hostStarted = false;
 
   const send = (message: ParentMessage): void => {
     if (!child.stdin.destroyed && !child.stdin.writableEnded) {
@@ -173,8 +174,15 @@ export async function executeCodeMode(
     terminate(child);
   };
   const onWallTimeout = () => {
+    // Name the budget that actually applied: before the host signals
+    // execution start the boot bound is in force, afterwards the guest
+    // budget plus the frame-I/O grace.
     protocolError = new Error(
-      `JavaScript execution timed out after ${timeoutMs}ms.`,
+      hostStarted
+        ? `JavaScript execution timed out after ${
+            timeoutMs + CODE_MODE_HOST_WALL_GRACE_MS
+          }ms (guest budget ${timeoutMs}ms).`
+        : `JavaScript execution timed out after ${CODE_MODE_HOST_BOOT_TIMEOUT_MS}ms (guest budget ${timeoutMs}ms; the code-mode host may not have finished starting).`,
     );
     cancelNested(protocolError);
     terminate(child);
@@ -227,6 +235,7 @@ export async function executeCodeMode(
           continue;
         }
         if (message.type === 'started') {
+          hostStarted = true;
           if (!completed && !protocolError) {
             if (wallTimer) clearTimeout(wallTimer);
             wallRemainingMs = timeoutMs + CODE_MODE_HOST_WALL_GRACE_MS;

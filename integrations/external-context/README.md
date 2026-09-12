@@ -295,7 +295,7 @@ fails open as `{}` after the Node entry point starts. Failure to spawn the
 pinned Node process and a Qwen outer command timeout retain Qwen's blocking
 command-Hook semantics. The Provider timeout defaults to 1500ms and is capped
 at 5000ms; the internal Hook wall-clock budget is 6500ms and the managed Qwen
-command timeout is 8000ms. Each Hook invocation destroys its own proxy
+command timeout is 8 seconds. Each Hook invocation destroys its own proxy
 dispatcher after the attempted retrieval so stalled proxy connections cannot
 retain the child process; the long-running MCP process keeps its dispatcher.
 
