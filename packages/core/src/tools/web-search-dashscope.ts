@@ -20,9 +20,8 @@ import type {
   WebSearchOutcome,
   WebSearchSource,
 } from './web-search-backend.js';
+import { sliceAtCharBoundary } from './web-search-backend.js';
 
-/** Total budget for one tool invocation, covering the no-search retry. */
-const SEARCH_TIMEOUT_MS = 60_000;
 /**
  * Cap on characters accumulated from the SSE stream (text deltas + item
  * payloads). Truncating at parse time is too late — a runaway stream must be
@@ -32,6 +31,31 @@ const SEARCH_TIMEOUT_MS = 60_000;
 const MAX_STREAM_CHARS = 2_000_000;
 const NO_SEARCH_RETRY_BASE_DELAY_MS = 750;
 const NO_SEARCH_RETRY_JITTER_MS = 500;
+/**
+ * Extractor output is whole-page text. It stands in for the answer only when
+ * the side model's narration never arrived — typically a search the budget
+ * cut off mid-read — so it is labeled as page content and bounded: a
+ * timed-out search must not hand the model an entire page in place of
+ * findings.
+ */
+const MAX_EXTRACTED_FALLBACK_CHARS = 6_000;
+
+function salvagedPageText(parts: string[]): string {
+  if (parts.length === 0) return '';
+  const text = parts.join('\n\n');
+  const truncated = text.length > MAX_EXTRACTED_FALLBACK_CHARS;
+  const label =
+    "[Raw page content salvaged from the search agent's page reads — its narrated answer did not arrive" +
+    (truncated
+      ? `. Truncated to ${MAX_EXTRACTED_FALLBACK_CHARS} characters.]`
+      : '.]');
+  return `${label}\n${truncated ? sliceAtCharBoundary(text, MAX_EXTRACTED_FALLBACK_CHARS) : text}`;
+}
+
+/** "120s", "90s", "0.2s": the budget as configured, never rounded to zero. */
+function formatBudget(ms: number): string {
+  return `${Number((ms / 1000).toFixed(1))}s`;
+}
 
 /**
  * Inner defense layer: system instructions on the search side request
@@ -177,7 +201,9 @@ function collectFromItems(
     // The narrated answer supersedes raw extraction (it is derived from it);
     // extraction text is the fallback when narration never arrived.
     answerText:
-      messageParts.join('\n') || fallbackText || extractedParts.join('\n\n'),
+      messageParts.join('\n') ||
+      fallbackText ||
+      salvagedPageText(extractedParts),
     searchCallCount,
     usage,
   };
@@ -214,7 +240,7 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
     const client = new OpenAI({
       apiKey,
       baseURL: backend.baseUrl,
-      timeout: resolveRequestTimeout(SEARCH_TIMEOUT_MS),
+      timeout: resolveRequestTimeout(backend.timeoutMs),
       maxRetries: 1,
       defaultHeaders: {
         'User-Agent': `QwenCode/${this.config.getCliVersion() || 'unknown'} (${process.platform}; ${process.arch})`,
@@ -233,7 +259,7 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
     // cancellation signal and our stream-size cap. The timeout signal is
     // kept separate so timeouts and user cancellations report differently.
     const capController = new AbortController();
-    const timeoutSignal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+    const timeoutSignal = AbortSignal.timeout(backend.timeoutMs);
     const combinedSignal = AbortSignal.any([
       signal,
       timeoutSignal,
@@ -245,7 +271,7 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
     ): WebSearchBackendResult => ({ ok: false, message, errorType });
     const timedOut = () =>
       failure(
-        `Web search timed out after ${SEARCH_TIMEOUT_MS / 1000}s.`,
+        `Web search timed out after ${formatBudget(backend.timeoutMs)}.`,
         ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
       );
     const cancelled = () =>
@@ -267,7 +293,7 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
     } as unknown as OpenAI.Responses.ResponseCreateParamsStreaming;
 
     // The SDK client also has maxRetries: 1, so worst-case request count
-    // exceeds maxAttempts; the shared 60s AbortSignal.timeout bounds total
+    // exceeds maxAttempts; the shared AbortSignal.timeout budget bounds total
     // wall time regardless.
     const maxAttempts = 2;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
