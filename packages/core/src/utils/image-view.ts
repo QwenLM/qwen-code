@@ -166,6 +166,10 @@ async function prepareImage(
   signal: AbortSignal,
 ): Promise<PreparedImage> {
   signal.throwIfAborted();
+  // Load the renderer before any file-level check: an unavailable sharp keeps
+  // priority over `file_not_found`, so a host without the native binary still
+  // reports the recoverable error (zoom-image.sharp-failure.test.ts).
+  await loadSharp();
 
   let stats: Awaited<ReturnType<typeof fs.stat>>;
   try {
