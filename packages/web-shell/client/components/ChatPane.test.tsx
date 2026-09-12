@@ -12,6 +12,7 @@ import {
   DaemonHttpError,
   GOAL_PAUSE_REASON_COMMAND,
 } from '@qwen-code/sdk/daemon';
+import type { ContextUsageControls } from '../hooks/useContextUsageControls';
 import { I18nProvider } from '../i18n';
 import { formatDateTime } from '../utils/formatDateTime';
 import {
@@ -540,6 +541,83 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it('publishes owner-specific context controls and withdraws them on unmount', () => {
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    const cleanups: ReturnType<typeof vi.fn>[] = [];
+    const registerContextUsageControls = vi.fn(
+      (_controls: ContextUsageControls) => {
+        const cleanup = vi.fn();
+        cleanups.push(cleanup);
+        return cleanup;
+      },
+    );
+    render({ registerContextUsageControls });
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sessionId: connectionState.sessionId,
+        canCompress: true,
+      }),
+    );
+    pendingPermission = {
+      id: 'perm-1',
+      toolName: 'write_file',
+      rawInput: {},
+    };
+    rerender({ registerContextUsageControls });
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: false }),
+    );
+    pendingPermission = null;
+    rerender({ registerContextUsageControls });
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: true }),
+    );
+    sessionHasActivePromptValue = true;
+    rerender({ registerContextUsageControls });
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: false }),
+    );
+    expect(cleanups[0]).toHaveBeenCalledOnce();
+    act(() => root!.unmount());
+    root = null;
+    expect(cleanups.at(-1)).toHaveBeenCalledOnce();
+  });
+
+  it('clears the previous follow-up before submitting context compression', async () => {
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    const registerContextUsageControls = vi.fn(
+      (_controls: ContextUsageControls) => vi.fn(),
+    );
+    const command = deferred<{ stopReason: 'cancelled' }>();
+    const onBeforeContextCompress = vi.fn();
+    sendPrompt.mockReturnValue(command.promise);
+    render({ registerContextUsageControls, onBeforeContextCompress });
+    let pending!: Promise<void>;
+    act(() => {
+      pending = registerContextUsageControls.mock.calls.at(-1)![0].compress();
+    });
+    expect(sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress');
+    expect(clearFollowup).toHaveBeenCalledOnce();
+    expect(onBeforeContextCompress).toHaveBeenCalledExactlyOnceWith(
+      connectionState.sessionId,
+    );
+    expect(clearFollowup.mock.invocationCallOrder[0]).toBeLessThan(
+      sendPrompt.mock.invocationCallOrder[0],
+    );
+    expect(onBeforeContextCompress.mock.invocationCallOrder[0]).toBeLessThan(
+      sendPrompt.mock.invocationCallOrder[0],
+    );
+    await act(async () => {
+      command.resolve({ stopReason: 'cancelled' });
+      await pending;
+    });
+  });
+
   it('exposes the selected pane without confusing it with a running session', () => {
     const props = { isActive: true };
     render(props);

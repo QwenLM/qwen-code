@@ -127,6 +127,11 @@ import {
   loadSessionCatalogOnce,
   SESSION_CATALOG_TRAILING_REFRESH_MS,
 } from './session-catalog/session-catalog-store';
+import {
+  useContextUsageControls,
+  type ContextUsageControls,
+  type RegisterContextUsageControls,
+} from './hooks/useContextUsageControls';
 import { useWorkspaceSessionLiveState } from './session-catalog/workspace-session-live-state';
 import { isAbsolutePath } from './components/sidebar/WorkspaceSection';
 import { useLiveVoiceSetup } from './live/useLiveVoiceSetup';
@@ -7592,6 +7597,16 @@ export function App({
   const [showRetryHint, setShowRetryHint] = useState(false);
   const showRetryHintRef = useRef(showRetryHint);
   showRetryHintRef.current = showRetryHint;
+  const disarmSubmittedPromptRetry = useCallback(() => {
+    lastSubmittedPromptRef.current = '';
+    lastSubmittedImagesRef.current = undefined;
+    lastSubmittedFilesRef.current = undefined;
+    lastSubmittedInputAnnotationsRef.current = undefined;
+    retryableTurnErrorIdRef.current = null;
+    retryableTurnErrorIdentityRef.current = undefined;
+    retriedTurnErrorIdRef.current = null;
+    failedTurnErrorRetryRef.current = null;
+  }, []);
   const rearmFailedTurnErrorRetry = useCallback(
     (
       retryableTurnError: DaemonTranscriptBlock,
@@ -9956,14 +9971,7 @@ export function App({
         // A slash submit is never retried; disarm the previous submit's
         // recorded retry state so a turn error on the slash turn cannot
         // resend the already-succeeded earlier prompt.
-        lastSubmittedPromptRef.current = '';
-        lastSubmittedImagesRef.current = undefined;
-        lastSubmittedFilesRef.current = undefined;
-        lastSubmittedInputAnnotationsRef.current = undefined;
-        retryableTurnErrorIdRef.current = null;
-        retryableTurnErrorIdentityRef.current = undefined;
-        retriedTurnErrorIdRef.current = null;
-        failedTurnErrorRetryRef.current = null;
+        disarmSubmittedPromptRetry();
       }
       setShowRetryHint(false);
       finishPreparing();
@@ -10062,6 +10070,7 @@ export function App({
     [
       beginPromptPreparation,
       clearFollowup,
+      disarmSubmittedPromptRetry,
       ensureSessionForPrompt,
       finishPromptPreparation,
       getComposerWorkspaceCwd,
@@ -17074,11 +17083,143 @@ export function App({
     };
   }, [appClassName, appStyle, portalRoot, selectedLanguage, selectedTheme]);
 
+  const prepareContextCompression = useCallback(() => {
+    disarmSubmittedPromptRetry();
+    setShowRetryHint(false);
+    clearFollowup();
+  }, [clearFollowup, disarmSubmittedPromptRetry]);
+  const preparePaneContextCompression = useCallback(
+    (sessionId: string) => {
+      if (sessionId === connection.sessionId) prepareContextCompression();
+    },
+    [connection.sessionId, prepareContextCompression],
+  );
+  const primaryContextControls = useContextUsageControls({
+    connection,
+    actions: sessionActions,
+    ownerGuard: sessionOwnerGuard,
+    onBeforeCompress: prepareContextCompression,
+    busy: streamingState !== 'idle' || sessionHasActivePrompt,
+    writeBlocked:
+      isDisabled ||
+      isStartingNewSessionSuggestion ||
+      approvalOverlayActive ||
+      unknownPromptAdmission?.payloadAvailable === true,
+  });
+  const [paneContextControls, setPaneContextControls] = useState<
+    Record<string, ContextUsageControls>
+  >({});
+  const registerContextUsageControls =
+    useCallback<RegisterContextUsageControls>((controls) => {
+      setPaneContextControls((current) => ({
+        ...current,
+        [controls.sessionId]: controls,
+      }));
+      return () =>
+        setPaneContextControls((current) => {
+          if (current[controls.sessionId] !== controls) return current;
+          const next = { ...current };
+          delete next[controls.sessionId];
+          return next;
+        });
+    }, []);
+  const [compressionResults, setCompressionResults] = useState<
+    Record<string, NonNullable<ContextUsageControls['result']>>
+  >({});
+  const observedCompressionResults = useRef(
+    new WeakSet<NonNullable<ContextUsageControls['result']>>(),
+  );
+  const reconciledContextReaders = useRef(
+    new WeakMap<
+      ContextUsageControls['getContextUsage'],
+      {
+        result: NonNullable<ContextUsageControls['result']>;
+        owner: ReturnType<ContextUsageControls['captureOwner']>;
+      }
+    >(),
+  );
+  useEffect(() => {
+    const updates: typeof compressionResults = {};
+    const owners = [
+      primaryContextControls,
+      ...Object.values(paneContextControls),
+    ];
+    for (const controls of owners) {
+      const result = controls?.result;
+      if (result && !observedCompressionResults.current.has(result)) {
+        observedCompressionResults.current.add(result);
+        updates[controls.sessionId] = result;
+        reconciledContextReaders.current.set(controls.getContextUsage, {
+          result,
+          owner: controls.captureOwner(),
+        });
+      }
+    }
+    if (Object.keys(updates).length > 0)
+      setCompressionResults((current) => ({ ...current, ...updates }));
+    for (const controls of owners) {
+      const result =
+        controls &&
+        (updates[controls.sessionId] ?? compressionResults[controls.sessionId]);
+      const reconciled =
+        controls &&
+        reconciledContextReaders.current.get(controls.getContextUsage);
+      if (
+        !controls?.canCompress ||
+        !result ||
+        result.kind === 'failed' ||
+        (reconciled?.result === result && reconciled.owner.isCurrent())
+      )
+        continue;
+      reconciledContextReaders.current.set(controls.getContextUsage, {
+        result,
+        owner: controls.captureOwner(),
+      });
+      // Reattachment can restore old replay counters even on the same reader.
+      // Reconcile through its current owner, never copy another one's counters.
+      void controls
+        .getContextUsage({ silent: true, syncCounters: true })
+        .catch(() => undefined);
+    }
+  }, [primaryContextControls, paneContextControls, compressionResults]);
+  const contextUsageControls = useMemo(() => {
+    const live =
+      primaryContextControls &&
+      (mainView !== 'split' ||
+        !splitSessionIds.includes(primaryContextControls.sessionId))
+        ? {
+            ...paneContextControls,
+            [primaryContextControls.sessionId]: primaryContextControls,
+          }
+        : paneContextControls;
+    return Object.fromEntries(
+      Object.entries(live).map(([id, controls]) => [
+        id,
+        {
+          ...controls,
+          result: controls.compressing
+            ? undefined
+            : controls.result &&
+                !observedCompressionResults.current.has(controls.result)
+              ? controls.result
+              : (compressionResults[id] ?? controls.result),
+        },
+      ]),
+    );
+  }, [
+    mainView,
+    splitSessionIds,
+    paneContextControls,
+    primaryContextControls,
+    compressionResults,
+  ]);
+
   // Shared by the drawer and docked render sites below; only the genuine
   // per-variant props (variant / panelWidth) stay at each site.
   const artifactPanelSharedProps = {
     artifacts: artifactPanelArtifacts,
     tabs: artifactPanelTabs,
+    contextUsageControls,
     activeTabId: activeArtifactPanelTabId,
     reviewChanges,
     selectedReviewPath,
@@ -18559,6 +18700,8 @@ export function App({
                         onRightPanelOpen={handleTurnOutputOpen}
                         onOpenMonitor={openMonitorPanel}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
+                        registerContextUsageControls={registerContextUsageControls}
+                        onBeforeContextCompress={preparePaneContextCompression}
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}

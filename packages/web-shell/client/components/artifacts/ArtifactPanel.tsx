@@ -109,6 +109,7 @@ import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
 import type { WebPreviewState } from '../preview/web-preview';
 import { TokenUsagePanel } from './TokenUsagePanel';
+import type { ContextUsageControls } from '../../hooks/useContextUsageControls';
 import { ContextUsagePanel } from './ContextUsagePanel';
 import {
   useArtifactWorkspaceTarget,
@@ -354,6 +355,7 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
 ];
 
 interface ArtifactPanelProps {
+  contextUsageControls?: Readonly<Record<string, ContextUsageControls>>;
   artifacts: readonly DaemonSessionArtifact[];
   tabs: readonly ArtifactPanelTab[];
   activeTabId: string | null;
@@ -431,6 +433,7 @@ interface ArtifactPanelProps {
 }
 
 export function ArtifactPanel({
+  contextUsageControls,
   artifacts,
   tabs,
   activeTabId,
@@ -1227,6 +1230,7 @@ export function ArtifactPanel({
         ) : activeTab.kind === 'context_usage' ? (
           <ContextUsagePanel
             key={activeTab.id}
+            controls={contextUsageControls?.[activeTab.sessionId]}
             sessionActions={activeTab.sessionActions}
             sessionId={activeTab.sessionId}
           />

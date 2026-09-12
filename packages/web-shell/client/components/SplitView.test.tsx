@@ -112,6 +112,12 @@ vi.mock('./ChatPane', () => ({
         data-maximized={props.isMaximized ? 'true' : 'false'}
         data-pane-active={props.isActive ? '' : undefined}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
+        data-context-controls={
+          props.registerContextUsageControls ? 'true' : 'false'
+        }
+        data-before-context-compress={
+          props.onBeforeContextCompress ? 'true' : 'false'
+        }
         data-hidden={props.hidden ? 'true' : 'false'}
         data-report-catalog-turn-completion={
           props.reportCatalogTurnCompletion ? 'true' : 'false'
@@ -508,8 +514,16 @@ describe('SplitView', () => {
   });
 
   it('renders one pane per initial session, each under its own provider', () => {
-    render({ sessionIds: ['s1', 's2'] });
+    render({
+      sessionIds: ['s1', 's2'],
+      registerContextUsageControls: vi.fn(),
+      onBeforeContextCompress: vi.fn(),
+    });
     expect(panes()).toHaveLength(2);
+    for (const pane of panes()) {
+      expect(pane.getAttribute('data-context-controls')).toBe('true');
+      expect(pane.getAttribute('data-before-context-compress')).toBe('true');
+    }
     expect(titles()).toEqual(['One', 'Two']);
     const providers = container!.querySelectorAll('[data-session]');
     expect(providers[0].getAttribute('data-session')).toBe('s1');

@@ -25,6 +25,154 @@ import type {
   SettledPrompt,
 } from './types';
 
+describe('context usage counter reconciliation', () => {
+  function snapshot() {
+    return {
+      v: 1,
+      sessionId: 'session-a',
+      workspaceCwd: '/workspace',
+      formattedText: '',
+      usage: {
+        modelName: 'model-a',
+        isEstimated: true,
+        totalTokens: 40,
+        contextWindowSize: 100,
+        breakdown: {
+          systemPrompt: 10,
+          builtinTools: 0,
+          mcpTools: 0,
+          memoryFiles: 0,
+          skills: 0,
+          messages: 30,
+          freeSpace: 50,
+          autocompactBuffer: 10,
+        },
+        builtinTools: [],
+        mcpTools: [],
+        memoryFiles: [],
+        skills: [],
+      },
+    };
+  }
+
+  it.each([false, true])(
+    'updates only composer counters when explicitly requested (sync=%s)',
+    async (syncCounters) => {
+      const session = createMockSession('session-a');
+      session.contextUsage.mockResolvedValue(snapshot());
+      const tokenUsage = { inputTokens: 500, outputTokens: 100 };
+      const h = createActionsHarness({
+        session,
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          workspaceCwd: '/workspace',
+          currentModel: 'model-a',
+          tokenCount: 60,
+          contextWindow: undefined,
+          tokenUsage,
+        },
+      });
+      const result = await h.actions.getContextUsage({
+        detail: true,
+        syncCounters,
+      });
+      expect(result).toEqual(snapshot());
+      expect(h.getConnection().tokenCount).toBe(syncCounters ? 40 : 60);
+      expect(h.getConnection().contextWindow).toBe(
+        syncCounters ? 100 : undefined,
+      );
+      expect(h.getConnection().tokenUsage).toBe(tokenUsage);
+      expect(session.contextUsage).toHaveBeenCalledWith({ detail: true });
+    },
+  );
+
+  it.each([
+    'usage',
+    'equal-count-usage',
+    'model',
+    'client',
+    'disconnect',
+    'wrong-snapshot',
+    'loadingTranscript',
+    'catchingUp',
+    'workspace',
+    'unavailable-snapshot',
+    'unknown-count',
+    'context-window',
+    'model-round-trip',
+    'connection-session',
+    'zero-window',
+  ] as const)(
+    'does not overwrite a newer or different owner: %s',
+    async (change) => {
+      const session = createMockSession('session-a');
+      let resolve!: (value: ReturnType<typeof snapshot>) => void;
+      session.contextUsage.mockReturnValue(
+        new Promise<ReturnType<typeof snapshot>>((done) => {
+          resolve = done;
+        }),
+      );
+      const connection: DaemonConnectionState = {
+        status: 'connected',
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace',
+        currentModel: 'model-a',
+        tokenCount: 60,
+        contextWindow: 100,
+        tokenUsage: { inputTokens: 60 },
+      };
+      const h = createActionsHarness({ session, connection });
+      const request = h.actions.getContextUsage({ syncCounters: true });
+      if (change === 'usage')
+        h.replaceConnection({ ...connection, tokenCount: 70 });
+      if (change === 'equal-count-usage')
+        h.replaceConnection({ ...connection, tokenUsage: { inputTokens: 60 } });
+      if (change === 'model')
+        h.replaceConnection({ ...connection, currentModel: 'model-b' });
+      if (change === 'client')
+        h.sessionRef.current = createMockSession(
+          'session-a',
+          'new-client',
+        ) as unknown as DaemonSessionClient;
+      if (change === 'disconnect')
+        h.replaceConnection({ ...connection, status: 'error' });
+      if (change === 'loadingTranscript' || change === 'catchingUp')
+        h.replaceConnection({ ...connection, [change]: true });
+      if (change === 'workspace')
+        h.replaceConnection({ ...connection, workspaceCwd: '/other' });
+      if (change === 'connection-session')
+        h.replaceConnection({ ...connection, sessionId: 'session-b' });
+      if (change === 'context-window')
+        h.replaceConnection({ ...connection, contextWindow: 32_000 });
+      if (change === 'model-round-trip') {
+        await h.actions.setModel('model-b');
+        expect(h.getConnection().currentModel).toBe('model-b');
+        await h.actions.setModel('model-a');
+        expect(h.getConnection().currentModel).toBe('model-a');
+      }
+      const value = snapshot();
+      if (change === 'wrong-snapshot') value.sessionId = 'session-b';
+      if (change === 'unavailable-snapshot') {
+        value.usage.totalTokens = 0;
+        value.usage.contextWindowSize = 0;
+      }
+      if (change === 'unknown-count') {
+        value.usage.totalTokens = 0;
+        value.usage.breakdown.messages = 0;
+        value.usage.breakdown.freeSpace = 80;
+      }
+      if (change === 'zero-window') value.usage.contextWindowSize = 0;
+      resolve(value);
+      await request;
+      expect(h.getConnection().tokenCount).toBe(change === 'usage' ? 70 : 60);
+      expect(h.getConnection().contextWindow).toBe(
+        change === 'context-window' ? 32_000 : 100,
+      );
+    },
+  );
+});
+
 describe('getConnectionAfterSessionClear', () => {
   it.each(['sendPrompt', 'submitPrompt'] as const)(
     'preserves declared text before host and attachment expansion through %s',
