@@ -10,6 +10,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonGitBranchesResult,
+  DaemonGitRemotesResult,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 
@@ -17,14 +18,78 @@ import type {
 // settle under `act` in jsdom. Render the trigger and content inline instead
 // so the action wiring can be exercised directly.
 vi.mock('./ui/popover', async () => {
-  const { createElement } = await import('react');
+  const {
+    createElement,
+    createContext,
+    forwardRef,
+    useContext,
+    useEffect,
+    useRef,
+  } = await import('react');
+  interface PopoverOpenState {
+    open: boolean;
+    onOpenChange?: (open: boolean) => void;
+  }
+  const OpenContext = createContext<PopoverOpenState>({ open: true });
+  const PopoverContent = forwardRef<
+    HTMLDivElement,
+    {
+      children?: unknown;
+      onEscapeKeyDown?: (e: KeyboardEvent) => void;
+    }
+  >(({ children, onEscapeKeyDown }, ref) => {
+    // Like Radix, the content unmounts when the popover closes.
+    const { open: popoverOpen, onOpenChange } = useContext(OpenContext);
+    const escapeHandlerRef = useRef(onEscapeKeyDown);
+    escapeHandlerRef.current = onEscapeKeyDown;
+    // Like Radix's DismissableLayer (react-use-escape-keydown): Escape is
+    // handled on the owner document in the CAPTURE phase — ahead of any
+    // handler on the focused input — and only `event.key` is checked (no
+    // IME guard), so the component's preserveImeEscape mask is exercised
+    // exactly the way the real layer sees it. An un-prevented Escape
+    // dismisses the popover.
+    useEffect(() => {
+      if (!popoverOpen) return;
+      const handler = (e: KeyboardEvent) => {
+        if (e.key !== 'Escape') return;
+        escapeHandlerRef.current?.(e);
+        if (!e.defaultPrevented) onOpenChange?.(false);
+      };
+      document.addEventListener('keydown', handler, { capture: true });
+      return () =>
+        document.removeEventListener('keydown', handler, { capture: true });
+    }, [popoverOpen, onOpenChange]);
+    if (!popoverOpen) return null;
+    return createElement(
+      'div',
+      {
+        'data-test-popover-content': '',
+        ref,
+      },
+      children,
+    );
+  });
+  PopoverContent.displayName = 'PopoverContent';
   return {
-    Popover: ({ children }: { children?: unknown }) =>
-      createElement('div', null, children),
+    Popover: ({
+      children,
+      open,
+      onOpenChange,
+    }: {
+      children?: unknown;
+      open?: boolean;
+      onOpenChange?: (open: boolean) => void;
+    }) =>
+      createElement(
+        OpenContext.Provider,
+        { value: { open: open ?? true, onOpenChange } },
+        children,
+      ),
     PopoverTrigger: ({ children }: { children?: unknown }) =>
       createElement('div', null, children),
-    PopoverContent: ({ children }: { children?: unknown }) =>
-      createElement('div', { 'data-test-popover-content': '' }, children),
+    // Forward onEscapeKeyDown the way Radix's DismissableLayer does, so the
+    // component's Escape handling is exercised without the real dependency.
+    PopoverContent,
   };
 });
 
@@ -35,6 +100,9 @@ const {
   workspaceGitCheckout,
   workspaceGitPush,
   workspaceGit,
+  workspaceGitRemotes,
+  workspaceGitRemoteAdd,
+  workspaceGitRemoteRemove,
   workspaceClient,
 } = vi.hoisted(() => {
   const workspaceGitBranches = vi.fn();
@@ -43,6 +111,9 @@ const {
   const workspaceGitCheckout = vi.fn();
   const workspaceGitPush = vi.fn();
   const workspaceGit = vi.fn();
+  const workspaceGitRemotes = vi.fn();
+  const workspaceGitRemoteAdd = vi.fn();
+  const workspaceGitRemoteRemove = vi.fn();
   // A stable client so the popover's memoized workspace handle (and thus its
   // fetch effect) stays referentially stable across renders.
   const workspaceClient = {
@@ -53,6 +124,9 @@ const {
       workspaceGitCreateBranch,
       workspaceGitPush,
       workspaceGitPull,
+      workspaceGitRemotes,
+      workspaceGitRemoteAdd,
+      workspaceGitRemoteRemove,
     }),
   };
   return {
@@ -62,6 +136,9 @@ const {
     workspaceGitCheckout,
     workspaceGitPush,
     workspaceGit,
+    workspaceGitRemotes,
+    workspaceGitRemoteAdd,
+    workspaceGitRemoteRemove,
     workspaceClient,
   };
 });
@@ -82,8 +159,12 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
 
 const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
 const { I18nProvider } = await import('../i18n');
-const { BranchPickerPopover, deriveActionHints, listingContradictsStatus } =
-  await import('./BranchPickerPopover');
+const {
+  BranchPickerPopover,
+  deriveActionHints,
+  listingContradictsStatus,
+  GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
+} = await import('./BranchPickerPopover');
 
 // A branch with an upstream it is behind on, so the Update Project row is
 // enabled (the action hints disable it without an upstream). Annotated with
@@ -144,20 +225,25 @@ function mount(
     onOpenDiff: () => void;
     onOpenCommit: () => void;
     onOpenChange: (open: boolean) => void;
+    onBranchChanged: () => void;
     open: boolean;
     onStatusRefreshed: (status: DaemonWorkspaceGitStatus) => void;
     status: DaemonWorkspaceGitStatus;
+    gitCwd: string;
+    language: 'en' | 'zh-CN';
   }> = {},
 ): void {
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={overrides.language ?? 'en'}>
         <BranchPickerPopover
           open={overrides.open ?? true}
           onOpenChange={overrides.onOpenChange ?? vi.fn()}
           workspaceCwd="/repo"
+          gitCwd={overrides.gitCwd}
           status={overrides.status}
           onStatusRefreshed={overrides.onStatusRefreshed}
+          onBranchChanged={overrides.onBranchChanged}
           onOpenDiff={overrides.onOpenDiff}
           onOpenCommit={overrides.onOpenCommit}
         >
@@ -166,6 +252,26 @@ function mount(
       </I18nProvider>,
     );
   });
+}
+
+function defaultRemotesResult(): DaemonGitRemotesResult {
+  return {
+    v: 1,
+    workspaceCwd: '/repo',
+    available: true,
+    remotes: [
+      {
+        name: 'origin',
+        fetchUrl: 'https://example.com/o/r.git',
+        pushUrl: 'https://example.com/o/r.git',
+        extraFetchUrls: 0,
+        extraPushUrls: 0,
+        promisor: false,
+        customRefspec: false,
+        otherSettings: 0,
+      },
+    ],
+  };
 }
 
 function clickButton(label: string): void {
@@ -187,20 +293,29 @@ afterEach(() => {
   workspaceGitCheckout.mockResolvedValue(undefined);
   workspaceGitPush.mockReset();
   workspaceGitPush.mockResolvedValue({ success: true, output: '' });
+  workspaceGitRemotes.mockReset();
+  workspaceGitRemotes.mockResolvedValue(defaultRemotesResult());
+  workspaceGitRemoteAdd.mockReset();
+  workspaceGitRemoteRemove.mockReset();
   // Default: the popover's own status fetch yields nothing, so hints derive
   // from the caller's `status` prop alone unless a test resolves it.
   workspaceGit.mockRejectedValue(new Error('no status'));
 });
 workspaceGit.mockRejectedValue(new Error('no status'));
+// Seeded at module scope too: `afterEach` only runs after a test, so the
+// first test in the file (or any `-t` filtered run starting inside the
+// remotes block) would otherwise face a bare `vi.fn()` resolving undefined.
+workspaceGitRemotes.mockResolvedValue(defaultRemotesResult());
 
 function mountWithBranches(
   branchesResult: DaemonGitBranchesResult = BRANCHES,
+  overrides: Parameters<typeof mount>[0] = {},
 ): void {
   workspaceGitBranches.mockResolvedValue(branchesResult);
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  mount({});
+  mount(overrides);
 }
 
 describe('BranchPickerPopover actions', () => {
@@ -1648,5 +1763,2864 @@ describe('listingContradictsStatus', () => {
     expect(listingContradictsStatus(gone, status({ hasUpstream: false }))).toBe(
       false,
     );
+  });
+});
+
+describe('BranchPickerPopover remotes view', () => {
+  function setInput(testId: string, value: string): void {
+    const input = document.body.querySelector<HTMLInputElement>(
+      `input[data-testid="${testId}"]`,
+    );
+    expect(input).toBeTruthy();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      nativeSetter?.call(input, value);
+      input?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  function clickTestId(testId: string): void {
+    const el = document.body.querySelector(`[data-testid="${testId}"]`);
+    expect(el).toBeTruthy();
+    act(() => {
+      el?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+  }
+
+  async function openRemotesView(
+    overrides: Parameters<typeof mount>[0] = {},
+  ): Promise<void> {
+    mountWithBranches(BRANCHES, overrides);
+    await flush();
+    // The popover's open-time autofocus fires on an unawaited 50ms timer:
+    // let it land before a test moves focus, or under load the timer
+    // steals the asserted target back to the search box (and blesses the
+    // search-box fallback for the wrong reason).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+    });
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+  }
+
+  it('opens the remotes panel and lists remotes with URLs', async () => {
+    await openRemotesView();
+
+    expect(workspaceGitRemotes).toHaveBeenCalledTimes(1);
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('origin');
+    expect(content?.textContent).toContain('https://example.com/o/r.git');
+    // The branches listing is swapped out while the panel is up.
+    expect(content?.textContent).not.toContain('Update Project');
+  });
+
+  it('adds a remote and renders the list the daemon returned', async () => {
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+        },
+        {
+          name: 'fork',
+          fetchUrl: 'https://example.com/f/r.git',
+          pushUrl: 'https://example.com/f/r.git',
+        },
+      ],
+    });
+    await openRemotesView();
+
+    setInput('remote-add-name', ' fork ');
+    setInput('remote-add-url', ' https://example.com/f/r.git ');
+    clickTestId('remote-add-submit');
+    await flush();
+
+    expect(workspaceGitRemoteAdd).toHaveBeenCalledWith(
+      'fork',
+      'https://example.com/f/r.git',
+      undefined,
+      GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
+    );
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('fork');
+    expect(footerText()).toContain('Added remote fork');
+    // The add form cleared for the next entry.
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        'input[data-testid="remote-add-name"]',
+      )?.value,
+    ).toBe('');
+  });
+
+  it('surfaces a daemon add failure in the footer and keeps the list', async () => {
+    workspaceGitRemoteAdd.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'remote_already_exists',
+          message: 'error: remote origin already exists.',
+        },
+        'POST /workspaces/:workspace/git/remote: remote_already_exists',
+      ),
+    );
+    await openRemotesView();
+
+    setInput('remote-add-name', 'origin');
+    setInput('remote-add-url', 'https://example.com/other.git');
+    clickTestId('remote-add-submit');
+    await flush();
+
+    expect(footerText()).toContain('remote origin already exists');
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('origin');
+    expect(content?.textContent).not.toContain('other.git');
+  });
+
+  it('rejects dash-prefixed input locally without calling the daemon', async () => {
+    await openRemotesView();
+
+    setInput('remote-add-name', '-x');
+    setInput('remote-add-url', 'https://example.com/o/r.git');
+    // The submit button stays enabled for non-empty input; the guard fires
+    // on click.
+    clickTestId('remote-add-submit');
+    await flush();
+
+    expect(workspaceGitRemoteAdd).not.toHaveBeenCalled();
+    expect(footerText()).toContain('Enter a remote name and URL');
+  });
+
+  it('removes a remote only after the two-click confirm', async () => {
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    const onBranchChanged = vi.fn();
+    await openRemotesView({ onBranchChanged });
+    const branchesCallsBefore = workspaceGitBranches.mock.calls.length;
+    const statusCallsBefore = workspaceGit.mock.calls.length;
+
+    clickTestId('remote-remove-origin');
+    // First click only arms the confirm; nothing is sent yet.
+    expect(workspaceGitRemoteRemove).not.toHaveBeenCalled();
+    expect(onBranchChanged).not.toHaveBeenCalled();
+
+    clickTestId('remote-remove-origin');
+    await flush();
+
+    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith(
+      'origin',
+      undefined,
+      GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
+    );
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('No remotes configured');
+    expect(footerText()).toContain('Removed remote origin');
+    // Removal invalidates the branch listing's remote groups and the chip's
+    // tracking state, so both refresh. Counted before/after: the on-open
+    // fetches already recorded a call each, so a bare toHaveBeenCalled()
+    // would pass even with the post-remove refresh deleted.
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(
+      branchesCallsBefore,
+    );
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusCallsBefore);
+    expect(onBranchChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces a remove failure in the footer', async () => {
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "error: No such remote: 'gone'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    await openRemotesView();
+    const remotesCallsBefore = workspaceGitRemotes.mock.calls.length;
+
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+
+    expect(footerText()).toContain('No such remote');
+    // A refused remove means the displayed list is stale (git says the
+    // remote is gone); the panel must re-read instead of keeping the row.
+    expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(
+      remotesCallsBefore,
+    );
+  });
+
+  it('returns to the branches view via the back button', async () => {
+    await openRemotesView();
+
+    clickTestId('remotes-back');
+    await flush();
+
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('Update Project');
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+  });
+
+  it('filters remotes by the search box', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+        },
+        {
+          name: 'upstream',
+          fetchUrl: 'git@example.com:u/r.git',
+          pushUrl: 'git@example.com:u/r.git',
+        },
+      ],
+    });
+    await openRemotesView();
+
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search remotes"]',
+    );
+    expect(search).toBeTruthy();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      nativeSetter?.call(search, 'upstream');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('upstream');
+    expect(content?.textContent).not.toContain('origin');
+  });
+
+  it('renders the load failure and hides the add form', async () => {
+    workspaceGitRemotes.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        {
+          error: 'not_a_git_repository',
+          message: 'fatal: not a git repository',
+        },
+        'GET /workspaces/:workspace/git/remotes: not_a_git_repository',
+      ),
+    );
+    await openRemotesView();
+
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('not a git repository');
+    // A failed read must not masquerade as an empty configuration.
+    expect(content?.textContent).not.toContain('No remotes configured');
+    expect(
+      document.body.querySelector('input[data-testid="remote-add-name"]'),
+    ).toBeNull();
+  });
+
+  it('distinguishes a filtered-to-empty list from no remotes at all', async () => {
+    await openRemotesView();
+
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search remotes"]',
+    );
+    expect(search).toBeTruthy();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      nativeSetter?.call(search, 'zzz-no-match');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('No remotes match the search');
+    expect(content?.textContent).not.toContain('No remotes configured');
+  });
+
+  it('keeps a sticky stash warning across a remotes round trip', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 1..2',
+      stashRestoreConflict: true,
+      stashSha: 'dcda4a53ed6526ecc6c4cda837d665140a2baff1',
+    });
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+
+    // Navigating into the remotes view and back must not destroy the only
+    // record that the user's changes sit in a stash entry.
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    clickTestId('remotes-back');
+    await flush();
+
+    expect(footerText()).toContain('restoring your stashed changes failed');
+    expect(footerText()).toContain('dcda4a53ed65');
+  });
+
+  it('restores the sticky stash warning a remotes mutation overwrote', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 1..2',
+      stashRestoreConflict: true,
+      stashSha: 'dcda4a53ed6526ecc6c4cda837d665140a2baff1',
+    });
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    // A remotes mutation writes its own footer: the stash warning must
+    // come back — message AND sticky flag — when leaving the view, or
+    // the only record of the stash entry is lost.
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(footerText()).toContain('Added remote');
+    clickTestId('remotes-back');
+    await flush();
+
+    expect(footerText()).toContain('restoring your stashed changes failed');
+    expect(footerText()).toContain('dcda4a53ed65');
+    expect(footerText()).not.toContain('Added remote');
+
+    // The sticky flag is restored too: the reopen reset must keep the
+    // warning, not clear it.
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+  });
+
+  it('restores the sticky warning after a dismiss with the remotes view up', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 1..2',
+      stashRestoreConflict: true,
+      stashSha: 'dcda4a53ed6526ecc6c4cda837d665140a2baff1',
+    });
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(footerText()).toContain('Added remote');
+
+    // Dismissal (outside click, trigger toggle) never runs the back
+    // button's restore path — the snapshot must still come back, message
+    // AND flag, on the next open.
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+    expect(footerText()).toContain('dcda4a53ed65');
+    expect(footerText()).not.toContain('Added remote');
+  });
+
+  it('keeps the sticky warning when a mutation settles after the view exit', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 1..2',
+      stashRestoreConflict: true,
+      stashSha: 'dcda4a53ed6526ecc6c4cda837d665140a2baff1',
+    });
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // Leave the view while the removal is still in flight: the settle's
+    // footer must win the exit, not clobber the restored warning.
+    clickTestId('remotes-back');
+    await flush();
+    // A dismiss+reopen WHILE BUSY must not consume the held snapshot
+    // either — the open effect's busy gate keeps it for a post-settle
+    // open.
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+    expect(footerText()).toContain('Removed remote');
+
+    // Re-entering the view before any restore point must not null the
+    // held snapshot (the settle disarmed the flag, so the re-snapshot
+    // reads null and the held copy is the only surviving one). The back
+    // click below is unblocked, so closeRemores restores and consumes
+    // the held snapshot there.
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    clickTestId('remotes-back');
+    await flush();
+
+    // The dismiss/reopen pins the re-armed warning surviving the open
+    // reset.
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+    expect(footerText()).toContain('dcda4a53ed65');
+    expect(footerText()).not.toContain('Removed remote');
+  });
+
+  it('a newer sticky warning outranks a snapshot held from an older one', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 1..2',
+      stashRestoreConflict: true,
+      stashSha: 'dcda4a53ed6526ecc6c4cda837d665140a2baff1',
+    });
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('dcda4a53ed65');
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    clickTestId('remotes-back');
+    await flush();
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+
+    // A second pull arms a NEWER warning while the older one is still
+    // held: the standing warning wins and the stale snapshot is dropped.
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 3..4',
+      stashRestoreConflict: true,
+      stashSha: 'aaaa1111bbbb6526ecc6c4cda837d665140a2baff1',
+    });
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('aaaa1111bbbb');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    expect(footerText()).toContain('aaaa1111bbbb');
+    expect(footerText()).not.toContain('dcda4a53ed65');
+    expect(footerText()).not.toContain('Removed remote');
+  });
+
+  it('disarms a pending remove confirm when the popover reopens', async () => {
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).toContain('Confirm');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    // The reopen lands on the branches view (this click only exists there),
+    // and re-entering the panel must not carry the armed confirm over.
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+
+    const removeBtn = document.body.querySelector(
+      '[data-testid="remote-remove-origin"]',
+    );
+    expect(removeBtn).toBeTruthy();
+    expect(removeBtn?.textContent).not.toContain('Confirm');
+  });
+
+  it('strips bidi/zero-width characters from the display but removes by the raw name', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'or\u202eigin',
+          fetchUrl: 'https://example.com/\u202eevil\u2029x',
+          pushUrl: 'https://example.com/\u202eevil\u2029x',
+        },
+        {
+          // RLM (U+200F): a bidi mark outside the \u202a-\u202e range —
+          // the Default_Ignorable extension of the sanitizer's class.
+          name: 'upstre\u200fam',
+          fetchUrl: 'https://example.com/u/r.git',
+          pushUrl: 'https://example.com/u/r.git',
+        },
+      ],
+    });
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+
+    const row = document.body.querySelector(
+      '[data-testid="remote-remove-or\u202eigin"]',
+    )?.parentElement;
+    // The rendered text carries the stripped form, not the raw override or
+    // the paragraph separator (a CSS segment break).
+    expect(row?.textContent).toContain('origin');
+    expect(row?.textContent).not.toContain('\u202e');
+    expect(row?.textContent).not.toContain('\u2029');
+    expect(row?.textContent).toContain('https://example.com/evilx');
+
+    // The RLM-bearing name renders stripped too.
+    const rlmRow = document.body.querySelector(
+      '[data-testid="remote-remove-upstre\u200fam"]',
+    )?.parentElement;
+    expect(rlmRow?.textContent).toContain('upstream');
+    expect(rlmRow?.textContent).not.toContain('\u200f');
+
+    // The search filter matches what the row renders, so typing the
+    // displayed name still finds it — for both character classes.
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search remotes"]',
+    );
+    expect(search).toBeTruthy();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      nativeSetter?.call(search, 'upstream');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+    expect(
+      document.body.querySelector(
+        '[data-testid="remote-remove-upstre\u200fam"]',
+      ),
+    ).toBeTruthy();
+    act(() => {
+      nativeSetter?.call(search, 'origin');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-or\u202eigin"]'),
+    ).toBeTruthy();
+    act(() => {
+      nativeSetter?.call(search, '');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    // Removal still targets the raw configured name.
+    clickTestId('remote-remove-or\u202eigin');
+    clickTestId('remote-remove-or\u202eigin');
+    await flush();
+    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith(
+      'or\u202eigin',
+      undefined,
+      GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
+    );
+    // The footer renders the success message verbatim too, so it carries
+    // the stripped name, not the raw override.
+    expect(footerText()).toContain('Removed remote origin');
+    expect(footerText()).not.toContain('\u202e');
+  });
+
+  it('does not carry the action-finding query into the remotes filter', async () => {
+    mountWithBranches();
+    await flush();
+
+    // Typing "remotes" is the natural way to find the action row; entering
+    // the panel must not keep it as the list filter.
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search for branches and actions"]',
+    );
+    expect(search).toBeTruthy();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      nativeSetter?.call(search, 'remotes');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+    expect(search?.value).toBe('');
+  });
+
+  it('re-reads only when the refusal says the list is stale', async () => {
+    // 404 no_such_remote means a row on screen no longer exists: re-read.
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "error: No such remote: 'gone'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    await openRemotesView();
+    let calls = workspaceGitRemotes.mock.calls.length;
+    const branchCalls = workspaceGitBranches.mock.calls.length;
+    const statusCalls = workspaceGit.mock.calls.length;
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(calls);
+    // no_such_remote proves the refs and upstream config are gone too:
+    // refresh the branch list and the sidebar chip.
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(branchCalls);
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusCalls);
+    // A refused removal disarms the two-click confirm on the surviving
+    // row: the next single click must re-arm, not execute.
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).not.toContain('Confirm');
+    const removeCalls = workspaceGitRemoteRemove.mock.calls.length;
+    clickTestId('remote-remove-origin');
+    expect(workspaceGitRemoteRemove.mock.calls.length).toBe(removeCalls);
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).toContain('Confirm');
+
+    // A 400 validation refusal leaves the usable list and the typed draft
+    // on screen: no re-read, no teardown.
+    workspaceGitRemoteAdd.mockRejectedValue(
+      new DaemonHttpError(
+        400,
+        { error: 'invalid_remote_name', message: 'Invalid remote name' },
+        'POST /workspaces/:workspace/git/remote: invalid_remote_name',
+      ),
+    );
+    calls = workspaceGitRemotes.mock.calls.length;
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    expect(nameInput).toBeTruthy();
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setter?.call(nameInput, 'origin/main');
+      nameInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const urlInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-url"]',
+    );
+    act(() => {
+      setter?.call(urlInput, 'https://example.com/o/r.git');
+      urlInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(workspaceGitRemotes.mock.calls.length).toBe(calls);
+    expect(
+      document.body.querySelector('input[data-testid="remote-add-name"]'),
+    ).toBeTruthy();
+    // The typed draft and the usable list survive the refusal.
+    expect(nameInput?.value).toBe('origin/main');
+    expect(urlInput?.value).toBe('https://example.com/o/r.git');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+    expect(footerText()).toContain('Invalid remote name');
+
+    // 409 remote_already_exists on ADD means a remote the panel does not
+    // show already exists: silent re-read, rows retained.
+    workspaceGitRemoteAdd.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'remote_already_exists',
+          message: 'error: remote fork already exists.',
+        },
+        'POST /workspaces/:workspace/git/remote: remote_already_exists',
+      ),
+    );
+    calls = workspaceGitRemotes.mock.calls.length;
+    act(() => {
+      setter?.call(nameInput, 'fork');
+      nameInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      setter?.call(urlInput, 'https://example.com/f/r.git');
+      urlInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(calls);
+  });
+
+  it('keeps rows on screen while a stale-list re-read is in flight', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "error: No such remote: 'gone'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    await openRemotesView();
+    workspaceGitRemotes.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // The silent re-read must not swap the rows for the loading placeholder.
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+    expect(document.body.textContent).not.toContain('Loading remotes');
+    // The refusal catch AWAITS the re-read, so the settle-time effects
+    // (focus restore, busy release) only run after the list converges.
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeNull();
+
+    // The add path keeps the fire-and-forget re-read: a mutation that
+    // completes while that read is in flight still wins when it lands.
+    let releaseAdd: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteAdd
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          409,
+          {
+            error: 'remote_already_exists',
+            message: 'error: remote fork already exists.',
+          },
+          'POST /workspaces/:workspace/git/remote: remote_already_exists',
+        ),
+      )
+      .mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/repo',
+        remotes: [
+          {
+            name: 'fork',
+            fetchUrl: 'https://example.com/f/r.git',
+            pushUrl: 'https://example.com/f/r.git',
+            extraFetchUrls: 0,
+            extraPushUrls: 0,
+            promisor: false,
+            customRefspec: false,
+            otherSettings: 0,
+          },
+        ],
+      });
+    workspaceGitRemotes.mockImplementation(
+      () => new Promise((resolve) => (releaseAdd = resolve)),
+    );
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    const urlInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-url"]',
+    );
+    act(() => {
+      setter?.call(nameInput, 'fork');
+      nameInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      setter?.call(urlInput, 'https://example.com/f/r.git');
+      urlInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // First submit is refused (stale re-read held); the retry succeeds.
+    clickTestId('remote-add-submit');
+    await flush();
+    clickTestId('remote-add-submit');
+    await flush();
+    await act(async () => {
+      releaseAdd?.(defaultRemotesResult());
+    });
+    await flush();
+    // The older read must not repaint its stale snapshot over the row the
+    // successful add just put on screen.
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-fork"]'),
+    ).toBeTruthy();
+  });
+
+  it('Escape leaves the remotes view instead of dismissing the popover', async () => {
+    await openRemotesView();
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content).toBeTruthy();
+    // Radix dismisses on Escape unless the handler prevents default, and
+    // the cancelable event is the only carrier of that witness here (the
+    // mock renders content unconditionally).
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      content?.dispatchEvent(escape);
+    });
+    expect(escape.defaultPrevented).toBe(true);
+    await flush();
+    // Back on the branches view: the manage-remotes row is visible again and
+    // the panel header is gone.
+    expect(
+      document.body.querySelector(
+        '[data-testid="branch-picker-manage-remotes"]',
+      ),
+    ).toBeTruthy();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+  });
+
+  it('renders a visible label for a name that strips to empty', async () => {
+    const result: DaemonGitRemotesResult = {
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: '\u200b\u200c',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    };
+    workspaceGitRemotes.mockResolvedValue(result);
+    await openRemotesView();
+    const row = document.body.querySelector(
+      '[data-testid="remote-remove-\u200b\u200c"]',
+    )?.parentElement;
+    expect(row?.textContent).toContain('(invisible name)');
+    // The armed confirm names the object it destroys.
+    clickTestId('remote-remove-\u200b\u200c');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-\u200b\u200c"]')
+        ?.textContent,
+    ).toContain('Confirm');
+    // ...through the escaped raw name, so two lookalike rows cannot
+    // announce the same destructive step.
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-\u200b\u200c"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Confirm removing (invisible name) \\u{200b}\\u{200c}');
+  });
+
+  it('renders the removal-consequence badge and sanitizes the filter value', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 1,
+          extraPushUrls: 0,
+          promisor: true,
+          partialCloneFilter: 'blob:none\u202eevil',
+          customRefspec: true,
+          otherSettings: 2,
+        },
+        {
+          // The filter is destroyed by removal even with the promisor
+          // flag unset, so the badge must fire on the filter alone; the
+          // single other setting pins the singular badge copy.
+          name: 'mirror',
+          fetchUrl: 'https://example.com/m/r.git',
+          pushUrl: 'https://example.com/m/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          partialCloneFilter: 'blob:none',
+          customRefspec: false,
+          otherSettings: 1,
+        },
+      ],
+    });
+    await openRemotesView();
+    const badge = document.body.querySelector('[class*="remoteBadge"]');
+    expect(badge).toBeTruthy();
+    const text = badge?.textContent ?? '';
+    expect(text).toContain('partial clone');
+    expect(text).toContain('blob:none');
+    expect(text).not.toContain('\u202e');
+    expect(badge?.getAttribute('title')).not.toContain('\u202e');
+    expect(text).toContain('custom refspec');
+    expect(text).toContain('+1 URL');
+    expect(text).toContain('2 other settings');
+    const badges = document.body.querySelectorAll('[class*="remoteBadge"]');
+    expect(badges).toHaveLength(2);
+    expect(badges[1]?.textContent).toContain('partial clone (blob:none)');
+    expect(badges[1]?.textContent).toContain('1 other setting');
+  });
+
+  it('marks a row whose URL carries a non-ASCII homoglyph', async () => {
+    // URLs are ASCII-only by spec: a Cyrillic і in the host inks
+    // identically to i — fail closed.
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://gіthub.com/qwen/qwen-code.git',
+          // A DIFFERING push URL carrying its own homoglyph: the push
+          // line of the tooltip must spell it too.
+          pushUrl: 'https://gіthub.com/push/qwen-code.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // Homoglyph on the PUSH side only — the push arm alone must
+          // mark the row.
+          name: 'pushonly',
+          fetchUrl: 'https://example.com/clean/r.git',
+          pushUrl: 'https://gіthub.com/push/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // Homoglyph on the FETCH side only.
+          name: 'fetchonly',
+          fetchUrl: 'https://gіthub.com/fetch/r.git',
+          pushUrl: 'https://example.com/clean/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView();
+    const row = document.body.querySelector('[data-testid="remote-row"]');
+    expect(row?.textContent).toContain('(hidden characters)');
+    const title = row
+      ?.querySelector('[data-testid="remote-url"]')
+      ?.getAttribute('title');
+    expect(title).toContain('\\u{456}');
+    // The push line is escaped too (pushUrl !== fetchUrl renders both).
+    expect(title?.split('\n')).toHaveLength(2);
+    expect(title?.split('\n')[1]).toContain('\\u{456}');
+    // The name is clean — the aria tail must not stutter it.
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-origin"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Remove origin (hidden characters)');
+    // Each arm alone marks its row.
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-pushonly"]')
+        ?.parentElement?.textContent,
+    ).toContain('(hidden characters)');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-fetchonly"]')
+        ?.parentElement?.textContent,
+    ).toContain('(hidden characters)');
+  });
+
+  it('restores focus to the manage-remotes row when leaving the view', async () => {
+    await openRemotesView();
+    clickTestId('remotes-back');
+    await flush();
+    expect(document.activeElement).toBe(
+      document.body.querySelector(
+        '[data-testid="branch-picker-manage-remotes"]',
+      ),
+    );
+  });
+
+  it('re-reads when the removal verification reports the section survived', async () => {
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'remote_still_configured',
+          message: 'remote still configured after removal',
+        },
+        'POST /workspaces/:workspace/git/remote/remove: remote_still_configured',
+      ),
+    );
+    await openRemotesView();
+    const calls = workspaceGitRemotes.mock.calls.length;
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(calls);
+  });
+
+  it('keeps the sentence boundary of a multi-line git error in the footer', async () => {
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'git_config_write_failed',
+          message:
+            "error: could not lock config file .git/config: File exists\nfatal: could not remove config section 'remote.origin'",
+        },
+        'POST /workspaces/:workspace/git/remote/remove: git_config_write_failed',
+      ),
+    );
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    const footer = document.body.querySelector('[class*="statusBar"]');
+    // The two git sentences stay separated — a stripped \n would fuse
+    // them into 'File existsfatal:'.
+    expect(footer?.textContent).toContain('File exists fatal:');
+    expect(footer?.textContent).not.toContain('File existsfatal');
+  });
+
+  it('marks a skeleton-collision twin inside the Latin script', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        remote('office'),
+        // U+FB01 LATIN SMALL LIGATURE FI inks as the glyph pair `fi`:
+        // no invisible character, no whitespace, NFC-stable, Script
+        // Latin — only the TR39 confusables fold sees the twin. (The
+        // literals stay ESCAPED — an ink-identical fixture pair must
+        // never rely on the reader's eyes.)
+        remote('of\u{fb01}ce'),
+        // A dotless-ı twin folds the same way (0131 → i).
+        remote('origin'),
+        remote('or\u{131}g\u{131}n'),
+        // U+017F LATIN SMALL LETTER LONG S: the table's prototype is f
+        // while NFKC says s — the fold must answer the TABLE before the
+        // compatibility fallback, or this twin never collides with the
+        // pafword row (NFKC-first would land it beside `password`).
+        remote('pafword'),
+        remote('pa\u{17f}word'),
+        // A lone non-canonical name without a twin stays unmarked:
+        // the fold is collision-based, not a blanket non-ASCII rule.
+        remote('na\u{ef}ve'),
+        // A lone name the fold REWRITES (U+FB01, no sibling) stays
+        // unmarked too — the count > 1 conjunct, pinned here rather
+        // than by an incidental assertion elsewhere.
+        remote('o\u{fb01}ce'),
+      ],
+    });
+    await openRemotesView();
+
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    // The canonical sibling rows stay plain; the rows carrying the
+    // non-canonical spelling mark and spell the confusable out.
+    expect(rowOf('office')?.textContent).not.toContain('(hidden characters)');
+    expect(rowOf('of\u{fb01}ce')?.textContent).toContain('(hidden characters)');
+    expect(
+      rowOf('of\u{fb01}ce')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{fb01}');
+    expect(rowOf('origin')?.textContent).not.toContain('(hidden characters)');
+    expect(rowOf('or\u{131}g\u{131}n')?.textContent).toContain(
+      '(hidden characters)',
+    );
+    expect(
+      rowOf('or\u{131}g\u{131}n')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{131}');
+    expect(rowOf('na\u{ef}ve')?.textContent).not.toContain(
+      '(hidden characters)',
+    );
+    expect(rowOf('o\u{fb01}ce')?.textContent).not.toContain(
+      '(hidden characters)',
+    );
+    expect(rowOf('o\u{fb01}ce')?.textContent).not.toContain('(lookalike name)');
+    // The long-s twin: marked, and the tooltip spells 017F.
+    expect(rowOf('pa\u{17f}word')?.textContent).toContain(
+      '(hidden characters)',
+    );
+    expect(
+      rowOf('pa\u{17f}word')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{17f}');
+  });
+
+  it('keeps the hidden-characters marker when a URL homoglyph co-fires with a skeleton collision', async () => {
+    const remote = (name: string, url: string) => ({
+      name,
+      fetchUrl: url,
+      pushUrl: url,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        // Skeleton twins with a non-ASCII FETCH URL on the marked row:
+        // the row genuinely has hidden characters — the marker must not
+        // soften to the lookalike copy.
+        {
+          ...remote('remote1', 'https://example.com/remote1/r.git'),
+          fetchUrl: 'https://example.c\u{43e}m/a/r.git',
+        },
+        remote('remotel', 'https://example.com/remotel/r.git'),
+        // Same on the PUSH side.
+        {
+          ...remote('push1', 'https://example.com/push1/r.git'),
+          pushUrl: 'https://example.c\u{43e}m/push1/r.git',
+        },
+        remote('pushl', 'https://example.com/pushl/r.git'),
+      ],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    for (const marked of ['remote1', 'push1']) {
+      expect(rowOf(marked)?.textContent).toContain('(hidden characters)');
+      expect(rowOf(marked)?.textContent).not.toContain('(lookalike name)');
+    }
+    // The twins carry no hidden characters anywhere: never the
+    // hidden-characters copy. (remotel marks `(lookalike name)` — the
+    // table's prototype for `m` is `rn`, so its raw name is not its
+    // skeleton; pushl is its own skeleton and stays plain.)
+    expect(rowOf('remotel')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('remotel')?.textContent).not.toContain('(hidden characters)');
+    // The all-ASCII group marks BOTH rows: `raw ≠ skeleton` carries no
+    // evidence about which spelling is the impostor there.
+    expect(rowOf('pushl')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('pushl')?.textContent).not.toContain('(hidden characters)');
+  });
+
+  it('marks an NFC-closure twin pair the raw table would split', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      // U+AB74's prototype is o+U+031B, whose NFC form (U+01A1) is itself
+      // a table key: without the generator's NFC closure the two fold
+      // to different skeletons and neither row marks.
+      remotes: [remote('\u{ab74}'), remote('\u{1a1}')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('\u{ab74}')?.textContent).toContain('(hidden characters)');
+    expect(rowOf('\u{1a1}')?.textContent).toContain('(hidden characters)');
+  });
+
+  it('marks both rows of a consumer-fold split the generator closes', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      // U+1D52's prototype carried U+00BA — a table-ABSENT compatibility
+      // half the runtime NFKC-folds to `o`. Without the generator's
+      // consumer-fold closure `ᵒ` skeletons to `º` while a literal `º`
+      // skeletons to `o`: one ink, two skeletons, neither row marked.
+      // The group carries non-ASCII members, so the collision speaks
+      // the `(hidden characters)` arm (the all-ASCII `(lookalike name)`
+      // arm is pinned by the `main`/`rnain` pair below).
+      remotes: [remote('\u{1d52}'), remote('\u{ba}')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('\u{1d52}')?.textContent).toContain('(hidden characters)');
+    expect(rowOf('\u{ba}')?.textContent).toContain('(hidden characters)');
+  });
+
+  it('marks both rows of a non-ASCII-skeleton table-fold collision', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      // The table prototypes Latin ö to Arabic ة, and ة is a fixed
+      // point: the prototype-script twin carries NO visible oddity, so
+      // the raw ≠ skeleton polarity would mark the Latin row and leave
+      // the confusable row plain — the exact inversion the marker
+      // exists to prevent. Both rows mark.
+      remotes: [remote('\u{f6}\u{f6}'), remote('\u{629}\u{629}')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('\u{f6}\u{f6}')?.textContent).toContain('(hidden characters)');
+    expect(rowOf('\u{629}\u{629}')?.textContent).toContain(
+      '(hidden characters)',
+    );
+  });
+
+  it('marks both rows of an all-ASCII expansion-prototype collision', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('main'), remote('rnain')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    // The `m → rn` expansion makes the legitimate `main` the
+    // deviant-looking side of its own skeleton — both rows must carry
+    // the marker, or the panel certifies the planted twin as clean.
+    expect(rowOf('main')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('rnain')?.textContent).toContain('(lookalike name)');
+    // The prototype-spelling row has no escape tail to offer: its title
+    // stays its own name and its aria-label must not stutter.
+    expect(
+      rowOf('rnain')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toBe('rnain');
+    const aria = document.body
+      .querySelector('[data-testid="remote-remove-rnain"]')
+      ?.getAttribute('aria-label');
+    expect(aria).not.toContain('rnain rnain');
+  });
+
+  it('finds table-only ink twins by the text they ink as', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('origin'), remote('or\u{131}g\u{131}n')],
+    });
+    await openRemotesView();
+    // NFKC alone cannot fold the dotless-ı twin; the marking fold must
+    // be a search target too, or the flagged row is unreachable by the
+    // text the panel displays for it.
+    setInput('remotes-search', 'origin');
+    await flush();
+    expect(
+      document.body.querySelectorAll('[data-testid="remote-row"]').length,
+    ).toBe(2);
+  });
+
+  it('spells the fold-covered code points for a printable-ASCII collision', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    // The table folds 1→l: two printable-ASCII rows ink alike with
+    // NOTHING hidden — the marker copy names a lookalike instead of
+    // claiming hidden characters, and the tooltip spells the folded
+    // code point (never a no-op tail that would stutter in the
+    // aria-label).
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('remote1'), remote('remotel')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    const marked = rowOf('remote1');
+    expect(marked?.textContent).toContain('(lookalike name)');
+    expect(marked?.textContent).not.toContain('(hidden characters)');
+    const title = marked
+      ?.querySelector('[data-testid="remote-name"]')
+      ?.getAttribute('title');
+    expect(title).toContain('\\u{31}');
+    expect(title).not.toBe('remote1');
+    // The remove button's accessible name carries the escape tail once
+    // — no doubled name.
+    const aria = document.body
+      .querySelector('[data-testid="remote-remove-remote1"]')
+      ?.getAttribute('aria-label');
+    expect(aria).toContain('\\u{31}');
+    expect(aria).not.toContain('remote1 remote1');
+  });
+
+  it('finds a ligature row by the text it inks as', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('office'), remote('of\u{fb01}ce')],
+    });
+    await openRemotesView();
+    setInput('remotes-search', 'office');
+    await flush();
+    // The ligature row inks as `office` and must be found by it.
+    const rows = [
+      ...document.body.querySelectorAll('[data-testid="remote-row"]'),
+    ];
+    expect(rows.length).toBe(2);
+    expect(
+      rows.some((row) => row.textContent?.includes('(hidden characters)')),
+    ).toBe(true);
+    // The collision counts are computed over the UNFILTERED list: a
+    // search that isolates the ligature row (via its encoded URL) must
+    // not strip its marker.
+    setInput('remotes-search', 'of%ef%ac%81ce');
+    await flush();
+    const isolated = [
+      ...document.body.querySelectorAll('[data-testid="remote-row"]'),
+    ];
+    expect(isolated.length).toBe(1);
+    expect(isolated[0]?.textContent).toContain('(hidden characters)');
+  });
+
+  it('marks canonical-equivalence and script-mixing lookalikes', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        remote('origin'),
+        // A Cyrillic \u043e in a Latin name: inks identically to the
+        // row above, no invisible character involved.
+        remote('оrigin'),
+        // Canonical twins: composed vs decomposed é.
+        remote('café'),
+        remote('cafe\u0301'),
+        // A legitimate non-ASCII name must NOT be marked.
+        remote('上游'),
+      ],
+    });
+    await openRemotesView();
+
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    // The plain Latin row stays unmarked; its Cyrillic twin is marked
+    // and its tooltip spells the confusable out as a codepoint.
+    expect(rowOf('origin')?.textContent).not.toContain('(hidden characters)');
+    expect(rowOf('оrigin')?.textContent).toContain('(hidden characters)');
+    expect(
+      rowOf('оrigin')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{43e}');
+    // Canonical twins: the decomposed (NFD) row is marked — the unusual
+    // spelling carries the marker, like the ZWSP precedent — while the
+    // NFC row stays plain.
+    expect(rowOf('café')?.textContent).not.toContain('(hidden characters)');
+    expect(rowOf('cafe\u0301')?.textContent).toContain('(hidden characters)');
+    expect(
+      rowOf('cafe\u0301')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{301}');
+    // The legitimate non-ASCII name renders as itself, unmarked.
+    expect(rowOf('上游')?.textContent).not.toContain('(hidden characters)');
+    expect(
+      rowOf('上游')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toBe('上游');
+  });
+
+  it('tells apart rows whose sanitized names collide', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // A ZWSP lookalike of the row above: both sanitize to "origin",
+          // so the marker, the tooltip and the aria-label must carry what
+          // distinguishes the two identities.
+          name: 'ori\u200bgin',
+          fetchUrl: 'https://example.com/evil/r.git',
+          pushUrl: 'https://example.com/evil/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          name: 'mirror',
+          fetchUrl: 'https://example.com/m/r.git',
+          pushUrl: 'https://example.com/m/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // Same URL as mirror modulo a ZWSP: the name marker cannot fire,
+          // so the URL tooltip must carry the distinction.
+          name: 'mirror2',
+          fetchUrl: 'https://example.com/m/\u200br.git',
+          pushUrl: 'https://example.com/m/\u200br.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+
+    const plain = document.body.querySelector(
+      '[data-testid="remote-remove-origin"]',
+    )?.parentElement;
+    const lookalike = document.body.querySelector(
+      '[data-testid="remote-remove-ori\u200bgin"]',
+    )?.parentElement;
+    expect(plain?.textContent).toContain('origin');
+    expect(plain?.textContent).not.toContain('(hidden characters)');
+    expect(lookalike?.textContent).toContain('origin (hidden characters)');
+    // The tooltip names the raw name with its invisible character as a
+    // visible codepoint escape; an ordinary name tooltips as itself so a
+    // truncated name stays readable.
+    expect(
+      lookalike?.querySelector('[class*="remoteName"]')?.getAttribute('title'),
+    ).toBe('ori\\u{200b}gin');
+    expect(
+      plain?.querySelector('[class*="remoteName"]')?.getAttribute('title'),
+    ).toBe('origin');
+    // URLs that differ only by invisible characters tooltip differently.
+    const mirrorUrl = document.body
+      .querySelector('[data-testid="remote-remove-mirror"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    const mirror2Url = document.body
+      .querySelector('[data-testid="remote-remove-mirror2"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    expect(mirrorUrl?.getAttribute('title')).toBe(
+      'https://example.com/m/r.git',
+    );
+    expect(mirror2Url?.getAttribute('title')).toContain('\\u{200b}');
+    expect(mirror2Url?.getAttribute('title')).not.toBe(
+      mirrorUrl?.getAttribute('title'),
+    );
+
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-origin"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Remove origin');
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-ori\u200bgin"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Remove origin (hidden characters) ori\\u{200b}gin');
+
+    // Removal still targets the raw configured name.
+    clickTestId('remote-remove-ori\u200bgin');
+    clickTestId('remote-remove-ori\u200bgin');
+    await flush();
+    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith(
+      'ori\u200bgin',
+      undefined,
+      GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
+    );
+  });
+
+  it('tells apart rows whose names differ only by whitespace', async () => {
+    // CSS collapses edge whitespace out of the inked text, so `origin`
+    // and `origin ` present one row and one aria-label — the exact
+    // hand-edited-config threat the hidden-characters marker exists for.
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          name: 'origin ',
+          fetchUrl: 'https://example.com/evil/r.git',
+          pushUrl: 'https://example.com/evil/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // URLs differing only by whitespace must not tooltip identically.
+          name: 'mirror',
+          fetchUrl: 'https://example.com/m/r.git',
+          pushUrl: 'https://example.com/m/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          name: 'mirror2',
+          fetchUrl: 'https://example.com/m/r.git ',
+          pushUrl: 'https://example.com/m/r.git ',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // An internal whitespace run renders collapsed, and the search
+          // must still find the row by its displayed (collapsed) text.
+          name: 'upstream  x',
+          fetchUrl: 'https://example.com/u/r.git',
+          pushUrl: 'https://example.com/u/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+
+    const plain = document.body.querySelector(
+      '[data-testid="remote-remove-origin"]',
+    )?.parentElement;
+    const padded = document.body.querySelector(
+      '[data-testid="remote-remove-origin "]',
+    )?.parentElement;
+    expect(plain?.textContent).not.toContain('(hidden characters)');
+    expect(padded?.textContent).toContain('(hidden characters)');
+    // The tooltip and the aria-label spell the whitespace out as a
+    // codepoint escape, so the two identities stay tellable apart.
+    expect(
+      padded?.querySelector('[class*="remoteName"]')?.getAttribute('title'),
+    ).toBe('origin\\u{20}');
+    expect(
+      plain?.querySelector('[class*="remoteName"]')?.getAttribute('title'),
+    ).toBe('origin');
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-origin"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Remove origin');
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-origin "]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Remove origin (hidden characters) origin\\u{20}');
+
+    // URLs differing only by whitespace tooltip differently, with the
+    // whitespace spelled out as a codepoint escape.
+    const mirrorUrl = document.body
+      .querySelector('[data-testid="remote-remove-mirror"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    const mirror2Url = document.body
+      .querySelector('[data-testid="remote-remove-mirror2"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    expect(mirrorUrl?.getAttribute('title')).toBe(
+      'https://example.com/m/r.git',
+    );
+    expect(mirror2Url?.getAttribute('title')).toBe(
+      'https://example.com/m/r.git\\u{20}',
+    );
+
+    // The search finds a whitespace-collapsed name by its displayed text.
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search remotes"]',
+    );
+    expect(search).toBeTruthy();
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(search, 'upstream x');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+    const internalRow = document.body.querySelector(
+      '[data-testid="remote-remove-upstream  x"]',
+    );
+    expect(internalRow).toBeTruthy();
+    // The internal run gets the same marker treatment: the row flags, and
+    // the tooltip and aria-label spell the run out as codepoint escapes.
+    expect(internalRow?.parentElement?.textContent).toContain(
+      '(hidden characters)',
+    );
+    expect(
+      internalRow?.parentElement
+        ?.querySelector('[class*="remoteName"]')
+        ?.getAttribute('title'),
+    ).toBe('upstream\\u{20}\\u{20}x');
+    expect(internalRow?.getAttribute('aria-label')).toBe(
+      'Remove upstream x (hidden characters) upstream\\u{20}\\u{20}x',
+    );
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(search, '');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    // Removal still targets the raw configured name, padding included.
+    clickTestId('remote-remove-origin ');
+    clickTestId('remote-remove-origin ');
+    await flush();
+    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith(
+      'origin ',
+      undefined,
+      GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
+    );
+  });
+
+  it('refreshes the branch list when a remove fails on the config write', async () => {
+    // git deletes refs/remotes/<name>/* before removing the config
+    // section, so a lock-failed section write leaves the branch list
+    // stale even though the remote row itself survives.
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((_, reject) => (release = reject)),
+    );
+    await openRemotesView();
+    const branchCalls = workspaceGitBranches.mock.calls.length;
+    const remoteCalls = workspaceGitRemotes.mock.calls.length;
+    const statusCalls = workspaceGit.mock.calls.length;
+    const button = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="remote-remove-origin"]',
+    );
+    act(() => {
+      button?.focus();
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // jsdom never blurs a control when it becomes disabled, unlike real
+    // browsers: simulate the in-flight blur so the settle restore is
+    // what puts focus back.
+    act(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+    await act(async () => {
+      release?.(
+        new DaemonHttpError(
+          409,
+          {
+            error: 'git_config_write_failed',
+            message: "error: Could not remove config section 'remote.origin'",
+          },
+          'POST /workspaces/:workspace/git/remote/remove: git_config_write_failed',
+        ),
+      );
+    });
+    await flush();
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(branchCalls);
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusCalls);
+    // The remote list is not stale here (the section survived): no re-read.
+    expect(workspaceGitRemotes.mock.calls.length).toBe(remoteCalls);
+    // ...and the surviving row's button takes the focus back.
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    );
+  });
+
+  it('leaves search focus alone when the remove button never held focus', async () => {
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search remotes"]',
+    );
+    act(() => {
+      search?.focus();
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // Programmatic/Safari-style activation never moved focus onto the row
+    // button, so the settle effect must not move it anywhere either.
+    expect(document.activeElement).toBe(search);
+  });
+
+  it('resets the remotes view and restores no focus after a workspace switch', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    const onBranchChanged = vi.fn();
+    mountWithBranches(undefined, { gitCwd: '/repo', onBranchChanged });
+    await flush();
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    const button = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="remote-remove-origin"]',
+    );
+    act(() => {
+      button?.focus();
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // The workspace switches while the mutation is in flight: the view
+    // resets to branches, so focus lent to workspace A's control can
+    // never be restored onto workspace B's panel — carried by the view
+    // reset plus the settle effect's view-exit clearing.
+    mount({ gitCwd: '/repo2' });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+    // The settle lands after the switch: it must not move focus ANYWHERE
+    // (search box, back button, a re-rendered row). The saved target was
+    // cleared at view-exit, and a ref-restore onto a detached node is a
+    // no-op by construction, so any movement at all is the bug — an
+    // equality on the pre-settle element falsifies every restore shape
+    // that could reach an attached node, where `not.toBe(one testid)`
+    // falsified none.
+    const activeBefore = document.activeElement;
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo2', remotes: [] });
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+    expect(document.activeElement).toBe(activeBefore);
+    // The cross-workspace staleness guard is what drops the late
+    // response: workspace A's success must never reach workspace B's
+    // footer, branches, or callback.
+    expect(footerText()).not.toContain('Removed remote origin');
+    expect(onBranchChanged).not.toHaveBeenCalled();
+  });
+
+  it('issues the post-refusal refresh before the awaited re-read, not after a mid-await switch', async () => {
+    let releaseReRead: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockRejectedValueOnce(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "No such remote: 'origin'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    mountWithBranches(undefined, { gitCwd: '/repo' });
+    await flush();
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    // Hold the catch's silent re-read so the workspace switch lands
+    // INSIDE its await. The branch/status refresh must have been
+    // issued in the same synchronous block as the staleness guard;
+    // issued after the await instead, it would carry the old closure's
+    // cwd and seed workspace B's panel with A's branches.
+    workspaceGitRemotes.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseReRead = resolve)),
+    );
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    mount({ gitCwd: '/repo2' });
+    await flush();
+    const branchCallsAtSwitch = workspaceGitBranches.mock.calls.length;
+    await act(async () => {
+      releaseReRead?.({ v: 2, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+    for (const call of workspaceGitBranches.mock.calls.slice(
+      branchCallsAtSwitch,
+    )) {
+      expect(call[0]).not.toBe('/repo');
+    }
+  });
+
+  it('refreshes the branch list when the removal verification survives', async () => {
+    // git exits 0 over a split section after deleting the tracking refs:
+    // the row survives (silent re-read) AND the branch list is stale.
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'remote_still_configured',
+          message: 'remote still configured after removal',
+        },
+        'POST /workspaces/:workspace/git/remote/remove: remote_still_configured',
+      ),
+    );
+    await openRemotesView();
+    const branchCalls = workspaceGitBranches.mock.calls.length;
+    const remoteCalls = workspaceGitRemotes.mock.calls.length;
+    const statusCalls = workspaceGit.mock.calls.length;
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(branchCalls);
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusCalls);
+    expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(remoteCalls);
+  });
+
+  it('keeps rows and draft when the silent re-read itself fails', async () => {
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "error: No such remote: 'gone'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    await openRemotesView();
+    // The background re-read the refusal triggers fails (draining daemon):
+    // a silent read must neither raise the placeholder nor replace the
+    // usable rows and the typed draft with its own error.
+    workspaceGitRemotes.mockRejectedValue(
+      new DaemonHttpError(
+        503,
+        {
+          error: 'workspace_runtime_unavailable',
+          message: 'runtime unavailable',
+        },
+        'GET /workspaces/:workspace/git/remotes: workspace_runtime_unavailable',
+      ),
+    );
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+    // The typed draft survives the failed silent re-read (not just the
+    // form's existence).
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        'input[data-testid="remote-add-name"]',
+      )?.value,
+    ).toBe('fork');
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        'input[data-testid="remote-add-url"]',
+      )?.value,
+    ).toBe('https://example.com/f/r.git');
+    expect(document.body.textContent).not.toContain('runtime unavailable');
+  });
+
+  it('disables the add inputs while a mutation is in flight', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteAdd.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await openRemotesView();
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    const urlInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-url"]',
+    );
+    expect(nameInput).toBeTruthy();
+    expect(urlInput).toBeTruthy();
+    act(() => {
+      setter?.call(nameInput, 'fork');
+      nameInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      setter?.call(urlInput, 'https://example.com/f/r.git');
+      urlInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(nameInput?.disabled).toBe(true);
+    expect(urlInput?.disabled).toBe(true);
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        'input[data-testid="remote-add-name"]',
+      )?.disabled,
+    ).toBe(false);
+  });
+
+  it('restores focus to the back button after a successful removal', async () => {
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+    const button = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="remote-remove-origin"]',
+    );
+    act(() => {
+      button?.focus();
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeNull();
+    // The row is gone with its focused button: land on the panel's back
+    // button rather than document.body.
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    );
+  });
+
+  it('restores focus to the back button when a refused removal unmounts the row', async () => {
+    // no_such_remote: the silent re-read drops the ghost row, so the
+    // settle-time focus restore must land on the back button, not on a
+    // remove button that is about to unmount.
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "error: No such remote: 'gone'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    await openRemotesView();
+    // The silent re-read after the refusal converges on the terminal's
+    // truth: origin is gone.
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    const button = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="remote-remove-origin"]',
+    );
+    act(() => {
+      button?.focus();
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeNull();
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    );
+  });
+
+  it('restores add-form focus after a mutation settles', async () => {
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    const urlInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-url"]',
+    );
+    expect(nameInput).toBeTruthy();
+    expect(urlInput).toBeTruthy();
+    act(() => {
+      setter?.call(nameInput, 'fork');
+      nameInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      setter?.call(urlInput, 'https://example.com/f/r.git');
+      urlInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      urlInput?.focus();
+    });
+    act(() => {
+      urlInput?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flush();
+    // The success path clears the draft and puts focus on the name input
+    // for the next remote, instead of leaving it on document.body.
+    expect(document.activeElement).toBe(nameInput);
+  });
+
+  it('does not submit the add form on an IME-owned Enter', async () => {
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+    setInput('remote-add-name', 'shangyou');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    // An IME-owned Enter commits the composition, not the form — in both
+    // shapes the house documents (isComposing, and WebKit's keyCode 229
+    // with isComposing already false).
+    act(() => {
+      nameInput?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          isComposing: true,
+        }),
+      );
+    });
+    await flush();
+    expect(workspaceGitRemoteAdd).not.toHaveBeenCalled();
+    act(() => {
+      nameInput?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          keyCode: 229,
+          bubbles: true,
+        }),
+      );
+    });
+    await flush();
+    expect(workspaceGitRemoteAdd).not.toHaveBeenCalled();
+    // The URL input carries the identical guard.
+    const urlInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-url"]',
+    );
+    act(() => {
+      urlInput?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          isComposing: true,
+        }),
+      );
+    });
+    await flush();
+    expect(workspaceGitRemoteAdd).not.toHaveBeenCalled();
+    act(() => {
+      urlInput?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          keyCode: 229,
+          bubbles: true,
+        }),
+      );
+    });
+    await flush();
+    expect(workspaceGitRemoteAdd).not.toHaveBeenCalled();
+    // A plain Enter still submits — the guard does not swallow the real
+    // key.
+    act(() => {
+      nameInput?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flush();
+    expect(workspaceGitRemoteAdd).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores focus inside a shadow-portal root', async () => {
+    // In the shadowDom/{portals:true} embedding the popover content lives
+    // in a shadow root: document.activeElement retargets to the host and
+    // document.body lookups cannot cross the boundary, so the focus
+    // capture and restore must resolve from the content's own root.
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    workspaceGitBranches.mockResolvedValue(BRANCHES);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    container = document.createElement('div');
+    shadow.appendChild(container);
+    root = createRoot(container);
+    mount();
+    try {
+      await flush();
+      // The open-time autofocus timer must land before focus moves.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 60));
+      });
+      const manage = shadow.querySelector(
+        '[data-testid="branch-picker-manage-remotes"]',
+      );
+      act(() => {
+        manage?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      await flush();
+      const button = shadow.querySelector<HTMLButtonElement>(
+        '[data-testid="remote-remove-origin"]',
+      );
+      expect(button).toBeTruthy();
+      act(() => {
+        button?.focus();
+      });
+      expect(shadow.activeElement).toBe(button);
+      act(() => {
+        button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      await flush();
+      act(() => {
+        shadow
+          .querySelector('[data-testid="remote-remove-origin"]')
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      await flush();
+      expect(
+        shadow.querySelector('[data-testid="remote-remove-origin"]'),
+      ).toBeNull();
+      // The row is gone with its focused button: the restore lands on the
+      // panel's back button INSIDE the shadow root — not the host, and
+      // not document.body.
+      expect(shadow.activeElement).toBe(
+        shadow.querySelector('[data-testid="remotes-back"]'),
+      );
+    } finally {
+      host.remove();
+    }
+  });
+
+  it('does not restore focus into another mounted popover after a mid-mutation dismissal', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteAdd.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await openRemotesView();
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    // Focus the URL input so the mutation remembers it as the restore
+    // target.
+    act(() => {
+      document.body
+        .querySelector<HTMLInputElement>('input[data-testid="remote-add-url"]')
+        ?.focus();
+    });
+    clickTestId('remote-add-submit');
+    await flush();
+    // Dismiss mid-flight: the content unmounts, and the settle must not
+    // fall back to a document-wide lookup that can land on ANOTHER
+    // popover instance's control.
+    mount({ open: false });
+    await flush();
+    const foreign = document.createElement('input');
+    foreign.setAttribute('data-testid', 'remote-add-name');
+    document.body.appendChild(foreign);
+    try {
+      await act(async () => {
+        release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+      });
+      await flush();
+      expect(document.activeElement).not.toBe(foreign);
+    } finally {
+      foreign.remove();
+    }
+  });
+
+  it('falls back to the search box when the manage row is busy', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // The mutation is still in flight, so the manage row is disabled and
+    // cannot take focus: the search box must.
+    clickTestId('remotes-back');
+    await flush();
+    expect(document.activeElement).toBe(
+      document.body.querySelector(
+        'input[placeholder="Search for branches and actions"]',
+      ),
+    );
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+  });
+
+  it('disarms the armed confirm when its row leaves the filtered list', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        defaultRemotesResult().remotes[0]!,
+        {
+          name: 'upstream',
+          fetchUrl: 'https://example.com/u/r.git',
+          pushUrl: 'https://example.com/u/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView();
+    clickTestId('remote-remove-upstream');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-upstream"]')
+        ?.textContent,
+    ).toContain('Confirm');
+    // Filter the armed row out: the arm must not survive as a pre-armed
+    // trap for the next single click.
+    setInput('remotes-search', 'origin');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-upstream"]'),
+    ).toBeNull();
+    setInput('remotes-search', '');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-upstream"]')
+        ?.textContent,
+    ).not.toContain('Confirm');
+  });
+
+  it('shows the loading state on the first non-silent remotes read', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemotes.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    mountWithBranches();
+    await flush();
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('Loading remotes');
+    expect(content?.textContent).not.toContain('No remotes configured');
+    expect(
+      document.body.querySelector('input[data-testid="remote-add-name"]'),
+    ).toBeNull();
+    await act(async () => {
+      release?.(defaultRemotesResult());
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+  });
+
+  it('scopes the remotes read to the workspace cwd', async () => {
+    await openRemotesView({ gitCwd: '/repo/wt' });
+    expect(workspaceGitRemotes).toHaveBeenCalledWith('/repo/wt');
+  });
+
+  it('clears a standing pull-resolution panel when entering the view', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    mountWithBranches();
+    await flush();
+    clickButton('Update Project');
+    await flush();
+    expect(document.body.textContent).toContain('Stash Changes and Update');
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    expect(document.body.textContent).not.toContain('Stash Changes and Update');
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeTruthy();
+  });
+
+  it('disarms a pending remove confirm when an add is submitted', async () => {
+    workspaceGitRemoteAdd.mockResolvedValue(defaultRemotesResult());
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).toContain('Confirm');
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).not.toContain('Confirm');
+  });
+
+  it('sanitizes config-sourced git error text before the footer', async () => {
+    workspaceGitRemoteAdd.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'remote_already_exists',
+          message: 'error: remote ori\u200bgin already exists.',
+        },
+        'POST /workspaces/:workspace/git/remote: remote_already_exists',
+      ),
+    );
+    await openRemotesView();
+    setInput('remote-add-name', 'ori\u200bgin');
+    setInput('remote-add-url', 'https://example.com/o/r.git');
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(footerText()).toContain('already exists');
+    expect(footerText()).not.toContain('ori\u200bgin');
+  });
+
+  it('releases the remove buttons without awaiting the branch refresh', async () => {
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+    // Installed AFTER the mount's seeding: mountWithBranches re-seeds
+    // workspaceGitBranches via mockResolvedValue (which REPLACES the
+    // implementation), so the never-resolving listing must be the LAST
+    // word before the removal's background refresh picks it up.
+    workspaceGitBranches.mockImplementation(() => new Promise(() => {}));
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // The branch-listing round trip must not hold the remotes view
+    // hostage: busy clears as soon as the removal lands.
+    expect(
+      document.body.querySelector<HTMLButtonElement>(
+        '[data-testid="remotes-back"]',
+      )?.disabled,
+    ).toBe(false);
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        'input[data-testid="remote-add-name"]',
+      )?.disabled,
+    ).toBe(false);
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    );
+  });
+
+  it('clears the search filter after a successful add', async () => {
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [
+        {
+          name: 'fork',
+          fetchUrl: 'https://example.com/f/r.git',
+          pushUrl: 'https://example.com/f/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView();
+    setInput('remotes-search', 'upstream');
+    await flush();
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        'input[placeholder="Search remotes"]',
+      )?.value,
+    ).toBe('');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-fork"]'),
+    ).toBeTruthy();
+  });
+
+  it('sanitizes the search needle the way the rows are sanitized', async () => {
+    await openRemotesView();
+    setInput('remotes-search', 'ori\u200bgin');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+  });
+
+  it('matches the search against the extras badge text', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+          partialCloneFilter: 'blob:none',
+        },
+      ],
+    });
+    await openRemotesView();
+    setInput('remotes-search', 'blob:none');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+    expect(document.body.textContent).not.toContain('No remotes match');
+  });
+
+  it('disarms the confirm with Escape before leaving the view', async () => {
+    const onOpenChange = vi.fn();
+    await openRemotesView({ onOpenChange });
+    clickTestId('remote-remove-origin');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).toContain('Confirm');
+    const content = document.body.querySelector('[data-test-popover-content]');
+    act(() => {
+      content?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await flush();
+    // The armed tier consumed the cancelable Escape: no dismissal fired.
+    expect(onOpenChange).not.toHaveBeenCalled();
+    // The universal cancel disarms the destructive confirm instead of
+    // throwing the user out of the view.
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).not.toContain('Confirm');
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeTruthy();
+    // The next Escape takes the view tier.
+    act(() => {
+      content?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+    // The view tier prevented it too: still no popover dismissal.
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it('lets an IME-owned Escape cancel the composition without tearing down the view', async () => {
+    const onOpenChange = vi.fn();
+    await openRemotesView({ onOpenChange });
+    setInput('remote-add-name', 'shangyou');
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    // A composition-cancelling Escape (isComposing) must be masked from
+    // the capture-phase dismiss layer: no view teardown, no dismissal,
+    // and the native composition cancel is not suppressed. The mask
+    // restores the key before the event reaches the focused input.
+    const composing = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    act(() => {
+      nameInput?.dispatchEvent(composing);
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeTruthy();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(composing.defaultPrevented).toBe(false);
+    expect(composing.key).toBe('Escape');
+    expect(nameInput?.value).toBe('shangyou');
+    // The WebKit shape: keyCode 229 with isComposing already false.
+    const webkit = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      keyCode: 229,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      nameInput?.dispatchEvent(webkit);
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeTruthy();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(webkit.defaultPrevented).toBe(false);
+    // A plain Escape still takes the view tier — the mask only covers
+    // IME-owned keydowns.
+    const plain = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      nameInput?.dispatchEvent(plain);
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(plain.defaultPrevented).toBe(true);
+  });
+
+  it('dismisses the popover on an un-prevented Escape from the branches view', async () => {
+    const onOpenChange = vi.fn();
+    mountWithBranches(BRANCHES, { onOpenChange });
+    await flush();
+    const content = document.body.querySelector('[data-test-popover-content]');
+    act(() => {
+      content?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await flush();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('focuses the back button on view entry', async () => {
+    await openRemotesView();
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    );
+  });
+
+  it('tooltips both URLs when the push URL differs', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/push/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView();
+    const url = document.body
+      .querySelector('[data-testid="remote-remove-origin"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    expect(url?.getAttribute('title')).toBe(
+      'fetch: https://example.com/o/r.git\npush: https://example.com/push/r.git',
+    );
+  });
+
+  it('localizes the push/fetch tooltip labels', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/push/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView({ language: 'zh-CN' });
+    const url = document.body
+      .querySelector('[data-testid="remote-remove-origin"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    expect(url?.getAttribute('title')).toBe(
+      '拉取: https://example.com/o/r.git\n推送: https://example.com/push/r.git',
+    );
+  });
+
+  it('names the removal consequence in the armed confirm aria-label', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: true,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-origin"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Confirm removing origin (partial clone)');
+  });
+
+  it('shows an in-flight spinner on the removing row', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    const button = document.body.querySelector(
+      '[data-testid="remote-remove-origin"]',
+    );
+    expect(button?.querySelector('svg')?.getAttribute('class')).toContain(
+      'spin',
+    );
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
   });
 });

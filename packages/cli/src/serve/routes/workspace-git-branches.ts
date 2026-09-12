@@ -17,6 +17,8 @@ import {
   isValidRefName,
   isValidCheckoutRef,
 } from '@qwen-code/qwen-code-core';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -41,14 +43,262 @@ function redactGitPaths(detail: string, cwd: string): string {
   if (gitRoot && gitRoot !== cwd) {
     message = message.split(gitRoot).join('<workspace>');
   }
+  // The gitdir git echoes for config writes can live OUTSIDE the cwd's
+  // tree: a linked worktree shares the MAIN repository's .git dir (`could
+  // not lock config file /srv/main/.git/config`), a submodule's gitdir
+  // lives under the superproject's .git/modules. Probe from the git root
+  // (it holds the .git file; cwd may be a sub-directory).
+  const externals = gitExternalDirs(gitRoot ?? cwd);
+  for (const dir of externals.dirs) {
+    message = message.split(dir).join('<workspace>');
+  }
+  for (const key of externals.truncatedKeys) {
+    // A target longer than the read head: git echoes it whole, so the
+    // head is redacted as a PREFIX TOKEN — an exact split would leave
+    // the tail of the absolute path on the wire.
+    message = message.replace(
+      new RegExp(`${escapeRegExp(key)}\\S*`, 'g'),
+      '<workspace>',
+    );
+  }
+  // Inherited-scope config files git echoes by absolute path when one is
+  // malformed or unreadable (`fatal: bad config line N in file <path>`,
+  // `fatal: unable to access '<path>'`) — a config read sits on every
+  // route's path. GIT_CONFIG_GLOBAL/SYSTEM are stripped from the child
+  // env (gitEnv), so git always reads the default locations.
+  const home = process.env['HOME'];
+  if (home) {
+    message = message.split(path.join(home, '.gitconfig')).join('<home>');
+    // git concatenates verbatim (`%s/.gitconfig` % $HOME): a
+    // trailing-slash HOME echoes a double-slash spelling path.join
+    // normalizes away.
+    message = message.split(`${home}/.gitconfig`).join('<home>');
+  }
+  // git's xdg_config_home: a set-but-EMPTY $XDG_CONFIG_HOME falls back
+  // to ~/.config (not a relative 'git/config'), and $XDG_CONFIG_HOME is
+  // honored with no $HOME at all — mirror both, or the key either
+  // over-redacts every `.git/config` mention or never fires.
+  // The fallback is built verbatim from $HOME too (git does
+  // `%s/.config/git/config` % $HOME): path.join would normalize a
+  // trailing-slash HOME away from the double-slash echo.
+  const xdg =
+    process.env['XDG_CONFIG_HOME'] || (home ? `${home}/.config` : undefined);
+  if (xdg) {
+    message = message.split(path.join(xdg, 'git', 'config')).join('<home>');
+    // Same verbatim concatenation for the XDG spelling.
+    message = message.split(`${xdg}/git/config`).join('<home>');
+  }
+  // The system gitconfig path is a build-time setting (ETC_GITCONFIG):
+  // Homebrew git reads /opt/homebrew/etc/gitconfig, a source build may
+  // read /usr/local/etc/gitconfig — so redact any path ENDING in
+  // /etc/gitconfig, not just the literal. Decide per whitespace-
+  // delimited TOKEN, not with an unbounded \S* prefix: one long
+  // whitespace-free run in the payload (a rejected push's sideband data
+  // bypasses git's vreportf cap) would otherwise cost O(L^2) of
+  // synchronous CPU on the daemon's single event loop, before the
+  // 512-char slice ever applies.
+  message = message
+    .split(/(\s+)/)
+    .map((token) => (/\/etc\/gitconfig\b/.test(token) ? '<home>' : token))
+    .join('');
+  // include.path pulls config files from ARBITRARY absolute locations
+  // (a team-shared file under the user's home, say), and git's
+  // config-error family echoes the target after ` in file ` — an OPEN
+  // set of shapes (`bad config line N in file %s`, `bad numeric/boolean/
+  // date config value … in file %s: out of range`, per-version drift),
+  // so the arm keys on the shared phrase, not one enumerated shape.
+  // The `(?!<)` keeps the already-labeled `<home>` arms intact.
+  // The path is the message tail in these shapes, unquoted — a
+  // space-bearing path must redact to end of line, not to the first
+  // space (the fail-closed sweep below redacts only the first
+  // whitespace-delimited token, so it cannot own this class).
+  message = message.replace(/( in file )(?!<)[^\n]+/g, '$1<config>');
+  // `unable to access '<url>'` is also git's TRANSPORT error on every
+  // fetch/pull/push network failure — only an absolute filesystem path
+  // is a config target; a URL payload stays as-is. Absolute means a
+  // leading slash, a Windows drive letter, or a UNC share.
+  message = message.replace(
+    /(unable to access ')(?!<)((?:\/|[A-Za-z]:[\\/]|\\\\)[^']*)(')/g,
+    '$1<config>$3',
+  );
+  // An apostrophe INSIDE the quoted target stops the payload early:
+  // drop the fragment between the label and the closing quote, or the
+  // tail of a host path reaches the client.
+  message = message.replace(/(<config>')[^'\n]*(')/g, '$1$2');
+  // Git's quoted-path convention (`die(_("'%s' …"))`, e.g. `fatal:
+  // '<path>' does not appear to be a git repository`) carries the
+  // payload INSIDE quotes and it may contain whitespace — the sweep's
+  // token boundary would keep everything past the first space. Redact
+  // the quoted payload up to an inner apostrophe (git prints the path
+  // RAW, so an apostrophe-bearing path stops the payload early); the
+  // fragment arm below drops a path-like rest (one carrying a slash —
+  // a slash-free tail carries no path structure and stays, preserving
+  // quote-bearing diagnostics). A quoted URL is untouched (its
+  // payload starts with a scheme, not a slash), and already-labeled
+  // `<config>'…'` payloads are outside the boundary class.
+  message = message.replace(
+    /(^|[\s(<])'((?:\/|[A-Za-z]:[\\/]|\\\\)[^'\n]*)'/g,
+    "$1'<path>'",
+  );
+  message = message.replace(/('<path>')[^'\n]*\/[^'\n]*(')/g, '$1$2');
+
+  // Fail-closed sweep: the ` in file ` family above owns its tail, but
+  // OTHER sentences can carry an absolute path (today's or tomorrow's
+  // wording) — remove ANY surviving absolute-path token, whatever
+  // sentence wrapped it. A transport URL survives: its slashes follow
+  // `:` or a word character, never whitespace, a quote, a paren or the
+  // start. The sweep's token boundary is the documented limit — a
+  // space-bearing path belongs to a shape arm, never to this one.
+  // It runs before the 512-char slice so the loose keyword branches
+  // classify on the bounded, swept text.
+  message = message.replace(
+    /(^|[\s'"(<])(?:\/|[A-Za-z]:[\\/]|\\\\)[^\s'"<>]*/g,
+    '$1<path>',
+  );
   return message;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// The absolute dirs outside a `.git`-FILE repo's own tree whose paths git
+// can echo: the gitdir the file points at (resolved — a submodule's
+// conventionally relative `gitdir:` value included) and, for the
+// worktrees layout, the shared common dir two levels up. Empty for a
+// plain repository, where findGitRoot's substitution already covers the
+// path.
+function gitExternalDirs(repoRoot: string): {
+  dirs: string[];
+  truncatedKeys: string[];
+} {
+  const out = { dirs: [] as string[], truncatedKeys: [] as string[] };
+  try {
+    const dotgit = path.join(repoRoot, '.git');
+    if (!fs.statSync(dotgit).isFile()) return out;
+    // HEAD-BOUNDED reads: the .git file is workspace-controlled content
+    // on the daemon's shared error path (a symlinked multi-GB target
+    // would otherwise be slurped whole on every git route failure). A
+    // valid gitdir target is a path (PATH_MAX 4096), so 8 KiB is
+    // lossless.
+    const head = readHead(dotgit, 8192);
+    if (head === null) return out;
+    // git accepts only a same-line target (probed 2.50.1: a newline
+    // after the prefix is rejected); the parser deliberately
+    // over-accepts — redaction must never under-accept a form git
+    // might parse, and over-redaction cannot leak.
+    const m = /^gitdir:\s*(\S[^\n]*?)(?:\r?\n|$)/m.exec(head.text);
+    if (!m) return out;
+    // git reads the target with C-string semantics — a NUL truncates it;
+    // Node's fs layer rejects NUL outright, so the redaction key must be
+    // the truncated form git will actually echo.
+    const target = m[1].split('\0')[0] ?? '';
+    if (head.truncated && !m[0].endsWith('\n')) {
+      // The gitdir line is cut at the head boundary: git echoes the
+      // WHOLE target, so an exact partial key would leave the tail on
+      // the wire (a multibyte cut could even end it in U+FFFD) — the
+      // prefix-token arm handles it. Key on the NUL-truncated target:
+      // git's C-string read never echoes past a NUL, so a key built
+      // from the raw capture would never match.
+      const key = target.replace(/\uFFFD+$/, '');
+      if (key) out.truncatedKeys.push(key);
+      return out;
+    }
+    const gitdir = path.resolve(path.dirname(dotgit), target);
+    const dirs: string[] = [];
+    // git echoes the REALPATHED form of these paths (macOS /tmp ->
+    // /private/tmp and any user-created symlink component), so redact
+    // both the literal and the canonical spelling of every candidate.
+    const push = (dir: string): void => {
+      dirs.push(dir);
+      try {
+        dirs.push(fs.realpathSync(dir));
+      } catch {
+        // A dangling target leaves only the literal spelling to redact.
+      }
+    };
+    push(gitdir);
+    let canonical = gitdir;
+    try {
+      canonical = fs.realpathSync(gitdir);
+    } catch {
+      // Dangling gitdir: only the literal can be redacted anyway.
+    }
+    // git's authoritative pointer to the shared config dir: the
+    // `commondir` file inside the gitdir (relative to it). The
+    // worktrees-layout heuristic is the fallback for gitdirs without one
+    // (a relocated admin dir has no worktrees-named parent).
+    const common = readHead(path.join(canonical, 'commondir'), 4096);
+    if (common !== null) {
+      // Same C-string semantics as the gitdir target: git truncates the
+      // pointer at a NUL, so the redaction key must be the truncated
+      // form git will actually echo.
+      const commonText = common.text.split('\0')[0] ?? '';
+      if (common.truncated && !commonText.includes('\n')) {
+        const key = commonText.trim().replace(/\uFFFD+$/, '');
+        if (key) out.truncatedKeys.push(key);
+      } else {
+        const first = commonText.split('\n', 1)[0].trim();
+        // git resolves the pointer against the gitdir it read; the echo
+        // can carry either spelling (the literal the user configured, or
+        // the canonical form git realpaths at setup).
+        if (first) {
+          push(path.resolve(gitdir, first));
+          if (canonical !== gitdir) push(path.resolve(canonical, first));
+        }
+      }
+    }
+    for (const base of new Set([gitdir, canonical])) {
+      if (path.basename(path.dirname(base)) === 'worktrees') {
+        push(path.dirname(path.dirname(base)));
+      }
+    }
+    out.dirs = dirs;
+    return out;
+  } catch {
+    return out;
+  }
+}
+
+// The first `cap` bytes of a file as utf8 plus whether the file continues
+// past them, or null when unreadable. The daemon is long-lived and these
+// files are workspace-controlled, so the read must never be sized by the
+// file itself.
+function readHead(
+  file: string,
+  cap: number,
+): { text: string; truncated: boolean } | null {
+  let fd: number | null = null;
+  try {
+    // A FIFO at a workspace-controlled path would block openSync until a
+    // writer appears — wedging the daemon event loop on the shared error
+    // path. Non-regular files answer null, like any unreadable target.
+    if (!fs.statSync(file).isFile()) return null;
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(cap + 1);
+    const bytes = fs.readSync(fd, buf, 0, cap + 1, 0);
+    return {
+      text: buf.toString('utf8', 0, Math.min(bytes, cap)),
+      truncated: bytes > cap,
+    };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // The head read already settled; a close failure carries nothing.
+      }
+    }
+  }
 }
 
 function redactGitMessage(detail: string, cwd: string): string {
   return redactGitPaths(detail, cwd).slice(0, GIT_ERROR_MESSAGE_MAX);
 }
 
-function sendGitError(
+export function sendGitError(
   res: Response,
   err: unknown,
   route: string,
@@ -63,13 +313,88 @@ function sendGitError(
   let detail: string;
   if (err && typeof err === 'object' && ('stdout' in err || 'stderr' in err)) {
     const e = err as { stdout?: string; stderr?: string };
-    detail = `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
+    // Empty parts are dropped so a genuine single-line message always sits
+    // at line 1: the anchored shapes below match line 1 (or the documented
+    // two-line lock chain) ONLY, because a config-chosen value (a URL or a
+    // fetch refspec) can carry a real newline and inject a line-initial
+    // prefix of the attacker's choice deeper in the text.
+    detail = [e.stdout, e.stderr]
+      .filter((part) => typeof part === 'string' && part.length > 0)
+      .join('\n');
   } else {
     detail = err instanceof Error ? err.message : String(err);
   }
 
-  const message = redactGitMessage(detail, cwd);
+  // Classification reads the FULL redacted detail: slicing before
+  // matching would cut a long lock line's second line off before its
+  // `could not …` prefix (a deeply nested workspace path pushes the
+  // two-line lock chain past 512 chars) and misread a config-write
+  // failure as an unclassified 500. Only the client-visible message is
+  // bounded.
+  const fullMessage = redactGitPaths(detail, cwd);
+  const message = fullMessage.slice(0, GIT_ERROR_MESSAGE_MAX);
 
+  // git's remote config-write failures echo the name as `remote.<name>`
+  // (no space) and the URL verbatim. Every remote-shape branch below is
+  // anchored to git's own message START (line 1 of the composed detail),
+  // because a config-chosen name or URL can carry any keyword — `a remote
+  // b already exists`, `no such remote`, even `could not remove config
+  // section` — and a config-chosen VALUE can carry a real newline, so any
+  // deeper line is attacker-controllable. A lock surfaces as git's own
+  // two-line chain (`could not lock config file …` followed by the write
+  // failure); everything else git reports in these shapes is single-line.
+  if (
+    /^(?:error|fatal): could not (?:remove config section |set 'remote\.|unset 'branch\.)/i.test(
+      fullMessage,
+    ) ||
+    /^(?:error|fatal): could not lock config file [^\n]*\n(?:error|fatal): could not (?:remove config section |set 'remote\.|unset 'branch\.)/i.test(
+      fullMessage,
+    )
+  ) {
+    res.status(409).json({ error: 'git_config_write_failed', message });
+    return;
+  }
+  if (/^(?:error|fatal): remote .+ already exists\.?\s*$/i.test(fullMessage)) {
+    res.status(409).json({ error: 'remote_already_exists', message });
+    return;
+  }
+  if (/^(?:error|fatal): No such remote: /i.test(fullMessage)) {
+    res.status(404).json({ error: 'no_such_remote', message });
+    return;
+  }
+  // Our own removal-verification throw (a plain Error, no git prefix): a
+  // remote NAMED after this text must not be claimed by it.
+  if (/^remote still configured after removal$/i.test(fullMessage)) {
+    res.status(409).json({ error: 'remote_still_configured', message });
+    return;
+  }
+  // Our own remove pre-flight refusal (a plain Error, no git prefix):
+  // the section lives in an include.path'd file git's rm cannot write,
+  // and spawning rm would destroy the tracking refs and upstream keys
+  // before failing — so nothing was mutated.
+  if (/^remote section lives in an included config file$/i.test(fullMessage)) {
+    res.status(409).json({ error: 'remote_section_in_included_file', message });
+    return;
+  }
+  // git dies parsing a configured fetch refspec before mutating anything:
+  // the row stays, nothing was destroyed, and the cause is nameable.
+  if (/^(?:error|fatal): invalid refspec/i.test(fullMessage)) {
+    res.status(409).json({ error: 'remote_config_unparsable', message });
+    return;
+  }
+  // Our own add AND remove pre-flight refusal (a plain Error, no git
+  // prefix): the name exists in an inherited scope — add refuses because
+  // git's duplicate check cannot see it; remove refuses because git rm
+  // would destroy the local half first while the survivor keeps the name
+  // resolving.
+  if (/^remote already configured in an inherited scope$/i.test(fullMessage)) {
+    res.status(409).json({ error: 'remote_shadows_inherited', message });
+    return;
+  }
+  // The loose keyword branches match the BOUNDED slice, not the full
+  // detail: an unbounded keyword scan reclassifies a long push/pull
+  // output by any path or URL past the cap (a `dirty-cache.git` URL at
+  // char 600 is not a dirty tree).
   if (
     /not a git repository/i.test(message) ||
     /invalid reference/i.test(message)

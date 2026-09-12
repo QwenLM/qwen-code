@@ -21,6 +21,7 @@ import {
 import {
   registerWorkspaceGitBranchRoutes,
   registerWorkspaceQualifiedGitBranchRoutes,
+  sendGitError,
 } from './workspace-git-branches.js';
 
 const passthroughMutate = () =>
@@ -329,6 +330,735 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(response.status).toBe(409);
     expect(response.body.error).toBe('dirty_working_tree');
     expect(JSON.stringify(response.body)).not.toContain(dir);
+  });
+
+  // The classifier is shared by every workspace git route, so the file that
+  // owns it must be able to go red when the table changes — including the
+  // remote-specific branches the remotes routes depend on.
+  describe('sendGitError classification table', () => {
+    function classify(stderr: string): {
+      status: number;
+      body: Record<string, unknown>;
+    } {
+      const out: { status: number; body: Record<string, unknown> } = {
+        status: 0,
+        body: {},
+      };
+      const res = {
+        status(code: number) {
+          out.status = code;
+          return res;
+        },
+        json(body: Record<string, unknown>) {
+          out.body = body;
+          return res;
+        },
+      };
+      sendGitError(
+        res as never,
+        { stderr, stdout: '' },
+        'test-route',
+        sendBridgeError,
+        '/work/main',
+      );
+      return out;
+    }
+
+    it.each([
+      [
+        'error: remote dirty-cache already exists.',
+        409,
+        'remote_already_exists',
+      ],
+      ["error: No such remote: 'dirty-cache'", 404, 'no_such_remote'],
+      // A remote whose NAME matches an earlier keyword branch must still
+      // classify by the remote-specific shape.
+      ["error: No such remote: 'not a git repository'", 404, 'no_such_remote'],
+      // Keyword-carrying names: the anchored shapes must keep git's own
+      // line-initial message prefix as the match, not the echoed name.
+      [
+        "error: No such remote: 'a remote b already exists'",
+        404,
+        'no_such_remote',
+      ],
+      [
+        'error: remote no such remote already exists.',
+        409,
+        'remote_already_exists',
+      ],
+      [
+        "error: No such remote: 'could not remove config section'",
+        404,
+        'no_such_remote',
+      ],
+      [
+        "error: No such remote: 'remote still configured after removal'",
+        404,
+        'no_such_remote',
+      ],
+      // The remaining keyword branches must stay behind the anchored
+      // remote shapes too: a remote can be named after any of them.
+      ["error: No such remote: 'nothing to commit'", 404, 'no_such_remote'],
+      ["error: No such remote: 'detached HEAD'", 404, 'no_such_remote'],
+      ["error: No such remote: 'no upstream'", 404, 'no_such_remote'],
+      // And for the remaining anchored remote branches.
+      ["error: No such remote: 'invalid refspec'", 404, 'no_such_remote'],
+      [
+        "error: No such remote: 'remote already configured in an inherited scope'",
+        404,
+        'no_such_remote',
+      ],
+      // A config-chosen VALUE can carry a real newline (git unescapes \n
+      // in quoted values), so an injected line-2 prefix must never be
+      // claimed: only line 1 (or git's two-line lock chain) classifies.
+      [
+        "fatal: invalid refspec '+refs/heads/*\nfatal: No such remote: 'spoofed''",
+        409,
+        'remote_config_unparsable',
+      ],
+      [
+        "fatal: invalid refspec '+refs/heads/*\nerror: could not remove config section 'remote.x''",
+        409,
+        'remote_config_unparsable',
+      ],
+      [
+        "error: could not lock config file .git/config\nerror: Could not remove config section 'remote.dirty-cache'",
+        409,
+        'git_config_write_failed',
+      ],
+      // A long lock line must not push the write failure's line-2
+      // prefix past the client-message slice: classification reads the
+      // full redacted detail. The filler is a long RELATIVE path — an
+      // absolute one would collapse to <path> under the fail-closed
+      // sweep and pull line 2 back inside the slice, neutering the
+      // row's discrimination.
+      [
+        `error: could not lock config file ${'deep/'.repeat(150)}config\nerror: could not remove config section 'remote.origin'`,
+        409,
+        'git_config_write_failed',
+      ],
+      [
+        "fatal: could not unset 'branch.main.remote'",
+        409,
+        'git_config_write_failed',
+      ],
+      [
+        "error: could not lock config file .git/config\nfatal: Could not set 'remote.origin.url' to 'https://example.com/o/r.git'",
+        409,
+        'git_config_write_failed',
+      ],
+      [
+        "fatal: Could not set 'remote.dirty-cache.url' to 'https://example.com/o/r.git'",
+        409,
+        'git_config_write_failed',
+      ],
+      // The echoed name/URL inside a config-write message must not be
+      // claimed by the loose remote shapes that run after it.
+      [
+        "error: could not lock config file .git/config\nerror: Could not remove config section 'remote.no such remote'",
+        409,
+        'git_config_write_failed',
+      ],
+      [
+        "error: could not lock config file .git/config\nfatal: Could not set 'remote.foo.url' to '/tmp/no such remote/x'",
+        409,
+        'git_config_write_failed',
+      ],
+      [
+        "fatal: invalid refspec '+refs/heads/*'",
+        409,
+        'remote_config_unparsable',
+      ],
+      ['fatal: not a git repository', 404, 'not_a_git_repository'],
+      [
+        'error: Your local changes to the following files would be overwritten by merge',
+        409,
+        'dirty_working_tree',
+      ],
+      ['fatal: a branch named x already exists', 409, 'branch_already_exists'],
+      ['remote still configured after removal', 409, 'remote_still_configured'],
+      [
+        'remote section lives in an included config file',
+        409,
+        'remote_section_in_included_file',
+      ],
+      [
+        'remote already configured in an inherited scope',
+        409,
+        'remote_shadows_inherited',
+      ],
+    ])('maps %j to %i %s', (stderr, status, code) => {
+      const out = classify(stderr);
+      expect(out.status).toBe(status);
+      expect(out.body['error']).toBe(code);
+    });
+
+    it('bounds the loose keyword branches to the capped slice', () => {
+      // A keyword past the 512 cap (a `dirty-cache.git` URL deep in a
+      // long push rejection) is not a dirty tree — the loose branches
+      // match the bounded slice, while the anchored remote branches
+      // still read the full detail.
+      const deep = `${'x'.repeat(600)} dirty`;
+      const out = classify(deep);
+      expect(out.body['error']).not.toBe('dirty_working_tree');
+      // The positive arm still fires when the keyword is inside the cap.
+      const early = classify('error: the working tree is dirty');
+      expect(early.status).toBe(409);
+      expect(early.body['error']).toBe('dirty_working_tree');
+    });
+
+    it('keeps redaction linear over a long whitespace-free run', () => {
+      // A bare remote's pre-receive hook prints one long line (sideband
+      // data bypasses git's vreportf cap): an arm scanning an unbounded
+      // \S* prefix per payload position costs O(L^2) of synchronous CPU
+      // on the daemon's single event loop — before the 512-char slice
+      // ever applies. The bound is deliberately loose: the quadratic arm
+      // it discriminates against costs ~17 s on this payload.
+      const start = Date.now();
+      const out = classify(`remote: ${'a'.repeat(200_000)}`);
+      expect(Date.now() - start).toBeLessThan(10_000);
+      expect(out.status).not.toBe(0);
+      // The labeled arm still redacts the build-time system path,
+      // prefix included, when the same kind of payload carries it.
+      const labeled = classify(
+        `/opt/homebrew/etc/gitconfig ${'a'.repeat(100_000)}`,
+      );
+      const text = String(labeled.body['error'] ?? labeled.body['message']);
+      expect(text).toContain('<home>');
+      expect(text).not.toContain('/opt/homebrew');
+    });
+
+    it('sweeps absolute paths in config-error shapes no arm enumerates', () => {
+      // The ` in file ` arm owns the whole config-error family to end of
+      // line — a SPACE-BEARING include target keeps no tail (the sweep's
+      // whitespace-token boundary cannot own that class).
+      const out = classify(
+        "fatal: bad numeric config value '999999999999999999999' for 'core.abbrev' in file /tmp/probe/inc sha/red/bad5.gitconfig: out of range",
+      );
+      const text = String(out.body['error'] ?? out.body['message']);
+      expect(text).not.toContain('/tmp/probe');
+      expect(text).not.toContain('bad5.gitconfig');
+      expect(text).not.toContain('sha/red');
+      // The fail-closed sweep owns what no shape arm names: any
+      // surviving absolute-path token goes, whatever sentence wraps it.
+      const other = classify(
+        'fatal: cannot parse /tmp/probe/inc/shared/bad5.gitconfig header',
+      );
+      const otherText = String(other.body['error'] ?? other.body['message']);
+      expect(otherText).not.toContain('/tmp/probe');
+      expect(otherText).toContain('<path>');
+      // An apostrophe-bearing include target stops the quoted arm's
+      // [^']* payload early: the prefix still redacts, and the tail
+      // carries no absolute-path token for the sweep to miss.
+      const apos = classify(
+        "fatal: unable to access '/tmp/probe/Team's cfg.gitconfig': No such file or directory",
+      );
+      const aposText = String(apos.body['error'] ?? apos.body['message']);
+      expect(aposText).not.toContain('/tmp/probe');
+      expect(aposText).not.toContain('s cfg.gitconfig');
+      // Git's quoted-path convention carries a SPACE-BEARING payload
+      // inside quotes (git's die(_("'%s' …)) family, e.g. `fatal:
+      // '<path>' does not appear to be a git repository`): the sweep's
+      // whitespace-token boundary would keep everything past the first
+      // space, so the quoted-path arm owns the whole quoted payload.
+      const quoted = classify(
+        "fatal: '/tmp/probe/My Repos/app.git' does not appear to be a git repository",
+      );
+      const quotedText = String(quoted.body['error'] ?? quoted.body['message']);
+      expect(quotedText).not.toContain('My Repos');
+      expect(quotedText).not.toContain('app.git');
+      expect(quotedText).toContain('<path>');
+      // An apostrophe INSIDE the quoted path stops the quoted-path
+      // arm's raw payload early (git prints the path unescaped); the
+      // fragment arm drops everything up to the closing quote.
+      const aposPath = classify(
+        "fatal: '/Users/o'brien/git/qwen-code' does not appear to be a git repository",
+      );
+      const aposPathText = String(
+        aposPath.body['error'] ?? aposPath.body['message'],
+      );
+      expect(aposPathText).not.toContain('brien');
+      expect(aposPathText).toContain('<path>');
+      // The transport negative control: a URL's slashes follow the
+      // scheme's colon, so the sweep leaves it verbatim.
+      const url = classify(
+        "fatal: unable to access 'https://example.invalid/org/repo.git/': Could not resolve host",
+      );
+      const urlText = String(url.body['error'] ?? url.body['message']);
+      expect(urlText).toContain('https://example.invalid/org/repo.git/');
+    });
+
+    it('classifies the stdout half of the detail too', () => {
+      // Empty stdout/stderr parts are dropped before the join, so a shape
+      // arriving on stdout alone sits at line 1 — the anchored branches
+      // match line 1 only.
+      const out = { status: 0, body: {} as Record<string, unknown> };
+      const res = {
+        status(code: number) {
+          out.status = code;
+          return res;
+        },
+        json(body: Record<string, unknown>) {
+          out.body = body;
+          return res;
+        },
+      };
+      sendGitError(
+        res as never,
+        { stdout: "error: No such remote: 'gone'", stderr: '' },
+        'test-route',
+        sendBridgeError,
+        '/work/main',
+      );
+      expect(out.status).toBe(404);
+      expect(out.body['error']).toBe('no_such_remote');
+    });
+
+    it('redacts the main gitdir a linked worktree cannot reach via its toplevel', () => {
+      // A linked worktree's .git is a FILE pointing into the main
+      // repository's .git dir; git echoes THAT absolute path for
+      // config-lock failures, and neither the cwd substitution nor
+      // findGitRoot covers it — the path must still not leave the
+      // process boundary.
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-redact-'));
+      try {
+        function classifyAt(
+          cwd: string,
+          stderr: string,
+        ): { status: number; body: Record<string, unknown> } {
+          const out = { status: 0, body: {} as Record<string, unknown> };
+          const res = {
+            status(code: number) {
+              out.status = code;
+              return res;
+            },
+            json(body: Record<string, unknown>) {
+              out.body = body;
+              return res;
+            },
+          };
+          sendGitError(
+            res as never,
+            { stdout: '', stderr },
+            'test-route',
+            sendBridgeError,
+            cwd,
+          );
+          return out;
+        }
+        const mainGit = path.join(root, 'main', '.git');
+        const wtGit = path.join(mainGit, 'worktrees', 'wt');
+        fs.mkdirSync(wtGit, { recursive: true });
+        const wt = path.join(root, 'wt');
+        fs.mkdirSync(wt, { recursive: true });
+        fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${wtGit}\n`);
+        const out = classifyAt(
+          wt,
+          `error: could not lock config file ${mainGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(out.status).toBe(409);
+        expect(out.body['error']).toBe('git_config_write_failed');
+        const message = String(out.body['message']);
+        expect(message).toContain('<workspace>/config');
+        expect(message).not.toContain(mainGit);
+        expect(message).not.toContain(root);
+
+        // A cwd BELOW the worktree root must not disable the redaction:
+        // the .git file lives at the git root, which is probed instead.
+        const sub = path.join(wt, 'sub');
+        fs.mkdirSync(sub, { recursive: true });
+        const outSub = classifyAt(
+          sub,
+          `error: could not lock config file ${mainGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outSub.body['message'])).not.toContain(mainGit);
+        expect(String(outSub.body['message'])).toContain('<workspace>/config');
+
+        // A submodule's gitdir (under the superproject, conventionally a
+        // RELATIVE gitdir: value) is outside the workspace tree too.
+        const superGit = path.join(root, 'super', '.git', 'modules', 'sub');
+        fs.mkdirSync(superGit, { recursive: true });
+        const subWt = path.join(root, 'super', 'sub');
+        fs.mkdirSync(subWt, { recursive: true });
+        fs.writeFileSync(
+          path.join(subWt, '.git'),
+          `gitdir: ${path.relative(subWt, superGit)}\n`,
+        );
+        const outModule = classifyAt(
+          subWt,
+          `error: could not lock config file ${superGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outModule.body['message'])).not.toContain(superGit);
+        expect(String(outModule.body['message'])).toContain(
+          '<workspace>/config',
+        );
+
+        // A gitdir whose parent is NOT named worktrees (a relocated
+        // admin dir) is resolved through the commondir FILE git writes
+        // inside it, not the layout heuristic.
+        const movedGit = path.join(root, 'moved-admin');
+        fs.mkdirSync(movedGit, { recursive: true });
+        fs.writeFileSync(
+          path.join(movedGit, 'commondir'),
+          `${path.relative(movedGit, mainGit)}\n`,
+        );
+        const movedWt = path.join(root, 'moved-wt');
+        fs.mkdirSync(movedWt, { recursive: true });
+        fs.writeFileSync(path.join(movedWt, '.git'), `gitdir: ${movedGit}\n`);
+        const outMoved = classifyAt(
+          movedWt,
+          `error: could not lock config file ${mainGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outMoved.body['message'])).not.toContain(mainGit);
+        expect(String(outMoved.body['message'])).toContain(
+          '<workspace>/config',
+        );
+
+        // A FIFO commondir must not wedge the daemon's synchronous head
+        // read on this shared error path: openSync on a FIFO blocks until
+        // a writer appears. The guard answers null as for any unreadable
+        // target; the gitdir arm still redacts the admin dir itself (the
+        // main dir is simply unknowable in this shape — git's own error
+        // would name the commondir path, not the main gitdir).
+        if (process.platform !== 'win32') {
+          const fifoGit = path.join(root, 'fifo-admin');
+          fs.mkdirSync(fifoGit, { recursive: true });
+          execFileSync('mkfifo', [path.join(fifoGit, 'commondir')]);
+          const fifoWt = path.join(root, 'fifo-wt');
+          fs.mkdirSync(fifoWt, { recursive: true });
+          fs.writeFileSync(path.join(fifoWt, '.git'), `gitdir: ${fifoGit}\n`);
+          const outFifo = classifyAt(
+            fifoWt,
+            `error: could not lock config file ${fifoGit}/config\nerror: Could not remove config section 'remote.origin'`,
+          );
+          expect(String(outFifo.body['message'])).not.toContain(fifoGit);
+          expect(String(outFifo.body['message'])).toContain(
+            '<workspace>/config',
+          );
+        }
+
+        // Deliberate over-redaction: the parser accepts forms beyond
+        // git's same-line grammar, because over-redaction cannot leak.
+        const nlWt = path.join(root, 'nl-wt');
+        fs.mkdirSync(nlWt, { recursive: true });
+        fs.writeFileSync(path.join(nlWt, '.git'), `gitdir:\n ${wtGit}\n`);
+        const outNl = classifyAt(
+          nlWt,
+          `error: could not lock config file ${mainGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outNl.body['message'])).not.toContain(mainGit);
+        expect(String(outNl.body['message'])).toContain('<workspace>/config');
+
+        // The .git file is workspace-controlled content on the daemon's
+        // shared error path: the read is head-bounded, and a valid
+        // target inside the head must still parse past an oversize tail.
+        const bigWt = path.join(root, 'big-wt');
+        fs.mkdirSync(bigWt, { recursive: true });
+        fs.writeFileSync(
+          path.join(bigWt, '.git'),
+          `gitdir: ${wtGit}\n${'x'.repeat(128 * 1024)}`,
+        );
+        const outBig = classifyAt(
+          bigWt,
+          `error: could not lock config file ${mainGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outBig.body['message'])).not.toContain(mainGit);
+        expect(String(outBig.body['message'])).toContain('<workspace>/config');
+
+        // git echoes the REALPATHED spelling of the gitdir (macOS
+        // /tmp -> /private/tmp, or any symlink component): a gitfile
+        // pointing through a symlink must redact the canonical form.
+        const alias = path.join(root, 'alias-git');
+        fs.symlinkSync(mainGit, alias, 'dir');
+        const aliasWt = path.join(root, 'alias-wt');
+        fs.mkdirSync(aliasWt, { recursive: true });
+        fs.writeFileSync(path.join(aliasWt, '.git'), `gitdir: ${alias}\n`);
+        const realMain = fs.realpathSync(mainGit);
+        const outAlias = classifyAt(
+          aliasWt,
+          `error: could not lock config file ${realMain}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outAlias.body['message'])).not.toContain(realMain);
+        expect(String(outAlias.body['message'])).toContain(
+          '<workspace>/config',
+        );
+
+        // Inherited config files git echoes by absolute path when one is
+        // malformed — the child env always reads the defaults (gitEnv
+        // strips the redirectors), so they are redacted too.
+        const home = process.env['HOME'];
+        expect(home).toBeTruthy();
+        const outCfg = classifyAt(
+          wt,
+          `fatal: bad config line 1 in file ${path.join(home!, '.gitconfig')}`,
+        );
+        // The unclassified fall-through carries the text in `error`.
+        const cfgText = String(outCfg.body['error'] ?? outCfg.body['message']);
+        expect(cfgText).not.toContain(home!);
+        expect(cfgText).toContain('<home>');
+
+        // A NUL byte in the gitdir target: git reads it with C-string
+        // semantics (truncated at the NUL), while Node's fs layer
+        // rejects NUL — the redaction key must be the truncated form
+        // git will actually echo.
+        fs.writeFileSync(
+          path.join(wt, '.git'),
+          Buffer.concat([
+            Buffer.from('gitdir: '),
+            Buffer.from(wtGit),
+            Buffer.from([0]),
+            Buffer.from('junk\n'),
+          ]),
+        );
+        const outNul = classifyAt(
+          wt,
+          `error: could not lock config file ${wtGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outNul.body['message'])).not.toContain(wtGit);
+        expect(String(outNul.body['message'])).toContain('<workspace>/config');
+
+        // The NUL-truncated target with the head cut mid-padding: the
+        // truncated-head arm must key on the NUL-normalized form too —
+        // git's C-string echo never contains the NUL a raw-capture key
+        // would require, so the prefix token would never match.
+        const padWt = path.join(root, 'pad-wt');
+        fs.mkdirSync(padWt, { recursive: true });
+        fs.writeFileSync(
+          path.join(padWt, '.git'),
+          Buffer.concat([
+            Buffer.from('gitdir: '),
+            Buffer.from(wtGit),
+            Buffer.from([0]),
+            Buffer.from('x'.repeat(16 * 1024)),
+          ]),
+        );
+        const outPad = classifyAt(
+          padWt,
+          `error: could not lock config file ${wtGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outPad.body['message'])).not.toContain(wtGit);
+        expect(String(outPad.body['message'])).toContain('<workspace>');
+
+        // The commondir pointer gets the same C-string NUL truncation:
+        // a NUL-bearing pointer to a sibling outside the worktrees
+        // heuristic must still redact the path git resolves.
+        const gd = path.join(root, 'gd');
+        fs.mkdirSync(gd, { recursive: true });
+        fs.writeFileSync(
+          path.join(gd, 'commondir'),
+          Buffer.concat([
+            Buffer.from('../main2'),
+            Buffer.from([0]),
+            Buffer.from('junk\n'),
+          ]),
+        );
+        const nulCommonWt = path.join(root, 'nul-common-wt');
+        fs.mkdirSync(nulCommonWt, { recursive: true });
+        fs.writeFileSync(path.join(nulCommonWt, '.git'), `gitdir: ${gd}\n`);
+        const outCommon = classifyAt(
+          nulCommonWt,
+          `error: could not lock config file ${path.join(root, 'main2')}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outCommon.body['message'])).not.toContain('main2');
+        expect(String(outCommon.body['message'])).toContain(
+          '<workspace>/config',
+        );
+
+        // git's xdg_config_home resolution: a set-but-EMPTY
+        // $XDG_CONFIG_HOME falls back to ~/.config (it is not a relative
+        // 'git/config'), and $XDG_CONFIG_HOME is honored with no $HOME
+        // at all — the redaction must mirror both.
+        const prevHome = process.env['HOME'];
+        const prevXdg = process.env['XDG_CONFIG_HOME'];
+        try {
+          process.env['XDG_CONFIG_HOME'] = '';
+          const xdgFallback = path.join(home!, '.config', 'git', 'config');
+          const outEmpty = classifyAt(
+            wt,
+            `fatal: bad config line 1 in file ${xdgFallback}`,
+          );
+          const emptyText = String(
+            outEmpty.body['error'] ?? outEmpty.body['message'],
+          );
+          expect(emptyText).toContain('<home>');
+          expect(emptyText).not.toContain(home!);
+
+          process.env['XDG_CONFIG_HOME'] = path.join(root, 'xdg');
+          delete process.env['HOME'];
+          const xdgOnly = path.join(root, 'xdg', 'git', 'config');
+          const outXdg = classifyAt(
+            wt,
+            `fatal: bad config line 1 in file ${xdgOnly}`,
+          );
+          const xdgText = String(
+            outXdg.body['error'] ?? outXdg.body['message'],
+          );
+          expect(xdgText).toContain('<home>');
+          expect(xdgText).not.toContain(path.join(root, 'xdg'));
+
+          // git concatenates HOME/XDG verbatim (`%s/.gitconfig` % $HOME):
+          // a trailing-slash value echoes a double-slash spelling that a
+          // path.join'd key never matches.
+          const fakeHome = path.join(root, 'home');
+          process.env['HOME'] = `${fakeHome}/`;
+          delete process.env['XDG_CONFIG_HOME'];
+          const outSlash = classifyAt(
+            wt,
+            `fatal: bad config line 1 in file ${fakeHome}//.gitconfig`,
+          );
+          const slashText = String(
+            outSlash.body['error'] ?? outSlash.body['message'],
+          );
+          expect(slashText).toContain('<home>');
+          expect(slashText).not.toContain(fakeHome);
+
+          // The XDG fallback keeps the verbatim junction too: git builds
+          // it as `%s/.config/git/config` % $HOME, double slash and all.
+          const outFallback = classifyAt(
+            wt,
+            `fatal: bad config line 1 in file ${fakeHome}//.config/git/config`,
+          );
+          const fallbackText = String(
+            outFallback.body['error'] ?? outFallback.body['message'],
+          );
+          expect(fallbackText).toContain('<home>');
+          expect(fallbackText).not.toContain(fakeHome);
+
+          const fakeXdg = path.join(root, 'xdg2');
+          process.env['XDG_CONFIG_HOME'] = `${fakeXdg}/`;
+          const outXdgSlash = classifyAt(
+            wt,
+            `fatal: bad config line 1 in file ${fakeXdg}//git/config`,
+          );
+          const xdgSlashText = String(
+            outXdgSlash.body['error'] ?? outXdgSlash.body['message'],
+          );
+          expect(xdgSlashText).toContain('<home>');
+          expect(xdgSlashText).not.toContain(fakeXdg);
+        } finally {
+          if (prevHome === undefined) delete process.env['HOME'];
+          else process.env['HOME'] = prevHome;
+          if (prevXdg === undefined) delete process.env['XDG_CONFIG_HOME'];
+          else process.env['XDG_CONFIG_HOME'] = prevXdg;
+        }
+
+        // include.path pulls config files from arbitrary locations, and
+        // git echoes those targets in the same two shapes — redact the
+        // payload wherever it points (the default locations keep their
+        // <home> label: the shape arms run after them and skip '<').
+        const shared = path.join(root, 'team', 'company.gitconfig');
+        const outInclude = classifyAt(
+          wt,
+          `fatal: bad config line 3 in file ${shared}`,
+        );
+        const includeText = String(
+          outInclude.body['error'] ?? outInclude.body['message'],
+        );
+        expect(includeText).toContain('<config>');
+        expect(includeText).not.toContain(root);
+        const outAccess = classifyAt(
+          wt,
+          `fatal: unable to access '${shared}': Permission denied`,
+        );
+        const accessText = String(
+          outAccess.body['error'] ?? outAccess.body['message'],
+        );
+        expect(accessText).toContain('<config>');
+        expect(accessText).not.toContain(root);
+
+        // git echoes the config path UNQUOTED in the bad-config-line
+        // shape — a space-bearing path must redact whole, not to the
+        // first space.
+        const spaced = path.join(root, 'team dir', 'company.gitconfig');
+        const outSpaced = classifyAt(
+          wt,
+          `fatal: bad config line 3 in file ${spaced}`,
+        );
+        const spacedText = String(
+          outSpaced.body['error'] ?? outSpaced.body['message'],
+        );
+        // The whole path goes, tail included.
+        expect(spacedText).toBe('fatal: bad config line 3 in file <config>');
+
+        // The unable-to-access shape is also git's TRANSPORT error: a
+        // remote URL is not a config target and must survive verbatim.
+        const outUrl = classifyAt(
+          wt,
+          "fatal: unable to access 'https://example.invalid/org/repo.git/': Could not resolve host",
+        );
+        const urlText = String(outUrl.body['error'] ?? outUrl.body['message']);
+        expect(urlText).toContain('https://example.invalid/org/repo.git/');
+        expect(urlText).not.toContain('<config>');
+
+        // A Windows drive-letter path is an absolute config target too.
+        const winShared = 'D:\\a\\_temp\\team\\company.gitconfig';
+        const outWin = classifyAt(
+          wt,
+          `fatal: unable to access '${winShared}': Permission denied`,
+        );
+        const winText = String(outWin.body['error'] ?? outWin.body['message']);
+        expect(winText).toContain('<config>');
+        expect(winText).not.toContain('_temp');
+
+        // git-for-Windows predominantly echoes forward-slash paths.
+        const winFwd = 'D:/a/_temp/team/company.gitconfig';
+        const outFwd = classifyAt(
+          wt,
+          `fatal: unable to access '${winFwd}': Permission denied`,
+        );
+        const fwdText = String(outFwd.body['error'] ?? outFwd.body['message']);
+        expect(fwdText).toContain('<config>');
+        expect(fwdText).not.toContain('_temp');
+
+        // So is a UNC share path.
+        const uncShared = String.raw`\\server\share\team.gitconfig`;
+        const outUnc = classifyAt(
+          wt,
+          `fatal: unable to access '${uncShared}': Permission denied`,
+        );
+        const uncText = String(outUnc.body['error'] ?? outUnc.body['message']);
+        expect(uncText).toContain('<config>');
+        expect(uncText).not.toContain('server');
+
+        // The system gitconfig path is build-time (ETC_GITCONFIG) —
+        // Homebrew git reads /opt/homebrew/etc/gitconfig — so any path
+        // ENDING in /etc/gitconfig redacts, prefix included.
+        const outEtc = classifyAt(
+          wt,
+          'fatal: bad config line 1 in file /etc/gitconfig',
+        );
+        const etcText = String(outEtc.body['error'] ?? outEtc.body['message']);
+        expect(etcText).toContain('<home>');
+        expect(etcText).not.toContain('/etc/gitconfig');
+        const outBrew = classifyAt(
+          wt,
+          'fatal: bad config line 1 in file /opt/homebrew/etc/gitconfig',
+        );
+        const brewText = String(
+          outBrew.body['error'] ?? outBrew.body['message'],
+        );
+        expect(brewText).toContain('<home>');
+        expect(brewText).not.toContain('/opt/homebrew');
+        expect(brewText).not.toContain('etc/gitconfig');
+
+        // A gitdir line longer than the read head: git echoes the WHOLE
+        // target, so the truncated capture redacts as a prefix token —
+        // the tail past the head must not reach the client either.
+        const longTarget = `/${'p'.repeat(9 * 1024)}`;
+        const longWt = path.join(root, 'long-wt');
+        fs.mkdirSync(longWt, { recursive: true });
+        fs.writeFileSync(path.join(longWt, '.git'), `gitdir: ${longTarget}\n`);
+        const outLong = classifyAt(
+          longWt,
+          `fatal: not a git repository: ${longTarget}`,
+        );
+        const longMessage = String(outLong.body['message']);
+        expect(longMessage).toContain('<workspace>');
+        expect(longMessage).not.toContain('p'.repeat(100));
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 
   it('updates a dirty tree and restores the local changes with stash', async () => {

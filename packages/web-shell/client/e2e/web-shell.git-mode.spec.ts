@@ -1,26 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
-  createWebShellDaemonScenario,
   installMockDaemon,
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
-
-const WORKSPACE_CWD = '/tmp/qwen-web-shell-e2e';
-
-function createGitWorkspaceScenario(
-  overrides: Parameters<typeof createWebShellDaemonScenario>[0] = {},
-): WebShellDaemonScenario {
-  return createWebShellDaemonScenario({
-    capabilities: {
-      workspaces: [
-        { id: 'primary', cwd: WORKSPACE_CWD, primary: true, trusted: true },
-      ],
-    },
-    gitStatus: { v: 2, workspaceCwd: WORKSPACE_CWD, branch: 'main' },
-    ...overrides,
-  });
-}
+import { createGitWorkspaceScenario } from './utils/gitScenario';
 
 async function installScenario(
   page: Page,

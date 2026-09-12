@@ -56,6 +56,11 @@ export default tseslint.config(
       'node_modules/*',
       'packages/**/dist/**',
       'packages/web-templates/src/generated/**',
+      // Generated UTS #39 confusables table (6.5k-entry literal): the
+      // type-aware rules OOM the eslint heap on it, and generated data
+      // has no idiom to enforce. Regenerate via
+      // packages/web-shell/scripts/generate-confusables.mjs.
+      'packages/web-shell/client/utils/unicodeConfusables.ts',
       'integrations/**/dist/**',
       'bundle/**',
       'package/bundle/**',
