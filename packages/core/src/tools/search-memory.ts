@@ -126,7 +126,31 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
       if (before !== undefined && sameBodyCoverage(before, coverage)) return;
       const live = bodyCoverage.get(ref);
       if (!live || live.version < coverage.version) {
-        bodyCoverage.set(ref, coverage);
+        // The call's entry was cloned from the pre-call snapshot, so it
+        // carries ranges this call never read. When the live entry vanished
+        // mid-call (memory-pressure eviction), committing those inherited
+        // ranges would claim evicted bodies are still in history — strip
+        // everything but the windows this call added.
+        const inherited =
+          before !== undefined &&
+          before.version === coverage.version &&
+          before.total === coverage.total
+            ? before
+            : undefined;
+        bodyCoverage.set(
+          ref,
+          inherited
+            ? {
+                ...coverage,
+                ranges: coverage.ranges.filter(
+                  (range) =>
+                    !inherited.ranges.some(
+                      (b) => b.start === range.start && b.end === range.end,
+                    ),
+                ),
+              }
+            : coverage,
+        );
         return;
       }
       if (live.version > coverage.version) {

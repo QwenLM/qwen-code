@@ -406,12 +406,18 @@ export function parseAutoMemoryTopicDocument(
   };
 }
 
-async function listMarkdownFiles(root: string) {
+async function listMarkdownFiles(root: string, scope: AutoMemoryScope) {
   return listTrustedMemoryMarkdownFiles(
     root,
     getMemoryRootTrustedAnchor(root),
     AUTO_MEMORY_INDEX_FILENAME,
-    { followRootSymlink: true },
+    // Only the user-owned root may itself be a symlink (dotfiles layout).
+    // Project and team roots can live INSIDE the repository
+    // (`<projectRoot>/.qwen/memory`, `<gitRoot>/.qwen/team-memory`), where a
+    // committed symlink would redirect the scan — and every injected
+    // project/team document — anywhere the user can read. The write side
+    // already rejects that shape (TeamMemoryRootSecurityError).
+    { followRootSymlink: scope === 'user' },
   );
 }
 
@@ -450,7 +456,7 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
 }> {
   let files: Awaited<ReturnType<typeof listMarkdownFiles>>;
   try {
-    files = await listMarkdownFiles(root);
+    files = await listMarkdownFiles(root, opts.scope);
   } catch (error) {
     debugLogger.debug(`failed to list memory root ${root}`, error);
     return {
@@ -781,7 +787,7 @@ export async function rereadAutoMemoryDocument(
       root,
       getMemoryRootTrustedAnchor(root),
       doc.relativePath,
-      { followRootSymlink: true },
+      { followRootSymlink: doc.scope === 'user' },
     );
     if (!trustedFile) return null;
     const stats = await fs.stat(trustedFile);

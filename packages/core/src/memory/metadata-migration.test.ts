@@ -347,10 +347,14 @@ describe('memory metadata migration', () => {
     );
   });
 
-  it('preserves the body when leniently parsed frontmatter is migrated', async () => {
+  it('refuses to rewrite frontmatter only the lenient parser accepts', async () => {
+    // Tab-indented frontmatter fails the strict parse; rebuilding it from the
+    // lenient parse would rewrite comments, block scalars, and other
+    // non-owned fields into wrong values, so the file stays untouched and the
+    // commit reports 'invalid' instead of a lossy 'committed'.
     const body = 'Real body\nwith trailing newline\n';
     const original = `---\ntype: project\n\tcategory: memory\n---\n${body}`;
-    await write('project/legacy.md', original);
+    const filePath = await write('project/legacy.md', original);
     const [candidate] = await scanMemoryMetadataMigrationCandidates(
       memoryRoot,
       'project',
@@ -358,9 +362,47 @@ describe('memory metadata migration', () => {
 
     expect(
       await commitMigratedMemoryMetadata(candidate!, metadata(candidate!)),
-    ).toBe('committed');
-    const updated = await fs.readFile(candidate!.filePath, 'utf-8');
-    expect(updated.slice(updated.indexOf('\n---\n') + 5)).toBe(body);
+    ).toBe('invalid');
+    await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe(original);
+  });
+
+  it('reports tab-indented frontmatter as failed without touching the file', async () => {
+    const original = [
+      '---',
+      '\tname: Old Name',
+      '\tdescription: old desc',
+      '\ttype: project',
+      '\t# hand-written comment the user cares about',
+      '\tnotes: |',
+      '\t line one',
+      '\t line two',
+      '\tcustom_list:',
+      '\t - alpha',
+      '\t - beta',
+      '---',
+      'Body text here.',
+      '',
+    ].join('\n');
+    const filePath = await write('project/legacy.md', original);
+    const generateMetadata = vi.fn(
+      async (
+        _config: Config,
+        candidate: MemoryMetadataMigrationCandidate,
+        _vocabulary: string,
+      ) => metadata(candidate),
+    );
+
+    const result = await runMemoryMetadataMigration({
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata,
+    });
+
+    expect(result.failed).toBe(1);
+    expect(result.committed).toBe(0);
+    await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe(original);
   });
 
   it('preserves the body when frontmatter has no valid type', async () => {
@@ -717,6 +759,65 @@ describe('memory metadata migration', () => {
       outputTokens: 0,
       totalTokens: 0,
     });
+    expect(vocabularies[0]).not.toContain('new canonical phrase');
+    expect(vocabularies[1]).toContain('new canonical phrase');
+  });
+
+  it('ranks a just-committed file as newest in the next file vocabulary', async () => {
+    // The low-frequency vocabulary bucket is budgeted (~30% of the 8KB
+    // snapshot): a committed file re-entering the corpus with a synthetic
+    // mtime of 0 sorts behind every pre-existing document and is cut, so the
+    // next file's writer never sees the term the previous file established.
+    const oldDate = new Date('2020-01-01T00:00:00.000Z');
+    for (let i = 0; i < 70; i += 1) {
+      const existingPath = await write(
+        `project/existing-${String(i).padStart(3, '0')}.md`,
+        [
+          '---',
+          `name: Existing ${i}`,
+          'description: Complete metadata',
+          'type: project',
+          'category: project_introduction',
+          'keywords:',
+          `  - existing topic ${i} alpha`,
+          `  - existing topic ${i} beta`,
+          `  - existing topic ${i} gamma`,
+          'usage_scenarios:',
+          '  - Testing migration',
+          '---',
+          'Body.',
+        ].join('\n'),
+      );
+      await fs.utimes(existingPath, oldDate, oldDate);
+    }
+    await write('project/one.md', legacyContent('First body'));
+    await write('project/two.md', legacyContent('Second body'));
+    const vocabularies: string[] = [];
+    const generateMetadata = vi.fn(
+      async (
+        _config: Config,
+        candidate: MemoryMetadataMigrationCandidate,
+        vocabulary: string,
+      ) => {
+        vocabularies.push(vocabulary);
+        return metadata(
+          candidate,
+          candidate.relativePath.endsWith('one.md')
+            ? 'new canonical phrase'
+            : 'second phrase',
+        );
+      },
+    );
+
+    const result = await runMemoryMetadataMigration({
+      config: { isTrustedFolder: () => true } as unknown as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata,
+    });
+
+    expect(result.committed).toBe(2);
     expect(vocabularies[0]).not.toContain('new canonical phrase');
     expect(vocabularies[1]).toContain('new canonical phrase');
   });

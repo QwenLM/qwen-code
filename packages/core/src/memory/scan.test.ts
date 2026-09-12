@@ -12,6 +12,7 @@ import {
   clearAutoMemoryRootCache,
   getAutoMemoryFilePath,
   getAutoMemoryRoot,
+  getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
 import {
@@ -21,6 +22,7 @@ import {
   scanAllAutoMemoryTopicDocuments,
   scanAutoMemorySnapshot,
   scanAutoMemoryTopicDocuments,
+  scanTeamAutoMemoryTopicDocuments,
   scanUserAutoMemoryTopicDocuments,
   type AutoMemoryDocumentCache,
   validateStructuredAutoMemoryDocument,
@@ -641,6 +643,65 @@ describe('auto-memory topic scanning', () => {
       }
       clearAutoMemoryRootCache();
     }
+  });
+
+  it('refuses a symlinked in-repo project memory root instead of scanning its target', async () => {
+    // With QWEN_CODE_MEMORY_LOCAL=1 (the test setup default) the project root
+    // is the repo-tracked `<projectRoot>/.qwen/memory`: a committed symlink
+    // there must not redirect the scan outside the repository. The write side
+    // already rejects this shape (TeamMemoryRootSecurityError); the read side
+    // matches it. Only the user-owned root keeps the dotfiles exemption.
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const outsideRoot = path.join(tempDir, 'outside-memory');
+    await fs.mkdir(outsideRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(outsideRoot, 'victim.md'),
+      '---\ntype: project\nname: Outside\ndescription: private\n---\nbody',
+      'utf-8',
+    );
+    await fs.rm(memoryRoot, { recursive: true, force: true });
+    await fs.symlink(
+      outsideRoot,
+      memoryRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    await expect(scanAutoMemoryTopicDocuments(projectRoot)).rejects.toThrow(
+      'symlinked memory root',
+    );
+    const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+      scopes: ['project'],
+    });
+    expect(snapshot.docs.some((doc) => doc.relativePath === 'victim.md')).toBe(
+      false,
+    );
+  });
+
+  it('refuses a symlinked team memory root instead of scanning its target', async () => {
+    const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+    const outsideRoot = path.join(tempDir, 'outside-team-memory');
+    await fs.mkdir(outsideRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(outsideRoot, 'victim.md'),
+      '---\ntype: project\nname: Outside\ndescription: private\n---\nbody',
+      'utf-8',
+    );
+    await fs.symlink(
+      outsideRoot,
+      teamRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    await expect(scanTeamAutoMemoryTopicDocuments(projectRoot)).rejects.toThrow(
+      'symlinked memory root',
+    );
+    const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+      scopes: ['team'],
+      teamMemoryEnabled: true,
+    });
+    expect(snapshot.docs.some((doc) => doc.relativePath === 'victim.md')).toBe(
+      false,
+    );
   });
 
   it('rejects a memory replaced by an outside symlink after scanning', async () => {

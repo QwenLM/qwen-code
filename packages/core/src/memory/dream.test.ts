@@ -9,9 +9,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import { runManagedAutoMemoryDream } from './dream.js';
+import { runManagedAutoMemoryDream, snapshotDreamFiles } from './dream.js';
 import { ensureAutoMemoryScaffold } from './store.js';
-import { getAutoMemoryRoot } from './paths.js';
+import {
+  getAutoMemoryIndexPath,
+  getAutoMemoryMetadataPath,
+  getAutoMemoryRoot,
+} from './paths.js';
+import type { AutoMemoryMetadata } from './types.js';
 import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
 
 vi.mock('./dreamAgentPlanner.js', () => ({
@@ -321,6 +326,96 @@ describe('managed auto-memory dream', () => {
     await expect(fs.readFile(concurrentFile, 'utf-8')).resolves.toBe(
       'written by another task',
     );
+  });
+
+  it('skips directory-shaped and symlinked entries when snapshotting', async () => {
+    // A cloned repo (QWEN_CODE_MEMORY_LOCAL=1 layout) can ship a directory
+    // named `*.md` or a symlink pointing outside the memory root; the dream
+    // must skip both instead of dying on EISDIR or reading out-of-root bytes.
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const projectDir = path.join(memoryRoot, 'project');
+    await fs.mkdir(path.join(projectDir, 'notes.md'), { recursive: true });
+    const outsideFile = path.join(tempDir, 'outside.md');
+    await fs.writeFile(
+      outsideFile,
+      '---\ntype: project\nname: Outside\ndescription: private\n---\nsecret\n',
+    );
+    await fs.symlink(outsideFile, path.join(projectDir, 'link.md'), 'file');
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    const result = await runManagedAutoMemoryDream(
+      projectRoot,
+      new Date('2026-04-02T00:00:00.000Z'),
+      mockConfig,
+    );
+
+    expect(result.createdEntries).toBe(0);
+    expect(result.updatedEntries).toBe(0);
+    const snapshot = await snapshotDreamFiles(memoryRoot);
+    expect(snapshot.has('project/notes.md')).toBe(false);
+    expect(snapshot.has('project/link.md')).toBe(false);
+  });
+
+  it('rebuilds the index after deleting memories with unparseable frontmatter', async () => {
+    // Frontmatter-malformed files are never migration candidates and carry no
+    // type, so deleting them produces no touched topic — the rebuild gate must
+    // still fire or MEMORY.md keeps pointing at files that no longer exist.
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const topicDir = path.join(memoryRoot, 'project');
+    await fs.mkdir(topicDir, { recursive: true });
+    await fs.writeFile(
+      path.join(topicDir, 'stale-a.md'),
+      '---\ntype: project\nunclosed\n',
+    );
+    await fs.writeFile(
+      path.join(topicDir, 'stale-b.md'),
+      '---\ntype: project\nunclosed\n',
+    );
+    await fs.writeFile(
+      getAutoMemoryIndexPath(projectRoot),
+      '- [stale a](project/stale-a.md) — hook\n- [stale b](project/stale-b.md) — hook\n',
+    );
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockImplementation(
+      async () => {
+        await fs.writeFile(
+          path.join(memoryRoot, DREAM_OPERATIONS_FILENAME),
+          JSON.stringify({
+            version: 1,
+            delete: ['project/stale-a.md', 'project/stale-b.md'],
+            operations: [],
+          }),
+        );
+        return {
+          status: 'completed',
+          finalText: 'Deleted stale memories.',
+          filesTouched: [],
+        };
+      },
+    );
+
+    const result = await runManagedAutoMemoryDream(
+      projectRoot,
+      new Date('2026-04-02T00:00:00.000Z'),
+      mockConfig,
+      undefined,
+      { recordMetadata: true },
+    );
+
+    expect(result.deletedEntries).toBe(2);
+    const index = await fs.readFile(
+      getAutoMemoryIndexPath(projectRoot),
+      'utf-8',
+    );
+    expect(index).not.toContain('stale-a');
+    expect(index).not.toContain('stale-b');
+    const metadata = JSON.parse(
+      await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf-8'),
+    ) as AutoMemoryMetadata;
+    expect(metadata.lastDreamStatus).toBe('updated');
   });
 
   it('skips manual dream while metadata migration is pending', async () => {

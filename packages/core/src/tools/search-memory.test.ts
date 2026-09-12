@@ -297,6 +297,59 @@ describe('SearchMemoryTool', () => {
     expect(liveExhausted.has('project:untouched.md')).toBe(false);
   });
 
+  it('commits only the ranges a touched ref added after a mid-call eviction', async () => {
+    // The call's coverage clone inherits the pre-call ranges; when compaction
+    // evicts the live entry mid-call, writing the whole clone back would
+    // resurrect coverage for a body compaction removed — later fetches would
+    // report it alreadyAvailable with no content.
+    const mockConfig = config();
+    const tool = new SearchMemoryTool(mockConfig);
+    const memoryManager = mockConfig.getMemoryManager();
+    const liveCoverage = memoryManager.getBodyCoverageInHistory();
+    liveCoverage.set('project:long.md', {
+      version: 7,
+      total: 20000,
+      ranges: [{ start: 0, end: 8000 }],
+    });
+    vi.mocked(executeSearchMemory).mockImplementationOnce(
+      async (_params, options) => {
+        memoryManager.getBodyPresentVersionsInHistory().clear();
+        liveCoverage.clear();
+        // readContentResult pushes the call's new window onto the cloned
+        // pre-call entry, so the call map carries both ranges.
+        options?.bodyCoverage?.set('project:long.md', {
+          version: 7,
+          total: 20000,
+          ranges: [
+            { start: 0, end: 8000 },
+            { start: 8000, end: 16000 },
+          ],
+        });
+        return {
+          mode: 'fetch',
+          sourceStatus: {
+            requestedScopes: ['project'],
+            searchedScopes: ['project'],
+            unavailableScopes: [],
+            complete: true,
+            incompleteScopes: [],
+          },
+          results: [],
+        };
+      },
+    );
+
+    await tool
+      .build({ mode: 'fetch', refs: ['project:long.md'] })
+      .execute(new AbortController().signal);
+
+    expect(liveCoverage.get('project:long.md')).toEqual({
+      version: 7,
+      total: 20000,
+      ranges: [{ start: 8000, end: 16000 }],
+    });
+  });
+
   it('summarizes the result for display instead of dumping the full JSON', async () => {
     const tool = new SearchMemoryTool(config());
     vi.mocked(executeSearchMemory).mockResolvedValue({

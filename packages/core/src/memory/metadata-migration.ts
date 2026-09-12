@@ -326,11 +326,15 @@ function mergeMetadata(
     }
   }
   if (renderedYaml === undefined) {
-    // No pre-existing frontmatter, or frontmatter only the lenient parser
-    // accepts (e.g. tab indentation): round-trip through it instead.
-    const frontmatter = parts.frontmatter.trim()
-      ? parseYaml(parts.frontmatter)
-      : {};
+    if (parts.frontmatter.trim()) {
+      // Frontmatter only the lenient parser accepts (e.g. tab indentation):
+      // rebuilding it from parseYaml's best-effort result would rewrite
+      // comments, anchors, block scalars, and other non-owned fields into
+      // wrong values. Refuse — the file stays byte-identical and is counted
+      // as failed, never silently committed with rewritten user data.
+      return null;
+    }
+    const frontmatter: Record<string, unknown> = {};
     for (const key of OWNED_FRONTMATTER_KEYS) {
       frontmatter[key] = metadata[key];
     }
@@ -611,10 +615,14 @@ export async function runMemoryMetadataMigration(params: {
         result.committed += 1;
         committedRoots.add(candidate.root);
         const content = await fs.readFile(candidate.filePath, 'utf-8');
+        // The committed doc re-enters the vocabulary corpus: give it its real
+        // mtime so the recency-sorted budget keeps the term it just
+        // established instead of ranking the newest file as the oldest.
+        const stats = await fs.stat(candidate.filePath);
         const migratedDoc = parseAutoMemoryTopicDocument(
           candidate.filePath,
           content,
-          0,
+          stats.mtimeMs,
           candidate.relativePath,
           params.scope,
         );

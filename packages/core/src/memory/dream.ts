@@ -7,7 +7,13 @@
 import * as fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
-import { getAutoMemoryMetadataPath, getAutoMemoryRoot } from './paths.js';
+import {
+  AUTO_MEMORY_INDEX_FILENAME,
+  getAutoMemoryMetadataPath,
+  getAutoMemoryRoot,
+  getMemoryRootTrustedAnchor,
+} from './paths.js';
+import { listTrustedMemoryMarkdownFiles } from './trusted-memory-filesystem.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
 import { ensureAutoMemoryScaffold } from './store.js';
@@ -47,37 +53,34 @@ export async function snapshotDreamFiles(
   memoryRoot: string,
   scope: 'project' | 'user' = 'project',
 ): Promise<Map<string, DreamSnapshotEntry>> {
-  let entries: string[];
-  try {
-    entries = (await fs.readdir(memoryRoot, { recursive: true })).filter(
-      (entry): entry is string =>
-        typeof entry === 'string' &&
-        entry.endsWith('.md') &&
-        path.basename(entry) !== 'MEMORY.md',
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Map();
-    throw error;
-  }
-
+  // Enumerate through the trusted helper every other memory scanner uses: a
+  // directory named `*.md` or an unreadable file must not fail the whole
+  // dream with EISDIR/EACCES, and a symlinked entry must never contribute
+  // out-of-root bytes to the snapshot. Only the user-owned root may itself
+  // be a symlink (dotfiles layout) — a symlinked in-repo project root is
+  // refused, matching the scan and write paths.
+  const files = await listTrustedMemoryMarkdownFiles(
+    memoryRoot,
+    getMemoryRootTrustedAnchor(memoryRoot),
+    AUTO_MEMORY_INDEX_FILENAME,
+    { followRootSymlink: scope === 'user' },
+  );
   const snapshot = new Map<string, DreamSnapshotEntry>();
   await Promise.all(
-    entries.map(async (entry) => {
-      const relativePath =
-        path.sep === '\\' ? entry.replaceAll('\\', '/') : entry;
-      const filePath = path.join(memoryRoot, entry);
+    files.map(async ({ relativePath, resolvedPath }) => {
       let content: string;
       try {
-        content = await fs.readFile(filePath, 'utf-8');
+        content = await fs.readFile(resolvedPath, 'utf-8');
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'EACCES') return;
         throw error;
       }
 
       let parsed: ReturnType<typeof parseAutoMemoryTopicDocument> = null;
       try {
         parsed = parseAutoMemoryTopicDocument(
-          filePath,
+          path.join(memoryRoot, relativePath),
           content,
           0,
           relativePath,
@@ -307,7 +310,15 @@ export async function runManagedAutoMemoryDream(
   // could persist gating metadata for a record the manager is about
   // to mark `'cancelled'`.
   if (abortSignal?.aborted) return agentResult;
-  if (agentResult.touchedTopics.length > 0) {
+  // Deleting a file whose frontmatter cannot be parsed yields no touched
+  // topic, so gating on touchedTopics alone would skip the rebuild and leave
+  // MEMORY.md pointing at deleted files (and record the run as a noop).
+  const hasChanges =
+    agentResult.createdEntries +
+      agentResult.updatedEntries +
+      agentResult.deletedEntries >
+      0 || agentResult.touchedTopics.length > 0;
+  if (hasChanges) {
     await rebuildManagedAutoMemoryIndex(projectRoot);
   }
   if (options.recordMetadata) {
@@ -315,6 +326,8 @@ export async function runManagedAutoMemoryDream(
       projectRoot,
       now,
       agentResult.touchedTopics,
+      undefined,
+      hasChanges,
     );
   }
 
@@ -322,7 +335,7 @@ export async function runManagedAutoMemoryDream(
     config,
     new MemoryDreamEvent({
       trigger: options.trigger ?? 'auto',
-      status: agentResult.touchedTopics.length > 0 ? 'updated' : 'noop',
+      status: hasChanges ? 'updated' : 'noop',
       deduped_entries: agentResult.dedupedEntries,
       created_entries: agentResult.createdEntries,
       updated_entries: agentResult.updatedEntries,
@@ -341,6 +354,7 @@ async function updateDreamMetadataResult(
   now: Date,
   touchedTopics: AutoMemoryType[],
   sessionId?: string,
+  hasChanges = touchedTopics.length > 0,
 ): Promise<void> {
   const metadataPath = getAutoMemoryMetadataPath(projectRoot);
   try {
@@ -349,7 +363,7 @@ async function updateDreamMetadataResult(
     metadata.updatedAt = now.toISOString();
     metadata.lastDreamAt = now.toISOString();
     metadata.lastDreamTouchedTopics = touchedTopics;
-    metadata.lastDreamStatus = touchedTopics.length > 0 ? 'updated' : 'noop';
+    metadata.lastDreamStatus = hasChanges ? 'updated' : 'noop';
     if (sessionId !== undefined) {
       metadata.lastDreamSessionId = sessionId;
       metadata.recentSessionIdsSinceDream = [];
