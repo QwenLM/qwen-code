@@ -2005,3 +2005,24 @@ describe('WebSearchTool execute', () => {
     vi.useRealTimers();
   });
 });
+
+describe('WebSearchTool citations', () => {
+  it('asks the model to cite bare URLs without titles', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM])),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('as bare URLs, one per line');
+    expect(content).toContain('cannot be verified');
+    expect(content).not.toContain('as markdown links');
+  });
+
+  it('shows a bare URL citation example in the tool description', () => {
+    const description = new WebSearchTool(makeConfig()).schema.description;
+    expect(description).toContain(
+      '- https://www.cms.gov/files/document/r12951cp.pdf',
+    );
+    expect(description).toContain('do not wrap them in markdown links');
+    expect(description).not.toContain('](https://');
+  });
+});
