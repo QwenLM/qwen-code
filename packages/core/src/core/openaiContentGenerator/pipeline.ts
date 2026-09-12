@@ -60,6 +60,7 @@ import {
 } from '../../telemetry/gen-ai-request.js';
 import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
+import { trailingReattachPartCount } from '../../services/image-payload-references.js';
 import type { ModelReasoningCapabilities } from '../../models/types.js';
 import { parseModelReasoningCapabilities } from '../reasoning-effort.js';
 
@@ -1054,6 +1055,7 @@ export class ContentGenerationPipeline {
     let providerRequest = this.config.provider.buildRequest(
       baseRequest,
       userPromptId,
+      trailingReattachPartCount(request.contents),
     );
     if (
       this.contentGeneratorConfig.enableCacheControl !== false &&

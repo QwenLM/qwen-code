@@ -51,11 +51,13 @@ Command hooks execute commands via child processes. Input JSON is passed through
 | `command`       | `string`                 | Yes      | Command to execute                          |
 | `name`          | `string`                 | No       | Hook name (for logging)                     |
 | `description`   | `string`                 | No       | Hook description                            |
-| `timeout`       | `number`                 | No       | Timeout in milliseconds, default 60000      |
+| `timeout`       | `number`                 | No       | Timeout in seconds, default 60              |
 | `async`         | `boolean`                | No       | Whether to run asynchronously in background |
 | `env`           | `Record<string, string>` | No       | Environment variables                       |
 | `shell`         | `"bash" \| "powershell"` | No       | Shell to use                                |
 | `statusMessage` | `string`                 | No       | Status message displayed during execution   |
+
+`timeout` is in seconds for command, HTTP and prompt hooks; SDK-registered function hooks keep milliseconds. Command hook timeouts used to be written in milliseconds, so for command hooks a value of `1000` or more is still read as milliseconds and existing settings keep working. To migrate, look for command hooks whose `timeout` is `1000` or more and rewrite the value in seconds, for example `10000` as `10`. To give a command hook a timeout of 1000 seconds or more, keep writing it in milliseconds, for example `1800000` for 30 minutes. A command hook `timeout` that is not a positive number, such as `"30s"`, is ignored and the 60 second default applies. With debug logging enabled (`QWEN_DEBUG_LOG_FILE=1`), each command hook with a millisecond or ignored `timeout` is named once per session in that session's debug log.
 
 **Example:**
 
@@ -70,7 +72,7 @@ Command hooks execute commands via child processes. Input JSON is passed through
             "type": "command",
             "command": "$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh",
             "name": "security-check",
-            "timeout": 10000
+            "timeout": 10
           }
         ]
       }
@@ -810,7 +812,7 @@ The hook uses the deleting runtime's normal session fields (`session_id`, `trans
 
 ```json
 {
-  "stop_hook_active": "boolean indicating if stop hook is active",
+  "stop_hook_active": "true when this turn is continuing because a stop hook blocked the previous stop check (still true after tool calls made during that continuation); false on the first check and again once the stop is allowed, the blocking cap is reached, the user steers or sends new input, or a new turn, retry or goal turn starts",
   "last_assistant_message": "the last message from the assistant",
   "context_usage": "ratio of context window used (may exceed 1 when tokens exceed window; optional)",
   "context_limit": "context window size in tokens (optional)",
@@ -933,7 +935,7 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 ```json
 {
   "permission_mode": "default | plan | auto_edit | yolo",
-  "stop_hook_active": "boolean indicating if stop hook is active",
+  "stop_hook_active": "false on the first stop check; true when the subagent is continuing because a SubagentStop hook blocked its previous stop",
   "agent_id": "identifier for the subagent",
   "agent_type": "type of agent",
   "agent_transcript_path": "path to the subagent's transcript",
@@ -1197,7 +1199,7 @@ exit 0
             "type": "command",
             "command": "$HOME/.qwen/hooks/todo-validator.sh",
             "name": "todo-validator",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -1291,7 +1293,7 @@ exit 0
             "type": "command",
             "command": "$HOME/.qwen/hooks/todo-completion-validator.sh",
             "name": "completion-validator",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -1324,7 +1326,7 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
             "command": "/path/to/security-check.sh",
             "name": "security-check",
             "description": "Run security checks before tool execution",
-            "timeout": 30000
+            "timeout": 30
           }
         ]
       }
@@ -1363,6 +1365,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
 - Cannot return decision control (operation has already occurred)
 - Results are injected in the next conversation turn via `systemMessage` or `additionalContext`, except for output-ignored fire-and-forget event types documented above
 - Suitable for auditing, logging, background testing, etc.
+- Occupies one of 10 concurrent async hook slots until it finishes or reaches its `timeout` (60 seconds by default)
 
 **Example:**
 
@@ -1377,7 +1380,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
             "type": "command",
             "command": "$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh",
             "async": true,
-            "timeout": 300000
+            "timeout": 300
           }
         ]
       }
@@ -1403,7 +1406,7 @@ fi
 
 - Hooks run in the user's environment with user privileges
 - Project-level hooks require trusted folder status
-- Timeouts prevent hanging hooks (default: 60 seconds)
+- Timeouts prevent hanging hooks (default: 60 seconds for command hooks)
 
 ## Best Practices
 
@@ -1463,7 +1466,7 @@ Configure in `.qwen/settings.json`:
             "command": "${SECURITY_CHECK_SCRIPT}",
             "name": "security-checker",
             "description": "Security validation for bash commands",
-            "timeout": 10000
+            "timeout": 10
           }
         ]
       }

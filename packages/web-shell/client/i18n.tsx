@@ -622,6 +622,15 @@ const EN: Messages = {
   'common.invalid': 'invalid',
   'common.loading': 'Loading...',
   'common.retry': 'Try again',
+  'session.recovery.interrupted_prompt':
+    'The previous request was interrupted before the response completed.',
+  'session.recovery.interrupted_turn':
+    'The previous task was interrupted. Some tool results were not saved.',
+  'session.recovery.degraded_history':
+    'Conversation history is incomplete. The interrupted task cannot be continued.',
+  'session.recovery.continue': 'Continue execution',
+  'session.recovery.continuing': 'Continuing…',
+  'session.recovery.failed': 'Could not continue the conversation.',
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -1480,6 +1489,7 @@ const EN: Messages = {
   'localFiles.status.needsGesture': 'Reconnect to continue',
   'localFiles.status.failed': 'Failed',
   'localFiles.status.unavailable': 'Unavailable here',
+  'localFiles.status.resolving': 'Resolving…',
   'localFiles.needsSessionHint':
     'Start a session first. The bridge binds to exactly one session, so no other session can reach your files.',
   'localFiles.blocker.insecureContext':
@@ -1490,6 +1500,10 @@ const EN: Messages = {
     'This browser has no File System Access API. Use Chrome or Edge to connect a local directory.',
   'localFiles.blocker.workspaceIneligible':
     "This conversation's workspace cannot host a local directory (untrusted or live workspace).",
+  'localFiles.blocker.workspaceResolving':
+    'Which workspace this conversation belongs to is not known yet.',
+  'localFiles.blocker.unsupportedDaemon':
+    'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -2385,6 +2399,7 @@ const EN: Messages = {
   'mcp.userMcp': 'Global MCP',
   'mcp.workingDirectory': 'Working Directory',
   'goal.aborted': 'Goal aborted',
+  'goal.blocked': 'Goal blocked',
   'goal.usageLimited': 'Goal usage limited',
   'goal.paused': 'Goal paused',
   'goal.achieved': 'Goal achieved',
@@ -4331,6 +4346,12 @@ const ZH: Messages = {
   'common.invalid': '无效',
   'common.loading': '加载中...',
   'common.retry': '重试',
+  'session.recovery.interrupted_prompt': '上次请求在回答完成前中断。',
+  'session.recovery.interrupted_turn': '上次任务已中断，部分工具结果未保存。',
+  'session.recovery.degraded_history': '会话历史不完整，无法继续中断的任务。',
+  'session.recovery.continue': '继续执行',
+  'session.recovery.continuing': '正在继续…',
+  'session.recovery.failed': '无法继续此会话。',
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
@@ -5119,6 +5140,7 @@ const ZH: Messages = {
   'localFiles.status.needsGesture': '需要重新连接',
   'localFiles.status.failed': '连接失败',
   'localFiles.status.unavailable': '当前环境不可用',
+  'localFiles.status.resolving': '解析中…',
   'localFiles.needsSessionHint':
     '请先创建一个会话。桥只绑定一个会话，因此其他会话无法访问你的文件。',
   'localFiles.blocker.insecureContext':
@@ -5129,6 +5151,9 @@ const ZH: Messages = {
     '当前浏览器没有 File System Access API。请使用 Chrome 或 Edge 连接本地目录。',
   'localFiles.blocker.workspaceIneligible':
     '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。',
+  'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
+  'localFiles.blocker.unsupportedDaemon':
+    '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -5943,6 +5968,7 @@ const ZH: Messages = {
   'mcp.userMcp': '全局 MCP',
   'mcp.workingDirectory': '工作目录',
   'goal.aborted': '目标已中止',
+  'goal.blocked': '目标已阻塞',
   'goal.usageLimited': '目标用量受限',
   'goal.paused': '目标已暂停',
   'goal.achieved': '目标已达成',
