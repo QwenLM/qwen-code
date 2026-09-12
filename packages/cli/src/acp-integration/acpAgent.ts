@@ -2996,9 +2996,12 @@ export async function runAcpAgent(
         // than rejected: `fireSessionEndEvent` resolves to `undefined` for a
         // cancelled hook (the `{ success: false, outcome: 'cancelled' }`
         // result never rejects), so `Promise.allSettled` cannot observe it and
-        // `failures` above stays empty. Detect the abort directly so a
-        // cancelled hook still surfaces as a shutdown failure (non-zero exit)
-        // instead of the CLI exiting 0 as though every hook had run.
+        // `failures` above stays empty. Detect the abort directly so the
+        // cancellation is recorded at all, instead of the CLI exiting 0 as
+        // though every hook had run. What recording it buys depends on the
+        // caller: the throw below is gated on `managedConfigs`, so a managed
+        // shutdown turns it into a non-zero exit while an unmanaged one gets
+        // the warning line only.
         if (controller.signal.aborted) {
           failures.push(
             new Error(
