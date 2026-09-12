@@ -3875,6 +3875,15 @@ export class LlmClient {
         // Every other send (retry, continuation, tool result, cron) leaves
         // the entry unmarked and stays on the positional rewind path.
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+        // Notification-style turns (drained background-agent notification,
+        // cron fire, teammate envelope) display as `notification` items, so
+        // their model-facing entry carries the notification provenance the
+        // rewind census pairs against notification items — the rendered text
+        // cannot carry it (a cron fire submits the raw job prompt), and the
+        // recorded subtype restores it on resume (R40-3).
+        messageType === SendMessageType.Notification ||
+          messageType === SendMessageType.Cron ||
+          messageType === SendMessageType.Teammate,
       );
 
       // Assemble the outgoing request. IDE context is merged into the

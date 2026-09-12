@@ -60,6 +60,34 @@ export function findApiHistoryPromptIndex(
   return match;
 }
 
+const API_HISTORY_NOTIFICATION = Symbol('apiHistoryNotification');
+
+type NotificationMarkedContent = Content & {
+  [API_HISTORY_NOTIFICATION]?: true;
+};
+
+/**
+ * Marks a user-role API history entry as the model-facing half of a
+ * background-notification-style turn (a drained background-agent notification,
+ * a cron fire, a teammate envelope). The UI renders those turns as
+ * `notification` items, never as user turns, so the TUI rewind census must
+ * pair them against notification items rather than user turns. The rendered
+ * text cannot carry that fact: a cron fire submits the raw job prompt with no
+ * `<task-notification>` envelope, so provenance has to ride the entry itself
+ * (R40-3). The submit path records the subtype on the `ChatRecord`; this mark
+ * is its in-memory projection, so it survives nothing the record does not —
+ * resume re-attaches it from the record's subtype.
+ */
+export function markApiHistoryNotification(content: Content): void {
+  (content as NotificationMarkedContent)[API_HISTORY_NOTIFICATION] = true;
+}
+
+export function isApiHistoryNotification(content: Content): boolean {
+  return (
+    (content as NotificationMarkedContent)[API_HISTORY_NOTIFICATION] === true
+  );
+}
+
 export interface BuildApiHistoryOptions {
   /**
    * Whether to strip thought parts from the history.
@@ -112,6 +140,10 @@ function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
   if (record.type === 'user' && !record.subtype) {
     markApiHistoryPrompt(message, record.promptId);
   }
+  if (record.subtype === 'notification' || record.subtype === 'cron') {
+    markApiHistoryNotification(message);
+  }
+
   if (record.subtype === 'mid_turn_user_message') {
     const previous = history.at(-1);
     if (previous?.role === 'user') {

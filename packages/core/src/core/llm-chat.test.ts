@@ -34,6 +34,7 @@ import {
   buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
+  isApiHistoryNotification,
 } from '../services/session-api-history.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
@@ -578,6 +579,42 @@ describe('LlmChat', async () => {
       // No identity supplied (retry, continuation, tool result): unmarked, so
       // rewind stays on the positional path for that turn.
       expect(getApiHistoryPromptId(await send())).toBeUndefined();
+    });
+
+    it('marks the pushed user entry as a notification turn when the send says so', async () => {
+      // The rewind census pairs UI notification items against entries
+      // carrying notification provenance (R40-3). The submit path knows the
+      // turn displays as a notification item, but the rendered text cannot
+      // carry the fact — a cron fire submits the raw job prompt with no
+      // <task-notification> envelope — so the send option puts it on the
+      // entry directly.
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streamResponse(stopResponse([{ text: 'ok' }])),
+      );
+
+      const send = async (options?: { notificationSubmitted?: boolean }) => {
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'hello' },
+          'prompt-id-notification-mark',
+          undefined,
+          options,
+        );
+        for await (const _ of stream) {
+          /* consume stream */
+        }
+        return chat
+          .getHistoryShallow()
+          .filter((entry) => entry.role === 'user')
+          .at(-1)!;
+      };
+
+      expect(
+        isApiHistoryNotification(await send({ notificationSubmitted: true })),
+      ).toBe(true);
+      // Ordinary sends stay unmarked, so the census never pairs a user turn's
+      // entry against a notification item.
+      expect(isApiHistoryNotification(await send())).toBe(false);
     });
 
     describe('manual plan-exit notices', () => {

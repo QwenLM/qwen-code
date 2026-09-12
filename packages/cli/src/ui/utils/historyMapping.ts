@@ -12,6 +12,7 @@ import {
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
   getStartupContextLength,
+  isApiHistoryNotification,
   isApiUserPrompt,
   isClearedMediaPlaceholder,
   isSystemReminderContent,
@@ -342,37 +343,38 @@ export function computeApiTruncationIndex(
     // positions have desynced — an absorbed turn — which is the case
     // identity exists to resolve and which the round-28 tests pin. Those
     // targets carry ordinary text and never reach this branch.
+    // Whether a real, non-file-key-only UI turn before the target claims
+    // `mark` — the ownership question both the backstop's claimed-entry
+    // clause and the demotion's safe-cut scan answer.
+    const isMarkClaimedByPreTargetTurn = (mark: string): boolean =>
+      uiHistory.some(
+        (item, index) =>
+          index < targetIndex &&
+          (compressionIndex === -1 || index > compressionIndex) &&
+          isRealUserTurn(item) &&
+          !item.promptIdFileKeyOnly &&
+          item.promptId === mark,
+      );
     // A drained background-agent/cron completion renders one notification
     // ITEM per drained task but submits one user-role ENTRY per drain batch,
     // so counting every notification item lets unowned items (batch tails,
     // dropped-summary notices, envelopes merged into a functionResponse)
     // cancel unowned entries — the R32-1 cancellation the ordinal proof and
     // the demotion exist to reject (R42-3). Pair the two sides ordinally
-    // among <task-notification>-shaped units: the k-th item owns the k-th
-    // entry; items past the entry count own nothing.
+    // among entries carrying notification PROVENANCE: the submit path knows
+    // the turn displays as a notification item and records it (subtype
+    // 'notification'/'cron'), and both the live send and the resume rebuild
+    // attach that fact to the entry itself — the rendered text cannot carry
+    // it, since a cron fire submits the raw job prompt with no
+    // `<task-notification>` envelope (R40-3). The k-th item owns the k-th
+    // provenance-marked entry; items past the entry count own nothing.
     const countOwnedNotificationItems = (
       uiTo: number,
       apiTo: number,
     ): number => {
       let entries = 0;
       for (let i = startIndex; i < apiTo; i++) {
-        const entry = apiHistory[i]!;
-        if (entry.role !== 'user' || !entry.parts) continue;
-        const promptPart = entry.parts.find(
-          (part) =>
-            'text' in part &&
-            typeof part.text === 'string' &&
-            part.text.length > 0 &&
-            !isSystemReminderContent({ role: 'user', parts: [part] }),
-        );
-        if (
-          promptPart !== undefined &&
-          'text' in promptPart &&
-          typeof promptPart.text === 'string' &&
-          promptPart.text.startsWith('<task-notification>')
-        ) {
-          entries++;
-        }
+        if (isApiHistoryNotification(apiHistory[i]!)) entries++;
       }
       let items = 0;
       for (
@@ -384,8 +386,31 @@ export function computeApiTruncationIndex(
       }
       return Math.min(items, entries);
     };
+    // Whether cutting at `boundary` — which drops [boundary, matchIndex)
+    // ahead of the proven match — would drop an entry owned by a UI turn
+    // that stays displayed after the rewind (a real turn BEFORE the target
+    // claims the entry's mark). An unowned excess (a Goal continuation, a
+    // claimant-less re-send) makes the walk land early, but demoting onto
+    // the walk's boundary is only honest when the cut drops nothing the UI
+    // still shows (R40-3).
+    const cutDropsDisplayedTurn = (
+      boundary: number,
+      matchIndex: number,
+    ): boolean => {
+      for (let i = boundary; i < matchIndex; i++) {
+        const mark = getApiHistoryPromptId(apiHistory[i]!);
+        if (mark !== undefined && isMarkClaimedByPreTargetTurn(mark)) {
+          return true;
+        }
+      }
+      return false;
+    };
     const matchOrdinalAgrees = (matchIndex: number): boolean => {
-      let expected = countOwnedNotificationItems(targetIndex, matchIndex);
+      const ownedNotifications = countOwnedNotificationItems(
+        targetIndex,
+        matchIndex,
+      );
+      let expected = ownedNotifications;
       for (
         let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
         i < targetIndex;
@@ -419,15 +444,7 @@ export function computeApiTruncationIndex(
         // claimant and stays out (R35-4).
         const claimedBeforeTarget = (() => {
           const mark = getApiHistoryPromptId(entry);
-          if (mark === undefined) return false;
-          return uiHistory.some(
-            (item, index) =>
-              index < targetIndex &&
-              (compressionIndex === -1 || index > compressionIndex) &&
-              isRealUserTurn(item) &&
-              !item.promptIdFileKeyOnly &&
-              item.promptId === mark,
-          );
+          return mark !== undefined && isMarkClaimedByPreTargetTurn(mark);
         })();
         if (
           entry.role === 'user' &&
@@ -444,8 +461,14 @@ export function computeApiTruncationIndex(
       // is not the target's own (R32-1). Media-only entries still occupy
       // positions even though the filtered count skips them, so the match
       // must also sit behind at least as many ownable user-role entries as
-      // the target has preceding real UI turns.
-      return counted === expected && absolute >= uiUserTurnCount;
+      // the target has preceding ownable UI items. The two sides of that
+      // term must count the same owning population (R40-3): `absolute`
+      // counts a drained notification's entry, so the right side credits
+      // its item — without the pairing one drained pair inflates the
+      // backstop into proving an impostor the aligned counts reject.
+      return (
+        counted === expected && absolute >= uiUserTurnCount + ownedNotifications
+      );
     };
     const ownershipProven = (matchIndex: number): boolean =>
       isApiEntryOwnedByText(apiHistory[matchIndex]!, ownerText) &&
@@ -461,7 +484,7 @@ export function computeApiTruncationIndex(
       // that own a counted entry — entries of turns the UI deleted, or of
       // a claimant-less re-send. The owning population is real user turns
       // with a model-facing text plus notification items PAIRED with a
-      // <task-notification> entry: a background-agent/cron completion
+      // provenance-marked entry: a background-agent/cron completion
       // displays as `{type: 'notification'}` but submits a real user-role
       // entry the walk counts (R33-1), while a mid-turn steer message owns
       // no counted entry (its parts merge into a functionResponse entry the
@@ -485,7 +508,10 @@ export function computeApiTruncationIndex(
       // the demotion spuriously — a Goal continuation, a standalone steer
       // pushed via the history.push fallback, an attachment-only turn's
       // text-less entry (the absolute backstop counts it; no census item
-      // does).
+      // does). The demotion therefore also requires the cut to be SAFE:
+      // when [positional, identifiedIndex) holds an entry a still-displayed
+      // turn owns, the early walk is the unowned excess's doing and the
+      // proven match stays (R40-3).
       const positional = positionalTruncationIndex();
       if (positional !== -1 && positional < identifiedIndex) {
         let countedBeforeMatch = 0;
@@ -506,7 +532,10 @@ export function computeApiTruncationIndex(
             ownedBeforeTarget++;
           }
         }
-        if (countedBeforeMatch > ownedBeforeTarget) {
+        if (
+          countedBeforeMatch > ownedBeforeTarget &&
+          !cutDropsDisplayedTurn(positional, identifiedIndex)
+        ) {
           return positional;
         }
       }

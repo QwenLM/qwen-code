@@ -91,6 +91,8 @@ export {
   buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
+  isApiHistoryNotification,
+  markApiHistoryNotification,
   markApiHistoryPrompt,
   type BuildApiHistoryOptions,
 } from './session-api-history.js';

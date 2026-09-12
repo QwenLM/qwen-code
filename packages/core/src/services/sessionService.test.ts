@@ -35,6 +35,7 @@ import {
   buildApiHistoryFromConversation,
   computeUniqueBranchTitle,
   getApiHistoryPromptId,
+  isApiHistoryNotification,
   normalizeDerivedBranchTitle,
   getResumePromptTokenCount,
   getResumeTokenCounts,
@@ -4627,6 +4628,50 @@ describe('SessionService', () => {
       ]);
       expect(getApiHistoryPromptId(history[0]!)).toBe('prompt-1');
       expect(JSON.stringify(history[0])).not.toContain('prompt-1');
+    });
+
+    it('marks rebuilt entries with notification provenance from the record subtype', () => {
+      // The rewind census pairs UI notification items against entries
+      // carrying notification provenance (R40-3). The live send attaches it
+      // directly; the resume rebuild re-attaches it from the record's
+      // subtype — a cron fire's raw prompt carries no envelope to recognize.
+      const cronRecord: ChatRecord = {
+        ...recordA1,
+        uuid: 'cron-1',
+        subtype: 'cron',
+        message: { role: 'user', parts: [{ text: 'Run the nightly job' }] },
+      };
+      const notificationRecord: ChatRecord = {
+        ...recordA1,
+        uuid: 'notif-1',
+        subtype: 'notification',
+        message: {
+          role: 'user',
+          parts: [{ text: '<task-notification>done</task-notification>' }],
+        },
+      };
+      const plainUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'user-1',
+        parentUuid: notificationRecord.uuid,
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [cronRecord, notificationRecord, plainUser],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(isApiHistoryNotification(history[0]!)).toBe(true);
+      expect(isApiHistoryNotification(history[1]!)).toBe(true);
+      expect(isApiHistoryNotification(history[2]!)).toBe(false);
+      expect(JSON.stringify(history[0])).not.toContain(
+        'apiHistoryNotification',
+      );
     });
 
     it('keeps Realtime dialogue out of backend model history', () => {

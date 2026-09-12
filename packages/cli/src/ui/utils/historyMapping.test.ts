@@ -10,6 +10,7 @@ import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
 import {
   CompressionStatus,
+  markApiHistoryNotification,
   markApiHistoryPrompt,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
@@ -1671,6 +1672,9 @@ describe('early-walk demotion with drained notification entries', () => {
     const notificationEntry = userContent(
       '<task-notification>\nBackground agent completed: task 7\n</task-notification>',
     );
+    // The drain records the turn as a notification, so the entry carries
+    // notification provenance (live mark / record subtype on resume).
+    markApiHistoryNotification(notificationEntry);
     const targetEntry = userContent('target prompt');
     markApiHistoryPrompt(targetEntry, 'session########1');
 
@@ -1713,6 +1717,9 @@ describe('early-walk demotion with drained notification entries', () => {
     const notificationEntry = userContent(
       '<task-notification>\nBackground agent completed: task 7\n</task-notification>',
     );
+    // The drain records the turn as a notification, so the entry carries
+    // notification provenance (live mark / record subtype on resume).
+    markApiHistoryNotification(notificationEntry);
     const targetEntry = userContent(PLACEHOLDER);
     markApiHistoryPrompt(targetEntry, 'session########1');
 
@@ -1752,6 +1759,7 @@ describe('early-walk demotion with drained notification entries', () => {
     const batchEntry = userContent(
       '<task-notification>\nBackground agent completed: tasks 1 and 2\n</task-notification>',
     );
+    markApiHistoryNotification(batchEntry);
     const impostor = userContent('target prompt');
     markApiHistoryPrompt(impostor, 'session########1');
 
@@ -1859,6 +1867,259 @@ describe('early-walk demotion with drained notification entries', () => {
     // walk cannot land; the unpaired notification item must not inflate
     // expected into admitting the impostor (returned 8 before the pairing).
     expect(computeApiTruncationIndex(ui, 9, api)).toBe(-1);
+  });
+});
+
+describe('owner-paired censuses close the unpaired-producer class (R40-3)', () => {
+  // The censuses used to compare independently-built populations, so every
+  // new producer of a UI-item/API-entry mismatch was a new entrance. The
+  // pairing is now authoritative: the API side counts entries carrying
+  // notification PROVENANCE (attached by the submit path, restored from the
+  // record's subtype), the absolute backstop credits the items paired with
+  // those entries, and the demotion fires only when its cut drops no entry
+  // a still-displayed turn owns. Each case below went red against the
+  // previous censuses.
+  //
+  // Three producers the gate comment names cannot build a red case, so they
+  // are documented here rather than pinned vacuously: a model-fallback
+  // notice and a functionResponse-merged envelope own no entry, and every
+  // drain batch renders at least one item per entry, so the items side
+  // never trails the entries side and the min() pairing is unchanged with
+  // or without them; a realtime_message record produces no API entry at all
+  // and its UI item is `sentToModel: false`, so neither side counts it.
+  function withPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+  const notificationItem = (id: number, text: string): HistoryItem =>
+    ({ type: 'notification', id, text }) as HistoryItem;
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  it('refuses (-1) when a drained notification pair inflates the unpaired absolute backstop', () => {
+    // One attachment-only turn whose own entry sits AFTER the match keeps
+    // the walk from landing, and one drained notification pair precedes the
+    // match. The unpaired backstop counted the notification entry on its
+    // left side while uiUserTurnCount never counts the item, so the proof
+    // agreed trivially and the gate resolved the placeholder impostor at 2
+    // — truncating the still-displayed attachment-only turn's own entry
+    // (index 4) out of model context — where the pre-identity walk refuses
+    // (-1). The paired backstop credits the item for its entry and the
+    // disagreement is restored.
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const notificationEntry = userContent(
+      '<task-notification>\nBackground agent completed: task 7\n</task-notification>',
+    );
+    markApiHistoryNotification(notificationEntry);
+    const impostor = userContent(PLACEHOLDER);
+    markApiHistoryPrompt(impostor, 'session########1');
+    const attachmentEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+        } as unknown as Part,
+      ],
+    };
+    markApiHistoryPrompt(attachmentEntry, 'session########0');
+
+    const ui: HistoryItem[] = [
+      attachmentOnlyItem(1, 'session########0'),
+      llmItem(2),
+      notificationItem(3, 'Background agent completed: task 7'),
+      llmItem(4),
+      withPromptId(5, PLACEHOLDER, 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      notificationEntry, // the drained pair's entry
+      modelContent('r0'),
+      impostor, // cleared media-only entry wearing the target's re-minted mark; the target's own entry never landed
+      modelContent('r1'),
+      attachmentEntry, // the attachment-only turn's own entry: no text part
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+
+  it('keeps the ownership-proven match when a cron fire submits its raw prompt', () => {
+    // A cron fire displays as a notification item but submits job.prompt
+    // with no <task-notification> envelope, so the rendered-text pairing
+    // credited nothing for it and the demotion discarded the target's
+    // unique, ownership-proven match onto the cron entry's boundary (2) —
+    // truncating the cron turn's entry out of model context while its item
+    // stays displayed. (Wrapping the same entry in the envelope returned 4,
+    // the text-shape dependence this closes.) Notification provenance pairs
+    // the entry with its item and the demotion sees no excess.
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const cronEntry = userContent('Run the nightly report'); // no envelope
+    markApiHistoryNotification(cronEntry);
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      notificationItem(3, 'Cron job fired'),
+      llmItem(4),
+      withPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      cronEntry,
+      modelContent('r1'),
+      targetEntry, // the target's own entry sits at index 4
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
+
+  it('keeps the ownership-proven match when a Goal continuation inflates the walk onto a displayed turn', () => {
+    // A Goal continuation submits a claimant-less user-role entry the walk
+    // counts. The demotion weighed only the excess, so it discarded the
+    // target's unique, ownership-proven match (6) onto the walk's boundary
+    // (4) — truncating a still-displayed turn's own marked entry out of
+    // model context while the UI keeps showing the turn. The demotion now
+    // also requires the cut to drop nothing a displayed turn owns.
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const shownEntry = userContent('shown turn');
+    markApiHistoryPrompt(shownEntry, 'session########1');
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########2');
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      withPromptId(3, 'shown turn', 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'target prompt', 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      userContent('goal continuation'), // claimant-less; no UI item
+      modelContent('r1'),
+      shownEntry, // a still-displayed turn's own entry, marked
+      modelContent('r2'),
+      targetEntry, // the target's own entry sits at index 6
+      modelContent('r3'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(6);
+  });
+
+  it('refuses (-1) a placeholder impostor behind a batch-of-2 drain', () => {
+    // Two drained tasks render two notification items but submit ONE entry.
+    // The unpaired backstop counted that entry while uiUserTurnCount counted
+    // neither item, supplying the position unit that admitted a cleared
+    // media-only impostor wearing the target's re-minted mark; the target's
+    // own entry never landed and the walk cannot land, so the refusal must
+    // be loud.
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const batchEntry = userContent(
+      '<task-notification>\nBackground agent completed: tasks 1 and 2\n</task-notification>',
+    );
+    markApiHistoryNotification(batchEntry);
+    const impostor = userContent(PLACEHOLDER);
+    markApiHistoryPrompt(impostor, 'session########1');
+    const attachmentEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+        } as unknown as Part,
+      ],
+    };
+    markApiHistoryPrompt(attachmentEntry, 'session########0');
+
+    const ui: HistoryItem[] = [
+      attachmentOnlyItem(1, 'session########0'),
+      llmItem(2),
+      notificationItem(3, 'Background agent completed: task 1'),
+      notificationItem(4, 'Background agent completed: task 2'),
+      llmItem(5),
+      withPromptId(6, PLACEHOLDER, 'session########1'),
+      llmItem(7),
+    ];
+    const api: Content[] = [
+      batchEntry, // one entry owns both notification items
+      modelContent('r0'),
+      impostor, // the target's own entry never landed
+      modelContent('r1'),
+      attachmentEntry, // the attachment-only turn's own entry: no text part
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 6, api)).toBe(-1);
+  });
+
+  it('keeps the ownership-proven match when a submit_prompt turn inflates the walk', () => {
+    // A slash-command submit_prompt turn sends its expanded content with a
+    // promptId minted like any first-party prompt, but its UI item is the
+    // command invocation, not a real user turn — a marked, ownable entry no
+    // real UI turn claims. The demotion weighed only the excess, so it
+    // discarded the target's proven match (6) onto the walk's boundary (4),
+    // truncating a still-displayed turn's own entry out of model context.
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const submitPromptEntry = userContent('expanded submit_prompt content');
+    // No real UI turn wears this id: the invocation item renders the
+    // command text, which isRealUserTurn excludes as a slash command.
+    markApiHistoryPrompt(submitPromptEntry, 'session########1');
+    const shownEntry = userContent('shown turn');
+    markApiHistoryPrompt(shownEntry, 'session########2');
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########3');
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      userItem(3, '/review'), // the submit_prompt invocation item
+      llmItem(4),
+      withPromptId(5, 'shown turn', 'session########2'),
+      llmItem(6),
+      withPromptId(7, 'target prompt', 'session########3'),
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      submitPromptEntry,
+      modelContent('r1'),
+      shownEntry, // a still-displayed turn's own entry, marked
+      modelContent('r2'),
+      targetEntry, // the target's own entry sits at index 6
+      modelContent('r3'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 7, api)).toBe(6);
   });
 });
 

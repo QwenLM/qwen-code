@@ -60,13 +60,19 @@ another entrance). A match is accepted only when **all** hold:
    ordinal also agrees — the entry has exactly as many prompt entries with a
    model-facing text before it as the target has preceding UI items that own
    a counted entry: real UI turns that carried one, plus drained notification
-   items (a background-agent/cron completion displays as a notification but
-   submits a real user-role entry the API side counts). The resume builder
-   records `promptHasModelText` so the two sides count the same population;
-   see below — AND at least `uiUserTurnCount` user-role, non-tool-result
-   entries _that can own a UI turn_ precede the match: a wholly-structural
-   reminder entry (the mid-history MCP added-tools notice) or a cleared
-   media-only entry carries a text part yet owns no turn, so it does not
+   items paired with a submitted entry (a background-agent/cron completion
+   displays as a notification but submits a real user-role entry the API side
+   counts; the pairing keys on the entry's recorded notification provenance,
+   not its text — a cron fire submits the raw job prompt with no envelope).
+   The resume builder records `promptHasModelText` so the two sides count the
+   same population; see below — AND at least `uiUserTurnCount` plus the paired
+   notification count of user-role, non-tool-result entries _that can own a
+   UI turn_ precede the match: a counted prompt entry, a text-less media
+   entry, or a cleared media-only entry whose mark a real UI turn before the
+   target still claims — that turn remains counted in `uiUserTurnCount`, so
+   its cleared entry must supply the matching position. A wholly-structural
+   reminder entry (the mid-history MCP added-tools notice) and an unclaimed
+   cleared media-only entry carry a text part yet own no turn, so they do not
    count. The aligned counts can drop together when both sides skip an
    attachment-only turn, so the absolute-position term keeps the proof from
    agreeing trivially at an entry that is not the target's own;
@@ -83,7 +89,11 @@ another entrance). A match is accepted only when **all** hold:
    with a model-facing text plus drained notification items — a
    background-agent/cron completion displays as a notification but submits a
    real user-role entry, while a mid-turn steer message owns no counted entry
-   and displays as a `sentToModel: false` user item.
+   and displays as a `sentToModel: false` user item. Even then the demotion
+   fires only when the cut is safe: dropping [walk, match) must not truncate
+   an entry a still-displayed turn before the target claims by mark — when it
+   would, the early walk is an unowned excess entry's doing (a Goal
+   continuation, a submit_prompt turn) and the proven match stays.
 
 Anything else falls through to the positional walk, whose loud -1 is the safe
 refusal. So the change can only make rewind more accurate than it was, never
@@ -97,10 +107,13 @@ cannot separate them. Their ordinal can: the target's own entry is the n-th
 entry whose prompt carried a model-facing text, where n is the number of
 preceding real UI turns that carried one, while a cleared entry wearing a
 re-minted mark sits elsewhere. The two sides must count the SAME population:
-an unfiltered API count also counts cleared placeholders (which never had a
-UI turn) and a raw UI count also counts resumed attachment-only turns (whose
-API entry has no text part), so the two divergence directions can cancel and
-admit an impostor. The API side therefore uses the walk's own filtered
+an unfiltered API count also counts cleared placeholders — a cleared
+media-only entry owns no UI turn, while a microcompaction-cleared
+attachment-only entry's turn survives, so the absolute backstop keeps the
+latter counted for exactly as long as a real UI turn before the target claims
+its mark (condition 5's third disjunct) — and a raw UI count also counts
+resumed attachment-only turns (whose API entry has no text part), so the two
+divergence directions can cancel and admit an impostor. The API side therefore uses the walk's own filtered
 binding and the UI side counts only turns the resume builder did not flag
 `promptHasModelText: false`.
 

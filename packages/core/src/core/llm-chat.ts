@@ -143,7 +143,10 @@ import {
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
-import { markApiHistoryPrompt } from '../services/session-api-history.js';
+import {
+  markApiHistoryNotification,
+  markApiHistoryPrompt,
+} from '../services/session-api-history.js';
 
 export { InvalidStreamError };
 
@@ -563,6 +566,16 @@ export interface LlmChatSendOptions {
   disableModelFallbacks?: boolean;
   /** Internal identity for the user prompt added to model history. */
   promptId?: string;
+  /**
+   * This send's user content is the model-facing half of a turn the UI
+   * renders as a `notification` item (a drained background-agent
+   * notification, a cron fire, a teammate envelope) rather than a user
+   * turn. The TUI rewind census pairs those entries against notification
+   * items; the rendered text cannot carry the fact (a cron fire submits
+   * the raw job prompt with no `<task-notification>` envelope), so it
+   * rides the entry itself (R40-3).
+   */
+  notificationSubmitted?: boolean;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -3106,6 +3119,9 @@ export class LlmChat {
       // snapshots the pending turn and derives its promptIds eagerly, so the
       // identity must be on userContent before tryCompress runs.
       markApiHistoryPrompt(userContent, options?.promptId);
+      if (options?.notificationSubmitted) {
+        markApiHistoryNotification(userContent);
+      }
       if (exactRoute || (isHardTier && !shouldForceFromHard)) {
         compressionInfo = {
           originalTokenCount: effectiveTokens,
