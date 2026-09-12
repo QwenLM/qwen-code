@@ -68,11 +68,13 @@ const IDLE_RECLAIM_MS = 15 * 60 * 1000;
  * backend answers none of them itself (see shellExecutionService.ts). Recording
  * one in the scrollback lets a reconnect that replays `session.buffer` make the
  * client's xterm.js re-answer it and write the fresh reply back into the
- * still-live shell's stdin. The sequences matched below are exactly the query
- * families xterm.js answers — Device Attributes (`c`, incl. the `>`/`=`
- * intermediates), Device Status Report (`n`), DECREQTPARM (`x`), DECRQM
- * (`$ p`), DECRQSS (the DCS request `ESC P $ q ... ESC \`), XTVERSION
- * (`> q`) and the OSC 10/11/4 colour queries — and none of those
+ * still-live shell's stdin. The sequences matched below are the query
+ * families xterm.js answers — Device Attributes (`c`, incl. the `>`
+ * intermediate), Device Status Report (`n`/`?n`), DECRQM (`$ p`), DECRQSS
+ * (the DCS request `ESC P $ q ... ESC \`) and the OSC 10/11/4 colour queries
+ * — plus `=`-DA3, XTVERSION (`> q`) and DECREQTPARM (`x`), whose
+ * finals/intermediates are never display content (neither xterm build answers
+ * those three, so stripping them is not removing an answerer). None of these
  * finals/intermediates is display content, so stripping them cannot drop
  * rendered output.
  */
@@ -85,27 +87,38 @@ const TERMINAL_QUERY_SEQUENCE_RE =
 /**
  * An incomplete trailing escape sequence — a query node-pty split across two
  * chunks. It is carried to the next chunk and stripped as a whole rather than
- * left to leak the partial probe into the scrollback. DECRQSS arrives as DCS
- * (`ESC P $ q ... ESC \`), so its partial form is held back the same way.
+ * left to leak the partial probe into the scrollback. Only viable query
+ * prefixes are held: the OSC arm keeps the `?` predicate (so an unterminated
+ * title/colour SET is not mistaken for a query), ends at any ESC that is not
+ * `ESC \` exactly as xterm cancels, and accepts the C1 ST byte `\x9c` as a
+ * terminator. DECRQSS arrives as DCS (`ESC P $ q ... ESC \`), so both the
+ * introducer (`\x1bP`, `\x1bP$`) and the full body are held back the same way.
  */
 const PARTIAL_ESCAPE_SUFFIX_RE =
   // eslint-disable-next-line no-control-regex
-  /(?:\x1b|\x1b\[[0-9;>?=$]*|\x1b\](?:[^\x07\x1b]|\x1b(?!\\))*|\x1bP\$q(?:[^\x1b]|\x1b(?!\\))*)$/;
+  /(?:\x1b|\x1b\[[0-9;>?=$]*|\x1b\](?:10|11|4;[0-9]+);\?(?:[^\x07\x1b\x9c])*|\x1bP\$q(?:[^\x1b]|\x1b(?!\\))*|\x1bP\$?)$/;
 
 /**
  * Stateful per-session stripper: `node-pty` may deliver a probe split across
  * two chunks, so an incomplete trailing escape sequence is held back until the
  * next chunk completes (or never, if the stream simply ends — a trailing
- * partial probe is not display content, so dropping it is harmless).
+ * partial probe is a few bytes of a query nobody answered, so dropping it is
+ * harmless). The hold is capped at MAX_HELD_ESCAPE_CHARS: a real query is a
+ * few dozen bytes, so anything longer is payload, not a split probe, and is
+ * flushed whole rather than swallowed.
  */
+const MAX_HELD_ESCAPE_CHARS = 256;
+
 class TerminalQueryStripper {
   private pending = '';
 
   strip(data: string): string {
     const combined = this.pending + data;
     const partial = PARTIAL_ESCAPE_SUFFIX_RE.exec(combined);
-    this.pending = partial ? partial[0] : '';
-    const complete = partial ? combined.slice(0, partial.index) : combined;
+    const hold =
+      partial !== null && partial[0].length <= MAX_HELD_ESCAPE_CHARS;
+    this.pending = hold ? partial![0] : '';
+    const complete = hold ? combined.slice(0, partial!.index) : combined;
     return complete.replace(TERMINAL_QUERY_SEQUENCE_RE, '');
   }
 }
@@ -321,10 +334,14 @@ export class WebTerminalRegistry {
         });
       }
       // No responder (headlessModule undefined): the query stays unanswered (a
-      // bounded ~2s stall), never injected — the strip still keeps it out of
-      // the scrollback.
+      // bounded ~2s stall), never injected.
     }
-    const queryStripper = useBundledConpty
+    // Tie the stripper to the responder it complements. Without a responder
+    // the browser is the only terminal that can answer, so stripping here
+    // would delete a query nobody is left to answer — permanently, because
+    // loadXtermHeadless memoizes its rejection for the life of the process.
+    // Only strip when a responder is actually present to answer the queries.
+    const queryStripper = queryTerminal
       ? new TerminalQueryStripper()
       : undefined;
     let spawned: SpawnedWebTerminalPty;

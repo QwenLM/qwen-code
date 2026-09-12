@@ -288,12 +288,43 @@ describe('WebTerminalRegistry', () => {
     expect(output).not.toContain('\x1b[c');
   });
 
+  it('does not strip queries when the headless responder fails to load', async () => {
+    // The stripper is tied to the responder it complements. loadXtermHeadless
+    // memoizes a rejection for the life of the process, so once it fails every
+    // later Windows terminal has no responder; stripping anyway would delete
+    // each DA/DSR/DECRQM probe from both the scrollback and the live listener,
+    // so the attached browser — which would have answered it at the merge base
+    // — never sees it and the shell stalls for its full probe timeout with no
+    // recovery short of a daemon restart. With no responder the query must
+    // reach the listener untouched, and nothing may be written back.
+    osPlatform.mockReturnValue('win32');
+    loadXtermHeadless.mockRejectedValueOnce(new Error('headless load failed'));
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:no-responder',
+      workspaceCwd: '/workspace',
+    });
+
+    const received: string[] = [];
+    registry.addOutputListener('terminal:no-responder', (data) => {
+      received.push(data);
+    });
+
+    onData('\x1b[c');
+
+    expect(received.join('')).toBe('\x1b[c');
+    expect(write).not.toHaveBeenCalled();
+  });
+
   it('strips every query family the browser client answers, not just DA/DSR', async () => {
-    // The client's xterm.js answers more than the DA / DSR probes: tertiary
-    // DA (`=`), DECRQM (`$ p`), DECRQSS (DCS `ESC P $ q`), XTVERSION (`> q`),
-    // DECREQTPARM (`x`) and the OSC colour queries all fire a reply too, so a
-    // regex over just the `c`/`n` finals would leave them in the scrollback to
-    // be re-answered into the live shell. Every one of these must come out.
+    // The client's xterm.js answers more than the DA / DSR probes: DECRQM
+    // (`$ p`), DECRQSS (DCS `ESC P $ q`) and the OSC colour queries all fire a
+    // reply too, so a regex over just the `c`/`n` finals would leave them in
+    // the scrollback to be re-answered into the live shell. `=`-DA3,
+    // XTVERSION (`> q`) and DECREQTPARM (`x`) are stripped as well — their
+    // finals/intermediates are never display content, so they must come out
+    // regardless of whether anyone would re-answer them. Every one of these
+    // must come out.
     osPlatform.mockReturnValue('win32');
     const registry = new WebTerminalRegistry();
     await registry.create({
@@ -345,6 +376,27 @@ describe('WebTerminalRegistry', () => {
     expect(output).not.toContain('\x1b');
   });
 
+  it('does not swallow payload after an unterminated non-query OSC', async () => {
+    // An OSC that is a title SET (not one of the 10/11/4 colour QUERIES) is
+    // not a viable probe prefix, so the stripper must not hold it: otherwise a
+    // program killed mid title-write (or a file containing a bare `1B 5D`)
+    // would leave `pending` matching every later chunk and eat all subsequent
+    // rendered bytes forever. The visible text after the partial OSC must
+    // still reach the scrollback.
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:osc-partial',
+      workspaceCwd: '/workspace',
+    });
+
+    onData('\x1b]0;title');
+    onData('visible');
+
+    const output = registry.readSnapshot('terminal:osc-partial')?.output ?? '';
+    expect(output).toContain('visible');
+  });
+
   it('answers a DCS DECRQSS query once and keeps it out of the scrollback', async () => {
     // Real DECRQSS is a DCS request (ESC P $ q <setting> ESC \), not the CSI
     // `$q` form. xterm.js answers the DCS server-side; leaving the DCS bytes
@@ -371,6 +423,22 @@ describe('WebTerminalRegistry', () => {
     write.mockClear();
     onData('\x1bP$q');
     onData('m\x1b\\');
+    await vi.waitFor(() => expect(write).toHaveBeenCalledWith(reply));
+    expect(write).toHaveBeenCalledTimes(1);
+
+    // The DCS introducer itself may straddle a chunk boundary: a split after
+    // `ESC P` or after `ESC P $` must hold the introducer rather than leak the
+    // halves, which would reassemble in the buffer into a complete DECRQSS the
+    // client re-answers on replay.
+    write.mockClear();
+    onData('\x1bP');
+    onData('$qm\x1b\\');
+    await vi.waitFor(() => expect(write).toHaveBeenCalledWith(reply));
+    expect(write).toHaveBeenCalledTimes(1);
+
+    write.mockClear();
+    onData('\x1bP$');
+    onData('qm\x1b\\');
     await vi.waitFor(() => expect(write).toHaveBeenCalledWith(reply));
     expect(write).toHaveBeenCalledTimes(1);
 
@@ -483,6 +551,17 @@ describe('WebTerminalRegistry', () => {
     // Inert on the POSIX prebuilds, but pinned so the option stays a
     // deliberate platform branch rather than an unconditional `true`.
     expect(spawn.mock.calls[0]?.[2]).toMatchObject({ useConptyDll: false });
+
+    // The responder-plus-strip feature is win32-gated, and the POSIX side of
+    // that gate is pinned here: on Linux/macOS there is no server-side
+    // answerer, the browser is the only terminal that can reply, so a query
+    // must be live-forwarded untouched rather than stripped — and the headless
+    // responder must never be constructed.
+    onData('\x1b[c');
+    expect(registry.readSnapshot('terminal:posix-backend')?.output).toContain(
+      '\x1b[c',
+    );
+    expect(loadXtermHeadless).not.toHaveBeenCalled();
   });
 
   it('retries a failed bundled spawn once on the inbox backend', async () => {
