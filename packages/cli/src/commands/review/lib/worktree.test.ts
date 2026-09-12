@@ -2353,9 +2353,12 @@ describe('filterCommandsIn — the include walk', () => {
     git(module, 'commit', '-qm', 'tracked filter source');
     const linked = join(dir, 'submodule-linked');
     git(module, 'worktree', 'add', '--detach', '-q', linked, 'HEAD');
+    const userPayload = join(gitIsolation.home, 'user-filter.cfg');
+    writeFileSync(userPayload, '[filter "user"]\n\tclean = cat\n');
     writeFileSync(
       join(gitIsolation.home, '.gitconfig'),
-      `[include]\n\tpath = ${JSON.stringify(payload)}\n`,
+      `[include]\n\tpath = ${JSON.stringify(payload)}\n` +
+        `[include]\n\tpath = ${JSON.stringify(userPayload)}\n`,
     );
     const commonDir = git(
       linked,
@@ -2372,7 +2375,7 @@ describe('filterCommandsIn — the include walk', () => {
 
     const screen = filterCommandsIn(commonDir, gitDir, linked);
     expect(screen.filters).toEqual(['filter.team.clean']);
-    expect(screen.exempt).toEqual([]);
+    expect(screen.exempt).toEqual(['filter.user.clean']);
   });
 
   it.skipIf(process.platform === 'win32')(

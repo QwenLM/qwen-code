@@ -1294,10 +1294,37 @@ export function filterCommandsIn(
     existsSync(join(commonDir, 'HEAD')) &&
     existsSync(join(commonDir, 'objects')) &&
     existsSync(join(commonDir, 'refs'));
-  const mainWorktreeUnknown =
-    commonLooksLikeGitDir && basename(resolve(commonDir)) !== '.git';
-  if (commonLooksLikeGitDir && !mainWorktreeUnknown) {
+  let mainWorktreeUnknown = false;
+  if (commonLooksLikeGitDir && basename(resolve(commonDir)) === '.git') {
     controlledSpellings.push(dirname(resolve(commonDir)));
+  } else if (commonLooksLikeGitDir) {
+    const configuredWorktree = spawnSync(
+      'git',
+      [
+        'config',
+        '--file',
+        join(commonDir, 'config'),
+        '--path',
+        '--get',
+        'core.worktree',
+      ],
+      {
+        cwd: commonDir,
+        encoding: 'utf8',
+        env: sanitizedGitEnv(),
+      },
+    );
+    if (
+      configuredWorktree.status === 0 &&
+      typeof configuredWorktree.stdout === 'string' &&
+      configuredWorktree.stdout.trim()
+    ) {
+      controlledSpellings.push(
+        resolve(commonDir, configuredWorktree.stdout.trim()),
+      );
+    } else {
+      mainWorktreeUnknown = true;
+    }
   }
   const controlledRealpaths = controlledSpellings.flatMap((path) => {
     try {
@@ -1307,9 +1334,8 @@ export function filterCommandsIn(
     }
   });
   const repositoryControl = (file: string): 'controlled' | 'outside' => {
-    // A separate git dir and a submodule common dir do not encode the main
-    // worktree location in a form this function can authenticate. Fail closed:
-    // without a complete containment set no origin can be granted authority.
+    // A separate git dir does not encode a discoverable main worktree. Fail
+    // closed: without a complete containment set no origin can gain authority.
     if (mainWorktreeUnknown) return 'controlled';
     const spelled = resolve(file);
     if (controlledSpellings.some((root) => isSubpath(root, spelled))) {
