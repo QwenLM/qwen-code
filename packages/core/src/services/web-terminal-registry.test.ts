@@ -316,15 +316,14 @@ describe('WebTerminalRegistry', () => {
     expect(write).not.toHaveBeenCalled();
   });
 
-  it('strips every query family the browser client answers, not just DA/DSR', async () => {
-    // The client's xterm.js answers more than the DA / DSR probes: DECRQM
-    // (`$ p`), DECRQSS (DCS `ESC P $ q`) and the OSC colour queries all fire a
-    // reply too, so a regex over just the `c`/`n` finals would leave them in
-    // the scrollback to be re-answered into the live shell. `=`-DA3,
-    // XTVERSION (`> q`) and DECREQTPARM (`x`) are stripped as well — their
-    // finals/intermediates are never display content, so they must come out
-    // regardless of whether anyone would re-answer them. Every one of these
-    // must come out.
+  it('strips every query family the headless responder answers, not just DA/DSR', async () => {
+    // The server-side responder answers more than the DA / DSR probes: DECRQM
+    // (`$ p`) and DECRQSS (DCS `ESC P $ q`) fire a reply too, so a regex over
+    // just the `c`/`n` finals would leave them in the scrollback to be
+    // re-answered into the live shell. `=`-DA3, XTVERSION (`> q`) and
+    // DECREQTPARM (`x`) are stripped as well — their finals/intermediates are
+    // never display content, so they must come out regardless of whether
+    // anyone would re-answer them. Every one of these must come out.
     osPlatform.mockReturnValue('win32');
     const registry = new WebTerminalRegistry();
     await registry.create({
@@ -342,15 +341,50 @@ describe('WebTerminalRegistry', () => {
     onData('\x1b[>0q'); // XTVERSION
     onData('\x1bP$qm\x1b\\'); // DECRQSS (DCS)
     onData('\x1b[3x'); // DECREQTPARM
-    onData('\x1b]10;?\x07'); // OSC foreground-colour query
-    onData('\x1b]11;?\x07'); // OSC background-colour query
-    onData('\x1b]4;5;?\x07'); // OSC palette-colour query
     onData('done');
 
     const output = registry.readSnapshot('terminal:queries')?.output ?? '';
     expect(output).toContain('prompt> ');
     expect(output).toContain('done');
     expect(output).not.toContain('\x1b');
+  });
+
+  it('leaves the OSC colour queries for the browser client to answer', async () => {
+    // The pinned @xterm/headless 5.5.0 responder answers no colour query:
+    // `onData` carries DSR/DA/DECRQM/DECRQSS only, while
+    // `_setOrReportSpecialColor` reports on the internal `_onColor` emitter
+    // that the headless Terminal does not expose (`term.onColor` is undefined)
+    // and nothing here subscribes to. Scrubbing the family therefore deleted it
+    // from the browser's stream as well, leaving a probing program unanswered
+    // where the browser's xterm.js 6.0.0 `_handleColorEvent` answered it at the
+    // merge base. The queries must reach the client untouched — whole or split
+    // across chunks, every form of the family — and nothing may be written
+    // back. The colour queries a reconnect replay re-answers are tracked in
+    // #11734.
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:colour',
+      workspaceCwd: '/workspace',
+    });
+
+    const received: string[] = [];
+    registry.addOutputListener('terminal:colour', (data) => {
+      received.push(data);
+    });
+
+    onData('\x1b]10;?\x07'); // OSC foreground-colour query
+    onData('\x1b]11;?'); // OSC background-colour query, split
+    onData('\x07'); // ... completed by the next chunk
+    onData('\x1b]12;?\x07'); // OSC cursor-colour query
+    onData('\x1b]4;5;?\x07'); // OSC palette-colour query
+    onData('\x1b]4;0;?;1;?\x07'); // OSC multi-index palette query
+
+    const family =
+      '\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07\x1b]4;5;?\x07\x1b]4;0;?;1;?\x07';
+    expect(received.join('')).toBe(family);
+    expect(registry.readSnapshot('terminal:colour')?.output).toBe(family);
+    expect(write).not.toHaveBeenCalled();
   });
 
   it('strips a query split across two chunks', async () => {
@@ -377,12 +411,12 @@ describe('WebTerminalRegistry', () => {
   });
 
   it('does not swallow payload after an unterminated non-query OSC', async () => {
-    // An OSC that is a title SET (not one of the 10/11/4 colour QUERIES) is
-    // not a viable probe prefix, so the stripper must not hold it: otherwise a
-    // program killed mid title-write (or a file containing a bare `1B 5D`)
-    // would leave `pending` matching every later chunk and eat all subsequent
-    // rendered bytes forever. The visible text after the partial OSC must
-    // still reach the scrollback.
+    // No OSC is a viable probe prefix — no OSC family is stripped any more —
+    // so the stripper must not hold one: otherwise a program killed mid
+    // title-write (or a file containing a bare `1B 5D`) would leave `pending`
+    // matching every later chunk and eat all subsequent rendered bytes
+    // forever. The visible text after the partial OSC must still reach the
+    // scrollback.
     osPlatform.mockReturnValue('win32');
     const registry = new WebTerminalRegistry();
     await registry.create({

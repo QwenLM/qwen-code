@@ -68,35 +68,49 @@ const IDLE_RECLAIM_MS = 15 * 60 * 1000;
  * backend answers none of them itself (see shellExecutionService.ts). Recording
  * one in the scrollback lets a reconnect that replays `session.buffer` make the
  * client's xterm.js re-answer it and write the fresh reply back into the
- * still-live shell's stdin. The sequences matched below are the query
- * families xterm.js answers — Device Attributes (`c`, incl. the `>`
- * intermediate), Device Status Report (`n`/`?n`), DECRQM (`$ p`), DECRQSS
- * (the DCS request `ESC P $ q ... ESC \`) and the OSC 10/11/4 colour queries
- * — plus `=`-DA3, XTVERSION (`> q`) and DECREQTPARM (`x`), whose
- * finals/intermediates are never display content (neither xterm build answers
- * those three, so stripping them is not removing an answerer). None of these
- * finals/intermediates is display content, so stripping them cannot drop
- * rendered output.
+ * still-live shell's stdin — and leaving one in the live stream lets the
+ * browser answer it a second time, alongside the server-side responder.
+ *
+ * So only the families the pinned `@xterm/headless` 5.5.0 responder actually
+ * answers are matched, giving every probe exactly one answerer: Device
+ * Attributes (`c`, incl. the `>` intermediate), Device Status Report
+ * (`n`/`?n`), DECRQM (`$ p`) and DECRQSS (the DCS request
+ * `ESC P $ q ... ESC \`). `=`-DA3, XTVERSION (`> q`) and DECREQTPARM (`x`) are
+ * matched as well although no build answers them: their finals/intermediates
+ * are never display content, so removing them cannot drop rendered output, and
+ * leaving them in the replay would only re-parse a request nobody answers.
+ *
+ * The OSC 10/11/12/4 colour queries are deliberately NOT matched. The pinned
+ * responder answers none of them: `onData` carries DA/DSR/DECRQM/DECRQSS only,
+ * while `_setOrReportSpecialColor` reports on the internal `_onColor` emitter,
+ * which the headless `Terminal` does not expose (`term.onColor` is `undefined`
+ * on 5.5.0) and which nothing in this file subscribes to. Scrubbing that
+ * family therefore deleted it from the browser's stream too and left a probing
+ * program unanswered — where the browser's own xterm.js 6.0.0
+ * `_handleColorEvent` is the answerer and answered it at the merge base. The
+ * colour queries a reconnect replay re-answers are part of the
+ * replay-suppression redesign tracked in #11734.
  */
 // `no-control-regex` fires on the ESC/BEL bytes, which is the whole point here:
 // these are terminal query sequences, not stray controls.
 const TERMINAL_QUERY_SEQUENCE_RE =
   // eslint-disable-next-line no-control-regex
-  /\x1b\[[0-9;>?=]*[cnx]|\x1b\[[0-9;?]*\$[pq]|\x1b\[>[0-9;]*q|\x1b\](?:10|11|4;[0-9]+);\?(?:\x07|\x1b\\)|\x1bP\$q(?:[^\x1b]|\x1b(?!\\))*\x1b\\/g;
+  /\x1b\[[0-9;>?=]*[cnx]|\x1b\[[0-9;?]*\$[pq]|\x1b\[>[0-9;]*q|\x1bP\$q(?:[^\x1b]|\x1b(?!\\))*\x1b\\/g;
 
 /**
  * An incomplete trailing escape sequence — a query node-pty split across two
  * chunks. It is carried to the next chunk and stripped as a whole rather than
- * left to leak the partial probe into the scrollback. Only viable query
- * prefixes are held: the OSC arm keeps the `?` predicate (so an unterminated
- * title/colour SET is not mistaken for a query), ends at any ESC that is not
- * `ESC \` exactly as xterm cancels, and accepts the C1 ST byte `\x9c` as a
- * terminator. DECRQSS arrives as DCS (`ESC P $ q ... ESC \`), so both the
- * introducer (`\x1bP`, `\x1bP$`) and the full body are held back the same way.
+ * left to leak the partial probe into the scrollback — or, on the live path,
+ * to render the tail of a probe as text. Only viable query prefixes are held:
+ * a CSI introducer with its parameter run (the complete sequence is filtered by
+ * the regex above, so a non-query CSI still passes through), and DECRQSS, which
+ * arrives as DCS (`ESC P $ q ... ESC \`) — both the introducer (`\x1bP`,
+ * `\x1bP$`) and the full body are held back the same way. No OSC prefix is
+ * held: no OSC family is stripped any more.
  */
 const PARTIAL_ESCAPE_SUFFIX_RE =
   // eslint-disable-next-line no-control-regex
-  /(?:\x1b|\x1b\[[0-9;>?=$]*|\x1b\](?:10|11|4;[0-9]+);\?(?:[^\x07\x1b\x9c])*|\x1bP\$q(?:[^\x1b]|\x1b(?!\\))*|\x1bP\$?)$/;
+  /(?:\x1b|\x1b\[[0-9;>?=$]*|\x1bP\$q(?:[^\x1b]|\x1b(?!\\))*|\x1bP\$?)$/;
 
 /**
  * Stateful per-session stripper: `node-pty` may deliver a probe split across
