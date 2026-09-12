@@ -7831,7 +7831,9 @@ function composeReviewBody(
             `re-launched delta territories under the ordinary retirement ` +
             `rules (a twice-dry one only on its cold-check rounds) and ` +
             `non-delta chunks the previous waves could not certify dry (a ` +
-            `yield, an uncertified receipt or no audit history keeps a chunk ` +
+            `yield, an uncertified receipt, an uncertified SIBLING in the ` +
+            `same round, a findings list that cannot be read where an ` +
+            `earlier round was not dry, or no audit history keeps a chunk ` +
             `in the wave; a dry receipt that shows no evidence of having ` +
             `seen an earlier yield or uncertified receipt — same list, same ` +
             `entries modulo verification tags, or no entry for the filed ` +
@@ -7845,7 +7847,8 @@ function composeReviewBody(
               : '（没有仍然干净的 importer 重新进入范围）') +
             `，反向审计各波按普通退役规则重发 delta ` +
             `领地（两次干燥的只在其冷检轮重发），并重发此前各波未能证实干燥的非 delta ` +
-            `chunk（出过发现、收据未认证或无审计历史会让 chunk 留在波内；干燥收据若` +
+            `chunk（出过发现、收据未认证、同轮存在未认证的兄弟、在此前某轮非干燥时` +
+            `发现清单不可读、或无审计历史，都会让 chunk 留在波内；干燥收据若` +
             `没有证据表明见过此前的发现或未认证收据——同一份清单、仅验证标记不同的` +
             `同批条目、或清单中找不到该发现的条目——则让它回到普通退役规则）。` +
             `${fixAuditFloorZh}`,

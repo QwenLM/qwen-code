@@ -3408,8 +3408,9 @@ function runAllChunks(
             `same-digest yield or uncertified receipt returns to the ` +
             `ordinary retirement rules; a chunk holding no delta file ` +
             `leaves the schedule after one substantive dry audit — a round the ` +
-            `record certifies dry in every member — and takes ` +
-            `no cold checks. Narrowed out this round:\n` +
+            `record certifies dry in every member, and whose findings list ` +
+            `can be read at all where an earlier round was not dry — and ` +
+            `takes no cold checks. Narrowed out this round:\n` +
             narrowedOut
               .map(
                 (n) =>

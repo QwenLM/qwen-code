@@ -3145,7 +3145,7 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       're-launched delta territories under the ordinary retirement rules (a twice-dry one only on its cold-check rounds)',
     );
     expect(r.body).toContain(
-      'a yield, an uncertified receipt or no audit history keeps a chunk in the wave; a dry receipt that shows no evidence of having seen an earlier yield or uncertified receipt — same list, same entries modulo verification tags, or no entry for the filed finding — returns it to the ordinary retirement rules',
+      'a yield, an uncertified receipt, an uncertified SIBLING in the same round, a findings list that cannot be read where an earlier round was not dry, or no audit history keeps a chunk in the wave; a dry receipt that shows no evidence of having seen an earlier yield or uncertified receipt — same list, same entries modulo verification tags, or no entry for the filed finding — returns it to the ordinary retirement rules',
     );
     expect(r.body).not.toContain('chunks whose previous wave yielded');
   });
@@ -3174,7 +3174,7 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       '按普通退役规则重发 delta 领地（两次干燥的只在其冷检轮重发）',
     );
     expect(r.body).toContain(
-      '出过发现、收据未认证或无审计历史会让 chunk 留在波内；干燥收据若没有证据表明见过此前的发现或未认证收据',
+      '出过发现、收据未认证、同轮存在未认证的兄弟、在此前某轮非干燥时发现清单不可读、或无审计历史，都会让 chunk 留在波内；干燥收据若没有证据表明见过此前的发现或未认证收据',
     );
     expect(r.body).not.toContain('上一波出过发现的 chunk');
 
