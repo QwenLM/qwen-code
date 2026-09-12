@@ -1428,15 +1428,25 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         recordedFloor: recordedSeverityFloor({
           callerPr: Number(prNumber),
           callerRepo: ownerRepo,
-          // The SAME evidence chain submit binds the recorded floor's host
-          // axis to (#10136): the explicit flag, else the host of the
-          // remote under review (the cwd origin submit's chain reads — the
-          // one already selected this fetch's platform above), else the gh
-          // fallback (GH_HOST, else github.com). `resolveGhHost` alone
-          // never yields a recorded Aone or GHE host, so a flagless capture
-          // of a URL-shaped record missed the operator's explicit
-          // `suggestion` — the one miss that spends the narrowed shape
-          // against an instruction to keep the full one.
+          // The host axis, bound to the evidence THIS command has (#10136):
+          // the explicit flag, else the host of the remote under review
+          // (the cwd origin submit's own chain reads — the one already
+          // selected this fetch's platform above), else the gh fallback
+          // (GH_HOST, else github.com). `resolveGhHost` alone never yields
+          // a recorded Aone or GHE host, so a flagless capture of a
+          // URL-shaped record missed the operator's explicit `suggestion`
+          // — the one miss that spends the narrowed shape against an
+          // instruction to keep the full one.
+          //
+          // Submit's chain has a fourth term this one deliberately omits
+          // (#10136 round 23): the RECORDED binding. There it is the host
+          // the write routes at, read from state the record does not
+          // supply; here the record IS what is being read, so binding the
+          // axis to the record's own host would make `recordedSeverityFloor`
+          // compare a value against itself and the axis would stop ruling
+          // at all. The two-names shape that term exists for — an Aone web
+          // host beside its git host — is absorbed downstream instead, by
+          // `hostsEquivalent`, and a bare-number record compares no host.
           callerHost:
             (typeof args.host === 'string' && args.host.trim()) ||
             (remoteUrl ? parseRemoteUrl(remoteUrl)?.host : undefined) ||

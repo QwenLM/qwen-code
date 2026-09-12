@@ -83,4 +83,38 @@ describe('resolveCriticalPosture', () => {
     ).toBeNull();
     expect(resolveCriticalPosture({ sideLedger: { round: '7' } })).toBeNull();
   });
+
+  it('refuses a counter this account cannot attribute (#10136 round 23)', () => {
+    // The round counter is a shared id space, and the side file records
+    // where its number came from. A foreign winner's round, or one an
+    // anonymous walk adopted because it could not ask whose it was, buys
+    // less review WORK now — so neither counter arm reads it.
+    for (const provenance of [
+      { foreign: true },
+      { anonymousAdoption: true },
+      { foreign: true, anonymousAdoption: true },
+    ]) {
+      expect(
+        resolveCriticalPosture({ sideLedger: { round: 9, ...provenance } }),
+      ).toBeNull();
+      expect(
+        resolveCriticalPosture({
+          sideLedger: { round: 4, flatRounds: 2, ...provenance },
+        }),
+      ).toBeNull();
+    }
+    // The controls: the same numbers from this account's own rounds engage,
+    // and the operator's OWN recorded floor is unconditioned — it reads the
+    // CLI-written invocation record, never this file.
+    expect(resolveCriticalPosture({ sideLedger: { round: 9 } })).toBe('round');
+    expect(
+      resolveCriticalPosture({ sideLedger: { round: 4, flatRounds: 2 } }),
+    ).toBe('flat-trend');
+    expect(
+      resolveCriticalPosture({
+        recordedFloor: 'critical',
+        sideLedger: { round: 9, foreign: true, anonymousAdoption: true },
+      }),
+    ).toBe('explicit');
+  });
 });

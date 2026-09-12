@@ -3010,6 +3010,21 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     // deferrals to the posture (#10136).
     expect(r.body).toContain('Deferred under the convergence posture');
     expect(r.body).toContain('resolved OPEN at compose time');
+    // …and it says WHICH reading resolved open (#10136 R23-1). The two
+    // diverge on exactly this state — an absent floor record beside a
+    // postured plan — so the unqualified claim contradicted the marker's
+    // own `floor: c` and the mechanism-health note in the same body.
+    expect(r.body).toContain(
+      "The posting floor's ENFORCEMENT reading resolved OPEN",
+    );
+    expect(r.body).not.toContain('The posting floor itself resolved OPEN');
+    // …and where only the plan record licenses the floor, the body says so
+    // (#10136 round 23): the plan is CLI-written content behind a
+    // MODEL-written path, and a round that states the coverage it gave up
+    // states what vouched the posting side of the same posture.
+    expect(r.body).toContain(
+      "The licence for that floor is the capture's own plan record",
+    );
     // The cause clause names the ABSENT record — never the operator, never
     // an unreadable value (#10136): folding the three causes into one
     // must red here.

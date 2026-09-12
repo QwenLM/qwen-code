@@ -771,6 +771,169 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('a RANGE-form filing is a filing — the format orders it (#10136 R20-3 round 23)', () => {
+    // `FINDING_FORMAT` orders `<file path>:<line number or range>` and is
+    // interpolated into every findings-producing role, so a range-form
+    // filing is one of the two spellings this CLI asks for. Read by a
+    // token reader that knew only `:12`, it yielded nothing, arm 3 had
+    // nothing to look for, and the chunk was priced out of the wave over a
+    // finding the orchestrator merged and no receipt ever saw.
+    const YIELD_RANGE =
+      'Found one gap the prior rounds missed.\n\n' +
+      '- **File:** src/pay.ts:12-20\n' +
+      '- **Anchor:** const a = 1\n' +
+      '- **Issue:** the inverted guard\n' +
+      '- **Severity:** Suggestion\n';
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const L2_WITHOUT_THE_FILING =
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n' +
+      '- **File:** src/other.ts:7 — an unrelated finding\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const f2 = writeFindingsFile(
+      plan,
+      'reverse-audit--round-2--d2',
+      L2_WITHOUT_THE_FILING,
+    );
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      YIELD_RANGE,
+    );
+    transcript(
+      record(
+        2,
+        14,
+        'chunk 14 round 2 territory walk\n' +
+          `read_file(file_path="${f2 ?? ''}")`,
+        'd2',
+      ),
+      DRY,
+    );
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a range-form entry the receipt DID see narrows — the reader must read it (#10136 R20-3 round 23)', () => {
+    // The half the doubt branch cannot stand in for. Round 2's list
+    // genuinely carries round 1's range-form filing, so the receipt saw it
+    // and the chunk should leave the wave — which it only does if the
+    // reader turns `src/pay.ts:12-20` into a token at all. A reader that
+    // knows only `:12` returns the doubt instead and the chunk stays hot
+    // forever.
+    const YIELD_RANGE =
+      'Found one gap the prior rounds missed.\n\n' +
+      '- **File:** src/pay.ts:12-20\n' +
+      '- **Anchor:** const a = 1\n' +
+      '- **Issue:** the inverted guard\n' +
+      '- **Severity:** Suggestion\n';
+    const L1 =
+      '- **File:** src/other.ts:7 — an unrelated finding — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const L2_CARRIES_THE_RANGE =
+      '- **File:** src/other.ts:7 — an unrelated finding\n' +
+      '- **Severity:** Suggestion\n' +
+      '- **File:** src/pay.ts:12-20 — the inverted guard\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const f2 = writeFindingsFile(
+      plan,
+      'reverse-audit--round-2--d2',
+      L2_CARRIES_THE_RANGE,
+    );
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      YIELD_RANGE,
+    );
+    transcript(
+      record(
+        2,
+        14,
+        'chunk 14 round 2 territory walk\n' +
+          `read_file(file_path="${f2 ?? ''}")`,
+        'd2',
+      ),
+      DRY,
+    );
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('a spelling the token reader does not know is doubt, not absence (#10136 R20-3 round 23)', () => {
+    // The class, not the corner. The allow-list was one spelling short of
+    // the CLI's own format for a whole round; a backticked path is another
+    // it still does not read. A file line NON-EMPTY after the tag strip
+    // that yields no token means "we cannot look", not "nothing was
+    // filed" — the direction `listUnreadable` already takes.
+    const YIELD_BACKTICKED =
+      'Found one gap the prior rounds missed.\n\n' +
+      '- **File:** `src/pay.ts:12`\n' +
+      '- **Anchor:** const a = 1\n' +
+      '- **Issue:** the inverted guard\n' +
+      '- **Severity:** Suggestion\n';
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const L2 =
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n' +
+      '- **File:** src/other.ts:7 — an unrelated finding\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const f2 = writeFindingsFile(plan, 'reverse-audit--round-2--d2', L2);
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      YIELD_BACKTICKED,
+    );
+    transcript(
+      record(
+        2,
+        14,
+        'chunk 14 round 2 territory walk\n' +
+          `read_file(file_path="${f2 ?? ''}")`,
+        'd2',
+      ),
+      DRY,
+    );
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
   it('a numbered entry is an entry — the reader sees both bullet spellings (#10136 R20-3)', () => {
     // The list is model-edited markdown, and an entry this reader cannot
     // see costs recall rather than safety: every consumer fails closed on

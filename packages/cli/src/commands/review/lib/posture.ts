@@ -89,7 +89,28 @@ export function resolveCriticalPosture(input: {
   if (input.recordedFloor === 'critical') return 'explicit';
   const prev = input.sideLedger;
   if (typeof prev !== 'object' || prev === null) return null;
-  const rec = prev as { round?: unknown; flatRounds?: unknown };
+  const rec = prev as {
+    round?: unknown;
+    flatRounds?: unknown;
+    foreign?: unknown;
+    anonymousAdoption?: unknown;
+  };
+  // The counter is a SHARED id space (`pr-context`: "the round counter is a
+  // shared id space, and the anchor was already stripped at the seam for a
+  // foreign winner"), so a round number can be another account's — or one
+  // an anonymous walk adopted because it could not ask whose it was. The
+  // file records both, and until this diff nothing read them here: before
+  // it, a counter from either source moved the posting FLOOR; with it, the
+  // same counter buys less review WORK — the territory fan-out forced on,
+  // the round-cap tier flipped, and a non-delta chunk leaving the wave
+  // after one dry receipt with no cold check and no return path.
+  //
+  // So the two arms that read the counter refuse it where its provenance
+  // is not this account's. The `explicit` arm above is unconditioned: it
+  // reads the operator's own CLI-written invocation record, not this file.
+  // Same direction as the flat arm's clamp below — a number nobody can
+  // attribute engages nothing.
+  if (rec.foreign === true || rec.anonymousAdoption === true) return null;
   const round =
     typeof rec.round === 'number' &&
     Number.isInteger(rec.round) &&

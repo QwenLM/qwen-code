@@ -103,6 +103,16 @@ interface Classification {
    * membership can be asked exactly (#10136 R20-4).
    */
   filedFile?: string;
+  /**
+   * This return filed something whose file line is NON-EMPTY after the tag
+   * strip yet yields no token the reader can compare (#10136 R20-3 round
+   * 23): a spelling the allow-list does not know — a backticked path, a
+   * shape the format gains later — rather than a line that names nothing.
+   * Arm 3 reads an absent `filedFile` as "there is nothing to look for";
+   * on this flag it reads "we cannot look", which is the doubt direction
+   * `listUnreadable` already takes.
+   */
+  filedTokenlessly?: boolean;
 }
 
 /** A retired chunk skipped this round, with the receipts that earned it. */
@@ -543,8 +553,7 @@ function entryRestsOf(list: string): string[] {
  * tag state stripped. Empty when the line names nothing.
  */
 function fileLineToken(rest: string): string {
-  const token =
-    rest.replace(UNVERIFIED_FINDING_TAG_RE, ' ').trim().split(/\s+/)[0] ?? '';
+  const token = strippedFileLine(rest).split(/\s+/)[0] ?? '';
   // …and it has to LOOK like one (#10136 R20-3 round 22). The anchor
   // decides where an entry may start; it cannot tell an entry from a
   // finding's own `**Anchor:**` block quoting `FINDING_FORMAT`'s template
@@ -554,14 +563,30 @@ function fileLineToken(rest: string): string {
   // quotation the entry set must not gain. Dropping it can only SHRINK
   // the set, and a list left with no token at all still reads as the
   // unparseable doubt state.
+  //
+  // The allow-list is a bar this reader can be WRONG about, though — it was
+  // one spelling short of the format for a whole round (#10136 R20-3 round
+  // 23), and a backticked filing still yields nothing. So callers that rule
+  // on a filing must ask `filedTokenlessly` rather than read an empty token
+  // as "nothing was filed": absence of a readable token is doubt, not
+  // absence of a finding.
   return FILE_LINE_TOKEN_RE.test(token) ? token : '';
 }
 
+/** An entry line with its verification tag state removed. */
+function strippedFileLine(rest: string): string {
+  return rest.replace(UNVERIFIED_FINDING_TAG_RE, ' ').trim();
+}
+
 /**
- * A `file:line` as `FINDING_FORMAT` mandates it: a path, a colon, a line
- * number, and nothing a markdown template would leave behind.
+ * A `file:line` as `FINDING_FORMAT` mandates it — `<file path>:<line number
+ * or RANGE>` (`agent-prompt.ts`, interpolated into every findings-producing
+ * role) — and nothing a markdown template would leave behind. The range
+ * half is not optional: measured over the lists one real round produced,
+ * 36 of 92 entries used it (#10136 R20-3 round 23), so a reader that knows
+ * only `:12` is blind to the format its own briefs order.
  */
-const FILE_LINE_TOKEN_RE = /^[^\s<>[\]{}`'"]+:\d+$/;
+const FILE_LINE_TOKEN_RE = /^[^\s<>[\]{}`'"]+:\d+(?:-\d+)?$/;
 
 /**
  * Whether a return's file line quotes this listed entry line. The listed
@@ -682,6 +707,8 @@ function classifyReturn(
   const text = rec.finalText.trim();
   /** A filing this walk refused as a quotation — see the refusal below. */
   let refusedFile: string | undefined;
+  /** A file line this reader could not turn into a comparable token. */
+  let tokenless = false;
   if (SEVERITY_LINE_RE.test(text)) {
     // The cumulative list is on hand for this agent: since #8597 it rides
     // a digest-named findings file the launch prompt points at (before, it
@@ -712,6 +739,14 @@ function classifyReturn(
       // listed `src/pay.ts:123`, and refusing it as one dropped a live
       // finding into an `unknown` that named nothing.
       const token = fileLineToken(file);
+      // A file line that is NON-EMPTY after the tag strip yet yields no
+      // token is not a line that names nothing — it is a spelling the
+      // allow-list does not know (#10136 R20-3 round 23). Remember that,
+      // whichever way the ruling below goes, so the staleness arms can read
+      // it as doubt. A line that IS empty after the strip names nothing and
+      // is no evidence either way.
+      const unreadable = token === '' && strippedFileLine(file) !== '';
+      if (unreadable) tokenless = true;
       if (quotes(file)) {
         // The refusal stands — counting a quotation re-opens the
         // never-retire direction — but the line rides along as staleness
@@ -719,15 +754,16 @@ function classifyReturn(
         // whatever this classifier ruled, so a later dry receipt whose
         // list does not carry this entry was built before it (#10136
         // R21-12). Evidence only; the outcome below is unchanged. A line
-        // that yields no token names nothing a list could carry, so it is
-        // no evidence either.
+        // that yields no token carries no evidence a list could be asked
+        // for — `tokenless` above is what the arms read instead.
         if (token !== '') refusedFile ??= token;
         continue;
       }
       return {
         outcome: 'yielded',
         failure: null,
-        ...(token === '' ? {} : { filedFile: token }),
+        ...(token !== '' ? { filedFile: token } : {}),
+        ...(unreadable ? { filedTokenlessly: true } : {}),
       };
     }
   }
@@ -774,6 +810,7 @@ function classifyReturn(
     outcome: 'unknown',
     failure,
     ...(refusedFile === undefined ? {} : { filedFile: refusedFile }),
+    ...(tokenless ? { filedTokenlessly: true } : {}),
   });
   if (rec.successfulToolCalls === 0) return unknown('no successful tool calls');
   if (rec.diffToolCalls === 0) return unknown('no read of the diff');
@@ -1069,6 +1106,13 @@ export function scheduleReverseAuditRound(
         fileLists: Set<string>;
         filedFiles: Set<string>;
         /**
+         * Some member of this round filed a finding whose file line yields
+         * no comparable token (#10136 R20-3 round 23). Arm 3 has nothing
+         * to look for then — and "nothing to look for" must not read as
+         * "nothing was filed".
+         */
+        tokenlessFiling: boolean;
+        /**
          * One outcome per audit MEMBER of the round. The round-level fold
          * above hides these — `mergeOutcomes` folds `['unknown', 'dry']` to
          * `'dry'` — and the narrowing branch needs them: a round holding one
@@ -1094,11 +1138,13 @@ export function scheduleReverseAuditRound(
       fileLists: new Set<string>(),
       filedFiles: new Set<string>(),
       memberOutcomes: [] as AuditOutcome[],
+      tokenlessFiling: false,
     };
     entry.outcomes.push(...classificationsByRecord[i].map((c) => c.outcome));
     entry.failures.push(...failuresByRecord[i]);
     for (const c of classificationsByRecord[i]) {
       if (c.filedFile !== undefined) entry.filedFiles.add(c.filedFile);
+      if (c.filedTokenlessly === true) entry.tokenlessFiling = true;
     }
     if (classificationsByRecord[i].length === 0) {
       // A record no transcript certified: nothing proves it dry, and the
@@ -1131,6 +1177,7 @@ export function scheduleReverseAuditRound(
         fileLists: [...entry.fileLists],
         filedFiles: [...entry.filedFiles],
         memberOutcomes: entry.memberOutcomes,
+        tokenlessFiling: entry.tokenlessFiling,
       }))
       .sort((a, b) => a.round - b.round);
     // The posture narrowing, ruled before retirement so a non-delta chunk
@@ -1197,6 +1244,13 @@ export function scheduleReverseAuditRound(
           // extracts no entry cannot certify anything, so it reads as not
           // carrying the token — the same fail-closed direction as the
           // arms above.
+          // A round that filed something this reader cannot turn into a
+          // token leaves the arm nothing to look for — and the arm must
+          // not read that as "nothing was filed" (#10136 R20-3 round 23).
+          // The allow-list was one spelling short of the CLI's own format
+          // for a whole round, so every spelling it does not know fails
+          // toward auditing, the direction `listUnreadable` takes.
+          if (a.tokenlessFiling) return true;
           return (
             latest.fileLists.length > 0 &&
             a.filedFiles.some(

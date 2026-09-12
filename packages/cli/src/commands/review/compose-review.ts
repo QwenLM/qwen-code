@@ -2477,6 +2477,26 @@ export function composeReview(
     signalEngaged,
     fixAuditPlan,
   );
+  // Whether the PLAN's own record is the only thing licensing that
+  // resolution (#10136 round 23). The plan is CLI-written content behind a
+  // MODEL-written path — which is why `authorization.ts` refuses to let it
+  // fill the host identity axis — so where the arms that read CLI-side
+  // facts could not reach the same answer, the licence rests on a file the
+  // model path can rewrite. That is the intended behaviour (the alternative
+  // is a round that narrowed its coverage on the posture and then posts
+  // Suggestions in full), but it is not a fact the body may leave implied:
+  // the same run states the reduction it made, so it states what licensed
+  // the reduction's posting half.
+  const planOnlyFloorLicence =
+    floorKind !== undefined &&
+    fixAuditPlan === true &&
+    criticalFloorKind(
+      input.severityFloor,
+      input.contextUnavailable === true,
+      prevRound,
+      signalEngaged,
+      false,
+    ) === undefined;
   let effective = input;
   if (reroute.indices.length > 0) {
     const drop = new Set(reroute.indices);
@@ -2675,6 +2695,7 @@ export function composeReview(
       floor: floorKind === undefined ? ('o' as const) : ('c' as const),
       ...(floorKind === undefined ? {} : { criticalFloorKind: floorKind }),
       floorEnforcementEngaged: floorInEffect,
+      planOnlyFloorLicence,
       // The streak the trigger just resolved, so the deferral header can
       // say WHY the floor engaged ahead of the round-6 schedule.
       flatRounds,
@@ -4893,6 +4914,14 @@ function composeReviewBody(
      * fails open. That gap is a mechanism fact, not a loop fact.
      */
     floorEnforcementEngaged?: boolean;
+    /**
+     * The floor resolved critical, and only the PLAN's own posture record
+     * licensed it — the CLI-side arms could not reach the same answer
+     * (#10136 round 23). The plan is CLI-written content behind a
+     * MODEL-written path, so the round says which of the two licensed its
+     * posting half rather than leaving it implied.
+     */
+    planOnlyFloorLicence?: boolean;
     /**
      * The flat-trend streak the floor's early trigger resolved to this
      * round (#9903). Read only by the deferral header: when the floor
@@ -7725,6 +7754,22 @@ function composeReviewBody(
   // "recorded and deferred" beside the very Suggestions posting inline in
   // the same body.
   const fixAuditFloorEngaged = convergence?.floorEnforcementEngaged === true;
+  // Named, not implied (#10136 round 23): where the CLI-side arms could not
+  // reach the resolution themselves, the licence for this round's posting
+  // half is the plan's own record — CLI-written content behind a
+  // MODEL-written path. The round already states the coverage it gave up;
+  // this states what vouched the posting side of the same posture.
+  const planLicenceEn =
+    convergence?.planOnlyFloorLicence === true
+      ? " The licence for that floor is the capture's own plan record: the " +
+        'compose-side facts could not re-derive the posture this round, so ' +
+        'the shape and its posting bar rest on the same file.'
+      : '';
+  const planLicenceZh =
+    convergence?.planOnlyFloorLicence === true
+      ? '该下限的依据是 capture 自己的 plan 记录：本轮 compose 侧的事实无法重推出该姿态，' +
+        '因此形态与其发布下限依据同一个文件。'
+      : '';
   // The open-floor sentence names its true cause, and the causes are THREE
   // distinct facts: an explicit `suggestion` floor the operator set, a
   // floor the state omitted, and a present value the module cannot read —
@@ -7799,7 +7844,15 @@ function composeReviewBody(
         : suggestionsInline > 0
           ? 'The floor was engaged and nothing was deferred this round; the only Suggestions the floor leaves inline are pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor.'
           : 'The floor was engaged and nothing below Critical reached it this round — any such finding would have been recorded and deferred, never posted (pre-confirmed `[build]`/`[test]`/`[probe]` findings excepted).'
-    : 'The posting floor itself resolved OPEN at compose time this round ' +
+    : // Attributed to the READING it is keyed on, never to "the floor"
+      // (#10136 R23-1). The two readings diverge on exactly one state — an
+      // absent floor record beside a postured plan — because the reporting
+      // one folds absence to `auto` while the enforcement one does not, and
+      // that state is the documented default. Said of the floor itself, the
+      // sentence contradicted the marker's `floor: c` and the
+      // mechanism-health note in the same body.
+      "The posting floor's ENFORCEMENT reading resolved OPEN at compose " +
+      'time this round ' +
       fixAuditOpenCauseEn +
       fixAuditOpenTailEn;
   const fixAuditFloorZh = fixAuditFloorEngaged
@@ -7813,7 +7866,7 @@ function composeReviewBody(
         : suggestionsInline > 0
           ? '下限已生效且本轮没有延后；下限唯一留在行内的 Suggestion 是预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内。'
           : '下限已生效，本轮没有任何低于 Critical 的发现触及它——若有，也只会记录延后、不发布（预确认的 `[build]`/`[test]`/`[probe]` 发现除外）。'
-    : '但本轮发布下限在 compose 期实际解析为开放' +
+    : '但本轮发布下限的**执行读法**在 compose 期解析为开放' +
       fixAuditOpenCauseZh +
       fixAuditOpenTailZh;
   const fixAuditShapeBlock: Bi[] = fixAudit
@@ -7838,7 +7891,7 @@ function composeReviewBody(
             `seen an earlier yield or uncertified receipt — same list, same ` +
             `entries modulo verification tags, or no entry for the filed ` +
             `finding — returns it to the ordinary retirement rules). ` +
-            `${fixAuditFloorEn}`,
+            `${fixAuditFloorEn}${planLicenceEn}`,
           zh:
             `轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行` +
             `（由${fixAuditCauseZh}触发）——领地扇出只覆盖上一轮以来的 commits` +
@@ -7851,7 +7904,7 @@ function composeReviewBody(
             `发现清单不可读、或无审计历史，都会让 chunk 留在波内；干燥收据若` +
             `没有证据表明见过此前的发现或未认证收据——同一份清单、仅验证标记不同的` +
             `同批条目、或清单中找不到该发现的条目——则让它回到普通退役规则）。` +
-            `${fixAuditFloorZh}`,
+            `${fixAuditFloorZh}${planLicenceZh}`,
         },
       ]
     : [];
