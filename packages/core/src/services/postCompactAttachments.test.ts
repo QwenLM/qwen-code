@@ -676,10 +676,10 @@ describe('buildImageRestorationBlock', () => {
     const header = (block!.parts![0] as { text: string }).text;
     expect(header).toContain('Recent visual snapshots');
     expect(header).toContain(
-      `- Image #${imagePartToStoredPayload(images[0].part).id}, turn 5: computer_use__get_app_state args={"app":"Safari"}`,
+      `- Image #${imagePartToStoredPayload(images[0].part).id}, turn 5: mcp__node-repl__node_repl args={"app":"Safari"}`,
     );
     expect(header).toContain(
-      `- Image #${imagePartToStoredPayload(images[1].part).id}, turn 11: computer_use__get_app_state args={"app":"Mail"}`,
+      `- Image #${imagePartToStoredPayload(images[1].part).id}, turn 11: mcp__node-repl__node_repl args={"app":"Mail"}`,
     );
     expect(header).toContain('turn 5');
     expect(header).toContain('mcp__node-repl__node_repl');

@@ -92,8 +92,8 @@ import {
 import {
   InMemoryImagePayloadStore,
   buildReattachParts,
-  collectReferencedImageIds,
-  countAllInlineImages,
+  collectMentionedImageIds,
+  countImageReferences,
   prepareImagePayloadsForRequest,
   rememberImagePayloads,
   replaceImagePayloadsInPlace,
@@ -2459,34 +2459,36 @@ export class LlmChat {
    * Public history readers still use {@link getHistory}, which returns a
    * defensive deep copy for caller mutation safety.
    */
-  private getRequestHistory(currentUserContent?: Content): Content[] {
+  private getRequestHistory(
+    currentUserContent?: Content,
+    supportedModalities?: InputModalities,
+  ): Content[] {
     const curatedHistory = extractCuratedHistory(this.history);
     const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
-    // History always holds `Image #<id>` markers rather than raw bytes: that
-    // is what survives compaction, truncation and resume. The threshold only
-    // decides how many payloads are reattached to the outgoing request.
-    const imageCount = countAllInlineImages(curatedHistory);
-    const skipEntry = currentUserContent
-      ? curatedHistory.find(
-          (c) =>
-            c === currentUserContent ||
-            (c.role === 'user' &&
-              currentUserContent.parts?.some((p) => c.parts?.includes(p))),
-        )
-      : undefined;
-    const replaced = replaceImagePayloadsInPlace(
-      curatedHistory,
-      this.imagePayloadStore,
-      skipEntry,
-    );
+    // History holds `Image #<id>` markers rather than raw bytes: that is what
+    // survives compaction, truncation and resume. The threshold only decides
+    // how many payloads are reattached to the outgoing request.
+    const imageCount = countImageReferences(curatedHistory);
+    // Evict only what this target can actually receive. A model without image
+    // input drops the payload from the outgoing contents anyway, so evicting
+    // it would trade live bytes for a marker the model never saw — keep them
+    // in history for the next image-capable turn.
+    const replaced =
+      supportedModalities?.image === true
+        ? replaceImagePayloadsInPlace(
+            curatedHistory,
+            this.imagePayloadStore,
+            currentUserContent,
+          )
+        : [];
     const requestHistory = curatedHistory.map(copyContentContainer);
     // A prompt naming explicit image ids attaches only those, so the recent
     // window contributes nothing; below the threshold every historical image
     // stays attached; at or above it only the configured recent ones do.
     const hasExplicitReferences =
-      collectReferencedImageIds(
+      collectMentionedImageIds(
         requestHistory.at(-1) ? [requestHistory.at(-1)!] : [],
       ).size > 0;
     const reattachCount = hasExplicitReferences
@@ -2518,13 +2520,15 @@ export class LlmChat {
    */
   resolveImageReferences(message: PartListUnion): PartListUnion {
     const current = createUserContent(message);
-    if (collectReferencedImageIds([current]).size === 0) {
+    const namedImageIds = collectMentionedImageIds([current]);
+    if (namedImageIds.size === 0) {
       return message;
     }
     const history = extractCuratedHistory(this.history);
     const resolved = prepareImagePayloadsForRequest([...history, current], {
       maxRecentImages: 0,
       preserveImagePartsForContentIndex: history.length,
+      namedImageIds,
       store: this.imagePayloadStore,
     }).at(-1)?.parts;
     return resolved?.some((part) => part.inlineData) ? resolved : message;
@@ -2550,7 +2554,7 @@ export class LlmChat {
     supportedModalities: InputModalities,
   ): Content[] {
     return slimCompactionInput(
-      this.getRequestHistory(currentUserContent),
+      this.getRequestHistory(currentUserContent, supportedModalities),
       supportedModalities,
     ).slimmedHistory;
   }
