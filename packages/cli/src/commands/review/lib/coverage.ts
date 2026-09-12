@@ -81,7 +81,11 @@ import {
 import { BRIEFS } from './agent-briefs.js';
 import { labelFromLaunchPrompt } from './agent-identity.js';
 import { chunkIdsProblem } from './diff-plan.js';
-import { readBudgetStop } from './deadline.js';
+import {
+  expectedAdmissionSeconds,
+  readBudgetStop,
+  reverseAuditBudgetExhausted,
+} from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
 import { shellQuotePath } from './shell-quote.js';
 
@@ -1709,12 +1713,34 @@ export function verificationGaps(
   //
   // Only the time-budget cause earns this exemption. A ROUND-CAP stop does
   // NOT: the cap gate refuses only `round > cap`, so the not-built gap's FIX
-  // (rebuild `--round 1`) is admitted, and a local run has no deadline to
-  // refuse it at all — the monotone-refusal premise fails twice. So a
-  // round-cap marker leaves the not-built gap and its rebuild remediation
-  // owed, exactly as if no marker were present.
+  // (rebuild `--round 1`) is admitted, and a run whose wall still holds —
+  // every healthy local run — has nothing to refuse it either: the
+  // monotone-refusal premise fails twice. So a round-cap marker leaves the
+  // not-built gap and its rebuild remediation owed, exactly as if no marker
+  // were present — UNLESS the wall can no longer admit that rebuild: then
+  // it is refused as deterministically as a budget stop's, and a FIX that
+  // cannot run is not owed. The wall is asked directly, at the price the
+  // gate itself would put on the rebuild the remediation names — a plain
+  // `--round 1` build, one auditor, priced by `expectedAdmissionSeconds`
+  // over the same stamps — not at a flat constant, which would answer for a
+  // different round than the one named. (On a 3B plan the orchestrator
+  // rebuilds with `--all-chunks`, which the gate prices one auditor per
+  // chunk; that is wider only inside the in-flight window, so this errs
+  // toward keeping the remediation.) Asked at compose time; the wall only
+  // closes further afterwards.
   const stop = readBudgetStop(planPath);
-  const budgetStopped = stop !== null && stop.cause !== 'round-cap';
+  const wallRefuses =
+    stop !== null &&
+    stop.cause === 'round-cap' &&
+    reverseAuditBudgetExhausted(
+      env,
+      expectedAdmissionSeconds(planPath, 1, 1, env),
+      Date.now(),
+      planPath,
+      plan,
+    ) !== null;
+  const budgetStopped =
+    stop !== null && (stop.cause !== 'round-cap' || wallRefuses);
   const reverseByDesign = budgetStopped && reverse === 'not-built';
   // A repairable reverse-audit gap only at high: medium is complete without it.
   const reverseGap =

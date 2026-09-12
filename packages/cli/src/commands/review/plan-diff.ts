@@ -25,7 +25,11 @@ import {
 import { REVIEW_TMP_DIR } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import { HOSTNAME_RE } from './lib/gh.js';
-import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
+import {
+  DEADLINE_OPTION,
+  EFFORT_OPTION,
+  type ReviewEffort,
+} from './parse-args.js';
 import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
@@ -38,7 +42,7 @@ import {
   stringifyPlanReport,
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
-import { hasReviewDeadline } from './lib/deadline.js';
+import { captureDeadline, validateDeadlineFlag } from './lib/deadline.js';
 
 interface PlanDiffArgs {
   diff_path: string;
@@ -51,6 +55,8 @@ interface PlanDiffArgs {
   /** The PR's host — recorded so Agent 0's evidence fetch is welded with it. */
   host?: string;
   effort?: ReviewEffort;
+  /** `--deadline`: minutes, or `none`; omitted for the tier's default wall. */
+  deadline?: string;
 }
 
 /** A plan for a diff nobody fetched: no worktree — and PR identity only when
@@ -70,6 +76,12 @@ type PlanDiffResult = PlanReport & {
 
 function runPlanDiff(args: PlanDiffArgs): void {
   const { diff_path: diffPath, out } = args;
+  // A malformed or too-short --deadline is a usage error (exit 2, like
+  // --host below), and it must fail here, before the diff is read and
+  // planned, not at the plan write after that work is done — both bars, the
+  // env-free floor and this shell's pricing. The same validation runs again
+  // inside `captureDeadline`; it is pure given the environment.
+  validateDeadlineFlag(process.env, args.deadline);
 
   let diffText: string;
   try {
@@ -105,6 +117,7 @@ function runPlanDiff(args: PlanDiffArgs): void {
   }
 
   const plan = buildDiffPlan(diffText, args.maxChunkLines);
+  const wall = captureDeadline(process.env, args.deadline, plan);
   const result: PlanDiffResult = {
     diffPath,
     diffPathAbsolute: resolve(diffPath),
@@ -128,8 +141,9 @@ function runPlanDiff(args: PlanDiffArgs): void {
     // coverage, which is what Step 3B needs, is not.
     ...buildPlanReport(plan, null, {
       operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-      hasDeadline: hasReviewDeadline(process.env),
+      hasDeadline: wall.explicit,
     }),
+    ...wall.fields,
     ...planEffortField(args.effort),
   };
 
@@ -194,7 +208,8 @@ export const planDiffCommand: CommandModule = {
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
       })
-      .option('effort', EFFORT_OPTION),
+      .option('effort', EFFORT_OPTION)
+      .option('deadline', DEADLINE_OPTION),
   handler: (argv) => {
     // The sibling handlers' contract: usage errors (a TypeError — the
     // malformed --host above) exit 2, everything else exits 1 — never an

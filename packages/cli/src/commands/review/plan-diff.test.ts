@@ -11,13 +11,19 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
     await importOriginal<typeof import('../../config/settings.js')>();
   return { ...actual, loadSettings: settingsMock };
 });
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planDiffCommand } from './plan-diff.js';
 import { chunksCoverDiff } from './lib/diff-plan.js';
 import { makeDiff, seedParseArgs } from './lib/test-utils.js';
-import { DEADLINE_ENV } from './lib/deadline.js';
+import { DEADLINE_ENV, DEFAULT_DEADLINE_SECONDS } from './lib/deadline.js';
 
 let dir: string;
 let cwd: string;
@@ -51,7 +57,7 @@ describe('plan-diff — the round cap the handler actually records', () => {
   // real env and reads the number out of the file it wrote.
   const hugeDiff = () => makeDiff('src/huge.ts', 9000);
 
-  it('records the huge tier only when the environment has a deadline', () => {
+  it('records the huge tier only under an explicit clock — here the environment’s', () => {
     const diffPath = join(dir, 'huge.diff');
     writeFileSync(diffPath, hugeDiff());
     const before = process.env[DEADLINE_ENV];
@@ -62,6 +68,10 @@ describe('plan-diff — the round cap the handler actually records', () => {
       const a = JSON.parse(readFileSync(noClock, 'utf8'));
       expect(a.srcDiffLines).toBeGreaterThanOrEqual(3000);
       expect(a.budget.reverseAuditRounds).toBe(5);
+      // The default wall rides along, and is why the tier still reads 5: a
+      // default is not an explicit clock.
+      expect(a.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.huge);
+      expect(a.deadlineSource).toBe('default');
 
       process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
       const withClock = join(dir, 'with-clock.json');
@@ -73,6 +83,63 @@ describe('plan-diff — the round cap the handler actually records', () => {
       if (before === undefined) delete process.env[DEADLINE_ENV];
       else process.env[DEADLINE_ENV] = before;
     }
+  });
+
+  const runWith = (out: string, deadline: string | undefined) =>
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: join(dir, 'huge.diff'),
+      out,
+      maxChunkLines: 400,
+      deadline,
+    });
+
+  it('records an explicit --deadline as a flag wall, which flips the huge tier like an env clock', () => {
+    writeFileSync(join(dir, 'huge.diff'), hugeDiff());
+    const before = process.env[DEADLINE_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      const out = join(dir, 'flag.json');
+      runWith(out, '120');
+      const a = JSON.parse(readFileSync(out, 'utf8'));
+      expect(a.deadlineSeconds).toBe(7200);
+      expect(a.deadlineSource).toBe('flag');
+      expect(a.budget.reverseAuditRounds).toBe(3);
+
+      const none = join(dir, 'none.json');
+      runWith(none, 'none');
+      const b = JSON.parse(readFileSync(none, 'utf8'));
+      expect(b).not.toHaveProperty('deadlineSeconds');
+      expect(b).not.toHaveProperty('deadlineSource');
+      expect(b.budget.reverseAuditRounds).toBe(5);
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+    }
+  });
+
+  it('a small diff records the small default', () => {
+    const diffPath = join(dir, 'small.diff');
+    writeFileSync(diffPath, makeDiff('src/small.ts', 40));
+    const out = join(dir, 'small.json');
+    run(diffPath, out);
+    const a = JSON.parse(readFileSync(out, 'utf8'));
+    expect(a.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.small);
+    expect(a.deadlineSource).toBe('default');
+  });
+
+  it('a malformed --deadline is a usage error: exit 2, nothing written, and it is ruled BEFORE the diff is read', () => {
+    // No diff file at all: a handler that validated the flag only at the
+    // plan write would die on the missing diff first (an ordinary error,
+    // exit 1). The usage ruling must come first, so exit 2 pins the order.
+    const out = join(dir, 'bad.json');
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: join(dir, 'missing.diff'),
+      out,
+      maxChunkLines: 400,
+      deadline: 'soon',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(existsSync(out)).toBe(false);
   });
 
   it('records the operator ceiling the settings actually carry', () => {

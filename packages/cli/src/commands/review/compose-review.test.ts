@@ -24,6 +24,7 @@ import {
   roundCapStopEntry,
   roundCapStopEntryZh,
   writeBudgetStop,
+  stampRound,
   writeRoundCapStop,
 } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
@@ -1883,9 +1884,11 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // marker with zero reverse-audit records must not suppress the not-built
     // gap the way a time-budget stop does: the cap gate refuses only
     // `round > cap`, so the gap's FIX (rebuild `--round 1`) is admitted, and
-    // a local run has no deadline to refuse it at all. Reading the marker
-    // cause-blind would silently drop both the gap and its rebuild
-    // remediation for a run that audited nothing.
+    // a run whose wall still holds — this one has no wall at all — has
+    // nothing to refuse it either. Reading the marker cause-blind would
+    // silently drop both the gap and its rebuild remediation for a run that
+    // audited nothing. (The sibling below is the one exception: a wall that
+    // has since closed refuses the rebuild too.)
     const plan = coveredPlan([]); // no reverse-audit ran — the not-built shape
     writeRoundCapStop(plan, 3, 4);
     const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
@@ -1893,6 +1896,93 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(r.event).toBe('COMMENT');
     expect(r.body).toContain('reverse-audit round cap of 3');
     // …but the not-built gap and its rebuild remediation are still owed.
+    expect(r.remediation.join(' ')).toContain('reverse audit:');
+  });
+
+  it('a round-cap stop DOES suppress the not-built gap once the plan’s wall can no longer admit the rebuild it names', () => {
+    // Same shape, but the plan carries a wall the gate can no longer admit
+    // a round under (the trigger is `remaining < reserve + round`, which
+    // opens before the wall itself closes): the remediation `--round 1`
+    // would meet the budget gate's refusal as deterministically as a
+    // time-budget stop's, so naming it is a FIX that cannot run. A 3600s
+    // wall is below what `--deadline` records — a hand-written or pre-rule
+    // plan — which is fine for the arithmetic under test.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    // Captured two hours ago: the hour-long wall is spent. Backdating the
+    // plan keeps every record and the marker below newer than it.
+    const captured = new Date(Date.now() - 2 * 3600 * 1000);
+    utimesSync(plan, captured, captured);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+  });
+
+  it('a round-cap stop is priced like the gate would price the rebuild — from the round stamps, not a flat constant', () => {
+    // ~4,210s remain on a 7,200s flag wall (reserve 2,400). A flat 1,800s
+    // round price would say the rebuild fits (4,210 ≥ 4,200) and keep the
+    // remediation; the gate itself prices round 1 from the costliest closed
+    // stamped span — 2,250s here, rounds 2→3, with round 3 long enough ago
+    // that no predecessor counts as in flight — and refuses (4,210 <
+    // 4,650). The exemption must agree with the gate, or it names a FIX
+    // that cannot run. (The ten seconds of slack keep the flat price on the
+    // admitting side of its boundary whatever the test's own runtime.)
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 7200,
+        deadlineSource: 'flag',
+      }),
+    );
+    const now = Date.now();
+    const captured = new Date(now - 2990 * 1000);
+    utimesSync(plan, captured, captured);
+    stampRound(plan, 2, now - 2940 * 1000);
+    stampRound(plan, 3, now - 690 * 1000);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+  });
+
+  it('a round-cap stop beside an OPEN plan wall still owes the not-built gap — the rebuild it names would be admitted', () => {
+    // The wall every real capture records (here a `--deadline 120`-shaped
+    // 7200s flag wall, captured now): the gate would admit `--round 1`, so
+    // the round-cap marker exempts nothing and the remediation stands. The
+    // wall-less sibling above never reaches the arithmetic; this one does.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 7200,
+        deadlineSource: 'flag',
+      }),
+    );
+    // Rewriting the plan moved its mtime past the records coveredPlan()
+    // wrote; date it a few seconds back so they stay this run's, and the
+    // wall stays open with hours to spare.
+    const captured = new Date(Date.now() - 5000);
+    utimesSync(plan, captured, captured);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
     expect(r.remediation.join(' ')).toContain('reverse audit:');
   });
 

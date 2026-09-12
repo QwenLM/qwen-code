@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { seedParseArgs } from './lib/test-utils.js';
-import { DEADLINE_ENV } from './lib/deadline.js';
+import { DEADLINE_ENV, DEFAULT_DEADLINE_SECONDS } from './lib/deadline.js';
 
 const captureMock = vi.hoisted(() => vi.fn());
 const settingsMock = vi.hoisted(() => vi.fn(() => ({ merged: {} })));
@@ -328,6 +328,10 @@ describe('capture-local — the budget context the handler actually passes', () 
       const a = JSON.parse(readFileSync(noClock, 'utf8'));
       expect(a.srcDiffLines).toBeGreaterThanOrEqual(3000);
       expect(a.budget.reverseAuditRounds).toBe(5); // huge, no clock → 3B tier
+      // The default wall rides along — and it is the reason the tier above
+      // still reads 5: a default is not an explicit clock.
+      expect(a.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.huge);
+      expect(a.deadlineSource).toBe('default');
 
       process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
       const withClock = join(dir, 'with-clock.json');
@@ -351,5 +355,77 @@ describe('capture-local — the budget context the handler actually passes', () 
       if (before === undefined) delete process.env[DEADLINE_ENV];
       else process.env[DEADLINE_ENV] = before;
     }
+  });
+});
+
+describe('capture-local — the --deadline flag the handler records', () => {
+  const hugeTree = () =>
+    capture({
+      diff: Buffer.from(
+        [
+          'diff --git a/src/huge.ts b/src/huge.ts',
+          '--- /dev/null',
+          '+++ b/src/huge.ts',
+          '@@ -0,0 +1,9000 @@',
+          Array.from({ length: 9000 }, (_, i) => `+const x${i} = ${i};`).join(
+            '\n',
+          ),
+          '',
+        ].join('\n'),
+        'utf8',
+      ),
+      untracked: ['src/huge.ts'],
+    });
+
+  it('an explicit --deadline is recorded as a flag wall and, like an env clock, flips the huge tier', () => {
+    const before = process.env[DEADLINE_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      hugeTree();
+      const out = join(dir, 'flag.json');
+      run(out, { deadline: '120' });
+      const a = JSON.parse(readFileSync(out, 'utf8'));
+      expect(a.deadlineSeconds).toBe(7200);
+      expect(a.deadlineSource).toBe('flag');
+      expect(a.budget.reverseAuditRounds).toBe(3);
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+    }
+  });
+
+  it('`--deadline none` records no wall, and a small diff records the small default', () => {
+    const before = process.env[DEADLINE_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      hugeTree();
+      const none = join(dir, 'none.json');
+      run(none, { deadline: 'none' });
+      const a = JSON.parse(readFileSync(none, 'utf8'));
+      expect(a).not.toHaveProperty('deadlineSeconds');
+      expect(a).not.toHaveProperty('deadlineSource');
+      expect(a.budget.reverseAuditRounds).toBe(5);
+
+      capture();
+      const small = join(dir, 'small.json');
+      run(small);
+      const b = JSON.parse(readFileSync(small, 'utf8'));
+      expect(b.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.small);
+      expect(b.deadlineSource).toBe('default');
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+    }
+  });
+
+  it('a malformed --deadline is a usage error thrown before the tree is captured', () => {
+    captureMock.mockClear();
+    const out = join(dir, 'bad.json');
+    expect(() => run(out, { deadline: 'soon' })).toThrow(TypeError);
+    expect(() => run(out, { deadline: '0' })).toThrow(
+      /--deadline must be a whole number of minutes or `none`/,
+    );
+    expect(captureMock).not.toHaveBeenCalled();
+    expect(existsSync(out)).toBe(false);
   });
 });

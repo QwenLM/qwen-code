@@ -179,6 +179,7 @@ export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
  * byte-identical copies that can silently diverge. `run` and `save-artifact`
  * keep their own shapes (per-target defaults; a resolved value without `low`).
  */
+
 export const EFFORT_OPTION = {
   type: 'string',
   choices: [...EFFORT_LEVELS],
@@ -189,6 +190,28 @@ export const EFFORT_OPTION = {
     'required roster; recorded in the plan ' +
     'so check-coverage, agent-prompt --roster and compose-review all ' +
     'read one value. Omit for the full (high) roster.',
+} as const;
+
+/**
+ * `--deadline`, shared by the three capture commands so the wall is one
+ * option with one grammar everywhere: a whole number of minutes, or `none`.
+ * Omitted, the capture records the tier's default wall (lib/deadline.ts).
+ */
+export const DEADLINE_OPTION = {
+  type: 'string',
+  describe:
+    "The review's wall, in minutes, recorded in the plan as a duration from " +
+    "the attempt's start — the round builder refuses a reverse-audit round " +
+    'that no longer fits inside it plus the tail reserve, and a `--resume` ' +
+    "from a new session renews it. Omit for the topology's default (8h on a 3A diff, 12h on a " +
+    '3B one, 16h when huge), which bounds a run that has stopped converging ' +
+    'without touching a healthy one; `none` records no wall; a wall that ' +
+    'cannot hold a convergence (two rounds plus the reserve — at or under ' +
+    'ninety minutes) is refused up front, and the fan-out before round 1 ' +
+    'spends any wall too. A ' +
+    'QWEN_REVIEW_DEADLINE_EPOCH in the environment (CI) wins over both. An ' +
+    "explicit deadline, like the environment's, applies the huge tier's " +
+    'round reduction; the default does not.',
 } as const;
 
 export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
@@ -267,6 +290,12 @@ function asTopology(value: string): ReviewTopology | null {
  */
 function isFlag(token: string): boolean {
   return token.length > 1 && token.startsWith('-');
+}
+
+/** What `--deadline` accepts: whole minutes or `none`, whitespace trimmed. */
+function isDeadlineValue(token: string): boolean {
+  const t = token.trim();
+  return /^\d+$/.test(t) || t.toLowerCase() === 'none';
 }
 
 function isPureInteger(token: string): boolean {
@@ -443,6 +472,13 @@ export function parseReviewArgs(
     | { kind: 'discarded'; value: string }
     | { kind: 'kept-as-target'; value: string };
   const effortIssues: EffortIssue[] = [];
+  // `--deadline` is not a `/review` flag at all (it belongs to the capture
+  // commands), but it takes a value, so its leftovers ride the same
+  // disposal pool as the three value flags above: a deadline-shaped value
+  // is consumed with the flag, anything else is an invalid value of it and
+  // is rescued or discarded exactly as `--effort`'s would be.
+  const deadlineIssues: EffortIssue[] = [];
+  const consumedDeadlineValues: string[] = [];
   // `--severity-floor` shares the value-token grammar and therefore the same
   // deferred-warning problem; its issues are a separate list because its
   // resolution sentence is its own.
@@ -457,7 +493,11 @@ export function parseReviewArgs(
   interface Kept {
     token: string;
     /** Set when this token arrived as an invalid value of the named flag. */
-    invalidValueOf?: '--effort' | '--severity-floor' | '--topology';
+    invalidValueOf?:
+      | '--effort'
+      | '--severity-floor'
+      | '--topology'
+      | '--deadline';
   }
   const kept: Kept[] = [];
 
@@ -609,6 +649,48 @@ export function parseReviewArgs(
       continue;
     }
 
+    // `--deadline` is a capture-command option (fetch-pr / capture-local /
+    // plan-diff), not a `/review` flag — but it takes a value, and the
+    // generic unknown-flag arm below would leave that value on the line,
+    // where `90` reads as PR #90 and `none` as a file. Consume it, and say
+    // which wall the run gets instead.
+    if (token === '--deadline' || token.startsWith('--deadline=')) {
+      unknownFlags.push('--deadline');
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        if (value === '') {
+          deadlineIssues.push({ kind: 'missing' });
+        } else if (isDeadlineValue(value)) {
+          consumedDeadlineValues.push(value);
+        } else if (isPrShapedToken(value)) {
+          kept.push({ token: value, invalidValueOf: '--deadline' });
+        } else {
+          deadlineIssues.push({ kind: 'invalid-eq', value });
+        }
+        continue;
+      }
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      if (next === undefined || isFlag(next)) {
+        deadlineIssues.push({ kind: 'missing' });
+        continue;
+      }
+      if (next === '') {
+        deadlineIssues.push({ kind: 'missing' });
+        i++;
+        continue;
+      }
+      if (isDeadlineValue(next)) {
+        consumedDeadlineValues.push(next);
+        i++;
+        continue;
+      }
+      // Not a deadline: the ordinary invalid-value disposal decides whether
+      // it is the target the caller meant (a PR number or URL) or a typo.
+      kept.push({ token: next, invalidValueOf: '--deadline' });
+      i++;
+      continue;
+    }
+
     if (isFlag(token)) {
       unknownFlags.push(token);
       warnings.push(`Unrecognized flag ${JSON.stringify(token)}; ignored.`);
@@ -756,6 +838,7 @@ export function parseReviewArgs(
     '--effort': effortIssues,
     '--severity-floor': floorIssues,
     '--topology': topologyIssues,
+    '--deadline': deadlineIssues,
   };
   let rescuedPr = false;
   for (const k of kept) {
@@ -995,6 +1078,38 @@ export function parseReviewArgs(
     warnings.push(
       `Invalid review.effort value ${JSON.stringify(invalidConfiguredEffort)} in settings; ${resolution}.`,
     );
+  }
+  const deadlinePrefix =
+    '`--deadline` is an option of the capture commands (`fetch-pr`, ' +
+    '`capture-local`, `plan-diff`), not of /review; ignored';
+  for (const value of consumedDeadlineValues) {
+    warnings.push(
+      `${deadlinePrefix} together with its value ${JSON.stringify(value)}.`,
+    );
+  }
+  for (const issue of deadlineIssues) {
+    switch (issue.kind) {
+      case 'missing':
+        warnings.push(`${deadlinePrefix} (it had no value).`);
+        break;
+      case 'invalid-eq':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline.`,
+        );
+        break;
+      case 'discarded':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline and was discarded.`,
+        );
+        break;
+      case 'kept-as-target':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline — treating it as the review target.`,
+        );
+        break;
+      default:
+        break;
+    }
   }
 
   // The floor resolves like the effort — explicit flag over configured

@@ -10,8 +10,9 @@
 // is open-ended: each round is a fan-out (one auditor per chunk on a 3B plan),
 // each round's findings go back through verification, and the loop runs until
 // two consecutive dry rounds or the plan's round cap (one value per topology:
-// 10 on a 3A diff, 5 on a 3B one, and 3 when huge — but only where a deadline
-// exists, since that reduction answers a ceiling; 5 when huge without one). On a PR where every round
+// 10 on a 3A diff, 5 on a 3B one, and 3 when huge — but only under an EXPLICIT
+// clock, CI's epoch or `--deadline`, since that reduction answers a ceiling;
+// 5 when huge under the plan's default wall). On a PR where every round
 // finds something, that is the whole budget. Measured on a real CI run
 // (#8368, +1699 lines): the audit loop ran to the 5-round cap, consumed 3.5 of
 // the job's 4 budgeted hours, and the outer GNU-timeout kill arrived while
@@ -35,10 +36,20 @@
 // the verdict-capping disclosure itself — the orchestrator's copy of the
 // entry is a courtesy to the terminal reader, not the mechanism.
 //
-// A run with no deadline in its environment — every local run — is untouched.
-// A malformed deadline fails OPEN (the gate stays silent): the outer kill
-// still bounds the run, and a broken environment variable must degrade to
-// today's behaviour, not wedge every budgeted review at round 1.
+// Where the deadline comes from, in order: the environment's epoch when CI
+// exports one; else the wall the plan recorded at capture — a `--deadline
+// <minutes>`, or the topology's own default (8h/12h/16h by tier) — added to
+// the CURRENT attempt's start, so a `--resume` that starts a new attempt (a
+// fresh session) renews it; else nothing, when
+// the capture was told `--deadline none`. So a local run now has a wall too,
+// and it is a LIVENESS bound: sized above what a healthy run at the round
+// cap spends, so it bites only a loop that has stopped converging. The huge
+// tier's round reduction keys on an EXPLICIT clock (env or flag), never on
+// the default — see `hasReviewDeadline`.
+// A malformed value fails OPEN at its own level: a broken environment
+// variable falls through to the plan's wall, a broken plan field to no wall
+// (the gate stays silent; the outer kill still bounds the run) — never a
+// wedge of every budgeted review at round 1.
 
 import {
   mkdirSync,
@@ -50,9 +61,91 @@ import {
 import { join } from 'node:path';
 import { resolveReviewWorkflowConcurrency } from '@qwen-code/qwen-code-core';
 import { promptRecordDir, runEpochMs } from './prompt-record.js';
+import { currentSessionEntry } from './run-ledger.js';
+import { sizeTier, type DiffSize, type SizeTier } from './budget.js';
 
-/** Unix seconds at which the review process will be killed. Set by CI. */
+/**
+ * Unix seconds at which the review process will be killed. Set by CI. Wins
+ * over the wall a plan records, because it is the one that is enforced from
+ * outside.
+ */
 export const DEADLINE_ENV = 'QWEN_REVIEW_DEADLINE_EPOCH';
+
+/**
+ * The default wall a capture records when told nothing, by topology tier, in
+ * seconds. A LIVENESS bound, not a cost calibration: cost is the round cap's
+ * business, so this must sit ABOVE what a healthy run at that cap spends and
+ * bite only a loop that has stopped converging. Sized from the repository's
+ * own CI review runs (83 runs of ten minutes or more on 2026-09-09 and 09-11
+ * that the Actions API tied to a PR, every attempt under the workflow's
+ * gate — 3h for a PR of ≤ 300 changed lines, 6h above, halved to a
+ * 90-minute floor for micro and docs-only PRs):
+ *
+ *   3A    un-gated runs (6h budget) posted at 106–293 min; the 3h budget
+ *         stopped runs "before round 3" at 142–196 min, so it is below a
+ *         healthy 3A run, and 6h is a thin margin over 293. 8h admits
+ *         rounds until ~6.2h elapsed (the reserve plus the 30-minute
+ *         round estimate must still remain at admission).
+ *   3B    every POSTED run past ~4.5h was gate-stopped between rounds 3
+ *         and 5 (270–337 min), two more were killed at the 6h wall with
+ *         nothing posted, and the two that ran the cap of 5 out posted at
+ *         328 and 333 min — a healthy 3B run is 5.5–8h. 12h.
+ *   huge  two of the four posted runs were stopped "before round 3" at
+ *         the 6h wall, the others posted at 345 and 354 min; without an
+ *         explicit clock the cap is 5 and a round is ~90 min, so a healthy
+ *         run is ~10h or more. 16h.
+ *
+ * — 1.5–2× the longest healthy run: measured for 3A (293 min), PROJECTED
+ * for 3B and huge from runs the CI wall itself cut (5.5–8h and ~10h are
+ * inferences from where the gate stopped them, not observed finishes), in
+ * whole hours a reader can hold in their head. 3A has no single CI budget:
+ * its PRs straddle the 300-line band. Calibrated against the wall, not the round: the gate prices
+ * rounds itself (#9243 is the size-aware first-round estimate that is still
+ * open). An operator who knows better passes `--deadline`.
+ */
+export const DEFAULT_DEADLINE_SECONDS: Readonly<Record<SizeTier, number>> = {
+  small: 8 * 3600,
+  large: 12 * 3600,
+  huge: 16 * 3600,
+};
+
+/**
+ * The reserve a PLAN-recorded wall implies — the rule the review workflow
+ * applies to the budget it exports (`attempt_timeout / 3`, capped at 4800),
+ * so a wall the plan carries and one the environment carries price their
+ * tails alike. The floor differs on purpose: the workflow floors at 600, but
+ * `verifyBudgetExhausted` rests on the compose floor never exceeding the
+ * reserve, so a plan wall floors at the EFFECTIVE compose floor — the
+ * `COMPOSE_FLOOR_ENV` override when it raises the floor, else the 1200
+ * default (a disabled or lowered floor never shrinks the reserve below
+ * 1200). Equal at the floor, inside above it; the round gate still fires
+ * first either way, because it prices the round on top of the reserve.
+ * Only for a plan-sourced deadline: an environment deadline keeps
+ * `RESERVE_ENV` / `DEFAULT_RESERVE_SECONDS`, which the workflow already
+ * scales. Without `env` the default floor applies — the up-front
+ * `--deadline` check prices that way, so a capture's ruling does not move
+ * with the shell it happens to run in.
+ */
+export function planReserveSeconds(
+  deadlineSeconds: number,
+  env: NodeJS.ProcessEnv = {},
+): number {
+  const floor = Math.max(
+    DEFAULT_COMPOSE_FLOOR_SECONDS,
+    readNonNegativeSeconds(
+      env,
+      COMPOSE_FLOOR_ENV,
+      DEFAULT_COMPOSE_FLOOR_SECONDS,
+    ),
+  );
+  return Math.max(
+    floor,
+    Math.min(
+      DEFAULT_RESERVE_SECONDS,
+      Math.max(DEFAULT_COMPOSE_FLOOR_SECONDS, Math.floor(deadlineSeconds / 3)),
+    ),
+  );
+}
 
 /** Override for the tail reserve, in seconds. */
 export const RESERVE_ENV = 'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS';
@@ -95,7 +188,9 @@ export const RESERVE_ENV = 'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS';
  * scaled to the budget it resolved rather than trusting this constant to fit
  * an arbitrary one. The workflow caps that scaled reserve at this same
  * number (`.github/workflows/qwen-code-pr-review.yml`) — keep the two in
- * sync. A local run has no deadline and no reserve at all.
+ * sync. A wall the PLAN carries gets the same scaling in-process
+ * (`planReserveSeconds`), so a local run's default wall prices its tail the
+ * way a CI budget of the same length would.
  */
 export const DEFAULT_RESERVE_SECONDS = 4800;
 
@@ -400,13 +495,235 @@ export interface BudgetExhausted {
   expectedRoundSeconds: number;
 }
 
+/** What `--deadline` parsed to: minutes as seconds, no wall, or the tier's. */
+export type DeadlineOption = { seconds: number } | 'none' | 'default';
+
 /**
- * The deadline epoch both gates read, or null when unset/malformed — the
- * fail-open contract in one place so the two gates cannot drift on it. A
- * missing, empty, non-finite or non-positive `QWEN_REVIEW_DEADLINE_EPOCH`
- * leaves the review ungated (the outer timeout still bounds it).
+ * Parse the `--deadline` option: a whole, positive number of minutes, or
+ * `none`; omitted means the tier's default. Anything else is a usage error
+ * — a wall that silently became the default because a value did not parse
+ * is a wall the operator does not know they have.
  */
-function readDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
+export function parseDeadlineOption(
+  raw: unknown,
+  env: NodeJS.ProcessEnv = {},
+): DeadlineOption {
+  if (raw === undefined) return 'default';
+  const usage = () =>
+    new TypeError(
+      `--deadline must be a whole number of minutes or \`none\`, got ${JSON.stringify(raw)}`,
+    );
+  // yargs hands `--no-deadline` over as `false`: a usage error, not a crash
+  // on `.trim`. A blank value is one too — `--deadline "$UNSET"` in a script
+  // must not quietly take the default it was trying to override.
+  if (typeof raw !== 'string') throw usage();
+  const text = raw.trim();
+  if (text === '') throw usage();
+  if (text.toLowerCase() === 'none') return 'none';
+  // Digits only, and a SAFE integer: a 310-digit "number" parses to
+  // Infinity, which would record as JSON `null` (no wall) after the capture
+  // had already priced the tier as explicitly clocked.
+  const minutes = /^\d+$/.test(text) ? Number(text) : Number.NaN;
+  if (!Number.isSafeInteger(minutes) || minutes <= 0) throw usage();
+  const seconds = minutes * 60;
+  // A wall that provably cannot hold a convergence is refused here, not
+  // discovered after the capture has spent the fan-out: the loop's shortest
+  // finish is two consecutive dry rounds, and the gate admits a round only
+  // while the round's estimate plus the reserve still remain — STRICTLY
+  // more than the sum, since the wall is spent from the moment of capture.
+  // The RULING is priced from the default reserve rule, so it is the same
+  // in every shell; `env` reaches only the message, whose "shortest wall"
+  // figure must be one `validateDeadlineFlag` accepts under THIS shell.
+  const floor = minimumDeadlineSeconds(seconds);
+  if (seconds <= floor) {
+    throw new TypeError(deadlineTooShort(minutes, floor, 'default', env));
+  }
+  return { seconds };
+}
+
+/**
+ * The capture-time validation of `--deadline`, both bars in one place: the
+ * grammar and the env-free convergence floor (`parseDeadlineOption`), then
+ * — unless `shellPriced` is false — the same floor priced the way the GATE
+ * will price this wall in the shell at hand: the `RESERVE_ENV` override
+ * when set, else the plan's reserve floored at the effective compose floor
+ * (`effectiveMinimumDeadlineSeconds`, the expression
+ * `reverseAuditBudgetExhausted` evaluates). The shell bar is skipped when
+ * the environment exports an epoch: the flag is inert at every gate while
+ * that epoch stands, and the shell a later env-less continuation runs in is
+ * not this one — a wall recorded that way can be refused at round 1 there
+ * if THAT shell raises the reserve or the floor. Pure given `env`, so the
+ * capture commands run it up front, before any fetch, lease or planning
+ * work, and `captureDeadline` runs it again at the plan write. A
+ * `fetch-pr --resume` passes `shellPriced: false` up front: the flag is
+ * ignored on a resumed plan, so only the grammar and the default rule are
+ * owed there; a resume that falls through to a fresh capture meets the
+ * shell bar the moment the fallthrough is ruled, before the stale worktree
+ * is destroyed.
+ */
+export function validateDeadlineFlag(
+  env: NodeJS.ProcessEnv,
+  raw: unknown,
+  opts: { shellPriced?: boolean } = {},
+): DeadlineOption {
+  // With the shell bar off, the message's "shortest wall" figure must be
+  // the default rule's too — the bars the caller is actually held to.
+  const option = parseDeadlineOption(
+    raw,
+    opts.shellPriced === false ? {} : env,
+  );
+  if (option === 'none' || option === 'default') return option;
+  if (opts.shellPriced === false) return option;
+  if (readEnvDeadlineSeconds(env) !== null) return option;
+  const floor = effectiveMinimumDeadlineSeconds(env, option.seconds);
+  if (option.seconds <= floor) {
+    throw new TypeError(
+      deadlineTooShort(option.seconds / 60, floor, 'shell', env),
+    );
+  }
+  return option;
+}
+
+/** Minutes for a message, floored to one decimal so sums never overshoot. */
+function minutesText(seconds: number): string {
+  const tenths = Math.floor(seconds / 6);
+  return tenths % 10 === 0 ? String(tenths / 10) : (tenths / 10).toFixed(1);
+}
+
+/**
+ * The refusal for a wall that cannot hold a convergence, from whichever bar
+ * refused it: the default rule, or this shell's pricing. Two numbers, both
+ * true: what THIS wall would need under that bar (its own reserve grows
+ * with it, so that figure is not an instruction) and the shortest wall
+ * `validateDeadlineFlag` admits under BOTH bars in `env` — the number to
+ * reach for, or the statement that no wall under a day can, when an
+ * override has put every wall out of reach.
+ */
+function deadlineTooShort(
+  minutes: number,
+  floor: number,
+  bar: 'default' | 'shell',
+  env: NodeJS.ProcessEnv,
+): string {
+  const reserve = floor - 2 * DEFAULT_ROUND_SECONDS;
+  const shortest = shortestDeadlineMinutes(env);
+  return (
+    `--deadline ${minutes} cannot hold a convergence: two rounds at the ` +
+    `${DEFAULT_ROUND_SECONDS / 60}-minute estimate plus the ` +
+    `${minutesText(reserve)}-minute reserve this wall would keep ` +
+    (bar === 'default'
+      ? 'under the default rule '
+      : "under this shell's reserve / compose-floor overrides ") +
+    `need more than ${Math.floor(floor / 60)} minutes; ` +
+    (shortest === null
+      ? "no wall under 24 hours can hold one under this shell's reserve / " +
+        'compose-floor overrides'
+      : `the shortest wall that can hold one here is ${shortest} minutes`) +
+    ` — and the fan-out before round 1 spends any wall too`
+  );
+}
+
+/**
+ * The shortest `--deadline` that `validateDeadlineFlag` admits under `env`,
+ * in whole minutes — BOTH bars: the default rule always, and the shell's
+ * pricing unless an epoch makes the flag inert. The reserve a wall implies
+ * grows with the wall, so this is a fixed point, found by scanning rather
+ * than solved, so it follows the pricing instead of a constant that can
+ * drift. 91 under the default rule; `null` when no wall under a day
+ * qualifies (a reserve override near or past the scan's end).
+ */
+export function shortestDeadlineMinutes(
+  env: NodeJS.ProcessEnv = {},
+): number | null {
+  const shellBar = readEnvDeadlineSeconds(env) === null;
+  for (let m = 1; m <= 24 * 60; m++) {
+    const s = m * 60;
+    if (s <= minimumDeadlineSeconds(s)) continue;
+    if (shellBar && s <= effectiveMinimumDeadlineSeconds(env, s)) continue;
+    return m;
+  }
+  return null;
+}
+
+/**
+ * `minimumDeadlineSeconds` priced the way the GATE will price this wall in
+ * the shell at hand: the `RESERVE_ENV` override when set, else the plan's
+ * reserve floored at the effective compose floor — the same expression
+ * `reverseAuditBudgetExhausted` evaluates for its reserve. What
+ * `validateDeadlineFlag` refuses on, so a wall this shell's pricing cannot
+ * hold a convergence under is not recorded. (Not "the gate refuses at zero
+ * elapsed": the gate needs one round plus the reserve; the bar is two.)
+ */
+export function effectiveMinimumDeadlineSeconds(
+  env: NodeJS.ProcessEnv,
+  wallSeconds: number,
+): number {
+  return (
+    readNonNegativeSeconds(
+      env,
+      RESERVE_ENV,
+      planReserveSeconds(wallSeconds, env),
+    ) +
+    2 * DEFAULT_ROUND_SECONDS
+  );
+}
+
+/**
+ * The wall a `--deadline` must strictly exceed under the DEFAULT pricing:
+ * two rounds at the round estimate (a convergence needs two consecutive dry
+ * rounds, and the convergence pair's second member can be priced at both)
+ * plus the reserve the wall implies. Deliberately env-free — see
+ * `parseDeadlineOption`. Not a promise of admission: the fan-out and
+ * verification before round 1 spend the wall as well, and the gate prices
+ * rounds from what it measures.
+ */
+export function minimumDeadlineSeconds(wallSeconds: number): number {
+  return planReserveSeconds(wallSeconds) + 2 * DEFAULT_ROUND_SECONDS;
+}
+
+/** The plan fields a capture writes for its wall — empty for `none`. */
+export type PlanDeadlineFields =
+  | { deadlineSeconds: number; deadlineSource: 'flag' | 'default' }
+  | Record<string, never>;
+
+/**
+ * What a capture command records about the wall, in one place for the three
+ * commands that write a plan: the fields to spread into the report, and
+ * whether this run has an EXPLICIT clock for the round tier's purposes
+ * (`hasReviewDeadline`, which the tier reads at capture time BEFORE the plan
+ * exists — this is the same answer computed from the same inputs).
+ *
+ * A default wall is written even when the environment carries a deadline:
+ * the environment's wins at read time, but a plan that outlives its
+ * environment (a `--resume` in a shell that no longer exports it) still has
+ * a bound to fall back on.
+ */
+export function captureDeadline(
+  env: NodeJS.ProcessEnv,
+  raw: string | undefined,
+  size: DiffSize,
+): { fields: PlanDeadlineFields; explicit: boolean } {
+  const option = validateDeadlineFlag(env, raw);
+  const envExplicit = readEnvDeadlineSeconds(env) !== null;
+  if (option === 'none') return { fields: {}, explicit: envExplicit };
+  if (option === 'default') {
+    return {
+      fields: {
+        deadlineSeconds: DEFAULT_DEADLINE_SECONDS[sizeTier(size)],
+        deadlineSource: 'default',
+      },
+      explicit: envExplicit,
+    };
+  }
+  // Both bars already ruled inside `validateDeadlineFlag`.
+  return {
+    fields: { deadlineSeconds: option.seconds, deadlineSource: 'flag' },
+    explicit: true,
+  };
+}
+
+/** The environment's epoch, well-formed, or null. */
+function readEnvDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
   const raw = env[DEADLINE_ENV];
   if (raw === undefined || raw.trim() === '') return null;
   const deadline = Number(raw);
@@ -414,23 +731,160 @@ function readDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
   return deadline;
 }
 
+/** The plan's recorded wall, well-formed, or null — read fail-open. */
 /**
- * Does this run have a clock at all?
+ * The wall the plan itself recorded, if any — what a capture wrote, read
+ * back without the environment and without an attempt start. For messages
+ * about the plan's own state (the resume note); the gates use
+ * `resolveReviewDeadline`.
+ */
+export function recordedPlanDeadline(
+  planPath: string,
+): { seconds: number; source: 'flag' | 'default' } | null {
+  return readPlanDeadline(planPath, undefined);
+}
+
+function readPlanDeadline(
+  planPath: string | undefined,
+  plan: unknown,
+): { seconds: number; source: 'flag' | 'default' } | null {
+  let report = plan;
+  if (report === undefined && planPath !== undefined) {
+    try {
+      report = JSON.parse(readFileSync(planPath, 'utf8')) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof report !== 'object' || report === null) return null;
+  const { deadlineSeconds, deadlineSource } = report as {
+    deadlineSeconds?: unknown;
+    deadlineSource?: unknown;
+  };
+  if (
+    typeof deadlineSeconds !== 'number' ||
+    !Number.isFinite(deadlineSeconds) ||
+    deadlineSeconds <= 0
+  ) {
+    return null;
+  }
+  return {
+    seconds: deadlineSeconds,
+    source: deadlineSource === 'flag' ? 'flag' : 'default',
+  };
+}
+
+/**
+ * When the CURRENT attempt started, in ms: the run-session ledger's entry
+ * for this session — `fetch-pr` appends one at capture and again on a
+ * `--resume` from a new session (a killed terminal, a fresh CLI), which is
+ * what makes a plan-recorded wall renew for a continuation — else the plan's
+ * own mtime, the run epoch every fence keys on. A resume from the SAME
+ * session keeps its first entry (the ledger records a session once), so its
+ * wall is the first attempt's; sized as the defaults are, that only matters
+ * to a run that had already spent it, and the refusal it then meets says so.
+ * Null when neither is readable, which reads as "no wall" (fail open).
+ */
+function attemptStartMs(
+  planPath: string,
+  env: NodeJS.ProcessEnv,
+): number | null {
+  // Whole milliseconds: `mtimeMs` is a float rendering of a nanosecond
+  // stamp, and a microsecond short of the intended instant would floor a
+  // whole second off the remaining time exactly at the admission boundary.
+  const session = currentSessionEntry(planPath, env);
+  if (session !== null) return Math.round(session.atMs);
+  try {
+    return Math.round(statSync(planPath).mtimeMs);
+  } catch {
+    return null;
+  }
+}
+
+/** Where a resolved deadline came from. */
+export interface ResolvedDeadline {
+  /** Unix seconds at which the wall stands. */
+  epochSeconds: number;
+  /** The wall's length, when the plan recorded it; absent for an env epoch. */
+  deadlineSeconds?: number;
+}
+
+/**
+ * The deadline every gate and the round tier read, or null when there is
+ * none — the ONE resolver, so the gates, the tier and the capture commands
+ * cannot drift on where the wall comes from. Precedence: the environment's
+ * epoch (CI's kill, enforced from outside); else the plan's recorded wall
+ * added to the current attempt's start; else nothing. Each source fails
+ * OPEN on a malformed value, exactly as the env-only read always did.
+ *
+ * `plan` is the already-parsed report when the caller holds one (the
+ * `agent-prompt` builders do); given only `planPath` the plan is read here.
+ */
+export function resolveReviewDeadline(
+  env: NodeJS.ProcessEnv,
+  planPath?: string,
+  plan?: unknown,
+): ResolvedDeadline | null {
+  const fromEnv = readEnvDeadlineSeconds(env);
+  if (fromEnv !== null) {
+    return { epochSeconds: fromEnv };
+  }
+  if (planPath === undefined && plan === undefined) return null;
+  const recorded = readPlanDeadline(planPath, plan);
+  if (recorded === null) return null;
+  const start = planPath === undefined ? null : attemptStartMs(planPath, env);
+  if (start === null) return null;
+  return {
+    epochSeconds: start / 1000 + recorded.seconds,
+    deadlineSeconds: recorded.seconds,
+  };
+}
+
+/**
+ * The deadline epoch both gates read, or null — `resolveReviewDeadline`'s
+ * epoch, kept as the name the gates always used.
+ */
+function readDeadlineSeconds(
+  env: NodeJS.ProcessEnv,
+  planPath?: string,
+  plan?: unknown,
+): number | null {
+  return resolveReviewDeadline(env, planPath, plan)?.epochSeconds ?? null;
+}
+
+/**
+ * Does this run have an EXPLICIT clock?
  *
  * The budget's huge-diff round reduction is a *finishability* ruling — five
  * ~90-minute rounds do not fit a six-hour CI ceiling — and a ruling about
- * fitting inside a wall is meaningless where there is no wall. This is how the
- * capture commands ask, and it deliberately reuses the same parse both gates
- * read from, so "has a deadline" and "the gate will enforce a deadline" cannot
- * come apart: a malformed value leaves the review ungated here exactly as it
- * leaves it ungated there.
+ * fitting inside a wall is meaningless where there is no wall. This is how
+ * the `agent-prompt` readers ask (the capture commands ask `captureDeadline`,
+ * which knows the flag before the plan exists), and it reads the environment
+ * and the plan through the same two readers the gates resolve from, so "has
+ * a deadline" and "the gate will enforce a deadline" cannot come apart on a
+ * malformed value. It does not need the attempt's start: whether the clock
+ * is explicit is a property of where it came from, not of when.
  *
- * The env, not `process.env`, for the reason every other function in this file
- * takes it: a test must be able to ask the question without editing the
- * process it runs in.
+ * The DEFAULT wall answers no here, on purpose. It is a liveness bound the
+ * round gate enforces from inside, sized above a healthy run's spend; the
+ * reduction was sized against a kill from outside that costs the whole
+ * review. Letting the default flip the tier would cut every local huge run
+ * from five rounds to three at plan time — the one place recall matters
+ * most — to fit a wall that only a wedged run reaches. An explicit clock
+ * (the environment's, or `--deadline <minutes>`) flips it as before.
+ *
+ * The env, not `process.env`, for the reason every other function in this
+ * file takes it: a test must be able to ask the question without editing
+ * the process it runs in.
  */
-export function hasReviewDeadline(env: NodeJS.ProcessEnv): boolean {
-  return readDeadlineSeconds(env) !== null;
+export function hasReviewDeadline(
+  env: NodeJS.ProcessEnv,
+  planPath?: string,
+  plan?: unknown,
+): boolean {
+  if (readEnvDeadlineSeconds(env) !== null) return true;
+  if (planPath === undefined && plan === undefined) return false;
+  return readPlanDeadline(planPath, plan)?.source === 'flag';
 }
 
 /**
@@ -455,21 +909,37 @@ function readNonNegativeSeconds(
  * Decide whether another reverse-audit round still fits the review's time
  * budget: the remaining time must cover the round being admitted AND the
  * tail after it. Returns `null` when it does — or when no (well-formed)
- * deadline is present, which is every local run.
+ * deadline resolves at all: no epoch in the environment and no wall in the
+ * plan (a capture told `--deadline none`, or a plan older than the field).
  */
+// The round price handed in is `expectedAdmissionSeconds`', whose last
+// span is open-ended (measured admission-to-now): a round genuinely in flight
+// for that long costs that long, and so does an idle gap inside a live
+// attempt — a paused session, a provider stall — which is charged as work.
+// Deliberate worst-case pricing (see `costliestSpanSeconds`); now that every
+// local run has a wall it is the local run's exposure too, and the refusal
+// message names the priced round so a reader can see when that is the cause.
 export function reverseAuditBudgetExhausted(
   env: NodeJS.ProcessEnv,
   roundCostSeconds: number,
   nowMs: number = Date.now(),
+  planPath?: string,
+  plan?: unknown,
 ): BudgetExhausted | null {
-  const deadline = readDeadlineSeconds(env);
-  if (deadline === null) return null;
+  const resolved = resolveReviewDeadline(env, planPath, plan);
+  if (resolved === null) return null;
+  const deadline = resolved.epochSeconds;
   // 0 is the escape hatch that shrinks the requirement to the round estimate
   // alone, keeping only the refusal of a round that cannot finish at all.
+  // A plan-recorded wall prices its tail from its own length, the way the
+  // workflow scales the reserve for the budget it exports; the env override
+  // still wins, and an env deadline keeps the constant the workflow scaled.
   const reserve = readNonNegativeSeconds(
     env,
     RESERVE_ENV,
-    DEFAULT_RESERVE_SECONDS,
+    resolved.deadlineSeconds === undefined
+      ? DEFAULT_RESERVE_SECONDS
+      : planReserveSeconds(resolved.deadlineSeconds, env),
   );
 
   const remainingSeconds = Math.floor(deadline - nowMs / 1000);
@@ -492,8 +962,9 @@ export interface ComposeFloorExhausted {
  * Decide whether a verification shard still fits before the compose floor:
  * the deterministic backstop that keeps the terminal round's verification
  * from consuming the time compose-review and submission need. Returns
- * `null` when a verify build may proceed — or when no deadline is set (a
- * local run), so the gate is inert exactly where the reverse-audit gate is.
+ * `null` when a verify build may proceed — or when no deadline resolves
+ * (neither environment nor plan), so the gate is inert exactly where the
+ * reverse-audit gate is.
  *
  * This fires only when the reserve has already been spent down into the
  * compose floor — the reverse-audit gate keeps `reserve` (which includes
@@ -505,8 +976,10 @@ export interface ComposeFloorExhausted {
 export function verifyBudgetExhausted(
   env: NodeJS.ProcessEnv,
   nowMs: number = Date.now(),
+  planPath?: string,
+  plan?: unknown,
 ): ComposeFloorExhausted | null {
-  const deadline = readDeadlineSeconds(env);
+  const deadline = readDeadlineSeconds(env, planPath, plan);
   if (deadline === null) return null;
   const floor = readNonNegativeSeconds(
     env,
