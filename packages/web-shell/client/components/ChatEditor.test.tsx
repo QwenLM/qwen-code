@@ -2363,7 +2363,12 @@ describe('ChatEditor slash command popovers', () => {
     expect(onSkillsOpenChange).toHaveBeenLastCalledWith(true);
     expect(
       document.querySelector('[data-web-shell-slash-menu]')?.textContent,
-    ).toContain('Loading skills...');
+    ).toContain('Loading...');
+    expect(
+      document
+        .querySelector('[data-web-shell-slash-menu]')
+        ?.getAttribute('role'),
+    ).toBeNull();
     rerenderChatEditor(container, {
       ...props,
       skillsLoading: false,
@@ -2372,6 +2377,14 @@ describe('ChatEditor slash command popovers', () => {
     expect(
       document.querySelector('[data-web-shell-slash-menu]')?.textContent,
     ).toContain('Failed to load results');
+    rerenderChatEditor(container, { onSkillsOpenChange, skillsLoaded: false });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu] [role="status"]'),
+    ).toBeNull();
+    rerenderChatEditor(container, { onSkillsOpenChange, skillsLoaded: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('No results');
     composerCoreState.slashMenu = null;
     rerenderChatEditor(container, props);
     expect(onSkillsOpenChange).toHaveBeenLastCalledWith(false);

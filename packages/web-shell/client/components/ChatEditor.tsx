@@ -1176,6 +1176,7 @@ function ModelReasoningControls({
 function SlashCommandPanel({
   menu,
   loading,
+  loaded,
   loadError,
   anchorRef,
   panelRef,
@@ -1187,6 +1188,7 @@ function SlashCommandPanel({
 }: {
   menu: SlashMenuState;
   loading?: boolean;
+  loaded?: boolean;
   loadError?: boolean;
   anchorRef: RefObject<HTMLElement | null>;
   panelRef: RefObject<HTMLDivElement | null>;
@@ -1276,7 +1278,7 @@ function SlashCommandPanel({
           collisionPadding={compact ? 8 : 12}
           collisionBoundary={collisionBoundary ?? undefined}
           className="duration-0 data-open:animate-none data-closed:animate-none"
-          role="listbox"
+          role={menu.items.length > 0 ? 'listbox' : undefined}
           data-web-shell-slash-menu
           data-web-shell-compact-overlay={compact ? '' : undefined}
           onOpenAutoFocus={(event) => event.preventDefault()}
@@ -1304,14 +1306,14 @@ function SlashCommandPanel({
           }}
         >
           <div className={styles.slashPanel}>
-            {menu.items.length === 0 && (
+            {menu.items.length === 0 && (loading || loadError || loaded) && (
               <div
                 role="status"
                 className="px-3 py-2 text-xs text-muted-foreground"
               >
                 {t(
                   loading
-                    ? 'skills.loading'
+                    ? 'common.loading'
                     : loadError
                       ? 'composerAdd.loadError'
                       : 'composerAdd.noResults',
@@ -3189,6 +3191,7 @@ export const ChatEditor = memo(
               <SlashCommandPanel
                 menu={core.slashMenu}
                 loading={skillsLoading}
+                loaded={skillsLoaded}
                 loadError={skillsLoadError}
                 anchorRef={containerRef}
                 panelRef={slashPanelRef}

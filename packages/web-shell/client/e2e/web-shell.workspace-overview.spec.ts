@@ -361,6 +361,7 @@ test('reads workspace metadata only while details or its menu are open @smoke', 
 
   await expect(header).toHaveAttribute('aria-expanded', 'true');
   await page.clock.runFor(60_000);
+  await page.waitForTimeout(200);
   expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(0);
   expect(gitRequests()).toBe(0);
 
@@ -377,6 +378,7 @@ test('reads workspace metadata only while details or its menu are open @smoke', 
     'skills',
   ]);
   await page.clock.runFor(29_000);
+  await page.waitForTimeout(200);
   expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(5);
   await page.clock.runFor(2_000);
   await expect

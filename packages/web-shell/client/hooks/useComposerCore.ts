@@ -3076,7 +3076,7 @@ export function useComposerCore(
           if (closeAtMenuIfOpen()) {
             return true;
           }
-          if (slashMenuRef.current) {
+          if (slashMenuRef.current?.items.length) {
             closeSlashMenu();
             return true;
           }
@@ -3216,7 +3216,7 @@ export function useComposerCore(
           if (acceptFollowupIntoEditor(view, 'tab')) {
             return true;
           }
-          if (slashMenuRef.current) {
+          if (slashMenuRef.current?.items.length) {
             if (acceptSlashCompletion()) return true;
             if (!cycleModeOnTabRef.current) return false;
           }

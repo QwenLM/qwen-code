@@ -26,6 +26,7 @@ function status(enabled: boolean): DaemonLiveSetupStatus {
       available: enabled,
       state: enabled ? 'idle' : 'unavailable',
       shortcut: 'Command+E',
+      requirements: { host: enabled ? 'ready' : 'missing' },
     },
   };
 }
@@ -96,6 +97,62 @@ describe('useLiveVoiceSetup', () => {
     expect(mocks.client.liveSetupStatus).toHaveBeenCalledTimes(5);
     act(() => root.unmount());
   });
+
+  it.each(['failed read', 'host starting', 'failed mutation'] as const)(
+    'recovers %s while open and stops polling once ready',
+    async (scenario) => {
+      vi.useFakeTimers();
+      const ready = {
+        ...status(true),
+        live: {
+          ...status(true).live,
+          requirements: { host: 'ready' as const },
+        },
+      };
+      mocks.client.liveSetupStatus.mockResolvedValue(ready);
+      let finishFirst!: (value: DaemonLiveSetupStatus) => void;
+      if (scenario === 'failed read')
+        mocks.client.liveSetupStatus.mockRejectedValueOnce(
+          new Error('offline'),
+        );
+      if (scenario === 'host starting')
+        mocks.client.liveSetupStatus.mockResolvedValueOnce({
+          ...ready,
+          live: { ...ready.live, requirements: { host: 'missing' } },
+        });
+      if (scenario === 'failed mutation')
+        mocks.client.liveSetupStatus.mockReturnValueOnce(
+          new Promise((resolve) => {
+            finishFirst = resolve;
+          }),
+        );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      let setup!: UseLiveVoiceSetupResult;
+      function Harness() {
+        setup = useLiveVoiceSetup(true);
+        return null;
+      }
+      await act(async () => root.render(<Harness />));
+      if (scenario === 'failed mutation') {
+        mocks.client.updateLiveSetup.mockRejectedValueOnce(
+          new Error('save failed'),
+        );
+        await act(async () => {
+          await setup.update({ enabled: true }).catch(() => undefined);
+          finishFirst(ready);
+        });
+      }
+      expect(mocks.client.liveSetupStatus).toHaveBeenCalledOnce();
+      await act(async () => vi.advanceTimersByTimeAsync(1_000));
+      expect(mocks.client.liveSetupStatus).toHaveBeenCalledTimes(2);
+      expect(setup.status).toEqual(ready);
+      await act(async () => vi.advanceTimersByTimeAsync(3_000));
+      expect(mocks.client.liveSetupStatus).toHaveBeenCalledTimes(2);
+      act(() => root.unmount());
+    },
+  );
 
   it('does not let an older status poll overwrite a completed mutation', async () => {
     let resolveStatus: ((value: DaemonLiveSetupStatus) => void) | undefined;

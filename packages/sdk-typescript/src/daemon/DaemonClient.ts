@@ -792,6 +792,7 @@ export class DaemonClient {
   private capabilityFeatures?: { features: Set<string>; expiresAt: number };
   private capabilitiesRequest?: Promise<DaemonCapabilities>;
   private capabilitiesGeneration = 0;
+  private restoreBudgetGeneration = 0;
   private readonly promptLimit: number;
   private readonly promptCounts: Record<string, number> = Object.create(null);
   /**
@@ -1218,6 +1219,9 @@ export class DaemonClient {
           ),
           expiresAt: Date.now() + CAPABILITY_PREFLIGHT_TTL_MS,
         };
+      }
+      if (generation > this.restoreBudgetGeneration) {
+        this.restoreBudgetGeneration = generation;
         const restoreTimeoutMs = capabilities.limits?.sessionRestoreTimeoutMs;
         this.cachedSessionRestoreTimeoutMs =
           typeof restoreTimeoutMs === 'number' &&
@@ -6190,7 +6194,7 @@ export class DaemonClient {
    * on the underlying transport throw `DaemonTransportClosedError`.
    */
   dispose(): void {
-    this.capabilitiesGeneration++;
+    this.restoreBudgetGeneration = ++this.capabilitiesGeneration;
     this.capabilitiesRequest = undefined;
     this.capabilityFeatures = undefined;
     this.transport.dispose();

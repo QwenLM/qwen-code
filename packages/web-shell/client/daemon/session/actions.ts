@@ -457,7 +457,11 @@ export function createDaemonSessionActions({
     );
   }
 
-  function discardsSlashCommandAttachments(text: string): boolean {
+  function discardsSlashCommandAttachments(
+    session: DaemonSessionClient,
+    text: string,
+    hasAttachments: boolean,
+  ): boolean | Promise<boolean> {
     const trimmed = text.trim();
     if (!trimmed.startsWith('/')) return false;
     if (trimmed.startsWith('//') || trimmed.startsWith('/*')) return false;
@@ -467,14 +471,39 @@ export function createDaemonSessionActions({
     // Keep this lexical gate and two-pass lookup aligned with the daemon's
     // isSlashCommand/parseSlashCommand behavior. A built-in entry marks a
     // fully loaded command snapshot; until then unresolved commands fail closed.
-    const connection = getConnection();
-    const command =
-      connection.commands?.find((candidate) => candidate.name === name) ??
-      connection.commands?.find((candidate) =>
-        candidate.altNames?.includes(name),
-      );
+    let commands = getConnection().commands;
+    const findCommand = () =>
+      commands?.find((candidate) => candidate.name === name) ??
+      commands?.find((candidate) => candidate.altNames?.includes(name));
+    const command = findCommand();
+    if (
+      hasAttachments &&
+      !command &&
+      !commands?.some((candidate) => candidate.source === 'builtin-command')
+    ) {
+      return withActionTimeout(
+        session.supportedCommands(),
+        'Loading commands timed out',
+      ).then((status) => {
+        if (sessionRef.current !== session)
+          throw new Error('Session changed before prompt submission');
+        const mapped = mapSupportedCommands(status);
+        commands = mapped.commands;
+        setConnection((current) =>
+          sessionRef.current === session
+            ? { ...current, ...mapped, supportedCommands: status }
+            : current,
+        );
+        const resolved = findCommand();
+        return resolved
+          ? resolved.source === 'builtin-command'
+          : !commands.some(
+              (candidate) => candidate.source === 'builtin-command',
+            );
+      });
+    }
     if (command) return command.source === 'builtin-command';
-    return !connection.commands?.some(
+    return !commands?.some(
       (candidate) => candidate.source === 'builtin-command',
     );
   }
@@ -489,13 +518,14 @@ export function createDaemonSessionActions({
       text?: string;
       mimeType: string;
     }>,
+    discardAttachments: boolean,
     signal?: AbortSignal,
   ): Promise<{
     content: PromptContentBlock[];
     references: DaemonSessionAttachmentReference[];
     fileReferences: DaemonSessionAttachmentReference[];
   }> {
-    if (discardsSlashCommandAttachments(text)) {
+    if (discardAttachments) {
       return {
         content: toDaemonPromptContent(text),
         references: [],
@@ -897,6 +927,10 @@ export function createDaemonSessionActions({
           sessionId,
           sessionContext: targetSessionContext,
           workspaceCwd: targetWorkspaceCwd,
+          gitBranch:
+            current.workspaceCwd === targetWorkspaceCwd
+              ? base.gitBranch
+              : undefined,
           standaloneSession: undefined,
           clientId: undefined,
           displayName: undefined,
@@ -1057,7 +1091,18 @@ export function createDaemonSessionActions({
             img.mimeType || img.mediaType || img.media_type || 'image/*',
         }));
         const normalizedFiles = normalizePromptFiles(options?.files);
-        const discardAttachments = discardsSlashCommandAttachments(text);
+        const classification = discardsSlashCommandAttachments(
+          session,
+          text,
+          normalizedImages.length > 0 || normalizedFiles.length > 0,
+        );
+        const discardAttachments =
+          typeof classification === 'boolean'
+            ? classification
+            : await classification;
+        if (sessionRef.current !== session)
+          throw new Error('Session changed before prompt submission');
+        ctrl.signal.throwIfAborted();
         const displayedImages = discardAttachments ? [] : normalizedImages;
         const displayedFiles = discardAttachments ? [] : normalizedFiles;
         const inputAnnotations =
@@ -1091,6 +1136,7 @@ export function createDaemonSessionActions({
             text,
             normalizedImages,
             normalizedFiles,
+            discardAttachments,
             ctrl.signal,
           );
         } catch (error) {
@@ -1242,7 +1288,19 @@ export function createDaemonSessionActions({
         mimeType: img.mimeType || img.mediaType || img.media_type || 'image/*',
       }));
       const normalizedFiles = normalizePromptFiles(options?.files);
-      const discardAttachments = discardsSlashCommandAttachments(text);
+      const classification = discardsSlashCommandAttachments(
+        session,
+        text,
+        normalizedImages.length > 0 || normalizedFiles.length > 0,
+      );
+      const discardAttachments =
+        typeof classification === 'boolean'
+          ? classification
+          : await classification;
+      if (sessionRef.current !== session)
+        throw new Error('Session changed before prompt submission');
+      if (typeof classification !== 'boolean')
+        options?.signal?.throwIfAborted();
       const displayedImages = discardAttachments ? [] : normalizedImages;
       const displayedFiles = discardAttachments ? [] : normalizedFiles;
       const inputAnnotations =
@@ -1276,6 +1334,7 @@ export function createDaemonSessionActions({
           text,
           normalizedImages,
           normalizedFiles,
+          discardAttachments,
           options?.signal,
         );
       } catch (error) {

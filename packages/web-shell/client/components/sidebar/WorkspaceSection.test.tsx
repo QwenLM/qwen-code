@@ -1225,6 +1225,9 @@ describe('WorkspaceSection Git summary', () => {
     });
     expect(workspaceGit).toHaveBeenCalledOnce();
     expect(dialog.textContent).toContain('6 modified · 11 stashed');
+    expect(
+      dialog.querySelector('[title="6 modified · 11 stashed"]'),
+    ).not.toBeNull();
     const branchRow = Array.from(dialog.querySelectorAll('div')).find(
       (row) => row.textContent === 'main6 modified · 11 stashed',
     );
@@ -1247,6 +1250,24 @@ describe('WorkspaceSection Git summary', () => {
     });
     expect(workspaceGit).not.toHaveBeenCalled();
     vi.useRealTimers();
+  });
+
+  it('keeps the newer Git snapshot when hover and focus reads overlap', async () => {
+    let resolveOlder!: (status: { branch: string }) => void;
+    workspaceGit
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveOlder = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({ branch: 'newer-branch' });
+    renderSection({ client: makeOverviewClient(), overviewEnabled: true });
+    const dialog = await openDetailsDialog(true);
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    expect(workspaceGit).toHaveBeenCalledTimes(2);
+    await act(async () => resolveOlder({ branch: 'older-branch' }));
+    expect(dialog.textContent).toContain('newer-branch');
+    expect(dialog.textContent).not.toContain('older-branch');
   });
 
   it.each([untrustedWorkspace, { ...trustedWorkspace, cwd: 'Project' }])(

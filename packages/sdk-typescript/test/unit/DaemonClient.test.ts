@@ -4288,6 +4288,66 @@ describe('DaemonClient', () => {
       }
     });
 
+    it.each([200, 503])(
+      'keeps the latest successful restore budget when newer discovery returns %s',
+      async (newerStatus) => {
+        vi.useFakeTimers();
+        try {
+          let restoreSignal: AbortSignal | undefined;
+          let resolveOlder!: (response: Response) => void;
+          let discoveryCalls = 0;
+          const fetch = vi.fn(
+            (input: RequestInfo | URL, init?: RequestInit) => {
+              const url = String(input);
+              if (url.endsWith('/capabilities')) {
+                if (++discoveryCalls === 1)
+                  return new Promise<Response>((resolve) => {
+                    resolveOlder = resolve;
+                  });
+                return Promise.resolve(
+                  jsonResponse(newerStatus, {
+                    v: 1,
+                    features: [],
+                    limits: { sessionRestoreTimeoutMs: 120_000 },
+                  }),
+                );
+              }
+              return new Promise<Response>((_resolve, reject) => {
+                restoreSignal = init?.signal ?? undefined;
+                restoreSignal?.addEventListener(
+                  'abort',
+                  () => reject(restoreSignal?.reason),
+                  { once: true },
+                );
+              });
+            },
+          ) as unknown as typeof globalThis.fetch;
+          const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+          const older = client.capabilities();
+          await client.capabilities().catch(() => undefined);
+          resolveOlder(
+            jsonResponse(200, {
+              v: 1,
+              features: [],
+              limits: { sessionRestoreTimeoutMs: 80_000 },
+            }),
+          );
+          await older;
+          const restore = client.loadSession('slow-session');
+          const outcome = restore.catch((error: unknown) => error);
+          expect(fetch).toHaveBeenCalledTimes(3);
+          await vi.advanceTimersByTimeAsync(
+            newerStatus === 200 ? 129_999 : 89_999,
+          );
+          expect(restoreSignal?.aborted).toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('lets an explicit global timeout win over the advertised budget', async () => {
       // Precedence, not just each branch in isolation: reordering the last two
       // branches to prefer the advertised budget would silently stretch a

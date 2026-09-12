@@ -17751,6 +17751,35 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.gitBranch).toBe('main');
   });
 
+  it('retains the current workspace Git snapshot while its consumer is hidden', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.gitBranch = undefined;
+    const workspaceGit = vi
+      .fn()
+      .mockResolvedValue({ branch: 'retained-branch' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { rerender } = renderApp({ composerToolbarActions: ['gitBranch'] });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitBranch).toBe('retained-branch');
+    rerender({ composerToolbarActions: [] });
+    await flush();
+    workspaceGit.mockReturnValue(new Promise(() => {}));
+    rerender({ composerToolbarActions: ['gitBranch'] });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitBranch).toBe('retained-branch');
+    rerender({ composerToolbarActions: [] });
+    mockConnection.workspaceCwd = '/other-workspace';
+    mockConnection.sessionId = 'other-session';
+    rerender({ composerToolbarActions: ['gitBranch'] });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitBranch).not.toBe(
+      'retained-branch',
+    );
+  });
+
   it('fetches the composer git status on both the fast and the wait:true fresh path', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {
@@ -18944,6 +18973,49 @@ describe('App session callbacks', () => {
     expect(mockWorkspaceActions.loadSkillsStatus).not.toHaveBeenCalled();
   });
 
+  it('reloads the Skill catalog when an attached session becomes a draft', async () => {
+    mockConnection.skills = undefined;
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [{ name: 'session-skill', status: 'ok' }],
+      })
+      .mockResolvedValueOnce({
+        skills: [{ name: 'draft-skill', status: 'ok' }],
+      });
+    const { rerender } = renderApp();
+    await flush();
+    await openComposerSkills();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      testState.latestChatEditorProps?.onSkillsOpenChange?.(false),
+    );
+    mockConnection.sessionId = undefined;
+    rerender();
+    await flush();
+    await openComposerSkills();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      expect.objectContaining({ name: 'draft-skill' }),
+    ]);
+  });
+
+  it('loads Skills for a custom footer without opening the composer menu', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [{ name: 'review', status: 'ok' }],
+    });
+    let footerSkills: unknown;
+    renderApp({
+      renderFooter: (props) => {
+        footerSkills = props.skills;
+        return null;
+      },
+    });
+    await flush();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledOnce();
+    expect(footerSkills).toEqual([expect.objectContaining({ name: 'review' })]);
+  });
+
   it('defers Skill refresh until the first menu opening after starting a chat', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.commands = [
@@ -19195,80 +19267,99 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
   });
 
-  it('uses a refreshed workspace Skill snapshot after partial activation', async () => {
-    mockConnection.commands = [
-      {
-        name: 'web-search',
-        description: 'Search the web',
-        source: 'skill',
-        raw: {
-          name: 'web-search',
-          description: 'Search the web',
-          input: null,
-          _meta: { source: 'skill' },
-        },
-      },
-    ];
-    mockConnection.skills = ['web-search'];
-    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
-      skills: [
+  it.each([false, true])(
+    'uses a refreshed workspace Skill snapshot after partial activation (close during refresh: %s)',
+    async (closeDuringRefresh) => {
+      mockConnection.commands = [
         {
           name: 'web-search',
           description: 'Search the web',
-          status: 'disabled',
+          source: 'skill',
+          raw: {
+            name: 'web-search',
+            description: 'Search the web',
+            input: null,
+            _meta: { source: 'skill' },
+          },
         },
-      ],
-    });
-    const { rerender } = renderApp();
-    await flush();
-    await openComposerSkills();
-    expect(testState.latestChatEditorProps?.skills).toHaveLength(1);
+      ];
+      mockConnection.skills = ['web-search'];
+      mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'disabled',
+          },
+        ],
+      });
+      const { rerender } = renderApp();
+      await flush();
+      await openComposerSkills();
+      expect(testState.latestChatEditorProps?.skills).toHaveLength(1);
 
-    testState.workspaceEventSignals = {
-      ...testState.workspaceEventSignals,
-      skillsVersion: 1,
-      lastSkillMutation: {
-        id: 'partial-web-search',
-        kind: 'skill_toggle',
-        skills: [{ name: 'web-search', enabled: false }],
-        activation: 'partial',
-        sessionsRefreshed: 0,
-        sessionsFailed: 1,
-      },
-    };
-    rerender();
-    await flush();
-    await vi.waitFor(() => {
-      expect(testState.latestChatEditorProps?.skills).toEqual([]);
-    });
+      testState.workspaceEventSignals = {
+        ...testState.workspaceEventSignals,
+        skillsVersion: 1,
+        lastSkillMutation: {
+          id: 'partial-web-search',
+          kind: 'skill_toggle',
+          skills: [{ name: 'web-search', enabled: false }],
+          activation: 'partial',
+          sessionsRefreshed: 0,
+          sessionsFailed: 1,
+        },
+      };
+      let resolveRefresh!: (value: { skills: [] }) => void;
+      if (closeDuringRefresh)
+        mockWorkspaceActions.loadSkillsStatus.mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveRefresh = resolve;
+          }),
+        );
+      rerender();
+      await flush();
+      if (closeDuringRefresh) {
+        await act(async () =>
+          testState.latestChatEditorProps?.onSkillsOpenChange?.(false),
+        );
+        await act(async () => resolveRefresh({ skills: [] }));
+        await openComposerSkills();
+      }
+      await vi.waitFor(() => {
+        expect(testState.latestChatEditorProps?.skills).toEqual([]);
+      });
 
-    expect(testState.latestChatEditorProps?.commands).not.toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
-    );
-    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
+      expect(testState.latestChatEditorProps?.commands).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'web-search' }),
+        ]),
+      );
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
 
-    mockConnection.commands = [
-      {
-        name: 'review',
-        description: 'Review changes',
-        source: 'skill',
-        raw: {
+      mockConnection.commands = [
+        {
           name: 'review',
           description: 'Review changes',
-          input: null,
-          _meta: { source: 'skill' },
+          source: 'skill',
+          raw: {
+            name: 'review',
+            description: 'Review changes',
+            input: null,
+            _meta: { source: 'skill' },
+          },
         },
-      },
-    ];
-    mockConnection.skills = ['review'];
-    rerender();
-    await flush();
-    await flush();
+      ];
+      mockConnection.skills = ['review'];
+      rerender();
+      await flush();
+      await flush();
 
-    expect(testState.latestChatEditorProps?.skills).toEqual([
-      { name: 'review', description: 'Review changes' },
-    ]);
-  });
+      expect(testState.latestChatEditorProps?.skills).toEqual([
+        { name: 'review', description: 'Review changes' },
+      ]);
+    },
+  );
 
   it('removes declaration-only enables from a mixed pending mutation', async () => {
     const lockedStatus = {

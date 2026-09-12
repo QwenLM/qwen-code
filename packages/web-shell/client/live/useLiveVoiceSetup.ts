@@ -6,12 +6,16 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
+  DaemonLiveHostInstallState,
   DaemonLiveSetupStatus,
   DaemonLiveSetupUpdate,
 } from '@qwen-code/sdk';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 
 const POLL_INTERVAL_MS = 1_000;
+
+export const INSTALLING_STATES: ReadonlySet<DaemonLiveHostInstallState> =
+  new Set(['checking', 'downloading', 'verifying', 'installing', 'launching']);
 
 export interface UseLiveVoiceSetupResult {
   supported: boolean;
@@ -114,20 +118,20 @@ export function useLiveVoiceSetup(
     };
   }, [refresh, supported, active, workspace.client]);
 
-  const installationPending = [
-    'checking',
-    'downloading',
-    'verifying',
-    'installing',
-    'launching',
-  ].includes(status?.install.state ?? '');
+  const statusPending =
+    !status ||
+    Boolean(refreshError) ||
+    INSTALLING_STATES.has(status.install.state) ||
+    (status.enabled &&
+      status.install.state === 'installed' &&
+      status.live.requirements?.host !== 'ready');
   useEffect(() => {
-    if (!supported || !active || !installationPending) return;
+    if (!supported || !active || !statusPending) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refresh();
     }, POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [supported, active, installationPending, refresh]);
+  }, [supported, active, statusPending, refresh]);
 
   const mutate = useCallback(
     async (operation: () => Promise<DaemonLiveSetupStatus>): Promise<void> => {

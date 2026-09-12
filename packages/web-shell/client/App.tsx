@@ -3817,7 +3817,7 @@ export function App({
   // connection.gitStatus by the session provider) into the chip state so the
   // enriched counters fill in right after the branch-only first paint.
   // Worktree sessions bypass the daemon cache/SSE path — their status comes
-  // from the ?cwd= fetch above.
+  // from the worktree-qualified ?cwd= fetch.
   useEffect(() => {
     const status = connection.gitStatus;
     if (!status || sessionWorktree) return;
@@ -7619,7 +7619,9 @@ export function App({
   const workspaceEventSignals = useWorkspaceEventSignals();
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [composerSkillsOpen, setComposerSkillsOpen] = useState(false);
-  const skillsCatalogActive = composerSkillsOpen || showHelpDialog;
+  const skillsCatalogActive =
+    composerSkillsOpen || showHelpDialog || Boolean(renderFooter);
+  const skillsCatalogForNewSession = connection.sessionId === undefined;
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsLoadError, setSkillsLoadError] = useState(false);
   const skillsLoadRef = useRef<
@@ -7643,6 +7645,7 @@ export function App({
   const skillsCatalogKey = useMemo(
     () => ({
       cwd: connection.workspaceCwd,
+      forNewSession: skillsCatalogForNewSession,
       client: workspace.client,
       settings: workspaceEventSignals?.settingsVersion,
       extensions: workspaceEventSignals?.extensionsVersion,
@@ -7650,6 +7653,7 @@ export function App({
     }),
     [
       connection.workspaceCwd,
+      skillsCatalogForNewSession,
       workspace.client,
       workspaceEventSignals?.settingsVersion,
       workspaceEventSignals?.extensionsVersion,
@@ -7822,7 +7826,7 @@ export function App({
     const promise = reloadLoadedSkills(
       connection.workspaceCwd,
       false,
-      connectionSkillSnapshotRef.current.sessionId === undefined,
+      skillsCatalogForNewSession,
     );
     skillsCatalogCacheRef.current = { key: skillsCatalogKey, promise };
     void promise.then((status) => {
@@ -7838,6 +7842,7 @@ export function App({
     connection.workspaceCwd,
     reloadLoadedSkills,
     skillsCatalogActive,
+    skillsCatalogForNewSession,
     skillsCatalogKey,
     workspaceContextActive,
   ]);
@@ -7902,10 +7907,10 @@ export function App({
       return;
     }
     pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
-    let cancelled = false;
+    const owner = sessionOwnerGuard.capture();
     void reloadLoadedSkills(workspaceCwd, true, sessionId === undefined).then(
       (status) => {
-        if (cancelled || !status) return;
+        if (!owner.isCurrent() || !status) return;
         markHandled();
         if (!sessionId) {
           pendingSkillTogglesByContextRef.current.delete(contextKey);
@@ -7942,9 +7947,6 @@ export function App({
         setLoadedSkillsFallback({ sessionId, workspaceCwd });
       },
     );
-    return () => {
-      cancelled = true;
-    };
   }, [
     connected,
     connection.sessionId,
@@ -7954,6 +7956,7 @@ export function App({
     workspaceEventSignals?.skillMutationsByCwd,
     workspaceContextActive,
     skillsCatalogActive,
+    sessionOwnerGuard,
   ]);
   useEffect(() => {
     if (!loadedSkillsFallback) return;
@@ -10058,7 +10061,7 @@ export function App({
         }
       : undefined;
   // The workspace the Changes dialog reads — the same active workspace the
-  // git-status effect targets (computed once above), so the chip and the
+  // git-status effect targets, so the chip and the
   // dialog always target the same repo.
   const gitDiffWorkspaceCwd = isKnownLiveWorkspaceCwd(activeWorkspaceCwd)
     ? undefined
@@ -16507,11 +16510,7 @@ export function App({
   // parameter); the chip prefers the live branch from that status, falling
   // back to the creation-time sessionWorktree.branch.
   useEffect(() => {
-    if (
-      !workspaceGitStatusEnabled ||
-      !activeWorkspaceCwd ||
-      isKnownLiveWorkspaceCwd(activeWorkspaceCwd)
-    ) {
+    if (!activeWorkspaceCwd || isKnownLiveWorkspaceCwd(activeWorkspaceCwd)) {
       gitStatusWorkspaceCwdRef.current = undefined;
       setSelectedWorkspaceGitStatus(undefined);
       return;
@@ -16521,6 +16520,7 @@ export function App({
       gitStatusWorkspaceCwdRef.current = statusTarget;
       setSelectedWorkspaceGitStatus(undefined);
     }
+    if (!workspaceGitStatusEnabled) return;
     let cancelled = false;
     const fetchStatus = () => {
       const git = workspace.client.workspaceByCwd(activeWorkspaceCwd);

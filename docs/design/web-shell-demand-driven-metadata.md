@@ -12,7 +12,7 @@ provider independently fetches the branch during initialization and session load
 Source-filtered session lists also issue a discovery request before every read.
 
 This change gates those reads by their consumers. It does not change endpoints,
-workspace ownership, session-list refresh timing, the Git dialog, or the workspace management table.
+workspace ownership, session-list refresh timing, or the workspace management table. The Git dialogs remain available for the active workspace.
 
 ## Behavior
 
@@ -25,7 +25,7 @@ workspace ownership, session-list refresh timing, the Git dialog, or the workspa
   reopening refreshes it. No new cache lifetime or request scheduler is added.
 - Trusted-workspace and real-path guards remain in place. Custom headers only
   request overview facets when their consuming header menu is open.
-- Remove the sidebar header Git button. The hover popover's branch row shows a plain-text summary on the right (for example, “6 modified · 11 stashed”), using the existing translated Git status phrases. Its terminal action uses `square-terminal`. Git status loads only while these details or a Git-dependent workspace menu is open; closing them stops the 60-second and focus refreshes.
+- Remove the sidebar header Git button. The hover popover's branch row shows a plain-text summary on the right (for example, “6 modified · 11 stashed”), using the existing translated Git status phrases. Its terminal action uses `square-terminal`. Branch checkout, Changes, and Commit for a non-active workspace now require selecting that workspace first; the hover summary is not an interactive Git picker. Git status loads only while these details or a Git-dependent workspace menu is open; closing them stops the 60-second and focus refreshes.
 - Chat Git reads run only when the visible composer includes `gitBranch`, or the environment panel is visible and includes the environment card. A configured but closed panel does not trigger reads. Omitting `composerToolbarActions` preserves the default toolbar choices; an explicit array without `gitBranch` disables that consumer.
 - `WebShellWithProviders` disables redundant provider Git prefetches and lets
   the UI own those reads. Attached sessions can display the fetched branch
@@ -44,7 +44,7 @@ on-demand refresh; there is no background timer or cross-client cache.
 
 Public `capabilities()` calls always fetch fresh data and invalidate the old
 snapshot immediately. A generation counter prevents older responses from
-replacing newer features or the advertised session-restore timeout. Checks
+replacing newer features. The restore budget follows the newest successful response, so a newer failed discovery does not discard an older successful budget. Checks
 waiting on a superseded request follow the current state, including when the
 obsolete request fails. Failed discovery is not cached. Disposal invalidates
 pending cache updates; the transport continues enforcing its closed state.
@@ -89,13 +89,13 @@ updates, explicit refresh, and manual-mode compatibility.
 
 Web Shell sets `prefetchSkills={false}` to opt out of sessionless Skill prefetch; the low-level session provider
 keeps its default. Opening slash suggestions, the composer Skill submenu, or
-Help requests the current workspace catalog. Skills management keeps its own
+Help requests the current workspace catalog. A custom `renderFooter` also counts as a consumer because its public `skills` field has no separate load callback. Skills management keeps its own
 on-open reads. Reuse an attached session's supported commands where available;
 ordinary input and starting another chat do not preload the workspace catalog.
 
 Keep one cached load and one in-flight read for the current workspace and
-catalog revision. Settings, extensions, and Skill events invalidate the cache;
-closed consumers defer reads until next opening. Preserve the existing partial
+catalog revision and draft/session load mode. Settings, extensions, and Skill events invalidate the cache;
+closed consumers defer reads until next opening. A mutation refresh already in flight may complete its bookkeeping after the menu closes, provided its session owner remains current. Preserve the existing partial
 Skill-mutation recovery for attached sessions. Workspace changes invalidate
 pending results. Configuration and ready-runtime Skill reads remain distinct.
 
@@ -105,18 +105,18 @@ the catalog loads. MCP/extension reference categories retain their existing
 on-demand reads and per-search request reuse; their menu-lifetime caches remain
 separate from management-page reads and filesystem caches.
 
-Acceptance: no Skill prefetch for idle/ordinary/new chat; exactly one load per
+Acceptance: no Skill prefetch for idle/ordinary/new chat without a custom footer; exactly one load per
 unchanged workspace revision across repeated slash/Skill submenu openings;
 visible loading, retry after failure, workspace isolation, fresh Skill changes,
 and unchanged MCP/extension category demand loading. No endpoint is added.
 
 Equivalent capability responses preserve the loaded catalog even when their feature arrays have new identities. Changes to the actual Skills protocol capabilities still invalidate the load. Command-refresh failures appear as errors in empty suggestions, clear on retry, and belong only to the session that failed. Changing either prefetch option at runtime reconnects the session; hosts should normally select those options when mounting their provider.
 
-Runtime preparation errors retain the configuration fallback but surface failure and permit retry on reopening. Legacy primary-workspace daemons advertising ACP preheat prepare their runtime on first demand and then reread Skills. Clearing a session retains known commands only within the same workspace; opting out of prefetch must not erase custom commands that Skill reads cannot restore. Slash status messages appear only for empty results. Empty queries can trigger the first load, but unmatched menus close after a successful catalog load. Attached sessions with pending extension or Skill changes retain empty suggestions until their deferred refresh completes, including when a new command is pasted directly.
+Runtime preparation errors retain the configuration fallback but surface failure and permit retry on reopening. Legacy primary-workspace daemons advertising ACP preheat prepare their runtime on first demand and then reread Skills. Clearing a session retains known commands only within the same workspace; opting out of prefetch must not erase custom commands that Skill reads cannot restore. Slash status messages appear only for empty results. A skipped provider prefetch preserves unknown command state. When submitting attachments with an unresolved slash command, read the session command snapshot before deciding whether to discard them; known commands and ordinary messages need no extra read. Empty queries can trigger the first load, but unmatched menus close after a successful catalog load. Attached sessions with pending extension or Skill changes retain empty suggestions until their deferred refresh completes, including when a new command is pasted directly.
 
 ## Live setup reads
 
-Live setup status loads when Settings opens. Installation and launch progress poll every second only while Settings remains open; stable states refresh on focus or page visibility changes. Closing Settings stops automatic reads. `sidebar.showLive` continues to control the sidebar group only. The setup card remains discoverable even when Live is disabled, so it can enable the feature.
+Live setup status loads when Settings opens. Installation and launch progress poll every second only while Settings remains open; failed or not-yet-loaded status and an enabled, installed host awaiting readiness also keep polling. Stable states refresh on focus or page visibility changes. Closing Settings stops automatic reads. `sidebar.showLive` continues to control the sidebar group only. The setup card remains discoverable even when Live is disabled, so it can enable the feature.
 
 ## Constraints and risks
 
@@ -124,7 +124,7 @@ A hover opening incurs network latency; retained snapshots reduce blank states
 on subsequent openings. Requests already sent may finish after closing, but
 stale results are discarded by the existing overview hook. Visible consumers
 retain their existing polling cadence. Visible independent Git consumers still request Git even when the composer action is hidden. Disabling a provider prefetch must
-not erase branch events received while session metadata loads. Source capability
+not erase branch events received in the same workspace while session metadata loads. A workspace switch clears the old branch; superseded sidebar Git responses cannot replace newer snapshots. Source capability
 checks may retain an old decision within the 60-second cache lifetime; an
 explicit `capabilities()` call refreshes it immediately.
 

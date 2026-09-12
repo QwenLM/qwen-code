@@ -15360,7 +15360,7 @@ describe('DaemonSessionProvider', () => {
         await flushPromises();
         await flushPromises();
       });
-      expect(connection?.commands?.map((c) => c.name)).not.toContain(
+      expect(connection?.commands?.map((c) => c.name) ?? []).not.toContain(
         'custom-review',
       );
     },
@@ -20322,6 +20322,154 @@ describe('DaemonSessionProvider', () => {
     expect(session.detach).not.toHaveBeenCalled();
     localStorage.removeItem('qwen-code-web-shell-browser-notifications');
   });
+  it('preserves an event branch after same-workspace deferred clear', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/workspace-a',
+      features: ['multi_workspace_sessions'],
+      workspaces: [
+        { id: 'a', cwd: '/workspace-a', primary: true, trusted: true },
+        { id: 'b', cwd: '/workspace-b', primary: false, trusted: true },
+      ],
+    });
+    const session = createMockSession({
+      sessionId: 'session-a',
+      workspaceCwd: '/workspace-a',
+      events: async function* events(opts) {
+        yield {
+          v: 1,
+          type: 'git_branch_changed',
+          data: { workspaceCwd: '/workspace-a', branch: 'feature/x' },
+        };
+        yield* createIdleEvents()(opts);
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let connection: DaemonConnectionState | undefined;
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+      workspaceCwd: '/workspace-a',
+      autoReconnect: false,
+      prefetchGitBranch: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({
+      status: 'connected',
+      workspaceCwd: '/workspace-a',
+    });
+    await vi.waitFor(() => expect(connection?.gitBranch).toBe('feature/x'));
+    await act(async () => {
+      await actions?.clearSession();
+      await flushPromises();
+    });
+    expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.workspaceCwd).toBe('/workspace-a');
+    expect(connection?.gitBranch).toBe('feature/x');
+    expect(sdkMocks.workspaceGit).not.toHaveBeenCalled();
+  });
+  it.each(['action', 'workspaceCwd', 'sessionContext'] as const)(
+    'clears another workspace event branch during %s session switch',
+    async (switchPath) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/workspace-a',
+        features: ['multi_workspace_sessions'],
+        workspaces: [
+          { id: 'a', cwd: '/workspace-a', primary: true, trusted: true },
+          { id: 'b', cwd: '/workspace-b', primary: false, trusted: true },
+        ],
+      });
+      const first = createMockSession({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-a',
+        events: async function* events(opts) {
+          yield {
+            v: 1,
+            type: 'git_branch_changed',
+            data: { workspaceCwd: '/workspace-a', branch: 'feature/x' },
+          };
+          yield* createIdleEvents()(opts);
+        },
+      });
+      const second = createMockSession({
+        sessionId: 'session-b',
+        workspaceCwd: '/workspace-b',
+      });
+      sdkMocks.sessions.push(first, second);
+      let connection: DaemonConnectionState | undefined;
+      let actions: DaemonSessionActions | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        actions = useDaemonActions();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-a',
+        autoReconnect: false,
+        prefetchGitBranch: false,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(connection).toMatchObject({
+        status: 'connected',
+        workspaceCwd: '/workspace-a',
+      });
+      await vi.waitFor(() => expect(connection?.gitBranch).toBe('feature/x'));
+      if (switchPath === 'action') {
+        let loaded: Promise<void> | undefined;
+        act(() => {
+          loaded = actions!.loadSession('session-b', {
+            workspaceCwd: '/workspace-b',
+          });
+        });
+        await act(async () => {
+          await flushPromises();
+        });
+        await loaded;
+      } else {
+        await act(async () => {
+          root!.render(
+            <DaemonSessionProvider
+              baseUrl="http://127.0.0.1:4170"
+              autoConnect
+              autoReconnect={false}
+              prefetchGitBranch={false}
+              sessionId="session-b"
+              {...(switchPath === 'workspaceCwd'
+                ? { workspaceCwd: '/workspace-b' }
+                : {
+                    sessionContext: {
+                      kind: 'workspace' as const,
+                      cwd: '/workspace-b',
+                    },
+                  })}
+            >
+              <Harness />
+            </DaemonSessionProvider>,
+          );
+          await flushPromises();
+        });
+      }
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(connection?.sessionId).toBe('session-b');
+      expect(connection?.workspaceCwd).toBe('/workspace-b');
+      expect(connection?.gitBranch).not.toBe('feature/x');
+      expect(sdkMocks.workspaceGit).not.toHaveBeenCalled();
+    },
+  );
+
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},

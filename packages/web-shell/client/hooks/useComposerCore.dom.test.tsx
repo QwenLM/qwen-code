@@ -335,6 +335,26 @@ describe('useComposerCore history and drafts', () => {
     },
   );
 
+  it.each([
+    ['Escape', false],
+    ['Tab', true],
+  ] as const)(
+    'empty menu retains prior %s default behavior',
+    async (key, prevented) => {
+      await mount({ allowEmptySlashMenu: true });
+      act(() => latest!.insertText('/zzz'));
+      expect(latest!.slashMenu?.items).toEqual([]);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        code: key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(prevented);
+    },
+  );
+
   it('closes an unmatched menu when catalog loading completes without new commands', async () => {
     const mounted = await mount({ allowEmptySlashMenu: true });
     act(() => latest!.insertText('/zzz'));

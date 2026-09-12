@@ -1965,9 +1965,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 workspaceCwd: effectWorkspaceCwd,
                 standaloneSession: undefined,
                 gitBranch:
-                  gitResult.status === 'fulfilled'
-                    ? (gitResult.value?.branch ?? undefined)
-                    : undefined,
+                  !prefetchGitBranch &&
+                  current.workspaceCwd === effectWorkspaceCwd
+                    ? current.gitBranch
+                    : gitResult.status === 'fulfilled'
+                      ? (gitResult.value?.branch ?? undefined)
+                      : undefined,
                 models: providerModelStatus.models,
                 currentModel: providerModelStatus.currentModel,
                 currentMode: providerModelStatus.currentMode,
@@ -1976,12 +1979,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 capabilities: caps,
                 commands: preserveClearedSessionCommands
                   ? current.commands
-                  : skillsResult.status === 'rejected'
+                  : !prefetchSkills || skillsResult.status === 'rejected'
                     ? undefined
                     : deferredSkillCommands,
                 skills: preserveClearedSessionCommands
                   ? current.skills
-                  : skillsResult.status === 'rejected'
+                  : !prefetchSkills || skillsResult.status === 'rejected'
                     ? undefined
                     : deferredSkills,
               }));
@@ -2927,6 +2930,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             workspaceCwd: activeWorkspaceScoped
               ? activeProductSessionContext.cwd
               : undefined,
+            gitBranch:
+              activeWorkspaceScoped &&
+              current.workspaceCwd === activeProductSessionContext.cwd
+                ? current.gitBranch
+                : undefined,
             standaloneSession:
               activeProductSessionContext.kind === 'standalone'
                 ? getStandaloneConnectionState(activeSession.session)

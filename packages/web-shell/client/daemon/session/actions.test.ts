@@ -2924,6 +2924,160 @@ describe('createDaemonSessionActions', () => {
     expect(session.uploadAttachment).toHaveBeenCalledOnce();
   });
 
+  it.each(['known', 'empty', 'unknown'] as const)(
+    'skill attachments survive %s catalog',
+    async (catalog) => {
+      const session = createMockSession('session-a');
+      Object.assign(session, {
+        supportedCommands: vi.fn(async () => ({
+          v: 1,
+          sessionId: 'session-a',
+          availableCommands: [
+            {
+              name: 'review',
+              description: 'Review',
+              input: null,
+              _meta: { source: 'skill-dir-command' },
+            },
+          ],
+          availableSkills: ['review'],
+        })),
+      });
+      const { actions } = createActionsHarness({
+        session,
+        connection: {
+          status: 'connected',
+          workspaceCwd: '/workspace',
+          commands:
+            catalog === 'known'
+              ? [commandInfo('review', 'skill-dir-command')]
+              : catalog === 'empty'
+                ? []
+                : undefined,
+          capabilities: {
+            v: 1,
+            mode: 'http-bridge',
+            features: ['session_attachments'],
+            modelServices: [],
+          },
+        },
+      });
+      await actions.submitPrompt('/review this diff', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      });
+      expect(session.supportedCommands).toHaveBeenCalledTimes(
+        catalog === 'known' ? 0 : 1,
+      );
+      expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'appends ordinary text synchronously before %s yields',
+    async (method) => {
+      const session = createMockSession('session-a');
+      session.submitPrompt.mockRejectedValueOnce(
+        new Error('stop after optimistic append'),
+      );
+      const { actions, store } = createActionsHarness({ session });
+      const submission = actions[method]('ordinary message');
+      const outcome = submission.catch((error: unknown) => error);
+      expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(session.supportedCommands).not.toHaveBeenCalled();
+      expect(await outcome).toMatchObject({
+        message: 'stop after optimistic append',
+      });
+    },
+  );
+
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'rejects %s if the session changes after command classification resolves',
+    async (method) => {
+      const session = createMockSession('session-a');
+      const replacement = createMockSession('session-b');
+      const pendingCommands =
+        createDeferred<ReturnType<typeof supportedCommandsStatus>>();
+      session.supportedCommands.mockReturnValueOnce(pendingCommands.promise);
+      const { actions, store, sessionRef, getConnection } =
+        createActionsHarness({ session });
+      const submission = actions[method]('/review this diff', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      });
+      const outcome = submission.catch((error: unknown) => error);
+      pendingCommands.resolve(supportedCommandsStatus('session-a', 'review'));
+      for (
+        let tick = 0;
+        tick < 20 && !getConnection().supportedCommands;
+        tick++
+      )
+        await Promise.resolve();
+      expect(getConnection().supportedCommands).toBeDefined();
+      sessionRef.current = replacement as unknown as DaemonSessionClient;
+      expect(await outcome).toMatchObject({
+        message: 'Session changed before prompt submission',
+      });
+      expect(session.uploadAttachment).not.toHaveBeenCalled();
+      expect(session.submitPrompt).not.toHaveBeenCalled();
+      expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'does not upload or submit when %s cannot classify attachments',
+    async (method) => {
+      const session = createMockSession('session-a');
+      session.supportedCommands.mockRejectedValueOnce(
+        new Error('commands unavailable'),
+      );
+      const { actions, store } = createActionsHarness({ session });
+      await expect(
+        actions[method]('/review this diff', {
+          images: [{ data: 'AQID', mimeType: 'image/png' }],
+        }),
+      ).rejects.toThrow('commands unavailable');
+      expect(session.uploadAttachment).not.toHaveBeenCalled();
+      expect(session.submitPrompt).not.toHaveBeenCalled();
+      expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'rejects %s when attachment classification belongs to a replaced session',
+    async (method) => {
+      const session = createMockSession('session-a');
+      const replacement = createMockSession('session-b');
+      const pendingCommands =
+        createDeferred<ReturnType<typeof supportedCommandsStatus>>();
+      session.supportedCommands.mockReturnValueOnce(pendingCommands.promise);
+      const { actions, store, sessionRef, replaceConnection, getConnection } =
+        createActionsHarness({ session });
+      const submission = actions[method]('/review this diff', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      });
+      const outcome = submission.catch((error: unknown) => error);
+      sessionRef.current = replacement as unknown as DaemonSessionClient;
+      replaceConnection({
+        status: 'connected',
+        sessionId: 'session-b',
+        workspaceCwd: '/other-workspace',
+        commands: [commandInfo('other-command', 'skill-dir-command')],
+      });
+      pendingCommands.resolve(supportedCommandsStatus('session-a', 'review'));
+      expect(await outcome).toMatchObject({
+        message: 'Session changed before prompt submission',
+      });
+      expect(session.uploadAttachment).not.toHaveBeenCalled();
+      expect(session.submitPrompt).not.toHaveBeenCalled();
+      expect(replacement.submitPrompt).not.toHaveBeenCalled();
+      expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(getConnection()).toMatchObject({
+        sessionId: 'session-b',
+        workspaceCwd: '/other-workspace',
+        commands: [commandInfo('other-command', 'skill-dir-command')],
+      });
+    },
+  );
+
   it('uploads attachments used by skill slash commands', async () => {
     const session = createMockSession('session-a');
     const { actions, store } = createActionsHarness({

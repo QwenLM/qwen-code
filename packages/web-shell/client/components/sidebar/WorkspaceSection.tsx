@@ -141,8 +141,8 @@ interface WorkspaceSectionProps {
   /**
    * Hover-revealed actions at the right edge of the folder header. Receives
    * the workspace's overview snapshot — undefined until the first fetch or
-   * when the overview is disabled; the last fetched one while the row is
-   * collapsed — so a menu can show live counts, and the polled git branch
+   * when the overview is disabled; the last fetched one while its consumers
+   * are closed — so a menu can show counts, and the polled git branch
    * so git-only actions can be withheld from non-git workspaces.
    */
   headerActions?: (
@@ -157,6 +157,7 @@ interface WorkspaceSectionProps {
    */
   overviewEnabled?: boolean;
   overviewItems?: readonly WorkspaceOverviewItem[];
+  /** Whether the header menu is consuming workspace metadata. */
   overviewMenuOpen?: boolean;
   /**
    * A header action reads the polled git branch (the worktree entry), so the
@@ -459,8 +460,10 @@ export function WorkspaceSection({
   // Log a poll failure only on the success→failure transition, not on every
   // 60s/focus tick, so an unreachable workspace doesn't spam a long-lived tab.
   const gitPollFailed = useRef(false);
+  const gitPollGeneration = useRef(0);
   const loadGitStatus = useCallback(async () => {
     if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) return;
+    const generation = ++gitPollGeneration.current;
     try {
       // wait: the hover summary shows the enriched counters and has no SSE
       // fill-in path, so it keeps the blocking semantics instead of the
@@ -468,9 +471,11 @@ export function WorkspaceSection({
       const status = await client
         .workspaceByCwd(gitPollCwd)
         .workspaceGit({ wait: true });
+      if (generation !== gitPollGeneration.current) return;
       gitPollFailed.current = false;
       setGitStatus(status);
     } catch (err) {
+      if (generation !== gitPollGeneration.current) return;
       // Keep the last known status on a transient failure so a brief network
       // or daemon blip doesn't blank the summary for a whole poll interval; log
       // only on the success→failure transition.
@@ -495,6 +500,7 @@ export function WorkspaceSection({
       if (document.visibilityState === 'visible') void loadGitStatus();
     }, 60_000);
     return () => {
+      gitPollGeneration.current += 1;
       window.removeEventListener('focus', onFocus);
       window.clearInterval(timer);
     };
@@ -519,9 +525,8 @@ export function WorkspaceSection({
     items: overviewItems,
     reloadToken,
   });
-  // The header menu stays reachable on a collapsed row, so it keeps the last
-  // snapshot the row fetched (the same retention the session counts get)
-  // instead of dropping its counts the moment the row collapses.
+  // Keep the last snapshot while consumers are closed so reopening can show
+  // counts before the fresh read completes.
   const [retainedOverview, setRetainedOverview] =
     useState<WorkspaceOverviewSnapshot>();
   useEffect(() => {

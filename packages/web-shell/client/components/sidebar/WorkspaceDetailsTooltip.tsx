@@ -335,7 +335,10 @@ export function WorkspaceDetailsTooltip({
           <div className={sidebarStyles.sessionDetailsRow}>
             <GitBranchIcon aria-hidden="true" />
             <span title={branch}>{branch}</span>
-            <span className={sidebarStyles.sessionDetailsRowValue}>
+            <span
+              className={sidebarStyles.sessionDetailsRowValue}
+              title={gitSummary || undefined}
+            >
               {gitSummary}
             </span>
           </div>
