@@ -69,12 +69,27 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
+      # A bare `npm ci` has no retry: run 34700339334's build leg died at this
+      # step before any test ran, on a tree whose install reproduces clean,
+      # and every leg behind `needs: [build]` went down with it. The bounded
+      # retry is the recipe repo-hygiene.yml and qwen-autofix.yml already wrap
+      # their installs in (registry blips; ETXTBSY when an install script
+      # execs a binary npm has not finished writing). A deterministically
+      # broken tree fails all three attempts and stays red.
       - name: 'Install dependencies'
         env:
           # The install must not build; the two steps below do it explicitly.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: 'Build project'
         run: |-
@@ -256,7 +271,15 @@ jobs:
           # so it keeps building during install.)
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       - name: 'Download build artifact'
@@ -371,7 +394,15 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       - name: 'Download build artifact'
@@ -439,7 +470,15 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       - name: 'Download build artifact'
@@ -502,7 +541,15 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       - name: 'Download build artifact'
@@ -549,7 +596,15 @@ jobs:
 
       - name: 'Install dependencies'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: 'Install Playwright Chromium'
         run: |-

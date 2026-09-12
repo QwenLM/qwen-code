@@ -412,6 +412,50 @@ describe('e2e workflow', () => {
     });
   });
 
+  describe('npm ci retry', () => {
+    // Run 34700339334 died at the build job's bare `npm ci` before any test
+    // ran — the same install reproduces clean at that commit, so the failure
+    // was a transient the tree could not explain — and every leg behind
+    // `needs: [build]` went down with it. repo-hygiene.yml and
+    // qwen-autofix.yml already wrap their installs in this exact bounded
+    // retry; a regression to a bare `npm ci` is silent until the next
+    // transient reddens a main run, so pin the shape on every install step.
+    const installSteps = Object.entries(yml.jobs).flatMap(([jobName, job]) =>
+      (job.steps ?? [])
+        .filter((step) => step.name === 'Install dependencies')
+        .map((step) => [jobName, step]),
+    );
+
+    it('wraps every Install dependencies step in the bounded retry', () => {
+      // Six jobs install: the build, the three artifact-fed legs, the
+      // nightly legs, and the web-shell browser gate. A new job adding a
+      // bare `npm ci` must fail here, not in a main-branch run.
+      expect(installSteps.map(([jobName]) => jobName).sort()).toEqual([
+        'build',
+        'e2e-interactive-opentui',
+        'e2e-test-linux',
+        'e2e-test-macos',
+        'isolated-nightly',
+        'web-shell-browser-regression',
+      ]);
+      for (const [jobName, step] of installSteps) {
+        expect(step.run, jobName).toBe(
+          [
+            'for attempt in 1 2 3; do',
+            '  if npm ci --prefer-offline --no-audit --progress=false; then',
+            '    break',
+            '  fi',
+            '  if [[ "${attempt}" == "3" ]]; then',
+            '    exit 1',
+            '  fi',
+            '  sleep $((attempt * 15))',
+            'done',
+          ].join('\n'),
+        );
+      }
+    });
+  });
+
   it('routes Linux E2E scratch files away from /tmp', () => {
     expect(e2eRunScript).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
     expect(e2eRunScript).toContain('rm -rf "$QWEN_CI_TMPDIR"');
