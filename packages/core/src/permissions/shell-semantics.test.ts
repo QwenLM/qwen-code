@@ -884,6 +884,46 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  it('treats a shell-fed heredoc body as executed commands', () => {
+    // A body fed to a child shell runs there, so its lines stay visible as
+    // commands; but the child never moves the parent's cwd, so the track is
+    // untrustworthy and every op escalates to cwd-unknown (#9417).
+    expect(
+      extractShellOperationsAcrossCommand(
+        ['bash <<EOF', 'cd /tmp', 'EOF', 'echo > .qwen/settings.json'].join(
+          '\n',
+        ),
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/tmp/.qwen/settings.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
+  it('tracks parent state after a compound heredoc opener', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        [
+          'cat <<EOF && cd .qwen',
+          'cd /tmp',
+          'EOF',
+          'echo > settings.json',
+        ].join('\n'),
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/.qwen/settings.json',
+      },
+    ]);
+  });
+
   it('does not treat quoted heredoc-looking text as a heredoc marker', () => {
     expect(
       extractShellOperationsAcrossCommand(
@@ -892,6 +932,121 @@ describe('extractShellOperationsAcrossCommand', () => {
       ),
     ).toEqual([
       { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+
+  it('keeps the body visible when a bare dot sources a receiver override', () => {
+    // `.` is the POSIX source builtin: the file can redefine `cat`, so the
+    // body is real commands that stay visible; the track they poison is
+    // marked cwd-unknown rather than trusted (#9417).
+    expect(
+      extractShellOperationsAcrossCommand(
+        [
+          '. /tmp/evil',
+          'cat <<EOF',
+          'cd /tmp',
+          'EOF',
+          'echo > settings.json',
+        ].join('\n'),
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/tmp/settings.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
+  it('keeps the body visible for interpreter and persisting receivers', () => {
+    // Interpreters run the body as a program; tee can persist it to a file
+    // that is executed later. Neither may strip it from view, and the
+    // resulting cwd track is untrusted (#9417).
+    for (const opener of ['python <<EOF', 'node <<EOF']) {
+      expect(
+        extractShellOperationsAcrossCommand(
+          [opener, 'cd /tmp', 'EOF', 'echo > settings.json'].join('\n'),
+          '/repo',
+        ),
+      ).toEqual([
+        {
+          virtualTool: 'write_file',
+          filePath: '/tmp/settings.json',
+          cwdUnknown: true,
+          pathMayDependOnCwd: true,
+        },
+      ]);
+    }
+    // tee's own write to the named file is itself a tracked operation, and
+    // the body still moves the cwd afterwards.
+    expect(
+      extractShellOperationsAcrossCommand(
+        ['tee /tmp/s.sh <<EOF', 'cd /tmp', 'EOF', 'echo > settings.json'].join(
+          '\n',
+        ),
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/tmp/s.sh',
+        cwdUnknown: true,
+        pathMayDependOnCwd: false,
+      },
+      {
+        virtualTool: 'write_file',
+        filePath: '/tmp/settings.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
+  it('keeps the body visible when a pipe follows the delimiter', () => {
+    // `cat <<EOF | bash` feeds the body to the shell after the pipe, so the
+    // body is executed commands, not stdin data; the piped structure is
+    // unprovable, so the track escalates to cwd-unknown (#9417).
+    expect(
+      extractShellOperationsAcrossCommand(
+        ['cat <<EOF | bash', 'cd /tmp', 'EOF', 'echo > settings.json'].join(
+          '\n',
+        ),
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/tmp/settings.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
+  it('keeps the body visible across a line-continuation splice', () => {
+    // bash joins `bash -s \` with the next line before reading, a splice this
+    // parser does not model, so every later line stays visible and the track
+    // is marked cwd-unknown (#9417).
+    expect(
+      extractShellOperationsAcrossCommand(
+        [
+          'bash -s \\',
+          'cat <<EOF',
+          'cd /tmp',
+          'EOF',
+          'echo > settings.json',
+        ].join('\n'),
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/tmp/settings.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
     ]);
   });
 
@@ -998,6 +1153,41 @@ describe('extractShellOperationsAcrossCommand', () => {
       ]);
     },
   );
+
+  it('marks ops cwd-unknown when a heredoc body could launder the tracked cwd', () => {
+    // bash <<EOF runs the body in a CHILD shell: the cd inside never moves
+    // the parent. Reading it as a real cd attributes the write below to a
+    // directory the shell never entered, and an absolute cd would wash a
+    // plain cwdUnknown flag clean again, so unprovable heredoc structure
+    // poisons the whole compound command's track.
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd /outside\nbash <<EOF\ncd /inside\nEOF\nprintf x > settings.json',
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/inside/settings.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
+  it('keeps provably inert heredocs off the cwd-unknown escalation', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cat <<EOF\nignored\nEOF\nprintf x > settings.json',
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/settings.json',
+      },
+    ]);
+  });
 
   it('marks relative writes after dynamic `cd` targets as cwd-unknown', () => {
     // Keep the guessed path, but mark it unsafe to trust as final.
