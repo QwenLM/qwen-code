@@ -49,7 +49,11 @@ vi.mock('./skillReviewAgentPlanner.js', async (importOriginal) => ({
 import { runAutoMemoryExtract } from './extract.js';
 import { runManagedAutoMemoryDream } from './dream.js';
 import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
-import type { ExperienceSignals } from './experience-signals.js';
+import {
+  isSubstantiveToolCall,
+  type ExperienceSignals,
+} from './experience-signals.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 /** Window with substantive work but no trial-and-error signal: only the count
  * backstop can trigger. */
@@ -358,6 +362,37 @@ describe('MemoryManager', () => {
 
         expect([result.status, result.skippedReason]).toEqual(expected);
         if (result.status === 'skipped') {
+          expect(runSkillReviewByAgent).not.toHaveBeenCalled();
+        }
+        await result.promise;
+      },
+    );
+
+    it.each([
+      [ToolNames.EXEC, AUTO_SKILL_THRESHOLD - 1, 'skipped'],
+      [ToolNames.EXEC, AUTO_SKILL_THRESHOLD, 'scheduled'],
+      [ToolNames.READ_FILE, AUTO_SKILL_THRESHOLD, 'skipped'],
+    ] as const)(
+      'evaluates a %s-only window of %i calls as %s',
+      async (toolName, count, expectedStatus) => {
+        const calls = Array.from({ length: count }, () => toolName);
+        const result = new MemoryManager().scheduleSkillReview({
+          projectRoot: '/project',
+          sessionId: 'sess',
+          history: [],
+          toolCallCount: calls.length,
+          skillsModified: false,
+          experienceSignals: {
+            retryArc: false,
+            userSteer: false,
+            hasSubstantiveWork: calls.some(isSubstantiveToolCall),
+          },
+          config: makeMockConfig(),
+        });
+
+        expect(result.status).toBe(expectedStatus);
+        if (expectedStatus === 'skipped') {
+          expect(result.skippedReason).toBe('below_threshold');
           expect(runSkillReviewByAgent).not.toHaveBeenCalled();
         }
         await result.promise;

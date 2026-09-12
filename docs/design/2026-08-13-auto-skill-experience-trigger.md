@@ -1,60 +1,85 @@
-# AutoSkill 经验信号触发：用试错轨迹替代裸工具调用计数
+# AutoSkill experience signals: replacing raw tool-call counts with retry evidence
 
-## 问题
+[English](2026-08-13-auto-skill-experience-trigger.md) | [简体中文](2026-08-13-auto-skill-experience-trigger.zh-CN.md)
 
-`scheduleSkillReview` 的唯一触发条件是 `toolCallCount >= AUTO_SKILL_THRESHOLD`（20）。
-原设计文档（`docs/design/skill-nudge/skill-nudge.md` 原则 4）选择计数是因为它"反映任务
-复杂度——高工具密度意味着试错、调整策略等行为更多"。但计数只是试错行为的代理，两个方
-向都会误判：
+## Problem
 
-- 一个只读 25 个文件的平庸会话会触发一次评审（8 轮 fork agent 跑完大概率回答
-  "Nothing to save."，纯浪费）；
-- 一个 5 次调用就完成红→绿调试的会话永远等不到评审。
+Previously, `scheduleSkillReview` only checked `toolCallCount >= AUTO_SKILL_THRESHOLD`
+(20). Principle 4 of the original design (`docs/design/skill-nudge/skill-nudge.md`)
+used call density as a proxy for task complexity, retries, and strategy changes.
+That proxy can be wrong in both directions:
 
-评审 prompt 自身的入选标准是"trial and error / changing course / user expected a
-different outcome"。触发器应当直接检测这些事件的确定性特征，而不是用计数去赌它们的
-出现概率。
+- A routine session that reads 25 files triggers a review, potentially spending
+  eight fork-agent turns only to conclude "Nothing to save."
+- A five-call debugging session that takes a test from red to green never reaches
+  the review threshold.
 
-## 方案
+The review prompt already asks for trial and error, changing course, or a user
+expecting a different outcome. The trigger should detect deterministic evidence
+of these events instead of estimating them from call volume.
 
-在触发链路中加入一个**确定性经验信号检测器**（无 LLM，随已接收的工具结果线性累计，
-成本可忽略），把触发条件改为两条路径：
+## Solution
 
-1. **经验信号快速通道**：检测到任一试错信号，且窗口内工具调用 ≥
-   `AUTO_SKILL_EXPERIENCE_FLOOR`（5，保证评审 agent 有足够素材）；
-2. **计数兜底通道**（保留原行为用于召回）：工具调用 ≥ `AUTO_SKILL_THRESHOLD`（20），且
-   窗口内至少完成一次 `write_file`、`edit`、`notebook_edit` 或
-   `run_shell_command`。纯读会话不再触发。
+Add a **deterministic experience-signal detector** with no LLM calls. It accumulates
+accepted tool outcomes with negligible linear overhead and provides two paths:
 
-### 经验信号
+1. **Experience fast path**: a retry signal exists and the window contains at least
+   `AUTO_SKILL_EXPERIENCE_FLOOR` calls (5), giving the reviewer enough material.
+2. **Count backstop**: at least `AUTO_SKILL_THRESHOLD` calls (20), including a
+   completed `write_file`, `edit`, `notebook_edit`, `run_shell_command`, or `exec`.
+   Sessions using only read, list, or search tools no longer trigger this backstop.
 
-| 信号                 | 定义                                                                | 检测方式                                                                                                                                                                                                                              |
-| -------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `retryArc`           | 某工具失败后，同一工具出现成功结果——试错且被克服                    | 工具完成时按结构化 `status` / `executionStatus` 分类，并以 `callId` 暂存；在对应 `ToolResult` 或 `Retry` 被接受，或直接通过 `GeminiClient.addHistory` 写入 history 后消费。shell 还必须能解析到最终数字退出码，未知退出状态为 neutral |
-| `userSteer`          | 用户在 agent 工作中途插话（steer 消息）——"用户期望不同的方法或结果" | 不由 history 推断；`GeminiClient` 在 `SendMessageType.Steer` 完成时，或被接受的 `ToolResult` 提交附带 steer 时置位                                                                                                                    |
-| `hasSubstantiveWork` | 窗口内完成过写文件、编辑 notebook 或执行 shell                      | 仅用于兜底通道，排除纯读会话                                                                                                                                                                                                          |
+Code Mode wraps internal tool calls in an outer `exec`; those internal calls do
+not enter the experience window as separate history functionCalls. Add `exec`
+beyond the four tools prescribed by issue #9062 to preserve the Code Mode
+backstop. Count each outer `exec` once, without expanding its internal calls or
+parsing its script. As with shell, classification uses the tool category, so an
+`exec` that only reads also counts as substantive work. This is an explicit
+prefilter tradeoff; the review agent still decides whether anything merits saving.
 
-> 曾设想过独立的 `testFlip`（测试红转绿）信号，但它为真时 `retryArc` 在同一次扫描中
-> 必然为真（转绿的那次成功同时闭合试错弧），对门控决策零增量，故合并进 `retryArc`，
-> 不为它单独维护测试命令识别。
+### Experience signals
 
-### 窗口（防重复触发）
+| Signal               | Definition                                                                           | Detection                                                                                                                                                                                                                                                                         |
+| -------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `retryArc`           | A tool fails and the same tool later succeeds: a recovered retry                     | Classify structured `status` / `executionStatus` at completion and stage by `callId`; consume after the corresponding `ToolResult` or `Retry` is accepted, or after direct `LlmClient.addHistory`. Shell also requires a structured numeric exit code; unknown exits are neutral. |
+| `userSteer`          | The user intervenes while the agent works, expecting a different approach or outcome | Not inferred from history. Set when `LlmClient` completes `SendMessageType.Steer`, or accepts a ToolResult submission carrying steer input.                                                                                                                                       |
+| `hasSubstantiveWork` | The window includes file writing, notebook editing, shell execution, or exec         | Used only by the backstop to exclude sessions using only read, list, or search tools.                                                                                                                                                                                             |
 
-`GeminiClient` 在工具完成时接收结构化 outcome：`callId`、`status`、
-`executionStatus`、`errorType` 和 `responseParts`。可靠的 success / failure 以 `callId` 暂存；对应
-`ToolResult`（含以 `Retry` 重提交的结果）真正被接受进入 history，或由直接 `addHistory` 路径写入后才消费一次；history dedup 路径则在发现同一 `callId` 已配对时立即消费。因此拒绝的提交可以重试，已接受结果的
-重复提交自然 no-op。分类状态只存在于客户端 sidecar，不写入模型可见的
-`functionResponse.response`。
+A separate `testFlip` (red-to-green test) signal was considered, but it always
+implies `retryArc` in the same scan: the successful test closes the retry arc.
+It adds nothing to the gate, so it is folded into `retryArc` without a separate
+test-command detector.
 
-工具完成时同时更新 `toolCallCount` 与 `hasSubstantiveWork`：从未执行的调用不计数；执行完成
-后才取消的调用保持 `status: cancelled`，但 `executionStatus` 保留真实的 `success` 或 `error`，因此仍计数但不贡献 success / failure。`Steer` 到达或被接受的 ToolResult 附带
-steer 时置位 `userSteer`。评审被调度或已有同类评审在运行时，累计窗口与计数一起清零；
-session reset 还会清除尚未消费的 outcome sidecar。
+### Window and duplicate prevention
 
-### 门控逻辑（`MemoryManager.scheduleSkillReview`）
+`LlmClient` receives structured outcomes at tool completion: `callId`, `status`,
+`executionStatus`, `errorType`, `responseParts`, and optional `exitCode`. Reliable
+successes and failures are staged by `callId`. Consume each once after its
+ToolResult (including one resubmitted as Retry) is accepted into history or written
+through direct `addHistory`. The history-dedup path consumes immediately when the
+same `callId` is already paired. Rejected submissions can therefore be retried,
+and resubmitting accepted results is a no-op. Classification state lives in a
+client sidecar, not in model-visible `functionResponse.response`.
 
-```
-disabled / skillsModified            → 维持原有跳过
+Tool completion updates `toolCallCount` and `hasSubstantiveWork`. Calls that never
+executed do not count. Calls cancelled after execution completed retain
+`status: cancelled` and their actual `executionStatus` of `success` or `error`:
+they count but contribute neither a successful nor a failed experience. Set
+`userSteer` on Steer arrival or accepted ToolResult submissions carrying steer.
+Reset the signals and count together when review is scheduled or an equivalent
+review is already running. Session reset also clears unconsumed outcome sidecars.
+
+Tools cancelled during execution must return `aborted: true`. The scheduler sets
+`executionStatus: cancelled`, so the client neither counts the call nor stages a
+failure. Workflow cancellation before startup and during a registered run follow
+the same contract. Mid-run cancellation uses the registry's `cancelled` status,
+even when the outer signal remains live. Genuine execution failures do not add
+this flag and can still form a retry arc with a later success.
+
+### Gate logic (`MemoryManager.scheduleSkillReview`)
+
+```text
+disabled / skillsModified            → preserve existing skips
 fastPath  = (retryArc || userSteer) && toolCallCount >= 5
 backstop  = hasSubstantiveWork && toolCallCount >= AUTO_SKILL_THRESHOLD
 !fastPath && !backstop               → skipped
@@ -62,37 +87,51 @@ backstop  = hasSubstantiveWork && toolCallCount >= AUTO_SKILL_THRESHOLD
 fastPath || backstop                 → scheduled
 ```
 
-`AUTO_SKILL_THRESHOLD` 固定为 20，不接受调用方覆盖。
+`AUTO_SKILL_THRESHOLD` is fixed at 20 and cannot be overridden by callers.
 
-in-flight 去重检查在门控之后，因此 `already_running` 本身即代表"本应触发"；客户端和
-`scheduled` 一样重置该窗口，避免旧信号在当前评审结束后立即重放。
+The in-flight dedup check follows the gate, so `already_running` means the window
+would have triggered a review. The client resets that window just as it does for
+`scheduled`, preventing old signals from replaying immediately after the active
+review finishes.
 
-## 集成点
+## Integration points
 
-- `packages/core/src/memory/experience-signals.ts`（新增）：结构化 outcome 分类、工作量判定和
-  三态累计器，可独立单测。
-- `packages/core/src/memory/manager.ts`：`experienceSignals` 为兼容性可选参数；内部调用始终
-  传入完整信号，未传时保留原 count-only 行为。新增 `AUTO_SKILL_EXPERIENCE_FLOOR`。
-- `packages/core/src/core/client.ts`：维护窗口信号与 `callId` outcome sidecar，在
-  `runManagedAutoMemoryBackgroundTasks` 中传给 manager，并在 scheduled / already-running 时
-  重置窗口。
-- CLI interactive、history-dedup 和 headless 完成路径统一传递结构化 outcome；公共模型协议、
-  JSON 输出协议和工具文本预算保持不变。
+- `packages/core/src/memory/experience-signals.ts` (new): structured outcome
+  classification, work detection, and a three-state accumulator, independently
+  unit-testable.
+- `packages/core/src/memory/manager.ts`: `experienceSignals` is optional for
+  compatibility. Internal callers always supply complete signals; omitted signals
+  retain the count-only behavior. Adds `AUTO_SKILL_EXPERIENCE_FLOOR`.
+- `packages/core/src/core/client.ts`: owns window signals and the `callId` outcome
+  sidecar; forwards signals to the manager in `runManagedAutoMemoryBackgroundTasks`
+  and resets the window on scheduled / already-running results.
+- Interactive CLI, history-dedup, and headless completion paths forward structured
+  outcomes consistently. Public model protocols, JSON output protocols, and tool
+  text budgets remain unchanged.
 
-## 明确不做
+## Non-goals
 
-- 不引入 LLM 分类器到触发路径（每轮一次的成本不可接受，且触发只是预筛选，语义判断是
-  评审 agent 的职责）；
-- 不做用户纠正的文本内容分析（多语言正则太脆，Steer 事件已是一等公民）；
-- 不新增阈值/floor 配置项（无此需求）；
-- 不改变评审 agent 本体、权限围栏与确认流。
+- No LLM classifier in the trigger path: per-turn inference is too expensive, and
+  semantic assessment belongs to the review agent after this prefilter.
+- No text analysis of user corrections: multilingual regexes are fragile, and
+  Steer is already a first-class event.
+- No new threshold or floor settings.
+- No changes to the review agent, permission boundaries, or confirmation flow.
 
-## 验证
+## Validation
 
-- `experience-signals.test.ts`（新增）：可靠/neutral outcome、same-tool 顺序、unknown-shell 和
-  substantive-work 边界。
-- `manager.test.ts`：表驱动覆盖快速通道 floor、计数兜底与纯读拒绝边界；
-  `skillReviewNudge.integration.test.ts` 保留快速通道和兜底通道的集成 smoke。
-- `client.test.ts` 覆盖 ToolResult 接受/拒绝、Retry 单次消费、Steer 与两种窗口重置；CLI
-  测试锁定 structured outcome wiring 和 structured-output sibling 兼容性。
-- E2E 测试计划见 `.qwen/e2e-tests/2026-08-13-auto-skill-experience-trigger.md`。
+- `experience-signals.test.ts` (new): reliable and neutral outcomes, same-tool
+  ordering, unknown shell exits, and substantive-work boundaries.
+- `manager.test.ts`: table-driven fast-path floor, backstop, and read-only rejection
+  boundaries. `skillReviewNudge.integration.test.ts` retains fast-path and backstop
+  integration smoke coverage.
+- `client.test.ts`: ToolResult acceptance/rejection, Retry single consumption,
+  Steer, and both window resets. CLI tests pin structured-outcome wiring and
+  compatibility with the structured-output sibling path.
+- Regression acceptance: an all-`exec` window with no retry arc or steer skips at
+  19 calls and schedules at 20; derive signals from the real tool classifier.
+  Actual cancelled Workflow results passing through the scheduler and client do
+  not count or stage failures, and a later success creates no retry arc. Genuine
+  failure followed by success still creates one. Removing the `exec` set entry or
+  cancellation flag must make the respective regression tests fail.
+- E2E test plan: `.qwen/e2e-tests/2026-08-13-auto-skill-experience-trigger.md`.

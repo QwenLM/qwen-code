@@ -44,6 +44,7 @@ const SUBSTANTIVE_TOOL_NAMES: ReadonlySet<string> = new Set([
   ToolNames.EDIT,
   ToolNames.NOTEBOOK_EDIT,
   ToolNames.SHELL,
+  ToolNames.EXEC,
 ]);
 
 export function isSubstantiveToolCall(name: string): boolean {

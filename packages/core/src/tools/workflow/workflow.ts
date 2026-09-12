@@ -587,6 +587,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
           message: `${failureText}\n${trailer}`,
           type: ToolErrorType.EXECUTION_FAILED,
         },
+        ...(cancelled ? { aborted: true } : {}),
       };
     }
   }

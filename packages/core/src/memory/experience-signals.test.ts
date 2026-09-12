@@ -209,6 +209,7 @@ describe('isSubstantiveToolCall', () => {
     ToolNames.EDIT,
     ToolNames.NOTEBOOK_EDIT,
     ToolNames.SHELL,
+    ToolNames.EXEC,
     'replace',
   ])('counts %s', (name) => {
     expect(isSubstantiveToolCall(name)).toBe(true);
