@@ -2457,6 +2457,7 @@ export class Config {
   private activeTodoReminders = new Map<string, string>();
   private activeTodoWorkChainOwners = new Map<string, string>();
   private activeTodoReminderTurns = new Map<string, number>();
+  private activeTodoPlanWriterOwner: string | undefined;
   private llmClient!: LlmClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -7896,6 +7897,28 @@ export class Config {
   }
 
   /**
+   * The owner of the prompt id that last WROTE the session-scoped plan file
+   * (i.e. a real, non-no-op `todo_write`). The continuation guard only
+   * carries a registered reminder when the foreground head still owns the
+   * authoritative plan; an isolated cron/notification/Goal turn that rewrites
+   * the plan under its own owner must not re-deliver the foreground's stale
+   * snapshot.
+   */
+  getActiveTodoPlanWriterOwner(): string | undefined {
+    return this.activeTodoPlanWriterOwner;
+  }
+
+  /**
+   * Records the owner of the prompt id that just wrote the session plan file.
+   * Called only from the real write path of `todo_write` (never the no-op
+   * `isDeepStrictEqual` short-circuit), so a foreign no-op write cannot
+   * suppress a still-accurate continuation.
+   */
+  recordActiveTodoPlanWriter(promptId: string): void {
+    this.activeTodoPlanWriterOwner = this.getActiveTodoWorkChainOwner(promptId);
+  }
+
+  /**
    * Reads the reminder for injection, re-issuing it only every
    * ACTIVE_TODO_REMINDER_REFRESH_TURNS tool turns: each injected copy lands in
    * chat history permanently, so per-turn injection would grow the context
@@ -7936,6 +7959,7 @@ export class Config {
       // `undefined` here is unambiguous completion: clear session-wide.
       reminders.clear();
       this.getOwnActiveTodoReminderTurns().clear();
+      this.activeTodoPlanWriterOwner = undefined;
     }
   }
 
@@ -8008,6 +8032,7 @@ export class Config {
     this.getOwnActiveTodoReminders().clear();
     this.getOwnActiveTodoWorkChainOwners().clear();
     this.getOwnActiveTodoReminderTurns().clear();
+    this.activeTodoPlanWriterOwner = undefined;
   }
 
   /**

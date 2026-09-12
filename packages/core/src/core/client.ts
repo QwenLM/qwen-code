@@ -3501,7 +3501,10 @@ export class LlmClient {
       const continuedFrom =
         this.activeTodoWorkChainPromptId !== undefined &&
         this.config.getActiveTodoReminder(this.activeTodoWorkChainPromptId) !==
-          undefined
+          undefined &&
+        this.config.getActiveTodoWorkChainOwner(
+          this.activeTodoWorkChainPromptId,
+        ) === this.config.getActiveTodoPlanWriterOwner()
           ? this.activeTodoWorkChainPromptId
           : undefined;
       this.config.startActiveTodoWorkChain(prompt_id, continuedFrom);

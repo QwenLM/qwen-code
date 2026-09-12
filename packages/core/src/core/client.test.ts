@@ -593,6 +593,7 @@ describe('Gemini Client (client.ts)', () => {
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      getActiveTodoPlanWriterOwner: vi.fn().mockReturnValue(undefined),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
       endAutomaticActiveTodoWorkChain: vi.fn(),
@@ -2323,6 +2324,11 @@ describe('Gemini Client (client.ts)', () => {
       vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(
         '<system-reminder>unfinished todo: delegated node</system-reminder>',
       );
+      // The foreground head still owns the session plan file, so the
+      // continuation guard's owner-equality conjunct holds.
+      vi.mocked(mockConfig.getActiveTodoPlanWriterOwner).mockReturnValue(
+        'prompt-userQuery',
+      );
 
       const stream = client.sendMessageStream(
         [{ text: 'how is progress going?' }],
@@ -2346,6 +2352,32 @@ describe('Gemini Client (client.ts)', () => {
       // of the continuation guard must not keep carrying the previous chain.
       vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(undefined);
       await runTurn(SendMessageType.UserQuery);
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+        'prompt-userQuery',
+        undefined,
+      );
+    });
+
+    it('does not continue the todo work chain when the plan was last written by a foreign owner', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      await runTurn(SendMessageType.UserQuery);
+      // A reminder is registered, but an isolated cron/notification turn last
+      // wrote the session plan under its own owner — the foreground head no
+      // longer owns the authoritative plan, so the continuation guard must
+      // not carry (and must not re-deliver the stale foreground snapshot).
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(
+        '<system-reminder>unfinished todo: delegated node</system-reminder>',
+      );
+      vi.mocked(mockConfig.getActiveTodoPlanWriterOwner).mockReturnValue(
+        'prompt-cron',
+      );
+
+      await runTurn(SendMessageType.UserQuery);
+
       expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
         'prompt-userQuery',
         undefined,

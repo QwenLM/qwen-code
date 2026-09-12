@@ -14084,6 +14084,33 @@ describe('Model Switching and Config Updates', () => {
     expect(config.getActiveTodoReminder('p1')).toBeUndefined();
   });
 
+  it('does not carry the foreground reminder when the plan was last written by a foreign owner', () => {
+    // The continuation guard carries a registered reminder only when the
+    // foreground head still owns the session plan file. A real write from the
+    // foreground records that ownership; an isolated cron/notification turn
+    // that rewrites the plan under its own owner must flip the predicate off.
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('p1');
+    config.setActiveTodoReminder('p1', 'R1');
+    config.recordActiveTodoPlanWriter('p1');
+
+    expect(
+      config.getActiveTodoReminder('p1') !== undefined &&
+        config.getActiveTodoWorkChainOwner('p1') ===
+          config.getActiveTodoPlanWriterOwner(),
+    ).toBe(true);
+
+    config.startAutomaticActiveTodoWorkChain('p-cron');
+    config.recordActiveTodoPlanWriter('p-cron');
+    config.setActiveTodoReminder('p-cron', 'R2');
+
+    expect(
+      config.getActiveTodoReminder('p1') !== undefined &&
+        config.getActiveTodoWorkChainOwner('p1') ===
+          config.getActiveTodoPlanWriterOwner(),
+    ).toBe(false);
+  });
+
   it('prunes the superseded foreground head when continuing a chain', () => {
     const config = Object.create(Config.prototype) as Config;
     config.startActiveTodoWorkChain('prompt-user-1');
