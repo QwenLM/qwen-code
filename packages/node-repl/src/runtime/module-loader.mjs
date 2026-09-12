@@ -497,7 +497,7 @@ export function createModuleLoader(options) {
       names,
       function initialize() {
         for (const name of names) {
-          this.setExport(name, previousBindings.get(name).value);
+          this.setExport(name, previousBindings.get(name).reference);
         }
       },
       { context: untrustedContext, identifier: '@prev' },

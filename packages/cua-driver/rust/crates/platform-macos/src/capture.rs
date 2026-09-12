@@ -318,6 +318,8 @@ struct WindowCaptureIdentity {
     y: u64,
     width: u64,
     height: u64,
+    requires_display_crop: bool,
+    is_on_screen: bool,
 }
 
 impl WindowCaptureIdentity {
@@ -329,6 +331,8 @@ impl WindowCaptureIdentity {
             y: y.to_bits(),
             width: width.to_bits(),
             height: height.to_bits(),
+            requires_display_crop: false,
+            is_on_screen: true,
         }
     }
 }
@@ -336,14 +340,20 @@ impl WindowCaptureIdentity {
 fn current_window_capture_identity(window_id: u32) -> anyhow::Result<WindowCaptureIdentity> {
     let info = crate::windows::window_info_by_id(window_id)
         .ok_or_else(|| anyhow::anyhow!("WindowServer no longer lists window id {window_id}"))?;
-    Ok(WindowCaptureIdentity::new(
+    let mut identity = WindowCaptureIdentity::new(
         info.pid,
         info.layer,
         info.bounds.x,
         info.bounds.y,
         info.bounds.width,
         info.bounds.height,
-    ))
+    );
+    // AX-unreadable apps can still be captured with screen-recording access.
+    // Use conservative display cropping rather than requiring AX permission.
+    identity.requires_display_crop =
+        crate::ax::sheets::window_is_in_attached_group(info.pid, window_id).unwrap_or(true);
+    identity.is_on_screen = info.is_on_screen;
+    Ok(identity)
 }
 
 const WINDOW_PLAN_CACHE_TTL: Duration = Duration::from_secs(2);
@@ -473,7 +483,7 @@ fn build_window_capture_plan(
         .ok_or_else(|| {
             anyhow::anyhow!("ScreenCaptureKit: window id {window_id} has no owning application")
         })?;
-    let actual_identity = WindowCaptureIdentity::new(
+    let mut actual_identity = WindowCaptureIdentity::new(
         owner_pid,
         window.window_layer(),
         frame.origin.x,
@@ -481,6 +491,8 @@ fn build_window_capture_plan(
         frame.size.width,
         frame.size.height,
     );
+    actual_identity.requires_display_crop = expected_identity.requires_display_crop;
+    actual_identity.is_on_screen = window.is_on_screen();
     if actual_identity != expected_identity {
         anyhow::bail!(
             "ScreenCaptureKit: window id {window_id} changed identity while capture was prepared"
@@ -489,14 +501,36 @@ fn build_window_capture_plan(
 
     // Desktop-independent window filter (captures only the specified window):
     // https://developer.apple.com/documentation/screencapturekit/sccontentfilter/init(desktopindependentwindow:)
-    let filter = SCContentFilter::create().with_window(&window).build();
+    // Single-window mode scales the entire AppKit attachment group into the
+    // requested sheet size. sourceRect is ignored in that mode. A display
+    // filter restricted to this window preserves its actual point coordinates.
+    let filter = if expected_identity.requires_display_crop {
+        if !window.is_on_screen() {
+            anyhow::bail!("window {window_id} is not on screen for display-relative capture");
+        }
+        let display = content
+            .displays()
+            .into_iter()
+            .find(|display| relative_capture_rect(frame, display.frame()).is_some())
+            .ok_or_else(|| {
+                anyhow::anyhow!("attached window {window_id} is not fully contained in one display")
+            })?;
+        SCContentFilter::create()
+            .with_display(&display)
+            .with_including_windows(&[&window])
+            .build()
+    } else {
+        SCContentFilter::create().with_window(&window).build()
+    };
 
     // Pixel output size = content_rect * point_pixel_scale (macOS 14+ filter info).
     // https://docs.rs/screencapturekit/6.0.1/screencapturekit/
     let scale = f64::from(filter.point_pixel_scale());
     let (width_pts, height_pts) = {
         let rect = filter.content_rect();
-        if content_rect_usable(rect) {
+        if expected_identity.requires_display_crop {
+            (frame.size.width, frame.size.height)
+        } else if content_rect_usable(rect) {
             (rect.size.width, rect.size.height)
         } else {
             (frame.size.width, frame.size.height)
@@ -506,15 +540,50 @@ fn build_window_capture_plan(
     let out_w = rounded_pixel_dim(width_pts * scale, "width")?;
     let out_h = rounded_pixel_dim(height_pts * scale, "height")?;
 
-    let config = SCStreamConfiguration::new()
+    let mut config = SCStreamConfiguration::new()
         .with_width(out_w)
         .with_height(out_h);
+    if expected_identity.requires_display_crop {
+        let source = relative_capture_rect(frame, filter.content_rect())
+            .ok_or_else(|| anyhow::anyhow!("capture filter does not cover window {window_id}"))?;
+        config = config.with_source_rect(source).with_shows_cursor(false);
+    } else {
+        // SCK may otherwise scale a GTK attachment group into this window's frame.
+        config = config.with_includes_child_windows(false);
+    }
 
     Ok(std::sync::Arc::new(WindowCapturePlan {
         filter,
         config,
         identity: expected_identity,
     }))
+}
+
+fn relative_capture_rect(
+    frame: screencapturekit::cg::CGRect,
+    display: screencapturekit::cg::CGRect,
+) -> Option<screencapturekit::cg::CGRect> {
+    if !content_rect_usable(frame)
+        || !content_rect_usable(display)
+        || ![
+            frame.origin.x,
+            frame.origin.y,
+            display.origin.x,
+            display.origin.y,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+        || frame.origin.x < display.origin.x
+        || frame.origin.y < display.origin.y
+        || frame.origin.x + frame.size.width > display.origin.x + display.size.width
+        || frame.origin.y + frame.size.height > display.origin.y + display.size.height
+    {
+        return None;
+    }
+    let mut source = frame;
+    source.origin.x -= display.origin.x;
+    source.origin.y -= display.origin.y;
+    Some(source)
 }
 
 /// Single-frame capture + RGBA/PNG encode from an existing plan.
@@ -726,11 +795,12 @@ fn screenshot_window_bytes_sck(window_id: u32) -> anyhow::Result<Vec<u8>> {
 /// Tries ScreenCaptureKit first; falls back to the `screencapture` CLI on
 /// native error or empty output.
 pub fn screenshot_window_bytes(window_id: u32) -> anyhow::Result<Vec<u8>> {
-    capture_window_with_backends(
-        window_id,
-        screenshot_window_bytes_sck,
-        screenshot_window_bytes_shell,
-    )
+    capture_window_with_backends(window_id, screenshot_window_bytes_sck, |wid| {
+        if current_window_capture_identity(wid)?.requires_display_crop {
+            anyhow::bail!("shell capture cannot preserve attached window {wid} geometry");
+        }
+        screenshot_window_bytes_shell(wid)
+    })
 }
 
 /// Capture a window by its `window_id` (CGWindowID).
@@ -823,6 +893,29 @@ pub fn png_dimensions(data: &[u8]) -> anyhow::Result<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_source_rect_preserves_display_relative_geometry() {
+        use screencapturekit::cg::{CGPoint, CGRect, CGSize};
+        let rect = |x, y, width, height| CGRect {
+            origin: CGPoint { x, y },
+            size: CGSize { width, height },
+        };
+        let display = rect(-1512.0, 100.0, 1512.0, 982.0);
+        let sheet = rect(-1350.0, 478.0, 880.0, 448.0);
+        let source = relative_capture_rect(sheet, display).unwrap();
+        assert_eq!(source, rect(162.0, 378.0, 880.0, 448.0));
+        // A sheet wider than its parent is valid; coverage is by the display.
+        assert!(relative_capture_rect(sheet, rect(-1242.0, 443.0, 663.0, 518.0)).is_none());
+        for frame in [
+            rect(-1600.0, 478.0, 880.0, 448.0),
+            rect(-200.0, 478.0, 880.0, 448.0),
+            rect(-1350.0, 1000.0, 880.0, 448.0),
+            rect(f64::NAN, 478.0, 880.0, 448.0),
+        ] {
+            assert!(relative_capture_rect(frame, display).is_none());
+        }
+    }
     use std::cell::Cell;
     use std::rc::Rc;
     use std::sync::Arc;

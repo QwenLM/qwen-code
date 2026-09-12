@@ -273,8 +273,6 @@ impl Snapshot {
     pub fn detect_with(self, timeout: Duration, poll_interval: Duration) -> Changes {
         let deadline = Instant::now() + timeout;
         loop {
-            std::thread::sleep(poll_interval);
-
             let current: Vec<WindowInfo> = windows::visible_windows()
                 .into_iter()
                 .filter(|w| w.layer == 0)
@@ -315,6 +313,7 @@ impl Snapshot {
             if Instant::now() >= deadline {
                 return Changes::no_change();
             }
+            std::thread::sleep(poll_interval);
         }
     }
 

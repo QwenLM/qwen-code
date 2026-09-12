@@ -14,6 +14,7 @@
 use super::bindings::*;
 use super::window_scope::{decide_window_scope, TopLevelCandidate, WindowScope};
 use core_foundation::base::{CFEqual, CFHash, CFRelease, CFRetain, CFTypeRef};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 /// Default maximum depth for AX tree walks. Deep menus and complex web views
@@ -334,7 +335,7 @@ pub fn walk_tree_bounded(
         // and walks nothing; it must never fall back to "everything that isn't
         // a window", which is how issue #2237 returned menu bars as panels.
         let walk_these: Vec<AXUIElementRef> = if let Some(wid) = window_id {
-            let candidates: Vec<TopLevelCandidate> = top_level
+            let mut candidates: Vec<TopLevelCandidate> = top_level
                 .iter()
                 .map(|&child| {
                     set_messaging_timeout(child);
@@ -353,7 +354,7 @@ pub fn walk_tree_bounded(
                     complete &= identifier_read.complete;
                     // Match AX window element → CGWindowID via private SPI.
                     // Only windows carry one, so skip the round-trip elsewhere.
-                    let ax_window_id = if role == "AXWindow" {
+                    let ax_window_id = if matches!(role.as_str(), "AXWindow" | "AXSheet") {
                         ax_get_window_id(child)
                     } else {
                         None
@@ -366,9 +367,29 @@ pub fn walk_tree_bounded(
                     }
                 })
                 .collect();
-            let decision = decide_window_scope(&candidates, wid, || {
+            let mut decision = decide_window_scope(&candidates, wid, || {
                 crate::windows::resolve_window_owner(pid, wid)
             });
+            if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
+                let (sheets, discovery_complete) = super::sheets::copy_attached_sheets(&top_level);
+                complete &= discovery_complete;
+                if discovery_complete {
+                    for sheet in sheets {
+                        let element = sheet.element.as_ptr() as AXUIElementRef;
+                        if !top_level
+                            .iter()
+                            .any(|&seen| CFEqual(seen as CFTypeRef, element as CFTypeRef) != 0)
+                        {
+                            CFRetain(element as CFTypeRef);
+                            top_level.push(element);
+                            candidates.push(TopLevelCandidate::new("AXSheet", sheet.window_id));
+                        }
+                    }
+                    decision = decide_window_scope(&candidates, wid, || {
+                        crate::windows::resolve_window_owner(pid, wid)
+                    });
+                }
+            }
             let walk = decision
                 .walk
                 .iter()
@@ -381,12 +402,14 @@ pub fn walk_tree_bounded(
         };
 
         // Walk each top-level child at depth 0.
+        let mut visited_identities = HashSet::new();
         for child in walk_these {
             walk_element(
                 child,
                 0,
                 None,
                 false,
+                &mut visited_identities,
                 &mut nodes,
                 &mut lines,
                 &mut index_counter,
@@ -439,6 +462,47 @@ unsafe fn walk_element(
     depth: usize,
     parent_index: Option<usize>,
     in_web_content: bool,
+    visited_identities: &mut HashSet<AXIdentity>,
+    nodes: &mut Vec<AXNode>,
+    lines: &mut Vec<(usize, String)>,
+    counter: &mut usize,
+    visited_count: &mut usize,
+    truncated: &mut bool,
+    complete: &mut bool,
+    max_elements: usize,
+    max_depth: usize,
+) {
+    let identity = AXIdentity::retained(element);
+    if visited_identities.contains(&identity) {
+        return;
+    }
+    if depth <= max_depth && *visited_count < max_elements {
+        visited_identities.insert(identity);
+    }
+    walk_element_contents(
+        element,
+        depth,
+        parent_index,
+        in_web_content,
+        visited_identities,
+        nodes,
+        lines,
+        counter,
+        visited_count,
+        truncated,
+        complete,
+        max_elements,
+        max_depth,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn walk_element_contents(
+    element: AXUIElementRef,
+    depth: usize,
+    parent_index: Option<usize>,
+    in_web_content: bool,
+    visited_identities: &mut HashSet<AXIdentity>,
     nodes: &mut Vec<AXNode>,
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
@@ -468,8 +532,14 @@ unsafe fn walk_element(
     set_messaging_timeout(element);
 
     let role_read = copy_string_attr_with_status(element, "AXRole");
+    if role_read.complete
+        && role_read.value.is_none()
+        && super::placeholder::is_empty_search_field_leaf(element)
+    {
+        return;
+    }
     if role_read.complete && role_read.value.is_none() {
-        super::bindings::note_incomplete("AXRole", "success with no role value");
+        super::bindings::note_incomplete("AXRole", "required role value unavailable");
     }
     *complete &= role_read.complete && role_read.value.is_some();
     let role = role_read.value.unwrap_or_else(|| "AXUnknown".into());
@@ -489,6 +559,7 @@ unsafe fn walk_element(
                 depth,
                 parent_index,
                 in_web_content,
+                visited_identities,
                 nodes,
                 lines,
                 counter,
@@ -584,6 +655,7 @@ unsafe fn walk_element(
                 depth + 1,
                 parent_index,
                 in_web_content,
+                visited_identities,
                 nodes,
                 lines,
                 counter,
@@ -725,6 +797,7 @@ unsafe fn walk_element(
             depth + 1,
             next_parent,
             in_web_content,
+            visited_identities,
             nodes,
             lines,
             counter,
