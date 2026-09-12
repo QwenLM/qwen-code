@@ -160,6 +160,14 @@ describe('normalizeMemoryBudgetMb', () => {
   });
 });
 
+describe('legacyChildCeilingMb', () => {
+  it('caps the modeled ceiling at MAX_CHILD_HEAP_MB on a saturated host', () => {
+    // floor(32_768 * 0.5) lands exactly on the cap, so only a host strictly
+    // above it exercises the Math.min in legacyChildCeilingMb.
+    expect(legacyChildCeilingMb(65_536)).toBe(MAX_CHILD_HEAP_MB);
+  });
+});
+
 describe('recommendedChildShareMb', () => {
   const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 32_768 });
 
