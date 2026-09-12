@@ -40,7 +40,7 @@ Point the tool at a ModelStudio Standard/Token Plan or another verified DashScop
   "modelProviders": {
     "openai": [
       {
-        "id": "qwen3.6-plus",
+        "id": "qwen3.8-flash",
         "envKey": "DASHSCOPE_API_KEY",
         "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1"
       }
@@ -49,17 +49,18 @@ Point the tool at a ModelStudio Standard/Token Plan or another verified DashScop
   "tools": {
     "webSearch": {
       "enabled": true,
-      "model": "qwen3.6-plus"
+      "model": "qwen3.8-flash"
     }
   }
 }
 ```
 
-| Setting                        | Env override           | Meaning                                                                                                                                                                                                                                                                       |
-| ------------------------------ | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tools.webSearch.enabled`      | `ENABLE_WEB_SEARCH`    | Set `false` to turn the tool off. Implicit startup activation requires leaving `enabled`, `model`, and the env-only backend unset. Setting `true` permits automatic derivation only when the env-only backend is also unset; otherwise a `model` is required.                 |
-| `tools.webSearch.model`        | `WEB_SEARCH_MODEL`     | Search model selector for the explicit path (`modelId` or `authType:modelId`). With `WEB_SEARCH_BASE_URL` it is the plain model id for that endpoint; otherwise it must match a declared DashScope-compatible `modelProviders` entry. The automatic path uses `qwen3.6-plus`. |
-| `tools.webSearch.webExtractor` | `WEB_SEARCH_EXTRACTOR` | Let the search agent open result pages for better-grounded answers (default `true`; billed separately by DashScope).                                                                                                                                                          |
+| Setting                        | Env override            | Meaning                                                                                                                                                                                                                                                                        |
+| ------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tools.webSearch.enabled`      | `ENABLE_WEB_SEARCH`     | Set `false` to turn the tool off. Implicit startup activation requires leaving `enabled`, `model`, and the env-only backend unset. Setting `true` permits automatic derivation only when the env-only backend is also unset; otherwise a `model` is required.                  |
+| `tools.webSearch.model`        | `WEB_SEARCH_MODEL`      | Search model selector for the explicit path (`modelId` or `authType:modelId`). With `WEB_SEARCH_BASE_URL` it is the plain model id for that endpoint; otherwise it must match a declared DashScope-compatible `modelProviders` entry. The automatic path uses `qwen3.8-flash`. |
+| `tools.webSearch.webExtractor` | `WEB_SEARCH_EXTRACTOR`  | Let the search agent open result pages for better-grounded answers (default `true`; billed separately by DashScope).                                                                                                                                                           |
+| `tools.webSearch.timeoutMs`    | `WEB_SEARCH_TIMEOUT_MS` | Total time budget for one search, in milliseconds (default `120000`, max `600000`; other values fall back to the default). A search that runs out of time returns what arrived as a partial result.                                                                            |
 
 ### Env-only configuration (no settings.json)
 
@@ -69,7 +70,7 @@ variables — no `modelProviders` entry needed:
 
 ```bash
 export ENABLE_WEB_SEARCH=true
-export WEB_SEARCH_MODEL=qwen3.6-plus
+export WEB_SEARCH_MODEL=qwen3.8-flash
 export WEB_SEARCH_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 export DASHSCOPE_API_KEY=sk-...        # or set WEB_SEARCH_API_KEY instead
 ```
@@ -88,6 +89,7 @@ Notes:
 - If enabled explicitly but misconfigured, the tool stays off and a startup notice explains which condition failed. Automatic activation never emits a notice.
 - Searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
 - There is no client-side model allowlist; a model the Responses endpoint does not serve fails loudly on first use.
+- A search that exceeds its time budget returns what arrived as a partial result. When the search agent's narrated answer never arrived, the result carries at most 6,000 characters of the page text the agent had read, labeled as raw page content.
 
 ## MCP alternatives
 

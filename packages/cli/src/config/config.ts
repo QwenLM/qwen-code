@@ -35,6 +35,7 @@ import {
   NativeLspService,
   isBareMode,
   isTruthy,
+  parsePositiveIntegerEnv,
   isSafeModeEnv,
   isToolEnabled,
   isTlsVerificationDisabled,
@@ -1025,7 +1026,8 @@ function resolveModelFallbacks(
  * Resolve the built-in WebSearch tool settings, with env overrides taking
  * precedence over `tools.webSearch` (mirroring the QWEN_SANDBOX_IMAGE
  * pattern): ENABLE_WEB_SEARCH for the flag, WEB_SEARCH_MODEL for the model
- * selector, WEB_SEARCH_EXTRACTOR for page reading.
+ * selector, WEB_SEARCH_EXTRACTOR for page reading, WEB_SEARCH_TIMEOUT_MS for
+ * the per-search budget.
  *
  * Env-only backend: WEB_SEARCH_BASE_URL mirrors a modelProviders entry's
  * baseUrl for environments that cannot write settings.json; the API key
@@ -1048,6 +1050,13 @@ function resolveWebSearchSettings(
     envExtractor !== undefined
       ? isTruthy(envExtractor)
       : webSearch?.webExtractor;
+  // A non-numeric or non-positive override is ignored rather than zeroing the
+  // budget; the core resolver applies the default and the cap.
+  const envTimeoutMs = parsePositiveIntegerEnv(
+    process.env['WEB_SEARCH_TIMEOUT_MS'],
+    0,
+  );
+  const timeoutMs = envTimeoutMs > 0 ? envTimeoutMs : webSearch?.timeoutMs;
   const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
   const apiKeyEnv = baseUrl
     ? process.env['WEB_SEARCH_API_KEY']?.trim()
@@ -1058,11 +1067,12 @@ function resolveWebSearchSettings(
     enabled === undefined &&
     model === undefined &&
     webExtractor === undefined &&
-    baseUrl === undefined
+    baseUrl === undefined &&
+    timeoutMs === undefined
   ) {
     return undefined;
   }
-  return { enabled, model, webExtractor, baseUrl, apiKeyEnv };
+  return { enabled, model, webExtractor, baseUrl, apiKeyEnv, timeoutMs };
 }
 
 /**
