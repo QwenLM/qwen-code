@@ -25,6 +25,7 @@ import {
 import { OpenAIContentConverter } from './converter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
+import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { Config } from '../../config/config.js';
 import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
@@ -3716,6 +3717,67 @@ describe('ContentGenerationPipeline', () => {
           return emptyResponse;
         },
       );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // Consume until EOF validation runs.
+        }
+      }).rejects.toMatchObject({ type: 'PROTOCOL_TAG_LEAK' });
+      expect(logProtocolTagSanitized).not.toHaveBeenCalled();
+    });
+
+    it('rejects an unclosed thinking block at clean stream EOF after content-only demotion', async () => {
+      // Review finding 4: the converter's finish-reason guard only runs when
+      // a chunk carries finish_reason. When the stream ends without one
+      // (truncated connection, provider quirk), the post-loop pipeline guard
+      // is the only fail-closed backstop — so it must also cover the
+      // contentOnlyThinkingTagLeaks demotion path, not just
+      // taggedThinkingTagsAfterReasoning.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'response-id',
+            choices: [
+              {
+                delta: { content: '<think>a</think>ok<think>oops' },
+                finish_reason: null,
+              },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const emptyResponse = new GenerateContentResponse();
+      emptyResponse.candidates = [
+        { content: { parts: [], role: 'model' }, index: 0 },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
+        (_chunk, context) => {
+          // Simulate the post-demotion converter state (PR #11188): the
+          // content-only demotion installed a tagged-thinking parser whose
+          // thought block never closed, and no finish_reason chunk ever
+          // reached the converter guard.
+          context.taggedThinkingParser ??= new TaggedThinkingParser();
+          context.taggedThinkingParser.parse('<think>a</think>ok<think>oops');
+          return emptyResponse;
+        },
+      );
+      mockProvider.getResponseParsingOptions = vi.fn().mockReturnValue({
+        contentOnlyThinkingTagLeaks: true,
+      });
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
       );

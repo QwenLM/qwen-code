@@ -553,13 +553,19 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(repeatedOpening.candidates?.[0]?.content?.parts).toEqual([]);
+      // The leading balanced block is demoted to a thought part (issue
+      // #10791); only visible text parts must stay suppressed here.
+      expect(repeatedOpening.candidates?.[0]?.content?.parts).toEqual([
+        { text: '\n\n', thought: true },
+      ]);
       const nestedOpening = converter.convertOpenAIChunkToLlm(
         streamChunk('nested-opening', { content: 'nk>9<think>-3' }),
         stream,
       );
 
-      expect(nestedOpening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(nestedOpening.candidates?.[0]?.content?.parts).toEqual([
+        { text: '9<think>-3', thought: true },
+      ]);
       expect(() => finishStream(stream)).toThrowError(
         expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
       );
@@ -592,10 +598,9 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
-    it('holds a long confirmed opening tag until its closing tag arrives', () => {
+    it('holds an unbalanced opening tag and demotes the block once balanced', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const text = `<thinking>${'x'.repeat(200)}</thinking>`;
 
       const opening = converter.convertOpenAIChunkToLlm(
         streamChunk('long-balanced', {
@@ -608,8 +613,13 @@ describe('OpenAIContentConverter', () => {
         stream,
       );
 
+      // The unclosed prefix stays held (no visible leak); once the closing
+      // tag balances the block it is demoted to a thought part (issue #10791)
+      // instead of being released as literal text.
       expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(closing.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+      expect(closing.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x'.repeat(200), thought: true },
+      ]);
     });
 
     it('leaks the production <thinking> shape without provider provenance', () => {
@@ -637,14 +647,23 @@ describe('OpenAIContentConverter', () => {
     });
 
     it.each([
-      ['split literal block', ['<thi', 'nk>literal</think>']],
-      ['empty block with a separate finish chunk', ['<think>\n\n</think>', '']],
+      ['split literal block', ['<thi', 'nk>literal</think>'], 'literal'],
+      [
+        'empty block with a separate finish chunk',
+        ['<think>\n\n</think>', ''],
+        '\n\n',
+      ],
       [
         'two split valid blocks',
         ['<think>\n\n', '</think><thi', 'nk>literal</think>'],
+        '\n\nliteral',
       ],
-      ['long empty block', [`<thinking>${' '.repeat(128)}</thinking>`, '']],
-    ])('preserves content-only %s', (_name, chunks) => {
+      [
+        'long empty block',
+        [`<thinking>${' '.repeat(128)}</thinking>`, ''],
+        ' '.repeat(128),
+      ],
+    ])('demotes content-only %s to thought parts', (_name, chunks, thought) => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
       const parts = chunks.flatMap((content, index) => {
@@ -659,8 +678,145 @@ describe('OpenAIContentConverter', () => {
         return response.candidates?.[0]?.content?.parts ?? [];
       });
 
-      expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
-      expect(parts.every((part) => part.thought !== true)).toBe(true);
+      // Balanced content-only blocks are leaked chain-of-thought in
+      // production (issue #10791): the block text is demoted to the hidden
+      // thought channel and never reaches user-visible output.
+      expect(parts.map((part) => part.text).join('')).toBe(thought);
+      expect(parts.every((part) => part.thought === true)).toBe(true);
+      expect(parts.join('')).not.toContain('<think');
+    });
+
+    it('demotes a balanced content-only thinking block with trailing answer (issue #10791)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      const response = converter.convertOpenAIChunkToLlm(
+        streamChunk(
+          'balanced-leak',
+          {
+            content:
+              '<thinking>\nThe user asks about project 10088.\n</thinking>\n\nHere is the answer.',
+          },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        {
+          text: '\nThe user asks about project 10088.\n',
+          thought: true,
+        },
+        { text: '\n\nHere is the answer.' },
+      ]);
+    });
+
+    it('demotes a balanced content-only thinking block split across chunks with trailing answer', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const chunks = [
+        '<thi',
+        'nking>plan the query',
+        '</thinking>',
+        'The visible answer.',
+      ];
+      const parts = chunks.flatMap((content, index) => {
+        const response = converter.convertOpenAIChunkToLlm(
+          streamChunk(
+            `balanced-split-${index}`,
+            { content },
+            index === chunks.length - 1 ? 'stop' : null,
+          ),
+          stream,
+        );
+        return response.candidates?.[0]?.content?.parts ?? [];
+      });
+
+      expect(parts).toEqual([
+        { text: 'plan the query', thought: true },
+        { text: 'The visible answer.' },
+      ]);
+    });
+
+    it('demotes a thinking-only content-only turn without leaking visible text', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      const response = converter.convertOpenAIChunkToLlm(
+        streamChunk(
+          'thinking-only',
+          { content: '<think>reasoning with no answer</think>' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'reasoning with no answer', thought: true },
+      ]);
+    });
+
+    it('keeps demoting follow-up blocks after the leading demotion', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      const response = converter.convertOpenAIChunkToLlm(
+        streamChunk(
+          'second-block',
+          { content: '<think>first</think>ok<think>second</think>done' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'first', thought: true },
+        { text: 'ok' },
+        { text: 'second', thought: true },
+        { text: 'done' },
+      ]);
+    });
+
+    it('fails closed when a thinking block opened after demotion never closes', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      const response = converter.convertOpenAIChunkToLlm(
+        streamChunk('unclosed-after-demote', {
+          content: '<think>a</think>ok<think>oops',
+        }),
+        stream,
+      );
+
+      // The unclosed tail only reaches the hidden thought channel (the parser
+      // streams thinking incrementally); the turn still fails closed below.
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'a', thought: true },
+        { text: 'ok' },
+        { text: 'oops', thought: true },
+      ]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('leaks a balanced content-only block without provider provenance', () => {
+      // Control for the demotion tests above: the defense stays gated on
+      // contentOnlyThinkingTagLeaks, so endpoints whose provider does not
+      // opt in keep seeing the literal tags verbatim.
+      const stream = withStreamParser();
+      const response = converter.convertOpenAIChunkToLlm(
+        streamChunk(
+          'literal',
+          { content: '<thinking>reasoning</thinking>answer' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<thinking>reasoning</thinking>answer' },
+      ]);
     });
 
     it('releases a long unconfirmed prefix before the stream finishes', () => {
@@ -703,21 +859,112 @@ describe('OpenAIContentConverter', () => {
       expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
     });
 
-    it.each([
-      [
-        'at the start of the stream',
-        ['<think></think><think>outer <think>literal', '</think></think>'],
-      ],
-      [
-        'after visible content',
-        [
-          'Explanation: ',
-          '<think></think><think>outer <think>literal</think></think>',
-        ],
-      ],
-    ])('preserves balanced nested literals %s', (_name, chunks) => {
+    it('demotes the leading balanced nested literal without releasing a stray closing tag', () => {
+      // The leading <think></think> balances, so the block is demoted and the
+      // remainder flows through the tagged-thinking parser's documented
+      // binary toggle (issue #10791) instead of being preserved verbatim.
+      // The depth-counted tail closes one tag earlier than the binary parser
+      // does; the leftover </think> is a protocol remnant, not the visible
+      // answer, so it must be stripped (review finding 2) instead of being
+      // released as the whole user-facing output.
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const chunks = [
+        '<think></think><think>outer <think>literal',
+        '</think></think>',
+      ];
+      const parts = chunks.flatMap((content, index) => {
+        const response = converter.convertOpenAIChunkToLlm(
+          streamChunk(
+            `balanced-${index}`,
+            { content },
+            index === chunks.length - 1 ? 'stop' : null,
+          ),
+          stream,
+        );
+        return response.candidates?.[0]?.content?.parts ?? [];
+      });
+
+      expect(parts).toEqual([{ text: 'outer <think>literal', thought: true }]);
+    });
+
+    it('strips a stray closing tag split across chunks after demotion', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const chunks = ['<think></think>ok</thi', 'nk>more'];
+      const parts = chunks.flatMap((content, index) => {
+        const response = converter.convertOpenAIChunkToLlm(
+          streamChunk(
+            `stray-split-${index}`,
+            { content },
+            index === chunks.length - 1 ? 'stop' : null,
+          ),
+          stream,
+        );
+        return response.candidates?.[0]?.content?.parts ?? [];
+      });
+
+      // Partial closing tags are buffered inside the parser, so the remnant
+      // is stripped even when the chunk boundary splits it. Part boundaries
+      // follow chunk boundaries; the concatenated visible text is what the
+      // user sees.
+      expect(parts.map((part) => part.text).join('')).toBe('okmore');
+      expect(parts.every((part) => part.thought !== true)).toBe(true);
+    });
+
+    it('fails closed for a closing tag with inner whitespace on streaming demotion', () => {
+      // THINKING_TAG_PATTERN tolerates whitespace before '>' but the
+      // parser's exact tag literals do not: the demoted block never closes,
+      // so the turn fails closed exactly like any other unclosed block
+      // instead of hiding the tail (review finding 1, streaming side).
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          streamChunk(
+            'whitespace-close',
+            { content: '<think>plan</think >answer' },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('does not demote a streaming leading block on structured-reasoning turns', () => {
+      // Streaming pin for the load-bearing scoping condition (review
+      // finding 3): once structured reasoning has been seen the content-only
+      // demotion stays off, and a leading tag in content keeps failing
+      // closed through the structured-reasoning leak guard rather than
+      // being silently demoted to a thought part.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('reasoning', { reasoning_content: 'structured phase' }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          streamChunk(
+            'content',
+            { content: '<think>second phase</think>answer' },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('preserves balanced nested literals after visible content', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const chunks = [
+        'Explanation: ',
+        '<think></think><think>outer <think>literal</think></think>',
+      ];
       const parts = chunks.flatMap((content, index) => {
         const response = converter.convertOpenAIChunkToLlm(
           streamChunk(
@@ -761,7 +1008,12 @@ describe('OpenAIContentConverter', () => {
         stream,
       );
 
-      expect(response.candidates?.[0]?.content?.parts).toEqual([]);
+      // The leading balanced <think></think> activates the demotion parser
+      // (issue #10791), which buffers the unclosed tail in the hidden
+      // thought channel; the turn still fails closed at stream finish.
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: '9<think>' + 'x'.repeat(257), thought: true },
+      ]);
       expect(() => finishStream(stream, 'stop')).toThrowError(
         expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
       );
@@ -5386,7 +5638,7 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
-    it('should leave tags visible when tagged thinking parsing is disabled', () => {
+    it('demotes a balanced leading block on content-only non-streaming turns', () => {
       const response = converter.convertOpenAIResponseToLlm(
         {
           object: 'chat.completion',
@@ -5398,7 +5650,140 @@ describe('OpenAIContentConverter', () => {
               index: 0,
               message: {
                 role: 'assistant',
-                content: '<think>visible xml example</think>',
+                content: '<thinking>visible xml example</thinking>answer',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        {
+          ...requestContext,
+          responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
+        },
+      );
+
+      // Non-streaming completions get the same treatment as streams
+      // (issue #10791): the balanced leading block is demoted to a thought
+      // part and only the trailing answer stays user-visible.
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'visible xml example', thought: true },
+        { text: 'answer' },
+      ]);
+    });
+
+    it('keeps non-streaming tags visible without contentOnlyThinkingTagLeaks provenance', () => {
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-openai-2',
+          created: 123,
+          model: 'gpt-test',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: '<think>literal example</think>answer',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<think>literal example</think>answer' },
+      ]);
+    });
+
+    it('keeps a non-streaming leading block untouched on structured-reasoning turns', () => {
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-openai-3',
+          created: 123,
+          model: 'gpt-test',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: '<think>second phase</think>answer',
+                reasoning_content: 'first phase',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        {
+          ...requestContext,
+          responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
+        },
+      );
+
+      // The content-only demotion only covers turns with no structured
+      // reasoning channel; reasoning turns keep the inline-block handling
+      // of the streaming path unchanged for now.
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'first phase', thought: true },
+        { text: '<think>second phase</think>answer' },
+      ]);
+    });
+
+    it('fails closed for a closing tag with inner whitespace on non-streaming turns', () => {
+      // The tolerant balance detector counts </think > as closing, but the
+      // parser's exact tag literals never leave thought mode. The
+      // non-streaming demotion must fail closed like the streaming path
+      // (review finding 1 / #10982) instead of silently hiding the whole
+      // message — including the visible answer — in the thought channel.
+      expect(() =>
+        converter.convertOpenAIResponseToLlm(
+          {
+            object: 'chat.completion',
+            id: 'chatcmpl-whitespace-close',
+            created: 123,
+            model: 'gpt-test',
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: 'assistant',
+                  content: '<think>plan</think >answer',
+                },
+                finish_reason: 'stop',
+                logprobs: null,
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletion,
+          {
+            ...requestContext,
+            responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
+          },
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('strips stray closing tags after a nested leading demotion on non-streaming turns', () => {
+      // Non-streaming mirror of the streaming nested-demotion test (review
+      // finding 2): the depth-nested tail must not surface a dangling
+      // </think> as the user-visible answer.
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-nested-demotion',
+          created: 123,
+          model: 'gpt-test',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content:
+                  '<think></think><think>outer <think>literal</think></think>',
               },
               finish_reason: 'stop',
               logprobs: null,
@@ -5412,7 +5797,7 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(response.candidates?.[0]?.content?.parts).toEqual([
-        { text: '<think>visible xml example</think>' },
+        { text: 'outer <think>literal', thought: true },
       ]);
     });
 
