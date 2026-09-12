@@ -130,6 +130,23 @@ interface ScheduledTasksDialogProps {
   onError: (error: unknown, fallback: string) => void;
 }
 
+// Mirrors the daemon's isSlashCommand
+// (packages/cli/src/ui/utils/commandUtils.ts): the daemon only dispatches a
+// slash command when the prompt text starts with '/', so a command prompt
+// must reach it bare — wrapped in the run envelope (first line
+// "Scheduled task: ...") it would go to the model as literal text instead.
+function runsAsSlashCommand(prompt: string): boolean {
+  if (
+    !prompt.startsWith('/') ||
+    prompt.startsWith('//') ||
+    prompt.startsWith('/*')
+  ) {
+    return false;
+  }
+  const firstToken = prompt.slice(1).trimStart().split(/\s+/u)[0] ?? '';
+  return !/[/\\]/.test(firstToken);
+}
+
 /** A stable per-card identity. Task ids are unique only WITHIN a workspace's
  * file, so the aggregated view keys on (workspace, id) — otherwise two
  * same-id tasks from different workspaces would collide in the React list and
@@ -1249,17 +1266,18 @@ export function ScheduledTasksDialog({
           await reload();
           return;
         }
-        const runPrompt = fresh.sessionId
-          ? buildScheduledTaskRunContent({
-              id: fresh.id,
-              name: fresh.name,
-              cron: fresh.cron,
-              triggeredAt: Date.now(),
-              trigger: 'manual',
-              sessionMode: 'persistent',
-              prompt: fresh.prompt,
-            })
-          : fresh.prompt;
+        const runPrompt =
+          fresh.sessionId && !runsAsSlashCommand(fresh.prompt)
+            ? buildScheduledTaskRunContent({
+                id: fresh.id,
+                name: fresh.name,
+                cron: fresh.cron,
+                triggeredAt: Date.now(),
+                trigger: 'manual',
+                sessionMode: 'persistent',
+                prompt: fresh.prompt,
+              })
+            : fresh.prompt;
         if (fresh.recurring) {
           // Recurring: enqueue FIRST (onRunPrompt resolves at admission, rejects
           // if the session can't be opened), record AFTER — so a failed enqueue

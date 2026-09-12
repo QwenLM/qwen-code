@@ -78,13 +78,6 @@ async function mount(
       sessionId: string | null,
     ) => void | Promise<void>;
     onError?: (error: unknown, message: string) => void;
-    lockedWorkspace?: {
-      id: string;
-      cwd: string;
-      primary: boolean;
-      trusted: boolean;
-      kind: 'ordinary';
-    };
   } = {},
 ) {
   actions.listScheduledTasks.mockResolvedValue(tasks);
@@ -108,31 +101,21 @@ async function mount(
   document.body.appendChild(container);
   document.body.appendChild(portalRoot);
   root = createRoot(container);
-  const render = async (nextOpts: typeof opts) => {
-    await act(async () => {
-      root!.render(
-        <WebShellPortalRootContext.Provider value={portalRoot}>
-          <I18nProvider language="en">
-            <ScheduledTasksDialog
-              onRunPrompt={nextOpts.onRunPrompt ?? vi.fn()}
-              onCreateViaChat={vi.fn()}
-              onOpenSession={nextOpts.onOpenSession}
-              lockedWorkspace={nextOpts.lockedWorkspace}
-              onError={nextOpts.onError ?? vi.fn()}
-            />
-          </I18nProvider>
-        </WebShellPortalRootContext.Provider>,
-      );
-    });
-  };
-  await render(opts);
+  await act(async () => {
+    root!.render(
+      <WebShellPortalRootContext.Provider value={portalRoot}>
+        <I18nProvider language="en">
+          <ScheduledTasksDialog
+            onRunPrompt={opts.onRunPrompt ?? vi.fn()}
+            onCreateViaChat={vi.fn()}
+            onOpenSession={opts.onOpenSession}
+            onError={opts.onError ?? vi.fn()}
+          />
+        </I18nProvider>
+      </WebShellPortalRootContext.Provider>,
+    );
+  });
   await flush();
-  return {
-    rerender: async (nextOpts: typeof opts) => {
-      await render(nextOpts);
-      await flush();
-    },
-  };
 }
 
 // Flush the async list load (and any post-action reload) so state settles.
@@ -186,6 +169,16 @@ function findRunDestination(
   value: 'per_run' | 'dedicated',
 ): HTMLButtonElement | null {
   return document.querySelector(`[data-web-shell-run-destination="${value}"]`);
+}
+
+// The option div's data-selected is the component-owned styling hook; the
+// radio's data-state is Radix-internal.
+function runDestinationSelected(value: 'per_run' | 'dedicated'): boolean {
+  return (
+    findRunDestination(value)
+      ?.closest('[data-selected]')
+      ?.getAttribute('data-selected') === 'true'
+  );
 }
 
 function deferred<T = unknown>() {
@@ -255,9 +248,13 @@ describe('ScheduledTasksDialog editing', () => {
     expect(
       document.querySelectorAll('[data-web-shell-run-destination]'),
     ).toHaveLength(2);
-    expect(findRunDestination('per_run')?.dataset['state']).toBe('checked');
-    expect(findRunDestination('dedicated')).not.toBeNull();
-    expect(document.body.textContent).not.toContain('Current conversation');
+    expect(runDestinationSelected('per_run')).toBe(true);
+    expect(runDestinationSelected('dedicated')).toBe(false);
+    expect(
+      Array.from(
+        document.querySelectorAll('[data-web-shell-run-destination]'),
+      ).map((el) => el.getAttribute('data-web-shell-run-destination')),
+    ).toEqual(['per_run', 'dedicated']);
     await enterPromptAndCreate('continue later');
 
     expect(actions.createScheduledTask).toHaveBeenCalledWith(
@@ -322,7 +319,7 @@ describe('ScheduledTasksDialog editing', () => {
     await mount([]);
     click(findButton('New scheduled task'));
 
-    expect(findRunDestination('per_run')?.dataset['state']).toBe('checked');
+    expect(runDestinationSelected('per_run')).toBe(true);
     const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
     act(() => {
       prompt.textContent = 'review pull requests';
@@ -1088,6 +1085,20 @@ describe('ScheduledTasksDialog run now', () => {
       ),
       'sess-9',
     );
+  });
+
+  it('sends a slash-command prompt bare so the daemon still dispatches the command', async () => {
+    // The run envelope's first line is "Scheduled task: ...", and the daemon
+    // only dispatches slash commands when the prompt starts with '/' — an
+    // enveloped '/deploy-check' would reach the model as literal text.
+    const onRunPrompt = vi.fn();
+    await mount([baseTask({ sessionId: 'sess-9', prompt: '/deploy-check' })], {
+      onRunPrompt,
+    });
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+    expect(onRunPrompt).toHaveBeenCalledWith('/deploy-check', 'sess-9');
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
   });
 
   it('passes a null sessionId through for an unbound task', async () => {

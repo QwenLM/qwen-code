@@ -2333,6 +2333,27 @@ describe('SessionOverviewPanel', () => {
     expect(onOpenSession).not.toHaveBeenCalled();
   });
 
+  it('keeps archive and delete unavailable for a scheduled-task controller card', () => {
+    // The daemon couples the controller session to its task: archiving
+    // disables the task and deleting removes it. Those pauses live on the
+    // sidebar row / Tasks surface, which name the task — the card row does
+    // not offer them.
+    sessionsState.sessions = [
+      session('controller-1', {
+        displayName: 'Daily digest',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      }),
+      session('plain-1', { displayName: 'Plain chat', sourceType: 'default' }),
+    ];
+    render();
+    const [controllerRow, plainRow] = rows();
+    expect(rowActionButton(controllerRow!, 'Archive').disabled).toBe(true);
+    expect(rowActionButton(controllerRow!, 'Delete').disabled).toBe(true);
+    expect(rowActionButton(plainRow!, 'Archive').disabled).toBe(false);
+    expect(rowActionButton(plainRow!, 'Delete').disabled).toBe(false);
+  });
+
   it('archives the current session and clears it after success', async () => {
     connectionState.sessionId = 's1';
     sessionsState.sessions = [session('s1', { displayName: 'One' })];

@@ -1339,6 +1339,8 @@ export function WebShellSidebar({
   );
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
+  const [unarchiveCandidate, setUnarchiveCandidate] =
+    useState<DaemonSessionSummary | null>(null);
   const [groupMenu, setGroupMenu] = useState<GroupMenuState | null>(null);
   const groupMenuOpenRef = useRef(groupMenu !== null);
   useEffect(() => {
@@ -3616,6 +3618,12 @@ export function WebShellSidebar({
     ],
   );
 
+  const confirmUnarchiveSession = useCallback(() => {
+    const session = unarchiveCandidate;
+    setUnarchiveCandidate(null);
+    if (session) handleUnarchive(session);
+  }, [handleUnarchive, unarchiveCandidate]);
+
   const openGroupMenuFromAnchor = useCallback(
     async (anchorEl: HTMLElement, session: DaemonSessionSummary) => {
       if (!canOrganizeSession(session, 'group')) return;
@@ -4365,6 +4373,11 @@ export function WebShellSidebar({
                             disabled={busy}
                             onSelect={() => {
                               if (standalone) standalone.onUnarchive?.();
+                              // Restoring a task-bound controller re-enables
+                              // its scheduled task daemon-side — pause first so
+                              // that does not happen unnamed.
+                              else if (session.sourceType === 'scheduled_task')
+                                setUnarchiveCandidate(session);
                               else handleUnarchive(session);
                             }}
                           >
@@ -5336,6 +5349,33 @@ export function WebShellSidebar({
                 >
                   {t('sidebar.delete')}
                 </button>
+              </div>
+            </div>
+          </DialogShell>
+        )}
+        {unarchiveCandidate && (
+          <DialogShell
+            title={t('sidebar.unarchive')}
+            size="sm"
+            onClose={() => setUnarchiveCandidate(null)}
+          >
+            <div className={styles.confirmContent}>
+              <p className={styles.confirmDescription}>
+                {t('sidebar.unarchiveScheduledTaskConfirmDescription', {
+                  name: getCompactSessionLabel(unarchiveCandidate),
+                })}
+              </p>
+              <div className={styles.confirmActions}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  onClick={() => setUnarchiveCandidate(null)}
+                >
+                  {t('common.cancel')}
+                </button>
+                <Button type="button" onClick={confirmUnarchiveSession}>
+                  {t('sidebar.unarchive')}
+                </Button>
               </div>
             </div>
           </DialogShell>

@@ -48,6 +48,8 @@ import {
   SessionService,
   Storage,
   stripTerminalControlSequences,
+  detectLoopSentinel,
+  detectAutonomousSentinel,
   isValidCronTaskRoutingId,
   MAX_JOBS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
@@ -155,6 +157,11 @@ const MAX_SESSION_NAME_LENGTH = 60;
  * the session list — and truncates on a code-point boundary so slicing can't
  * leave a lone surrogate rendered as `�`. */
 export function scheduledTaskSessionName(label: string): string {
+  // A tool-created /loop task's prompt is a sentinel marker, not a readable
+  // label — name the session after what the sentinel runs instead of showing
+  // a literal `<<loop.md>>` row in the session list.
+  if (detectLoopSentinel(label)) return 'Loop (loop.md)';
+  if (detectAutonomousSentinel(label)) return 'Autonomous loop';
   const cleaned = stripTerminalControlSequences(label)
     // Unicode Bidi_Control marks: ALM (U+061C), LRM/RLM (U+200E/200F), the
     // embedding/override set (U+202A..U+202E), and the isolates (U+2066..U+2069).

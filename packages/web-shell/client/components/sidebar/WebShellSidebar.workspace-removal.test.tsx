@@ -4743,6 +4743,55 @@ describe('WebShellSidebar session source switch', () => {
     expect(ordinaryDialog?.textContent).not.toContain('scheduled task');
   });
 
+  it('confirms before restoring an archived scheduled-task controller', async () => {
+    // Restoring the controller re-enables its recurring task daemon-side
+    // (enableTasksForSessions), so the row names the task and waits for a
+    // confirm instead of resuming an unattended schedule on one menu click.
+    archived.sessions.push(
+      {
+        sessionId: 'archived-controller',
+        displayName: 'Archived digest',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+        isArchived: true,
+      },
+      {
+        sessionId: 'archived-ordinary',
+        displayName: 'Archived ordinary',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+        isArchived: true,
+      },
+    );
+    renderSidebar();
+    await expandArchived();
+
+    await selectSessionMenuItem('Archived digest', 'Restore');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain(
+      'Its scheduled task will start running again.',
+    );
+    expect(archived.unarchiveSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      click(dialogButton('Restore'));
+      await Promise.resolve();
+      await archived.unarchiveSession.mock.results.at(-1)?.value;
+    });
+    expect(archived.unarchiveSession).toHaveBeenCalledWith(
+      'archived-controller',
+    );
+
+    // An ordinary archived row still restores with no dialog.
+    await selectSessionMenuItem('Archived ordinary', 'Restore');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    await act(async () => {
+      await archived.unarchiveSession.mock.results.at(-1)?.value;
+    });
+    expect(archived.unarchiveSession).toHaveBeenCalledWith('archived-ordinary');
+  });
+
   it('groups scheduled-task runs under the task title and source icon', async () => {
     const scheduledRun: DaemonSessionSummary = {
       sessionId: 'scheduled-run',

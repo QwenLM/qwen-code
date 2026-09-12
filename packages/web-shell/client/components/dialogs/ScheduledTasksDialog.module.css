@@ -119,10 +119,6 @@
   border: 0;
 }
 
-.runDestinationField > .fieldLabel {
-  margin-bottom: 7px;
-}
-
 .runDestinationGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -154,7 +150,7 @@
     color-mix(in srgb, var(--primary) 18%, transparent);
 }
 
-.runDestinationOption:focus-within {
+.runDestinationOption:has(:focus-visible) {
   outline: 2px solid color-mix(in srgb, var(--primary) 45%, transparent);
   outline-offset: 2px;
 }
@@ -168,10 +164,7 @@
 
 .runDestinationLabel {
   display: flex;
-  align-items: flex-start;
   gap: 10px;
-  min-height: 76px;
-  padding: 13px 38px 13px 13px;
   box-sizing: border-box;
   cursor: pointer;
 }

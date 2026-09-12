@@ -4721,6 +4721,67 @@ describe('Session', () => {
     }
   });
 
+  it.each([
+    {
+      label: 'a legacy bound task',
+      mode: { boundSessionId: 'test-session-id' },
+    },
+    {
+      label: 'an explicit persistent task',
+      mode: { sessionMode: 'persistent' as const },
+    },
+  ])(
+    'keeps a bound <<autonomous-loop>> sentinel firing as a loop ($label) instead of enveloping it',
+    async ({ mode }) => {
+      // A bare /loop durable task stores the autonomous sentinel with no
+      // sessionMode; the keepalive binds it, so at fire time it satisfies the
+      // envelope gate's legacy branch. Wrapping the sentinel would defeat
+      // detectAutonomousSentinel's whole-string match downstream and the loop
+      // would silently stop self-pacing, so the gate must leave it bare.
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(
+          (
+            callback: (job: {
+              id: string;
+              prompt: string;
+              cronExpr: string;
+              lastFiredAt: number;
+              sessionMode?: 'persistent';
+              boundSessionId?: string;
+            }) => void,
+          ) => {
+            callback({
+              id: 'auto-task-1',
+              prompt: '<<autonomous-loop>>',
+              cronExpr: '*/5 * * * *',
+              lastFiredAt: 123,
+              ...mode,
+            });
+          },
+        ),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      session.startCronScheduler();
+
+      await vi.waitFor(() => {
+        const sentToModel = textParts(firstSentMessage()).join('');
+        expect(sentToModel).toContain('# Autonomous loop tick');
+      });
+      const sentToModel = textParts(firstSentMessage()).join('');
+      expect(sentToModel).not.toContain('Scheduled task:');
+      expect(sentToModel).not.toContain('Execute the instructions below now');
+    },
+  );
+
   it('keeps a legacy unbound scheduled fire as a plain prompt', async () => {
     const scheduler = {
       hasPendingWork: true,

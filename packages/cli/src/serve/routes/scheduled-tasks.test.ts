@@ -3122,6 +3122,25 @@ describe('scheduledTaskSessionName', () => {
     expect(name.endsWith('…')).toBe(true);
   });
 
+  it('names sentinel-prompt tasks after what they run, not the raw marker', () => {
+    // A tool-created /loop task is stored unnamed, so its controller session
+    // would otherwise appear in the session list as a literal `<<loop.md>>`.
+    expect(scheduledTaskSessionName('<<loop.md>>')).toBe('Loop (loop.md)');
+    expect(scheduledTaskSessionName('<<loop.md-dynamic>>')).toBe(
+      'Loop (loop.md)',
+    );
+    expect(scheduledTaskSessionName('<<autonomous-loop>>')).toBe(
+      'Autonomous loop',
+    );
+    expect(scheduledTaskSessionName('<<autonomous-loop-dynamic>>')).toBe(
+      'Autonomous loop',
+    );
+    // A prompt merely mentioning a sentinel is still an ordinary label.
+    expect(scheduledTaskSessionName('check <<loop.md>> hourly')).toBe(
+      'check <<loop.md>> hourly',
+    );
+  });
+
   it('strips Unicode bidi override/isolate chars (Trojan-Source reordering defense)', () => {
     // The bridge's title guard only rejects C0/DEL, so bidi controls (all
     // > 0x9f) slip through and would visually reorder the label in renderers
