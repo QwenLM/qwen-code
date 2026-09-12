@@ -46,6 +46,7 @@ import {
 } from '../stream-guards.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
+import { markFlushedToolCallPark } from '../stream-transport-retry.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
@@ -267,6 +268,23 @@ function isSSECompatibleContentType(contentType: string | null): boolean {
     mediaType === 'text/event-stream' ||
     mediaType === 'application/x-ndjson' ||
     mediaType === 'application/stream+json'
+  );
+}
+
+/**
+ * True when the response carries user-visible model output: any candidate
+ * part without the `thought` flag (text, functionCall, inlineData, …).
+ * Mirrors LlmChat's delivered-content notion (its
+ * `hasNonThoughtCandidateParts`), which excludes thought parts — a
+ * thought-only prefix must still count as nothing delivered.
+ */
+function hasNonThoughtCandidateParts(
+  response: GenerateContentResponse,
+): boolean {
+  return Boolean(
+    response.candidates?.some((candidate) =>
+      candidate.content?.parts?.some((part) => !part.thought),
+    ),
   );
 }
 
@@ -546,7 +564,7 @@ export class ContentGenerationPipeline {
   private async *processStreamWithLogging(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     context: RequestContext,
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
     telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
@@ -559,6 +577,17 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    // Whether any user-visible content (a non-thought part) has been yielded
+    // on this stream. The error-path flush below consults it before
+    // withholding a parked tool-call finish: it must mirror LlmChat's
+    // delivered-content notion, which excludes thought parts. Seeded from the
+    // caller's continuation marker because the replay gate the withhold
+    // protects is turn-scoped (LlmChat's transportContinuationText), which a
+    // fresh attempt's own yields cannot see: with a continuation in flight
+    // that gate is already shut by the accumulated prefix, and withholding
+    // would only strand the model's decided tool call into another prose
+    // continuation.
+    let contentYielded = request.continuationInFlight === true;
     let pendingFinishProtocolTagSanitized:
       | NonNullable<RequestContext['protocolTagSanitized']>
       | undefined;
@@ -681,11 +710,16 @@ export class ContentGenerationPipeline {
               pendingFinishResponse,
               pendingFinishProtocolTagSanitized,
             );
-            yield pendingFinishResponse;
+            // Set before suspending rather than after: a consumer that throws
+            // into this generator at the yield below never runs the statement
+            // that follows it, and the error-path flush re-tests this flag
+            // before deciding whether the response still needs delivering.
             finishYielded = true;
+            yield pendingFinishResponse;
             // Keep pendingFinishResponse alive so late-arriving usage
             // metadata can still be merged (see finishYielded block above).
           } else {
+            contentYielded ||= hasNonThoughtCandidateParts(response);
             logPendingProtocolTagSanitized(response, sanitization);
             yield response;
           }
@@ -708,6 +742,13 @@ export class ContentGenerationPipeline {
               index: 0,
             },
           ];
+          // Held parts are whatever the converter had accumulated — plain
+          // content, thought-marked reasoning, or both — so this goes through
+          // the same predicate as every other yield site. LlmChat counts a
+          // chunk as delivered on that same rule; if the two flags disagree
+          // here, the error-path flush below withholds a parked tool call
+          // whose replay gate is already shut.
+          contentYielded ||= hasNonThoughtCandidateParts(response);
           yield response;
         }
       } else if (
@@ -728,11 +769,74 @@ export class ContentGenerationPipeline {
           pendingFinishResponse,
           pendingFinishProtocolTagSanitized,
         );
+        // Before the yield, for the reason given at the in-loop one above.
+        finishYielded = true;
         yield pendingFinishResponse;
       }
     } catch (error) {
       if (error instanceof InvalidStreamError) {
         throw error;
+      }
+
+      // A finish chunk parked for the usage merge must not be lost when the
+      // iterator throws before the trailing usage chunk arrives (e.g. a
+      // gateway error frame landing where that tail would have been):
+      // downstream completeness gates key on the finish reason to tell a
+      // completed answer from a cut one. The flush sits below the
+      // InvalidStreamError rethrow — a protocol-tag-leak stream must not
+      // deliver one — and above the guard and StreamContentError rethrows so
+      // every recoverable error class still sees it. The Stage 2d flush above
+      // sets `finishYielded` before it suspends, so a consumer that throws
+      // into this generator while it is parked on that yield cannot make this
+      // flush deliver the same response a second time.
+      //
+      // A parked finish carrying a functionCall stays parked only while
+      // nothing user-visible was delivered: the converter emits functionCall
+      // parts only on the finish chunk, and releasing one here would flip
+      // LlmChat's delivered flags (streamYieldedContentChunk,
+      // streamYieldedFunctionCall) and shut the transport replay gate that
+      // recovers exactly this cut. Once content has been yielded that gate
+      // is already shut, so withholding buys no recovery — it would strand
+      // the model's decided tool call: LlmChat would see prose, no
+      // functionCall, and no finish reason, so the continuation arm would
+      // resume over the delivered prose while the call never reaches
+      // error-path persistence or the scheduler's repair flow. Releasing it
+      // here puts the cut on the same footing as the Anthropic
+      // deferred-batch release gate.
+      // TypeScript narrows pendingFinishResponse to null here (its only
+      // assignments sit inside the handleChunkMerging callback), so the
+      // property access needs the same explicit cast as the finishYielded
+      // merge above.
+      const parked = pendingFinishResponse as GenerateContentResponse | null;
+      const parkedHasToolCall = parked?.candidates?.some((candidate) =>
+        candidate.content?.parts?.some((part) => part.functionCall),
+      );
+      if (
+        pendingFinishResponse &&
+        !finishYielded &&
+        // A cancellation is not a stream failure to recover from: synthesising
+        // a delivery here hands the consumer a finish it was never shown, and
+        // cancellation persistence keeps whatever the consumer received.
+        // Spelled exactly as the PROTOCOL_TAG_LEAK branch below spells it, so
+        // one catch does not hold two notions of "aborted".
+        request.config?.abortSignal?.aborted !== true &&
+        (!parkedHasToolCall || contentYielded)
+      ) {
+        logPendingProtocolTagSanitized(
+          pendingFinishResponse,
+          pendingFinishProtocolTagSanitized,
+        );
+        // `contentYielded` is this pipeline's view of what was delivered, and
+        // the consumer can still withhold a chunk it was handed — LlmChat's
+        // protocol-tag suppression drops a leading-JSON chunk whole. Tag a
+        // released tool call so the send loop, which knows what actually
+        // reached the caller, can refuse to let it shut a replay gate that is
+        // in fact still open.
+        if (parkedHasToolCall) {
+          markFlushedToolCallPark(pendingFinishResponse);
+        }
+        yield pendingFinishResponse;
+        finishYielded = true;
       }
 
       // Re-throw StreamContentError directly so it can be handled by

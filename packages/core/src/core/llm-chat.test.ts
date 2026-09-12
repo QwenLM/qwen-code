@@ -6013,6 +6013,147 @@ describe('LlmChat', async () => {
       ).toBe(true);
     });
 
+    it('compacts a status-less upstream overflow instead of replaying it', async () => {
+      // A gateway can relay an input-length rejection into an already-200
+      // stream with no HTTP status and a request id attached, and `Range` is
+      // not a code the permanence list knows — so this classifies as a
+      // retryable upstream failure. Re-sending cannot shrink the request, and
+      // the continuation arm would re-send it strictly larger, so the recovery
+      // gate has to let it fall through to the one-shot compaction below.
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 128_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+
+      const overflowError = Object.assign(
+        new Error(
+          "This model's maximum context length is 128000 tokens. " +
+            'However, your messages resulted in 135000 tokens.',
+        ),
+        { code: 'Range', requestID: 'req-1' },
+      );
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          (async function* () {
+            throw overflowError;
+
+            yield {} as GenerateContentResponse;
+          })(),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('answer after compact'));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-statusless-overflow-compacts',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      // Compaction ran, and it came first. A replay would have emitted a plain
+      // RETRY with no COMPRESSED event at all and never called compress.
+      expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(events[1]?.type).toBe(StreamEventType.RETRY);
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'answer after compact',
+        ),
+      ).toBe(true);
+    });
+
+    it('compacts a status-less payload overflow instead of replaying it', async () => {
+      // The byte-size sibling of the context-length case above: a reverse
+      // proxy can reject the serialized request with a bare 413 reason phrase
+      // — no token wording, no HTTP status surviving, but a request id
+      // attached — so the error classifies as a retryable upstream failure
+      // and only the payload-overflow exclusion keeps it out of the replay
+      // gate. Re-sending cannot shrink a request.
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 128_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+
+      const overflowError = Object.assign(
+        new Error('413 Request Entity Too Large'),
+        { requestID: 'req-1' },
+      );
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          (async function* () {
+            throw overflowError;
+
+            yield {} as GenerateContentResponse;
+          })(),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('answer after compact'));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-statusless-payload-overflow-compacts',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      // Compaction ran, and it came first. A replay would have emitted a plain
+      // RETRY with no COMPRESSED event at all and never called compress.
+      expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(events[1]?.type).toBe(StreamEventType.RETRY);
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'answer after compact',
+        ),
+      ).toBe(true);
+    });
+
     it('uses the configured context window when reactive overflow has no token counts', async () => {
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,
@@ -10513,6 +10654,49 @@ describe('LlmChat', async () => {
         },
       );
 
+      it('does not accept a server error that lands after the answer closed', async () => {
+        // The acceptance gate in processStreamResponse swallows a trailing
+        // failure only for the two classes that say nothing about the answer —
+        // a socket cut and a status-less frame the provider traced. A 5xx is
+        // the server's own verdict on the response, so a closed answer with
+        // delivered text must still fail here rather than be certified
+        // complete. The sibling case above cannot pin this: its chunk carries
+        // no finish reason, so the gate declines on that conjunct whatever the
+        // allow-list says.
+        const error = serverError();
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'a complete answer' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as GenerateContentResponse;
+            throw error;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'server-after-closed-answer',
+        );
+        const { caughtError } = await drainCollecting(stream);
+
+        expect(caughtError).toBe(error);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+        expect(mockDebugLoggerWarn).not.toHaveBeenCalledWith(
+          'Accepting completed answer despite trailing stream failure.',
+          expect.anything(),
+        );
+      });
+
       it('does not replay when an earlier transport attempt already delivered text', async () => {
         const error = serverError();
         vi.mocked(mockContentGenerator.generateContentStream)
@@ -11739,6 +11923,832 @@ describe('LlmChat', async () => {
         }
       });
 
+      it('continues from the delivered text when a status-less upstream error cuts the stream', async () => {
+        // A gateway error frame is not a socket cut, but once answer text has
+        // reached the caller the two have the same constraint: replaying would
+        // duplicate what is already on screen, so the only recovery left is to
+        // keep the delivered text and ask the model to resume from it.
+        vi.useFakeTimers();
+        try {
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('<html><body>');
+                throw upstreamError;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('</body></html>', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'write a game' },
+            'prompt-upstream-statusless-continuation',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(1);
+          expect(
+            retries[0]!.type === StreamEventType.RETRY &&
+              retries[0]!.isContinuation,
+          ).toBe(true);
+
+          // Both halves reach the caller, in order and exactly once — the
+          // no-duplication invariant the replay gate exists to protect.
+          const delivered = events
+            .filter((event) => event.type === StreamEventType.CHUNK)
+            .map(
+              (event) =>
+                (event as { value: GenerateContentResponse }).value
+                  .candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+            )
+            .join('');
+          expect(delivered).toBe('<html><body></body></html>');
+          // The continuation log carries the same classifier fields as the
+          // replay log: the reason names the cause, and the request id is the
+          // only handle a gateway ticket can be filed against.
+          expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+            'Transport stream continuation scheduled',
+            expect.objectContaining({
+              classificationReason: 'upstream-error-without-status',
+              providerCode: 'KeyError',
+              requestId: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+            }),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('accepts the completed answer when a status-less upstream error lands after the terminal finish reason', async () => {
+        // The SDK's error scan is position-independent and the pipeline keeps
+        // pulling the iterator after the finish chunk to absorb trailing usage
+        // metadata, so a gateway that fails while writing that tail throws the
+        // same status-less frame *after* the answer already completed. The
+        // turn is over: failing it would strand a complete answer out of
+        // history and the JSONL record, and continuing would send a
+        // "connection dropped mid-response" instruction that is false for
+        // this shape and fold a fabricated tail into durable history.
+        const upstreamError = Object.assign(new Error("'id'"), {
+          code: 'KeyError',
+          requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+        });
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield textChunk('a complete answer', 'STOP');
+              throw upstreamError;
+            })(),
+          )
+          // Consumed only if the gate wrongly resumes the finished answer:
+          // the continuation would land here and appear to succeed, so a
+          // regression reports as a call count rather than as a hang.
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield textChunk('fabricated tail', 'STOP');
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-upstream-statusless-after-finish',
+        );
+        // No fake timers: nothing retries on this path, so there is no
+        // backoff to advance through (see the permanent-rejection case in the
+        // retry describe above).
+        const { events, caughtError } = await drainCollecting(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(0);
+        expect(caughtError).toBeUndefined();
+        // The completed answer is the turn's outcome: it reaches durable
+        // history exactly as a cleanly-ended stream would leave it.
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: 'a complete answer' }],
+        });
+        // The trailing failure stays observable — as the acceptance log,
+        // not as a retry decision.
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Accepting completed answer despite trailing stream failure.',
+          expect.objectContaining({ finishReason: 'STOP' }),
+        );
+      });
+
+      it('accepts the completed answer when a transport cut lands after the terminal finish reason', async () => {
+        // The same post-completion shape through the socket-cut class: the
+        // finish chunk was already delivered when the connection died, so
+        // the turn is complete and must neither fail nor resume.
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            cutAfter([textChunk('a complete answer', 'STOP')]),
+          )
+          // Tripwire: consumed only if the finished answer is wrongly resumed.
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield textChunk('fabricated tail', 'STOP');
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-cut-after-finish',
+        );
+        const { events, caughtError } = await drainCollecting(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(0);
+        expect(caughtError).toBeUndefined();
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: 'a complete answer' }],
+        });
+      });
+
+      it('propagates a user cancellation that lands after the terminal finish reason', async () => {
+        // The acceptance gate exists for transport cuts and status-less
+        // gateway frames in the trailing usage tail. A user cancel arriving
+        // in the same window is not a trailing-transport failure: this
+        // file's convention (the isAbortError rethrows in the model-fallback
+        // paths) is that a cancel is never converted into another outcome.
+        const abortError = Object.assign(new Error('Aborted'), {
+          name: 'AbortError',
+        });
+
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(
+          (async function* () {
+            yield textChunk('a complete answer', 'STOP');
+            throw abortError;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-abort-after-finish',
+        );
+        const { events, caughtError } = await drainCollecting(stream);
+
+        expect(caughtError).toBe(abortError);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(0);
+        // The cancelled turn must not persist as a completed model turn.
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'user',
+          parts: [{ text: 'test' }],
+        });
+        expect(mockDebugLoggerWarn).not.toHaveBeenCalledWith(
+          'Accepting completed answer despite trailing stream failure.',
+          expect.anything(),
+        );
+      });
+
+      it("propagates the pipeline's own InvalidStreamError after the terminal finish reason", async () => {
+        // The pipeline converts a post-finish content blip into
+        // InvalidStreamError('PROTOCOL_TAG_LEAK') when it has already judged
+        // the response untrustworthy. Accepting the turn anyway would
+        // persist exactly the response the pipeline rejected and bypass the
+        // invalid-stream retry budget that class rides on.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a complete answer', 'STOP');
+                throw new InvalidStreamError(
+                  'Model response continued after a finish reason.',
+                  'PROTOCOL_TAG_LEAK',
+                );
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a clean answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-invalid-stream-after-finish',
+          );
+          await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          // The rejection rode the invalid-stream retry budget that owns it
+          // instead of being swallowed by the acceptance gate.
+          expect(mockLogContentRetry).toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              error_type: 'PROTOCOL_TAG_LEAK',
+              model: 'test-model',
+            }),
+          );
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'a clean answer' }],
+          });
+          expect(mockDebugLoggerWarn).not.toHaveBeenCalledWith(
+            'Accepting completed answer despite trailing stream failure.',
+            expect.anything(),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('propagates a throttle only the configured retry codes recognise', async () => {
+        // The gate decides by classification, so it has to classify with the
+        // send loop's own context. A provider code that only the configured
+        // `retryErrorCodes` mark as throttling carries a request id and no
+        // status: read without that context it looks like a status-less
+        // upstream frame — the one class this gate accepts — and a throttled
+        // turn gets certified as a completed one.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+            authType: AuthType.USE_OPENAI,
+            model: 'test-model',
+            retryErrorCodes: [4999],
+          });
+          const configuredThrottle = new StreamContentError(
+            '{"error":{"code":4999,"message":"custom throttle","request_id":"req-configured-throttle"}}',
+          );
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a complete answer', 'STOP');
+                throw configuredThrottle;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('answer after the throttle retry', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-configured-throttle-after-finish',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 120_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          // The throttle rode the rate-limit retry that owns it instead of
+          // being swallowed by the acceptance gate.
+          expect(
+            events.some((event) => event.type === StreamEventType.RETRY),
+          ).toBe(true);
+          expect(mockDebugLoggerWarn).not.toHaveBeenCalledWith(
+            'Accepting completed answer despite trailing stream failure.',
+            expect.anything(),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('retries a quiet tool-result close rather than persisting the delivered prefix', async () => {
+        // The no-error arm of the quiet tool-result close. An attempt that
+        // closes carrying only a thought part made no visible progress, which
+        // #7039 owns: it rides the invalid-stream retry and recovers on the
+        // third attempt, and the fresh restart discards the prose attempt 1
+        // delivered — that discard is this policy's doing, not the acceptance
+        // gate's. The with-error sibling below is why the gate's progress term
+        // is turn-scoped: a trailing frame used to leave the same shape owned
+        // by no arm at all, so the turn died on a transport artefact where the
+        // identical attempt one frame earlier recovered. Both arms now end
+        // here.
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              cutAfter([textChunk('Let me read that file. ')]),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        role: 'model',
+                        parts: [{ text: 'Reconsidering.', thought: true }],
+                      },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('the recovered answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            {
+              message: [
+                {
+                  functionResponse: {
+                    id: 'call_quiet_tool_result_close',
+                    name: 'read_file',
+                    response: { output: 'file contents' },
+                  },
+                },
+              ],
+            },
+            'prompt-quiet-tool-result-close-no-trailing-error',
+          );
+
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(60_000);
+          const { caughtError } = await collecting;
+
+          // The quiet close rode the invalid-stream retry and recovered.
+          expect(caughtError).toBeUndefined();
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          // The turn's answer is the retry's, and the prefix the caller watched
+          // stream is in neither durable layer — with no error involved.
+          expect(recordedText(recordAssistantTurn)).toBe(
+            'the recovered answer',
+          );
+          expect(JSON.stringify(chatWithRecording.getHistory())).not.toContain(
+            'Let me read that file.',
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it.each([
+        {
+          label: 'status-less frame',
+          trailing: () =>
+            Object.assign(new Error("'id'"), {
+              code: 'KeyError',
+              requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+            }),
+        },
+        { label: 'socket cut', trailing: () => socketCut() },
+      ] as const)(
+        'continues past a trailing $label on a quiet tool-result close',
+        async ({ trailing }) => {
+          // R17-1. A tool-result continuation attempt that closes carrying
+          // only a thought part plus STOP, then takes a trailing failure where
+          // the usage tail belonged. The continuation arm owns this shape: the
+          // closed-finish veto is scoped to an attempt that produced output of
+          // its own, and a thought-only attempt never trips it, so the cut is
+          // continuable and the prefix the caller watched stream is folded into
+          // the resumed answer. The acceptance gate must therefore decline
+          // here, on its attempt-local progress term. Accepting instead nulls
+          // the error, the empty-response validation throws
+          // NO_TOOL_RESULT_PROGRESS, and the invalid-stream arm's fresh restart
+          // calls resetTransportContinuation — the prose is then lost from both
+          // durable layers and the whole answer is regenerated. Both classes
+          // the gate admits take the same path through that conjunct, so the
+          // shape is pinned for each.
+          vi.useFakeTimers();
+          try {
+            const recordAssistantTurn = vi.fn();
+            const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+            const trailingError = trailing();
+
+            vi.mocked(mockContentGenerator.generateContentStream)
+              .mockResolvedValueOnce(
+                cutAfter([textChunk('Let me read that file. ')]),
+              )
+              .mockResolvedValueOnce(
+                (async function* () {
+                  yield {
+                    candidates: [
+                      {
+                        content: {
+                          role: 'model',
+                          parts: [{ text: 'Reconsidering.', thought: true }],
+                        },
+                        finishReason: 'STOP',
+                      },
+                    ],
+                  } as unknown as GenerateContentResponse;
+                  throw trailingError;
+                })(),
+              )
+              .mockResolvedValueOnce(
+                (async function* () {
+                  yield textChunk('the recovered answer', 'STOP');
+                })(),
+              );
+
+            const stream = await chatWithRecording.sendMessageStream(
+              'test-model',
+              {
+                message: [
+                  {
+                    functionResponse: {
+                      id: 'call_quiet_close_with_frame',
+                      name: 'read_file',
+                      response: { output: 'file contents' },
+                    },
+                  },
+                ],
+              },
+              'prompt-quiet-tool-result-close-with-trailing-failure',
+            );
+
+            const collecting = drainCollecting(stream);
+            await vi.advanceTimersByTimeAsync(0);
+            await vi.advanceTimersByTimeAsync(60_000);
+            const { events, caughtError } = await collecting;
+
+            expect(caughtError).toBeUndefined();
+            expect(
+              mockContentGenerator.generateContentStream,
+            ).toHaveBeenCalledTimes(3);
+            // Continuations, not fresh restarts: that is what keeps the prefix.
+            const retries = events.filter(
+              (event) => event.type === StreamEventType.RETRY,
+            );
+            expect(retries).toHaveLength(2);
+            expect(
+              retries.every(
+                (event) =>
+                  event.type === StreamEventType.RETRY && event.isContinuation,
+              ),
+            ).toBe(true);
+            // The prose the caller watched stream is folded into the resumed
+            // answer in both durable layers, and the gate did not certify the
+            // trailing failure as a completion.
+            expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+            expect(recordedText(recordAssistantTurn)).toBe(
+              'Let me read that file. the recovered answer',
+            );
+            expect(mockDebugLoggerWarn).not.toHaveBeenCalledWith(
+              'Accepting completed answer despite trailing stream failure.',
+              expect.anything(),
+            );
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
+
+      it('does not schedule a continuation over a closed finish reason on a tool-result send', async () => {
+        // With a user[functionResponse] history tail every attempt is a
+        // tool-result continuation, so processStreamResponse defers the
+        // finishReason off every yielded chunk and a failed attempt never
+        // re-emits it: the veto's yielded-chunk signal is blind to the
+        // close and must read what processStreamResponse observed instead.
+        vi.useFakeTimers();
+        try {
+          chat.setHistory([
+            { role: 'user', parts: [{ text: 'read the file' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call_read_file',
+                    name: 'read_file',
+                    args: { path: '/tmp/x' },
+                  },
+                },
+              ],
+            },
+          ]);
+          const upstreamError = () =>
+            Object.assign(new Error("'id'"), {
+              code: 'KeyError',
+              requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+            });
+          // A 5xx sits outside the acceptance gate's allow-list, so the gate
+          // declines and this veto is the operative cause — the shape this
+          // witness exists for. A socket cut or a traced status-less frame on a
+          // tool-result send is owned elsewhere now: the gate accepts it and
+          // #7039 retries the quiet close (see the two siblings above).
+          const serverError = () =>
+            Object.assign(new Error('Upstream inference unavailable'), {
+              status: 500,
+              code: 'server_error',
+            });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            // Attempt 1 delivers prose and is cut, arming a continuation.
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('Let me read that file. ');
+                throw upstreamError();
+              })(),
+            )
+            // Attempt 2 closes the answer with output of its own — visible text
+            // beside STOP — and the server then fails in the usage tail.
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('The file is empty.', 'STOP');
+                throw serverError();
+              })(),
+            )
+            // Tripwire: consumed only by a wrongly scheduled third attempt.
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('fabricated tail', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            {
+              message: {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            },
+            'prompt-upstream-statusless-tool-result-closed-finish',
+          );
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(10_000);
+          const { caughtError } = await collecting;
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          expect(caughtError).toBeInstanceOf(Error);
+          expect(JSON.stringify(chat.getHistory())).not.toContain(
+            'fabricated tail',
+          );
+          // The not-taken log can only attribute the stop to the closed
+          // finish reason if the veto actually saw the close — and on a
+          // tool-result send it can only see it through the observed-close
+          // mirror, because the deferral strips the reason off every chunk
+          // this loop receives.
+          expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+            'Server stream retry not taken',
+            expect.objectContaining({
+              retryDecision: 'skipped_terminal_finish_reason',
+            }),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("does not let a previous send's closed finish reason veto a later send's continuation", async () => {
+        // The observed-close side channel is per-attempt state, reset beside
+        // `lastFinishReason` before each attempt: a completed earlier send
+        // must not leak its terminal reason into a later send's
+        // continuation decision.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mockResolvedValueOnce(
+            (async function* () {
+              yield textChunk('first answer', 'STOP');
+            })(),
+          );
+          const first = await chat.sendMessageStream(
+            'test-model',
+            { message: 'first' },
+            'prompt-observed-close-isolation-1',
+          );
+          for await (const _ of first) {
+            /* drain */
+          }
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('second partial ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('completed', 'STOP');
+              })(),
+            );
+          const second = await chat.sendMessageStream(
+            'test-model',
+            { message: 'second' },
+            'prompt-observed-close-isolation-2',
+          );
+          const events = await collectStreamWithFakeTimers(second, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(1);
+          expect(
+            retries[0]!.type === StreamEventType.RETRY &&
+              retries[0]!.isContinuation,
+          ).toBe(true);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'second partial completed' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('continues when the cut follows a finish reason that carries no completeness information', async () => {
+        // The converters map every unrecognised wire value to
+        // FINISH_REASON_UNSPECIFIED — a truthy "we could not tell", not a
+        // terminal signal. Treating it as a closed answer would refuse the
+        // very continuation this arm exists for.
+        vi.useFakeTimers();
+        try {
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('partial answer', 'FINISH_REASON_UNSPECIFIED');
+                throw upstreamError;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk(' and the rest', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-upstream-statusless-unmapped-finish',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(1);
+          expect(
+            retries[0]!.type === StreamEventType.RETRY &&
+              retries[0]!.isContinuation,
+          ).toBe(true);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'partial answer and the rest' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('continues a MAX_TOKENS-truncated answer after a stream cut', async () => {
+        // The carve-out's own witness: a generation truncated at MAX_TOKENS
+        // and then cut by the same gateway idle timeout is the exact shape
+        // the continuation arm exists for. The finish reason must ride the
+        // *pre-error* chunk — `lastFinishReason` is reset per attempt and
+        // only the failing attempt's chunks feed the gate.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              cutAfter([textChunk('partial answer', 'MAX_TOKENS')]),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk(' completed', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-max-tokens',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(1);
+          expect(
+            retries[0]!.type === StreamEventType.RETRY &&
+              retries[0]!.isContinuation,
+          ).toBe(true);
+          const delivered = events
+            .filter((event) => event.type === StreamEventType.CHUNK)
+            .map(
+              (event) =>
+                (event as { value: GenerateContentResponse }).value
+                  .candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+            )
+            .join('');
+          expect(delivered).toBe('partial answer completed');
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'partial answer completed' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('attributes a refused continuation to the terminal finish reason', async () => {
+        // When the finish chunk was already delivered, recovery is refused
+        // because the answer closed — not because content reached the
+        // caller. The not-taken log must name the operative cause, or a
+        // gateway ticket filed with this payload points at the wrong gate.
+        const toolChunk = {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_1',
+                      name: 'read_file',
+                      args: { path: '/tmp/a.txt' },
+                    },
+                  },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          cutAfter([textChunk('delivered half '), toolChunk]),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-not-taken-terminal-finish',
+        );
+        await expect(async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        }).rejects.toThrow('terminated');
+
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Transport stream retry not taken',
+          expect.objectContaining({
+            retryDecision: 'skipped_terminal_finish_reason',
+          }),
+        );
+      });
+
       it('stitches the delivered text into durable history', async () => {
         // Without the merge, history would keep only the continuation half and
         // every later turn (plus /compress and --resume) would see an answer
@@ -11972,6 +12982,213 @@ describe('LlmChat', async () => {
           // The durable record and in-memory history must not disagree, even
           // though the send was abandoned before it could finish.
           expect(historyText).toBe(recordedText(recordAssistantTurn));
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('persists the delivered prefix when a continuation closes without new visible text', async () => {
+        // R11-1: the acceptance gate measured completeness with this attempt's
+        // own `contentText`. A continuation attempt that closes carrying only a
+        // thought part therefore has `contentText === ''`, the gate declines,
+        // and no other arm owns the failure — replay needs an empty delivered
+        // prefix, continuation is vetoed by the very close this attempt
+        // mirrored, and the rate-limit, overflow and invalid-stream arms do not
+        // match a status-less frame. The turn threw, and the prose the caller
+        // already watched stream reached neither `this.history` nor the JSONL
+        // record, so the next request and `--resume` both continued as if it had
+        // never been said. The identical attempt without the trailing error is
+        // accepted and persisted, which is what makes this the gate's doing
+        // rather than the provider's.
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('Here is the game: ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        role: 'model',
+                        parts: [
+                          { text: 'Double-checking the rules.', thought: true },
+                        ],
+                      },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+                throw upstreamError;
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'write a game' },
+            'prompt-continuation-closes-without-new-text',
+          );
+
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(60_000);
+          const { caughtError } = await collecting;
+
+          expect(caughtError).toBeUndefined();
+          // The closed answer is the turn's outcome: the prefix the caller
+          // already saw reaches both durable layers, as a clean close would.
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe('Here is the game: ');
+          const historyText = chatWithRecording
+            .getHistory()
+            .at(-1)
+            ?.parts?.find(
+              (part) => part.text !== undefined && !part.thought,
+            )?.text;
+          expect(historyText).toBe('Here is the game: ');
+          // Nothing was refused: the turn completed rather than reporting a
+          // recovery decision it never had to make.
+          expect(mockDebugLoggerWarn).not.toHaveBeenCalledWith(
+            'Transport stream retry not taken',
+            expect.anything(),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('continues when a continuation attempt closes without contributing parts', async () => {
+        // R15-1. Asked to resume an answer it considers complete, a model
+        // returns a bare finish chunk with no parts, and the attempt then dies
+        // in the usage tail. Two changes in this diff combine on that shape:
+        // the pipeline's error-path flush now delivers the parked empty finish
+        // (pre-diff it was dropped), so `lastFinishReason` reads `STOP`, and
+        // the closed-finish veto then refuses the continuation. The acceptance
+        // gate cannot take the turn either — its `hasAnyContent` conjunct is
+        // attempt-local and this attempt produced nothing — so every arm falls
+        // through, the error rethrows, and the prose attempt 1 already
+        // delivered reaches neither durable layer. The veto exists to stop a
+        // *fabricated tail* on an answer that completed with output; an attempt
+        // that contributed no output has nothing to fabricate onto, and the
+        // continuation is the arm that can still save the turn.
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('Here is the game: ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                // A bare finish chunk: the close, with no parts of its own.
+                yield {
+                  candidates: [{ finishReason: 'STOP' }],
+                } as unknown as GenerateContentResponse;
+                throw socketCut();
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('the completed game', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'write a game' },
+            'prompt-continuation-closes-with-no-parts',
+          );
+
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(60_000);
+          const { caughtError } = await collecting;
+
+          expect(caughtError).toBeUndefined();
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          // The turn completes, and the prose the caller watched stream is in
+          // both durable layers rather than stranded.
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe(
+            'Here is the game: the completed game',
+          );
+          expect(chatWithRecording.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'Here is the game: the completed game' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('keeps an attempt that delivered nothing at all off the invalid-stream budget', async () => {
+        // The other side of the R11-1 `hasAnyContent` conjunct, and the
+        // status-less sibling of the socket-cut case above. The turn does have
+        // delivered text and this attempt did close, so a turn-scoped reading
+        // of completeness alone would accept it — but the attempt contributed
+        // nothing of its own, and accepting hands the turn to the
+        // empty-response validation, which throws `InvalidStreamError` and
+        // re-sends the *original* prompt on the invalid-stream budget, losing
+        // the prefix the caller already watched stream. Declining leaves the
+        // shape with the continuation arm, which resumes from that prefix: the
+        // same third attempt, but the delivered prose survives into both
+        // durable layers.
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('Here is the game: ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                // A finish chunk carrying no candidate content at all.
+                yield {
+                  candidates: [{ finishReason: 'STOP' }],
+                } as unknown as GenerateContentResponse;
+                throw upstreamError;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('the completed game', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'write a game' },
+            'prompt-continuation-attempt-delivered-nothing',
+          );
+
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(60_000);
+          const { caughtError } = await collecting;
+
+          expect(caughtError).toBeUndefined();
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          // Resumed from the prefix rather than re-sent from the original
+          // prompt: the recorded turn carries both halves.
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe(
+            'Here is the game: the completed game',
+          );
         } finally {
           vi.useRealTimers();
         }
@@ -12500,6 +13717,460 @@ describe('LlmChat', async () => {
         expect(
           mockContentGenerator.generateContentStream,
         ).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not continue a status-less upstream error that delivered a functionCall', async () => {
+        // The continuation gate admits a status-less upstream failure for
+        // prose, but a delivered functionCall excludes it exactly as for a
+        // socket cut. The Anthropic deferred-batch release relies on this
+        // exclusion: it releases a closed tool call ahead of this error
+        // class so the call reaches error-path persistence and the
+        // scheduler's repair flow, instead of the model being asked to
+        // resume prose whose tool decision it never saw.
+        const upstreamError = Object.assign(new Error("'id'"), {
+          code: 'KeyError',
+          requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+        });
+        const toolChunk = {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_1',
+                      name: 'read_file',
+                      args: { path: '/tmp/a.txt' },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield textChunk('Let me read that file. ');
+              yield toolChunk;
+              throw upstreamError;
+            })(),
+          )
+          // Tripwire: consumed only if the cut is wrongly resumed.
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield textChunk('fabricated tail', 'STOP');
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-upstream-statusless-functioncall',
+        );
+        const { events, caughtError } = await drainCollecting(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(0);
+        expect(caughtError).toBe(upstreamError);
+        // The delivered functionCall is persisted on the error path, paired
+        // for the scheduler's repair flow.
+        expect(
+          chat
+            .getHistory()
+            .at(-1)
+            ?.parts?.some((part) => part.functionCall),
+        ).toBe(true);
+      });
+
+      it('delivers a prose-prefixed parked tool-call finish through the real pipeline instead of continuing', async () => {
+        // End-to-end over the real OpenAI pipeline and converter: the
+        // converter emits functionCall parts only on the finish chunk, and
+        // streaming parks that chunk for the trailing usage metadata, so the
+        // gateway error frame lands while the tool call is still parked. The
+        // prose that already reached the caller has shut the transport replay
+        // gate, so withholding the finish buys no recovery — it only strands
+        // the model's decided tool call and leaves LlmChat to inject a
+        // continuation whose fabricated tail folds into durable history.
+        // Releasing the finish lets the delivered functionCall shut the
+        // continuation gate instead, and error-path persistence plus the
+        // scheduler's repair flow take over.
+        vi.useFakeTimers();
+        try {
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+          const openaiChunk = (
+            id: string,
+            delta: Record<string, unknown>,
+            finishReason: string | null = null,
+          ) =>
+            ({
+              id,
+              created: 1,
+              model: 'test-model',
+              choices: [{ index: 0, delta, finish_reason: finishReason }],
+            }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+          const create = vi
+            .fn()
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                yield openaiChunk('chunk-prose', {
+                  content: 'Let me read that file. ',
+                });
+                yield openaiChunk('chunk-tool-open', {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_1',
+                      type: 'function',
+                      function: {
+                        name: 'read_file',
+                        arguments: '{"file_path":"a.sql"}',
+                      },
+                    },
+                  ],
+                });
+                yield openaiChunk('chunk-finish', {}, 'tool_calls');
+                throw upstreamError;
+              })(),
+            )
+            // Tripwire: consumed only if the cut is wrongly resumed.
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                yield openaiChunk('chunk-tail', {
+                  content: 'fabricated tail',
+                });
+                yield openaiChunk('chunk-tail-finish', {}, 'stop');
+              })(),
+            );
+          const provider = {
+            buildClient: () =>
+              ({ chat: { completions: { create } } }) as unknown as OpenAI,
+            buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+              request,
+            buildHeaders: () => ({}),
+            getDefaultGenerationConfig: () => ({}),
+          } as OpenAICompatibleProvider;
+          const generator = new OpenAIContentGenerator(
+            { model: 'test-model', authType: AuthType.USE_OPENAI },
+            mockConfig,
+            provider,
+          );
+          vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+          vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+            model: 'test-model',
+            authType: AuthType.USE_OPENAI,
+          });
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-upstream-statusless-parked-toolcall',
+          );
+          const events: StreamEvent[] = [];
+          let caughtError: unknown;
+          const collecting = (async () => {
+            try {
+              for await (const event of stream) events.push(event);
+            } catch (error) {
+              caughtError = error;
+            }
+          })();
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(5_000);
+          await collecting;
+
+          // One attempt only: the delivered functionCall shuts both the
+          // replay and the continuation gates.
+          expect(create).toHaveBeenCalledTimes(1);
+          expect(
+            events.filter(
+              (event) =>
+                event.type === StreamEventType.RETRY && event.isContinuation,
+            ),
+          ).toHaveLength(0);
+          // The error propagates — the turn must not be recorded as a
+          // successful continuation.
+          expect(caughtError).toBeDefined();
+          // The delivered functionCall reaches history on the error path,
+          // paired for the scheduler's repair flow.
+          expect(
+            chat
+              .getHistory()
+              .at(-1)
+              ?.parts?.some((part) => part.functionCall?.name === 'read_file'),
+          ).toBe(true);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('replays instead of counting a flushed tool call the caller never received', async () => {
+        // R16-2, end-to-end over the real pipeline. The release decision is the
+        // pipeline's, and it reads what the pipeline yielded — but LlmChat
+        // withholds a leading-JSON chunk whole while its protocol-tag detector
+        // is blocking, so the two delivered-content flags can disagree. When
+        // they do, the released functionCall is the first thing this loop has
+        // seen: counting it flips `streamYieldedContentChunk` and
+        // `streamYieldedFunctionCall`, which shuts the replay gate that was
+        // still open and the continuation gate beside it, so a cut the replay
+        // arm could have recovered kills the turn on one attempt and leaves a
+        // tool call in history that was never dispatched to a caller that saw
+        // nothing. The merge base had no flush at all and replayed cleanly.
+        vi.useFakeTimers();
+        try {
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+          const openaiChunk = (
+            id: string,
+            delta: Record<string, unknown>,
+            finishReason: string | null = null,
+          ) =>
+            ({
+              id,
+              created: 1,
+              model: 'test-model',
+              choices: [{ index: 0, delta, finish_reason: finishReason }],
+            }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+          const create = vi
+            .fn()
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                // Leading JSON: the detector blocks and LlmChat withholds the
+                // chunk, while the pipeline counts it as delivered.
+                yield openaiChunk('chunk-json', {
+                  content: '{"function_call": {"name": "read_file"}',
+                });
+                yield openaiChunk('chunk-tool-open', {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_1',
+                      type: 'function',
+                      function: {
+                        name: 'read_file',
+                        arguments: '{"file_path":"a.sql"}',
+                      },
+                    },
+                  ],
+                });
+                yield openaiChunk('chunk-finish', {}, 'tool_calls');
+                throw upstreamError;
+              })(),
+            )
+            // Consumed by the replay, which is the point: the turn recovers.
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                yield openaiChunk('chunk-retry-answer', {
+                  content: 'the answer after replay',
+                });
+                yield openaiChunk('chunk-retry-finish', {}, 'stop');
+              })(),
+            );
+          const provider = {
+            buildClient: () =>
+              ({ chat: { completions: { create } } }) as unknown as OpenAI,
+            buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+              request,
+            buildHeaders: () => ({}),
+            getDefaultGenerationConfig: () => ({}),
+          } as OpenAICompatibleProvider;
+          const generator = new OpenAIContentGenerator(
+            { model: 'test-model', authType: AuthType.USE_OPENAI },
+            mockConfig,
+            provider,
+          );
+          vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+          vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+            model: 'test-model',
+            authType: AuthType.USE_OPENAI,
+          });
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-flushed-toolcall-not-received',
+          );
+          const events: StreamEvent[] = [];
+          let caughtError: unknown;
+          const collecting = (async () => {
+            try {
+              for await (const event of stream) events.push(event);
+            } catch (error) {
+              caughtError = error;
+            }
+          })();
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(10_000);
+          await collecting;
+
+          expect(caughtError).toBeUndefined();
+          expect(create).toHaveBeenCalledTimes(2);
+          // A replay, not a continuation: nothing was delivered, so the
+          // original request is re-sent rather than resumed.
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(1);
+          expect(
+            retries[0]!.type === StreamEventType.RETRY &&
+              retries[0]!.isContinuation,
+          ).toBeFalsy();
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'the answer after replay' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('releases a parked tool-call finish on a continuation attempt instead of continuing again', async () => {
+        // Sibling of the case above, one attempt later. Attempt 1 delivered
+        // prose and was cut, so the turn is mid-continuation and the replay
+        // gate is already shut by the accumulated prefix — which a fresh
+        // stream's own yields cannot show. Attempt 2 then delivers only
+        // reasoning and tool-call preparations (neither counts as delivered
+        // content) before the same gateway error lands where the usage tail
+        // should have been. Without the turn-scoped continuation marker
+        // seeding the pipeline's release flag, the parked tool-call finish
+        // stays withheld and the model is asked to resume prose whose tool
+        // decision it never saw, burning the continuation budget until the
+        // turn fails with the call lost. With it, the finish is released and
+        // the delivered functionCall shuts the continuation gate instead.
+        vi.useFakeTimers();
+        try {
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+          const openaiChunk = (
+            id: string,
+            delta: Record<string, unknown>,
+            finishReason: string | null = null,
+          ) =>
+            ({
+              id,
+              created: 1,
+              model: 'test-model',
+              choices: [{ index: 0, delta, finish_reason: finishReason }],
+            }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+          const create = vi
+            .fn()
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                yield openaiChunk('chunk-prose', {
+                  content: 'Let me read that file. ',
+                });
+                throw upstreamError;
+              })(),
+            )
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                yield openaiChunk('chunk-reasoning', {
+                  reasoning_content: 'Reconsidering the approach. ',
+                });
+                yield openaiChunk('chunk-tool-open', {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_1',
+                      type: 'function',
+                      function: {
+                        name: 'read_file',
+                        arguments: '{"file_path":"a.sql"}',
+                      },
+                    },
+                  ],
+                });
+                yield openaiChunk('chunk-finish', {}, 'tool_calls');
+                throw upstreamError;
+              })(),
+            )
+            // Tripwire: consumed only if the second cut is wrongly continued.
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                yield openaiChunk('chunk-tail', {
+                  content: 'fabricated tail',
+                });
+                yield openaiChunk('chunk-tail-finish', {}, 'stop');
+              })(),
+            );
+          const provider = {
+            buildClient: () =>
+              ({ chat: { completions: { create } } }) as unknown as OpenAI,
+            buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+              request,
+            buildHeaders: () => ({}),
+            getDefaultGenerationConfig: () => ({}),
+          } as OpenAICompatibleProvider;
+          const generator = new OpenAIContentGenerator(
+            { model: 'test-model', authType: AuthType.USE_OPENAI },
+            mockConfig,
+            provider,
+          );
+          vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+          vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+            model: 'test-model',
+            authType: AuthType.USE_OPENAI,
+          });
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-upstream-statusless-parked-toolcall-continuation',
+          );
+          const events: StreamEvent[] = [];
+          let caughtError: unknown;
+          const collecting = (async () => {
+            try {
+              for await (const event of stream) events.push(event);
+            } catch (error) {
+              caughtError = error;
+            }
+          })();
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(5_000);
+          await collecting;
+
+          // Exactly the two attempts: the prose cut schedules one
+          // continuation, and the released tool-call finish shuts the
+          // continuation gate for the second cut instead of burning the
+          // remaining continuation budget re-asking for the same call.
+          expect(create).toHaveBeenCalledTimes(2);
+          expect(
+            events.filter(
+              (event) =>
+                event.type === StreamEventType.RETRY && event.isContinuation,
+            ),
+          ).toHaveLength(1);
+          // The error propagates — the turn must not be recorded as a
+          // successful continuation.
+          expect(caughtError).toBeDefined();
+          // The released functionCall reaches history on the error path,
+          // paired for the scheduler's repair flow.
+          expect(
+            chat
+              .getHistory()
+              .at(-1)
+              ?.parts?.some((part) => part.functionCall?.name === 'read_file'),
+          ).toBe(true);
+        } finally {
+          vi.useRealTimers();
+        }
       });
 
       it('replays rather than continues when only a thought was delivered', async () => {
@@ -13109,6 +14780,144 @@ describe('LlmChat', async () => {
               'Recovered from depth-2 RST',
         ),
       ).toBe(true);
+    });
+
+    it('replays a status-less upstream error thrown mid-stream', async () => {
+      // The shape the incident actually produced: the gateway pushes
+      // `{"error":{"code":"KeyError","message":"'id'"}}` into an already-200 SSE
+      // stream and the SDK throws it from inside the lazy iterator — after
+      // retryWithBackoff has resolved the established stream. It is therefore
+      // the mid-stream replay gate that must catch it, not the establishment
+      // predicate, and the generator below throws on its first next() so the
+      // error arrives where the real one does.
+      vi.useFakeTimers();
+      try {
+        const upstreamError = Object.assign(new Error("'id'"), {
+          code: 'KeyError',
+          requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+        });
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw upstreamError;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Recovered from upstream KeyError' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-upstream-statusless-midstream',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        const retries = events.filter(
+          (event) => event.type === StreamEventType.RETRY,
+        );
+        expect(retries).toHaveLength(1);
+        // A replay, not a continuation: nothing had reached the caller, so the
+        // request is re-sent from scratch instead of resumed from partial text.
+        expect(
+          retries[0]!.type === StreamEventType.RETRY &&
+            retries[0]!.isContinuation,
+        ).toBeFalsy();
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered from upstream KeyError',
+          ),
+        ).toBe(true);
+        // The recovery log has to carry the classifier's own fields: the label
+        // still says "Transport", `transportCode` is absent for this class, and
+        // the provider's request id is the only handle a gateway ticket can be
+        // filed against.
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Transport stream retry scheduled',
+          expect.objectContaining({
+            classificationReason: 'upstream-error-without-status',
+            providerCode: 'KeyError',
+            requestId: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('propagates a permanent provider rejection delivered mid-stream', async () => {
+      // The mirror image of the replay above. A moderation or credential
+      // rejection arrives the same way — inside an already-200 stream, traced
+      // with a request id, no HTTP status — but re-sending the identical
+      // request can never succeed, so the widened gate must not adopt it.
+      const permanentError = Object.assign(new Error('Content filtered'), {
+        code: 'data_inspection_failed',
+        requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+      });
+
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          (async function* () {
+            throw permanentError;
+
+            yield {} as GenerateContentResponse;
+          })(),
+        )
+        // Consumed only if the gate wrongly adopts the rejection: the replay
+        // would land here and appear to succeed, so a regression reports as a
+        // call count rather than as a hang.
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'must not be delivered' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-upstream-permanent-midstream',
+      );
+      // No fake timers here. Nothing retries on this path, so there is no
+      // backoff to advance through, and `collectStreamWithFakeTimers` cannot be
+      // used for a stream that rejects: it builds its collector, awaits two
+      // timer steps, and only then hands the collector back to be awaited, so
+      // the rejection is unhandled in between.
+      const { events, caughtError } = await drainCollecting(stream);
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(
+        events.filter((event) => event.type === StreamEventType.RETRY),
+      ).toHaveLength(0);
+      expect(String(caughtError)).toContain('Content filtered');
     });
 
     it('does not retry a transport error that carries an HTTP 4xx status', async () => {
