@@ -46,10 +46,46 @@ export function assembleMcpServers(
     writeStderrLine(`Warning: ${error}`);
   }
 
-  return {
+  const assembled = {
     ...belowProject,
     ...projectResult.servers,
     ...aboveProject,
     ...(cliMcpServers ?? {}),
   };
+  setProjectMcpLiteralSource(cwd, projectResult.literalServers);
+  return assembled;
+}
+
+/**
+ * The pre-expansion `.mcp.json` configs of the most recent
+ * {@link assembleMcpServers} run per project root, for approval hashing
+ * (#11499). Approval hashes must bind to the file's literal text: project
+ * servers are loaded with `${VAR}` placeholders already resolved, so
+ * hashing the live config would bind an approval to the secret's value and
+ * re-prompt on token rotation, though `.mcp.json` never changed (#4615's
+ * intent is that editing the file re-triggers approval, not the env).
+ * Populated as a side effect of assembly because every approval consumer
+ * (CLI commands, ACP, the OpenTUI dialog) already flows through it.
+ */
+const projectMcpLiteralSources = new Map<
+  string,
+  Record<string, MCPServerConfig>
+>();
+
+export function setProjectMcpLiteralSource(
+  projectRoot: string,
+  literalServers: Record<string, MCPServerConfig>,
+): void {
+  projectMcpLiteralSources.set(projectRoot, literalServers);
+}
+
+/** FOR TESTING ONLY. */
+export function resetProjectMcpLiteralSourceForTesting(): void {
+  projectMcpLiteralSources.clear();
+}
+
+export function getProjectMcpLiteralSource(
+  projectRoot: string,
+): Record<string, MCPServerConfig> | undefined {
+  return projectMcpLiteralSources.get(projectRoot);
 }

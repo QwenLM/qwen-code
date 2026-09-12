@@ -17,8 +17,30 @@ import {
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { getProjectMcpLiteralSource } from './mcpServers.js';
 
 export const MCP_APPROVALS_FILENAME = 'mcpApprovals.json';
+
+/**
+ * The canonical config hash for approval binding. Project `.mcp.json`
+ * servers are loaded with env-var placeholders already resolved (#11499),
+ * so hashing the live config would bind the approval to the secret's
+ * *value*: rotating a token or a teammate cloning the repo with their own
+ * token would flip an approved server back to `pending` although the file
+ * never changed. #4615's intent is that *editing the file* re-triggers
+ * approval — so a project server binds to the hash of its pre-expansion
+ * literal config when that is available, and to the live config otherwise
+ * (settings-sourced servers are resolved upstream and keep the existing
+ * binding).
+ */
+function approvalConfigHash(
+  projectRoot: string,
+  serverName: string,
+  config: MCPServerConfig,
+): string {
+  const literal = getProjectMcpLiteralSource(projectRoot)?.[serverName];
+  return hashMcpServerConfig(literal ?? config);
+}
 
 /**
  * The user's persisted decision for one project-scoped MCP server. A decision is
@@ -175,7 +197,7 @@ export class LoadedMcpApprovals {
     if (!record) {
       return 'pending';
     }
-    if (record.hash !== hashMcpServerConfig(config)) {
+    if (record.hash !== approvalConfigHash(projectRoot, serverName, config)) {
       return 'pending';
     }
     return record.status;
@@ -196,7 +218,10 @@ export class LoadedMcpApprovals {
       ? existing
       : Object.create(null);
     Object.defineProperty(project, serverName, {
-      value: { hash: hashMcpServerConfig(config), status },
+      value: {
+        hash: approvalConfigHash(projectRoot, serverName, config),
+        status,
+      },
       enumerable: true,
       configurable: true,
       writable: true,
