@@ -15,8 +15,7 @@
  *     `ps -o rss=`. POSIX-only (no Windows). Used to capture the RSS curve
  *     across session counts.
  *   - `countDescendants` walks the daemon's process tree via `pgrep -P`
- *     (matches the existing inline pattern at
- *     `qwen-serve-streaming.test.ts:144`, with optional filtered subtree
+ *     with optional filtered subtree
  *     matching). Used to surface the P1 "MCP child × session"
  *     amplification before the M2 shared-pool fix.
  *   - `percentiles` is a dependency-free p50/p90/p99 calculator for the
@@ -335,16 +334,11 @@ export function startRssPolling(pid: number, intervalMs = 100): RssPoller {
 
 /**
  * Walk daemon → ACP child → MCP descendants via `pgrep -P` calls.
- * Pattern starts with the existing inline approach at
- * `qwen-serve-streaming.test.ts:144`. When `pgrepOpts.mcpFilter` is
+ * When `pgrepOpts.mcpFilter` is
  * supplied, matching MCP processes are searched recursively within each
  * ACP child subtree because the ACP transport can introduce an extra
  * `qwen --acp` process between the daemon-facing ACP child and stdio MCP
  * servers.
- *
- * `pgrepOpts.acpFilter` defaults to a standalone `--acp` argument,
- * independent of the repository checkout path; pass an override only if
- * a future bridge changes the ACP child invocation shape.
  *
  * Returns explicit PID arrays so callers can cross-check (e.g., assert
  * the ACP child PID matches what the test setup observed). `total` is
@@ -358,11 +352,12 @@ export interface DescendantCount {
 
 export function countDescendants(
   daemonPid: number,
-  pgrepOpts: { acpFilter?: string; mcpFilter?: string } = {},
+  pgrepOpts: { mcpFilter?: string } = {},
 ): DescendantCount {
-  const acpFilter =
-    pgrepOpts.acpFilter ?? '(^|[[:space:]])--acp([[:space:]]|$)';
-  const acpChildren = pgrepChildren(daemonPid, acpFilter);
+  const acpChildren = pgrepChildren(
+    daemonPid,
+    '(^|[[:space:]])--acp([[:space:]]|$)',
+  );
   const mcpGrandchildren: number[] = [];
   for (const acpPid of acpChildren) {
     if (pgrepOpts.mcpFilter) {
