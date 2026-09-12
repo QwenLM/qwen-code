@@ -403,6 +403,59 @@ describe('runForkedAgent (cache path)', () => {
     expect(result.model).toBe('test-model');
   });
 
+  it('discards failed-attempt text and usage after model fallback', async () => {
+    saveCacheSafeParams({}, [], 'test-model');
+    const mockSendMessageStream = vi.fn(() =>
+      Promise.resolve(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'stale answer' }] } }],
+              usageMetadata: {
+                promptTokenCount: 10,
+                candidatesTokenCount: 5,
+              },
+            },
+          };
+          yield {
+            type: StreamEventType.MODEL_FALLBACK,
+            info: {
+              fromModel: 'primary',
+              toModel: 'fallback',
+              fallbackIndex: 1,
+            },
+          };
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                { content: { parts: [{ text: 'current answer' }] } },
+              ],
+            },
+          };
+        })(),
+      ),
+    );
+    vi.mocked(LlmChat).mockImplementation(
+      () =>
+        ({ sendMessageStream: mockSendMessageStream }) as unknown as LlmChat,
+    );
+
+    const result = await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'suggest something',
+      cacheSafeParams: getCacheSafeParams()!,
+    });
+
+    expect(result.text).toBe('current answer');
+    expect(result.usage).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheHitTokens: 0,
+    });
+  });
+
   it('preserves tools: [] even when jsonSchema is provided', async () => {
     saveCacheSafeParams(
       {

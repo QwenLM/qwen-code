@@ -146,6 +146,26 @@ describe('MessageDisplayDispatcher', () => {
     });
   });
 
+  it('discards restarted-attempt text but preserves continuation text', async () => {
+    const { bus, sent, release } = createControlledBus();
+    const dispatcher = createDispatcher(bus);
+
+    dispatcher.addChunk('discarded', 0);
+    dispatcher.restartAttempt(false, 10);
+    dispatcher.addChunk('kept ', 20);
+    dispatcher.restartAttempt(true, 30);
+    dispatcher.addChunk('continuation', 40);
+    const finished = dispatcher.finish();
+    await release();
+    await finished;
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      displayed_text: 'kept continuation',
+      is_final: true,
+    });
+  });
+
   it('lets the final flush supersede a pending mid-stream payload, keeping is_final', async () => {
     const { bus, sent, release } = createControlledBus();
     const dispatcher = createDispatcher(bus);
