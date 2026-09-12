@@ -493,6 +493,56 @@ describe('downgradeRejectedReasoningItems', () => {
     ).toEqual([keep]);
   });
 
+  it('drops the call unit whose signature-only reasoning is dropped', () => {
+    const keep = userItem('hi');
+    const after = userItem('bye');
+    const items = Object.freeze([
+      keep,
+      reasoningItem(LONG, []),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'f',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c1',
+        output: 'ok',
+      }),
+      after,
+    ]) as ResponsesApiInputItem[];
+    expect(
+      downgradeRejectedReasoningItems(items, { namedIndex: 1, maxLength: 64 }),
+    ).toEqual([keep, after]);
+  });
+
+  it('keeps the call unit when the reasoning downgrades to a message', () => {
+    const call = Object.freeze({
+      type: 'function_call',
+      call_id: 'c1',
+      name: 'f',
+      arguments: '{}',
+    }) as ResponsesApiInputItem;
+    const output = Object.freeze({
+      type: 'function_call_output',
+      call_id: 'c1',
+      output: 'ok',
+    }) as ResponsesApiInputItem;
+    const items = Object.freeze([
+      reasoningItem(LONG, ['thought']),
+      call,
+      output,
+    ]) as ResponsesApiInputItem[];
+    expect(
+      downgradeRejectedReasoningItems(items, { namedIndex: 0, maxLength: 64 }),
+    ).toEqual([
+      { type: 'message', role: 'assistant', content: 'thought' },
+      call,
+      output,
+    ]);
+  });
+
   it('downgrades every reasoning item when no maximum is reported', () => {
     const items = Object.freeze([
       reasoningItem(LONG, ['long']),

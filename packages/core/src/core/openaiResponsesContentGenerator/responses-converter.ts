@@ -812,18 +812,39 @@ export function cleanOrphanedFunctionCalls(
       outputCallIds.add((item as ResponsesApiFunctionCallOutputItem).call_id);
     }
   }
-  return items.filter((item) => {
+  const kept: ResponsesApiInputItem[] = [];
+  for (const item of items) {
     if (typeof item !== 'object' || item === null || !('type' in item)) {
-      return true;
+      kept.push(item);
+      continue;
     }
     if (item.type === 'function_call' && 'call_id' in item) {
-      return outputCallIds.has((item as ResponsesApiFunctionCallItem).call_id);
+      if (outputCallIds.has((item as ResponsesApiFunctionCallItem).call_id)) {
+        kept.push(item);
+        continue;
+      }
+      // A reasoning item belongs to the call that follows it; dropping the
+      // orphaned call while keeping it sends reasoning with no required
+      // following item, and the endpoint rejects the whole request (#11665).
+      const previous = kept[kept.length - 1];
+      if (
+        typeof previous === 'object' &&
+        previous !== null &&
+        previous.type === 'reasoning'
+      ) {
+        kept.pop();
+      }
+      continue;
     }
     if (item.type === 'function_call_output' && 'call_id' in item) {
-      return callIds.has((item as ResponsesApiFunctionCallOutputItem).call_id);
+      if (callIds.has((item as ResponsesApiFunctionCallOutputItem).call_id)) {
+        kept.push(item);
+      }
+      continue;
     }
-    return true;
-  });
+    kept.push(item);
+  }
+  return kept;
 }
 
 export function convertGeminiToolsToResponsesTools(
