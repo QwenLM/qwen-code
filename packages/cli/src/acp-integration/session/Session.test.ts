@@ -4296,6 +4296,7 @@ describe('Session', () => {
   it('rejects a prompt while an exclusive history mutation is active', async () => {
     const releaseMutation = session.beginHistoryMutation();
 
+    expect(session.hasActiveTurn()).toBe(true);
     expect(session.isIdle()).toBe(false);
     expect(session.isTurnIdle()).toBe(false);
     await expect(
@@ -4308,6 +4309,65 @@ describe('Session', () => {
 
     releaseMutation();
     expect(session.isIdle()).toBe(true);
+    expect(session.isTurnIdle()).toBe(true);
+    expect(session.hasActiveTurn()).toBe(false);
+  });
+
+  it('reports no active turn while the close gate is held', () => {
+    expect(session.hasActiveTurn()).toBe(false);
+    expect(session.isTurnIdle()).toBe(true);
+    const releaseClose = session.beginClose();
+    expect(session.hasActiveTurn()).toBe(false);
+    expect(session.isTurnIdle()).toBe(false);
+    releaseClose();
+    expect(session.isTurnIdle()).toBe(true);
+  });
+
+  it('reports an active turn while a prompt is in flight', async () => {
+    let resolveStream!: () => void;
+    const streamGate = new Promise<void>((resolve) => {
+      resolveStream = resolve;
+    });
+    mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+      await streamGate;
+      return createEmptyStream();
+    });
+
+    const prompt = session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'hello' }],
+    });
+    await vi.waitFor(() => expect(session.hasActiveTurn()).toBe(true));
+    expect(session.isTurnIdle()).toBe(false);
+
+    resolveStream();
+    await prompt;
+    expect(session.hasActiveTurn()).toBe(false);
+    expect(session.isTurnIdle()).toBe(true);
+  });
+
+  it('reports an active turn from a non-prompt source under the close gate', async () => {
+    const internals = session as unknown as {
+      notificationProcessing: boolean;
+      notificationCompletion: Promise<void> | null;
+    };
+    let resolveNotification!: () => void;
+    internals.notificationProcessing = true;
+    internals.notificationCompletion = new Promise<void>((resolve) => {
+      resolveNotification = resolve;
+    });
+
+    expect(session.hasActiveTurn()).toBe(true);
+    const releaseClose = session.beginClose();
+    expect(session.hasActiveTurn()).toBe(true);
+    expect(session.isTurnIdle()).toBe(false);
+
+    releaseClose();
+    resolveNotification();
+    internals.notificationProcessing = false;
+    internals.notificationCompletion = null;
+
+    expect(session.hasActiveTurn()).toBe(false);
     expect(session.isTurnIdle()).toBe(true);
   });
 

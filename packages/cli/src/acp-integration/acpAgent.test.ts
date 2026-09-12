@@ -464,6 +464,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     Buffer.from(JSON.stringify(state), 'utf8').toString('base64url'),
   ),
   SessionTranscriptReader: vi.fn(),
+  ChatRecordingService: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).ChatRecordingService,
   isReplayTurnStartType: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isReplayTurnStartType,
@@ -1122,11 +1125,13 @@ import {
   applyProviderInstallPlan,
   Storage,
   SessionTranscriptReader,
+  ChatRecordingService,
   InvalidSessionTranscriptCursorError,
   InvalidSessionTranscriptTurnAnchorError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   SessionTranscriptPageTooLargeError,
+  SessionWriterUnavailableError,
   encodeSessionTranscriptCursor,
   findBoundaryAtOrBefore,
   isReplayTurnStartType,
@@ -2250,6 +2255,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         noteExternalWorkflowDeletion: ReturnType<typeof vi.fn>;
         isIdle: ReturnType<typeof vi.fn>;
         isTurnIdle: ReturnType<typeof vi.fn>;
+        hasActiveTurn: ReturnType<typeof vi.fn>;
         getCreatedAt: ReturnType<typeof vi.fn>;
         getTurnCount: ReturnType<typeof vi.fn>;
       }
@@ -5010,6 +5016,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
           isIdle: vi.fn().mockReturnValue(true),
           isTurnIdle: vi.fn().mockReturnValue(true),
+          hasActiveTurn: vi.fn().mockReturnValue(false),
           getCreatedAt: vi.fn().mockReturnValue(1_700_000_000_000),
           getTurnCount: vi.fn().mockReturnValue(3),
           prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
@@ -18801,7 +18808,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('flushes the live recording before reading the latest persisted page', async () => {
+  it('reads the live transcript page through the owner write barrier', async () => {
     const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
     const recording = innerConfig.getChatRecordingService();
     const readPage = vi.fn().mockResolvedValue({
@@ -18830,13 +18837,389 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     );
 
-    expect(recording?.flush).toHaveBeenCalledOnce();
+    expect(recording?.runWithWriteBarrier).toHaveBeenCalledOnce();
+    expect(recording?.flush).not.toHaveBeenCalled();
     expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
       direction: 'backward',
       limit: 100,
       maxBytes: 4 * 1024 * 1024,
     });
     expect(result['hasMore']).toBe(false);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('runs the live transcript read as the write-barrier operation', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    const recording = innerConfig.getChatRecordingService();
+    let releaseBarrier!: () => void;
+    let markBarrierEntered!: () => void;
+    const barrierEntered = new Promise<void>((resolve) => {
+      markBarrierEntered = resolve;
+    });
+    const barrierGate = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    recording.runWithWriteBarrier.mockImplementation(
+      async <T>(operation: () => Promise<T>): Promise<T> => {
+        markBarrierEntered();
+        await barrierGate;
+        return operation();
+      },
+    );
+
+    let readStarted = false;
+    const readPage = vi.fn().mockImplementation(async () => {
+      readStarted = true;
+      return {
+        sessionId: VALID_SESSION_ID,
+        records: [],
+        hasMore: false,
+        startTime: 'start',
+        lastUpdated: 'end',
+      };
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const transcriptPromise = agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+        direction: 'backward',
+        limit: 1,
+      },
+    );
+    await barrierEntered;
+    expect(readStarted).toBe(false);
+
+    releaseBarrier();
+    await transcriptPromise;
+    expect(readPage).toHaveBeenCalledOnce();
+    const barrierResult = await recording.runWithWriteBarrier.mock.results[0]!
+      .value;
+    expect(barrierResult).toEqual(
+      expect.objectContaining({ sessionId: VALID_SESSION_ID }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not barrier cursor or record-anchor transcript pages', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    const recording = innerConfig.getChatRecordingService();
+    recording.runWithWriteBarrier.mockRejectedValue(
+      new Error('recorder not accepting writes'),
+    );
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        cursor: 'cursor-1',
+        limit: 50,
+      }),
+    ).resolves.toMatchObject({ hasMore: false });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        beforeRecordId: 'record-1',
+        limit: 50,
+      }),
+    ).resolves.toMatchObject({ hasMore: false });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        atRecordId: 'u1',
+        snapshot: 'snapshot-1',
+      }),
+    ).resolves.toMatchObject({ hasMore: false });
+
+    expect(recording.runWithWriteBarrier).not.toHaveBeenCalled();
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(readPage).toHaveBeenNthCalledWith(1, VALID_SESSION_ID, {
+      cursor: 'cursor-1',
+      limit: 50,
+      maxBytes: 4 * 1024 * 1024,
+    });
+    expect(readPage).toHaveBeenNthCalledWith(2, VALID_SESSION_ID, {
+      beforeRecordId: 'record-1',
+      limit: 50,
+      maxBytes: 4 * 1024 * 1024,
+    });
+    expect(readPage).toHaveBeenNthCalledWith(3, VALID_SESSION_ID, {
+      atRecordId: 'u1',
+      snapshot: 'snapshot-1',
+      maxBytes: 4 * 1024 * 1024,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('falls back to a drained latest transcript page when the recorder is only lifecycle-unavailable', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    const recording = innerConfig.getChatRecordingService();
+    Object.assign(recording, {
+      acceptingWrites: false,
+      state: 'closing',
+    });
+    recording.runWithWriteBarrier.mockRejectedValue(
+      new SessionWriterUnavailableError(),
+    );
+    let queuedVisible = false;
+    let readStarted = false;
+    let releaseFlush!: () => void;
+    let markFlushEntered!: () => void;
+    const flushEntered = new Promise<void>((resolve) => {
+      markFlushEntered = resolve;
+    });
+    const flushGate = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    recording.flush.mockImplementation(async () => {
+      markFlushEntered();
+      await flushGate;
+      queuedVisible = true;
+    });
+    const readPage = vi.fn().mockImplementation(async () => {
+      readStarted = true;
+      return {
+        sessionId: VALID_SESSION_ID,
+        records: queuedVisible ? [{ uuid: 'queued-tool-result' }] : [],
+        hasMore: false,
+        startTime: 'start',
+        lastUpdated: 'end',
+      };
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const transcriptPromise = agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+        direction: 'backward',
+        limit: 1,
+      },
+    );
+    await flushEntered;
+    expect(readStarted).toBe(false);
+
+    releaseFlush();
+    await expect(transcriptPromise).resolves.toMatchObject({ hasMore: false });
+
+    expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
+    expect(recording.flush).toHaveBeenCalledOnce();
+    expect(readPage).toHaveBeenCalledOnce();
+    expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
+      direction: 'backward',
+      limit: 1,
+      maxBytes: 4 * 1024 * 1024,
+    });
+    expect(await readPage.mock.results[0]!.value).toEqual(
+      expect.objectContaining({
+        records: [{ uuid: 'queued-tool-result' }],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not retry a latest transcript page when the barriered read itself fails', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    const recording = innerConfig.getChatRecordingService();
+    Object.assign(recording, {
+      acceptingWrites: false,
+      state: 'closing',
+    });
+    recording.runWithWriteBarrier.mockImplementation(
+      async <T>(operation: () => Promise<T>): Promise<T> => operation(),
+    );
+    const readPage = vi
+      .fn()
+      .mockRejectedValue(new Error('EMFILE: too many open files'));
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        direction: 'backward',
+        limit: 1,
+      }),
+    ).rejects.toThrow('EMFILE: too many open files');
+
+    expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(readPage).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('propagates a latest transcript page refusal when the recorder has a writeFailure', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    const recording = innerConfig.getChatRecordingService();
+    const writeFailure = new SessionWriterUnavailableError();
+    Object.assign(recording, {
+      writeFailure,
+      acceptingWrites: false,
+      state: 'integrity_failed',
+    });
+    recording.runWithWriteBarrier.mockRejectedValue(writeFailure);
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        direction: 'backward',
+        limit: 1,
+      }),
+    ).rejects.toMatchObject({
+      code: -32023,
+      data: { errorKind: 'session_writer_unavailable' },
+    });
+
+    expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(readPage).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('falls back after a real recorder beginClose and refuses a latched writeFailure', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    const recorder = new ChatRecordingService(
+      {
+        getSessionId: () => VALID_SESSION_ID,
+        getProjectRoot: () => '/tmp',
+        getCliVersion: () => '1.0.0',
+        getResumedSessionData: () => undefined,
+        storage: { getProjectDir: () => '/tmp' },
+      } as unknown as Config,
+      undefined,
+      false,
+    );
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recorder);
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    recorder.beginClose();
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        direction: 'backward',
+        limit: 1,
+      }),
+    ).resolves.toMatchObject({ hasMore: false });
+    expect(readPage).toHaveBeenCalledOnce();
+
+    const { SessionWriterUnavailableError: RealWriterUnavailable } =
+      await vi.importActual<typeof import('@qwen-code/qwen-code-core')>(
+        '@qwen-code/qwen-code-core',
+      );
+    const failedRecorder = new ChatRecordingService(
+      {
+        getSessionId: () => VALID_SESSION_ID,
+        getProjectRoot: () => '/tmp',
+        getCliVersion: () => '1.0.0',
+        getResumedSessionData: () => undefined,
+        storage: { getProjectDir: () => '/tmp' },
+      } as unknown as Config,
+      undefined,
+      false,
+    );
+    await expect(
+      failedRecorder.runWithWriteBarrier(async () => {
+        throw new RealWriterUnavailable();
+      }),
+    ).rejects.toBeInstanceOf(RealWriterUnavailable);
+    innerConfig.getChatRecordingService = vi
+      .fn()
+      .mockReturnValue(failedRecorder);
+    readPage.mockClear();
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        direction: 'backward',
+        limit: 1,
+      }),
+    ).rejects.toMatchObject({
+      code: -32023,
+      data: { errorKind: 'session_writer_unavailable' },
+    });
+    expect(readPage).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -19041,7 +19424,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('does not finalize dangling transcript calls when a prompt settles during the read', async () => {
+  it('does not finalize dangling transcript calls when a turn settles during the read', async () => {
     await setupSessionMocks(VALID_SESSION_ID);
     const page = {
       sessionId: VALID_SESSION_ID,
@@ -19060,18 +19443,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
     const { agent, agentPromise } = await bootAcpAgent();
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    let finishPrompt: ((value: unknown) => void) | undefined;
-    lastSessionMock!.prompt.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          finishPrompt = resolve;
-        }),
-    );
-
-    const prompt = agent.prompt({ sessionId: VALID_SESSION_ID, prompt: [] });
-    await vi.waitFor(() => expect(lastSessionMock!.prompt).toHaveBeenCalled());
+    lastSessionMock!.hasActiveTurn.mockReturnValue(true);
     readPage.mockImplementationOnce(async () => {
-      finishPrompt?.({ stopReason: 'end_turn' });
+      lastSessionMock!.hasActiveTurn.mockReturnValue(false);
       await new Promise<void>((resolve) => setImmediate(resolve));
       return page;
     });
@@ -19085,9 +19459,211 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({ finalizeDangling: false }),
     );
 
-    await prompt;
     await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
       sessionId: VALID_SESSION_ID,
+    });
+    expect(mockHistoryReplayPage).toHaveBeenLastCalledWith(
+      expect.anything(),
+      [],
+      expect.objectContaining({ finalizeDangling: true }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps a dangling transcript call pending when a turn starts during the read', async () => {
+    await setupSessionMocks(VALID_SESSION_ID);
+    const page = {
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      startTime: 'start',
+      lastUpdated: 'end',
+    };
+    const readPage = vi.fn().mockResolvedValue(page);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.hasActiveTurn.mockReturnValue(false);
+    readPage.mockImplementationOnce(async () => {
+      lastSessionMock!.hasActiveTurn.mockReturnValue(true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return page;
+    });
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    expect(mockHistoryReplayPage).toHaveBeenLastCalledWith(
+      expect.anything(),
+      [],
+      expect.objectContaining({ finalizeDangling: false }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('finalizes dangling transcript calls when the session is closing with no active turn', async () => {
+    await setupSessionMocks(VALID_SESSION_ID);
+    const page = {
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      startTime: 'start',
+      lastUpdated: 'end',
+    };
+    const readPage = vi.fn().mockResolvedValue(page);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.isTurnIdle.mockReturnValue(false);
+    lastSessionMock!.hasActiveTurn.mockReturnValue(false);
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    expect(mockHistoryReplayPage).toHaveBeenLastCalledWith(
+      expect.anything(),
+      [],
+      expect.objectContaining({ finalizeDangling: true }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not finalize dangling transcript calls while a prompt is waiting at admission', async () => {
+    await setupSessionMocks(VALID_SESSION_ID);
+    const page = {
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      startTime: 'start',
+      lastUpdated: 'end',
+    };
+    const readPage = vi.fn().mockResolvedValue(page);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    // Admission window: registered in activePromptCalls, Session turn idle.
+    lastSessionMock!.hasActiveTurn.mockReturnValue(false);
+
+    let finishPrompt: ((value: unknown) => void) | undefined;
+    lastSessionMock!.prompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishPrompt = resolve;
+        }),
+    );
+
+    const gatedPrompt = agent.prompt({
+      sessionId: VALID_SESSION_ID,
+      prompt: [],
+    });
+    await vi.waitFor(() => expect(lastSessionMock!.prompt).toHaveBeenCalled());
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+      direction: 'backward',
+      limit: 1,
+    });
+    expect(mockHistoryReplayPage).toHaveBeenLastCalledWith(
+      expect.anything(),
+      [],
+      expect.objectContaining({ finalizeDangling: false }),
+    );
+
+    finishPrompt?.({ stopReason: 'end_turn' });
+    await gatedPrompt;
+
+    lastSessionMock!.prompt.mockClear();
+    lastSessionMock!.prompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishPrompt = resolve;
+        }),
+    );
+    const settlingPrompt = agent.prompt({
+      sessionId: VALID_SESSION_ID,
+      prompt: [],
+    });
+    await vi.waitFor(() => expect(lastSessionMock!.prompt).toHaveBeenCalled());
+    readPage.mockImplementationOnce(async () => {
+      finishPrompt?.({ stopReason: 'end_turn' });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return page;
+    });
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+      direction: 'backward',
+      limit: 1,
+    });
+    expect(mockHistoryReplayPage).toHaveBeenLastCalledWith(
+      expect.anything(),
+      [],
+      expect.objectContaining({ finalizeDangling: false }),
+    );
+
+    await settlingPrompt;
+
+    lastSessionMock!.prompt.mockClear();
+    lastSessionMock!.prompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishPrompt = resolve;
+        }),
+    );
+    let startedDuringRead: Promise<unknown> | undefined;
+    readPage.mockImplementationOnce(async () => {
+      startedDuringRead = agent.prompt({
+        sessionId: VALID_SESSION_ID,
+        prompt: [],
+      });
+      await vi.waitFor(() =>
+        expect(lastSessionMock!.prompt).toHaveBeenCalled(),
+      );
+      return page;
+    });
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+      direction: 'backward',
+      limit: 1,
+    });
+    expect(mockHistoryReplayPage).toHaveBeenLastCalledWith(
+      expect.anything(),
+      [],
+      expect.objectContaining({ finalizeDangling: false }),
+    );
+
+    finishPrompt?.({ stopReason: 'end_turn' });
+    await startedDuringRead;
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+      direction: 'backward',
+      limit: 1,
     });
     expect(mockHistoryReplayPage).toHaveBeenLastCalledWith(
       expect.anything(),

@@ -768,6 +768,27 @@ function mapSessionWriterRequestError(error: unknown): unknown {
     : error;
 }
 
+/**
+ * A write-barrier refusal is only a lifecycle miss when the recorder has
+ * stopped accepting writes and has not latched a writeFailure. Do not key
+ * this on `instanceof SessionWriterUnavailableError`: the barrier rethrows
+ * writeFailure first, and that failure can itself be that class.
+ */
+function isWriterLifecycleUnavailable(recording: object): boolean {
+  const writer = recording as {
+    writeFailure?: unknown;
+    acceptingWrites?: boolean;
+    state?: string;
+  };
+  if (writer.writeFailure != null) {
+    return false;
+  }
+  return (
+    writer.acceptingWrites === false ||
+    (writer.state !== undefined && writer.state !== 'active')
+  );
+}
+
 async function shutdownSessionConfig(config: Config): Promise<void> {
   await config.shutdown({ shutdownTelemetry: false });
   if (config.hasSessionWriteOwnership()) {
@@ -4844,12 +4865,30 @@ class QwenAgent implements Agent {
    * turns, blocks new ones, and reports closing=true — so isTurnIdle()
    * there is structurally false and would keep genuinely abandoned calls
    * pending forever.
+   *
+   * qwen/status/session/transcript is also ungated and can be served while
+   * another request holds the close gate, or after dispose before the
+   * session leaves this.sessions. Pass ignoreClosing so that path samples
+   * hasActiveTurn() rather than isTurnIdle(): a closing session with no
+   * active turn must still finalize abandoned trailing calls. loadUpdates
+   * keeps the isTurnIdle() sample. isTurnIdle() itself is unchanged — it
+   * remains the busy-check for turn admission.
+   *
+   * That transcript path also ANDs the agent-level activePromptCalls
+   * sample (taken before the read and again at replay). A prompt already
+   * registered but still waiting at Session admission has no pendingPrompt
+   * yet, so hasActiveTurn() is false across that window; without the
+   * extra sample a backward page would finalize a trailing call the
+   * prompt is about to resume.
    */
   private finalizeDanglingForRestore(
     session: Session | undefined,
     turnIdleBeforeRead: boolean,
+    options?: { ignoreClosing?: boolean },
   ): boolean {
-    const idleAtReplay = session?.isTurnIdle() ?? true;
+    const idleAtReplay = options?.ignoreClosing
+      ? !(session?.hasActiveTurn() ?? false)
+      : (session?.isTurnIdle() ?? true);
     const finalize = turnIdleBeforeRead && idleAtReplay;
     // Template literal, not printf-style placeholders: createDebugLogger's
     // formatArgs does no util.format substitution, it space-joins the args.
@@ -9338,41 +9377,81 @@ class QwenAgent implements Agent {
 
         try {
           const readTranscriptPage = async (settings: LoadedSettings) => {
-            if (rawDirection === 'backward') {
-              await this.sessions
-                .get(sessionId)
-                ?.getConfig()
-                .getChatRecordingService()
-                ?.flush();
-            }
-            const reader = new SessionTranscriptReader(cwd);
-            const activePromptBeforeRead =
-              this.activePromptCalls.has(sessionId);
-            const page = await reader.readPage(sessionId, {
-              ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
-              ...(typeof rawBeforeRecordId === 'string'
-                ? { beforeRecordId: rawBeforeRecordId }
-                : {}),
-              ...(typeof rawAtRecordId === 'string'
-                ? { atRecordId: rawAtRecordId }
-                : {}),
-              ...(typeof rawSnapshot === 'string'
-                ? { snapshot: rawSnapshot }
-                : {}),
-              ...(rawDirection === 'backward'
-                ? { direction: rawDirection }
-                : {}),
-              ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
-              maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
-            });
+            const liveSession = this.sessions.get(sessionId);
+            const recording = liveSession
+              ?.getConfig()
+              .getChatRecordingService();
+            const promptCallBeforeRead = this.activePromptCalls.has(sessionId);
+            const turnIdleBeforeRead = liveSession
+              ? !liveSession.hasActiveTurn()
+              : true;
+            let readAttempted = false;
+            const readPersistedPage = async () => {
+              readAttempted = true;
+              const reader = new SessionTranscriptReader(cwd);
+              return await reader.readPage(sessionId, {
+                ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
+                ...(typeof rawBeforeRecordId === 'string'
+                  ? { beforeRecordId: rawBeforeRecordId }
+                  : {}),
+                ...(typeof rawAtRecordId === 'string'
+                  ? { atRecordId: rawAtRecordId }
+                  : {}),
+                ...(typeof rawSnapshot === 'string'
+                  ? { snapshot: rawSnapshot }
+                  : {}),
+                ...(rawDirection === 'backward'
+                  ? { direction: rawDirection }
+                  : {}),
+                ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+                maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+              });
+            };
+            // Barrier the request's backward/latest page so queued
+            // appends drain before the disk read. Request direction,
+            // not the resolved page direction, is the gate.
+            // Cursor/anchor pages never consulted writer health.
+            // The barrier refuses before touching the tail when the
+            // recorder is lifecycle-inactive, so that fallback drains
+            // via flush().catch then reads. A latched writeFailure
+            // still fails the read. The #9704 dangling placeholder is
+            // decided below by ANDing the activePromptCalls sample with
+            // finalizeDanglingForRestore (ignoreClosing active-turn
+            // sample), not by this drain — tool results are recorded
+            // only after the batch ends.
+            const page =
+              recording !== undefined && rawDirection === 'backward'
+                ? await recording
+                    .runWithWriteBarrier(readPersistedPage)
+                    .catch(async (error: unknown) => {
+                      if (
+                        readAttempted ||
+                        !isWriterLifecycleUnavailable(recording)
+                      ) {
+                        throw error;
+                      }
+                      const reason =
+                        error instanceof Error ? error.message : String(error);
+                      debugLogger.debug(
+                        `[ACP] sessionTranscript lifecycle fallback session=${sessionId} error=${reason}`,
+                      );
+                      await recording.flush().catch(() => undefined);
+                      return readPersistedPage();
+                    })
+                : await readPersistedPage();
             const config = await this.getTranscriptReplayConfig(cwd, settings);
             const replay = await replayTranscriptRecordPage({
               sessionId,
               page,
               config,
               finalizeDangling:
-                !activePromptBeforeRead &&
-                !this.activePromptCalls.has(sessionId),
+                !promptCallBeforeRead &&
+                !this.activePromptCalls.has(sessionId) &&
+                this.finalizeDanglingForRestore(
+                  liveSession,
+                  turnIdleBeforeRead,
+                  { ignoreClosing: true },
+                ),
               encodeCursor: (state) =>
                 encodeSessionTranscriptCursor(state, cwd),
               logger: debugLogger,
