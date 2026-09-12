@@ -243,6 +243,7 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
+  AUTO_REJECT_APPROVAL_PAYLOAD,
   decideNotificationAdmission,
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
@@ -265,7 +266,6 @@ import {
   type BridgeConversationDirectoryExpectation,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
-  DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
@@ -415,6 +415,8 @@ import {
   buildPermissionRequestContent,
   interactionMetaFields,
   type PermissionPersistencePolicy,
+  permissionCancelMessageFromResponse,
+  permissionCancelReasonFromResponse,
   requestPermissionWithAbort,
   resolvePermissionOutcome,
   toPermissionOptions,
@@ -2901,13 +2903,17 @@ export class Session implements SessionContext {
         response,
         offeredPermissionOptions,
       );
+      const cancelMessage =
+        outcome === ToolConfirmationOutcome.Cancel
+          ? permissionCancelMessageFromResponse(response)
+          : undefined;
       const resolved = await registry.resolvePendingApproval(
         runId,
         approval.approvalId,
         outcome === ToolConfirmationOutcome.ProceedOnce
           ? outcome
           : ToolConfirmationOutcome.Cancel,
-        undefined,
+        cancelMessage !== undefined ? { cancelMessage } : undefined,
       );
       await this.#finishWorkflowApprovalToolCall(
         approval,
@@ -2920,6 +2926,7 @@ export class Session implements SessionContext {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
       await this.#finishWorkflowApprovalToolCall(
         approval,
@@ -13421,8 +13428,15 @@ export class Session implements SessionContext {
                 );
               }
 
+              const permissionCancelMessage =
+                outcome === ToolConfirmationOutcome.Cancel
+                  ? permissionCancelMessageFromResponse(output)
+                  : undefined;
               let confirmationPayload: ToolConfirmationPayload | undefined = {
                 answers: output.answers,
+                ...(permissionCancelMessage !== undefined
+                  ? { cancelMessage: permissionCancelMessage }
+                  : {}),
                 ...(output.expectedPlanExecutionMode !== undefined
                   ? {
                       expectedPlanExecutionMode:
@@ -13547,9 +13561,8 @@ export class Session implements SessionContext {
                   // fabricated decline — leave the transcript dangling so a
                   // later load can re-hang the question. A deliberate user
                   // cancel persists, matching live decline handling.
-                  const cancelReason = (
-                    output as { _meta?: Record<string, unknown> | null }
-                  )._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
+                  const cancelReason =
+                    permissionCancelReasonFromResponse(output);
                   const unattendedRestore =
                     isUnattendedRestorePermissionCancel(cancelReason) &&
                     this.restoringAskUserQuestionCallIds?.has(callId) === true;

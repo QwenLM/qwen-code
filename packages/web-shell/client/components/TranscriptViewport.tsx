@@ -63,6 +63,7 @@ export const TranscriptViewport = forwardRef<
   const appliedTarget = useRef<number | undefined>(undefined);
   const scrollIntent = useRef(0);
   const restoring = useRef(false);
+  const restoredScrollTop = useRef<number | undefined>(undefined);
   const loadFrame = useRef<number | undefined>(undefined);
   useLayoutEffect(
     () => () => {
@@ -146,6 +147,50 @@ export const TranscriptViewport = forwardRef<
     [historical, loading, returnToLive],
   );
 
+  const restoreReadingAnchor = useCallback(
+    (saved: ReadingAnchor) => {
+      const scroll = scroller();
+      if (!scroll) return;
+      const child = saved.callId
+        ? [
+            ...(root.current?.querySelectorAll<HTMLElement>(
+              '[data-transcript-tool-call-id]',
+            ) ?? []),
+          ].find(
+            (candidate) =>
+              candidate.dataset.transcriptToolCallId === saved.callId &&
+              candidate.getBoundingClientRect().height > 0,
+          )
+        : undefined;
+      const row =
+        child ??
+        (saved.rowKey
+          ? rows().find(
+              (candidate) => candidate.dataset.messageRowKey === saved.rowKey,
+            )
+          : undefined) ??
+        rows().find((candidate) =>
+          candidate.dataset.sourceBlockIds?.split(',').includes(saved.source),
+        );
+      if (row) {
+        scroll.scrollTop +=
+          row.getBoundingClientRect().top -
+          scroll.getBoundingClientRect().top -
+          saved.offset;
+        restoredScrollTop.current = scroll.scrollTop;
+        return;
+      }
+      const message = messages.find((candidate) =>
+        candidate.sourceBlockIds?.includes(saved.source),
+      );
+      if (message) {
+        list.current?.scrollToMessage(message.id, saved.callId);
+        restoredScrollTop.current = scroll.scrollTop;
+      }
+    },
+    [messages, rows, scroller],
+  );
+
   useLayoutEffect(() => {
     const changedView = lastView.current !== viewKey;
     const changedMessages = lastMessages.current !== messages;
@@ -176,36 +221,7 @@ export const TranscriptViewport = forwardRef<
       if (target) {
         list.current?.scrollToMessage(target.id);
       } else if (saved) {
-        const child = saved.callId
-          ? [
-              ...(root.current?.querySelectorAll<HTMLElement>(
-                '[data-transcript-tool-call-id]',
-              ) ?? []),
-            ].find(
-              (child) =>
-                child.dataset.transcriptToolCallId === saved.callId &&
-                child.getBoundingClientRect().height > 0,
-            )
-          : undefined;
-        const row =
-          child ??
-          (saved.rowKey
-            ? rows().find((row) => row.dataset.messageRowKey === saved.rowKey)
-            : undefined) ??
-          rows().find((row) =>
-            row.dataset.sourceBlockIds?.split(',').includes(saved.source),
-          );
-        if (row)
-          scroll.scrollTop +=
-            row.getBoundingClientRect().top -
-            scroll.getBoundingClientRect().top -
-            saved.offset;
-        else {
-          const message = messages.find((message) =>
-            message.sourceBlockIds?.includes(saved.source),
-          );
-          if (message) list.current?.scrollToMessage(message.id, saved.callId);
-        }
+        restoreReadingAnchor(saved);
       } else if (changedView) {
         scroll.scrollTop =
           entryDirection.current === 'newer' ? 0 : scroll.scrollHeight;
@@ -213,7 +229,6 @@ export const TranscriptViewport = forwardRef<
       capture();
       if (--remaining > 0) frame = requestAnimationFrame(restore);
       else {
-        anchor.current = undefined;
         restoring.current = false;
       }
     };
@@ -222,7 +237,41 @@ export const TranscriptViewport = forwardRef<
       cancelAnimationFrame(frame);
       restoring.current = false;
     };
-  }, [messages, viewKey, historical, viewport.target, capture, rows, scroller]);
+  }, [
+    messages,
+    viewKey,
+    historical,
+    viewport.target,
+    capture,
+    restoreReadingAnchor,
+    scroller,
+  ]);
+
+  useLayoutEffect(() => {
+    if (!historical || typeof ResizeObserver === 'undefined') return;
+    const scroll = scroller();
+    const content = scroll?.firstElementChild;
+    if (!scroll || !content) return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (!anchor.current || restoring.current || frame) return;
+      const intent = scrollIntent.current;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const saved = anchor.current;
+        if (!saved || intent !== scrollIntent.current) return;
+        restoring.current = true;
+        restoreReadingAnchor(saved);
+        capture();
+        restoring.current = false;
+      });
+    });
+    observer.observe(content);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [capture, historical, restoreReadingAnchor, scroller, viewKey]);
 
   const load = (direction: 'older' | 'newer') => {
     if (loadFrame.current !== undefined) return;
@@ -330,9 +379,11 @@ export const TranscriptViewport = forwardRef<
             handleScrollIntent();
         }}
         onScrollCapture={(event) => {
-          if (event.target !== scroller() || restoring.current) return;
-          const current = capture();
-          if (loading) anchor.current = current;
+          const scroll = scroller();
+          if (event.target !== scroll || restoring.current) return;
+          if (restoredScrollTop.current === scroll.scrollTop) return;
+          restoredScrollTop.current = undefined;
+          anchor.current = capture();
           loadAtEdge();
         }}
       >
