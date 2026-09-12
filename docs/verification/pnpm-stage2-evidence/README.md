@@ -8,7 +8,9 @@ because it does not run builds or test suites. Every number below that is not
 marked as measured comes from #10444 and has not been reproduced here.
 
 Report results as a comment on #10444, then add a `results.md` next to this
-file.
+file. Pushing the scratch branch, dispatching the workflow, and posting the
+results comment are operator actions, not steps for an agent to take
+unattended.
 
 ## Already measured
 
@@ -34,7 +36,12 @@ Run this on every host class that creates worktrees: the ECS runner hosts and
 developer Macs.
 
 1. Record the filesystem. On Linux, run `df -T <repo>`. On macOS, run
-   `diskutil info / | grep Personality`.
+   `diskutil info "$(pwd)" | grep -E 'Personality|Mount Point'` from the
+   checkout and record the mount point beside the personality. Probing `/`
+   reports the sealed read-only APFS system volume on every Mac regardless
+   of where the checkout actually lives; the repo sits on the Data volume
+   or under `/Volumes`. When the repo is on the internal disk,
+   `diskutil info /System/Volumes/Data` is the equivalent.
 
 2. Prepare three fresh worktrees of the same commit from the primary
    checkout. The primary checkout must already have a completed `npm ci`.
@@ -108,7 +115,15 @@ script changes.
    After the install step, add `npm run build`,
    `npm run typecheck`, `npm run lint:ci`, `npm run test:ci`,
    `npm run bundle`, and `npm run check:serve-fast-path-bundle`.
-2. Run the workflow with `gh workflow run <workflow-file> --ref <branch>`.
+2. Push the scratch branch, then dispatch the run. `--ref <branch>` is
+   resolved server-side, so a branch that exists only locally is not a ref
+   GitHub can dispatch: push it first — `git push origin <branch>`, with a
+   token carrying `workflow` scope (the branch adds a file under
+   `.github/workflows/`) — then run
+   `gh workflow run <workflow-file> --ref <branch>`. If a workflow file
+   that exists only on a scratch branch is not dispatchable, merge the
+   throwaway workflow to the default branch or trigger the run via
+   `pull_request` instead.
 3. Repeat the run with the install step replaced by
    `QWEN_SKIP_PREPARE=1 QWEN_SKIP_NOTICE_GENERATION=1 npm ci --prefer-offline`,
    the same guard pair `scripts/setup-worktree.js` sets — a bare `npm ci`
