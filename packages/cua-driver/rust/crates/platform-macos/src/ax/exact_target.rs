@@ -13,9 +13,9 @@ use cua_driver_core::background_input::{
 };
 
 use super::bindings::{
-    ax_get_window_id, copy_ax_windows, copy_bool_attr, copy_element_attr, copy_string_attr,
-    focused_element_of_pid, kAXErrorSuccess, AXUIElementCreateApplication, AXUIElementGetPid,
-    AXUIElementRef, AXUIElementSetMessagingTimeout,
+    ax_get_window_id, copy_ax_windows_with_status, copy_bool_attr, copy_element_attr,
+    copy_string_attr, focused_element_of_pid, kAXErrorSuccess, AXUIElementCreateApplication,
+    AXUIElementGetPid, AXUIElementRef, AXUIElementSetMessagingTimeout,
 };
 use crate::windows::{all_windows, resolve_window_owner, WindowOwner};
 
@@ -171,7 +171,7 @@ pub(crate) fn validate_keyboard_target(pid: i32, window_id: u32) -> anyhow::Resu
     }
 }
 
-/// One fresh `AXWindows` row: the mapped CGWindowID plus its minimized state.
+/// One fresh AX window or attached sheet: its mapped ID and minimized state.
 /// `minimized: None` means the attribute could not be read — unknown, not
 /// "not minimized".
 struct AxWindowRecord {
@@ -179,21 +179,60 @@ struct AxWindowRecord {
     minimized: Option<bool>,
 }
 
-/// Map the application's fresh `AXWindows` through `_AXUIElementGetWindow`.
-/// Windows whose id the SPI cannot resolve are omitted: an unmappable window
-/// can never satisfy an exact-target requirement.
-unsafe fn ax_window_records(app: AXUIElementRef) -> Vec<AxWindowRecord> {
-    copy_ax_windows(app)
-        .into_iter()
-        .filter_map(|window| {
-            let record = ax_get_window_id(window).map(|window_id| AxWindowRecord {
+fn attached_sheet_record(
+    window_id: Option<u32>,
+    root_window_id: Option<u32>,
+    records: &[AxWindowRecord],
+) -> Option<AxWindowRecord> {
+    let window_id = window_id?;
+    let root_window_id = root_window_id?;
+    if records.iter().any(|record| record.window_id == window_id) {
+        return None;
+    }
+    let root = records
+        .iter()
+        .find(|record| record.window_id == root_window_id)?;
+    Some(AxWindowRecord {
+        window_id,
+        // Attached sheets minimize with their proven root window.
+        minimized: root.minimized,
+    })
+}
+
+/// Map fresh AXWindows, resolving a missing target only through proven sheets.
+/// An unmapped window or incomplete attachment discovery cannot unlock input.
+unsafe fn ax_window_records(app: AXUIElementRef, target_window_id: u32) -> Vec<AxWindowRecord> {
+    let windows_read = copy_ax_windows_with_status(app);
+    let windows = windows_read.elements;
+    let mut records: Vec<_> = windows
+        .iter()
+        .filter_map(|&window| {
+            ax_get_window_id(window).map(|window_id| AxWindowRecord {
                 window_id,
                 minimized: copy_bool_attr(window, "AXMinimized"),
-            });
-            CFRelease(window as CFTypeRef);
-            record
+            })
         })
-        .collect()
+        .collect();
+    if windows_read.complete
+        && !records
+            .iter()
+            .any(|record| record.window_id == target_window_id)
+    {
+        let (sheets, complete) = super::sheets::copy_attached_sheets(&windows);
+        if complete {
+            for sheet in sheets {
+                if let Some(record) =
+                    attached_sheet_record(sheet.window_id, sheet.root_window_id, &records)
+                {
+                    records.push(record);
+                }
+            }
+        }
+    }
+    for window in windows {
+        CFRelease(window as CFTypeRef);
+    }
+    records
 }
 
 /// Count independently AX-mapped, non-minimized sibling top-level windows.
@@ -256,7 +295,7 @@ pub fn gather_background_facts(
             // Electron/Chromium apps may need per-process-lifetime enablement
             // before their AX windows and subtrees are materialized.
             super::enablement::ensure_chromium_ax_enabled(pid, app);
-            let records = ax_window_records(app);
+            let records = ax_window_records(app, window_id);
             let app_hidden = copy_bool_attr(app, "AXHidden");
             let element = element_ptr.map(|ptr| match element_window_id(ptr as AXUIElementRef) {
                 Some(id) if id == window_id => ElementAncestry::ProvenDescendant,
@@ -294,12 +333,35 @@ pub fn gather_background_facts(
 
 #[cfg(test)]
 mod tests {
-    use super::{count_competing_keyboard_destinations, AxWindowRecord};
+    use super::{attached_sheet_record, count_competing_keyboard_destinations, AxWindowRecord};
 
     fn ax_window(window_id: u32, minimized: Option<bool>) -> AxWindowRecord {
         AxWindowRecord {
             window_id,
             minimized,
+        }
+    }
+
+    #[test]
+    fn mapped_sheet_inherits_only_its_proven_roots_minimized_state() {
+        for minimized in [Some(false), Some(true), None] {
+            let records = [ax_window(10, minimized), ax_window(20, Some(false))];
+            let sheet = attached_sheet_record(Some(11), Some(10), &records).unwrap();
+            assert_eq!(sheet.window_id, 11);
+            assert_eq!(sheet.minimized, minimized);
+        }
+    }
+
+    #[test]
+    fn unmapped_or_duplicate_sheet_cannot_add_a_target() {
+        let records = [ax_window(10, Some(false))];
+        for (window, root) in [
+            (None, Some(10)),
+            (Some(11), None),
+            (Some(11), Some(99)),
+            (Some(10), Some(10)),
+        ] {
+            assert!(attached_sheet_record(window, root, &records).is_none());
         }
     }
 
