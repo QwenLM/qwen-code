@@ -487,17 +487,18 @@ export async function gitRemoteRemove(
     if (!completed) {
       if (
         /^(?:error|fatal): No such remote: /m.test(detail) &&
-        // A sectionless upstream VALUE (`.`, a URL, a path, a scp-like
-        // `host:path`) is admitted by the lenient name predicate, and a
-        // repo whose branch tracks such a value holds LIVE config a
-        // value-matched sweep would destroy over a 404. The skip trades
-        // away one residual: git accepts a colon-bearing (or `.`/`/`-
-        // shaped) SECTION name too, so a hand-made sectionless-named
-        // remote whose first-attempt cleanup died mid-sweep converges
-        // nothing on retry — accepted because the two states
-        // (never-sectioned live upstream vs orphaned-by-failed-removal)
-        // are indistinguishable once the section is gone, and sweeping
-        // risks the live one.
+        // A sectionless upstream VALUE that skips the probes (`.`, a
+        // URL, a scp-like `host:path`) is admitted by the lenient name
+        // predicate, and a repo whose branch tracks such a value holds
+        // LIVE config a value-matched sweep would destroy over a 404;
+        // colon-less values (bare words, path shapes) reach the probes
+        // and refuse there when dangling. The skip trades away one
+        // residual: git accepts a colon-bearing SECTION name too, so a
+        // hand-made sectionless-named remote whose first-attempt
+        // cleanup died mid-sweep converges nothing on retry — accepted
+        // because the two states (never-sectioned live upstream vs
+        // orphaned-by-failed-removal) are indistinguishable once the
+        // section is gone, and sweeping risks the live one.
         // Pure string test, ahead of the scope read: no spawn for a
         // name git resolves without a section.
         !isSectionlessUpstream(name) &&
@@ -539,10 +540,11 @@ export async function gitRemoteRemove(
         // the exclusion (an earlier attempt removed the section and
         // died mid-cleanup; the two states are indistinguishable once
         // the section is gone, and sweeping risks the live one — same
-        // trade as the sectionless-name residual below), and a flat
-        // layout's SLASHED branch refs (`refs/remotes/release/1.0`)
-        // stay namespace refs of the never-configured prefix, sweepable
-        // as before.
+        // trade as the sectionless-name residual below). A flat
+        // layout's SLASHED branch refs (`refs/remotes/release/1.0`) are
+        // no longer sweepable here: the foreign-dest-namespace
+        // exclusion (remoteTrackingRefs) owns them for the surviving
+        // remote.
         await deleteRemoteTrackingRefs(cwd, name, env, false);
         // Same re-verify the certify path runs: the sweep is
         // best-effort per ref, so a surviving ref (a stale lock) must
@@ -851,8 +853,11 @@ async function bareWordResolvesAsRepoPath(
   // `--resolve-git-dir` model misses bundles (git sniffs the bundle
   // magic, extension-independent) and needs the base by hand. No
   // `--exit-code`: a ref-less repo exits 2 and would read as
-  // unresolved. Only bare words reach this probe and insteadOf aliases
-  // are answered by the resolver probes ahead of it, so no network.
+  // unresolved. Colon-bearing values skip this probe at every call site
+  // via isSectionlessUpstream (they would put `ls-remote` on the
+  // network), so only bare words and colon-less path shapes reach it —
+  // local transports only — and insteadOf aliases are answered by the
+  // resolver probes ahead of it.
   // Fail-closed: a kill rethrows stripped; any other failure is false.
   try {
     await runGit(cwd, ['ls-remote', '--', name], env);
@@ -905,10 +910,12 @@ async function pushInsteadOfAliases(
 // in both polarities: a URL-less section (a bare `[remote "foo"] proxy =
 // …`) puts the name in the record set while resolving NOTHING, and a
 // legacy `$GIT_DIR/remotes/<name>` file resolves with no record at all.
-// Only the bare-word class reaches this probe — `.`, URLs and paths
-// short-circuit through isSectionlessUpstream first. Fail-closed toward
-// refusal: a read that cannot answer (other than a kill, which
-// propagates) counts as unresolved.
+// Only bare words and colon-less path shapes reach this probe — `.`
+// and colon-bearing values (URLs, scp-like) short-circuit through
+// isSectionlessUpstream first; an EXISTING path resolves here (the
+// certification side), a dangling one counts as unresolved (refusal).
+// Fail-closed toward refusal: a read that cannot answer (other than a
+// kill, which propagates) counts as unresolved.
 async function remoteNameResolves(
   cwd: string,
   value: string,
@@ -1240,14 +1247,32 @@ async function remoteTrackingRefs(
 ): Promise<string[]> {
   let refsRaw: string;
   let namesRaw: string;
+  let fetchRaw: string;
   try {
-    [refsRaw, namesRaw] = await Promise.all([
+    [refsRaw, namesRaw, fetchRaw] = await Promise.all([
       runGit(
         cwd,
         ['for-each-ref', '--format=%(refname)', 'refs/remotes/'],
         env,
       ),
       runGit(cwd, ['remote'], env),
+      // Surviving remotes can own refs OUTSIDE their own namespace (a
+      // second fetch refspec desting into refs/remotes/release/*, or a
+      // flat refs/remotes/*): name-prefix ownership would hand those
+      // live refs to the sweep of an unconfigured name. Read the dest
+      // namespaces and treat them as foreign. NUL-framed like every
+      // sibling read: a newline-bearing fetch value would otherwise
+      // hide its own namespace (or inject a fake `remote.<x>.fetch`
+      // line) under line framing.
+      runGit(
+        cwd,
+        ['config', '-z', '--get-regexp', '^remote\\..*\\.fetch$'],
+        env,
+      ).catch((err: unknown) => {
+        if (isNoMatchConfigError(err)) return '';
+        stripConfigDump(err);
+        throw err;
+      }),
     ]);
   } catch (err) {
     // for-each-ref exits 0 on empty, so any failure here must abort,
@@ -1255,12 +1280,38 @@ async function remoteTrackingRefs(
     stripConfigDump(err);
     throw err;
   }
+  const foreignRoots = new Set<string>();
+  for (const entry of fetchRaw.split('\0')) {
+    if (entry === '') continue;
+    const nl = entry.indexOf('\n');
+    if (nl < 0) continue;
+    const value = entry.slice(nl + 1);
+    const colon = value.lastIndexOf(':');
+    const target = colon >= 0 ? value.slice(colon + 1) : value;
+    if (!target.startsWith('refs/remotes/')) continue;
+    const rest = target.slice('refs/remotes/'.length);
+    if (rest === '*' || rest.endsWith('/*')) {
+      foreignRoots.add(rest === '*' ? '' : rest.slice(0, -2));
+    } else if (!rest.includes('*')) {
+      foreignRoots.add(rest);
+    }
+  }
   const owners = [...namesRaw.split('\n').filter(Boolean), name];
   return refsRaw
     .split('\n')
     .filter((ref) => ref !== '')
     .filter((ref) => {
       if (owningRemote(ref, owners) !== name) return false;
+      // A ref inside a SURVIVING remote's dest namespace is that
+      // remote's live tracking state, whatever name prefix it sits
+      // under — never sweep over it (the flat `refs/remotes/*` dest
+      // owns everything below it, root '').
+      const rel = ref.slice('refs/remotes/'.length);
+      for (const root of foreignRoots) {
+        if (root === '' || rel === root || rel.startsWith(`${root}/`)) {
+          return false;
+        }
+      }
       // The converge arm excludes the removed name's own namespace-less
       // top-level ref (live state for a never-configured name), but the
       // ownership resolution above must stay WHOLE: suppressing the
@@ -1504,10 +1555,14 @@ async function localBranchKeyValues(
   try {
     const out = await runGit(
       cwd,
-      ['config', '--local', '--includes', '--get-all', key],
+      ['config', '--local', '--includes', '--get-all', '-z', key],
       env,
     );
-    return out.split('\n').filter((line) => line !== '');
+    // NUL-framed: an EMPTY value (`remote.pushDefault = `) prints as an
+    // empty LINE under the default framing and would read as absent —
+    // the restore would then re-add a key git never destroyed, doubling
+    // it on every removal. Split on NUL, dropping the final terminator.
+    return out.split('\0').filter((v, i, a) => v !== '' || i < a.length - 1);
   } catch (err) {
     if (isNoMatchConfigError(err)) return [];
     stripConfigDump(err);
@@ -1719,23 +1774,24 @@ async function survivingUpstreamKeys(
 }
 
 // Values git resolves WITHOUT a remote section: the local repository
-// (`.`), anything carrying a `:` — a URL (`https:…`, `ssh:…`) or the
-// scp-like `[user@]host:path` — and local PATHS (`/abs`, `./rel`,
-// `a/b`): git decides the transport from the shape, so an unmasked one
-// is a valid upstream, not a dangling remote name. Only these shapes
-// skip the resolution probe — a bare word is the one remaining class,
-// and git's own resolver answers it (a URL-less section resolves
-// nothing; a legacy remotes/ file resolves with no section at all).
+// (`.`) and anything carrying a `:` — a URL (`https:…`, `ssh:…`) or the
+// scp-like `[user@]host:path` — those are the shapes a probe would put
+// on the network, so they skip it. Every colon-less value (bare word
+// OR path-shaped) falls through to the resolver + path probes: an
+// EXISTING path resolves (valid upstream, no refusal) while a
+// dangling slashed value (`ghost/fork`, a relative path that does not
+// exist) must refuse — the unmask gate fails open for exactly that
+// class if the shape alone short-circuits it. The one win32 exception:
+// a UNC path (`\\server\share`) IS a network transport, so probing it
+// would block up to the git timeout on an offline share (and refuse on
+// the timeout); drive-letter paths carry their `:` above, and
+// backslash-relative paths probe locally. On POSIX a backslash is an
+// ordinary name character — the probes decide.
 function isSectionlessUpstream(value: string): boolean {
   return (
     value === '.' ||
     value.includes(':') ||
-    value.includes('/') ||
-    // Windows path spellings are sectionless values on win32 the same
-    // way `/`-bearing ones are on POSIX (git normalizes backslashes);
-    // on POSIX a backslash is an ordinary name character.
-    (process.platform === 'win32' &&
-      (value.includes('\\') || /^[A-Za-z]:[\\/]/.test(value)))
+    (process.platform === 'win32' && value.startsWith('\\\\'))
   );
 }
 

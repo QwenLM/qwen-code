@@ -556,6 +556,29 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       const aposText = String(apos.body['error'] ?? apos.body['message']);
       expect(aposText).not.toContain('/tmp/probe');
       expect(aposText).not.toContain('s cfg.gitconfig');
+      // Git's quoted-path convention carries a SPACE-BEARING payload
+      // inside quotes (git's die(_("'%s' …)) family, e.g. `fatal:
+      // '<path>' does not appear to be a git repository`): the sweep's
+      // whitespace-token boundary would keep everything past the first
+      // space, so the quoted-path arm owns the whole quoted payload.
+      const quoted = classify(
+        "fatal: '/tmp/probe/My Repos/app.git' does not appear to be a git repository",
+      );
+      const quotedText = String(quoted.body['error'] ?? quoted.body['message']);
+      expect(quotedText).not.toContain('My Repos');
+      expect(quotedText).not.toContain('app.git');
+      expect(quotedText).toContain('<path>');
+      // An apostrophe INSIDE the quoted path stops the quoted-path
+      // arm's raw payload early (git prints the path unescaped); the
+      // fragment arm drops everything up to the closing quote.
+      const aposPath = classify(
+        "fatal: '/Users/o'brien/git/qwen-code' does not appear to be a git repository",
+      );
+      const aposPathText = String(
+        aposPath.body['error'] ?? aposPath.body['message'],
+      );
+      expect(aposPathText).not.toContain('brien');
+      expect(aposPathText).toContain('<path>');
       // The transport negative control: a URL's slashes follow the
       // scheme's colon, so the sweep leaves it verbatim.
       const url = classify(

@@ -125,6 +125,22 @@ function redactGitPaths(detail: string, cwd: string): string {
   // drop the fragment between the label and the closing quote, or the
   // tail of a host path reaches the client.
   message = message.replace(/(<config>')[^'\n]*(')/g, '$1$2');
+  // Git's quoted-path convention (`die(_("'%s' …"))`, e.g. `fatal:
+  // '<path>' does not appear to be a git repository`) carries the
+  // payload INSIDE quotes and it may contain whitespace — the sweep's
+  // token boundary would keep everything past the first space. Redact
+  // the quoted payload up to an inner apostrophe (git prints the path
+  // RAW, so an apostrophe-bearing path stops the payload early); the
+  // fragment arm below drops a path-like rest (one carrying a slash —
+  // a slash-free tail carries no path structure and stays, preserving
+  // quote-bearing diagnostics). A quoted URL is untouched (its
+  // payload starts with a scheme, not a slash), and already-labeled
+  // `<config>'…'` payloads are outside the boundary class.
+  message = message.replace(
+    /(^|[\s(<])'((?:\/|[A-Za-z]:[\\/]|\\\\)[^'\n]*)'/g,
+    "$1'<path>'",
+  );
+  message = message.replace(/('<path>')[^'\n]*\/[^'\n]*(')/g, '$1$2');
 
   // Fail-closed sweep: the ` in file ` family above owns its tail, but
   // OTHER sentences can carry an absolute path (today's or tomorrow's

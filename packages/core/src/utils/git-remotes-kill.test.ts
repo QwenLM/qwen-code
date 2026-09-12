@@ -183,8 +183,10 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
       .mockResolvedValueOnce('origin\n') // ls-remote --get-url: name echoed = gone
       .mockResolvedValueOnce('') // tracking-refs read (empty)
       .mockResolvedValueOnce('') // remote list (empty)
+      .mockRejectedValueOnce(noMatchError()) // fetch refspec dests (none)
       .mockResolvedValueOnce('') // tracking-refs re-verify (empty)
       .mockResolvedValueOnce('') // remote list (empty)
+      .mockRejectedValueOnce(noMatchError()) // fetch refspec dests (none)
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // sweep read
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // sweep re-verify
       .mockResolvedValueOnce('') // worktree list --porcelain
@@ -192,7 +194,7 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     await expect(gitRemoteRemove('/repo', 'origin')).rejects.toThrow(
       /remote still configured after removal/,
     );
-    expect(runGit.mock.calls.length).toBe(calls + 18);
+    expect(runGit.mock.calls.length).toBe(calls + 20);
   });
 
   it('fails the removal closed on a killed worktree-list read', async () => {
@@ -212,8 +214,10 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
       .mockResolvedValueOnce('origin\n') // ls-remote --get-url: name echoed = gone
       .mockResolvedValueOnce('') // tracking-refs read (empty)
       .mockResolvedValueOnce('') // remote list (empty)
+      .mockRejectedValueOnce(noMatchError()) // fetch refspec dests (none)
       .mockResolvedValueOnce('') // tracking-refs re-verify (empty)
       .mockResolvedValueOnce('') // remote list (empty)
+      .mockRejectedValueOnce(noMatchError()) // fetch refspec dests (none)
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // sweep read
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // sweep re-verify
       .mockRejectedValueOnce(killedDumpError()); // worktree list --porcelain -z
@@ -222,7 +226,7 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     );
     expect(err).toMatchObject({ killed: true });
     expect((err as { stdout?: unknown }).stdout).toBe('');
-    expect(runGit.mock.calls.length).toBe(calls + 17);
+    expect(runGit.mock.calls.length).toBe(calls + 19);
   });
 
   it('fails the removal closed on a killed sibling worktree read', async () => {
@@ -242,8 +246,10 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
       .mockResolvedValueOnce('origin\n') // ls-remote --get-url: name echoed = gone
       .mockResolvedValueOnce('') // tracking-refs read (empty)
       .mockResolvedValueOnce('') // remote list (empty)
+      .mockRejectedValueOnce(noMatchError()) // fetch refspec dests (none)
       .mockResolvedValueOnce('') // tracking-refs re-verify (empty)
       .mockResolvedValueOnce('') // remote list (empty)
+      .mockRejectedValueOnce(noMatchError()) // fetch refspec dests (none)
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // sweep read
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // sweep re-verify
       .mockResolvedValueOnce('worktree /other\0\0') // one sibling
@@ -254,7 +260,7 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     );
     expect(err).toMatchObject({ killed: true });
     expect((err as { stdout?: unknown }).stdout).toBe('');
-    expect(runGit.mock.calls.length).toBe(calls + 19);
+    expect(runGit.mock.calls.length).toBe(calls + 21);
   });
 
   it('fails the converge arm closed on a killed repo-path probe', async () => {
@@ -309,6 +315,7 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
       '--local',
       '--includes',
       '--get-all',
+      '-z',
       'branch.main.remote',
     ]);
   });
@@ -543,8 +550,10 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
       .mockResolvedValueOnce('origin\n') // ls-remote --get-url: name echoed = gone
       .mockResolvedValueOnce('') // tracking-refs read (empty)
       .mockResolvedValueOnce('') // remote list (empty)
+      .mockRejectedValueOnce(noMatchError()) // fetch refspec dests (none)
       .mockResolvedValueOnce('') // tracking-refs re-verify (empty)
       .mockResolvedValueOnce('') // remote list (empty)
+      .mockRejectedValueOnce(noMatchError()) // fetch refspec dests (none)
       .mockRejectedValueOnce(killedDumpError()); // branch-key sweep read
     const err = await gitRemoteRemove('/repo', 'origin').catch(
       (e: unknown) => e,
@@ -554,7 +563,7 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     expect((err as { stderr?: unknown }).stderr).toBe(
       'fatal: unable to read config file',
     );
-    expect(runGit.mock.calls.length).toBe(calls + 17);
+    expect(runGit.mock.calls.length).toBe(calls + 19);
   });
 
   it('strips the dump from a killed upstream-survivor read after cleanup', async () => {
@@ -577,8 +586,10 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
       .mockResolvedValueOnce('origin\n') // ls-remote --get-url: name echoed = gone
       .mockResolvedValueOnce('') // tracking-refs read (empty)
       .mockResolvedValueOnce('') // remote list (empty)
+      .mockRejectedValueOnce(noMatchError()) // fetch refspec dests (none)
       .mockResolvedValueOnce('') // tracking-refs re-verify (empty)
       .mockResolvedValueOnce('') // remote list (empty)
+      .mockRejectedValueOnce(noMatchError()) // fetch refspec dests (none)
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // worktree sweep read
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // worktree re-verify
       .mockResolvedValueOnce('') // worktree list --porcelain
@@ -591,7 +602,7 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     expect((err as { stderr?: unknown }).stderr).toBe(
       'fatal: unable to read config file',
     );
-    expect(runGit.mock.calls.length).toBe(calls + 18);
+    expect(runGit.mock.calls.length).toBe(calls + 20);
   });
 
   it('fails the listing closed on a killed promisor badge read', async () => {
@@ -668,7 +679,9 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // listing read
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // all-scope section verify
       .mockResolvedValueOnce('origin\n') // ls-remote --get-url: name echoed = gone
-      .mockRejectedValueOnce(killedDumpError()); // tracking-refs read
+      .mockRejectedValueOnce(killedDumpError()) // tracking-refs read
+      .mockResolvedValueOnce('') // remote list (spawned alongside the killed for-each-ref)
+      .mockResolvedValueOnce(''); // fetch refspec dests (spawned alongside the killed for-each-ref)
     const err = await gitRemoteRemove('/repo', 'origin').catch(
       (e: unknown) => e,
     );
@@ -677,7 +690,7 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     expect((err as { stderr?: unknown }).stderr).toBe(
       'fatal: unable to read config file',
     );
-    expect(runGit.mock.calls.length).toBe(calls + 12);
+    expect(runGit.mock.calls.length).toBe(calls + 13);
   });
 
   it('strips the dump from a killed tracking-refs re-verification', async () => {
@@ -698,8 +711,11 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
       .mockResolvedValueOnce('origin\n') // ls-remote --get-url: name echoed = gone
       .mockResolvedValueOnce('refs/remotes/origin/main\n') // refs read
       .mockResolvedValueOnce('') // remote list (empty)
+      .mockRejectedValueOnce(noMatchError()) // fetch refspec dests (none)
       .mockResolvedValueOnce('') // update-ref -d
-      .mockRejectedValueOnce(killedDumpError()); // re-verify
+      .mockRejectedValueOnce(killedDumpError()) // re-verify for-each-ref
+      .mockResolvedValueOnce('') // remote list (spawned alongside the killed for-each-ref)
+      .mockResolvedValueOnce(''); // fetch refspec dests (spawned alongside the killed for-each-ref)
     const err = await gitRemoteRemove('/repo', 'origin').catch(
       (e: unknown) => e,
     );
@@ -708,6 +724,6 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     expect((err as { stderr?: unknown }).stderr).toBe(
       'fatal: unable to read config file',
     );
-    expect(runGit.mock.calls.length).toBe(calls + 15);
+    expect(runGit.mock.calls.length).toBe(calls + 17);
   });
 });

@@ -2304,28 +2304,19 @@ describe('repository-scope listing and removal', () => {
     expect(git(dir, 'config', '--get', 'remote.pushdefault')).toBe('sub\n');
   });
 
-  it('certifies an unmasked Windows-spelled path upstream on win32', async () => {
+  it('refuses an unmasked dangling Windows-spelled upstream value', async () => {
     const dir = makeRepo();
     git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
-    // Backslash spellings are sectionless path values on win32 the same
-    // way `/`-bearing ones are on POSIX — an inert `..\old-sibling`
-    // must not false-refuse a completed removal there.
-    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
-    Object.defineProperty(process, 'platform', {
-      value: 'win32',
-      configurable: true,
-    });
-    try {
-      git(dir, 'config', '--global', 'branch.main.remote', '..\\old-sibling');
-      git(dir, 'config', '--local', 'branch.main.remote', 'origin');
-      const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
-      expect(remotes).toEqual([]);
-      expect(git(dir, 'config', '--get', 'branch.main.remote')).toBe(
-        '..\\old-sibling\n',
-      );
-    } finally {
-      Object.defineProperty(process, 'platform', platform!);
-    }
+    // A backslash-spelled value naming neither a section nor an
+    // existing path is DANGLING once unmasked — the probes decide it.
+    // The old win32 shape carve certified it (fail-open); an EXISTING
+    // win32 path still certifies, through the path probe on win32
+    // hosts, so the carve is gone.
+    git(dir, 'config', '--global', 'branch.main.remote', '..\\old-sibling');
+    git(dir, 'config', '--local', 'branch.main.remote', 'origin');
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
   });
 
   it('certifies an unmasked upstream naming a local path, not a section', async () => {
@@ -2397,6 +2388,32 @@ describe('repository-scope listing and removal', () => {
     const remotes = await gitRemoteRemove(dir, 'upstream', fixtureEnv);
     expect(remotes).toEqual([]);
     expect(git(dir, 'config', '--get', 'branch.main.remote')).toBe('second\n');
+  });
+
+  it('does not duplicate an empty-value pushDefault the removal never touched', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // An empty value prints as an empty LINE under default framing: the
+    // restore's presence read must see it as PRESENT (NUL framing), or
+    // it re-adds a key git never destroyed — doubling per removal.
+    git(dir, 'config', '--local', 'remote.pushDefault', '');
+    await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(
+      git(dir, 'config', '--local', '--get-all', 'remote.pushdefault'),
+    ).toBe('\n');
+  });
+
+  it('refuses when the removal unmasks a dangling slashed upstream value', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // A slashed value naming neither a section nor an existing path is
+    // a DANGLING upstream once unmasked — the shape shortcut must not
+    // certify it (the bare-word twin refuses; so must this).
+    git(dir, 'config', '--global', 'branch.main.remote', 'ghost/fork');
+    git(dir, 'config', '--local', 'branch.main.remote', 'origin');
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
   });
 
   it('does not duplicate an include-held pushDefault into the local file', async () => {
@@ -2502,6 +2519,45 @@ describe('repository-scope listing and removal', () => {
       /No such remote/,
     );
     expect(git(dir, 'rev-parse', '--verify', 'refs/remotes/main')).toBeTruthy();
+  });
+
+  it('refuses a never-configured name whose namespace a surviving refspec dests into', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // A second fetch refspec dests origin's refs into
+    // refs/remotes/release/*: those refs are ORIGIN's live tracking
+    // state, and removing the never-configured name `release` must not
+    // sweep them over a 404 (name-prefix ownership would).
+    git(
+      dir,
+      'config',
+      '--add',
+      'remote.origin.fetch',
+      '+refs/heads/*:refs/remotes/release/*',
+    );
+    git(dir, 'update-ref', 'refs/remotes/release/1.0', 'HEAD');
+    await expect(gitRemoteRemove(dir, 'release', fixtureEnv)).rejects.toThrow(
+      /No such remote/,
+    );
+    expect(
+      git(dir, 'rev-parse', '--verify', 'refs/remotes/release/1.0'),
+    ).toBeTruthy();
+  });
+
+  it('refuses a never-configured name under a flat dest namespace with slashed branches', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // The flat dest owns EVERYTHING below refs/remotes/, slashed branch
+    // refs included — the residual the bare-ref exclusion alone could
+    // not close.
+    git(dir, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/*');
+    git(dir, 'update-ref', 'refs/remotes/release/1.0', 'HEAD');
+    await expect(gitRemoteRemove(dir, 'release', fixtureEnv)).rejects.toThrow(
+      /No such remote/,
+    );
+    expect(
+      git(dir, 'rev-parse', '--verify', 'refs/remotes/release/1.0'),
+    ).toBeTruthy();
   });
 
   it('keeps a configured slashed sibling bare ref out of the converge sweep', async () => {

@@ -3718,6 +3718,44 @@ describe('BranchPickerPopover remotes view', () => {
     expect(onBranchChanged).not.toHaveBeenCalled();
   });
 
+  it('issues the post-refusal refresh before the awaited re-read, not after a mid-await switch', async () => {
+    let releaseReRead: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockRejectedValueOnce(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "No such remote: 'origin'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    mountWithBranches(undefined, { gitCwd: '/repo' });
+    await flush();
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    // Hold the catch's silent re-read so the workspace switch lands
+    // INSIDE its await. The branch/status refresh must have been
+    // issued in the same synchronous block as the staleness guard;
+    // issued after the await instead, it would carry the old closure's
+    // cwd and seed workspace B's panel with A's branches.
+    workspaceGitRemotes.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseReRead = resolve)),
+    );
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    mount({ gitCwd: '/repo2' });
+    await flush();
+    const branchCallsAtSwitch = workspaceGitBranches.mock.calls.length;
+    await act(async () => {
+      releaseReRead?.({ v: 2, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+    for (const call of workspaceGitBranches.mock.calls.slice(
+      branchCallsAtSwitch,
+    )) {
+      expect(call[0]).not.toBe('/repo');
+    }
+  });
+
   it('refreshes the branch list when the removal verification survives', async () => {
     // git exits 0 over a split section after deleting the tracking refs:
     // the row survives (silent re-read) AND the branch list is stale.

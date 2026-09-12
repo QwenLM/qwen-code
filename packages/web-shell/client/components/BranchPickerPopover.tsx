@@ -1117,19 +1117,17 @@ export function BranchPickerPopover({
       } catch (err) {
         if (requestId !== remotesRequestIdRef.current) return;
         showStatus(sanitizeStatusText(pullErrorMessage(err)), 'error');
-        // A refused remove usually means the list is stale (git answered
-        // "No such remote" for a row still on screen — a terminal removed
-        // it first); re-read silently so the panel converges instead of
-        // offering the same doomed click forever. Awaited: the converged
-        // list must commit before the settle effect restores focus, or the
-        // restore lands on a row the re-read is about to unmount.
-        if (mutationMeansStaleList(err)) await fetchRemotes(true);
         // git deletes refs/remotes/<name>/* and the pointing branches'
         // upstream config BEFORE the section write, so every refusal that
         // proves or leaves that destruction — no-such-remote (another
         // client already removed it, refs and all), a lock-failed write,
         // or a split section whose other half survives the verification —
         // leaves the branch list and the upstream chip stale as well.
+        // Issued in the SAME synchronous block as the staleness guard:
+        // after an await the caller may have switched workspace, and a
+        // refresh issued later would still carry this closure's
+        // ws/gitCwd — seeding the NEW workspace's panel with the old
+        // workspace's branches and status.
         const code = daemonErrorBody(err)?.['error'];
         if (
           code === 'no_such_remote' ||
@@ -1139,6 +1137,14 @@ export function BranchPickerPopover({
           void fetchBranches(true);
           void fetchStatus();
         }
+        // A refused remove usually means the list is stale (git answered
+        // "No such remote" for a row still on screen — a terminal removed
+        // it first); re-read silently so the panel converges instead of
+        // offering the same doomed click forever. Awaited LAST: the
+        // converged list must commit before the settle effect restores
+        // focus, or the restore lands on a row the re-read is about to
+        // unmount.
+        if (mutationMeansStaleList(err)) await fetchRemotes(true);
       } finally {
         setBusyAction(null);
         setRemovingName(null);
