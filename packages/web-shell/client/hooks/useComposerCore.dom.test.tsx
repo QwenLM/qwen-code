@@ -2293,3 +2293,318 @@ describe('useComposerCore tags', () => {
     expect(editor.textContent).not.toContain(serialized);
   });
 });
+
+describe('useComposerCore attachment chip deletion keys', () => {
+  // Deterministic ingestion wait: `waitForImageIngestion` drains the batch
+  // lane, but the committed attachment state can lag the batch count by one
+  // render, so assert the expected state itself before touching the keymap.
+  async function ingestAttachmentsAndWait(
+    files: readonly File[],
+    expected: { images: number; files: number },
+  ) {
+    await act(async () => {
+      expect(latest!.ingestFiles(files)).toBe(true);
+      await waitForImageIngestion();
+    });
+    await vi.waitFor(async () => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(latest!.pastedImages).toHaveLength(expected.images);
+      expect(latest!.pastedFiles).toHaveLength(expected.files);
+    });
+  }
+
+  function pressChipKey(key: string, init?: KeyboardEventInit): KeyboardEvent {
+    const view = latest!.viewRef.current!;
+    // Real keydowns are cancelable so `defaultPrevented` is observable at
+    // all. Note it only discriminates for keys CodeMirror does not bind with
+    // `preventDefault` — the default keymap prevents Backspace/Delete
+    // unconditionally, so the flag is meaningful here only for other keys
+    // (e.g. the printable-key test below).
+    const event = new KeyboardEvent('keydown', {
+      key,
+      code: key,
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    act(() => {
+      view.contentDOM.dispatchEvent(event);
+    });
+    return event;
+  }
+  it('removes the last pasted image with Backspace when the composer has no text or tags', async () => {
+    // Regression for issue #10794: Backspace used to return false when no
+    // removable @-tag existed, so image-only composers ignored the key.
+    await mount();
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['png2'], 'photo2.png', { type: 'image/png' }),
+    ];
+
+    await ingestAttachmentsAndWait(files, { images: 2, files: 0 });
+
+    pressChipKey('Backspace');
+
+    expect(latest!.pastedImages).toHaveLength(1);
+    // data is stored base64-encoded: 'png' identifies the *first* image,
+    // proving Backspace removed the last one.
+    expect(atob(latest!.pastedImages[0].data as string)).toBe('png');
+  });
+
+  it('removes the first pasted image with Delete when the composer has no text or tags', async () => {
+    await mount();
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['png2'], 'photo2.png', { type: 'image/png' }),
+    ];
+
+    await ingestAttachmentsAndWait(files, { images: 2, files: 0 });
+
+    pressChipKey('Delete');
+
+    expect(latest!.pastedImages).toHaveLength(1);
+    // data is stored base64-encoded: 'png2' identifies the *second* image,
+    // proving Delete removed the first one.
+    expect(atob(latest!.pastedImages[0].data as string)).toBe('png2');
+  });
+
+  it('keeps normal Delete editing when text is present with an image attached', async () => {
+    // Review follow-up on the #10794 fix: the attachment fallback must fire
+    // only on an empty composer, so Delete at position 0 still deletes the
+    // character after the caret instead of eating the first chip.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    const view = latest!.viewRef.current!;
+    act(() => {
+      latest!.setText('abc');
+      view.dispatch({ selection: { anchor: 0 } });
+    });
+    pressChipKey('Delete');
+
+    expect(view.state.doc.toString()).toBe('bc');
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('keeps Backspace a no-op at position 0 when text is present with an image attached', async () => {
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    const view = latest!.viewRef.current!;
+    act(() => {
+      latest!.setText('abc');
+      view.dispatch({ selection: { anchor: 0 } });
+    });
+    pressChipKey('Backspace');
+
+    expect(view.state.doc.toString()).toBe('abc');
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('ignores auto-repeat Backspace so a held key cannot destroy attachment chips', async () => {
+    // A held Backspace clears the text and would then remove one chip per
+    // repeat event (~30/s) with no way back; repeats must never fire the
+    // fallback.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    pressChipKey('Backspace', { repeat: true });
+    pressChipKey('Backspace', { repeat: true });
+
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('removes a pasted file with Backspace when the composer has no text or tags', async () => {
+    await mount();
+    const file = new File(['log'], 'a.log', { type: 'text/plain' });
+
+    await ingestAttachmentsAndWait([file], { images: 0, files: 1 });
+    expect(latest!.pastedFiles).toHaveLength(1);
+
+    pressChipKey('Backspace');
+
+    expect(latest!.pastedFiles).toHaveLength(0);
+  });
+
+  it('removes the pasted file before the image with Backspace for mixed attachments', async () => {
+    // Files render after images, so the visually last chip is the file.
+    await mount();
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['log'], 'notes.log', { type: 'text/plain' }),
+    ];
+
+    await ingestAttachmentsAndWait(files, { images: 1, files: 1 });
+
+    pressChipKey('Backspace');
+
+    expect(latest!.pastedFiles).toHaveLength(0);
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('removes the pasted image before the file with Delete for mixed attachments', async () => {
+    // Images render before files, so the visually first chip is the image.
+    await mount();
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['log'], 'notes.log', { type: 'text/plain' }),
+    ];
+
+    await ingestAttachmentsAndWait(files, { images: 1, files: 1 });
+
+    pressChipKey('Delete');
+
+    expect(latest!.pastedImages).toHaveLength(0);
+    expect(latest!.pastedFiles).toMatchObject([{ name: 'notes.log' }]);
+  });
+
+  it('removes a removable composer tag before pasted attachments with Backspace', async () => {
+    // The tag scan exists to give tags precedence over the attachment
+    // fallback; a later reorder that lets the fallback win must turn red.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    act(() => {
+      latest!.addTags([{ id: 'orders', value: 'orders' }]);
+    });
+    expect(latest!.composerTags).toHaveLength(1);
+
+    pressChipKey('Backspace');
+
+    expect(latest!.composerTags).toHaveLength(0);
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('keeps a non-removable composer tag and falls through to the pasted attachment with Backspace', async () => {
+    // A pinned (removable: false) tag cannot be removed by the key scan, so
+    // the attachment fallback still fires on an empty composer. This pins the
+    // intended reading: only *removable* tags block the fallback.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    act(() => {
+      latest!.addTags([{ id: 'pinned', value: 'pinned', removable: false }]);
+    });
+    expect(latest!.composerTags).toHaveLength(1);
+
+    pressChipKey('Backspace');
+
+    expect(latest!.composerTags).toHaveLength(1);
+    expect(latest!.pastedImages).toHaveLength(0);
+  });
+
+  it('removes a removable composer tag before pasted attachments with Delete', async () => {
+    // Delete twin of the Backspace tag-precedence test: weakening the named
+    // Delete handler's tag scan must turn red instead of destroying the image.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    act(() => {
+      latest!.addTags([{ id: 'orders', value: 'orders' }]);
+    });
+    expect(latest!.composerTags).toHaveLength(1);
+
+    pressChipKey('Delete');
+
+    expect(latest!.composerTags).toHaveLength(0);
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('removes the last pasted file with Backspace when only files are attached', async () => {
+    // Two files pin the file-side index: Backspace removes the visually last
+    // file, so 'a.log' must survive.
+    await mount();
+    const files = [
+      new File(['a'], 'a.log', { type: 'text/plain' }),
+      new File(['b'], 'b.log', { type: 'text/plain' }),
+    ];
+
+    await ingestAttachmentsAndWait(files, { images: 0, files: 2 });
+
+    pressChipKey('Backspace');
+
+    expect(latest!.pastedFiles).toMatchObject([{ name: 'a.log' }]);
+  });
+
+  it('removes the first pasted file with Delete when only files are attached', async () => {
+    // Delete twin of the file-side index pin: Delete removes the visually
+    // first file, so 'b.log' must survive. This also exercises the Delete
+    // wrapper's file branch, which no other test reaches.
+    await mount();
+    const files = [
+      new File(['a'], 'a.log', { type: 'text/plain' }),
+      new File(['b'], 'b.log', { type: 'text/plain' }),
+    ];
+
+    await ingestAttachmentsAndWait(files, { images: 0, files: 2 });
+
+    pressChipKey('Delete');
+
+    expect(latest!.pastedFiles).toMatchObject([{ name: 'b.log' }]);
+  });
+
+  it('keeps a non-removable composer tag and falls through to the pasted attachment with Delete', async () => {
+    // Delete twin of the pinned-tag test: Delete scans composerTags with its
+    // own predicate, so only *removable* tags may block the fallback here too.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    act(() => {
+      latest!.addTags([{ id: 'pinned', value: 'pinned', removable: false }]);
+    });
+    expect(latest!.composerTags).toHaveLength(1);
+
+    pressChipKey('Delete');
+
+    expect(latest!.composerTags).toHaveLength(1);
+    expect(latest!.pastedImages).toHaveLength(0);
+  });
+
+  it('ignores modified Backspace/Delete so editing chords cannot destroy attachment chips', async () => {
+    // Every modifier disjunct in the fallback's guard is witnessed against
+    // both keys: Ctrl/Cmd+Backspace (delete-to-line-start), Cmd/Ctrl+Delete
+    // (delete-group), Shift+Delete (cut), and Alt+Backspace (delete-word)
+    // are ordinary editing chords that must reach their own bindings, not
+    // destroy the chip.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+
+    pressChipKey('Backspace', { ctrlKey: true });
+    pressChipKey('Delete', { metaKey: true });
+    pressChipKey('Backspace', { metaKey: true });
+    pressChipKey('Delete', { ctrlKey: true });
+    pressChipKey('Backspace', { shiftKey: true });
+    pressChipKey('Delete', { shiftKey: true });
+    pressChipKey('Backspace', { altKey: true });
+    pressChipKey('Delete', { altKey: true });
+
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('ignores non-deletion keys so ordinary typing cannot destroy attachment chips', async () => {
+    // The fallback must match the two deletion keys exactly; swallowing any
+    // other keydown would both remove a chip and eat the keystroke.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+
+    const event = pressChipKey('x');
+
+    // The fallback must neither remove the chip nor consume the keystroke:
+    // a swallowing handler would silently block typing into the composer.
+    expect(event.defaultPrevented).toBe(false);
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+});

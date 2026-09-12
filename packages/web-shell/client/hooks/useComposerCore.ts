@@ -126,6 +126,27 @@ import {
   type ExtractedFileTransfer,
 } from '../utils/imageIngestion';
 
+// On Android Chrome and iOS, the composer can mount the CodeMirror backend
+// (Android: whenever `(hover: none) and (pointer: coarse)` does not match —
+// tablets, DeX with a mouse — or via the `?composer=codemirror` escape
+// hatch; iOS: the same escape hatch, and iPadOS 13+ with a pointer, which
+// reports a desktop user agent). There, CodeMirror swallows the real
+// Backspace keydown and re-dispatches a synthetic event that does not
+// carry the information the guards below rely on (@codemirror/view
+// delayAndroidKey on Android strips the repeat flag and every modifier;
+// flushIOSKey on iOS defers bare Backspace/Delete and replays them without
+// the repeat flag). A held key would drain every chip (~30/s, no undo), and
+// on Android a single Ctrl+Backspace would destroy one. The flags are
+// undeliverable on those platforms, so the keyboard fallback stays off and
+// the chips remain removable through their close buttons.
+// Mirrors @codemirror/view's own browser.ios detection (vendor + mobile UA
+// or iPadOS 13+ maxTouchPoints).
+export const isIosCodeMirrorComposer =
+  typeof navigator !== 'undefined' &&
+  /Apple Computer/.test(navigator.vendor) &&
+  (/Mobile\/\w+/.test(navigator.userAgent) || navigator.maxTouchPoints > 2);
+export const isAndroidCodeMirrorComposer =
+  typeof navigator !== 'undefined' && /\bAndroid\b/.test(navigator.userAgent);
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
 const TOOLTIP_STYLES = `
 [data-web-shell-tooltip-portal] {
@@ -2957,6 +2978,33 @@ export function useComposerCore(
       return true;
     };
 
+    // Attachment fallback for the Backspace/Delete handlers below (issue
+    // #10794). Files render after images in the composer, so the visually
+    // last chip is a file when one exists and the visually first chip is an
+    // image — matching how the same keys already treat composer tags.
+    const removeLastAttachment = (): boolean => {
+      if (pastedFilesRef.current.length > 0) {
+        removeFile(pastedFilesRef.current.length - 1);
+        return true;
+      }
+      if (pastedImagesRef.current.length > 0) {
+        removeImage(pastedImagesRef.current.length - 1);
+        return true;
+      }
+      return false;
+    };
+    const removeFirstAttachment = (): boolean => {
+      if (pastedImagesRef.current.length > 0) {
+        removeImage(0);
+        return true;
+      }
+      if (pastedFilesRef.current.length > 0) {
+        removeFile(0);
+        return true;
+      }
+      return false;
+    };
+
     const submitKeymap = keymap.of([
       {
         key: 'Backspace',
@@ -3000,6 +3048,36 @@ export function useComposerCore(
             current.filter((_, index) => index !== removableIndex),
           );
           return true;
+        },
+      },
+      {
+        // Attachment-chip fallback for the two keys above. Lives in the `any`
+        // slot — the only keymap slot that receives the KeyboardEvent — so it
+        // can skip OS auto-repeat (a held key must not destroy every chip,
+        // one per event, with no way back) and match only the bare,
+        // unmodified keys, exactly like the named bindings above. It runs
+        // after those named bindings returned false (no removable tag), and
+        // only on an otherwise-empty composer: with text present, Backspace
+        // at position 0 stays a no-op and Delete keeps deleting characters.
+        any: (view, event) => {
+          if (isAndroidCodeMirrorComposer || isIosCodeMirrorComposer)
+            return false;
+          if (!event || (event.key !== 'Backspace' && event.key !== 'Delete')) {
+            return false;
+          }
+          if (
+            event.repeat ||
+            event.altKey ||
+            event.ctrlKey ||
+            event.metaKey ||
+            event.shiftKey
+          ) {
+            return false;
+          }
+          if (view.state.doc.length !== 0) return false;
+          return event.key === 'Backspace'
+            ? removeLastAttachment()
+            : removeFirstAttachment();
         },
       },
       {
