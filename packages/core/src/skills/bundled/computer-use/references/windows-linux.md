@@ -38,7 +38,11 @@ type ComputerUse = {
       },
   ) => Promise<object>;
   observeWindow: (
-    args: WindowTarget & { disableDiff?: boolean; includeScreenshot?: boolean },
+    args: WindowTarget & {
+      disableDiff?: boolean;
+      includeScreenshot?: boolean;
+      maxTextChars?: number;
+    },
   ) => Promise<WindowObservation>;
   listApps: () => Promise<Array<App>>;
   listWindows: (args: {
@@ -169,6 +173,12 @@ disregard the text from a previous call to `observeWindow`, such as when you onl
 emit the screenshot, get the full tree next time you inspect AX text.
 `state.elements` remains the current full actionable element list when
 `state.text` is a diff or reports no change.
+
+Returned text defaults to at most 12,000 characters. Set `maxTextChars` (minimum 512) to adjust the limit. When text is truncated, filter `state.elements` for
+the controls you need or request `disableDiff: true` with a larger
+`maxTextChars`. Do not repeatedly print the whole array. An omitted row does not
+prove absence. Incomplete captures retain only currently issued action tokens;
+after a read failure, use only tokens from the latest observation.
 
 ### 2. Actions using the exact window
 

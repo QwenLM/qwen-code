@@ -351,8 +351,8 @@ impl Tool for GetWindowStateTool {
                         max_elements,
                         max_depth,
                         app_context,
-                        &tree.nodes,
-                        tree.complete && scope_matched,
+                        tree,
+                        scope_matched,
                         request,
                     ) {
                         Ok(revision) => Some(revision),
@@ -593,16 +593,16 @@ impl Tool for GetWindowStateTool {
             self.state.watch_target(pid, window_id);
         }
 
-        let revision_capture_complete = observation_revision
+        let revision_stable_element_ids = observation_revision
             .as_ref()
             .is_some_and(|revision| revision.stable_element_ids)
             && tree_result
                 .as_ref()
-                .is_some_and(|tree| tree.complete && scope_matched);
+                .is_some_and(|tree| tree.read_complete && scope_matched);
         if let (Some(revision), Some(sid)) = (
             observation_revision
                 .as_ref()
-                .filter(|_| revision_capture_complete),
+                .filter(|_| revision_stable_element_ids),
             snapshot_id,
         ) {
             if let Err(error) = cua_driver_core::observation_revision::revision_tokens()
@@ -625,8 +625,8 @@ impl Tool for GetWindowStateTool {
             snapshot_id,
             tree_result.as_ref(),
         ) {
-            (Some(revision), Some(_), Some(r)) if revision_capture_complete => {
-                build_revision_elements_array(&r.nodes, revision)
+            (Some(revision), Some(sid), Some(r)) => {
+                build_revision_elements_array(&r.nodes, revision, sid)
             }
             (_, Some(sid), Some(r)) => build_elements_array_with_token(&r.nodes, sid),
             (_, None, Some(r)) if scope_matched => build_elements_array(&r.nodes),
@@ -658,6 +658,20 @@ impl Tool for GetWindowStateTool {
                 Issue #22865: use `max_elements` / `max_depth` to bound the \
                 AX walk on apps with very large trees."
         });
+        let capture_complete = tree_result
+            .as_ref()
+            .is_some_and(|tree| tree.complete && scope_matched);
+        let capture_truncated = tree_result.as_ref().is_some_and(|tree| tree.truncated);
+        let capture_read_complete = tree_result
+            .as_ref()
+            .is_some_and(|tree| tree.read_complete && scope_matched);
+        let incomplete_details = tree_result.as_ref().map(|tree| &tree.incomplete_notes);
+        structured["capture_complete"] = serde_json::json!(capture_complete);
+        structured["capture_read_complete"] = serde_json::json!(capture_read_complete);
+        structured["capture_truncated"] = serde_json::json!(capture_truncated);
+        if !capture_complete {
+            structured["capture_incomplete_details"] = serde_json::json!(incomplete_details);
+        }
         if query.is_some() {
             structured["filtered_element_count"] = serde_json::json!(filtered_element_count);
         }
@@ -685,9 +699,11 @@ impl Tool for GetWindowStateTool {
                 "target": { "pid": pid, "window_id": window_id },
                 "identity": "macos_ax_cf",
                 "elements_scope": "current_full",
-                "stable_element_ids": revision_capture_complete,
-                "capture_complete": revision_capture_complete,
-                "retained": revision_capture_complete,
+                "stable_element_ids": revision_stable_element_ids,
+                "capture_complete": capture_complete,
+                "capture_read_complete": capture_read_complete,
+                "capture_truncated": capture_truncated,
+                "retained": revision_stable_element_ids,
                 "selected_bytes": revision.text.len(),
                 "full_bytes": revision.full_text.len(),
                 "estimated_tokens": revision.text.len().div_ceil(4),
@@ -698,7 +714,7 @@ impl Tool for GetWindowStateTool {
                 structured["observation_revision"]["resync_reason"] =
                     serde_json::json!(reason.as_str());
             }
-            if !revision_capture_complete {
+            if !capture_complete {
                 if let Some(tree) = tree_result.as_ref() {
                     if !tree.incomplete_notes.is_empty() {
                         structured["observation_revision"]["capture_incomplete_details"] =
@@ -1029,29 +1045,32 @@ pub(crate) fn build_elements_array_with_token(
 pub(crate) fn build_revision_elements_array(
     nodes: &[crate::ax::tree::AXNode],
     revision: &cua_driver_core::observation_revision::ObservationRevisionResult,
+    snapshot_id: u32,
 ) -> Vec<serde_json::Value> {
-    let stable_ids = revision
+    let rendered_ids = revision
         .nodes
         .iter()
         .filter_map(|node| node.actionable_index.map(|index| (index, node.element_id)))
         .collect::<HashMap<_, _>>();
-    let mut elements = build_elements_array(nodes);
+    let mut elements = build_elements_array_with_token(nodes, snapshot_id);
     for element in &mut elements {
         let Some(index) = element.get("element_index").and_then(Value::as_u64) else {
             continue;
         };
         let Some(element_id) = usize::try_from(index)
             .ok()
-            .and_then(|index| stable_ids.get(&index).copied())
+            .and_then(|index| rendered_ids.get(&index).copied())
         else {
             continue;
         };
         element["element_id"] = serde_json::json!(element_id);
-        element["element_token"] =
-            serde_json::json!(cua_driver_core::observation_revision::revision_token_for(
-                &revision.lineage_id,
-                element_id,
-            ));
+        if revision.stable_element_ids {
+            element["element_token"] =
+                serde_json::json!(cua_driver_core::observation_revision::revision_token_for(
+                    &revision.lineage_id,
+                    element_id,
+                ));
+        }
     }
     elements
 }
@@ -1605,12 +1624,55 @@ mod tests {
             cache_estimate_bytes: 256,
         };
 
-        let entries = build_revision_elements_array(&nodes, &revision);
+        let entries = build_revision_elements_array(&nodes, &revision, 42);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["element_index"], 4);
         assert_eq!(entries[0]["element_id"], 37);
         assert_eq!(entries[0]["element_token"], "rv1:lineage-a:25");
+    }
+
+    #[test]
+    fn transient_revision_ids_match_text_but_tokens_use_snapshot_indices() {
+        use cua_driver_core::observation_revision::{
+            CapturedNode, FullResyncReason, ObservationLineage,
+        };
+
+        let nodes = vec![
+            node(None, "AXStaticText", Some("Hint"), 0, None, None),
+            node(Some(0), "AXButton", Some("Save"), 0, None, None),
+            node(Some(1), "AXButton", Some("Cancel"), 0, None, None),
+        ];
+        let captured = nodes
+            .iter()
+            .enumerate()
+            .map(|(identity, node)| CapturedNode {
+                identity,
+                depth: node.depth,
+                body: crate::ax::projection::format_app_body(node),
+                actionable_index: node.element_index,
+            })
+            .collect();
+        let revision = ObservationLineage::new("transient", 8)
+            .unwrap()
+            .for_app()
+            .observe_unretained_full(captured, FullResyncReason::CaptureIncomplete)
+            .unwrap();
+        let entries = build_revision_elements_array(&nodes, &revision, 42);
+
+        assert!(!revision.stable_element_ids);
+        assert!(revision.text.contains("[1] Button \"Save\""));
+        assert!(revision.text.contains("[2] Button \"Cancel\""));
+        for (entry, (id, index, label)) in entries.iter().zip([(1, 0, "Save"), (2, 1, "Cancel")]) {
+            assert_eq!(entry["element_id"], id);
+            assert_eq!(entry["element_index"], index);
+            assert_eq!(entry["label"], label);
+            assert_eq!(
+                entry["element_token"],
+                cua_driver_core::element_token::token_for(42, index),
+            );
+        }
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]

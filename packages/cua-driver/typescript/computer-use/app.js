@@ -152,19 +152,15 @@ export class ComputerUseApp {
     this.#observation = state;
     this.#generation = this.#computer.connectionGeneration;
     this.#elements = new Map(state.elements.flatMap((element) => {
-      const id = element.element_id ?? element.element_index;
+      const id = element.element_id ?? (state.diagnostics.revisionSupported ? undefined : element.element_index);
       return Number.isSafeInteger(id) && typeof element.element_token === "string"
         ? [[id, element]] : [];
     }));
-    const text = state.diagnostics.captureComplete === false
-      ? "Accessibility capture is incomplete. Observe again after the UI settles; element actions are unavailable.\n\n" +
-        state.text.slice(state.text.indexOf("\n\n") + 2)
-      : state.text;
     return {
       app: this.name,
       window: target.window.title ?? "",
       mode: state.mode,
-      text,
+      text: state.text,
       ...(exposeScreenshot && state.screenshot ? { screenshot: state.screenshot } : {}),
     };
   }
