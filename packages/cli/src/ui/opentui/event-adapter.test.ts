@@ -65,6 +65,229 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
     ).toEqual([{ type: 'tool-end', id: 'c1', success: true, summary: 'ok' }]);
   });
 
+  it('carries the confirmation type and dialog body on confirm events', () => {
+    // pendingCardMaxRows prices the card against the dialog's own body:
+    // info/plan render an expandable TextBody and exec renders its command
+    // in full, so the confirm event must carry the type and (for them) the
+    // body text.
+    const map = createEventMapper();
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c1', name: 'exit_plan_mode' },
+          details: {
+            title: 'Approve this plan?',
+            type: 'plan',
+            plan: 'step one\nstep two',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c1',
+        tool: 'exit_plan_mode',
+        title: 'Approve this plan?',
+        confirmType: 'plan',
+        confirmBody: 'step one\nstep two',
+      },
+    ]);
+    // mcp confirmations have no expandable body: type only, no body text.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c2', name: 'mcp__fs__write_file' },
+          details: {
+            title: 'Allow?',
+            type: 'mcp',
+            serverName: 'fs',
+            toolName: 'write_file',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c2',
+        tool: 'mcp__fs__write_file',
+        title: 'Allow?',
+        confirmType: 'mcp',
+        confirmBody: undefined,
+      },
+    ]);
+    // A hook-forced info confirmation carries its prompt as the body: the
+    // core scheduler's PreToolUse 'ask' bounce builds { type: 'info',
+    // prompt: hookReason }, and the pending card prices the dialog's
+    // expandable body against it.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c3', name: 'mcp__fs__write_file' },
+          details: {
+            title: 'Hook requested confirmation to run mcp__fs__write_file',
+            type: 'info',
+            prompt: 'line one\nline two',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c3',
+        tool: 'mcp__fs__write_file',
+        title: 'Hook requested confirmation to run mcp__fs__write_file',
+        confirmType: 'info',
+        confirmBody: 'line one\nline two',
+      },
+    ]);
+    // An exec confirmation carries its command: the dialog renders it in
+    // full with no collapsed window, so the card prices the real body
+    // newline-aware instead of the folded card-payload proxy.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c4', name: 'run_shell_command' },
+          details: {
+            title: 'Run this command?',
+            type: 'exec',
+            command: 'echo hi\necho bye',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c4',
+        tool: 'run_shell_command',
+        title: 'Run this command?',
+        confirmType: 'exec',
+        confirmBody: 'echo hi\necho bye',
+      },
+    ]);
+    // An info dialog renders a `URLs to fetch:` block OUTSIDE the prompt's
+    // window (one margin row, one header row, one row per URL — web_fetch
+    // always produces this shape), so the block travels as its own field:
+    // the dialog's TextBody windows only the prompt, and the block's rows
+    // must charge in addition to the body, not inside the same string.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c5', name: 'web_fetch' },
+          details: {
+            title: 'Confirm Web Fetch',
+            type: 'info',
+            prompt:
+              'Fetch content from https://example.com/docs and process with: summarize',
+            urls: ['https://example.com/docs'],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c5',
+        tool: 'web_fetch',
+        title: 'Confirm Web Fetch',
+        confirmType: 'info',
+        confirmBody:
+          'Fetch content from https://example.com/docs and process with: summarize',
+        confirmExtra: '\nURLs to fetch:\n - https://example.com/docs',
+      },
+    ]);
+    // The dialog's displayUrls predicate: a single URL identical to the
+    // prompt would be listed twice, so no block renders and none is priced.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c6', name: 'web_fetch' },
+          details: {
+            title: 'Confirm Web Fetch',
+            type: 'info',
+            prompt: 'https://example.com',
+            urls: ['https://example.com'],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c6',
+        tool: 'web_fetch',
+        title: 'Confirm Web Fetch',
+        confirmType: 'info',
+        confirmBody: 'https://example.com',
+        confirmExtra: undefined,
+      },
+    ]);
+    // An exec dialog renders one row per warning below the command —
+    // outside any body window — so the rows join the priced body.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c7', name: 'run_shell_command' },
+          details: {
+            title: 'Confirm Shell Command',
+            type: 'exec',
+            command: 'echo $(date)',
+            warnings: ['Command substitution detected'],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c7',
+        tool: 'run_shell_command',
+        title: 'Confirm Shell Command',
+        confirmType: 'exec',
+        confirmBody: 'echo $(date)',
+        confirmExtra: '⚠ Command substitution detected',
+      },
+    ]);
+  });
+
+  it('fails the dialog body back to the payload proxy on version-skewed details (R5-2)', () => {
+    // A field present in an unexpected shape means the rest of the dialog
+    // may differ too (a skewed 'exec' could window its command): the
+    // confirm event keeps the type but drops body and extra to undefined,
+    // so the pending card prices its own folded payload. Asserted with
+    // toBeUndefined — toEqual ignores undefined keys and would pass
+    // vacuously.
+    const map = createEventMapper();
+    const confirmOf = (details: Record<string, unknown>) =>
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'sk1', name: 'some_tool' },
+          details: { title: 'Confirm?', ...details },
+        },
+      } as unknown as AnyEv)[0] as {
+        confirmType?: string;
+        confirmBody?: unknown;
+        confirmExtra?: unknown;
+      };
+    for (const [details, type] of [
+      [{ type: 'info', prompt: 42 }, 'info'],
+      [{ type: 'info', prompt: 'x', urls: 'https://example.com' }, 'info'],
+      [{ type: 'info', prompt: 'x', urls: ['a', 7] }, 'info'],
+      [{ type: 'plan', plan: null }, 'plan'],
+      [{ type: 'exec', command: 'ls', warnings: 'nope' }, 'exec'],
+      [{ type: 'exec', command: 42 }, 'exec'],
+    ] as const) {
+      const ev = confirmOf(details);
+      expect(ev.confirmType).toBe(type);
+      expect(ev.confirmBody).toBeUndefined();
+      expect(ev.confirmExtra).toBeUndefined();
+    }
+  });
+
   it('carries FileDiff resultDisplay as a structured diff payload', () => {
     const map = createEventMapper();
     const fileDiff = '@@ -1,1 +1,1 @@\n-old\n+new';

@@ -54,6 +54,7 @@ import {
 import type { Part, PartListUnion } from '@google/genai';
 import {
   createEventMapper,
+  confirmationDialogBody,
   extractStructuredResult,
   renderResultDisplay,
   toolResultEvent,
@@ -920,11 +921,15 @@ export async function* livePromptEvents(
           const callId = c.request.callId;
           if (waitingSeen.has(callId)) continue;
           waitingSeen.add(callId);
+          const dialogBody = confirmationDialogBody(c.confirmationDetails);
           live.push({
             type: 'confirm',
             id: callId,
             tool: c.request.name,
             title: c.confirmationDetails.title,
+            confirmType: c.confirmationDetails.type,
+            confirmBody: dialogBody?.body,
+            confirmExtra: dialogBody?.extra,
           });
           options?.onWaitingCall?.({
             callId,

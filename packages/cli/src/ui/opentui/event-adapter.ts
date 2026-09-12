@@ -35,6 +35,75 @@ import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 
 /**
+ * What a confirmation dialog paints, split the way dialogs-confirm's
+ * ConfirmationBody render switch lays it out: `body` is the windowed text
+ * (an info confirmation's prompt, a plan confirmation's plan, an exec
+ * confirmation's command — the exec dialog renders it in full, with no
+ * collapsed window), and `extra` is the rows the dialog renders OUTSIDE
+ * that window — info's `URLs to fetch:` block (a margin row, a header row
+ * and one row per URL, gated by the same displayUrls predicate) and exec's
+ * one row per warning. Every other type's body renders no measurable text:
+ * mcp shows two fixed lines, edit a tail-windowed diff below an unbounded
+ * warnings list, ask_user_question a fixed question/options list. The two
+ * fields feed the pending card's dialog-body measure (pendingCardMaxRows),
+ * which charges extra IN ADDITION to the windowed body — the same split the
+ * render makes, so a body filling the collapsed window can never swallow
+ * the block's rows. This lives here, not in dialogs-confirm, so this module
+ * stays free of UI-runtime imports.
+ */
+export function confirmationDialogBody(details: {
+  type?: string;
+  prompt?: unknown;
+  plan?: unknown;
+  command?: unknown;
+  urls?: unknown;
+  warnings?: unknown;
+}): { body: string; extra?: string } | undefined {
+  // Version-skew guard: a field present in an unexpected shape fails the
+  // whole body back to undefined, so the card keeps its payload proxy.
+  const skewedStrings = (v: unknown): v is string[] =>
+    Array.isArray(v) && v.every((e) => typeof e === 'string');
+  if (details.type === 'info') {
+    if (typeof details.prompt !== 'string') return undefined;
+    if (details.urls !== undefined && !skewedStrings(details.urls)) {
+      return undefined;
+    }
+    const urls = details.urls;
+    // dialogs-confirm's displayUrls: a single URL identical to the prompt
+    // would be listed twice.
+    const displayUrls =
+      urls !== undefined &&
+      urls.length > 0 &&
+      !(urls.length === 1 && urls[0] === details.prompt);
+    return {
+      body: details.prompt,
+      extra: displayUrls
+        ? ['', 'URLs to fetch:', ...urls.map((url) => ` - ${url}`)].join('\n')
+        : undefined,
+    };
+  }
+  if (details.type === 'plan') {
+    return typeof details.plan === 'string'
+      ? { body: details.plan }
+      : undefined;
+  }
+  if (details.type === 'exec') {
+    if (typeof details.command !== 'string') return undefined;
+    if (details.warnings !== undefined && !skewedStrings(details.warnings)) {
+      return undefined;
+    }
+    const warnings = details.warnings;
+    return {
+      body: details.command,
+      extra: warnings?.length
+        ? warnings.map((warning) => `⚠ ${warning}`).join('\n')
+        : undefined,
+    };
+  }
+  return undefined;
+}
+
+/**
  * Neutral-model union extension: tool detail events the backend folds into
  * tool cards (args preview, result content, approval state), plus turn
  * segmentation and inline images.
@@ -72,7 +141,21 @@ export type OpenTuiStreamEvent =
        * machine via the vision model. */
       visionBridgeNotice?: string;
     }
-  | { type: 'confirm'; id: string; tool: string; title: string }
+  | {
+      type: 'confirm';
+      id: string;
+      tool: string;
+      title: string;
+      /** confirmationDetails.type — the card prices itself against the
+       * dialog's body (LiveToolItem.confirmType). */
+      confirmType?: string;
+      /** The dialog's body text (info's prompt, plan's plan, exec's
+       * command). */
+      confirmBody?: string;
+      /** Rows the dialog renders outside the body window: info's urls
+       * block, exec's warnings (LiveToolItem.confirmExtra). */
+      confirmExtra?: string;
+    }
   /** The call left awaiting_approval (approved, declined, or bounced):
    * releases the transcript card's pending marker and records how it left
    * — 'rejected' when the scheduler cancelled the call (No/Esc), otherwise
@@ -515,14 +598,26 @@ export function createEventMapper(
             name: string;
             args?: Record<string, unknown>;
           };
-          details: { title?: string };
+          details: {
+            title?: string;
+            type?: string;
+            prompt?: unknown;
+            plan?: unknown;
+            command?: unknown;
+            urls?: unknown;
+            warnings?: unknown;
+          };
         };
         const id = v.request.callId ?? `tool-${++toolSeq}`;
+        const dialogBody = confirmationDialogBody(v.details);
         out.push({
           type: 'confirm',
           id,
           tool: v.request.name,
           title: v.details.title ?? v.request.name,
+          confirmType: v.details.type,
+          confirmBody: dialogBody?.body,
+          confirmExtra: dialogBody?.extra,
         });
         const args = formatToolArgs(v.request.args);
         if (args) out.push({ type: 'tool-args', id, args });

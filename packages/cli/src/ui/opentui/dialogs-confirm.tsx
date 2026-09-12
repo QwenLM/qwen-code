@@ -62,6 +62,7 @@ import {
 } from './dialogs-shared.js';
 import { renderDiffBody } from './diff-render.js';
 import {
+  CONFIRM_BODY_COLLAPSED_ROWS,
   headWindowPhysical,
   hiddenLinesLabel,
   hiddenTailLinesLabel,
@@ -81,15 +82,16 @@ export interface PendingToolConfirmation {
   confirmationDetails: ToolCallConfirmationDetails;
 }
 
-/** Max body rows before the tail window truncates (keeps dialogs bounded). */
-const MAX_BODY_ROWS = 20;
-
 /**
  * Rows reserved above/below an EXPANDED body: dialog chrome (frame, title,
  * options, footer) plus the transcript region that keeps its place above the
  * dialog. The expanded tail window is budgeted as terminal height minus this
  * reserve, so the end of the content — where the options still are — stays on
  * screen (ink reaches the same visible outcome through terminal scrollback).
+ * messages.tsx's DIALOG_EXPANDED_RESERVE_ROWS prices the same region from the
+ * pending card's side, including the fresh-session banner and startup rows;
+ * this side stays lower so ctrl-s expansion still gains rows on shorter
+ * terminals. Keep the two consistent when the dialog chrome changes.
  */
 const EXPANDED_BODY_RESERVE_ROWS = 20;
 
@@ -276,7 +278,7 @@ export function buildConfirmationPrompt(
 /** Renders a colored diff body within a bounded row window. */
 function DiffBody({ fileDiff }: { fileDiff: string }) {
   const lines = useMemo(() => renderDiffBody(fileDiff), [fileDiff]);
-  const window = tailWindow(lines, MAX_BODY_ROWS);
+  const window = tailWindow(lines, CONFIRM_BODY_COLLAPSED_ROWS);
   return (
     <box flexDirection="column">
       {window.hiddenCount > 0 ? (
@@ -307,9 +309,16 @@ function DiffBody({ fileDiff }: { fileDiff: string }) {
 function TextBody({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false);
   const { width, height } = useTerminalDimensions();
-  const rows = useMemo(() => sanitizeTerminalText(text).split('\n'), [text]);
+  // The renderer advances TAB exactly 2 columns while string widths count it
+  // as 0 (customBanner's detab convention): window the detabbed rows —
+  // visually identical on screen, and the pending card's dialog-body price
+  // (messages.tsx's dialogBodyMeasure) models the same detabbed rows.
+  const rows = useMemo(
+    () => sanitizeTerminalText(text).replace(/\t/g, '  ').split('\n'),
+    [text],
+  );
   const window = useMemo(
-    () => headWindowPhysical(rows, width, MAX_BODY_ROWS),
+    () => headWindowPhysical(rows, width, CONFIRM_BODY_COLLAPSED_ROWS),
     [rows, width],
   );
   const expandedWindow = useMemo(

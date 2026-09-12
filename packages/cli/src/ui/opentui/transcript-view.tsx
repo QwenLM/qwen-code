@@ -16,7 +16,7 @@
  * silent no-op, which the composition-root contract forbids.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 import { C, SYNTAX } from './theme.js';
 import {
@@ -79,6 +79,16 @@ export interface TranscriptViewProps {
   availableTerminalHeight?: number;
   /** ink's app-wide ctrl+O toggle: forces every committed thought open. */
   thoughtsExpanded?: boolean;
+  /** The callId whose confirmation dialog the shell has mounted
+   * (waitingToolCalls[0] — opentui-app-shell renders that call's dialog), so
+   * parked cards price against THAT dialog rather than the transcript's
+   * first parked item. */
+  activeWaitingCallId?: string;
+  /** False when the shell's popup slot is preempted by the gated-MCP
+   * approval dialog, which outranks the tool confirmation (opentui-app-shell's
+   * popup rank): no tool dialog is mounted then, so parked cards must price
+   * the body-less payload proxy instead of a dialog that is not painting. */
+  pendingDialogMounted?: boolean;
 }
 
 /** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
@@ -105,8 +115,38 @@ export function OpenTuiTranscriptView({
   availableWidth = 80,
   availableTerminalHeight = 24,
   thoughtsExpanded = false,
+  activeWaitingCallId,
+  pendingDialogMounted = true,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
+  // Pending tool cards share the transcript region with the confirmation
+  // dialog: each budgets its description against the sibling count so N
+  // parked calls cannot each claim the whole viewport.
+  const pendingItems = items.filter(
+    (item): item is LiveToolItem =>
+      item.kind === 'tool' && item.confirm === 'pending' && !item.done,
+  );
+  const pendingCount = pendingItems.length;
+  // At most one TOOL confirmation dialog is ever mounted — the shell
+  // renders waitingToolCalls[0] — but the gated-MCP approval dialog outranks
+  // it in the shell's popup rank, and while it owns the slot no tool dialog
+  // paints (reported here as pendingDialogMounted === false). The two
+  // orderings can also diverge: a resolved call's card updates in place at
+  // its transcript index while a re-parked call appends at the waiting
+  // list's end, so the mounted call can be a LATER transcript item. Every
+  // parked card budgets against the MOUNTED dialog's body rather than a
+  // hypothetical one of its own: a parked mcp sibling of an exec call must
+  // yield for the command the mounted dialog renders in full — and when no
+  // tool dialog is mounted at all, the body-less payload proxy keeps the
+  // cards on the yielding side.
+  const mountedPending =
+    pendingDialogMounted === false
+      ? undefined
+      : (pendingItems.find((item) => item.id === activeWaitingCallId) ??
+        pendingItems[0]);
+  const pendingDialogType = mountedPending?.confirmType;
+  const pendingDialogBody = mountedPending?.confirmBody;
+  const pendingDialogExtra = mountedPending?.confirmExtra;
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
@@ -120,6 +160,10 @@ export function OpenTuiTranscriptView({
             maxRows={maxRows}
             terminalHeight={availableTerminalHeight}
             width={availableWidth}
+            pendingCount={pendingCount}
+            pendingDialogType={pendingDialogType}
+            pendingDialogBody={pendingDialogBody}
+            pendingDialogExtra={pendingDialogExtra}
             thoughtsExpanded={thoughtsExpanded}
           />
         </box>
@@ -133,12 +177,20 @@ function TranscriptItem({
   maxRows,
   terminalHeight,
   width,
+  pendingCount,
+  pendingDialogType,
+  pendingDialogBody,
+  pendingDialogExtra,
   thoughtsExpanded,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  pendingCount: number;
+  pendingDialogType?: string;
+  pendingDialogBody?: string;
+  pendingDialogExtra?: string;
   thoughtsExpanded: boolean;
 }) {
   switch (item.kind) {
@@ -155,6 +207,10 @@ function TranscriptItem({
           maxRows={maxRows}
           terminalHeight={terminalHeight}
           width={width}
+          pendingCount={pendingCount}
+          pendingDialogType={pendingDialogType}
+          pendingDialogBody={pendingDialogBody}
+          pendingDialogExtra={pendingDialogExtra}
         />
       );
     case 'task':
@@ -296,11 +352,19 @@ function ToolCard({
   maxRows,
   terminalHeight,
   width,
+  pendingCount,
+  pendingDialogType,
+  pendingDialogBody,
+  pendingDialogExtra,
 }: {
   item: LiveToolItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  pendingCount: number;
+  pendingDialogType?: string;
+  pendingDialogBody?: string;
+  pendingDialogExtra?: string;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
@@ -315,17 +379,47 @@ function ToolCard({
   // confirmation dialog shows only the server and tool names, so the card
   // is the only surface carrying the arguments (R5-9) — the settled 5-row
   // cap would hide the tail of exactly the payload being approved. The
-  // pending budget stays viewport- and payload-aware (pendingCardMaxRows):
-  // the dialog renders in flow below the transcript, and a hook-forced
-  // confirmation renders this same payload in its body, so the card must
-  // yield rows for it or ctrl-s expansion pushes the dialog off screen.
-  const cap = capToolCardDescription(
-    text,
-    name,
-    width,
-    item.confirm === 'pending' && !item.done
-      ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width)
-      : TOOL_CARD_DESCRIPTION_ROWS,
+  // pending budget stays viewport- and dialog-aware (pendingCardMaxRows):
+  // the dialog renders in flow below the transcript, so when the dialog's
+  // own body can expand past its collapsed footprint (a hook-forced info
+  // confirmation duplicates this payload; a plan body is much taller than
+  // its folded card row) the card yields rows for it — and when it cannot
+  // (mcp, whose card is the only surface with the arguments; edit, whose
+  // card description is a single path row; ask_user_question) the card
+  // keeps them. Memoized: a sibling call's stream events re-render this
+  // card, and the pending measure scans the whole confirmation body.
+  const cap = useMemo(
+    () =>
+      capToolCardDescription(
+        text,
+        name,
+        width,
+        item.confirm === 'pending' && !item.done
+          ? pendingCardMaxRows(
+              terminalHeight,
+              getCachedStringWidth(text),
+              width,
+              {
+                type: pendingDialogType,
+                body: pendingDialogBody,
+                extra: pendingDialogExtra,
+              },
+              pendingCount,
+            )
+          : TOOL_CARD_DESCRIPTION_ROWS,
+      ),
+    [
+      text,
+      name,
+      width,
+      terminalHeight,
+      pendingCount,
+      pendingDialogType,
+      pendingDialogBody,
+      pendingDialogExtra,
+      item.confirm,
+      item.done,
+    ],
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
   return (

@@ -30,6 +30,16 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
    * mapToDisplay parity) — takes precedence over the args-based fallback. */
   description?: string;
   confirm?: ToolConfirmState;
+  /** confirmationDetails.type while the call awaits approval: the pending
+   * card prices itself against the dialog's body (pendingCardMaxRows), and
+   * only the type says whether that body can expand. */
+  confirmType?: string;
+  /** The dialog's body text for the plain-text-body confirmations
+   * (info's prompt, plan's plan, exec's command). */
+  confirmBody?: string;
+  /** Rows the dialog renders outside the body window (info's urls block,
+   * exec's warnings) — charged in addition to the windowed body. */
+  confirmExtra?: string;
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */
   diff?: { fileDiff: string; fileName: string };
@@ -352,7 +362,14 @@ export function foldLiveEvent(
       const i = findToolIndex(items, ev.id);
       if (i >= 0) {
         const t = items[i] as LiveToolItem;
-        items[i] = { ...t, title: ev.title, confirm: 'pending' };
+        items[i] = {
+          ...t,
+          title: ev.title,
+          confirm: 'pending',
+          confirmType: ev.confirmType,
+          confirmBody: ev.confirmBody,
+          confirmExtra: ev.confirmExtra,
+        };
         return items;
       }
       if (last?.kind === 'assistant' && last.streaming)
@@ -365,6 +382,9 @@ export function foldLiveEvent(
         output: '',
         done: false,
         confirm: 'pending',
+        confirmType: ev.confirmType,
+        confirmBody: ev.confirmBody,
+        confirmExtra: ev.confirmExtra,
       });
       return items;
     }

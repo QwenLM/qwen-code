@@ -121,8 +121,11 @@ export interface OpenTuiAppProps {
   initialDialog?: OpenTuiDialogRequest | null;
 
   // --- seams owned by the renderer / entry layer ---------------------------
-  /** Renders the transcript + status line (needs the real OpenTUI renderer). */
-  renderMain?: () => ReactNode;
+  /** Renders the transcript + status line (needs the real OpenTUI renderer).
+   * The shell reports whether its popup slot is preempted by a dialog that
+   * outranks the tool confirmation (the gated-MCP approval), so the
+   * transcript prices no measured body for a dialog that is not mounted. */
+  renderMain?: (popup: { toolDialogPreempted: boolean }) => ReactNode;
   /**
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
@@ -922,7 +925,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     >
       <box flexDirection="column" flexGrow={1} flexShrink={0}>
         <OpenTuiBanner config={config} settings={settings} />
-        {renderMain ? renderMain() : null}
+        {renderMain
+          ? renderMain({
+              toolDialogPreempted: Boolean(
+                mcpApproval.isMcpApprovalDialogOpen &&
+                  mcpApproval.currentMcpApproval,
+              ),
+            })
+          : null}
         {!dialog &&
         !activeModal &&
         !activeToolCall &&

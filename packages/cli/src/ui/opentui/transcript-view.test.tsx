@@ -51,11 +51,22 @@ const mocks = vi.hoisted(() => {
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
-  return { buildJsxRuntime };
+  return {
+    buildJsxRuntime,
+    pendingSpy: undefined as unknown as import('vitest').Mock,
+  };
 });
 
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
+
+// Spy on the pending-card budget so the memoization test can count the
+// dialog-body measure across re-renders; every other export passes through.
+vi.mock('./messages.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./messages.js')>();
+  mocks.pendingSpy = vi.fn(actual.pendingCardMaxRows);
+  return { ...actual, pendingCardMaxRows: mocks.pendingSpy };
+});
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import type { LiveThinkingItem, LiveToolItem } from './live-session-model.js';
@@ -158,18 +169,70 @@ describe('OpenTuiTranscriptView', () => {
   });
 
   it('yields pending rows a hook-confirmation dialog needs when expanded (mem0 e2e)', () => {
-    // The mem0 confirmation duplicates the card's description inside its
-    // dialog body: once ctrl-s expands it, the whole payload plus dialog
-    // chrome must fit the viewport, so a ~4k-char payload must shrink the
-    // card BELOW the collapsed-dialog bound (34 rows ≈ 3523 visible chars
-    // at 110 columns). A marker placed past the yielded budget pins the
-    // shrink — that bound alone would still show it and the e2e expansion
-    // stage would stay red.
+    // The production mem0 shape: a PreToolUse 'ask' bounce builds an info
+    // confirmation whose prompt is the hook reason, and the card carries
+    // the call's args JSON alongside it. A 30-row body engages the
+    // expanded-dialog bound ((80-26-30)*0.7 = 16 rows ≈ 1600 visible
+    // columns at 110), so a marker past that cut must leave the screen —
+    // while the description stays short enough (19 folded rows) that the
+    // payload proxy stays off: only the wired-through confirmBody can make
+    // this pass.
+    const confirmBody = Array.from({ length: 30 }, () => 'reason line').join(
+      '\n',
+    );
+    // HEAD_MARKER (~810 columns in) sits inside the 16-row budget's 1600
+    // visible columns but past the settled 5-row floor's 412: without it an
+    // OVER-yielding card (collapsing to the floor) passes vacuously.
     const description =
       '{"content":"' +
-      'a'.repeat(2500) +
+      'a'.repeat(800) +
+      'HEAD_MARKER' +
+      'a'.repeat(989) +
       'MID_MARKER' +
-      'b'.repeat(1500) +
+      'b'.repeat(200) +
+      '"}';
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            tool: 'mcp__fs__write_file',
+            description,
+            confirm: 'pending',
+            confirmType: 'info',
+            confirmBody,
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    expect(text).toContain('HEAD_MARKER');
+    expect(text).toContain('... last');
+    expect(text).not.toContain('MID_MARKER');
+  });
+
+  it('yields pending rows via the payload proxy for an untyped confirm event (wire fallback)', () => {
+    // A confirm event from a server that predates confirmType/confirmBody
+    // carries neither: the card falls back to pricing its own folded
+    // payload as the dialog body. The ~4k-char payload wraps to ~38 folded
+    // rows — past the collapsed window — so the expanded-payload bound
+    // shrinks the card to 11 budget rows (1060 visible columns at 110).
+    // Two markers bracket the budget: MID_MARKER at 1512 must leave the
+    // screen — and it sits inside the collapsed-only 23-row budget's 2356
+    // visible columns, so losing the payload proxy (collapsing to that
+    // bound) turns this red — while HEAD_MARKER at ~611, inside the 11-row
+    // budget's 1060 columns but past the settled 5-row floor's 412, must
+    // stay, so an over-yielding card fails too. The payload total stays
+    // ~4024 columns so payloadRows keeps the intended budget at 11.
+    const description =
+      '{"content":"' +
+      'a'.repeat(600) +
+      'HEAD_MARKER' +
+      'a'.repeat(889) +
+      'MID_MARKER' +
+      'b'.repeat(2500) +
       '"}';
     const { container } = render(
       <OpenTuiTranscriptView
@@ -186,8 +249,439 @@ describe('OpenTuiTranscriptView', () => {
     );
     const text = container.textContent ?? '';
     expect(text).toContain('awaiting approval');
+    expect(text).toContain('HEAD_MARKER');
     expect(text).toContain('... last');
     expect(text).not.toContain('MID_MARKER');
+  });
+
+  it('keeps the pending rows when the mcp dialog cannot expand (R5-9)', () => {
+    // Same payload as the wire-fallback case above, but typed mcp: that
+    // dialog renders two fixed lines and has no ctrl-s expansion, so the
+    // card — the only surface carrying the arguments — keeps the
+    // collapsed-footprint budget and MID_MARKER stays on screen.
+    const description =
+      '{"content":"' +
+      'a'.repeat(2500) +
+      'MID_MARKER' +
+      'b'.repeat(1500) +
+      '"}';
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            tool: 'mcp__fs__write_file',
+            description,
+            confirm: 'pending',
+            confirmType: 'mcp',
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    expect(text).toContain('MID_MARKER');
+  });
+
+  it('splits the pending budget between sibling cards awaiting approval', () => {
+    // Two parked mcp calls: without the sibling count each card budgets
+    // against the whole viewport (34 rows ≈ 3544 visible columns), and two
+    // ~45-row cards push the first call's confirmation dialog — the only
+    // actionable surface — off an 80-row alt screen. Sharing the transcript
+    // region halves each budget after charging the sibling's chrome rows
+    // (16 rows ≈ 1600 columns), so the marker past that cut leaves the
+    // screen.
+    const description =
+      '{"content":"' +
+      'a'.repeat(900) +
+      'HEAD_MARKER' +
+      'a'.repeat(1589) +
+      'MID_MARKER' +
+      'b'.repeat(1500) +
+      '"}';
+    const parked = (id: string) =>
+      toolItem({
+        id,
+        tool: 'mcp__fs__write_file',
+        description,
+        confirm: 'pending',
+        confirmType: 'mcp',
+      });
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[parked('t1'), parked('t2')]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    // HEAD_MARKER (~911 columns in) sits inside each card's 17-row budget
+    // (1708 visible columns) but past the settled 5-row floor's 412, so an
+    // over-yielding card fails too.
+    expect(text).toContain('HEAD_MARKER');
+    expect(text).not.toContain('MID_MARKER');
+  });
+
+  it('keeps eight parked sibling cards inside the shared region (R4-8)', () => {
+    // floor((80-26-5-14)*0.7/8) = 3 rows each — the region also spends each
+    // sibling's hidden-tail and awaiting rows (2 per card past the first)
+    // before dividing. If the settled 5-row floor lifted the divided bound
+    // back up, eight cards would paint 8*5/0.7 + 14 ≈ 71 physical rows
+    // against the 80-26-5 = 49-row region and push the one mounted dialog
+    // off the alt screen. N8_MARKER at ~351 sits past the 3-row budget's
+    // 196 visible columns but inside the lifted floor's 412, so only the
+    // released floor shows it; HEAD_MARKER at ~150 sits inside the 196 but
+    // past the 1-row floor's 88, so an over-yielding card fails too. (An
+    // under-yield to exactly 4 rows — 304 columns — hides N8_MARKER as
+    // well; the arithmetic pins in messages.test.tsx discriminate that.)
+    const description =
+      '{"content":"' +
+      'h'.repeat(138) +
+      'HEAD_MARKER' +
+      'a'.repeat(190) +
+      'N8_MARKER' +
+      'b'.repeat(300) +
+      '"}';
+    const parked = (id: string) =>
+      toolItem({
+        id,
+        tool: 'mcp__fs__write_file',
+        description,
+        confirm: 'pending',
+        confirmType: 'mcp',
+      });
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          parked('t1'),
+          parked('t2'),
+          parked('t3'),
+          parked('t4'),
+          parked('t5'),
+          parked('t6'),
+          parked('t7'),
+          parked('t8'),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    expect(text).toContain('HEAD_MARKER');
+    expect(text).not.toContain('N8_MARKER');
+  });
+
+  it('memoizes the pending-card measure across sibling re-renders', () => {
+    // A sibling call's stream events re-render the whole transcript, and the
+    // pending card's dialog-body measure scans the whole confirmation body —
+    // it must re-run only when its own inputs change.
+    const pending = toolItem({
+      id: 't1',
+      tool: 'exit_plan_mode',
+      description: 'plan ready',
+      confirm: 'pending',
+      confirmType: 'plan',
+      confirmBody: Array.from({ length: 30 }, () => 'step').join('\n'),
+    });
+    const sibling = toolItem({ id: 't2', output: 'chunk one' });
+    const view = (items: LiveToolItem[]) => (
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={items}
+      />
+    );
+    // The spy is module-scoped and never cleared, so the count must be
+    // measured against a baseline captured by THIS test — the calls earlier
+    // tests accumulated would satisfy an absolute threshold vacuously.
+    const callsBefore = mocks.pendingSpy.mock.calls.length;
+    const { rerender } = render(view([pending, sibling]));
+    const callsAfterFirstRender = mocks.pendingSpy.mock.calls.length;
+    expect(callsAfterFirstRender).toBeGreaterThan(callsBefore);
+    rerender(view([pending, { ...sibling, output: 'chunk two' }]));
+    expect(mocks.pendingSpy.mock.calls.length).toBe(callsAfterFirstRender);
+  });
+
+  it('re-prices the pending card when any memo input changes', () => {
+    // The memoized cap must invalidate on each dep: a stale memo keeps the
+    // old price after the dialog's type or body is replaced, or after a
+    // sibling parks. The spy counts every card's measure, so each delta
+    // filters to this card's description width — a mounting sibling's own
+    // measure must not leak in. Each rerender below changes exactly one
+    // memo input.
+    const description = '{"content":"' + 'a'.repeat(3000) + '"}';
+    const base = toolItem({
+      id: 't1',
+      tool: 'mcp__fs__write_file',
+      description,
+      confirm: 'pending',
+      confirmType: 'mcp',
+    });
+    const view = (items: LiveToolItem[], width = 110, height = 80) => (
+      <OpenTuiTranscriptView
+        availableWidth={width}
+        availableTerminalHeight={height}
+        items={items}
+      />
+    );
+    let from = mocks.pendingSpy.mock.calls.length;
+    const { rerender } = render(view([base]));
+    const mainCardCalls = () =>
+      mocks.pendingSpy.mock.calls
+        .slice(from)
+        .filter((call) => (call[1] as number) > 1000);
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The dialog type only (mcp -> edit, body absent both times).
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([{ ...base, confirmType: 'edit' }]));
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The dialog body only.
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([{ ...base, confirmType: 'edit', confirmBody: 'a\nb' }]));
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The sibling count only: a second call parks beside the unchanged card.
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(
+      view([
+        { ...base, confirmType: 'edit', confirmBody: 'a\nb' },
+        toolItem({
+          id: 't2',
+          description: 'sib',
+          confirm: 'pending',
+          confirmType: 'mcp',
+        }),
+      ]),
+    );
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The dialog's outside-window rows only (the urls/warnings block).
+    const withExtra = {
+      ...base,
+      confirmType: 'edit',
+      confirmBody: 'a\nb',
+      confirmExtra: '⚠ w',
+    };
+    const sibling = toolItem({
+      id: 't2',
+      description: 'sib',
+      confirm: 'pending',
+      confirmType: 'mcp',
+    });
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([withExtra, sibling]));
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The card's own description only (the `text` dep).
+    const desc2 = '{"content":"' + 'a'.repeat(3200) + '"}';
+    const renamed = {
+      ...withExtra,
+      description: desc2,
+      tool: 'mcp__other__write_a_much_longer_tool_name',
+    };
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([{ ...withExtra, description: desc2 }, sibling]));
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The card's display name only (the `name` dep).
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([renamed, sibling]));
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The terminal height only: a resize with the dialog up. toolCardText
+    // is width-independent, so nothing but the terminalHeight dep can fire
+    // here — removing it from the memo's dep array leaves the stale 80-row
+    // cap in place and this assertion fails.
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([renamed, sibling], 110, 40));
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The width only.
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([renamed, sibling], 100, 40));
+    expect(mainCardCalls()).not.toHaveLength(0);
+  });
+
+  it('drops the pending budget when the call resolves or completes', () => {
+    // A stale memo would keep the pending-priced cap after the call leaves
+    // awaiting_approval: the 34-row budget shows the whole ~3k-column
+    // payload, while the settled 5-row cap cuts it past column 412. Each
+    // rerender parks a fresh sibling in the same batch so the sibling count
+    // stays 1 and only the flipped field changes — otherwise the count
+    // delta masks a dropped confirm/done dep.
+    const description = '{"content":"' + 'a'.repeat(3000) + 'TAIL"}';
+    const parked = (id: string) =>
+      toolItem({
+        id,
+        tool: 'mcp__fs__write_file',
+        description,
+        confirm: 'pending',
+        confirmType: 'mcp',
+      });
+    const sibling = toolItem({
+      id: 't2',
+      description: 'sib',
+      confirm: 'pending',
+      confirmType: 'mcp',
+    });
+    const view = (items: LiveToolItem[]) => (
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={items}
+      />
+    );
+
+    // pending -> approved flips only the card's own confirm field.
+    const resolved = render(view([parked('t1')]));
+    expect(resolved.container.textContent).toContain('TAIL');
+    resolved.rerender(
+      view([{ ...parked('t1'), confirm: 'approved' }, sibling]),
+    );
+    expect(resolved.container.textContent).not.toContain('TAIL');
+    expect(resolved.container.textContent).toContain('... last');
+    resolved.unmount();
+
+    // pending -> done flips only the card's own done field.
+    const done = render(view([parked('t1')]));
+    expect(done.container.textContent).toContain('TAIL');
+    done.rerender(view([{ ...parked('t1'), done: true }, sibling]));
+    expect(done.container.textContent).not.toContain('TAIL');
+    expect(done.container.textContent).toContain('... last');
+    done.unmount();
+  });
+
+  it('keeps the full pending budget beside a sibling that is not parked', () => {
+    // The sibling divisor counts only parked calls: a still-executing
+    // sibling (a hook-bounced batch runs one call while another awaits
+    // approval) or a settled one must not halve the pending card's budget —
+    // halving cuts this ~4k-column args JSON back to 1708 visible columns
+    // and hides MID_MARKER, the R5-9 regression.
+    const description =
+      '{"content":"' +
+      'a'.repeat(2500) +
+      'MID_MARKER' +
+      'b'.repeat(1500) +
+      '"}';
+    const parked = toolItem({
+      id: 't1',
+      tool: 'mcp__fs__write_file',
+      description,
+      confirm: 'pending',
+      confirmType: 'mcp',
+    });
+    for (const sibling of [
+      toolItem({ id: 't2', description: 'echo still running' }),
+      toolItem({ id: 't2', description: 'echo done', done: true }),
+    ]) {
+      const { container, unmount } = render(
+        <OpenTuiTranscriptView
+          availableWidth={110}
+          availableTerminalHeight={80}
+          items={[parked, sibling]}
+        />,
+      );
+      const text = container.textContent ?? '';
+      expect(text).toContain('awaiting approval');
+      expect(text).toContain('MID_MARKER');
+      unmount();
+    }
+  });
+
+  it('prices every parked card against the one mounted dialog', () => {
+    // Exactly one confirmation dialog is mounted — the shell renders
+    // waitingToolCalls[0], whose order is (re-)park time: a
+    // resolve-then-re-park appends the call at the waiting list's end while
+    // its transcript card keeps its original index, so the mounted call can
+    // be a LATER transcript item. Every parked card must budget against the
+    // mounted dialog (t2's exec arm, with its outside-window warning row),
+    // not the first parked card's — cards pricing themselves against
+    // different dialogs over-commit the shared region.
+    const hookBody = Array.from({ length: 20 }, () => 'reason').join('\n');
+    const callsBefore = mocks.pendingSpy.mock.calls.length;
+    render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        activeWaitingCallId="t2"
+        items={[
+          toolItem({
+            id: 't1',
+            tool: 'mcp__fs__write_file',
+            description: '{"a":"b"}',
+            confirm: 'pending',
+            confirmType: 'info',
+            confirmBody: hookBody,
+          }),
+          toolItem({
+            id: 't2',
+            tool: 'run_shell_command',
+            description: '{"c":"d"}',
+            confirm: 'pending',
+            confirmType: 'exec',
+            confirmBody: 'echo $(date)',
+            confirmExtra: '⚠ Command substitution detected',
+          }),
+        ]}
+      />,
+    );
+    const dialogs = mocks.pendingSpy.mock.calls
+      .slice(callsBefore)
+      .map((call) => call[3]);
+    expect(dialogs.length).toBeGreaterThanOrEqual(2);
+    for (const dialog of dialogs) {
+      expect(dialog).toEqual({
+        type: 'exec',
+        body: 'echo $(date)',
+        extra: '⚠ Command substitution detected',
+      });
+    }
+
+    // While the gated-MCP approval dialog owns the shell's popup slot no
+    // tool confirmation is mounted: the same parked cards must price the
+    // body-less payload proxy, not a dialog that is not painting.
+    const preemptedBefore = mocks.pendingSpy.mock.calls.length;
+    render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        activeWaitingCallId="t2"
+        pendingDialogMounted={false}
+        items={[
+          toolItem({
+            id: 't1',
+            tool: 'mcp__fs__write_file',
+            description: '{"a":"b"}',
+            confirm: 'pending',
+            confirmType: 'info',
+            confirmBody: hookBody,
+          }),
+          toolItem({
+            id: 't2',
+            tool: 'run_shell_command',
+            description: '{"c":"d"}',
+            confirm: 'pending',
+            confirmType: 'exec',
+            confirmBody: 'echo $(date)',
+            confirmExtra: '⚠ Command substitution detected',
+          }),
+        ]}
+      />,
+    );
+    const preemptedDialogs = mocks.pendingSpy.mock.calls
+      .slice(preemptedBefore)
+      .map((call) => call[3]);
+    expect(preemptedDialogs.length).toBeGreaterThanOrEqual(2);
+    for (const dialog of preemptedDialogs) {
+      expect(dialog?.type).toBeUndefined();
+      expect(dialog?.body).toBeUndefined();
+      expect(dialog?.extra).toBeUndefined();
+    }
   });
 
   it('folds newlines in a live description before the cap measures it (R6-2)', () => {

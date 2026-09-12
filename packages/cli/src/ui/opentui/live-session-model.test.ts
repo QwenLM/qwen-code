@@ -117,6 +117,61 @@ describe('foldLiveEvent done (turn end)', () => {
   });
 });
 
+describe('foldLiveEvent confirm (pending card dialog measure)', () => {
+  it('stores the confirmation type and expandable body on the card', () => {
+    // pendingCardMaxRows keys its expanded-dialog bound on these: only the
+    // type says whether the dialog's body can expand, and the body text is
+    // what it measures.
+    const items = foldLiveEvent([runningTool()], {
+      type: 'confirm',
+      id: 'tool1',
+      tool: 'exit_plan_mode',
+      title: 'Approve this plan?',
+      confirmType: 'plan',
+      confirmBody: 'step one\nstep two',
+    });
+    expect(items[0]).toMatchObject({
+      confirm: 'pending',
+      confirmType: 'plan',
+      confirmBody: 'step one\nstep two',
+    });
+  });
+
+  it('replaces the stored type and body when the call re-parks (hook bounce)', () => {
+    // A PreToolUse 'ask' bounce rebuilds a non-edit call's details as
+    // { type: 'info', prompt: hookReason } (coreToolScheduler), so the
+    // second confirm for the same callId must REPLACE the stored pair —
+    // keeping the stale exec type would price the card against a dialog
+    // that no longer exists.
+    const parked = foldLiveEvent([runningTool()], {
+      type: 'confirm',
+      id: 'tool1',
+      tool: 'run_shell_command',
+      title: 'Run?',
+      confirmType: 'exec',
+      confirmBody: 'echo $(date)',
+      confirmExtra: '⚠ Command substitution detected',
+    });
+    expect(parked[0]).toMatchObject({
+      confirmExtra: '⚠ Command substitution detected',
+    });
+    const items = foldLiveEvent(parked, {
+      type: 'confirm',
+      id: 'tool1',
+      tool: 'run_shell_command',
+      title: 'Hook requested confirmation to run',
+      confirmType: 'info',
+      confirmBody: 'hook said no',
+    });
+    expect(items[0]).toMatchObject({
+      confirm: 'pending',
+      confirmType: 'info',
+      confirmBody: 'hook said no',
+      confirmExtra: undefined,
+    });
+  });
+});
+
 describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {
   it('records a rejected resolution and clears the pending marker', () => {
     const items = foldLiveEvent([waitingTool()], {
