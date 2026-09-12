@@ -104,11 +104,18 @@ export function OpenTuiTranscriptView({
   thoughtsExpanded = false,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
-  // Sibling pending cards split one dialog's collapsed allowance: the
-  // dialog renders below the whole transcript (R3-1).
-  const pendingCount = items.filter(
+  // Sibling pending cards split one dialog's allowance: it renders below
+  // the whole transcript and belongs to the FIRST parked call
+  // (waitingToolCalls[0]; the confirm events push in this same order). That
+  // card keeps the full allowance — for an mcp call it is the only surface
+  // carrying the arguments being approved (R4-1) — while the remaining
+  // siblings divide it (R3-1); as each call settles the next pending card
+  // becomes first and the allowance rotates to it.
+  const pendingItems = items.filter(
     (item) => item.kind === 'tool' && item.confirm === 'pending' && !item.done,
-  ).length;
+  );
+  const pendingCount = pendingItems.length;
+  const activePendingId = pendingItems[0]?.id;
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
@@ -123,7 +130,7 @@ export function OpenTuiTranscriptView({
             terminalHeight={availableTerminalHeight}
             width={availableWidth}
             thoughtsExpanded={thoughtsExpanded}
-            pendingCount={pendingCount}
+            pendingCount={item.id === activePendingId ? 1 : pendingCount}
           />
         </box>
       ))}
@@ -328,8 +335,9 @@ function ToolCard({
   // body (threaded onto the item as confirmBody — a hook reason, plan, or
   // command) is tall enough to hide rows, the card yields so the dialog
   // plus its chrome stays on screen. Sibling pending cards split the
-  // collapsed allowance (pendingCount): the one dialog renders below all
-  // of them.
+  // allowance (pendingCount): the one dialog renders below all of them and
+  // belongs to the first parked call, so that card arrives here with the
+  // undivided allowance (R4-1).
   const cap = capToolCardDescription(
     text,
     name,

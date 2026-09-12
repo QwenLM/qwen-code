@@ -219,11 +219,13 @@ describe('OpenTuiTranscriptView', () => {
     expect(text).not.toContain('... last');
   });
 
-  it('splits the pending budget across sibling pending cards (R3-1)', () => {
-    // Two wide-payload mcp cards awaiting approval at once must share the
-    // collapsed allowance a lone card would get, or their painted rows push
-    // the confirmation dialog below the transcript off the viewport — each
-    // card windows its tail instead.
+  it("keeps the active card's payload while siblings split the allowance (R3-1, R4-1)", () => {
+    // The one rendered dialog belongs to the FIRST parked call
+    // (waitingToolCalls[0], pushed in transcript order), and an mcp dialog
+    // shows only the server and tool names: an even split windows BOTH
+    // cards, hiding the arguments of exactly the call being approved. The
+    // first card keeps the full allowance; its siblings divide it, and the
+    // allowance rotates as each call settles.
     const description = (marker: string) =>
       '{"path":"/x","content":"' + 'x'.repeat(3000) + marker + '"}';
     const { container } = render(
@@ -247,9 +249,41 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     const text = container.textContent ?? '';
-    expect(text).toContain('... last');
-    expect(text).not.toContain('FIRST_TAIL');
+    expect(text).toContain('FIRST_TAIL');
     expect(text).not.toContain('SECOND_TAIL');
+    expect(text).toContain('... last');
+  });
+
+  it('keeps the active payload when a parked sibling needs nothing (R4-1)', () => {
+    // An even split charges the active card for siblings regardless of what
+    // they paint: a wide mcp payload parked beside a one-row `ls` card lost
+    // its tail to the halved allowance — adding a sibling that needs
+    // nothing removed the payload from the screen.
+    const description =
+      '{"path":"/x","content":"' + 'x'.repeat(3400) + 'WIDE_TAIL"}';
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            id: 't1',
+            tool: 'mcp__fs__write_file',
+            description,
+            confirm: 'pending',
+          }),
+          toolItem({
+            id: 't2',
+            tool: 'run_shell_command',
+            description: 'ls',
+            confirm: 'pending',
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('WIDE_TAIL');
+    expect(text).toContain('ls');
   });
 
   it('folds newlines in a live description before the cap measures it (R6-2)', () => {

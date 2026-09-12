@@ -296,11 +296,18 @@ const CARD_DESC_WRAP_RATIO = 0.7;
  * budget, which the card needs as the only surface carrying the arguments
  * (R5-9); above roughly 90 rows the converted empty-body bound is the
  * tighter one and they yield rows their dialog never paints (R3-3).
- * `pendingCount` splits the collapsed allowance across the pending
- * siblings: one dialog renders below the whole transcript, so N parked
- * confirmations share the rows a lone card would get instead of pushing
- * that dialog off the viewport (R3-1); at 1 the split is a no-op. Short
- * terminals fall back to the settled cap.
+ * `pendingCount` splits both allowances across the pending siblings: one
+ * dialog renders below the whole transcript, so the parked siblings share
+ * the rows a lone card would get — the collapsed allowance divided so the
+ * cards' sum is charged against that dialog, and the dialog bound divided
+ * so the converted operand does not silently stop binding exactly where
+ * the split matters (R3-1). The split is a no-op at 1, and the transcript
+ * view passes 1 for the FIRST pending card: the rendered dialog belongs
+ * to it (waitingToolCalls[0], pushed in transcript order), so it keeps
+ * the full allowance — for an mcp call that card is the only surface
+ * carrying the arguments being approved (R4-1), and the allowance rotates
+ * to the next sibling as each call settles. Short terminals fall back to
+ * the settled cap.
  */
 export function pendingCardMaxRows(
   terminalHeight: number,
@@ -328,9 +335,12 @@ export function pendingCardMaxRows(
   // dialog was charged and its outcome list falls off the viewport (R1-3).
   // It applies unconditionally — gating it on the body outgrowing the
   // collapsed window made the UNCONVERTED collapsed bound the binding one
-  // exactly inside that window.
+  // exactly inside that window. The sibling count divides it too: granted
+  // in full to each of N parked cards the unconverted collapsed operand
+  // binds instead and the split goes inert (R3-1).
   const dialogBound = Math.floor(
-    (h - DIALOG_EXPANDED_RESERVE_ROWS - bodyRows) * CARD_DESC_WRAP_RATIO,
+    ((h - DIALOG_EXPANDED_RESERVE_ROWS - bodyRows) * CARD_DESC_WRAP_RATIO) /
+      pendingCount,
   );
   return Math.max(
     TOOL_CARD_DESCRIPTION_ROWS,

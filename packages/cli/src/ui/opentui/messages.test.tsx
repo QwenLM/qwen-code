@@ -220,7 +220,20 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(pendingCardMaxRows(80, undefined, 106, 1)).toBe(34);
     expect(pendingCardMaxRows(80, undefined, 106, 2)).toBe(17);
     expect(pendingCardMaxRows(80, undefined, 106, 3)).toBe(11);
-    // The settled floor still holds when the share runs out.
+    // The dialog bound divides by the same count, or the split is inert
+    // exactly where it matters: at 200 rows the unconverted collapsed
+    // operand (77) binds under an undivided converted one (121), granting
+    // each sibling more than a lone card's budget; divided, 60.
+    expect(pendingCardMaxRows(200, undefined, 106, 2)).toBe(60);
+    // Same inertness at 80 rows with a 40-row exec body: undivided, the
+    // dialog bound grants each sibling the lone-card 9; divided it falls
+    // past the settled floor.
+    const heredoc = Array.from({ length: 40 }, () => 'echo hi').join('\n');
+    expect(pendingCardMaxRows(80, heredoc, 106, 2)).toBeLessThan(9);
+    // A sibling's share still bottoms out at the settled floor. The card
+    // whose dialog is on screen never rides the split — the transcript view
+    // passes 1 for the first pending item (R4-1), so this floor is the
+    // sibling minimum, and it rotates as each call settles.
     expect(pendingCardMaxRows(80, undefined, 106, 8)).toBe(
       TOOL_CARD_DESCRIPTION_ROWS,
     );
