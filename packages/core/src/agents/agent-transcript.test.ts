@@ -17,6 +17,7 @@ import {
   buildAgentTranscriptAttach,
   normalizeResumedAgentDepth,
   readAgentMeta,
+  readAgentTrace,
   readLastTranscriptRecordUuidSync,
   writeAgentMeta,
   type AgentMeta,
@@ -619,6 +620,106 @@ describe('agent-transcript', () => {
       });
     });
 
+    it('persists only nested session readiness transitions and removes the listener', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+      emitter.emit(AgentEventType.TOOL_CALL, {
+        subagentId: 'agent-x',
+        round: 1,
+        callId: 'nested',
+        name: 'agent',
+        description: 'nested',
+        args: {},
+        timestamp: Date.now(),
+      });
+      const update = (ready: boolean) =>
+        emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+          subagentId: 'agent-x',
+          round: 1,
+          callId: 'nested',
+          outputChunk: {
+            type: 'task_execution',
+            subagentName: 'general-purpose',
+            taskDescription: 'nested',
+            taskPrompt: 'nested',
+            status: 'running',
+            subagentSessionReady: ready,
+          },
+          timestamp: Date.now(),
+        });
+      update(false);
+      update(true);
+      update(true);
+      cleanup();
+      update(false);
+      const records = readJsonl(jsonlPath);
+      expect(records.map((record) => record.type)).toEqual([
+        'assistant',
+        'system',
+        'system',
+      ]);
+      expect(
+        records.slice(1).map((record) => ({
+          subtype: record.subtype,
+          payload: record.systemPayload,
+        })),
+      ).toEqual([
+        {
+          subtype: 'agent_session_ready',
+          payload: { callId: 'nested', subagentSessionReady: false },
+        },
+        {
+          subtype: 'agent_session_ready',
+          payload: { callId: 'nested', subagentSessionReady: true },
+        },
+      ]);
+      expect(records[1].parentUuid).toBe(records[0].uuid);
+      expect(records[2].parentUuid).toBe(records[1].uuid);
+    });
+
+    it('preserves a nested launch failure in its finalized result', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+      emitter.emit(AgentEventType.TOOL_CALL, {
+        subagentId: 'agent-x',
+        round: 1,
+        callId: 'nested',
+        name: 'agent',
+        description: 'nested',
+        args: {},
+        timestamp: Date.now(),
+      });
+      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+        subagentId: 'agent-x',
+        round: 1,
+        timestamp: Date.now(),
+        responses: [
+          {
+            callId: 'nested',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'nested',
+                  name: 'agent',
+                  response: { error: 'Registration failed' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+      cleanup();
+      const records = readJsonl(jsonlPath);
+      expect(records[1].systemPayload).toEqual({
+        callId: 'nested',
+        subagentSessionReady: false,
+      });
+      expect(records[2].toolCallResult).toEqual({
+        callId: 'nested',
+        status: 'error',
+      });
+    });
+
     it('does not persist provisional TOOL_RESULT response parts', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);
@@ -921,6 +1022,97 @@ describe('agent-transcript', () => {
       expect(normalizeResumedAgentDepth(null as unknown as number)).toBe(
         undefined,
       );
+    });
+  });
+
+  describe('readAgentTrace', () => {
+    let projectDir: string;
+
+    beforeEach(() => {
+      projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-trace-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    });
+
+    it('returns complete, filtered lineage and marks missing parents', async () => {
+      const sessionId = 'session-1';
+      const write = (meta: AgentMeta) =>
+        writeAgentMeta(
+          getAgentMetaPath(projectDir, sessionId, meta.agentId),
+          meta,
+        );
+      write({
+        agentId: 'root',
+        agentType: 'reviewer',
+        description: 'root task',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        status: 'completed',
+      });
+      write({
+        agentId: 'child',
+        agentType: 'tester',
+        description: 'child task',
+        parentSessionId: sessionId,
+        parentAgentId: 'root',
+        createdAt: '2026-01-01T00:00:01.000Z',
+        status: 'running',
+      });
+      write({
+        agentId: 'orphan',
+        agentType: 'tester',
+        description: 'orphan task',
+        parentSessionId: sessionId,
+        parentAgentId: 'missing',
+        createdAt: '2026-01-01T00:00:02.000Z',
+      });
+      write({
+        agentId: 'cycle-a',
+        agentType: 'tester',
+        description: 'cycle a',
+        parentSessionId: sessionId,
+        parentAgentId: 'cycle-b',
+        createdAt: '2026-01-01T00:00:03.000Z',
+      });
+      write({
+        agentId: 'cycle-b',
+        agentType: 'tester',
+        description: 'cycle b',
+        parentSessionId: sessionId,
+        parentAgentId: 'cycle-a',
+        createdAt: '2026-01-01T00:00:04.000Z',
+      });
+      write({
+        agentId: '0-cycle-child',
+        agentType: 'tester',
+        description: 'cycle child',
+        parentSessionId: sessionId,
+        parentAgentId: 'cycle-a',
+        createdAt: '2026-01-01T00:00:05.000Z',
+      });
+
+      const trace = await readAgentTrace(projectDir, sessionId, 'root');
+
+      expect(trace.rootAgentIds).toEqual(['root']);
+      expect(trace.nodes.map((node) => node.agentId)).toEqual([
+        'root',
+        'child',
+      ]);
+      expect(
+        trace.nodes.find((node) => node.agentId === 'child'),
+      ).toMatchObject({ rootAgentId: 'root', lineageState: 'complete' });
+      const fullTrace = await readAgentTrace(projectDir, sessionId);
+      expect(
+        fullTrace.nodes.find((node) => node.agentId === 'orphan'),
+      ).toMatchObject({ lineageState: 'orphaned' });
+      expect(
+        fullTrace.nodes
+          .filter((node) => node.lineageState === 'cycle')
+          .map((node) => node.rootAgentId),
+      ).toEqual(['cycle-a', 'cycle-a', 'cycle-a']);
     });
   });
 });

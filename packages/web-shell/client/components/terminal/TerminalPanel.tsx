@@ -18,6 +18,7 @@ interface TerminalPanelProps {
   terminalId: string;
   cwd?: string;
   active?: boolean;
+  enabled?: boolean;
 }
 
 const CONTROL_FRAME_PREFIX = '\x00';
@@ -29,6 +30,18 @@ const releaseCallbacks = new Map<string, () => void>();
 
 export function releaseWebTerminal(terminalId: string): void {
   releaseCallbacks.get(terminalId)?.();
+}
+
+export function releaseDetachedWebTerminal(
+  baseUrl: string,
+  terminalId: string,
+  cwd?: string,
+): void {
+  const ws = new WebSocket(
+    buildWsUrl(baseUrl, terminalId, cwd, true),
+    wsProtocols(),
+  );
+  ws.onerror = () => ws.close();
 }
 
 // Browsers cannot set Authorization on a WebSocket. The daemon decodes this
@@ -79,6 +92,11 @@ function xtermTheme(theme: WebShellTheme) {
         background: '#ffffff',
         foreground: '#1a1a1a',
         cursor: '#1a1a1a',
+        // An unset selectionBackground defaults to white in xterm and blends
+        // into the white terminal background, leaving text selection with no
+        // visible highlight in the light theme. Pin the light-theme selection
+        // blue instead so selected terminal text stays visible.
+        selectionBackground: '#bdd8fe',
       }
     : {
         background: '#0a0a0a',
@@ -91,6 +109,7 @@ export function TerminalPanel({
   terminalId,
   cwd,
   active = true,
+  enabled = true,
 }: TerminalPanelProps) {
   const theme = useTheme();
   const { baseUrl } = useWorkspace();
@@ -110,6 +129,16 @@ export function TerminalPanel({
   }, [theme]);
 
   useEffect(() => {
+    if (!enabled) {
+      const release = () =>
+        releaseDetachedWebTerminal(baseUrl, terminalId, cwd);
+      releaseCallbacks.set(terminalId, release);
+      return () => {
+        if (releaseCallbacks.get(terminalId) === release) {
+          releaseCallbacks.delete(terminalId);
+        }
+      };
+    }
     if (!containerRef.current) return;
 
     const term = new Terminal({
@@ -339,7 +368,7 @@ export function TerminalPanel({
       wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
     const term = termRef.current;

@@ -1408,11 +1408,6 @@ export class FeishuChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
-    // In blockStreaming mode, the BlockStreamer delivers text as plain messages.
-    // Skip card creation/updates to avoid duplicate content and a misleading
-    // "已取消" card at the end.
-    if (this.config.blockStreaming === 'on') return;
-
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) {
       process.stderr.write(
@@ -1598,7 +1593,6 @@ export class FeishuChannel extends ChannelBase {
     _chatId: string,
     sessionId: string,
   ): void {
-    if (this.config.blockStreaming === 'on') return;
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) return;
     const cardState = this.cardSessions.get(inboundMsgId);
@@ -1626,7 +1620,7 @@ export class FeishuChannel extends ChannelBase {
       this.onResponseBoundary(chatId, sessionId);
       return;
     }
-    if (reason !== 'input_requested' || this.config.blockStreaming === 'on') {
+    if (reason !== 'input_requested') {
       return;
     }
 
@@ -2078,10 +2072,7 @@ export class FeishuChannel extends ChannelBase {
       const sourceLabel = this.getResponseSourceLabel(sessionId);
       this.sessionToInboundMsg.set(sessionId, inboundMsgId);
       this.addReaction(inboundMsgId, 'OnIt').catch(() => {});
-      if (
-        this.config.blockStreaming !== 'on' &&
-        !this.cardSessions.has(inboundMsgId)
-      ) {
+      if (!this.cardSessions.has(inboundMsgId)) {
         this.cardSessions.set(inboundMsgId, {
           messageId: '',
           created: false,
@@ -2187,8 +2178,9 @@ export class FeishuChannel extends ChannelBase {
         // to avoid leaking state if onResponseComplete was skipped.
         this.cleanupCard(inboundMsgId);
       } else if (!cs) {
-        // No card session created (blockStreaming mode or gate rejection) —
-        // clean up auxiliary maps populated by processMessage.
+        // onPromptStart's isKnownInboundMessageId gate rejected this message, so
+        // no card session exists — clean up the auxiliary maps processMessage
+        // populated.
         this.msgToQuestion.delete(inboundMsgId);
         this.msgToSenderName.delete(inboundMsgId);
         this.msgToSenderId.delete(inboundMsgId);
@@ -2629,28 +2621,32 @@ export class FeishuChannel extends ChannelBase {
       let isMentioned = false;
       let cleanText = content.text;
       if (msg.mentions && msg.mentions.length > 0) {
+        const mentionReplacements = new Map<string, string>();
         for (const mention of msg.mentions) {
           const mentionId =
             mention.id.open_id || mention.id.user_id || mention.id.union_id;
-          if (mentionId === this.botOpenId) {
+          const isBotMention = mentionId === this.botOpenId;
+          if (isBotMention) {
             isMentioned = true;
           }
-          // Replace @mention placeholder in text
-          cleanText = cleanText.replaceAll(
+          // Resolve the structured placeholder directly. Removing the bot by
+          // rendered display name would corrupt a preceding member whose name
+          // merely starts with the bot's name.
+          mentionReplacements.set(
             mention.key,
-            () => `@${mention.name}`,
+            isBotMention ? '' : `@${mention.name}`,
           );
         }
-        // Strip bot @mention from text — use replace (not replaceAll) to
-        // avoid removing literal occurrences of the bot's name the user typed.
-        if (isMentioned && this.botOpenId) {
-          for (const mention of msg.mentions) {
-            const mentionId =
-              mention.id.open_id || mention.id.user_id || mention.id.union_id;
-            if (mentionId === this.botOpenId) {
-              cleanText = cleanText.replace(`@${mention.name}`, '').trim();
-            }
-          }
+        const mentionKeys = [...mentionReplacements.keys()].sort(
+          (a, b) => b.length - a.length,
+        );
+        if (mentionKeys.length > 0) {
+          cleanText = cleanText
+            .replace(
+              new RegExp(mentionKeys.map(escapeRegExp).join('|'), 'gu'),
+              (key) => mentionReplacements.get(key) ?? key,
+            )
+            .trim();
         }
       }
 
@@ -2671,6 +2667,7 @@ export class FeishuChannel extends ChannelBase {
         chatId,
         ...(chatName ? { chatName } : {}),
         text: cleanText,
+        ...(!content.userAuthoredText ? { syntheticText: true as const } : {}),
         messageId: msgId,
         threadId: msg.root_id || undefined,
         isGroup,
@@ -2870,13 +2867,18 @@ export class FeishuChannel extends ChannelBase {
     imageKey?: string;
     fileKey?: string;
     fileName?: string;
+    /** Whether text came from the user rather than a media placeholder. */
+    userAuthoredText: boolean;
   } {
     try {
       const content = JSON.parse(contentJson);
 
       switch (messageType) {
         case 'text':
-          return { text: (content.text as string) || '' };
+          return {
+            text: (content.text as string) || '',
+            userAuthoredText: true,
+          };
 
         case 'post': {
           // Rich text (post) format: extract text from nested structure
@@ -2915,13 +2917,17 @@ export class FeishuChannel extends ChannelBase {
               lines.push(parts.join(''));
             }
           }
-          return { text: lines.join('\n').trim() || '' };
+          return {
+            text: lines.join('\n').trim() || '',
+            userAuthoredText: true,
+          };
         }
 
         case 'image':
           return {
             text: '(image)',
             imageKey: (content.image_key as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'file':
@@ -2929,29 +2935,34 @@ export class FeishuChannel extends ChannelBase {
             text: `(file: ${(content.file_name as string) || 'file'})`,
             fileKey: (content.file_key as string) || undefined,
             fileName: (content.file_name as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'audio':
-          return { text: '(audio)' };
+          return { text: '(audio)', userAuthoredText: false };
 
         case 'media':
           return {
             text: '(video)',
             fileKey: (content.file_key as string) || undefined,
             fileName: (content.file_name as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'interactive':
-          return { text: '(card message — not supported)' };
+          return {
+            text: '(card message — not supported)',
+            userAuthoredText: false,
+          };
 
         default:
-          return { text: '' };
+          return { text: '', userAuthoredText: false };
       }
     } catch (err) {
       process.stderr.write(
         `[Feishu:${this.name}] extractContent parse error (type=${messageType}): ${err instanceof Error ? err.message : err}\n`,
       );
-      return { text: '' };
+      return { text: '', userAuthoredText: false };
     }
   }
 }

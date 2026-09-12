@@ -117,6 +117,35 @@ describe('foldLiveEvent done (turn end)', () => {
   });
 });
 
+describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {
+  it('records a rejected resolution and clears the pending marker', () => {
+    const items = foldLiveEvent([waitingTool()], {
+      type: 'confirm-resolved',
+      id: 'tool1',
+      outcome: 'rejected',
+    });
+    expect(items[0]).toMatchObject({ confirm: 'rejected', done: false });
+  });
+
+  it('records an approved resolution and clears the pending marker', () => {
+    const items = foldLiveEvent([waitingTool()], {
+      type: 'confirm-resolved',
+      id: 'tool1',
+      outcome: 'approved',
+    });
+    expect(items[0]).toMatchObject({ confirm: 'approved', done: false });
+  });
+
+  it('leaves an already-resolved card untouched', () => {
+    const items = foldLiveEvent([{ ...waitingTool(), confirm: 'approved' }], {
+      type: 'confirm-resolved',
+      id: 'tool1',
+      outcome: 'rejected',
+    });
+    expect(items[0]).toMatchObject({ confirm: 'approved' });
+  });
+});
+
 describe('foldLiveEvent user (promptId/sentToModel parity)', () => {
   it('carries promptId and sentToModel onto the user item (R1-16)', () => {
     const items = foldLiveEvent([assistant('hi')], {
@@ -133,6 +162,36 @@ describe('foldLiveEvent user (promptId/sentToModel parity)', () => {
       promptId: 'session-1########0',
       sentToModel: false,
     });
+  });
+
+  it('collapses the same user text folded twice in a row', () => {
+    // ink's addItem drops a user item identical to its predecessor; steering
+    // the same text twice mid-turn reaches this fold as two events.
+    const steer = {
+      type: 'user',
+      text: 'continue',
+      sentToModel: false,
+    } as const;
+    let items = foldLiveEvent([], steer);
+    items = foldLiveEvent(items, steer);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: 'user', text: 'continue' });
+  });
+
+  it('keeps two different user texts folded in a row', () => {
+    let items = foldLiveEvent([], {
+      type: 'user',
+      text: 'first',
+      sentToModel: false,
+    });
+    items = foldLiveEvent(items, {
+      type: 'user',
+      text: 'second',
+      sentToModel: false,
+    });
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({ kind: 'user', text: 'first' });
+    expect(items[1]).toMatchObject({ kind: 'user', text: 'second' });
   });
 });
 
@@ -444,30 +503,120 @@ describe('foldLiveEvent status rows (ink StatusMessage parity)', () => {
       message: 'run the tests',
     });
   });
+
+  it('pushes the U-33 user shell row after settling a streaming assistant', () => {
+    const items = foldLiveEvent([assistant('thinking')], {
+      type: 'user-shell',
+      text: 'ls',
+    });
+    expect(items).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'user-shell', text: 'ls' },
+    ]);
+  });
+
+  it('pushes the U-34 command cards structurally, settling the stream first', () => {
+    const agent = {
+      label: 'left',
+      status: 'completed',
+      durationMs: 1200,
+      totalTokens: 10,
+      inputTokens: 4,
+      outputTokens: 6,
+      toolCalls: 2,
+      successfulToolCalls: 2,
+      failedToolCalls: 0,
+      rounds: 1,
+    } as never;
+    const recap = foldLiveEvent([assistant('thinking')], {
+      type: 'away-recap',
+      text: 'did X',
+    });
+    expect(recap).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'away-recap', text: 'did X' },
+    ]);
+
+    const advisor = foldLiveEvent([assistant('thinking')], {
+      type: 'advisor',
+      text: 'Looks good',
+      model: 'qwen3-max',
+    });
+    expect(advisor).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'advisor', text: 'Looks good', model: 'qwen3-max' },
+    ]);
+
+    const arenaAgent = foldLiveEvent([assistant('thinking')], {
+      type: 'arena-agent',
+      agent,
+    });
+    expect(arenaAgent).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'arena-agent', agent },
+    ]);
+
+    const arenaSession = foldLiveEvent([assistant('thinking')], {
+      type: 'arena-session',
+      sessionStatus: 'completed',
+      task: 'do it',
+      totalDurationMs: 2000,
+      agents: [agent],
+    });
+    expect(arenaSession).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      {
+        kind: 'arena-session',
+        sessionStatus: 'completed',
+        task: 'do it',
+        totalDurationMs: 2000,
+        agents: [agent],
+      },
+    ]);
+  });
 });
 
 describe('foldLiveEvent tool-output', () => {
-  it('appends live output to the running tool card', () => {
-    let items = foldLiveEvent([], {
+  const started = () =>
+    foldLiveEvent([], {
       type: 'tool-start',
       id: 'tool1',
       tool: 'run_shell_command',
       title: 'run_shell_command',
     });
-    items = foldLiveEvent(items, {
+
+  it('replaces the running card output with each snapshot', () => {
+    let items = foldLiveEvent(started(), {
       type: 'tool-output',
       id: 'tool1',
-      delta: 'line1\n',
+      output: 'line1\n',
     });
     items = foldLiveEvent(items, {
       type: 'tool-output',
       id: 'tool1',
-      delta: 'line2\n',
+      output: 'line1\nline2\n',
     });
     expect(items[0]).toMatchObject({
       kind: 'tool',
       done: false,
       output: 'line1\nline2\n',
+    });
+  });
+
+  it('holds one copy when the result repeats the streamed output', () => {
+    let items = foldLiveEvent(started(), {
+      type: 'tool-output',
+      id: 'tool1',
+      output: 'ACCEPT_TOOL_RAN\n',
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-result',
+      id: 'tool1',
+      display: 'ACCEPT_TOOL_RAN\n',
+    });
+    expect(items[0]).toMatchObject({
+      kind: 'tool',
+      output: 'ACCEPT_TOOL_RAN\n',
     });
   });
 });
@@ -613,6 +762,66 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
     });
   });
 
+  it('shows checkpoint health, matching the ink card', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          checkpointStalls: 2,
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+      ),
+    ).toMatchObject({
+      checkpoint: 'Checkpoint: 2/3 stalled · Error: provider failed',
+    });
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+      ),
+    ).toMatchObject({
+      checkpoint: 'Checkpoint: last check failed · Error: provider failed',
+    });
+    // A stop for another reason clears the diagnostic and keeps the streak:
+    // the line is the count alone, with no trailing separator.
+    expect(
+      describeGoalCard(
+        snap({ objective: 'o', status: 'paused', checkpointStalls: 2 }),
+      ),
+    ).toMatchObject({ checkpoint: 'Checkpoint: 2/3 stalled' });
+    const healthy = describeGoalCard(
+      snap({ objective: 'o', status: 'active' }),
+    );
+    expect(healthy).toMatchObject({ state: 'card' });
+    expect(healthy).not.toHaveProperty('checkpoint');
+
+    // Same visibility rule as the ink card: never on a completed Goal, and a
+    // stall-free failure only while the Goal is active.
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'complete',
+          checkpointStalls: 1,
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+      ),
+    ).not.toHaveProperty('checkpoint');
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'paused',
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+      ),
+    ).not.toHaveProperty('checkpoint');
+  });
+
   it('builds the subtitle from turns and active time', () => {
     expect(
       describeGoalCard(
@@ -624,6 +833,47 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
         }),
       ),
     ).toMatchObject({ subtitle: '2 turns · 1m 1s' });
+  });
+
+  it('carries spend in the subtitle, matching the ink card', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 2,
+          activeTimeMs: 61000,
+          tokensUsed: 1234,
+          tokenBudget: 30_000_000,
+        }),
+      ),
+    ).toMatchObject({ subtitle: '2 turns · 1m 1s · 1.2k/30.0m tokens' });
+  });
+
+  it('carries spend alone when the Goal has no budget', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 1,
+          tokensUsed: 900,
+        }),
+      ),
+    ).toMatchObject({ subtitle: '1 turn · 900 tokens' });
+  });
+
+  it('says nothing about spend before a turn has billed', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 2,
+          tokenBudget: 30_000_000,
+        }),
+      ),
+    ).toMatchObject({ subtitle: '2 turns' });
   });
 
   it('shows the reason only off-active or verifying', () => {

@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as path from 'node:path';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import {
   SessionNotFoundError,
   type AcpSessionBridge,
@@ -15,6 +16,7 @@ import {
 } from './acp-session-bridge.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
+import { Storage } from '@qwen-code/qwen-code-core';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 
 const WS_BOUND = path.resolve('/work/bound');
@@ -49,9 +51,7 @@ function makeBridge(
 // The ecs-qwen pool runs several jobs at once; under that contention these
 // tests pass alone in milliseconds but blow the 15s ceiling without any
 // real hang. Give that pool the raised budget its other suites already use.
-const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
-  ? 60_000
-  : 15_000;
+const timeoutMs = isSlowTestHost() ? 60_000 : 15_000;
 vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 describe('createServeApp default bridge wiring', () => {
@@ -99,6 +99,7 @@ describe('createServeApp default bridge wiring', () => {
     expect(sessionLifecycle).toBeDefined();
     expect(bridgeOptions).toMatchObject({
       delegateReadTextFileToClient: false,
+      artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
     });
     await expect(
       bridgeOptions!.fileSystem!.writeText({

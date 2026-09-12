@@ -390,6 +390,127 @@ describe('SettingsDialog', () => {
   });
 
   describe('Settings Toggling', () => {
+    it('toggles an unset WebSearch setting off and resets it to auto', async () => {
+      vi.mocked(saveModifiedSettings).mockClear();
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+      const { stdin, unmount, lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+      const targetIndex = getDialogSettingKeys().indexOf(
+        'tools.webSearch.enabled',
+      );
+      expect(targetIndex).toBeGreaterThan(0);
+      for (let i = 0; i < targetIndex; i++) {
+        act(() => stdin.write(TerminalKeys.DOWN_ARROW));
+        await wait();
+      }
+      await waitFor(() => {
+        expect(lastFrame()).toContain('●\uFE0E Enable WebSearch');
+        expect(lastFrame()).toContain('(not set)');
+      });
+
+      act(() => stdin.write(TerminalKeys.ENTER));
+      await waitFor(() => {
+        const activeRow = lastFrame()
+          ?.split('\n')
+          .find((line) => line.includes('●\uFE0E Enable WebSearch'));
+        expect(activeRow).toContain('false*');
+      });
+
+      act(() => stdin.write('\u0003'));
+      await waitFor(() => {
+        const activeRow = lastFrame()
+          ?.split('\n')
+          .find((line) => line.includes('●\uFE0E Enable WebSearch'));
+        expect(activeRow).toContain('(not set)');
+        expect(activeRow).not.toContain('(not set)*');
+      });
+      unmount();
+    });
+
+    it('persists resetting an explicit WebSearch setting to auto', async () => {
+      vi.mocked(saveModifiedSettings).mockClear();
+      const settings = createMockSettings({
+        tools: { webSearch: { enabled: true } },
+      });
+      const onRestartRequest = vi.fn();
+      const { stdin, unmount, lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog
+            settings={settings}
+            onSelect={() => {}}
+            onRestartRequest={onRestartRequest}
+          />
+        </KeypressProvider>,
+      );
+      const targetIndex = getDialogSettingKeys().indexOf(
+        'tools.webSearch.enabled',
+      );
+      for (let i = 0; i < targetIndex; i++) {
+        act(() => stdin.write(TerminalKeys.DOWN_ARROW));
+        await wait();
+      }
+
+      act(() => stdin.write('\u0003'));
+      await waitFor(() => {
+        const activeRow = lastFrame()
+          ?.split('\n')
+          .find((line) => line.includes('●\uFE0E Enable WebSearch'));
+        expect(activeRow).toContain('(not set)*');
+      });
+
+      act(() => stdin.write('r'));
+      await waitFor(() => expect(onRestartRequest).toHaveBeenCalledOnce());
+      expect(saveModifiedSettings).toHaveBeenCalledWith(
+        new Set(['tools.webSearch.enabled']),
+        expect.objectContaining({
+          tools: expect.objectContaining({
+            webSearch: expect.objectContaining({ enabled: undefined }),
+          }),
+        }),
+        settings,
+        SettingScope.User,
+      );
+      unmount();
+    });
+
+    it('does not persist a reset when the stored value already equals the default', async () => {
+      vi.mocked(saveModifiedSettings).mockClear();
+      const settings = createMockSettings({
+        general: { preventSystemSleep: true },
+      });
+      const { stdin, unmount, lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={() => {}} />
+        </KeypressProvider>,
+      );
+      const targetIndex = getDialogSettingKeys().indexOf(
+        'general.preventSystemSleep',
+      );
+      for (let i = 0; i < targetIndex; i++) {
+        act(() => stdin.write(TerminalKeys.DOWN_ARROW));
+        await wait();
+      }
+      await waitFor(() => {
+        const activeRow = lastFrame()
+          ?.split('\n')
+          .find((line) => line.includes('●\uFE0E Prevent System Sleep'));
+        expect(activeRow).toContain('true*');
+      });
+
+      act(() => stdin.write('\u0003'));
+      await wait();
+
+      expect(saveModifiedSettings).not.toHaveBeenCalled();
+      expect(lastFrame()).not.toContain(
+        'To see changes, Qwen Code must be restarted',
+      );
+      unmount();
+    });
+
     it('should toggle setting with Enter key', async () => {
       vi.mocked(saveModifiedSettings).mockClear();
 
@@ -1296,7 +1417,7 @@ describe('SettingsDialog', () => {
 
   describe('String Settings Editing', () => {
     it('should allow editing and committing a string setting', async () => {
-      let settings = createMockSettings({ 'a.string.setting': 'initial' });
+      let settings = createMockSettings({ advisorModel: 'initial' });
       const onSelect = vi.fn();
 
       const { stdin, unmount, rerender } = render(
@@ -1308,8 +1429,9 @@ describe('SettingsDialog', () => {
       // Wait for the dialog to render
       await wait();
 
-      // Navigate to the last setting
-      for (let i = 0; i < 20; i++) {
+      const stringSettingIndex = getDialogSettingKeys().indexOf('advisorModel');
+      expect(stringSettingIndex).toBeGreaterThanOrEqual(0);
+      for (let i = 0; i < stringSettingIndex; i++) {
         stdin.write('j'); // Down
         await wait(10);
       }
@@ -1326,11 +1448,7 @@ describe('SettingsDialog', () => {
       stdin.write('\r');
       await wait();
 
-      settings = createMockSettings(
-        { 'a.string.setting': 'new value' },
-        {},
-        {},
-      );
+      settings = createMockSettings({ advisorModel: 'new value' }, {}, {});
       rerender(
         <KeypressProvider kittyProtocolEnabled={false}>
           <SettingsDialog settings={settings} onSelect={onSelect} />

@@ -22,7 +22,7 @@ const defaultRootDir = path.resolve(__dirname, '..');
 const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
 // The docker-sandbox E2E leg builds its image by running this script, so an
 // over-budget package turns main's E2E run red as well as blocking publishing.
-const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 112 * 1024 * 1024;
+const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 128 * 1024 * 1024;
 const PACKAGE_TEXT_FILE_RE =
   /\.(?:[cm]?[jt]sx?|json|md|html|css|txt|ya?ml|sh|svg|map)$/i;
 const PACKAGE_SCAN_FORBIDDEN_LITERALS = [
@@ -78,6 +78,8 @@ function verifyBundleArtifacts(rootDir, distDir) {
     // --cli-only dev bundles; this is the release gate.
     path.join(distDir, 'web-shell', 'index.html'),
     path.join(distDir, 'web-shell', 'assets'),
+    path.join(distDir, 'export-transcript-document.js'),
+    path.join(distDir, 'export-transcript-document.css'),
   ];
 
   if (!fs.existsSync(distDir)) {
@@ -319,6 +321,7 @@ function writeDistPackageJson(rootDir, distDir) {
       // Must ship in the tarball or the @-picker silently falls back to the
       // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
       'fzfWorker.js',
+      'codeModeHost.js',
       'chunks',
       'vendor',
       '*.sb',
@@ -328,6 +331,8 @@ function writeDistPackageJson(rootDir, distDir) {
       'examples',
       'bundled',
       'web-shell',
+      'export-transcript-document.js',
+      'export-transcript-document.css',
       // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
       // web-tree-sitter wasm, native render library) are intentionally NOT
       // published in the npm package — a multi-megabyte tree dominated by the

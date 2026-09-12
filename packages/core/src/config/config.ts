@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { SessionSourceService } from '../services/session-sources.js';
+
 // Node built-ins
 import type { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
@@ -45,7 +47,11 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
-import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
+import {
+  getRuntimeContentGenerator,
+  isTopLevelSession,
+} from '../agents/runtime/agent-context.js';
+import type { ExternalAgentExecutor } from '../agents/runtime/subagent-executor.js';
 import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
 import {
   DashScopeOpenAICompatibleProvider,
@@ -86,6 +92,10 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  ToolMode,
+  type ToolMode as ToolModeValue,
+} from '../tools/code-mode.js';
 import type {
   ArtifactHostConfig,
   ArtifactOssConfig,
@@ -105,7 +115,11 @@ import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
-import type { SkillLevel } from '../skills/types.js';
+import {
+  authoredSkillName,
+  skillRestrictionNames,
+  type SkillLevel,
+} from '../skills/types.js';
 import {
   PermissionManager,
   type ToolRegistrationStatus,
@@ -170,9 +184,18 @@ import {
   type HookEventName,
   type HookDefinition,
   type PostToolBatchToolCall,
+  type AgentType,
+  type HookPhase,
+  type InstructionMemoryType,
+  type PostCompactTrigger,
+  type PreCompactTrigger,
+  type SessionEndReason,
+  type SessionStartSource,
+  type StopFailureErrorType,
+  type TodoItem,
+  type TodoStatus,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
-import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import {
   createGoalRuntime,
   GoalPersistenceUnavailableError,
@@ -182,8 +205,12 @@ import {
 import type { PendingGoalProposal } from '../goals/goal-tools.js';
 import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
-import { createGoalCheckpointVerifier } from '../goals/goal-checkpoint-verifier.js';
+import {
+  createGoalCheckpointVerifier,
+  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+} from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
+import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
 // Utils
@@ -235,6 +262,9 @@ import {
 import {
   deriveSessionName,
   patchSessionRecord,
+  SHARED_RECORD_SLOT,
+  type SessionRecordSlot,
+  type SessionRegistration,
   unregisterSession,
 } from '../services/session-registry.js';
 import { delay } from '../utils/retry.js';
@@ -645,6 +675,19 @@ export interface OutboundCorrelationSettings {
    * Tracing + DashScope — for cross-process trace stitching.
    */
   propagateTraceContext?: boolean;
+  /**
+   * Allow `modelProviders[].generationConfig.customHeaders` values to
+   * carry runtime placeholders such as `${session_id}`, expanded per
+   * request. Default: disabled — a value with a placeholder is dropped
+   * rather than sent.
+   *
+   * This is the consent decision, and it is the only part of the feature
+   * that is global: *which* hosts may receive the value, and *what* the
+   * header is called, are already answered by the provider entry the
+   * header is attached to. It controls only `${session_id}` expansion and
+   * cannot recover a header's provenance after settings are merged.
+   */
+  allowDynamicHeaderValues?: boolean;
 }
 
 export interface OutputSettings {
@@ -911,6 +954,12 @@ export interface ConfigParameters {
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
   enabledSkillNamesProvider?: () => ReadonlySet<string>;
+  /**
+   * Raw normalized skills lists, as written, for the startup migration
+   * warnings: unlike the resolved disablement set, the raw lists let the
+   * warnings tell load-bearing entries (a bare opt-in pair) from stale ones.
+   */
+  skillSettingsListsProvider?: () => SkillSettingsLists;
   terminalImageRenderSupportProvider?: () => Promise<TerminalImageRenderSupport>;
   /**
    * Skill discovery levels that should not be loaded. Sourced from
@@ -956,6 +1005,8 @@ export interface ConfigParameters {
    * auto-approval and never affects registration (#10075).
    */
   eagerTools?: string[];
+  /** Replace ordinary model-facing tools with the isolated exec bridge. */
+  codeModeOnly?: boolean;
   /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
@@ -1045,6 +1096,26 @@ export interface ConfigParameters {
    */
   goalTokenBudget?: number;
   /**
+   * Goal-turn window armed on each new Goal, in finished Goal turns including
+   * user-driven turns. Absent runs Goals with no turn ceiling, and `-1` says
+   * so explicitly. See `normalizeGoalMaxTurns`.
+   */
+  goalMaxTurns?: number;
+  /**
+   * Active-time window armed on each new Goal, in minutes of wall time while
+   * the Goal stays `active` in this process, including waits and idle time.
+   * Absent runs Goals with no time ceiling, and `-1` says so explicitly. See
+   * `normalizeGoalMaxActiveMinutes`.
+   */
+  goalMaxActiveMinutes?: number;
+  /**
+   * Ceiling on one Goal evidence-checkpoint verifier call, in seconds.
+   * Absent or invalid falls back to
+   * `GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS`. See
+   * `normalizeGoalCheckpointTimeoutSeconds`.
+   */
+  goalCheckpointTimeoutSeconds?: number;
+  /**
    * Maximum number of nested sub-agent levels (1-based). `1` reproduces the
    * pre-nesting behavior — level-1 sub-agents exist but cannot themselves
    * spawn sub-agents. The default `5` lets a sub-agent spawn sub-agents up to
@@ -1088,6 +1159,8 @@ export interface ConfigParameters {
    * listing the tool in the `coreTools` allowlist also re-enables it.
    */
   lsToolEnabled?: boolean;
+  /** Opt-in flag for the built-in `todo_write` tool. */
+  todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
   /** Enable the opt-in ACP/Web Shell Session Workflow gate. */
@@ -1264,13 +1337,9 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
-   * Built-in WebSearch tool settings (`tools.webSearch` / ENABLE_WEB_SEARCH +
-   * WEB_SEARCH_MODEL env overrides). The tool registers only when `enabled`
-   * is true and `model` resolves to a DashScope-compatible modelProviders
-   * entry carrying a direct API key — or, for environments that cannot write
-   * settings.json, when an env-declared backend is supplied (`baseUrl` from
-   * WEB_SEARCH_BASE_URL, `apiKeyEnv` naming the key variable), which takes
-   * precedence over modelProviders resolution.
+   * Built-in WebSearch settings. `enabled: false` disables the tool; when the
+   * setting is omitted, the tool may derive a backend from the active provider
+   * at startup. An explicit model or env-declared backend takes precedence.
    */
   webSearch?: WebSearchSettings;
   /**
@@ -1508,6 +1577,128 @@ export function isValidGoalTokenBudget(value: unknown): value is number {
   );
 }
 
+/**
+ * Largest accepted `model.goalMaxTurns`.
+ *
+ * A typo guard on the same reasoning as `GOAL_TOKEN_BUDGET_CAP`, sized well
+ * above any cadence a user would ask for by hand: a Goal that genuinely
+ * wants more turns than this wants no turn ceiling, which is the default.
+ */
+export const GOAL_MAX_TURNS_CAP = 10_000;
+
+/**
+ * Largest accepted `model.goalMaxActiveMinutes`: one week of active time.
+ *
+ * Active time accrues while the Goal stays active in a running process, so a
+ * week of it is already far past any single authorization a user would grant
+ * deliberately.
+ */
+export const GOAL_MAX_ACTIVE_MINUTES_CAP = 7 * 24 * 60;
+
+/**
+ * True for the values `normalizeGoalMaxTurns` honours: `0` and its alias `-1`
+ * for no ceiling, or a positive integer up to `GOAL_MAX_TURNS_CAP`.
+ */
+export function isValidGoalMaxTurns(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === -1 || (value >= 0 && value <= GOAL_MAX_TURNS_CAP))
+  );
+}
+
+/**
+ * Resolves the operator's Goal turn budget to the grant the runtime arms.
+ *
+ * Unlike the token budget, the default is no ceiling: a turn budget is a
+ * cadence a user asks for, not a runaway-spend guard every Goal needs, so an
+ * absent or invalid setting arms nothing rather than falling back to a
+ * number nobody chose. Direct Config embedders may use `0` or `-1` as an
+ * opt-out; the CLI rejects `0` as a likely typo before this layer. The runtime
+ * spells "arm nothing" as a non-finite grant.
+ */
+export function normalizeGoalMaxTurns(value: unknown): number {
+  if (!isValidGoalMaxTurns(value) || value === -1 || value === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return value;
+}
+
+/**
+ * True for the values `normalizeGoalMaxActiveMinutes` honours: `0` and its
+ * alias `-1` for no ceiling, or a positive integer up to
+ * `GOAL_MAX_ACTIVE_MINUTES_CAP`.
+ */
+export function isValidGoalMaxActiveMinutes(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === -1 || (value >= 0 && value <= GOAL_MAX_ACTIVE_MINUTES_CAP))
+  );
+}
+
+/**
+ * Resolves the host's Goal active-time budget to the grant the runtime arms,
+ * in milliseconds. Defaults to no ceiling, exactly like
+ * `normalizeGoalMaxTurns`.
+ */
+export function normalizeGoalMaxActiveMinutes(value: unknown): number {
+  if (!isValidGoalMaxActiveMinutes(value) || value === -1 || value === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return value * 60_000;
+}
+
+/**
+ * Largest accepted `model.goalCheckpointTimeoutSeconds`, in seconds.
+ *
+ * Derived from the stream lifetime cap rather than picked as a round number,
+ * because the checkpoint call is streamed: past that cap the guard throws
+ * `StreamLifetimeExceededError` and the verifier's own timer never fires, so
+ * a larger ceiling is a timer that cannot go off. Accepting one would let the
+ * setting promise a wait the default wire does not honour -- an operator who
+ * raised it to survive a slow model would wait the lifetime cap, get no
+ * checkpoint, and see exactly the behaviour they had before touching it.
+ *
+ * The bound is the shipped default, resolved once here rather than per
+ * request, so raising `QWEN_STREAM_MAX_LIFETIME_MS` (or an embedder's
+ * `ContentGeneratorConfig.streamMaxLifetimeMs`) does not raise it: a
+ * deployment that has lifted the lifetime guard still cannot set a longer
+ * ceiling through this setting. That is deliberate -- the accepted range
+ * stays the one every deployment can honour, instead of validating against
+ * a wire bound the process cannot know at construction time. This also keeps
+ * the typo-guard role `GOAL_TOKEN_BUDGET_CAP` plays for its sibling.
+ */
+export const GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP =
+  DEFAULT_STREAM_MAX_LIFETIME_MS / 1000;
+
+/**
+ * True for the values `normalizeGoalCheckpointTimeoutSeconds` honours: a
+ * positive integer number of seconds up to the cap.
+ */
+export function isValidGoalCheckpointTimeoutSeconds(
+  value: unknown,
+): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP
+  );
+}
+
+/**
+ * The checkpoint verifier timeout to arm, in milliseconds: the setting when
+ * it is valid, else the built-in default.
+ */
+export function normalizeGoalCheckpointTimeoutSeconds(
+  value: number | undefined,
+): number {
+  return isValidGoalCheckpointTimeoutSeconds(value)
+    ? value * 1000
+    : GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS;
+}
+
 function validateMaxToolCallsPerTurn(value: number | undefined): number {
   const resolved = value ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
   if (!Number.isInteger(resolved)) {
@@ -1540,6 +1731,221 @@ function normalizeModelFallbacks(raw: string[] | undefined): string[] {
     if (result.length >= MAX_MODEL_FALLBACKS) break;
   }
   return result;
+}
+
+/**
+ * Startup warnings for `skills.enabled` entries written before extension
+ * skills carried their owner: a bare entry that matches an extension skill's
+ * authored name — but no registry identity — enables nothing, and the user
+ * editing settings.json has no other surface that names the qualified
+ * replacement.
+ */
+export interface SkillSettingsLists {
+  enabled: ReadonlySet<string>;
+  defaultDisabled: ReadonlySet<string>;
+  hardDisabled: ReadonlySet<string>;
+}
+
+export function bareEnabledGrantWarnings(
+  lists: SkillSettingsLists,
+  skills: ReadonlyArray<{ name: string; authoredName?: string }>,
+  defaultOffNames: ReadonlySet<string> = new Set(),
+): string[] {
+  if (lists.enabled.size === 0) return [];
+  const registry = new Set(
+    skills.map((skill) => skill.name.trim().toLowerCase()),
+  );
+  // One bare entry names every same-authored extension skill, and editing
+  // it acts on all of them at once, so advise per entry: a per-skill warning
+  // for a shared entry goes silent for the siblings the moment one piece of
+  // advice is applied.
+  const registryNamesByAuthored = new Map<string, string[]>();
+  for (const skill of skills) {
+    const authored = authoredSkillName(skill).trim().toLowerCase();
+    const registryName = skill.name.trim().toLowerCase();
+    if (authored === registryName) continue;
+    const group = registryNamesByAuthored.get(authored) ?? [];
+    group.push(registryName);
+    registryNamesByAuthored.set(authored, group);
+  }
+  const warnings: string[] = [];
+  for (const [authored, registryNames] of registryNamesByAuthored) {
+    // A bare entry that IS some registry identity enables that skill; the
+    // shadowing is a separate, pre-existing concern, not a stale grant.
+    if (registry.has(authored)) continue;
+    if (!lists.enabled.has(authored)) continue;
+    const plural = registryNames.length > 1;
+    const names = registryNames.map((name) => `'${name}'`).join(', ');
+    const skillWord = plural ? 'skills' : 'skill';
+    const hardNote = lists.hardDisabled.has(authored)
+      ? ` A bare '${authored}' in skills.disabled also blocks ` +
+        `${plural ? 'them' : 'it'} under either spelling, so replacing the ` +
+        `grant alone will not enable anything: remove that entry too.`
+      : '';
+    // A bare entry identical to a defaultDisabled entry is load-bearing: it
+    // cancels that entry, so the pair is a working opt-in, not a stale grant.
+    if (lists.defaultDisabled.has(authored)) {
+      // For a default-off extension skill the pair no longer enables
+      // anything: pre-rename the enable beat the defaultDisabled entry, now
+      // the bare grant is void and the declared default decides. Name only
+      // the members that really default off: a default-on sibling stays
+      // enabled under the cancelled pair, and naming it would send the user
+      // to rewrite a grant that sibling never needed.
+      const offNames = registryNames.filter((name) =>
+        defaultOffNames.has(name),
+      );
+      // A qualified grant in skills.enabled already enables its skill (the
+      // pair cancels the bare disablement) unless a hard entry blocks it
+      // under either spelling: calling such a skill default-off would
+      // contradict the panel on the same boot, so advise cleanup only.
+      const onNames = offNames.filter(
+        (name) =>
+          lists.enabled.has(name) &&
+          !lists.hardDisabled.has(name) &&
+          !lists.hardDisabled.has(authored),
+      );
+      const stillOff = offNames.filter((name) => !onNames.includes(name));
+      if (stillOff.length) {
+        const offPlural = stillOff.length > 1;
+        const offList = stillOff.map((name) => `'${name}'`).join(', ');
+        // A qualified hard entry blocks only its own member, so the bare
+        // note above cannot see it: name it per blocked member or the
+        // replacement advice promises an enable the entry silently vetoes.
+        const hardQualified = stillOff.filter((name) =>
+          lists.hardDisabled.has(name),
+        );
+        const qualifiedNote = hardQualified.length
+          ? ` ${hardQualified.map((name) => `'${name}'`).join(', ')} in ` +
+            `skills.disabled also blocks ` +
+            `${hardQualified.length > 1 ? 'them' : 'it'} under either ` +
+            `spelling, so replacing the grant alone will not enable ` +
+            `anything: remove ` +
+            `${hardQualified.length > 1 ? 'those entries' : 'that entry'} too.`
+          : '';
+        warnings.push(
+          `Warning: skills.enabled and skills.defaultDisabled both list ` +
+            `'${authored}' by bare name. The pair cancels the disablement ` +
+            `but no longer enables the extension ` +
+            `${offPlural ? 'skills' : 'skill'} ${offList}, which ` +
+            `${offPlural ? 'default' : 'defaults'} off. Replace the bare ` +
+            `'${authored}' with ${offList} in both skills.enabled and ` +
+            `skills.defaultDisabled to enable ` +
+            `${offPlural ? 'them' : 'it'}.` +
+            hardNote +
+            qualifiedNote,
+        );
+      }
+      if (onNames.length) {
+        const onPlural = onNames.length > 1;
+        const onList = onNames.map((name) => `'${name}'`).join(', ');
+        warnings.push(
+          `Warning: skills.enabled and skills.defaultDisabled both list ` +
+            `'${authored}' by bare name, but the qualified ` +
+            `${onPlural ? 'grants' : 'grant'} ` +
+            `${onList} in skills.enabled already ` +
+            `${onPlural ? 'enable' : 'enables'} ` +
+            `${onPlural ? 'them' : 'it'}, so the bare pair changes ` +
+            `nothing. Replace the bare '${authored}' with ${onList} in ` +
+            `both skills.enabled and skills.defaultDisabled to drop ` +
+            `the dead entries.`,
+        );
+      }
+      continue;
+    }
+    warnings.push(
+      `Warning: skills.enabled lists '${authored}' by bare name, which no ` +
+        `longer enables the extension ${skillWord} ${names}. Replace it ` +
+        `with ${names}.` +
+        hardNote,
+    );
+  }
+  return warnings;
+}
+
+/**
+ * Startup warnings for the mirror trap: a qualified opt-in that a bare
+ * disable entry still blocks. Disable entries match a skill under either
+ * spelling, so `skills.enabled: ['rust:pdf']` does not get past a bare `pdf`
+ * in `skills.disabled` or `skills.defaultDisabled`; a defaultDisabled entry
+ * is cancelled only by the identical spelling, a disabled entry never. Left
+ * unwarned, the pair reads as if the enable wins.
+ */
+export function bareDisablementBlocksQualifiedGrantWarnings(
+  lists: SkillSettingsLists,
+  disabledNames: ReadonlySet<string>,
+  skills: ReadonlyArray<{ name: string; authoredName?: string }>,
+): string[] {
+  if (lists.enabled.size === 0 || disabledNames.size === 0) return [];
+  const warnings: string[] = [];
+  for (const skill of skills) {
+    const authored = authoredSkillName(skill).trim().toLowerCase();
+    const registryName = skill.name.trim().toLowerCase();
+    if (authored === registryName) continue;
+    if (!lists.enabled.has(registryName)) continue;
+    if (!disabledNames.has(authored)) continue;
+    // The advice follows the block's reason: a hard entry can only be
+    // removed (rewriting it to the qualified spelling would keep blocking
+    // and silence this warning), a defaultDisabled entry is cancelled by
+    // the identical spelling.
+    if (lists.hardDisabled.has(authored)) {
+      // Removing the bare entry re-enables every skill it blocks. Only a
+      // skill whose registry name differs from the bare entry can be
+      // re-blocked on its own afterwards; a skill whose registry identity
+      // IS the bare entry shares every matching entry with the opt-in, so
+      // advising the user to add it back would re-block the opt-in too and
+      // reprint this same warning, a fixed point.
+      const unlocked = [
+        ...new Set(
+          skills
+            .filter((other) => {
+              const name = other.name.trim().toLowerCase();
+              return (
+                name !== registryName &&
+                (name === authored ||
+                  authoredSkillName(other).trim().toLowerCase() === authored)
+              );
+            })
+            .map((other) => other.name.trim().toLowerCase()),
+        ),
+      ];
+      const names = (list: string[]) =>
+        list.map((name) => `'${name}'`).join(', ');
+      const reBlockable = unlocked.filter((name) => name !== authored);
+      const notAlone = unlocked.filter((name) => name === authored);
+      let sideEffect = '';
+      if (unlocked.length) {
+        sideEffect = ` The removal also re-enables ${names(unlocked)}.`;
+        if (reBlockable.length) {
+          sideEffect +=
+            ` Add ${names(reBlockable)} to skills.disabled to ` +
+            `keep ${reBlockable.length > 1 ? 'them' : 'it'} blocked.`;
+        }
+        if (notAlone.length) {
+          sideEffect +=
+            ` ${names(notAlone)} cannot be blocked on ` +
+            `${notAlone.length > 1 ? 'their' : 'its'} own while ` +
+            `'${registryName}' stays enabled, because any entry matching ` +
+            `${names(notAlone)} also matches '${registryName}'.`;
+        }
+      }
+      warnings.push(
+        `Warning: skills.enabled opts in '${registryName}' but ` +
+          `'${authored}' in skills.disabled still blocks it — hard entries ` +
+          `are never cancelled by skills.enabled. Remove '${authored}' ` +
+          `from skills.disabled to enable the skill.` +
+          sideEffect,
+      );
+      continue;
+    }
+    warnings.push(
+      `Warning: skills.enabled opts in '${registryName}' but a bare ` +
+        `'${authored}' entry still blocks it — disable entries match ` +
+        `under either spelling; a skills.defaultDisabled entry is ` +
+        `cancelled only by the identical spelling. Write ` +
+        `'${registryName}' in both lists, or remove '${authored}'.`,
+    );
+  }
+  return warnings;
 }
 
 function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
@@ -2175,6 +2581,9 @@ export class Config {
   private readonly enabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly skillSettingsListsProvider:
+    | (() => SkillSettingsLists)
+    | null;
   private readonly terminalImageRenderSupportProvider:
     | (() => Promise<TerminalImageRenderSupport>)
     | null;
@@ -2192,6 +2601,7 @@ export class Config {
   private readonly visibleTools: ReadonlySet<string>;
   private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
+  private readonly toolMode: ToolModeValue;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -2264,6 +2674,7 @@ export class Config {
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
+  private planExecutionMode?: ApprovalMode;
   private approvalModeRevision = 0;
   private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
     version: 0,
@@ -2301,6 +2712,7 @@ export class Config {
   private goalRuntimeReady: Promise<GoalRuntime> | undefined;
   /** A `propose_goal` approval waiting for its turn to end; see PendingGoalProposal. */
   private pendingGoalProposal: PendingGoalProposal | undefined;
+  private goalProposalApprovalController: AbortController | undefined;
   /**
    * A Goal restore held back because the session writer is not accepting
    * writes yet. Settled by {@link startPendingGoalRestore} once the
@@ -2336,6 +2748,9 @@ export class Config {
 
   private readonly maxSessionTurns: number;
   private readonly goalTokenBudgetGrant: number;
+  private readonly goalTurnBudgetGrant: number;
+  private readonly goalActiveTimeBudgetGrantMs: number;
+  private readonly goalCheckpointTimeoutMs: number;
   private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
@@ -2348,6 +2763,15 @@ export class Config {
   private runtimeStatusEnabled = false;
   private sessionRegistryActive = false;
   private sessionRegistered = false;
+  /**
+   * Which of this process's registry records belongs to this session.
+   *
+   * A process hosting one session owns the shared `<pid>.json`; one
+   * hosting several owns a minted record per session, and every patch and
+   * the final removal have to name the right one or they would rewrite a
+   * sibling's record. Learned from the registration itself.
+   */
+  private sessionRegistrySlot: SessionRecordSlot = SHARED_RECORD_SLOT;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly restoreAskUserQuestion: boolean = false;
   /**
@@ -2362,17 +2786,27 @@ export class Config {
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
   private readonly cronRecurringMaxAgeDays: number;
   private readonly lsToolEnabled: boolean = false;
+  private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
+  private artifactSnapshotsEnabled = false;
   private readonly artifactAutoOpen: boolean = true;
   private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
   private readonly artifactHost?: ArtifactHostConfig;
   private readonly artifactOss?: ArtifactOssConfig;
-  private workflowsEnabled = false;
+  private workflowsEnabled: boolean | undefined;
   private readonly sessionWorkflowEnabled: boolean;
   private sessionWorkflowEnabledProvider?: () => boolean;
   private sessionWorkflowPlanRevision?: SessionWorkflowPlanRevision;
+  /**
+   * Host-supplied factory for subagents that declare an `executor` block.
+   * `packages/core` has no ACP dependency, so the implementation lives in the
+   * host package. See `ExternalAgentExecutor` and `setExternalAgentExecutor`.
+   */
+  private externalAgentExecutor?: ExternalAgentExecutor;
   private readonly modelProposedGoals: ModelProposedGoalsMode;
+  private goalProposalHostSupported = false;
+  private goalProposalTurnKey: string | undefined;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -2535,6 +2969,7 @@ export class Config {
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
     this.enabledSkillNamesProvider = params.enabledSkillNamesProvider ?? null;
+    this.skillSettingsListsProvider = params.skillSettingsListsProvider ?? null;
     this.terminalImageRenderSupportProvider =
       params.terminalImageRenderSupportProvider ?? null;
     this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
@@ -2614,6 +3049,8 @@ export class Config {
     this.outboundCorrelationSettings = {
       propagateTraceContext:
         params.outboundCorrelation?.propagateTraceContext ?? false,
+      allowDynamicHeaderValues:
+        params.outboundCorrelation?.allowDynamicHeaderValues === true,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
@@ -2653,6 +3090,37 @@ export class Config {
         `Ignoring invalid goalTokenBudget ${String(params.goalTokenBudget)}: expected a non-negative integer or -1 (no budget); using the default of ${GOAL_DEFAULT_TOKEN_BUDGET}.`,
       );
     }
+    this.goalTurnBudgetGrant = normalizeGoalMaxTurns(params.goalMaxTurns);
+    if (
+      params.goalMaxTurns !== undefined &&
+      !isValidGoalMaxTurns(params.goalMaxTurns)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalMaxTurns ${String(params.goalMaxTurns)}: expected an integer between 1 and ${GOAL_MAX_TURNS_CAP}, or -1 for no turn ceiling; Goals will run with no turn ceiling.`,
+      );
+    }
+    this.goalActiveTimeBudgetGrantMs = normalizeGoalMaxActiveMinutes(
+      params.goalMaxActiveMinutes,
+    );
+    if (
+      params.goalMaxActiveMinutes !== undefined &&
+      !isValidGoalMaxActiveMinutes(params.goalMaxActiveMinutes)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalMaxActiveMinutes ${String(params.goalMaxActiveMinutes)}: expected an integer between 1 and ${GOAL_MAX_ACTIVE_MINUTES_CAP}, or -1 for no time ceiling; Goals will run with no time ceiling.`,
+      );
+    }
+    this.goalCheckpointTimeoutMs = normalizeGoalCheckpointTimeoutSeconds(
+      params.goalCheckpointTimeoutSeconds,
+    );
+    if (
+      params.goalCheckpointTimeoutSeconds !== undefined &&
+      !isValidGoalCheckpointTimeoutSeconds(params.goalCheckpointTimeoutSeconds)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalCheckpointTimeoutSeconds ${String(params.goalCheckpointTimeoutSeconds)}: expected an integer between 1 and ${GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP}; using the default of ${GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS / 1000}.`,
+      );
+    }
     this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
@@ -2681,13 +3149,14 @@ export class Config {
       params.cronRecurringMaxAgeDays,
     );
     this.lsToolEnabled = params.lsToolEnabled ?? false;
+    this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
     this.artifactPublisher = params.artifactPublisher ?? 'local';
     this.artifactHost = params.artifactHost;
     this.artifactOss = params.artifactOss;
-    this.workflowsEnabled = params.workflowsEnabled ?? false;
+    this.workflowsEnabled = params.workflowsEnabled;
     this.sessionWorkflowEnabled = params.sessionWorkflowEnabled ?? false;
     this.modelProposedGoals = params.modelProposedGoals ?? 'alwaysAsk';
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
@@ -2721,6 +3190,10 @@ export class Config {
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
+    this.toolMode =
+      params.codeModeOnly && !this.bareMode && !this.safeMode
+        ? ToolMode.CodeModeOnly
+        : ToolMode.Direct;
     if (this.safeMode) {
       this.debugLogger.info(
         'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
@@ -2991,7 +3464,10 @@ export class Config {
   }
 
   /**
-   * Must only be called once, throws if called again.
+   * Must only be called once, throws if called again after the first call
+   * settled. Callers arriving while the first call is still in flight join
+   * that flight instead of throwing; a joining caller's options are ignored
+   * — the first caller's options win.
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
@@ -2999,6 +3475,20 @@ export class Config {
       throw new Error('Derived Configs cannot be initialized');
     }
     if (this.initialized) {
+      // Joining the in-flight run matters: callers that swallow the old
+      // throw (the OpenTUI submit path, slash-command loading) proceeded on
+      // a config whose chat had not started yet, and the first prompt died
+      // with "Chat not initialized" (#11002).
+      if (!this.initializationSettled) {
+        // A joining caller's options cannot be honored, so an already-aborted
+        // signal must fail fast instead of blocking on the foreign flight.
+        options?.signal?.throwIfAborted();
+        this.debugLogger.debug(
+          'Config.initialize() called while initialization is in flight; joining the existing run',
+        );
+        await this.initializationPromise;
+        return;
+      }
       throw Error('Config was already initialized');
     }
     if (this.shutdownRequested) {
@@ -3171,8 +3661,6 @@ export class Config {
             // Execute the appropriate hook based on eventName
             let result;
             let stopHookCount: number | undefined;
-            let hasNonGoalBlockingStopHook: boolean | undefined;
-            let nonGoalBlockingStopReason: string | undefined;
             const input = request.input || {};
             const signal = request.signal;
             switch (request.eventName) {
@@ -3211,32 +3699,6 @@ export class Config {
                   ? createHookOutput('Stop', stopResult.finalOutput)
                   : undefined;
                 stopHookCount = stopResult.allOutputs.length;
-                const goalHookId =
-                  stopResult.finalOutput?.hookSpecificOutput?.[
-                    GOAL_HOOK_ID_OUTPUT_KEY
-                  ];
-                if (typeof goalHookId === 'string') {
-                  const nonGoalBlockingOutputs = stopResult.allOutputs.filter(
-                    (output) =>
-                      output.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] !==
-                        goalHookId &&
-                      (output.decision === 'block' ||
-                        output.decision === 'deny' ||
-                        output.continue === false),
-                  );
-                  hasNonGoalBlockingStopHook =
-                    nonGoalBlockingOutputs.length > 0;
-                  if (hasNonGoalBlockingStopHook) {
-                    nonGoalBlockingStopReason = nonGoalBlockingOutputs
-                      .map(
-                        (output) =>
-                          output.stopReason ||
-                          output.reason ||
-                          'No reason provided',
-                      )
-                      .join('\n');
-                  }
-                }
                 break;
               }
               case 'MessageDisplay': {
@@ -3276,6 +3738,9 @@ export class Config {
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
                   (input['tool_call_id'] as string) || undefined,
+                  typeof input['duration_ms'] === 'number'
+                    ? input['duration_ms']
+                    : undefined,
                 );
                 break;
               case 'PostToolUseFailure':
@@ -3288,6 +3753,9 @@ export class Config {
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
                   (input['tool_call_id'] as string) || undefined,
+                  typeof input['duration_ms'] === 'number'
+                    ? input['duration_ms']
+                    : undefined,
                 );
                 break;
               case 'PostToolBatch':
@@ -3350,6 +3818,100 @@ export class Config {
                   signal,
                 );
                 break;
+              case 'SessionStart':
+                result = await hookSystem.fireSessionStartEvent(
+                  input['source'] as SessionStartSource,
+                  (input['model'] as string) || '',
+                  (input['permission_mode'] as PermissionMode) || undefined,
+                  input['agent_type'] as AgentType | undefined,
+                  signal,
+                );
+                break;
+              case 'SessionEnd':
+                result = await hookSystem.fireSessionEndEvent(
+                  input['reason'] as SessionEndReason,
+                  signal,
+                );
+                break;
+              case 'SessionDelete':
+                result = await hookSystem.fireSessionDeleteEvent(
+                  (input['deleted_session_id'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'PreCompact':
+                result = await hookSystem.firePreCompactEvent(
+                  input['trigger'] as PreCompactTrigger,
+                  (input['custom_instructions'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'PostCompact':
+                result = await hookSystem.firePostCompactEvent(
+                  input['trigger'] as PostCompactTrigger,
+                  (input['compact_summary'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'InstructionsLoaded':
+                result = await hookSystem.fireInstructionsLoadedEvent(
+                  (input['file_path'] as string) || '',
+                  input['memory_type'] as InstructionMemoryType,
+                  input['load_reason'] as InstructionLoadReason,
+                  {
+                    triggerFilePath: input['trigger_file_path'] as
+                      | string
+                      | undefined,
+                    parentFilePath: input['parent_file_path'] as
+                      | string
+                      | undefined,
+                  },
+                  signal,
+                );
+                break;
+              // These three return the aggregated result, and the bus replies
+              // with its final output as is. For TodoCreated and TodoCompleted
+              // that is what direct callers read (todoWrite checks
+              // `finalOutput.decision`). StopFailure is fire-and-forget: the
+              // aggregator hard-codes its `finalOutput` to undefined and every
+              // direct caller detaches without reading the result, so its arm
+              // always replies with no output and awaits only so the hooks run.
+              // Stop and MessageDisplay instead wrap theirs with
+              // createHookOutput.
+              case 'StopFailure':
+                result = (
+                  await hookSystem.fireStopFailureEvent(
+                    input['error'] as StopFailureErrorType,
+                    input['error_details'] as string | undefined,
+                    input['last_assistant_message'] as string | undefined,
+                    signal,
+                  )
+                ).finalOutput;
+                break;
+              case 'TodoCreated':
+                result = (
+                  await hookSystem.fireTodoCreatedEvent(
+                    (input['todo_id'] as string) || '',
+                    (input['todo_content'] as string) || '',
+                    input['todo_status'] as TodoStatus,
+                    (input['all_todos'] as TodoItem[]) || [],
+                    input['phase'] as HookPhase,
+                    signal,
+                  )
+                ).finalOutput;
+                break;
+              case 'TodoCompleted':
+                result = (
+                  await hookSystem.fireTodoCompletedEvent(
+                    (input['todo_id'] as string) || '',
+                    (input['todo_content'] as string) || '',
+                    input['previous_status'] as 'pending' | 'in_progress',
+                    (input['all_todos'] as TodoItem[]) || [],
+                    input['phase'] as HookPhase,
+                    signal,
+                  )
+                ).finalOutput;
+                break;
               default:
                 this.debugLogger.warn(
                   `Unknown hook event: ${request.eventName}`,
@@ -3365,8 +3927,6 @@ export class Config {
               output: result,
               // Include stop hook count for Stop events
               stopHookCount,
-              hasNonGoalBlockingStopHook,
-              nonGoalBlockingStopReason,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);
@@ -3417,6 +3977,44 @@ export class Config {
         await this.skillManager.startWatching();
       }
       this.debugLogger.debug('Skill manager initialized');
+      if (this.skillSettingsListsProvider) {
+        try {
+          const lists = this.skillSettingsListsProvider();
+          const skills = await this.skillManager.listSkills();
+          const extensionIdByName = new Map(
+            this.getExtensions().map((extension) => [
+              extension.name,
+              extension.id,
+            ]),
+          );
+          const defaultOffNames = new Set<string>();
+          for (const skill of skills) {
+            const extensionId = skill.extensionName
+              ? extensionIdByName.get(skill.extensionName)
+              : undefined;
+            if (skill.level !== 'extension' || !extensionId) continue;
+            const state = this.extensionManager.getExtensionSkillState(
+              extensionId,
+              authoredSkillName(skill),
+            );
+            if (state.defaultEnabled === false && !state.workspaceEnabled) {
+              defaultOffNames.add(skill.name.trim().toLowerCase());
+            }
+          }
+          this.warnings.push(
+            ...bareEnabledGrantWarnings(lists, skills, defaultOffNames),
+            ...bareDisablementBlocksQualifiedGrantWarnings(
+              lists,
+              this.getDisabledSkillNames(),
+              skills,
+            ),
+          );
+        } catch (error) {
+          this.debugLogger.warn(
+            `Skill settings migration warning skipped: ${getErrorMessage(error)}`,
+          );
+        }
+      }
     } else {
       this.skillManager = null;
       this.debugLogger.debug('Skill manager skipped');
@@ -4250,6 +4848,12 @@ export class Config {
       },
     );
     const newContentGeneratorConfig = config;
+    if (
+      priorReasoning === false &&
+      newContentGeneratorConfig.thinkingMandatory !== true
+    ) {
+      newContentGeneratorConfig.reasoning = false;
+    }
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
       this,
@@ -4262,7 +4866,13 @@ export class Config {
     // fires — and the resolved model can differ from the pre-auth one.
     this.publishModelEnv();
 
-    // Re-apply the user's reasoning effort that the provider sync above wiped.
+    // Re-apply the user's reasoning preference that the provider sync wiped.
+    if (
+      priorReasoning === false &&
+      newContentGeneratorConfig.reasoning === false
+    ) {
+      this.modelsConfig.getGenerationConfig().reasoning = false;
+    }
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
@@ -4493,6 +5103,7 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
+    this.sessionSourceService = this.sessionSourceServiceFactory?.();
     this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
@@ -4607,10 +5218,11 @@ export class Config {
     failureWarning: string,
   ): void {
     this.queueSessionRegistryWrite(async () => {
-      let applied = await patchSessionRecord(patch);
+      const slot = this.sessionRegistrySlot;
+      let applied = await patchSessionRecord(patch, slot);
       for (let attempt = 0; attempt < 2 && !applied; attempt += 1) {
         await delay(250);
-        applied = await patchSessionRecord(patch);
+        applied = await patchSessionRecord(patch, slot);
       }
       if (!applied) {
         this.debugLogger.warn(failureWarning);
@@ -4635,20 +5247,36 @@ export class Config {
    * Serializes initial registration with mid-session patches and cleanup.
    * The registration promise is deliberately not awaited by UI startup.
    */
-  trackSessionRegistration(registration: Promise<boolean>): void {
+  trackSessionRegistration(registration: Promise<SessionRegistration>): void {
     this.sessionRegistryActive = true;
     this.sessionRegistryWrite = this.sessionRegistryWrite
       .catch(() => {
         // Keep registration independent from an earlier best-effort write.
       })
       .then(async () => {
-        this.sessionRegistered = await registration;
+        // The slot is taken whether or not the write landed: it names the
+        // record this session would own, and every later patch is queued
+        // behind this step, so none of them can run against the wrong one.
+        const outcome = await registration;
+        this.sessionRegistrySlot = outcome.slot;
+        this.sessionRegistered = outcome.registered;
         if (!this.sessionRegistered) this.sessionRegistryActive = false;
       })
       .catch(() => {
         this.sessionRegistered = false;
         this.sessionRegistryActive = false;
       });
+  }
+
+  /**
+   * Which registry record describes this session.
+   *
+   * Read by the send path: a process hosting several sessions has a record
+   * each, and the reply address, name and id a message carries have to
+   * come from the sending session's own.
+   */
+  getSessionRegistrySlot(): SessionRecordSlot {
+    return this.sessionRegistrySlot;
   }
 
   /**
@@ -4676,7 +5304,8 @@ export class Config {
     if (!this.sessionRegistryActive) return;
     let applied = false;
     this.queueSessionRegistryWrite(async () => {
-      applied = await patchSessionRecord({ ipcPath, ipcToken });
+      const slot = this.sessionRegistrySlot;
+      applied = await patchSessionRecord({ ipcPath, ipcToken }, slot);
       if (ipcPath === undefined || applied) return;
       // The advertise is one-shot: no later patch re-asserts ipcPath, and
       // every skip is transient (the fd-pressure window on this process's
@@ -4685,7 +5314,7 @@ export class Config {
       // session would keep a live inbox no peer can ever discover.
       for (let attempt = 0; attempt < 2 && !applied; attempt += 1) {
         await delay(250);
-        applied = await patchSessionRecord({ ipcPath, ipcToken });
+        applied = await patchSessionRecord({ ipcPath, ipcToken }, slot);
       }
       if (!applied) {
         this.debugLogger.warn(
@@ -4706,7 +5335,7 @@ export class Config {
       .then(async () => {
         if (!this.sessionRegistered) return;
         this.sessionRegistered = false;
-        await unregisterSession();
+        await unregisterSession(this.sessionRegistrySlot);
       })
       .catch(() => {
         // ignored: registry cleanup must not disrupt process teardown.
@@ -4785,10 +5414,13 @@ export class Config {
         // folder this session left. Unlike the /clear path, `name`
         // follows: it is derived from the directory's basename, which is
         // exactly what changed here.
-        await patchSessionRecord({
-          cwd: workDir,
-          name: deriveSessionName(workDir, sessionId),
-        });
+        await patchSessionRecord(
+          {
+            cwd: workDir,
+            name: deriveSessionName(workDir, sessionId),
+          },
+          this.sessionRegistrySlot,
+        );
       });
     }
     await this.flushRuntimeStatusWrites();
@@ -4836,6 +5468,20 @@ export class Config {
 
   getCurrentModelRegistryBaseUrl(): string | null | undefined {
     return this.modelsConfig.getCurrentRegistryBaseUrl();
+  }
+
+  /**
+   * The auth type of the currently selected model, read from `ModelsConfig`
+   * rather than the content generator config.
+   *
+   * Unlike {@link getAuthType}, this is usable before `refreshAuth` has run —
+   * the tool registry is built during `initialize()`, which happens first (the
+   * ACP bridge calls `initialize()` and only later `refreshAuth`). Callers that
+   * need the selected model's provider entry at registry-build time must use
+   * this.
+   */
+  getCurrentAuthType(): AuthType | undefined {
+    return this.modelsConfig.getCurrentAuthType();
   }
 
   /**
@@ -5138,13 +5784,16 @@ export class Config {
    */
   getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
     const cfg = this.getContentGeneratorConfig();
-    if (
-      !cfg ||
-      !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg) ||
-      !isTieredEffortWireModel(cfg.model)
-    ) {
+    if (!cfg || !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg)) {
       return undefined;
     }
+
+    const configuredReasoning = cfg.authType
+      ? this.getResolvedModelConfig(cfg.authType, cfg.model, cfg.baseUrl)
+          ?.capabilities.reasoning
+      : undefined;
+    const tieredModel = isTieredEffortWireModel(cfg.model, configuredReasoning);
+    if (!tieredModel) return undefined;
 
     const currentEffort = this.getReasoningEffort();
     const selected = selectDashScopeThinkingKnob(
@@ -5152,6 +5801,7 @@ export class Config {
       cfg.extra_body,
       cfg.samplingParams,
       currentEffort,
+      tieredModel,
     );
     if (
       !selected ||
@@ -5173,6 +5823,7 @@ export class Config {
         undefined,
         cfg.samplingParams,
         currentEffort,
+        tieredModel,
       );
       if (
         below?.source === 'samplingParams' &&
@@ -5581,6 +6232,33 @@ export class Config {
    */
   getGoalTokenBudgetGrant(): number {
     return this.goalTokenBudgetGrant;
+  }
+
+  /**
+   * The Goal-turn window armed on each new Goal, as the runtime's
+   * `turnBudgetGrant`: a positive integer, or `Infinity` when no ceiling is
+   * configured (the default).
+   */
+  getGoalTurnBudgetGrant(): number {
+    return this.goalTurnBudgetGrant;
+  }
+
+  /**
+   * The active-time window armed on each new Goal, in milliseconds, as the
+   * runtime's `activeTimeBudgetGrantMs`: a positive number, or `Infinity`
+   * when no ceiling is configured (the default).
+   */
+  getGoalActiveTimeBudgetGrantMs(): number {
+    return this.goalActiveTimeBudgetGrantMs;
+  }
+
+  /**
+   * Ceiling on one Goal evidence-checkpoint verifier call, in milliseconds:
+   * `goalCheckpointTimeoutSeconds` when it was valid, else the built-in
+   * default.
+   */
+  getGoalCheckpointTimeoutMs(): number {
+    return this.goalCheckpointTimeoutMs;
   }
 
   getMaxSubagentDepth(): number {
@@ -6187,13 +6865,25 @@ export class Config {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
   }
 
+  /** True when a startup migration-warning provider was attached. */
+  hasSkillSettingsListsProvider(): boolean {
+    return this.skillSettingsListsProvider !== null;
+  }
+
   isSkillEnabled(skill: {
     name: string;
+    authoredName?: string;
     level?: string;
     filePath?: string;
     extensionName?: string;
   }): boolean {
-    const name = skill.name.trim().toLowerCase();
+    // Two spellings of one skill: `name` is the registry identity, which for
+    // an extension skill carries its owner (`rust:pdf`). The manifest and the
+    // workspace extension-skill store both key on the authored spelling, so
+    // that is what the ownership lookup and the stored state are asked for.
+    // `authoredName` is absent whenever the two spellings are the same.
+    const registryName = skill.name.trim().toLowerCase();
+    const authoredName = authoredSkillName(skill).trim().toLowerCase();
     const extension =
       skill.level === 'extension'
         ? this.getExtensions().find(
@@ -6201,17 +6891,28 @@ export class Config {
               candidate.name === skill.extensionName &&
               candidate.skills?.some(
                 (owned) =>
-                  owned.name.trim().toLowerCase() === name &&
+                  owned.name.trim().toLowerCase() === authoredName &&
                   owned.filePath === skill.filePath,
               ),
           )
         : undefined;
     if (skill.level === 'extension' && !extension?.isActive) return false;
-    if (this.getDisabledSkillNames().has(name)) return false;
-    if (!extension || this.enabledSkillNamesProvider?.().has(name)) return true;
+    // A restriction blocks under either spelling, so renaming a skill cannot
+    // un-block it. `skills.enabled` is a grant and matches the registry
+    // identity only: a bare `enabled: ['pdf']` opens nothing once `pdf` is
+    // registered as `rust:pdf`.
+    const disabledNames = this.getDisabledSkillNames();
+    if (
+      skillRestrictionNames(skill).some((entry) => disabledNames.has(entry))
+    ) {
+      return false;
+    }
+    if (!extension || this.enabledSkillNamesProvider?.().has(registryName)) {
+      return true;
+    }
     const state = this.extensionManager.getExtensionSkillState(
       extension.id,
-      skill.name,
+      authoredSkillName(skill),
     );
     return state.workspaceEnabled ?? state.defaultEnabled;
   }
@@ -6278,6 +6979,14 @@ export class Config {
    */
   getToolSearchThreshold(): number {
     return this.toolSearchThreshold;
+  }
+
+  getCodeModeOnly(): boolean {
+    return this.toolMode === ToolMode.CodeModeOnly;
+  }
+
+  getToolMode(): ToolModeValue {
+    return this.toolMode;
   }
 
   /**
@@ -7023,6 +7732,13 @@ export class Config {
     return this.approvalMode;
   }
 
+  getSessionApprovalMode(): ApprovalMode {
+    if (isDerivedConfig(this)) {
+      return (Object.getPrototypeOf(this) as Config).getSessionApprovalMode();
+    }
+    return this.getApprovalMode();
+  }
+
   /**
    * Returns the AUTO approval mode classifier settings (hints + environment).
    * Returns an empty object when no settings are configured.
@@ -7055,6 +7771,28 @@ export class Config {
    */
   getPrePlanMode(): ApprovalMode {
     return this.prePlanMode ?? ApprovalMode.DEFAULT;
+  }
+
+  getPlanExecutionMode(): ApprovalMode | undefined {
+    return Object.hasOwn(this, 'planExecutionMode')
+      ? this.planExecutionMode
+      : undefined;
+  }
+
+  setPlanMode(enabled: boolean, executionMode: ApprovalMode): void {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot change plan workflow mode');
+    }
+    if (executionMode === ApprovalMode.PLAN) {
+      throw new Error('Plan is not an execution approval mode');
+    }
+    if (!this.isTrustedFolder() && executionMode !== ApprovalMode.DEFAULT) {
+      throw new TrustGateError(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      );
+    }
+    this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
+    this.planExecutionMode = enabled ? executionMode : undefined;
   }
 
   getApprovalModeRevision(): number {
@@ -7146,6 +7884,9 @@ export class Config {
       this.manualPlanExitNoticeEventState = noticeEvent;
     }
     if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
+      if (!isDerivedConfig(this)) {
+        this.goalProposalApprovalController?.abort();
+      }
       this.prePlanMode = fromMode;
       noticeEvent.version++;
       noticeEvent.kind = 'clear';
@@ -7167,6 +7908,7 @@ export class Config {
       this.autoModeDenialState = resetDenialState();
     }
     this.approvalMode = mode;
+    if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
     }
@@ -7489,6 +8231,15 @@ export class Config {
     return this.outboundCorrelationSettings.propagateTraceContext ?? false;
   }
 
+  /**
+   * Whether `customHeaders` values may carry runtime placeholders. See
+   * {@link OutboundCorrelationSettings.allowDynamicHeaderValues}; consumed by
+   * `core/outbound-dynamic-headers.ts`.
+   */
+  getOutboundAllowDynamicHeaderValues(): boolean {
+    return this.outboundCorrelationSettings.allowDynamicHeaderValues ?? false;
+  }
+
   getTelemetryOutfile(): string | undefined {
     return this.telemetrySettings.outfile;
   }
@@ -7692,6 +8443,10 @@ export class Config {
     );
   }
 
+  isTodoWriteEnabled(): boolean {
+    return this.todoWriteEnabled;
+  }
+
   isAgentTeamEnabled(): boolean {
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
@@ -7700,14 +8455,30 @@ export class Config {
 
   isArtifactEnabled(): boolean {
     // Publishing writes outside the project and opens a browser, so it is
-    // limited to interactive, non-SDK sessions. QWEN_CODE_DISABLE_ARTIFACT
+    // limited to interactive or managed preview sessions, excluding SDK use.
+    // Managed previews render in Web Shell instead of opening a host browser.
+    // QWEN_CODE_DISABLE_ARTIFACT
     // hard-disables both artifact tools; QWEN_CODE_ENABLE_ARTIFACT remains as
     // a compatibility override for old configs that explicitly disabled them.
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
-    if (!this.interactive) return false;
+    if (!this.interactive && !this.isArtifactSnapshotsEnabled()) return false;
     if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
     return this.artifactEnabled;
+  }
+
+  private sessionSourceService?: SessionSourceService;
+  private sessionSourceServiceFactory?: () => SessionSourceService;
+
+  setSessionSourceServiceFactory(factory: () => SessionSourceService): void {
+    this.sessionSourceServiceFactory = factory;
+    this.sessionSourceService = factory();
+  }
+
+  getSessionSourceService(): SessionSourceService | undefined {
+    return Object.hasOwn(this, 'sessionSourceService')
+      ? this.sessionSourceService
+      : undefined;
   }
 
   isRecordArtifactEnabled(): boolean {
@@ -7719,6 +8490,14 @@ export class Config {
 
   getArtifactPublisherKind(): 'local' | 'host' | 'oss' {
     return this.artifactPublisher;
+  }
+
+  isArtifactSnapshotsEnabled(): boolean {
+    return this.artifactSnapshotsEnabled && this.chatRecordingEnabled;
+  }
+
+  setArtifactSnapshotsEnabled(enabled: boolean): void {
+    this.artifactSnapshotsEnabled = enabled;
   }
 
   getArtifactHostConfig(): ArtifactHostConfig | undefined {
@@ -7781,21 +8560,38 @@ export class Config {
   }
 
   shouldAutoOpenArtifact(): boolean {
+    if (this.isArtifactSnapshotsEnabled()) return false;
     if (process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] === '1') return false;
     return this.artifactAutoOpen && !this.isBrowserLaunchSuppressed();
   }
 
   isWorkflowsEnabled(): boolean {
     if (this.provisionalWorkspace) return false;
-    // Workflows are experimental and opt-in: enabled via settings or env var
+    // Workflows are opt-in via settings, env, or the bundled review skill.
     // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
     if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
     if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
-    return this.workflowsEnabled;
+    return this.workflowsEnabled ?? false;
   }
 
-  setWorkflowsEnabled(enabled: boolean): void {
+  setWorkflowsEnabled(enabled: boolean | undefined): void {
     this.workflowsEnabled = enabled;
+  }
+
+  async enableReviewWorkflow(): Promise<void> {
+    if (
+      this.workflowsEnabled === false ||
+      !isTopLevelSession() ||
+      this.getBareMode() ||
+      this.provisionalWorkspace ||
+      process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1'
+    ) {
+      return;
+    }
+    if (await this.registerWorkflowTool(this.getToolRegistry())) {
+      this.setWorkflowsEnabled(true);
+      await this.getLlmClient().setTools();
+    }
   }
 
   /**
@@ -7822,6 +8618,23 @@ export class Config {
     if (!this.isSessionWorkflowEnabled()) {
       this.sessionWorkflowPlanRevision = undefined;
     }
+  }
+
+  /**
+   * Registers the host's factory for subagents that declare an `executor`
+   * block. `packages/core` has no ACP dependency, so the implementation lives
+   * in the host package; see `ExternalAgentExecutor`.
+   *
+   * A definition that declares an executor while none is registered fails
+   * loudly at spawn time rather than silently running in-process — silent
+   * substitution is the exact failure mode this seam exists to prevent.
+   */
+  setExternalAgentExecutor(executor?: ExternalAgentExecutor): void {
+    this.externalAgentExecutor = executor;
+  }
+
+  getExternalAgentExecutor(): ExternalAgentExecutor | undefined {
+    return this.externalAgentExecutor;
   }
 
   getSessionWorkflowPlanRevision(): SessionWorkflowPlanRevision | undefined {
@@ -7893,6 +8706,27 @@ export class Config {
     return this.modelProposedGoals;
   }
 
+  setGoalProposalHostSupported(supported: boolean): void {
+    this.goalProposalHostSupported = supported;
+  }
+
+  getGoalProposalHostSupported(): boolean {
+    return this.goalProposalHostSupported;
+  }
+
+  setGoalProposalTurnKey(turnKey: string | undefined): boolean {
+    if (this.goalProposalTurnKey === turnKey) return false;
+    this.goalProposalTurnKey = turnKey;
+    return true;
+  }
+
+  isGoalProposalAvailable(): boolean {
+    return (
+      resolveInteractionMode(this) === 'interactive' ||
+      (this.goalProposalHostSupported && this.goalProposalTurnKey !== undefined)
+    );
+  }
+
   hasPendingGoalProposal(): boolean {
     return this.pendingGoalProposal !== undefined;
   }
@@ -7900,7 +8734,14 @@ export class Config {
   /** Parks a `propose_goal` approval until the proposing turn ends. */
   setPendingGoalProposal(proposal: PendingGoalProposal): boolean {
     if (this.pendingGoalProposal) return false;
-    this.pendingGoalProposal = proposal;
+    this.goalProposalApprovalController = new AbortController();
+    if (this.approvalMode === ApprovalMode.PLAN) {
+      this.goalProposalApprovalController.abort();
+    }
+    this.pendingGoalProposal = {
+      ...proposal,
+      approvalSignal: this.goalProposalApprovalController.signal,
+    };
     return true;
   }
 
@@ -8653,15 +9494,15 @@ export class Config {
     return this.goalRuntime;
   }
 
-  getGoalRuntimeReady(): Promise<GoalRuntime> {
+  async getGoalRuntimeReady(): Promise<GoalRuntime> {
     const runtime = this.getGoalRuntime();
     if (!Object.hasOwn(this, 'goalRuntimeReady') || !this.goalRuntimeReady) {
-      return Promise.reject(new GoalPersistenceUnavailableError());
+      throw new GoalPersistenceUnavailableError();
     }
     return this.goalRuntimeReady.then(() => runtime);
   }
 
-  getGoalRuntimePrepared(): Promise<GoalRuntime> {
+  async getGoalRuntimePrepared(): Promise<GoalRuntime> {
     const runtime = this.getGoalRuntime();
     if (!this.sessionRestoreRuntime) return this.getGoalRuntimeReady();
     return runtime.getPreparedRestore().then(() => runtime);
@@ -8741,6 +9582,8 @@ export class Config {
       ),
     );
     // An approval belongs to the session that produced it.
+    this.goalProposalApprovalController?.abort();
+    this.goalProposalApprovalController = undefined;
     this.pendingGoalProposal = undefined;
     if (!this.chatRecordingService) {
       this.goalRuntime = undefined;
@@ -8751,13 +9594,18 @@ export class Config {
     const runtime = createGoalRuntime({
       journal: recorder,
       evidenceSource: recorder,
-      // The recorder already sees every assistant turn's usage stamped with
-      // the Goal permit that produced it, so the spend is Goal-scoped at the
-      // point it is recorded rather than reconstructed from session totals.
-      tokenLedger: recorder,
+      // The recorder already sees every assistant turn's usage and every
+      // tool result stamped with the Goal permit that produced it, so both
+      // the spend and the turn's output are Goal-scoped at the point they
+      // are recorded rather than reconstructed from session totals.
+      ledger: recorder,
       verifier: createGoalVerifier(this),
-      checkpointVerifier: createGoalCheckpointVerifier(this),
+      checkpointVerifier: createGoalCheckpointVerifier(this, {
+        timeoutMs: this.goalCheckpointTimeoutMs,
+      }),
       tokenBudgetGrant: this.goalTokenBudgetGrant,
+      turnBudgetGrant: this.goalTurnBudgetGrant,
+      activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {
@@ -9279,6 +10127,55 @@ export class Config {
     return this.onPersistPermissionRuleCallback;
   }
 
+  // Check permission then register a lazy factory; its import runs on first use.
+  private async registerLazyTool(
+    registry: ToolRegistry,
+    toolName: ToolName,
+    factory: ToolFactory,
+  ): Promise<void> {
+    // PermissionManager handles the coreTools allowlist, deny rules, and
+    // the `tools.eager` allowlist in a single check. A tool the active
+    // eager allowlist omits comes back `deferred`, not `disabled`: it is
+    // still registered — listed in `/tools` and loadable via ToolSearch —
+    // but its schema stays out of the eager model request (#9827) without
+    // the tool silently disappearing (#10075).
+    let status: ToolRegistrationStatus = 'registered';
+    try {
+      // Resolve through the getter, not the `permissionManager` field: on
+      // a Config derived via Object.create (e.g. the skill-review and
+      // managed-memory agent shims installed with deriveConfig), the field
+      // resolves through the prototype chain to the base manager and
+      // would silently bypass the scoped override — demoting the shim's
+      // promised tools under an active `tools.eager` allowlist and letting
+      // prepareTools strip them from the forked agent's explicit tool list
+      // (#10075).
+      const permissionManager = this.getPermissionManager();
+      status = permissionManager
+        ? await permissionManager.getToolRegistrationStatus(toolName)
+        : 'registered'; // Should never reach here after initialize(), but safe default.
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to check permissions for tool "${toolName}", skipping registration:`,
+        error,
+      );
+      return;
+    }
+    if (status === 'deferred') {
+      registry.registerPermissionDeferredFactory(toolName, factory);
+    } else if (status === 'registered') {
+      registry.registerFactory(toolName, factory);
+    }
+  }
+
+  private async registerWorkflowTool(registry: ToolRegistry): Promise<boolean> {
+    if (registry.getAllToolNames().includes(ToolNames.WORKFLOW)) return true;
+    await this.registerLazyTool(registry, ToolNames.WORKFLOW, async () => {
+      const { WorkflowTool } = await import('../tools/workflow/workflow.js');
+      return new WorkflowTool(this);
+    });
+    return registry.getAllToolNames().includes(ToolNames.WORKFLOW);
+  }
+
   private async registerImageGenerationTool(
     registry: ToolRegistry,
   ): Promise<void> {
@@ -9319,6 +10216,47 @@ export class Config {
     }
   }
 
+  async registerSessionSourceTool(
+    registry: ToolRegistry = this.toolRegistry,
+  ): Promise<void> {
+    if (
+      !this.getSessionSourceService() ||
+      this.sdkMode ||
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      registry.getAllToolNames().includes(ToolNames.RECORD_SOURCE)
+    ) {
+      return;
+    }
+    let status: ToolRegistrationStatus = 'registered';
+    try {
+      const permissionManager = this.getPermissionManager();
+      status = permissionManager
+        ? await permissionManager.getToolRegistrationStatus(
+            ToolNames.RECORD_SOURCE,
+          )
+        : 'registered';
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to check permissions for tool "${ToolNames.RECORD_SOURCE}", skipping registration:`,
+        error,
+      );
+      return;
+    }
+    const factory: ToolFactory = async () => {
+      const { RecordSourceTool } = await import('../tools/record-source.js');
+      return new RecordSourceTool(this);
+    };
+    if (status === 'deferred') {
+      registry.registerPermissionDeferredFactory(
+        ToolNames.RECORD_SOURCE,
+        factory,
+      );
+    } else if (status === 'registered') {
+      registry.registerFactory(ToolNames.RECORD_SOURCE, factory);
+    }
+  }
+
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
     options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
@@ -9329,46 +10267,10 @@ export class Config {
       sendSdkMcpMessage,
     );
 
-    // Helper: check permission then register a lazy factory (no module import
-    // happens here — the dynamic import() only runs when the tool is first used).
-    const registerLazy = async (
+    const registerLazy = (
       toolName: ToolName,
       factory: ToolFactory,
-    ): Promise<void> => {
-      // PermissionManager handles the coreTools allowlist, deny rules, and
-      // the `tools.eager` allowlist in a single check. A tool the active
-      // eager allowlist omits comes back `deferred`, not `disabled`: it is
-      // still registered — listed in `/tools` and loadable via ToolSearch —
-      // but its schema stays out of the eager model request (#9827) without
-      // the tool silently disappearing (#10075).
-      let status: ToolRegistrationStatus = 'registered';
-      try {
-        // Resolve through the getter, not the `permissionManager` field: on
-        // a Config derived via Object.create (e.g. the skill-review and
-        // managed-memory agent shims installed with deriveConfig), the field
-        // resolves through the prototype chain to the base manager and
-        // would silently bypass the scoped override — demoting the shim's
-        // promised tools under an active `tools.eager` allowlist and letting
-        // prepareTools strip them from the forked agent's explicit tool list
-        // (#10075).
-        const permissionManager = this.getPermissionManager();
-        status = permissionManager
-          ? await permissionManager.getToolRegistrationStatus(toolName)
-          : 'registered'; // Should never reach here after initialize(), but safe default.
-      } catch (error) {
-        this.debugLogger.warn(
-          `Failed to check permissions for tool "${toolName}", skipping registration:`,
-          error,
-        );
-        return;
-      }
-
-      if (status === 'deferred') {
-        registry.registerPermissionDeferredFactory(toolName, factory);
-      } else if (status === 'registered') {
-        registry.registerFactory(toolName, factory);
-      }
-    };
+    ): Promise<void> => this.registerLazyTool(registry, toolName, factory);
 
     // The synthetic structured_output tool is the terminal contract for
     // --json-schema runs. It must be registered in BOTH the bare-mode
@@ -9414,13 +10316,22 @@ export class Config {
       // keep the text hand-off (`/goal set …`) that /goal-draft prints.
       if (
         this.getModelProposedGoals() !== 'disabled' &&
-        resolveInteractionMode(this) === 'interactive'
+        (resolveInteractionMode(this) === 'interactive' ||
+          this.goalProposalHostSupported)
       ) {
         await registerLazy(ToolNames.PROPOSE_GOAL, async () => {
           const { ProposeGoalTool } = await import('../goals/goal-tools.js');
           return new ProposeGoalTool(this);
         });
       }
+    };
+
+    const registerExecIfEnabled = async (): Promise<void> => {
+      if (this.getToolMode() !== ToolMode.CodeModeOnly) return;
+      await registerLazy(ToolNames.EXEC, async () => {
+        const { ExecTool } = await import('../tools/exec.js');
+        return new ExecTool(this);
+      });
     };
 
     if (this.getBareMode()) {
@@ -9442,6 +10353,7 @@ export class Config {
       });
       await registerGoalWorkerTools();
       await registerStructuredOutputIfRequested();
+      await registerExecIfEnabled();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
       );
@@ -9449,6 +10361,7 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerExecIfEnabled();
     await registerGoalWorkerTools();
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
@@ -9557,10 +10470,12 @@ export class Config {
       const { ShellTool } = await import('../tools/shell.js');
       return new ShellTool(this);
     });
-    await registerLazy(ToolNames.TODO_WRITE, async () => {
-      const { TodoWriteTool } = await import('../tools/todoWrite.js');
-      return new TodoWriteTool(this);
-    });
+    if (this.isTodoWriteEnabled()) {
+      await registerLazy(ToolNames.TODO_WRITE, async () => {
+        const { TodoWriteTool } = await import('../tools/todoWrite.js');
+        return new TodoWriteTool(this);
+      });
+    }
     await registerLazy(ToolNames.REPORT_FINDINGS, async () => {
       const { ReportFindingsTool } = await import(
         '../tools/report-findings.js'
@@ -9611,11 +10526,22 @@ export class Config {
         return new DisplayImageTool(this);
       });
     }
-    // WebSearch is opt-in: it registers only when explicitly enabled AND the
-    // configured search model resolves to a usable DashScope entry. A failed
-    // gate surfaces a one-time startup notice instead of a silently missing
-    // tool. Nothing is imported unless the feature is enabled.
-    if (this.webSearchSettings?.enabled) {
+    // WebSearch is opt-out: it registers whenever the gate can resolve a
+    // usable backend — either configured explicitly, or derived from the
+    // provider the main model runs on. `enabled: false` turns it off without
+    // importing anything. A gate failure surfaces a one-time startup notice
+    // only when the tool was actually asked for; a provider with no search
+    // backend fails silently (`gate.silent`), since warning about a feature
+    // the user never configured is noise.
+    const hasExplicitWebSearchBackend =
+      !!this.webSearchSettings?.model?.trim() ||
+      !!this.webSearchSettings?.baseUrl;
+    if (
+      !this.getBareMode() &&
+      !this.isSafeMode() &&
+      this.webSearchSettings?.enabled !== false &&
+      (this.webSearchSettings?.enabled === true || !hasExplicitWebSearchBackend)
+    ) {
       const { evaluateWebSearchGate } = await import('../tools/web-search.js');
       const gate = evaluateWebSearchGate(this);
       if (gate.ok) {
@@ -9623,7 +10549,11 @@ export class Config {
           const { WebSearchTool } = await import('../tools/web-search.js');
           return new WebSearchTool(this);
         });
-      } else if (!this.webSearchNoticeEmitted && !options?.forSubAgent) {
+      } else if (
+        !gate.silent &&
+        !this.webSearchNoticeEmitted &&
+        !options?.forSubAgent
+      ) {
         this.webSearchNoticeEmitted = true;
         this.warnings.push(gate.notice);
       }
@@ -9636,6 +10566,9 @@ export class Config {
         );
         return new ArtifactTool(this);
       });
+    }
+    if (!options?.forSubAgent) {
+      await this.registerSessionSourceTool(registry);
     }
     if (this.isRecordArtifactEnabled()) {
       await registerLazy(ToolNames.RECORD_ARTIFACT, async () => {
@@ -9749,10 +10682,7 @@ export class Config {
 
     // Register workflow tool when enabled
     if (this.isWorkflowsEnabled()) {
-      await registerLazy(ToolNames.WORKFLOW, async () => {
-        const { WorkflowTool } = await import('../tools/workflow/workflow.js');
-        return new WorkflowTool(this);
-      });
+      await this.registerWorkflowTool(registry);
     }
 
     // Register monitor tool

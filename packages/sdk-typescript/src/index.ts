@@ -142,6 +142,7 @@ export {
   type DaemonWorkspaceRemovalActivity,
   type DaemonWorkspaceRemovalResult,
   type DaemonAvailableCommand,
+  type DaemonBrand,
   type DaemonCapabilities,
   type DaemonEnvCell,
   type DaemonEnvKind,
@@ -212,6 +213,7 @@ export {
   type DaemonSessionContextStatus,
   type DaemonLspServerStatus,
   type DaemonSessionLspStatus,
+  type DaemonSessionResourcesStatus,
   type DaemonSessionAgentTaskStatus,
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionWorkflowTaskStatus,
@@ -235,6 +237,9 @@ export {
   type DaemonSessionShellTaskStatus,
   type DaemonSessionTranscriptPage,
   type DaemonSessionTranscriptPageOptions,
+  type DaemonSessionTurnIndexEntry,
+  type DaemonSessionTurnIndexPage,
+  type DaemonSessionTurnIndexPageOptions,
   type DaemonSessionListPage,
   type DaemonSessionListPageOptions,
   type DaemonSessionListView,
@@ -254,6 +259,9 @@ export {
   type DaemonSessionTaskStatus,
   type DaemonSessionTaskWithWorkflowStatus,
   type DaemonSessionTasksStatus,
+  type DaemonSessionAgentsStatus,
+  type DaemonAgentTrace,
+  type DaemonAgentTraceNode,
   type DaemonSessionWorkflowTasksStatus,
   type DaemonSavedWorkflowMeta,
   type DaemonSessionSavedWorkflowDetail,
@@ -384,6 +392,7 @@ export {
   type SetUserLanguageResult,
   type SessionMetadataResult,
   type SubscribeOptions,
+  type WorktreeResetSessionRequest,
 } from './daemon/index.js';
 
 export {
