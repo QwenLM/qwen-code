@@ -115,6 +115,8 @@ function isInsightCommand(command: string): boolean {
 }
 
 const WEB_SHELL_SESSION_STATE_PREFIX = 'qwenCode.webShellSessionId:';
+const WEB_SHELL_SESSION_SOURCE_STATE_PREFIX = 'qwenCode.webShellSessionSource:';
+type SessionHistorySource = 'vscode' | 'default';
 
 function getRestorableDaemonSessionId(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -133,6 +135,13 @@ function webShellSessionStateKey(workspaceCwd: string): string {
   return `${WEB_SHELL_SESSION_STATE_PREFIX}${workspaceCwd}`;
 }
 
+function webShellSessionSourceStateKey(
+  workspaceCwd: string,
+  sessionId: string,
+): string {
+  return `${WEB_SHELL_SESSION_SOURCE_STATE_PREFIX}${workspaceCwd}:${sessionId}`;
+}
+
 export class WebViewProvider {
   private panelManager: PanelManager;
   private messageHandler: MessageHandler;
@@ -147,6 +156,7 @@ export class WebViewProvider {
    * (a reload re-runs the bootstrap) while staying distinct per chat host.
    */
   private readonly daemonClientId = `vscode-${randomUUID()}`;
+  private webShellSessionHistorySource: SessionHistorySource = 'vscode';
   private disposables: vscode.Disposable[] = [];
   private agentInitialized = false; // Track if agent has been initialized
   private isSyncingToVSCode = false; // Guard to prevent config change loop
@@ -1953,15 +1963,49 @@ export class WebViewProvider {
     if (message.type === 'webShellSessionChanged') {
       this.webShellPermissionOwners.delete(webview);
       const data = message.data as
-        | { sessionId?: unknown; workspaceCwd?: unknown }
+        | {
+            sessionId?: unknown;
+            workspaceCwd?: unknown;
+            historySource?: unknown;
+          }
         | undefined;
       const sessionId = getRestorableDaemonSessionId(data?.sessionId) ?? null;
+      this.webShellSessionHistorySource =
+        sessionId && data?.historySource === 'default' ? 'default' : 'vscode';
       this.messageHandler.setCurrentConversationId(sessionId);
       if (this.isViewHost && typeof data?.workspaceCwd === 'string') {
-        await this.context.workspaceState.update(
-          webShellSessionStateKey(data.workspaceCwd),
-          sessionId ?? undefined,
+        const sessionKey = webShellSessionStateKey(data.workspaceCwd);
+        const previousSessionId = getRestorableDaemonSessionId(
+          this.context.workspaceState.get<string>(sessionKey),
         );
+        if (sessionId) {
+          await this.context.workspaceState.update(
+            webShellSessionSourceStateKey(data.workspaceCwd, sessionId),
+            this.webShellSessionHistorySource,
+          );
+          await this.context.workspaceState.update(sessionKey, sessionId);
+        } else {
+          await this.context.workspaceState.update(sessionKey, undefined);
+        }
+        if (previousSessionId && previousSessionId !== sessionId) {
+          await this.context.workspaceState
+            .update(
+              webShellSessionSourceStateKey(
+                data.workspaceCwd,
+                previousSessionId,
+              ),
+              undefined,
+            )
+            .then(
+              () => undefined,
+              (error: unknown) => {
+                logger.warn(
+                  '[WebViewProvider] Failed to retire web-shell session source state:',
+                  error,
+                );
+              },
+            );
+        }
       }
       return true;
     }
@@ -2092,6 +2136,20 @@ export class WebViewProvider {
         const restoredSessionId = this.isViewHost
           ? viewSessionId
           : serializedSessionId;
+        const storedSessionSource =
+          this.isViewHost && restoredSessionId
+            ? this.context.workspaceState.get<unknown>(
+                webShellSessionSourceStateKey(
+                  canonicalWorkspaceCwd,
+                  restoredSessionId,
+                ),
+              )
+            : undefined;
+        const restoredSessionHistorySource = this.isViewHost
+          ? storedSessionSource === 'default'
+            ? 'default'
+            : 'vscode'
+          : this.webShellSessionHistorySource;
         await webview.postMessage({
           type: 'webShellBootstrap',
           data: {
@@ -2109,6 +2167,9 @@ export class WebViewProvider {
               : {}),
             hostKind: this.isViewHost ? 'view' : 'panel',
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
+            ...(restoredSessionId && restoredSessionHistorySource
+              ? { sessionHistorySource: restoredSessionHistorySource }
+              : {}),
             ...(legacyConversationIds ? { legacyConversationIds } : {}),
           },
         });
