@@ -269,6 +269,40 @@ describe('ContextMenuOverlay', () => {
       expect(bystanderKeys).toEqual([]);
     });
 
+    it('an unmodified ArrowDown at the last row clamps and keeps the menu usable', async () => {
+      // Mirror of the up-clamp witness for the down branch's Math.min:
+      // from the last row, the clamp is the only thing keeping
+      // selectedIndex on a real row. Without it a second Down lands past
+      // the end, Enter bounds-checks to a no-op inside executeIndex while
+      // the menu still closes — the chosen action silently drops and all
+      // 17 committed tests stay green. The second Down (from the last row)
+      // is the only press that discriminates the clamp: one chunk holding
+      // both Downs would compute both from the same stale closure index
+      // (the open R3-1 follow-up) and copy would fire either way. The
+      // fixture has exactly 2 rows, so the boundary is one Down past
+      // index 1.
+      const handlers = { open: vi.fn(), copy: vi.fn() };
+      const bystanderKeys: string[] = [];
+      const { lastFrame, stdin } = renderWithProviders(
+        <ExclusiveScene
+          items={makeItems(handlers)}
+          onKey={(k) => bystanderKeys.push(k)}
+        />,
+      );
+      await waitFor(() => expect(lastFrame()).toContain('Open Link'));
+
+      stdin.write('\u001b[B'); // Down -> item 2 (the last row)
+      await wait();
+      stdin.write('\u001b[B'); // Down from the last row — clamps to 1
+      await wait();
+      expect(lastFrame()).toContain('Open Link');
+
+      stdin.write('\r');
+      await waitFor(() => expect(handlers.copy).toHaveBeenCalledTimes(1));
+      expect(handlers.open).not.toHaveBeenCalled();
+      expect(bystanderKeys).toEqual([]);
+    });
+
     it('an ordinary handler does not receive Escape aimed at the open menu', async () => {
       const handlers = { open: vi.fn(), copy: vi.fn() };
       const bystanderKeys: string[] = [];
