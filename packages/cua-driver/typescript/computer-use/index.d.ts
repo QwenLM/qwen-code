@@ -25,6 +25,8 @@ export type AppPoint = number | { x: number; y: number };
 
 export interface AppObservationOptions extends CallOptions {
   disableDiff?: boolean;
+  /** Returned text budget. Default 12,000; minimum 512. */
+  maxTextChars?: number;
   /** Expose the screenshot captured with this App observation. */
   includeScreenshot?: boolean;
 }
@@ -129,6 +131,11 @@ export interface ComputerUseObservationDiagnostics {
   revisionSupported: boolean;
   stableElementIds: boolean;
   captureComplete?: boolean;
+  captureReadComplete?: boolean;
+  captureTruncated: boolean;
+  captureIncompleteDetails: string[];
+  textTruncated: boolean;
+  textChars: number;
   serializerVersion?: string;
   projectionVersion?: string;
   selectedBytes?: number;
@@ -146,6 +153,8 @@ export interface ObserveWindowOptions extends WindowRef, CallOptions {
   screenshotOutFile?: string;
   maxElements?: number;
   maxDepth?: number;
+  /** Returned text budget, independent of capture limits. Default 12,000; minimum 512. */
+  maxTextChars?: number;
 }
 
 export interface WindowObservation {

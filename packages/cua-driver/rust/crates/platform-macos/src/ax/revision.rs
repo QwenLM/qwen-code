@@ -8,7 +8,7 @@ use cua_driver_core::observation_revision::{
 };
 
 use super::projection::format_app_body;
-use super::tree::{format_revision_body, AXIdentity, AXNode};
+use super::tree::{format_revision_body, AXIdentity, AXNode, TreeWalkResult};
 
 const RETAINED_REVISIONS: usize = 8;
 const MAX_LINEAGES: usize = 64;
@@ -21,6 +21,7 @@ struct RevisionKey {
     max_elements: usize,
     max_depth: usize,
     app_context: bool,
+    bounded: bool,
     serializer_version: String,
     projection_version: String,
 }
@@ -73,8 +74,8 @@ impl MacObservationRevisions {
         max_elements: usize,
         max_depth: usize,
         app_context: bool,
-        nodes: &[AXNode],
-        complete: bool,
+        tree: &TreeWalkResult,
+        scope_matched: bool,
         request: &ObservationRevisionRequest,
     ) -> Result<ObservationRevisionResult, String> {
         let session = current_observation_session_identity().ok_or_else(|| {
@@ -87,10 +88,17 @@ impl MacObservationRevisions {
             max_elements,
             max_depth,
             app_context,
+            bounded: tree.truncated,
             serializer_version: request.serializer_version.clone(),
             projection_version: request.projection_version.clone(),
         };
         let mut store = self.store.lock().unwrap();
+        store.remove(&RevisionKey {
+            bounded: !key.bounded,
+            ..key.clone()
+        });
+        let nodes = &tree.nodes;
+        let complete = tree.read_complete && scope_matched;
         let identities = nodes
             .iter()
             .map(|node| node.identity.clone())
@@ -156,9 +164,16 @@ impl MacObservationRevisions {
         } else {
             request.force_full.then_some(FullResyncReason::Requested)
         };
-        lineage
-            .observe_with_reason(captured, request.base_revision_id.as_deref(), forced_reason)
-            .map_err(|error: ObservationRevisionError| error.to_string())
+        let result = if tree.truncated {
+            lineage.observe_bounded(captured, request.base_revision_id.as_deref(), forced_reason)
+        } else {
+            lineage.observe_with_reason(
+                captured,
+                request.base_revision_id.as_deref(),
+                forced_reason,
+            )
+        };
+        result.map_err(|error: ObservationRevisionError| error.to_string())
     }
 
     pub fn clear_session(&self, session_id: &str) {

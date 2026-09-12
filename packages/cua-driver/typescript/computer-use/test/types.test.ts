@@ -44,7 +44,7 @@ export async function exerciseComputerUseTypes(
 ): Promise<ActAndVerifyResult> {
   await computer.listApps({ signal });
   const app = await computer.getApp("org.example.fixture", { signal });
-  const appState = await app.getState({ includeScreenshot: true, signal });
+  const appState = await app.getState({ includeScreenshot: true, maxTextChars: 12_000, signal });
   appState.screenshot?.images.at(0)?.dataBase64;
   await app.click(37, { signal });
   await app.setValue(37, "draft");
@@ -87,12 +87,18 @@ export async function exerciseComputerUseTypes(
     windowId: 7,
     disableDiff: false,
     includeScreenshot: true,
+    maxTextChars: 12_000,
     signal,
   });
   observation.screenshot?.images.at(0)?.dataBase64;
   observation.elements.at(0)?.automation_id;
   observation.diagnostics.selectedBytes;
   observation.diagnostics.captureComplete;
+  observation.diagnostics.captureReadComplete;
+  observation.diagnostics.captureTruncated;
+  observation.diagnostics.captureIncompleteDetails.at(0);
+  observation.diagnostics.textTruncated;
+  observation.diagnostics.textChars;
   // @ts-expect-error revision identifiers are not public observation fields
   observation.revisionId;
   // @ts-expect-error base revision identifiers are not public observation fields

@@ -12,6 +12,7 @@ const ACCESSIBILITY_PROJECTION_VERSION = "full-tree-v1";
 const DEFAULT_EXPLICIT_SESSION_TTL_SECONDS = 60 * 60;
 const DEFAULT_EXPLICIT_IDLE_TTL_SECONDS = 5 * 60;
 const DEFAULT_DELIVERY_MODE_ENV = "QWEN_CUA_SDK_DEFAULT_DELIVERY_MODE";
+const DEFAULT_MAX_TEXT_CHARS = 12_000;
 const RECONNECTABLE_SESSION_CODES = new Set([
   "authorization_context_expired",
   "session_unavailable",
@@ -92,6 +93,57 @@ function verificationResult(result) {
   return result.verification === undefined
     ? value
     : { ...value, verification: result.verification };
+}
+
+function captureStatus(structured) {
+  const revision = structured?.observation_revision;
+  const details =
+    revision?.capture_incomplete_details ?? structured?.capture_incomplete_details;
+  const incompleteDetails = Array.isArray(details)
+    ? [...new Set(details.filter((detail) => typeof detail === "string"))]
+    : [];
+  const isBudgetDetail = (detail) =>
+    /^walk: max_(elements truncated|depth exceeded)$/.test(detail);
+  return {
+    complete: revision?.capture_complete ?? structured?.capture_complete,
+    readComplete:
+      revision?.capture_read_complete ??
+      structured?.capture_read_complete ??
+      (incompleteDetails.some((detail) => !isBudgetDetail(detail)) ? false : undefined),
+    truncated:
+      revision?.capture_truncated ??
+      structured?.capture_truncated ??
+      incompleteDetails.some(isBudgetDetail),
+    incompleteDetails,
+  };
+}
+
+function observationText(treeText, capture, maxTextChars, appContext) {
+  let warning = "";
+  if (capture.complete === false) {
+    warning =
+      capture.truncated && capture.readComplete !== false
+        ? "Accessibility capture is incomplete (traversal limit); this view covers captured nodes only.\n"
+        : `Accessibility capture is incomplete; use current snapshot ${appContext ? "IDs" : "tokens"} only. Retry after the UI settles or use a screenshot.\n`;
+    if (capture.incompleteDetails.length) {
+      warning += `Capture details: ${capture.incompleteDetails.join("; ").slice(0, 180)}\n`;
+    }
+  }
+  const lines = treeText.split("\n");
+  if (warning.length + treeText.length <= maxTextChars) {
+    return { text: warning + treeText, truncated: false };
+  }
+  const notice = appContext
+    ? "Text truncated; call app.getState with disableDiff:true and a larger maxTextChars.\n"
+    : "Text truncated; inspect current .elements, or request disableDiff:true with a larger maxTextChars.\n";
+  const selected = [];
+  let length = warning.length + notice.length;
+  for (const line of lines) {
+    if (length + line.length + 1 > maxTextChars) break;
+    selected.push(line);
+    length += line.length + 1;
+  }
+  return { text: warning + notice + selected.join("\n"), truncated: true };
 }
 
 function requirePositiveInteger(name, value, { allowZero = false } = {}) {
@@ -865,9 +917,11 @@ export class ComputerUse {
       screenshotOutFile,
       maxElements,
       maxDepth,
+      maxTextChars = DEFAULT_MAX_TEXT_CHARS,
       signal,
     } = options;
     const disableDiff = observationDisablesDiff(options);
+    requireIntegerRange("maxTextChars", maxTextChars, 512, Number.MAX_SAFE_INTEGER);
     const input = {
       pid: target.pid,
       windowId: target.windowId,
@@ -926,6 +980,7 @@ export class ComputerUse {
         },
       });
       const envelope = observed.structured?.observation_revision;
+      const capture = captureStatus(observed.structured);
       if (observedGeneration === this.#connectionGeneration) {
         const revisionId = envelope?.revision_id;
         const mode = envelope?.mode;
@@ -945,8 +1000,9 @@ export class ComputerUse {
       }
       if (
         !retriedIncompleteCapture &&
-        (envelope?.capture_complete ?? observed.structured?.capture_complete) ===
-          false &&
+        capture.complete === false &&
+        (!capture.truncated || capture.readComplete === false) &&
+        envelope?.stable_element_ids !== true &&
         envelope?.resync_reason === "capture_incomplete" &&
         activeInput.observationRevision
       ) {
@@ -965,24 +1021,18 @@ export class ComputerUse {
     }
     const { text, structured, images } = observed;
     const envelope = structured?.observation_revision;
-    const captureComplete =
-      envelope?.capture_complete ?? structured?.capture_complete;
-    const treeText = structured?.tree_markdown ?? text;
-    const publicText =
-      captureComplete === false
-        ? "Accessibility capture is incomplete; this tree is observation-only. " +
-          "Do not reuse element tokens from an earlier observation. Call " +
-          "observeWindow(target) again without `disableDiff` after the UI settles, " +
-          "or use the screenshot.\n\n" +
-          treeText
-        : treeText;
+    const capture = captureStatus(structured);
+    const treeText = structured?.tree_markdown ?? text ?? "";
+    const publicText = observationText(treeText, capture, maxTextChars, options.appContext);
     return {
       pid,
       windowId,
       mode: envelope?.mode ?? "full",
       resyncReason: envelope?.resync_reason ?? undefined,
-      text: publicText,
-      elements: captureComplete === false ? [] : (structured?.elements ?? []),
+      text: publicText.text,
+      elements: capture.complete === false
+        ? (structured?.elements ?? []).filter((element) => element.element_token)
+        : (structured?.elements ?? []),
       screenshot:
         structured?.screenshot_width !== undefined || structured?.screenshot_file_path
           ? {
@@ -1006,7 +1056,12 @@ export class ComputerUse {
       diagnostics: {
         revisionSupported: Boolean(envelope),
         stableElementIds: envelope?.stable_element_ids === true,
-        captureComplete,
+        captureComplete: capture.complete,
+        captureReadComplete: capture.readComplete,
+        captureTruncated: capture.truncated,
+        captureIncompleteDetails: capture.incompleteDetails,
+        textTruncated: publicText.truncated,
+        textChars: publicText.text.length,
         serializerVersion: envelope?.serializer_version,
         projectionVersion: envelope?.projection_version,
         selectedBytes: envelope?.selected_bytes,

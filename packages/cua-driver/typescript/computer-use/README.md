@@ -53,6 +53,14 @@ Normal window observations include immediate menu-bar items. A selected open
 menu supplies its own context, including nested and disabled commands.
 Normal actions do not emit another full tree or image.
 
+App text defaults to at most 12,000 characters; `maxTextChars` (minimum 512)
+adjusts the limit. Warnings and truncation notices appear before whole captured
+rows. To see more text, call `app.getState({ disableDiff: true, maxTextChars: 24000 })`.
+The App retains current short-ID action bindings even when text is truncated.
+A traversal-limited capture can return no-change when its captured state is
+identical; changed bounded state returns full. Read failures require using only
+IDs from the latest observation. Omitted rows do not prove absence.
+
 Call `getState()` after a dialog, sheet or menu opens or closes before acting
 on its IDs. A process/window/session change invalidates prior IDs. Every App
 observation captures a current screenshot internally so a later AX-only
@@ -122,11 +130,15 @@ compatibility alias; passing both names is rejected. If a base is stale, the
 native driver returns a full resync and the wrapper adopts the replacement
 revision. The wrapper never computes a second semantic diff.
 
-An incomplete capture clears the cursor and receives one automatic observation
-retry without disabling diffs. If that retry is still incomplete, the returned
-tree is marked observation-only, `elements` is empty, and
-`diagnostics.captureComplete` is false. Observe normally after the UI settles
-or use the screenshot; disabling diffs does not repair capture completeness.
+On macOS, successful AX reads bounded by traversal limits retain a separate
+baseline. Identical captured state returns `no_change`; changed bounded state
+returns full, since nodes outside the budget cannot be reported as deleted.
+`diagnostics.captureComplete` remains false and `captureTruncated` is true.
+Read failures invalidate the baseline and receive one automatic retry, including
+failures mixed with truncation. `captureReadComplete` distinguishes them from pure
+budget truncation, which does not retry. Current snapshot tokens remain available in
+`elements`; when `stableElementIds` is false, use only the latest observation's
+tokens. `captureIncompleteDetails` explains the capture limitation.
 
 Drivers that do not advertise the capability keep the legacy full-snapshot
 behavior; observations then report `diagnostics.revisionSupported: false`.
@@ -143,12 +155,23 @@ SDK actions remain screenshot pixels; `windowBounds` describes screen points.
 The native revision's `capture_complete` flag takes precedence over a legacy
 root-level flag.
 
-Treat a full response as the complete current AX state. Apply later diffs to
-that state; a no-change response leaves it intact. `elements` remains the
-current full actionable list for retained full, diff, and no-change responses.
+Treat a full response as the current captured AX state, subject to capture and
+text limits. Apply later diffs to that state; a no-change response leaves it
+intact within the captured scope. `elements` remains the current captured
+actionable list for retained full, diff, and no-change responses.
 While the same stable lineage is retained, tokens for unchanged elements remain
 current across all three modes; only removed or replaced element tokens become
 invalid.
+
+Text is capped at 12,000 characters by default. `maxTextChars`
+(minimum 512) controls this output budget independently of the native
+`maxElements` and `maxDepth` capture limits. `diagnostics.textTruncated` and
+`textChars` describe the returned text; capture warnings and truncation notices
+appear first. Rows are never cut in half. The full captured element array stays
+in `elements`, so filter it for the controls or text you need before printing.
+For more full text, request `disableDiff: true` with a larger `maxTextChars`.
+An omitted row does not prove absence, and the character budget is not a token
+count. Do not repeatedly print the entire element array.
 
 Screenshot capture is independent from the observation revision mode.
 `includeScreenshot: true` requests the image; `disableDiff: true` requests a
