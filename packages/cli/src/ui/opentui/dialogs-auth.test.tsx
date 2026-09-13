@@ -105,6 +105,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 import { AuthType } from '@qwen-code/qwen-code-core';
+import * as coreRuntime from '@qwen-code/qwen-code-core';
 import { OpenTuiAuthDialog } from './dialogs-auth.js';
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
@@ -308,6 +309,36 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await pressEsc(); // back to main
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('keeps authentication open when only service models were saved', async () => {
+    const servicePlan = coreRuntime.buildInstallPlan(
+      coreRuntime.minimaxProvider,
+      {
+        baseUrl: coreRuntime.resolveBaseUrl(coreRuntime.minimaxProvider),
+        apiKey: 'test-image',
+        modelIds: ['image-01'],
+      },
+    );
+    const build = vi
+      .spyOn(coreRuntime, 'buildInstallPlan')
+      .mockReturnValue(servicePlan);
+    try {
+      const { onClose, notify } = await runCustomProviderFlow();
+      await press('return');
+      await vi.waitFor(() =>
+        expect(
+          screen.getByText(
+            'Service models saved. Configure a conversation model to start chatting.',
+          ),
+        ).toBeTruthy(),
+      );
+      expect(onClose).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+      expect(core.logAuth).not.toHaveBeenCalled();
+    } finally {
+      build.mockRestore();
+    }
   });
 
   it('walks the custom-provider wizard and submits the install plan', async () => {

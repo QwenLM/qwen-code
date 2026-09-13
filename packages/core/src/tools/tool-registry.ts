@@ -207,7 +207,8 @@ export class ToolRegistry {
   private factories: Map<string, ToolFactory> = new Map();
   // In-flight factory promises — ensures concurrent ensureTool() calls for the
   // same name share one promise instead of running the factory multiple times.
-  private inflight: Map<string, Promise<AnyDeclarativeTool>> = new Map();
+  private inflight: Map<string, Promise<AnyDeclarativeTool | undefined>> =
+    new Map();
   // Deferred tools promoted into the declaration list by session setup,
   // compatibility replay, or an explicit runtime flow.
   private revealedDeferred: Set<string> = new Set();
@@ -416,6 +417,12 @@ export class ToolRegistry {
     return tool.shouldDefer || this.permissionDeferred.has(tool.name);
   }
 
+  private isToolAvailable(name: string): boolean {
+    return (
+      name !== ToolNames.IMAGE_GEN || this.config.isImageGenerationEnabled()
+    );
+  }
+
   /**
    * Ensures a specific tool is loaded. Returns the cached instance if already
    * loaded, otherwise invokes the factory, caches the result, and returns it.
@@ -423,6 +430,7 @@ export class ToolRegistry {
    * factory is never executed more than once.
    */
   async ensureTool(name: string): Promise<AnyDeclarativeTool | undefined> {
+    if (!this.isToolAvailable(name)) return undefined;
     const cached = this.tools.get(name);
     if (cached) {
       // Clean up any stale factory for this name so warmAll() and bulk
@@ -442,7 +450,7 @@ export class ToolRegistry {
         this.tools.set(name, tool);
         this.factories.delete(name);
         this.inflight.delete(name);
-        return tool;
+        return this.isToolAvailable(name) ? tool : undefined;
       })
       .catch((err: unknown) => {
         this.inflight.delete(name);
@@ -846,6 +854,7 @@ export class ToolRegistry {
     }
     const includeDeferred = options?.includeDeferred === true;
     return Array.from(this.tools.values())
+      .filter((tool) => this.isToolAvailable(tool.name))
       .filter((tool) => this.isToolDeclared(tool.name))
       .filter(
         (tool) =>
@@ -883,7 +892,10 @@ export class ToolRegistry {
     allowedNames?: ReadonlySet<string>,
   ): CodeModeBindingPlan {
     const plan = planCodeModeBindings(
-      Array.from(this.tools.values()),
+      Array.from(this.tools.values()).filter(
+        (tool) =>
+          this.isToolAvailable(tool.name) && this.isToolDeclared(tool.name),
+      ),
       (name) => this.isDeferredAndHidden(name),
       allowedNames,
     );
@@ -996,6 +1008,7 @@ export class ToolRegistry {
     const summary: DeferredToolSummary[] = [];
     this.tools.forEach((tool) => {
       if (
+        this.isToolAvailable(tool.name) &&
         this.isEffectivelyDeferred(tool) &&
         !tool.alwaysLoad &&
         this.isToolDeclared(tool.name) &&
@@ -1030,6 +1043,7 @@ export class ToolRegistry {
     const candidates: string[] = [];
     let totalChars = 0;
     for (const tool of this.tools.values()) {
+      if (!this.isToolAvailable(tool.name)) continue;
       if (!this.isEffectivelyDeferred(tool) || tool.alwaysLoad) continue;
       // Permission-deferred tools (#10075) are deliberately excluded: the
       // budget preload exists to stabilise the prompt cache for ordinary
@@ -1094,7 +1108,7 @@ export class ToolRegistry {
     }
     const declarations: FunctionDeclaration[] = [];
     for (const name of toolNames) {
-      const tool = this.tools.get(name);
+      const tool = this.getTool(name);
       if (tool && this.isToolDeclared(tool.name)) {
         declarations.push(tool.schema);
       }
@@ -1114,7 +1128,7 @@ export class ToolRegistry {
    */
   getAllToolNames(): string[] {
     const names = new Set([...this.tools.keys(), ...this.factories.keys()]);
-    return Array.from(names);
+    return Array.from(names).filter((name) => this.isToolAvailable(name));
   }
 
   /**
@@ -1130,9 +1144,9 @@ export class ToolRegistry {
           `Call warmAll() first to avoid incomplete results.`,
       );
     }
-    return Array.from(this.tools.values()).sort((a, b) =>
-      a.displayName.localeCompare(b.displayName),
-    );
+    return Array.from(this.tools.values())
+      .filter((tool) => this.isToolAvailable(tool.name))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
   }
 
   /**
@@ -1152,7 +1166,7 @@ export class ToolRegistry {
    * Get the definition of a specific tool.
    */
   getTool(name: string): AnyDeclarativeTool | undefined {
-    return this.tools.get(name);
+    return this.isToolAvailable(name) ? this.tools.get(name) : undefined;
   }
 
   async readMcpResource(
