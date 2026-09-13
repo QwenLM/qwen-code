@@ -4333,6 +4333,46 @@ describe('ShellTool', () => {
             vi.useRealTimers();
           }
         });
+
+        it('keeps the exit-code line when the reservation would eat a sub-advisory threshold', async () => {
+          // Companion to the sub-advisory pin above: at an explicit 600-char
+          // threshold the ~620-char advisory reservation alone would consume
+          // the whole body budget, leaving a 1-char preview whose head-and-tail
+          // keeps neither the rows nor the trailing `Exit Code:` line. The
+          // reservation is capped at half the threshold, so the tail preview
+          // keeps the exit-code line.
+          (
+            mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+          ).mockReturnValue(true);
+          (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+            600,
+          );
+          vi.useFakeTimers({ toFake: ['Date', 'performance'] });
+          try {
+            const output = 'x'.repeat(5_000);
+            const invocation = shellTool.build({
+              command: 'mid-output-cmd',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            // Past the 60s advisory threshold so the reservation fires.
+            await vi.advanceTimersByTimeAsync(60_000);
+            resolveShellExecution({ output, exitCode: 3, error: null });
+            const result = await promise;
+
+            expect(result.outputBudgetApplied).toBe(true);
+            expect(result.llmContent).toContain(
+              'this foreground command ran for 60s',
+            );
+            expect(result.llmContent).toContain(
+              'Tool output was too large and has been truncated',
+            );
+            expect(String(result.llmContent)).not.toContain(output);
+            expect(result.llmContent).toContain('Exit Code: 3');
+          } finally {
+            vi.useRealTimers();
+          }
+        });
       });
     });
 

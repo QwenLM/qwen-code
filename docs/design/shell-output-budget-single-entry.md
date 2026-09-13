@@ -104,7 +104,11 @@ send-boundary cap. Aggregate batch finalization still runs afterwards.
 Shell appends process metadata — the long-running advisory and the AI attribution
 warning — after truncation, deliberately outside the truncation envelope. Their
 combined size is reserved out of the body budget, so the assembled string still
-fits the declared budget and the marker vouches for the final string. Each
+fits the declared budget and the marker vouches for the final string. The
+reservation is capped at half the declared budget: an explicit threshold
+below roughly twice the metadata size cannot honour it in full anyway, and
+spending the whole budget on it would leave a preview too small to keep the
+trailing exit-code line. Each
 appended string is also bounded on its own: the ordinary failure path has no
 per-tool pass, and the timeout path re-bounds the detail only at the producer
 budget, so neither bounds appended metadata by itself. The advisory is a fixed

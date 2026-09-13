@@ -3004,9 +3004,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // metadata (the setting has no schema minimum) would stand the pass
       // down while outputBudgetApplied below still vouches for the body —
       // leaving the failure path, whose only bound is that marker, unbounded.
+      // Cap the reservation at half the threshold: a sub-advisory explicit
+      // threshold would otherwise spend the whole budget on the reservation
+      // and leave a 1-char preview, dropping the trailing exit-code line
+      // the head-and-tail preview exists to keep. The assembled string can
+      // exceed the declared budget in that corner — a ~510-char truncation
+      // header already does on its own — but it stays bounded.
       const bodyBudgetChars = Math.max(
         1,
-        outputThreshold - appendedMetadataChars,
+        outputThreshold -
+          Math.min(appendedMetadataChars, Math.floor(outputThreshold / 2)),
       );
       const truncatedResult = await truncateToolOutput(
         this.config,
