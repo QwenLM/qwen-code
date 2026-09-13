@@ -31,6 +31,15 @@ export interface RetryInfo {
 export interface RateLimitErrorDetails {
   statusCode?: number;
   providerCode?: string;
+  /**
+   * The provider body's `type`, kept separate from `providerCode` rather than
+   * folded into it. `providerCode` is compared by exact equality elsewhere
+   * (`isAllocatedQuotaExceeded`) and is what the collapsed `code ?? type`
+   * spelling has always produced, so it cannot carry both; a body with a
+   * specific `code` beside a class-naming `type` needs the second value on its
+   * own field to be readable at all.
+   */
+  providerType?: string;
   providerMessage?: string;
   requestId?: string;
   transport: 'http' | 'sse' | 'unknown';
@@ -133,6 +142,7 @@ export function getRateLimitErrorDetails(
     ...(payload?.code !== undefined || payload?.type !== undefined
       ? { providerCode: String(payload.code ?? payload.type) }
       : {}),
+    ...(payload?.type !== undefined ? { providerType: payload.type } : {}),
     ...(payload?.message !== undefined
       ? { providerMessage: payload.message }
       : {}),

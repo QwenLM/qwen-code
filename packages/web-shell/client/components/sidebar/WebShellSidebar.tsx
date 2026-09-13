@@ -441,12 +441,6 @@ interface WebShellSidebarProps {
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   /**
-   * Open the working-tree Changes dialog for a workspace. Forwarded to each
-   * trusted workspace's folder header, where a live git chip fires it on click.
-   */
-  onOpenGitDiff?: (workspaceCwd: string) => void;
-  onOpenCommit?: (workspaceCwd: string) => void;
-  /**
    * Opens the shared App-owned Add Workspace dialog. Omit this callback when
    * registration is unavailable; locked workspaces hide the action separately.
    */
@@ -955,8 +949,6 @@ export function WebShellSidebar({
   onMobileClose,
   selectedWorkspaceCwd,
   onSelectWorkspace,
-  onOpenGitDiff,
-  onOpenCommit,
   onOpenAddWorkspace,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
@@ -5951,12 +5943,6 @@ export function WebShellSidebar({
                         mapSession={applyOptimisticPin}
                         limitSessions={editingSessionIdentity === null}
                         isPinnedSectionMember={isPinnedSectionMember}
-                        onOpenGitDiff={
-                          projectFeaturesEnabled ? onOpenGitDiff : undefined
-                        }
-                        onOpenCommit={
-                          projectFeaturesEnabled ? onOpenCommit : undefined
-                        }
                         searchQuery={searchQuery}
                         expanded={ws.primary ? projectExpanded : undefined}
                         autoExpandKey={
@@ -6014,6 +6000,7 @@ export function WebShellSidebar({
                         }
                         showSessionDetails={sessionActionItems.has('details')}
                         overviewEnabled={workspaceOverviewEnabled}
+                        overviewMenuOpen={openWorkspaceMenuId === ws.id}
                         overviewItems={workspaceOverviewItems}
                         onOpenPathLocally={
                           localOpenEnabled
@@ -6137,20 +6124,9 @@ export function WebShellSidebar({
                                       }
                                     : {}),
                                 };
-                                // The section caps the folder name so the
-                                // git chip never slides under this overlay;
-                                // the count drives the cap's width. The
-                                // menu trigger is absent under a lock.
-                                const headerActionCount =
-                                  (ws.trusted
-                                    ? 1 + Number(canOrganizeWorkspace(ws.cwd))
-                                    : 0) + (lockedWorkspaceCwd ? 0 : 1);
                                 return (
                                   <div
                                     className={styles.workspaceHeaderActions}
-                                    data-workspace-action-count={
-                                      headerActionCount
-                                    }
                                     style={{
                                       visibility:
                                         visible || openWorkspaceMenuId === ws.id
