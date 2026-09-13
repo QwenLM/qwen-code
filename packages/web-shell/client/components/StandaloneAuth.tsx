@@ -48,6 +48,7 @@ interface AuthCopy {
   enterToken: string;
   policyBlocked: string;
   invalidAddress: string;
+  addressChanged: string;
   confirmTarget: string;
   remoteHint: string;
   remoteUnreachable: string;
@@ -77,6 +78,8 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     policyBlocked:
       'Access blocked by the daemon Origin or Host policy. Open its direct address, or check --allow-origin for cross-origin access.',
     invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
+    addressChanged:
+      'Connection paused. Select Connect to use the entered address.',
     confirmTarget:
       'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
     remoteHint:
@@ -102,6 +105,7 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     policyBlocked:
       '访问被守护进程的 Origin 或 Host 策略拦截。请直接打开守护进程地址，或检查 --allow-origin 以允许跨域访问。',
     invalidAddress: 'Daemon 地址无效。请输入 HTTP 或 HTTPS origin。',
+    addressChanged: '连接已暂停。点击“连接”以使用填写的地址。',
     confirmTarget:
       '此页面指向一个本浏览器从未连接过的守护进程。仅在你信任它时再连接。',
     remoteHint: '令牌会发送到上方显示的地址。请只输入该守护进程签发的令牌。',
@@ -369,6 +373,13 @@ export function StandaloneAuth({
               className="h-11 font-mono"
               value={address}
               onChange={(event) => {
+                controllerRef.current?.abort();
+                controllerRef.current = null;
+                if (timerRef.current !== null) clearTimeout(timerRef.current);
+                timerRef.current = null;
+                setConfirming(true);
+                setBusy(false);
+                setStatus(copy.addressChanged);
                 setAddress(event.target.value);
                 setToken('');
               }}

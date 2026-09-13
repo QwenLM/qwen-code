@@ -199,6 +199,68 @@ it('asks before probing a daemon this browser has not connected to', async () =>
   expect(fetch.mock.calls[0][0]).toBe('http://daemon.test/capabilities');
   expect(container.textContent).toContain('Connected');
 });
+it.each(['queued retry', 'in-flight response'])(
+  'retires the old target on address editing with a %s',
+  async (phase) => {
+    vi.useFakeTimers();
+    let finishProbe:
+      | ((response: ReturnType<typeof stubResponse>) => void)
+      | undefined;
+    const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
+    if (phase === 'queued retry') {
+      fetch.mockRejectedValueOnce(new Error('Failed to fetch'));
+    } else {
+      fetch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishProbe = resolve;
+          }),
+      );
+    }
+    const onChangeTarget = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    await mount(
+      'boot-secret',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onChangeTarget,
+    );
+    const signal = fetch.mock.calls[0][1].signal as AbortSignal;
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(addressInput(), window.location.origin);
+      addressInput().dispatchEvent(new Event('input', { bubbles: true }));
+      finishProbe?.(stubResponse({ status: 200 }));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(12_000);
+    });
+
+    expect(signal.aborted).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Connection paused');
+    expect(container.textContent).toContain(window.location.origin);
+    expect(container.textContent).not.toContain('Connected boot-secret');
+    expect(tokenInput().value).toBe('');
+    expect(
+      sessionStorage.getItem('qwen-daemon-token:http://daemon.test'),
+    ).toBeNull();
+    expect(sessionStorage.getItem('qwen-daemon-target-confirmed')).toBeNull();
+    expect(onChangeTarget).not.toHaveBeenCalled();
+
+    await act(submitForm);
+    expect(onChangeTarget).toHaveBeenCalledWith(
+      window.location.origin,
+      undefined,
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+  },
+);
 it('distinguishes policy rejection from authentication failure', async () => {
   vi.stubGlobal(
     'fetch',
