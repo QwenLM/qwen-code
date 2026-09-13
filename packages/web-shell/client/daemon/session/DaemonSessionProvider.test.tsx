@@ -10270,6 +10270,82 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('idle');
   });
 
+  it('does not settle a restored foreground prompt on a background terminal while the daemon reports activity', async () => {
+    const eventsGate = createDeferred<void>();
+    const backgroundSeen = createDeferred<void>();
+    const finish = createDeferred<void>();
+    const finished = createDeferred<void>();
+    const backgroundTurn = {
+      turnId: 'auto-1',
+      taskId: 'task-1',
+      kind: 'agent' as const,
+      startedAt: 100,
+    };
+    const session = createMockSession({
+      hasActivePrompt: true,
+      backgroundTurn,
+      lastEventId: 5,
+      async *events() {
+        await eventsGate.promise;
+        yield {
+          id: 6,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'auto-1', stopReason: 'end_turn' },
+        };
+        backgroundSeen.resolve();
+        await finish.promise;
+        yield {
+          id: 7,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'user-1', stopReason: 'end_turn' },
+        };
+        finished.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let connection: ReturnType<typeof useDaemonConnection> | undefined;
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      promptStatus = useDaemonPromptStatus();
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection?.backgroundTurn).toEqual(backgroundTurn);
+    expect(promptStatus).not.toBe('idle');
+    // The live-state authority reports the restored foreground prompt still
+    // in flight: the background execution's own terminal must not settle it.
+    // (The bridge re-supplies the tracked descriptor on every publish, the
+    // way useDaemonSessionActivityBridge does from the live-state response.)
+    await act(async () => {
+      actions?.setDaemonActivePrompt(true, undefined, backgroundTurn);
+      eventsGate.resolve();
+      await backgroundSeen.promise;
+      await flushPromises();
+    });
+    // The background bookkeeping completes (the descriptor is consumed) while
+    // the restored foreground prompt keeps the pane streaming.
+    expect(connection?.backgroundTurn).toBeUndefined();
+    expect(promptStatus).not.toBe('idle');
+    await act(async () => {
+      finish.resolve();
+      await finished.promise;
+      await flushPromises();
+    });
+    expect(promptStatus).toBe('idle');
+  });
+
   it('settles restored active prompts when turn_complete arrives', async () => {
     const turnCompleted = createDeferred<void>();
     const session = createMockSession({

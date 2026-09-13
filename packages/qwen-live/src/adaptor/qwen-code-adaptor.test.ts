@@ -882,6 +882,63 @@ describe('QwenCodeAdaptor.events', () => {
     expect((await iterator.next()).done).toBe(true);
   });
 
+  it('does not adopt a background execution as the active job of an idle session', async () => {
+    const client = makeClient({
+      subscribeEvents: vi.fn(() =>
+        envelopeStream([
+          envelope(
+            'session_update',
+            {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'Working on it' },
+                _meta: {
+                  source: 'background_notification_turn_started',
+                  backgroundTurn: { turnId: 'background-1' },
+                },
+              },
+            },
+            { promptId: 'background-1' },
+          ),
+          envelope('session_update', {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'background reply' },
+              _meta: {
+                source: 'background_notification_response',
+                backgroundTask: { taskId: 'task-1' },
+              },
+            },
+          }),
+          envelope(
+            'turn_complete',
+            {
+              promptId: 'background-1',
+              backgroundTurn: { turnId: 'background-1' },
+              stopReason: 'end_turn',
+            },
+            { promptId: 'background-1' },
+          ),
+        ]),
+      ),
+    });
+    const adaptor = makeAdaptor(client);
+    const handle = handleFor();
+    const events = await collect(adaptor, handle);
+    // The background execution is not an orchestrator-dispatched job: no
+    // terminal may be emitted for it, and the session must not read busy.
+    expect(events.filter((event) => event.type === 'turn_complete')).toEqual(
+      [],
+    );
+    expect(adaptor.isBusy(handle)).toBe(false);
+    // The reply activity still reaches the live transcript.
+    expect(events).toContainEqual({
+      type: 'activity',
+      kind: 'message',
+      text: 'background reply',
+    });
+  });
+
   it('maps turn_error to a turn_error event carrying the message', async () => {
     const client = makeClient({
       subscribeEvents: vi.fn(() =>

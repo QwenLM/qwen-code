@@ -11029,6 +11029,69 @@ describe('Session', () => {
         },
       );
 
+      it('defers admission when the host never answers the start_turn request', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(async () => createEmptyStream());
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start' }],
+        });
+        vi.mocked(mockClient.extMethod).mockImplementation(async (method) => {
+          if (method === '_qwencode/start_turn')
+            return new Promise(() => undefined);
+          return { messages: [], hasQueuedPrompt: false };
+        });
+        vi.useFakeTimers();
+        try {
+          notification()('done', 'RESULT', {
+            agentId: 'silent-host-worker',
+            status: 'completed',
+          });
+          await vi.advanceTimersByTimeAsync(0);
+          const starts = () =>
+            vi
+              .mocked(mockClient.extMethod)
+              .mock.calls.filter(
+                ([method]) => method === '_qwencode/start_turn',
+              );
+          expect(starts()).toHaveLength(1);
+          // The admission deadline releases the turn: the item is retained
+          // via the defer path (same turnId on the retry) rather than lost,
+          // and the notification pipeline is not wedged.
+          await vi.advanceTimersByTimeAsync(2100);
+          expect(
+            (session as unknown as { notificationProcessing: boolean })
+              .notificationProcessing,
+          ).toBe(false);
+          expect(
+            session
+              .collectActiveWorkHolds()
+              .some((hold) => hold.id === 'silent-host-worker'),
+          ).toBe(true);
+          // The defer path retries with the SAME turnId after the backoff.
+          await vi.advanceTimersByTimeAsync(1100);
+          expect(starts().length).toBeGreaterThan(1);
+          expect(
+            new Set(starts().map(([, params]) => params['turnId'])).size,
+          ).toBe(1);
+          // Let the second silent attempt hit its own admission deadline so
+          // no fake-timer race is left dangling across the switch below.
+          await vi.advanceTimersByTimeAsync(2100);
+          expect(
+            (session as unknown as { notificationProcessing: boolean })
+              .notificationProcessing,
+          ).toBe(false);
+        } finally {
+          vi.useRealTimers();
+        }
+        const followUp = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'next question' }],
+        });
+        expect(followUp.stopReason).toBe('end_turn');
+      });
+
       it.each([false, true])(
         'bounds admission retries and honors explicit stop=%s',
         async (stop) => {

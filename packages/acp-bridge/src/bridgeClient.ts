@@ -829,7 +829,10 @@ export class BridgeClient implements Client {
      * the resolution to the agent. Strategy dispatch and audit/emit
      * fan-out live inside the mediator.
      */
-    private readonly mediator: Pick<PermissionMediator, 'request'>,
+    private readonly mediator: Pick<
+      PermissionMediator,
+      'request' | 'cancelForPrompt'
+    >,
     /**
      * Bd1yh: wall-clock ms before `requestPermission` resolves as cancelled
      * if no client vote arrives. 0 = disabled. Forwarded directly to
@@ -1402,6 +1405,11 @@ export class BridgeClient implements Client {
       return;
     const backgroundTurn = entry.backgroundTurn;
     delete entry.backgroundTurn;
+    // The turn's own permission requests are attributed to its turnId
+    // (`requestPermission`). Ending the turn must cancel them: the child has
+    // stopped waiting on the RPC, and with the mediator timer disabled an
+    // orphaned approval would otherwise pend for the life of the session.
+    this.mediator.cancelForPrompt(sessionId, turnId);
     entry.events.publish({
       type: 'turn_complete',
       promptId: turnId,

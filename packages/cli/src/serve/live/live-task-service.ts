@@ -854,11 +854,21 @@ export class LiveTaskService {
       if (!reason) continue;
       if (
         event.type === 'turn_complete' &&
-        (event.data as { backgroundTurn?: unknown } | null)?.backgroundTurn &&
-        task.runtime.bridge.getSessionSummary(task.bridgeSessionId)
-          .hasActivePrompt
-      )
-        continue;
+        (event.data as { backgroundTurn?: unknown } | null)?.backgroundTurn
+      ) {
+        // getSessionSummary throws when the session left the bridge between
+        // the publish and this read; fail open so a delivered wake is not
+        // swallowed as a silent neither-woke-nor-timed-out result.
+        let stillActive = false;
+        try {
+          stillActive = task.runtime.bridge.getSessionSummary(
+            task.bridgeSessionId,
+          ).hasActivePrompt;
+        } catch {
+          stillActive = false;
+        }
+        if (stillActive) continue;
+      }
       return {
         reason,
         threadId: target.threadId,

@@ -3580,6 +3580,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               if (
                 !activePromptSettled &&
                 !ignoreStaleTerminal &&
+                // A background execution's own terminal is not authoritative
+                // for a restored FOREGROUND prompt; the live-state authority
+                // still releases a background-only session on its next poll.
+                !(
+                  backgroundTerminal &&
+                  getDaemonActivePrompt(activeSession) === true
+                ) &&
                 restoredActivePrompt &&
                 (event.type === 'turn_complete' || event.type === 'turn_error')
               ) {

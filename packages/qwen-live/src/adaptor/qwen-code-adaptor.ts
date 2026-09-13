@@ -749,9 +749,14 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       case 'session_update': {
         const update = isRecord(data['update']) ? data['update'] : undefined;
         if (!update) return [];
+        // An automatic background turn is never an orchestrator-dispatched
+        // job: its stamped updates must not adopt the session's activeJobRef,
+        // or its terminal would be reported as that job's completion.
+        const updateMeta = isRecord(update['_meta']) ? update['_meta'] : {};
         if (
           state.activeJobRef === undefined &&
-          envelope.promptId !== undefined
+          envelope.promptId !== undefined &&
+          updateMeta['backgroundTurn'] === undefined
         ) {
           state.activeJobRef = envelope.promptId;
           state.busy = true;
@@ -798,7 +803,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       }
       case 'turn_complete': {
         const jobRef = envelope.promptId ?? state.activeJobRef;
-        if (data['backgroundTurn'] && jobRef !== state.activeJobRef) return [];
+        if (data['backgroundTurn']) return [];
         const active =
           envelope.promptId === undefined || jobRef === state.activeJobRef;
         const detail = active ? state.turnBuffer.trim() : '';

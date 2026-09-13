@@ -75,7 +75,10 @@ import type {
   CurrentSessionScheduledTaskCreateInfo,
 } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
-import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
+import {
+  CANCEL_VOTE_SENTINEL,
+  MultiClientPermissionMediator,
+} from './permissionMediator.js';
 import { SessionArtifactStore } from './sessionArtifacts.js';
 import {
   SESSION_ATTACHMENT_MAX_ITEM_BYTES,
@@ -1240,7 +1243,7 @@ describe('BridgeClient — mode promotion fallback', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn() },
+        { request: vi.fn(), cancelForPrompt: vi.fn() },
         0,
         Infinity,
       );
@@ -5084,7 +5087,7 @@ describe('background execution ownership', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn() },
+        { request: vi.fn(), cancelForPrompt: vi.fn() },
         0,
         Infinity,
       );
@@ -5200,5 +5203,70 @@ describe('background execution ownership', () => {
         promptId: 'notification-1',
       }),
     );
+  });
+
+  it('cancels the finished turn’s orphaned approvals but not a live prompt’s', async () => {
+    const backgroundTurn = {
+      turnId: 'notification-1',
+      taskId: 'task',
+      kind: 'agent' as const,
+      startedAt: 1000,
+    };
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = {
+      sessionId: 'session',
+      promptActive: true,
+      activePromptId: 'user-1',
+      backgroundTurn,
+      events: { publish },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map<string, unknown>(),
+    };
+    const mediator = new MultiClientPermissionMediator('first-responder', {
+      emit: () => {},
+      audit: {
+        recordRequested: () => {},
+        recordVoted: () => {},
+        recordForbidden: () => {},
+        recordResolved: () => {},
+        recordTimeout: () => {},
+      },
+      now: () => Date.now(),
+      votersForSession: () => new Set<string>(),
+    });
+    const client = new BridgeClient(
+      (() => entry) as never,
+      () => undefined,
+      mediator,
+      0,
+      Infinity,
+    );
+
+    const turnApproval = client.requestPermission({
+      sessionId: 'session',
+      _meta: { backgroundTurn },
+      toolCall: { toolCallId: 'call-bg', title: 'run', kind: 'execute' },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+    });
+    const promptApproval = client.requestPermission({
+      sessionId: 'session',
+      toolCall: { toolCallId: 'call-fg', title: 'run', kind: 'execute' },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+    });
+    expect(entry.pendingPermissionIds.size).toBe(2);
+
+    client.finishBackgroundTurn('session', 'notification-1', 'end_turn');
+
+    await expect(turnApproval).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(entry.pendingPermissionIds.size).toBe(1);
+    expect(entry.pendingInteractions.size).toBe(1);
+    // The live prompt's approval stays pending for its own lifecycle.
+    mediator.forgetSession('session');
+    await expect(promptApproval).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(entry.pendingPermissionIds.size).toBe(0);
   });
 });

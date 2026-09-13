@@ -1477,6 +1477,14 @@ class TodoStopGuardClaimTimeoutError extends Error {
   }
 }
 
+class BackgroundTurnAdmissionTimeoutError extends Error {
+  constructor() {
+    super(
+      `background turn admission got no response within ${MID_TURN_QUEUE_DRAIN_TIMEOUT_MS}ms`,
+    );
+  }
+}
+
 export interface BackgroundNotificationQueueItem {
   sourceTurnId?: string;
   displayText: string;
@@ -10679,21 +10687,37 @@ export class Session implements SessionContext {
             return;
           }
           let admission: Record<string, unknown> | undefined;
+          let admissionTimeoutHandle: NodeJS.Timeout | undefined;
           try {
-            admission = await this.client.extMethod('_qwencode/start_turn', {
-              sessionId: this.sessionId,
-              source: 'background_notification',
-              ...turn,
-              ...(this.lastCompletedRpcPromptId
-                ? { afterPromptId: this.lastCompletedRpcPromptId }
-                : {}),
-            });
+            // The admission RPC is request-shaped: a host that silently drops
+            // unknown ext methods never settles it, so without the deadline
+            // the await would wedge the notification pipeline, the next user
+            // prompt, and the settle/close loop. A timeout rethrows into the
+            // outer catch, which retains the item via #deferBackgroundAdmission.
+            admission = await Promise.race([
+              this.client.extMethod('_qwencode/start_turn', {
+                sessionId: this.sessionId,
+                source: 'background_notification',
+                ...turn,
+                ...(this.lastCompletedRpcPromptId
+                  ? { afterPromptId: this.lastCompletedRpcPromptId }
+                  : {}),
+              }),
+              new Promise<never>((_, reject) => {
+                admissionTimeoutHandle = setTimeout(
+                  () => reject(new BackgroundTurnAdmissionTimeoutError()),
+                  MID_TURN_QUEUE_DRAIN_TIMEOUT_MS,
+                );
+              }),
+            ]);
           } catch (error) {
             const code =
               error && typeof error === 'object' && 'code' in error
                 ? error.code
                 : undefined;
             if (code !== -32601) throw error;
+          } finally {
+            clearTimeout(admissionTimeoutHandle);
           }
           if (admission?.['accepted'] === false) {
             this.#deferBackgroundAdmission(item);
