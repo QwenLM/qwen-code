@@ -412,6 +412,81 @@ describe('e2e workflow', () => {
     });
   });
 
+  describe('npm ci retry', () => {
+    // Run 34700339334 died at the build job's bare `npm ci` before any test
+    // ran — the same install reproduces clean at that commit, so the failure
+    // was a transient the tree could not explain — and every leg behind
+    // `needs: [build]` went down with it. repo-hygiene.yml and
+    // qwen-autofix.yml already wrap their installs in this exact bounded
+    // retry; a regression to a bare `npm ci` is silent until the next
+    // transient reddens a main run, so pin the shape on every install step.
+    const installSteps = Object.entries(yml.jobs).flatMap(([jobName, job]) =>
+      (job.steps ?? [])
+        .filter((step) => step.name === 'Install dependencies')
+        .map((step) => [jobName, step]),
+    );
+
+    it('wraps every Install dependencies step in the bounded retry', () => {
+      // Six jobs install: the build, the three artifact-fed legs, the
+      // nightly legs, and the web-shell browser gate. A new job adding a
+      // bare `npm ci` must fail here, not in a main-branch run.
+      expect(installSteps.map(([jobName]) => jobName).sort()).toEqual([
+        'build',
+        'e2e-interactive-opentui',
+        'e2e-test-linux',
+        'e2e-test-macos',
+        'isolated-nightly',
+        'web-shell-browser-regression',
+      ]);
+      // Fragment pins, not a byte-exact body: a formatting-only rewrite or
+      // a post-install line appended after `done` must stay green (the repo
+      // pins this same recipe in qwen-autofix.yml by fragment), while
+      // dropping the loop, the backoff, or the failure exit still reddens.
+      for (const [jobName, step] of installSteps) {
+        expect(step.run, jobName).toContain('for attempt in 1 2 3; do');
+        expect(step.run, jobName).toContain(
+          'if npm ci --prefer-offline --no-audit --progress=false; then',
+        );
+        expect(step.run, jobName).toContain('exit 1');
+        expect(step.run, jobName).toContain('sleep $((attempt * 15))');
+        expect(step.run, jobName).toContain('break');
+        expect(step.run, jobName).toContain(
+          'if [[ "${attempt}" == "3" ]]; then',
+        );
+        expect(step.run, jobName).toContain(
+          'if [[ "${attempt}" != "1" ]]; then',
+        );
+        // The ::warning:: keeps an absorbed install transient countable even
+        // though the recovered job concludes green — the same rule the
+        // upload-artifact retry's announce step follows. Deleting the echo
+        // from any one copy must red this loop.
+        expect(step.run, jobName).toContain('echo "::warning::npm ci');
+        // The defect under test is a bare `npm ci` line outside the loop.
+        expect(step.run, jobName).not.toMatch(/^\s*npm ci/m);
+      }
+    });
+
+    it('retries every npm ci run body, whatever the step is named', () => {
+      // The name-keyed collection above misses an install hiding under any
+      // other step name — repo-hygiene.yml and qwen-autofix.yml call theirs
+      // 'Install dependencies and build' — so scan the command itself.
+      // Command position, not a substring anywhere in the body: a `#`
+      // comment mentioning npm ci inside a run block must not red this, and
+      // the loop marker matches the retry's shape, not its attempt list.
+      const bareInstalls = Object.entries(yml.jobs).flatMap(([jobName, job]) =>
+        (job.steps ?? [])
+          .filter(
+            (step) =>
+              typeof step.run === 'string' &&
+              /^\s*npm ci\b/m.test(step.run) &&
+              !/for attempt in [0-9 ]+; do/.test(step.run),
+          )
+          .map((step) => `${jobName}/${step.name ?? '(unnamed)'}`),
+      );
+      expect(bareInstalls).toEqual([]);
+    });
+  });
+
   it('routes Linux E2E scratch files away from /tmp', () => {
     expect(e2eRunScript).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
     expect(e2eRunScript).toContain('rm -rf "$QWEN_CI_TMPDIR"');
