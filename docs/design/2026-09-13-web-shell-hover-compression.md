@@ -15,17 +15,17 @@ change the compression algorithm, daemon API, or shared operation lifecycle.
 Use the existing scoped nonmodal Popover primitive for an interactive card.
 Hover opens it after 300 ms; focus opens it without a delay. Moving between the
 ring and card has a short close grace period. Hover does not steal editor focus
-or fetch context. Keep the card open while focus is inside it. Leaving both
+or fetch context. Require pointer movement to start the hover delay, and suppress focus-open during a pointer click so the snapshot action does not flash the card. Keep the card open while focus is inside it. Leaving both
 surfaces, moving focus outside, clicking outside, or Escape dismisses it.
 
 The ring retains its snapshot click action. Down Arrow, or Tab while its card
-is open, moves keyboard focus into the actions. Escape from the card returns
+is open, moves keyboard focus into enabled actions. If none is enabled, retain native Tab navigation. Escape from the card returns
 focus to the ring without reopening it. Use an accessible dialog name and
-expanded/controls attributes. Preserve portal-root scoping and existing theme
+expanded/controls attributes and a concise localized used/window description on the ring. Loop Tab at the enabled action boundaries using the actual focused element inside shadow portals; if all actions become unavailable after entry, Tab dismisses the card. View details also restores ring focus unless the user or panel has already selected another target. Preserve portal-root scoping and existing theme
 and ring attributes; reuse stable CSS and shared buttons.
 
 The card retains exact used, total, and remaining counts, a proportional meter,
-and severity colors. Add explicit Compress and View details buttons. Unknown
+and severity colors. Preserve the existing secondary text and error colors, mapping the card’s semantic tokens to those local theme variables. Add explicit Compress and View details buttons. Unknown
 counts do not prevent valid live-session actions. View details opens the right
 context panel for the same session and closes the card; it does not add a
 transcript snapshot.
@@ -39,7 +39,7 @@ completion result. Active work, plan preparation, approval, recovery, Goal state
 and missing builtin command metadata keep their current restrictions.
 
 Display pending and settled feedback with the same wording and semantics as the
-right panel. Completion already synchronizes the live counter. Failure,
+right panel. Closing the card dismisses its settled feedback; an operation that finishes after closing remains available on the next open. Previously settled feedback is not replayed when the card’s owner remounts. The panel keeps its existing Refresh dismissal. Completion already synchronizes the live counter. Failure,
 cancellation, or a changed connection must never claim refreshed usage. The
 View details action provides the existing Refresh recovery path. Opening the
 card does not issue a read or retry a compression.
@@ -47,7 +47,7 @@ card does not issue a read or retry a compression.
 App opens main-session details through its existing panel action. SplitView
 forwards a pane detail callback independently of custom header rendering; each
 pane supplies its own session/actions and marks its tab to close with the pane.
-The hover card resets with its owning session. Old callbacks remain protected
+The hover card resets with its owning session. Composer shortcuts follow composer-toolbar visibility independently of `header.items`, which controls header actions only; keep the header defaults unchanged. Embedded side-task panes without a detail-panel opener keep their read-only summary and snapshot action, without introducing a compression action with no Refresh recovery path. Old callbacks remain protected
 by the existing compression hook's session/workspace and pending guards.
 
 ## Implementation areas

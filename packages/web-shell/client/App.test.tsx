@@ -14989,6 +14989,28 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('keeps composer controls stable when an unrelated pane registers or leaves', async () => {
+    renderApp({ splitSessionIds: ['s1'] });
+    await flush();
+    const before = testState.latestChatEditorProps!.contextUsageControls;
+    expect(before).toBeDefined();
+    let unregister!: () => void;
+    act(() => {
+      unregister = testState.latestSplitViewProps!
+        .registerContextUsageControls!({
+        sessionId: 's1',
+        canCompress: false,
+        compressing: false,
+        compress: vi.fn().mockResolvedValue(undefined),
+        captureOwner: () => ({ isCurrent: () => true }),
+        getContextUsage: mockPaneSessionActions.getContextUsage,
+      });
+    });
+    expect(testState.latestChatEditorProps!.contextUsageControls).toBe(before);
+    act(() => unregister());
+    expect(testState.latestChatEditorProps!.contextUsageControls).toBe(before);
+  });
+
   it('suppresses stale composer context usage on error and restores it on reconnect', async () => {
     const usageConnection = mockConnection as typeof mockConnection & {
       tokenCount?: number;

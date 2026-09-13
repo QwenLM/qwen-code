@@ -964,6 +964,32 @@ describe('ChatEditor context usage ring', () => {
     expect(ring(noWindow)).toBeNull();
   });
 
+  it('discards a pending hover when the owning session changes', async () => {
+    vi.useFakeTimers();
+    try {
+      const props = {
+        sessionId: 'session-a',
+        tokenCount: 100,
+        contextWindow: 1000,
+        onShowContextUsage: vi.fn(),
+      };
+      const container = renderChatEditor(props);
+      act(() =>
+        ring(container)!.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true }),
+        ),
+      );
+      rerenderChatEditor(container, { ...props, sessionId: 'session-b' });
+      expect(ring(container)).not.toBeNull();
+      await act(async () => vi.advanceTimersByTimeAsync(350));
+      expect(
+        document.querySelector('[data-web-shell-context-popover]'),
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps live hover actions available for an always-visible ring with unknown counts', async () => {
     const compress = vi.fn().mockResolvedValue(undefined);
     const onOpenContextUsage = vi.fn();
@@ -1045,6 +1071,11 @@ describe('ChatEditor context usage ring', () => {
         .getElementById(ring(container)!.getAttribute('aria-controls')!)
         ?.getAttribute('aria-label'),
     ).toBe('Context Usage');
+    expect(
+      document.getElementById(
+        ring(container)!.getAttribute('aria-describedby')!,
+      )?.textContent,
+    ).toBe('53,600 of 1,000,000 tokens used');
   });
 
   it('shows zero remaining capacity when usage exceeds the context window', async () => {

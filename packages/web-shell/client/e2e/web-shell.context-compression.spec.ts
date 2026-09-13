@@ -123,6 +123,10 @@ for (const theme of ['light', 'dark']) {
     await expect(editor).toBeFocused();
     expect(reads).toBe(readsBeforeHover);
     expect(submitted).toHaveLength(0);
+    await page.mouse.move(5, 5);
+    await expect(hover).not.toBeVisible();
+    await ring.hover();
+    await expect(hover).toBeVisible();
     await ring.focus();
     await ring.press('Escape');
     await ring.press('ArrowDown');
@@ -137,6 +141,10 @@ for (const theme of ['light', 'dark']) {
     await expect(firstAction).toBeFocused();
     await firstAction.press('Tab');
     await expect(secondAction).toBeFocused();
+    await secondAction.press('Tab');
+    await expect(firstAction).toBeFocused();
+    await firstAction.press('Shift+Tab');
+    await expect(secondAction).toBeFocused();
     await secondAction.press('Shift+Tab');
     await expect(firstAction).toBeFocused();
     expect(
@@ -149,10 +157,12 @@ for (const theme of ['light', 'dark']) {
     await expect(hover).not.toBeVisible();
     await expect(editor).toBeFocused();
     await ring.hover();
-    await hover
-      .getByRole('button', { name: 'View details', exact: true })
-      .click();
+    await ring.focus();
+    await ring.press('ArrowDown');
+    await firstAction.press('Tab');
+    await secondAction.press('Enter');
     await expect(hover).not.toBeVisible();
+    await expect(ring).toBeFocused();
     await expect(
       page
         .getByRole('group', { name: 'Context Usage', exact: true })
@@ -180,10 +190,21 @@ for (const theme of ['light', 'dark']) {
     await expect(ring).toBeFocused();
     await ring.press('ArrowDown');
     await expect(hoverCompress).toBeFocused();
-    await hoverCompress.evaluate((button: HTMLButtonElement) => {
-      button.click();
-      button.click();
+    await page.evaluate(() => {
+      window.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          document.body.dataset.contextHostEnter = 'true';
+        }
+      });
     });
+    await hoverCompress.press('Enter');
+    await expect(hover).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('body')).not.toHaveAttribute(
+      'data-context-host-enter',
+      'true',
+    );
     await expect.poll(() => submitted.length).toBe(1);
     expect(submitted[0]).toMatchObject({
       prompt: [{ type: 'text', text: '/compress' }],
@@ -218,6 +239,10 @@ for (const theme of ['light', 'dark']) {
     await expect(panel.getByRole('status')).toHaveCSS('color', feedbackColor);
     await expect.poll(() => reads).toBeGreaterThan(readsBeforeCompletion);
     await expect(ring).toHaveAttribute('aria-label', '20.0% context used');
+    await expect(hover).toContainText('20,000 tokens');
+    await expect(hover).toContainText(
+      'Compression completed. Context usage refreshed.',
+    );
     await expect(panel).toContainText('Remaining 80.0k');
     await expect(historical.locator('[class*="percentage"]')).toHaveText(
       '64.0%',
@@ -234,6 +259,7 @@ for (const theme of ['light', 'dark']) {
     await compress.click();
     await expect.poll(() => submitted.length).toBe(2);
     await ring.hover();
+    await expect(hover).toHaveAttribute('data-state', 'open');
     await expect(
       hover.getByRole('button', { name: 'Compressing…', exact: true }),
     ).toBeDisabled();
@@ -255,6 +281,7 @@ for (const theme of ['light', 'dark']) {
     await expect(hover.getByRole('alert')).toHaveText(
       'Compression failed. You can try again.',
     );
+    await expect(hover.getByRole('alert')).toHaveCSS('color', errorColor);
     await hover
       .getByRole('button', { name: 'View details', exact: true })
       .click();

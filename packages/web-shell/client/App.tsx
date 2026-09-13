@@ -17543,6 +17543,9 @@ export function App({
         .catch(() => undefined);
     }
   }, [primaryContextControls, paneContextControls, compressionResults]);
+  const reconciledContextControls = useRef(
+    new WeakMap<ContextUsageControls, ContextUsageControls>(),
+  );
   const contextUsageControls = useMemo(() => {
     const live =
       primaryContextControls &&
@@ -17554,18 +17557,21 @@ export function App({
           }
         : paneContextControls;
     return Object.fromEntries(
-      Object.entries(live).map(([id, controls]) => [
-        id,
-        {
-          ...controls,
-          result: controls.compressing
-            ? undefined
-            : controls.result &&
-                !observedCompressionResults.current.has(controls.result)
-              ? controls.result
-              : (compressionResults[id] ?? controls.result),
-        },
-      ]),
+      Object.entries(live).map(([id, controls]) => {
+        const result = controls.compressing
+          ? undefined
+          : controls.result &&
+              !observedCompressionResults.current.has(controls.result)
+            ? controls.result
+            : (compressionResults[id] ?? controls.result);
+        const previous = reconciledContextControls.current.get(controls);
+        const reconciled =
+          previous && previous.result === result
+            ? previous
+            : { ...controls, result };
+        reconciledContextControls.current.set(controls, reconciled);
+        return [id, reconciled];
+      }),
     );
   }, [
     mainView,

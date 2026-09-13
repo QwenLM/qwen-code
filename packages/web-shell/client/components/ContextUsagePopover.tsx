@@ -34,6 +34,7 @@ export function ContextUsagePopover({
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  const [dismissedResult, setDismissedResult] = useState(controls?.result);
   const id = useId();
   const anchorRef = useRef<ComponentRef<typeof PopoverAnchor>>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -46,6 +47,7 @@ export function ContextUsagePopover({
   const focusOnOpen = useRef(false);
   const restoreFocus = useRef(false);
   const suppressFocusOpen = useRef(false);
+  const pointerDown = useRef(false);
   const known = tokenCount > 0 && contextWindow > 0;
   const percentage = known ? (tokenCount / contextWindow) * 100 : 0;
 
@@ -57,9 +59,14 @@ export function ContextUsagePopover({
     [],
   );
   const cancelClose = () => clearTimeout(closeTimer.current);
-  const close = () => {
+  const cancelOpen = () => {
     clearTimeout(openTimer.current);
+    openTimer.current = undefined;
+  };
+  const close = () => {
+    cancelOpen();
     cancelClose();
+    setDismissedResult(controls?.result);
     setOpen(false);
   };
   const containsFocus = (target: EventTarget | null) =>
@@ -74,24 +81,27 @@ export function ContextUsagePopover({
     return active;
   };
   const closeAfterDelay = () => {
-    clearTimeout(openTimer.current);
+    cancelOpen();
     cancelClose();
     closeTimer.current = setTimeout(() => {
       if (!containsFocus(getActiveElement())) close();
     }, 150);
   };
   const enterActions = () => {
-    clearTimeout(openTimer.current);
+    if (!controls?.canCompress && !onOpenDetails) return false;
+    cancelOpen();
     cancelClose();
     if (contentRef.current) {
       const first = contentRef.current.querySelector<HTMLButtonElement>(
         'button:not(:disabled)',
       );
-      (first ?? contentRef.current)?.focus();
+      if (!first) return false;
+      first.focus();
     } else {
       focusOnOpen.current = true;
     }
     setOpen(true);
+    return true;
   };
 
   return (
@@ -105,34 +115,57 @@ export function ContextUsagePopover({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? id : undefined}
-        onPointerEnter={(event) => {
+        aria-describedby={known ? `${id}-description` : undefined}
+        onPointerMove={(event) => {
           if (event.pointerType === 'touch') return;
           cancelClose();
-          clearTimeout(openTimer.current);
-          openTimer.current = setTimeout(() => setOpen(true), 300);
+          if (open || openTimer.current !== undefined) return;
+          openTimer.current = setTimeout(() => {
+            openTimer.current = undefined;
+            setOpen(true);
+          }, 300);
         }}
         onPointerLeave={closeAfterDelay}
+        onPointerDown={() => {
+          pointerDown.current = true;
+          cancelOpen();
+        }}
+        onPointerCancel={() => {
+          pointerDown.current = false;
+        }}
         onFocus={() => {
-          clearTimeout(openTimer.current);
+          if (suppressFocusOpen.current) return;
+          cancelOpen();
           cancelClose();
-          if (!suppressFocusOpen.current) setOpen(true);
+          if (!pointerDown.current) setOpen(true);
         }}
         onBlur={(event) => {
+          pointerDown.current = false;
           if (!containsFocus(event.relatedTarget)) closeAfterDelay();
         }}
-        onClick={close}
+        onClick={() => {
+          pointerDown.current = false;
+          close();
+        }}
         onKeyDown={(event) => {
           if (
             event.key === 'ArrowDown' ||
             (open && event.key === 'Tab' && !event.shiftKey)
           ) {
-            event.preventDefault();
-            enterActions();
+            if (enterActions()) event.preventDefault();
           } else if (event.key === 'Escape') close();
         }}
       >
         {children}
       </PopoverAnchor>
+      {known && (
+        <span id={`${id}-description`} className="sr-only">
+          {t('contextUsage.accessibleUsage', {
+            used: tokenCount.toLocaleString(),
+            total: contextWindow.toLocaleString(),
+          })}
+        </span>
+      )}
       <PopoverContent
         id={id}
         ref={contentRef}
@@ -171,7 +204,27 @@ export function ContextUsagePopover({
           if (containsFocus(event.target)) event.preventDefault();
         }}
         onKeyDown={(event) => {
-          if (event.key === 'Tab') event.stopPropagation();
+          if (['Tab', 'Enter', ' ', 'ArrowUp', 'ArrowDown'].includes(event.key))
+            event.stopPropagation();
+          if (event.key === 'Tab') {
+            const actions =
+              event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                'button:not(:disabled)',
+              );
+            if (actions.length === 0) {
+              event.preventDefault();
+              restoreFocus.current = true;
+              close();
+              return;
+            }
+            const first = actions[0];
+            const last = actions[actions.length - 1];
+            // Radix sees the portal host as activeElement in a shadow root.
+            if (getActiveElement() === (event.shiftKey ? first : last)) {
+              event.preventDefault();
+              (event.shiftKey ? last : first).focus();
+            }
+          }
         }}
         onPointerEnter={cancelClose}
         onPointerLeave={closeAfterDelay}
@@ -210,10 +263,12 @@ export function ContextUsagePopover({
             </dl>
           </>
         )}
-        <ContextCompressionFeedback
-          controls={controls}
-          className="text-muted-foreground [&[role=alert]]:text-destructive"
-        />
+        {(controls?.compressing || controls?.result !== dismissedResult) && (
+          <ContextCompressionFeedback
+            controls={controls}
+            className="text-muted-foreground [&[role=alert]]:text-destructive"
+          />
+        )}
         {(controls || onOpenDetails) && (
           <div className="flex items-center gap-2 border-t pt-2">
             {controls && (
@@ -229,7 +284,11 @@ export function ContextUsagePopover({
                   variant="outline"
                   size="sm"
                   disabled={!controls.canCompress}
-                  onClick={() => void controls.compress()}
+                  onClick={() => {
+                    if (contentRef.current?.contains(getActiveElement()))
+                      contentRef.current.focus();
+                    void controls.compress();
+                  }}
                 >
                   {t(
                     controls.compressing
@@ -245,6 +304,9 @@ export function ContextUsagePopover({
                 variant="ghost"
                 size="sm"
                 onClick={() => {
+                  restoreFocus.current = Boolean(
+                    contentRef.current?.contains(getActiveElement()),
+                  );
                   close();
                   onOpenDetails();
                 }}
@@ -255,7 +317,7 @@ export function ContextUsagePopover({
           </div>
         )}
         {showSnapshotHint && (
-          <div className="text-muted-foreground">
+          <div className={styles.contextTooltipHint}>
             {t('contextUsage.viewInConversation')}
           </div>
         )}

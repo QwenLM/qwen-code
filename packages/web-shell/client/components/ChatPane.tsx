@@ -1437,6 +1437,10 @@ export function ChatPane({
     clearFollowup();
     if (connection.sessionId) onBeforeContextCompress?.(connection.sessionId);
   }, [clearFollowup, connection.sessionId, onBeforeContextCompress]);
+  const handleOpenContextUsage = useCallback(() => {
+    if (connection.sessionId)
+      onOpenContextUsage?.(connection.sessionId, actions);
+  }, [actions, connection.sessionId, onOpenContextUsage]);
   const contextUsageControls = useContextUsageControls({
     connection,
     actions,
@@ -1801,13 +1805,12 @@ export function ChatPane({
             onShowContextUsage={
               contextUsageAvailable ? handleShowContextUsage : undefined
             }
-            contextUsageControls={contextUsageControls}
+            contextUsageControls={
+              onOpenContextUsage ? contextUsageControls : undefined
+            }
             onOpenContextUsage={
               contextUsageAvailable && onOpenContextUsage
-                ? () => {
-                    if (connection.sessionId)
-                      onOpenContextUsage(connection.sessionId, actions);
-                  }
+                ? handleOpenContextUsage
                 : undefined
             }
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
