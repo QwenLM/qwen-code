@@ -661,76 +661,39 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
-  it('copies standalone PWA assets into the CLI bundle', () => {
+  it('copies Computer Use platform references to both CLI and core distributions', () => {
     const rootDir = createFixtureRoot();
-    stubConsole();
-    for (const [file, content] of [
-      ['index.html', '<!doctype html>'],
-      ['manifest.webmanifest', '{"start_url":"/"}'],
-      ['service-worker.js', 'self.addEventListener("fetch", () => {});'],
-      ['assets/pwa-icon-192-v1.png', 'icon'],
-    ]) {
-      writeFile(rootDir, `packages/web-shell/dist/${file}`, content);
+    const coreDir = path.join(rootDir, 'packages', 'core');
+    const resources = [
+      'SKILL.md',
+      'references/macos.md',
+      'references/windows-linux.md',
+    ];
+    for (const resource of resources) {
+      writeFile(
+        rootDir,
+        `packages/core/src/skills/bundled/computer-use/${resource}`,
+        resource,
+      );
     }
+    stubConsole();
     copyBundleAssets({ root: rootDir });
-    expect(
-      readFileSync(
-        path.join(rootDir, 'dist/web-shell/manifest.webmanifest'),
-        'utf8',
-      ),
-    ).toContain('"start_url":"/"');
-    expect(
-      readFileSync(
-        path.join(rootDir, 'dist/web-shell/service-worker.js'),
-        'utf8',
-      ),
-    ).toContain('addEventListener');
-    expect(
-      existsSync(
-        path.join(rootDir, 'dist/web-shell/assets/pwa-icon-192-v1.png'),
-      ),
-    ).toBe(true);
-  });
-
-  it.each([
-    ['both PWA files', []],
-    ['the manifest', ['service-worker.js']],
-    ['the service worker', ['manifest.webmanifest']],
-  ])('warns and skips Web Shell output missing %s', (_missing, publicFiles) => {
-    const rootDir = createFixtureRoot();
-    stubConsole();
-    writeFile(rootDir, 'packages/web-shell/dist/index.html', '<!doctype html>');
-    writeFile(rootDir, 'packages/web-shell/dist/assets/main.js', 'app');
-    for (const file of publicFiles) {
-      writeFile(rootDir, `packages/web-shell/dist/${file}`, 'public fixture');
-    }
-
-    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Warning: Web Shell assets not found'),
-    );
-    expect(existsSync(path.join(rootDir, 'dist', 'web-shell'))).toBe(false);
-  });
-
-  it.each(['manifest.webmanifest', 'service-worker.js'])(
-    'requires %s in release packages',
-    (file) => {
-      const rootDir = createFixtureRoot();
-      stubConsole();
-      createBundleArtifacts(rootDir);
-      rmSync(path.join(rootDir, 'dist/web-shell', file));
-      vi.spyOn(console, 'error').mockImplementation(() => {});
-      vi.spyOn(process, 'exit').mockImplementation((code) => {
-        throw new Error(`exit ${code}`);
-      });
-      expect(() => preparePackage({ rootDir })).toThrow('exit 1');
+    copyFiles({ root: coreDir });
+    for (const resource of resources) {
       expect(
-        console.error.mock.calls.some(([message]) =>
-          String(message).includes(file),
+        readFileSync(
+          path.join(rootDir, 'dist/bundled/computer-use', resource),
+          'utf8',
         ),
-      ).toBe(true);
-    },
-  );
+      ).toBe(resource);
+      expect(
+        readFileSync(
+          path.join(coreDir, 'dist/src/skills/bundled/computer-use', resource),
+          'utf8',
+        ),
+      ).toBe(resource);
+    }
+  });
 
   it('copies bundled skill scripts and references into the runtime dist', () => {
     const rootDir = createFixtureRoot();
@@ -1001,6 +964,45 @@ describe('package asset scripts', () => {
       readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
     );
     expect(distPackageJson.optionalDependencies.sharp).toBe('0.35.3');
+  });
+
+  it('derives every published node-pty pin from the core manifest', () => {
+    const rootDir = createFixtureRoot();
+    const corePath = path.join(rootDir, 'packages/core/package.json');
+    const core = JSON.parse(readFileSync(corePath, 'utf8'));
+    const pins = Object.fromEntries(
+      Object.entries(
+        JSON.parse(
+          readFileSync(
+            new URL('../../packages/core/package.json', import.meta.url),
+            'utf8',
+          ),
+        ).optionalDependencies,
+      )
+        .filter(([name]) => name.startsWith('@lydell/node-pty'))
+        .map(([name]) => [name, '1.2.0-test-pin']),
+    );
+    // The pin *count* is owned by conpty-host.test.ts as a deliberate human
+    // re-check tripwire; here a non-empty guard keeps `toEqual(pins)` honest
+    // without duplicating a number that fails before the code under test runs.
+    expect(Object.keys(pins).length).toBeGreaterThan(0);
+    core.optionalDependencies = pins;
+    writeFileSync(corePath, JSON.stringify(core));
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+
+    const published = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist/package.json'), 'utf8'),
+    );
+    expect(
+      Object.fromEntries(
+        Object.entries(published.optionalDependencies).filter(([name]) =>
+          name.startsWith('@lydell/node-pty'),
+        ),
+      ),
+    ).toEqual(pins);
   });
 
   it('rejects a locked sharp version outside the core declaration', () => {
@@ -1474,8 +1476,6 @@ describe('package asset scripts', () => {
     // Web Shell release gate (prepare-package.js verifyBundleArtifacts): the
     // published package must ship the UI, so the fixture provides it too.
     writeFile(rootDir, 'dist/web-shell/index.html', '<!doctype html>');
-    writeFile(rootDir, 'dist/web-shell/manifest.webmanifest', '{}');
-    writeFile(rootDir, 'dist/web-shell/service-worker.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'web-shell', 'assets'), {
       recursive: true,
     });

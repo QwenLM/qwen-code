@@ -186,10 +186,14 @@ export class LlmContentGenerator implements ContentGenerator {
         0.95,
       ),
       topK: getParameterValue<number>(configSamplingParams?.top_k, 'topK', 64),
-      maxOutputTokens: getParameterValue<number>(
-        configSamplingParams?.max_tokens,
-        'maxOutputTokens',
-      ),
+      maxOutputTokens:
+        configSamplingParams?.max_tokens !== undefined &&
+        requestConfig.maxOutputTokens !== undefined
+          ? Math.min(
+              configSamplingParams.max_tokens,
+              requestConfig.maxOutputTokens,
+            )
+          : (configSamplingParams?.max_tokens ?? requestConfig.maxOutputTokens),
       presencePenalty: getParameterValue<number>(
         configSamplingParams?.presence_penalty,
         'presencePenalty',
