@@ -50,6 +50,7 @@ import {
   DEFAULT_DEADLINE_SECONDS,
   budgetStopEntry,
   captureDeadline,
+  describeResumedWall,
   hasReviewDeadline,
   effectiveMinimumDeadlineSeconds,
   minimumDeadlineSeconds,
@@ -62,7 +63,10 @@ import {
   claimRetirementDegradeNote,
   clearBudgetStop,
   clearRoundStamps,
+  cheapestRebuildAdmissionSeconds,
   expectedAdmissionSeconds,
+  minutesPhrase,
+  wallLeftText,
   expectedRoundSeconds,
   readBudgetStop,
   readBudgetStopUnfenced,
@@ -523,6 +527,90 @@ describe('the pair admission price — a round launched beside an in-flight roun
         ),
       ).toBe(expected * DEFAULT_ROUND_SECONDS);
     }
+  });
+
+  it('prices a build whose round is not yet named at the least any round could cost', () => {
+    const p = plan();
+    // Nothing measured: the constant, whichever round it turns out to be.
+    expect(cheapestRebuildAdmissionSeconds(p, 1, {}, NOW_MS)).toBe(
+      DEFAULT_ROUND_SECONDS,
+    );
+    stampRound(p, 1, NOW_MS - 4_000_000);
+    stampRound(p, 2, NOW_MS - 1_000_000);
+    // `--round 1` excludes round 1's 3000-second span and prices round 2's
+    // open 1000; `--round 2` reaches past its own stamp to round 1's span
+    // extended to now (4000); a round after the last excludes nothing
+    // (3000). The least is what the waiver may assume.
+    expect(expectedAdmissionSeconds(p, 1, 1, {}, NOW_MS)).toBe(1000);
+    expect(expectedAdmissionSeconds(p, 2, 1, {}, NOW_MS)).toBe(4000);
+    expect(expectedAdmissionSeconds(p, 3, 1, {}, NOW_MS)).toBe(3000);
+    expect(cheapestRebuildAdmissionSeconds(p, 1, {}, NOW_MS)).toBe(1000);
+    // Round-less stamps name no round to exclude: round 1 alone is priced.
+    const q = plan();
+    stampRound(q, undefined, NOW_MS - 2_000_000);
+    expect(cheapestRebuildAdmissionSeconds(q, 1, {}, NOW_MS)).toBe(2000);
+    // Round 1 unstamped: pricing it excludes nothing (6450), and it is the
+    // FIRST stamped round whose exclusion drops the first span (1000).
+    const r = plan();
+    stampRound(r, 2, NOW_MS - 7_450_000);
+    stampRound(r, 3, NOW_MS - 1_000_000);
+    expect(expectedAdmissionSeconds(r, 1, 1, {}, NOW_MS)).toBe(6450);
+    expect(expectedAdmissionSeconds(r, 2, 1, {}, NOW_MS)).toBe(1000);
+    expect(expectedAdmissionSeconds(r, 3, 1, {}, NOW_MS)).toBe(7450);
+    expect(cheapestRebuildAdmissionSeconds(r, 1, {}, NOW_MS)).toBe(1000);
+  });
+
+  it('prices every round the stamps could make it — no shortcut orders them', () => {
+    // Excluding the only stamp falls back to the constant, above the
+    // measured open span: "no exclusion" (any unstamped k) is the least.
+    const lone = plan();
+    stampRound(lone, 2, NOW_MS - 1_267_000);
+    expect(expectedAdmissionSeconds(lone, 2, 1, {}, NOW_MS)).toBe(1800);
+    expect(cheapestRebuildAdmissionSeconds(lone, 1, {}, NOW_MS)).toBe(1267);
+    // In flight under the default pool: `--round 1` empties the predecessor
+    // set (constant), `--round 2` ends the window (2000), no exclusion
+    // prices round 1's closed span to round 2's admission (1700).
+    const flight = plan();
+    stampRound(flight, 1, NOW_MS - 2_000_000);
+    stampRound(flight, 2, NOW_MS - 300_000);
+    expect(expectedAdmissionSeconds(flight, 1, 1, {}, NOW_MS)).toBe(1800);
+    expect(expectedAdmissionSeconds(flight, 2, 1, {}, NOW_MS)).toBe(2000);
+    expect(expectedAdmissionSeconds(flight, 3, 1, {}, NOW_MS)).toBe(1700);
+    expect(cheapestRebuildAdmissionSeconds(flight, 1, {}, NOW_MS)).toBe(1700);
+    // Write order is not round order: a repair round appends round 1 after
+    // rounds 2 and 3. Excluding round 2 (a middle round by number, the
+    // first by time) merges nothing and drops the costliest span.
+    const repair = plan();
+    stampRound(repair, 2, NOW_MS - 7_450_000);
+    stampRound(repair, 3, NOW_MS - 3_000_000);
+    stampRound(repair, 1, NOW_MS - 500_000);
+    expect(expectedAdmissionSeconds(repair, 1, 1, {}, NOW_MS)).toBe(4450);
+    expect(expectedAdmissionSeconds(repair, 2, 1, {}, NOW_MS)).toBe(2500);
+    expect(expectedAdmissionSeconds(repair, 3, 1, {}, NOW_MS)).toBe(6950);
+    expect(cheapestRebuildAdmissionSeconds(repair, 1, {}, NOW_MS)).toBe(2500);
+    // A round-less stamp is priced but names no round: it stays in every
+    // candidate's set, and excluding round 1 leaves its span open to now.
+    const mixed = plan();
+    stampRound(mixed, undefined, NOW_MS - 3_863_000);
+    stampRound(mixed, 1, NOW_MS - 981_000);
+    expect(expectedAdmissionSeconds(mixed, 1, 1, {}, NOW_MS)).toBe(3863);
+    expect(expectedAdmissionSeconds(mixed, 2, 1, {}, NOW_MS)).toBe(2882);
+    expect(cheapestRebuildAdmissionSeconds(mixed, 1, {}, NOW_MS)).toBe(2882);
+  });
+
+  it('the round-1 price is not always the least: a one-slot pool doubles an in-flight estimate that excluding the in-flight round avoids', () => {
+    const p = plan();
+    const env = { QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '1' };
+    stampRound(p, 1, NOW_MS - 2_000_000);
+    stampRound(p, 2, NOW_MS - 1_500_000);
+    stampRound(p, 3, NOW_MS - 300_000); // still inside the in-flight window
+    // Priced for round 1: round 3 is in flight, so the pair price applies
+    // — round 2's 1200-second span, doubled by the one-slot pool. Priced
+    // for round 3 (the rebuild of the in-flight round): its own stamp is
+    // excluded, nothing is in flight, and round 2's span runs to now.
+    expect(expectedAdmissionSeconds(p, 1, 1, env, NOW_MS)).toBe(2400);
+    expect(expectedAdmissionSeconds(p, 3, 1, env, NOW_MS)).toBe(1500);
+    expect(cheapestRebuildAdmissionSeconds(p, 1, env, NOW_MS)).toBe(1500);
   });
 
   it('keeps the reserve on top of the pair price at the refusal boundary', () => {
@@ -1109,6 +1197,60 @@ describe('parseDeadlineOption — the flag grammar', () => {
         /--deadline must be a whole number of minutes or `none`/,
       );
     }
+    // The value is echoed back bounded — forty characters and a count —
+    // not reproduced in full.
+    expect(() => parseDeadlineOption('9'.repeat(310))).toThrow(
+      /got "9{40}"… \(310 characters\)$/,
+    );
+    expect(() => parseDeadlineOption('9'.repeat(310))).not.toThrow(/9{41}/);
+    expect(() => parseDeadlineOption('9'.repeat(40) + 'x')).toThrow(
+      /got "9{40}"… \(41 characters\)$/,
+    );
+    expect(() => parseDeadlineOption('9'.repeat(39) + 'x')).toThrow(
+      /got "9{39}x"$/,
+    );
+    // Counted in code points, so the count is what the operator typed.
+    expect(() => parseDeadlineOption('😀'.repeat(41))).toThrow(
+      /got "(?:😀){40}"… \(41 characters\)$/u,
+    );
+    expect(() => parseDeadlineOption('😀'.repeat(40))).toThrow(
+      /got "(?:😀){40}"$/u,
+    );
+    // A repeated flag arrives as an array: bounded too.
+    let message = '';
+    try {
+      parseDeadlineOption(['9'.repeat(310), '9'.repeat(310)]);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/got \["9{38}…$/);
+    expect(message.length).toBeLessThan(120);
+    // …and cut in code points there too: no lone surrogate at the cut.
+    let cut = '';
+    try {
+      parseDeadlineOption([`a${'😀'.repeat(45)}`, '5']);
+    } catch (err) {
+      cut = (err as Error).message;
+    }
+    expect(cut).toMatch(/got \["a(?:😀){37}…$/u);
+    expect(cut).not.toContain('\uFFFD');
+    // A value JSON cannot serialize (unreachable from yargs, which hands
+    // over strings, arrays and `false`) is still the usage error, never a
+    // serialization error.
+    expect(() => parseDeadlineOption(1n as unknown)).toThrow(
+      /must be a whole number of minutes or `none`, got 1$/,
+    );
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    expect(() => parseDeadlineOption(circular)).toThrow(
+      /must be a whole number of minutes or `none`, got \[object Object\]$/,
+    );
+    // …even one with no prototype to convert it with.
+    const bare = Object.create(null) as Record<string, unknown>;
+    bare['self'] = bare;
+    expect(() => parseDeadlineOption(bare)).toThrow(
+      /must be a whole number of minutes or `none`, got \[object Object\]$/,
+    );
     expect(() => parseDeadlineOption('9007199254740992')).toThrow(TypeError);
     expect(parseDeadlineOption('9007199254740991')).toEqual({
       seconds: 9007199254740991 * 60,
@@ -1127,10 +1269,10 @@ describe('parseDeadlineOption — the flag grammar', () => {
     // own reserve, which grows with it — so not an instruction) and the
     // shortest wall the rule admits, which is the number to reach for.
     expect(() => parseDeadlineOption('90')).toThrow(
-      /--deadline 90 cannot hold a convergence: two rounds at the 30-minute estimate plus the 30-minute reserve this wall would keep under the default rule need more than 90 minutes; the shortest wall that can hold one here is 91 minutes/,
+      /--deadline 90 cannot hold a convergence: two rounds at the 30-minute estimate plus the 30-minute reserve this wall would keep under the default rule need more than 90 minutes \(a longer wall keeps a larger reserve\); the shortest wall that can hold one here is 91 minutes/,
     );
     expect(() => parseDeadlineOption('60')).toThrow(
-      /plus the 20-minute reserve this wall would keep under the default rule need more than 80 minutes; the shortest wall that can hold one here is 91 minutes/,
+      /plus the 20-minute reserve this wall would keep under the default rule need more than 80 minutes \(a longer wall keeps a larger reserve\); the shortest wall that can hold one here is 91 minutes/,
     );
     expect(parseDeadlineOption('91')).toEqual({ seconds: 5460 });
     expect(() => parseDeadlineOption('50')).toThrow(TypeError);
@@ -1142,7 +1284,19 @@ describe('parseDeadlineOption — the flag grammar', () => {
     // THIS shell will accept under BOTH bars — never the ruling: 90 is
     // refused everywhere.
     expect(() => parseDeadlineOption('90', { [RESERVE_ENV]: '3000' })).toThrow(
-      /under the default rule need more than 90 minutes; the shortest wall that can hold one here is 111 minutes/,
+      /under the default rule need more than 90 minutes \(a longer wall keeps a larger reserve\); the shortest wall that can hold one here is 111 minutes/,
+    );
+    // The parenthetical appears only where the reserve really moves with
+    // the wall: not inside the floor band (a 30-minute wall keeps 1200, and
+    // so does 31) and not under a flat reserve override. At 60 minutes the
+    // next minute already lifts the reserve above the floor, so it shows.
+    expect(() => parseDeadlineOption('30')).toThrow(
+      /need more than 80 minutes; the shortest/,
+    );
+    expect(() =>
+      validateDeadlineFlag({ [RESERVE_ENV]: '4800' }, '120'),
+    ).toThrow(
+      /need more than 140 minutes; the shortest wall that can hold one here is 141 minutes/,
     );
     // A LOWERED reserve does not lower the figure below the default rule's
     // 91: the first bar still refuses 61..90, so 91 is what this shell
@@ -1513,6 +1667,276 @@ describe('resolveReviewDeadline — env, else the plan’s wall from the attempt
     // …and so does a run with no session id at all.
     expect(resolveReviewDeadline({}, p)?.epochSeconds).toBe(
       PLAN_CAPTURED_MS / 1000 + 3600,
+    );
+  });
+});
+
+describe('describeResumedWall — what a continuation is told about the wall it inherits', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function planWith(fields: Record<string, unknown>, atMs: number): string {
+    const dir = mkdtempSync(join(tmpdir(), 'deadline-resume-'));
+    dirs.push(dir);
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ srcDiffLines: 100, ...fields }));
+    backdatePlan(p, atMs);
+    return p;
+  }
+
+  it('names the wall, its source and what is left of it', () => {
+    // 100 minutes left on a 120-minute flag wall: above the reserve (2400)
+    // plus the round estimate (1800), so round 1 would be admitted.
+    const p = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 1200 * 1000,
+    );
+    expect(describeResumedWall({}, p, NOW_MS)).toBe(
+      "the plan's 120-minute wall (its --deadline) has 100 minutes left, dated from the plan's capture.",
+    );
+    const d = planWith(
+      { deadlineSeconds: 28_800, deadlineSource: 'default' },
+      NOW_MS - 600 * 1000,
+    );
+    expect(describeResumedWall({}, d, NOW_MS)).toContain(
+      "the plan's 480-minute wall (the tier default) has 470 minutes left",
+    );
+  });
+
+  it('says when what is left cannot admit round 1 — the round builder’s own question, asked before the fan-out', () => {
+    // 40 minutes left on a 120-minute flag wall: the reserve (2400) plus
+    // the round estimate (1800) is 4200 > 2400, so round 1 would be refused.
+    const p = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 4800 * 1000,
+    );
+    expect(describeResumedWall({}, p, NOW_MS)).toBe(
+      "the plan's 120-minute wall (its --deadline) has 40 minutes left, dated from the plan's capture, which is under the reserve plus the round estimate: the round builder will refuse the next reverse-audit round.",
+    );
+    // Seconds from running out read as "0 minutes left" only with the same
+    // warning attached; at the very second, and past it, "just ran out".
+    const edge = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 7197 * 1000,
+    );
+    expect(describeResumedWall({}, edge, NOW_MS)).toContain(
+      "has 0 minutes left, dated from the plan's capture, which is under",
+    );
+    const now = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 7200 * 1000,
+    );
+    expect(describeResumedWall({}, now, NOW_MS)).toContain(
+      'just ran out, dated',
+    );
+    const past = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 7203 * 1000,
+    );
+    expect(describeResumedWall({}, past, NOW_MS)).toContain(
+      'just ran out, dated',
+    );
+  });
+
+  it('says when the wall has run out and what the gates will do — before the fan-out is spent', () => {
+    const p = planWith(
+      { deadlineSeconds: 3600, deadlineSource: 'default' },
+      NOW_MS - 5400 * 1000,
+    );
+    expect(describeResumedWall({}, p, NOW_MS)).toBe(
+      "the plan's 60-minute wall (the tier default) ran out 30 minutes ago, dated from the plan's capture: the round builder will refuse every further reverse-audit round and the verify builder every shard.",
+    );
+  });
+
+  it('describes, never prescribes: the reader may be the orchestrator, which must neither drop --resume nor add --deadline', () => {
+    // SKILL.md forbids both remedies to the model (a fresh review destroys
+    // the worktree the resume just saved); they live in the user docs.
+    for (const at of [NOW_MS - 4800 * 1000, NOW_MS - 5400 * 1000]) {
+      const p = planWith({ deadlineSeconds: 3600, deadlineSource: 'flag' }, at);
+      const note = describeResumedWall({}, p, NOW_MS);
+      expect(note).not.toBeNull();
+      expect(note).not.toMatch(/--resume|--deadline none|fresh review/);
+    }
+  });
+
+  it('is silent when there is nothing to inherit: no wall, an epoch in force, or no attempt start', () => {
+    expect(describeResumedWall({}, planWith({}, NOW_MS), NOW_MS)).toBeNull();
+    const p = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 60 * 1000,
+    );
+    expect(
+      describeResumedWall({ [DEADLINE_ENV]: String(NOW_S + 99) }, p, NOW_MS),
+    ).toBeNull();
+    // …but a malformed epoch is no clock, so the plan's wall is described.
+    expect(
+      describeResumedWall({ [DEADLINE_ENV]: 'soon' }, p, NOW_MS),
+    ).toContain('119 minutes left');
+    const dir = mkdtempSync(join(tmpdir(), 'deadline-resume-'));
+    dirs.push(dir);
+    expect(
+      describeResumedWall({}, join(dir, 'missing.json'), NOW_MS),
+    ).toBeNull();
+  });
+
+  it('dates the wall from this session’s ledger entry, like the gates do', () => {
+    const p = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 7800 * 1000,
+    );
+    // Attempt 1's wall has run out; this session's entry renews it.
+    const session = { QWEN_CODE_SESSION_ID: 'sess-r' };
+    appendRunSession(p, session, NOW_MS - 600 * 1000);
+    expect(describeResumedWall(session, p, NOW_MS)).toContain(
+      "110 minutes left, dated from this session's first attempt",
+    );
+    // …and says which start it used: without an entry for this session the
+    // wall dates from the plan's capture, and the note says that instead.
+    expect(describeResumedWall({}, p, NOW_MS)).toContain(
+      "ran out 10 minutes ago, dated from the plan's capture",
+    );
+  });
+
+  it('prices this attempt’s rounds from this attempt’s stamps — a renewed wall is not refused on the dead attempt’s span', () => {
+    // A round-cap resume keeps the stamps. Captured 12h ago on an 8h
+    // default wall, rounds 1–3 admitted hourly and the attempt dead since;
+    // a new session's ledger entry renews the wall 50 minutes ago. Priced
+    // from the plan's capture the open span runs 9h and no wall admits it;
+    // priced from this attempt there is nothing measured yet.
+    const p = planWith(
+      { deadlineSeconds: 28_800, deadlineSource: 'default' },
+      NOW_MS - 12 * 3_600_000,
+    );
+    stampRound(p, 1, NOW_MS - 11 * 3_600_000);
+    stampRound(p, 2, NOW_MS - 10 * 3_600_000);
+    stampRound(p, 3, NOW_MS - 9 * 3_600_000);
+    const session = { QWEN_CODE_SESSION_ID: 'sess-cap' };
+    appendRunSession(p, session, NOW_MS - 3_000_000);
+    expect(expectedAdmissionSeconds(p, 1, 1, {}, NOW_MS)).toBe(9 * 3600);
+    expect(expectedAdmissionSeconds(p, 1, 1, session, NOW_MS)).toBe(
+      DEFAULT_ROUND_SECONDS,
+    );
+    expect(cheapestRebuildAdmissionSeconds(p, 1, session, NOW_MS)).toBe(
+      DEFAULT_ROUND_SECONDS,
+    );
+    expect(describeResumedWall(session, p, NOW_MS)).toBe(
+      "the plan's 480-minute wall (the tier default) has 430 minutes left, dated from this session's first attempt.",
+    );
+    expect(describeResumedWall({}, p, NOW_MS)).toContain(
+      "ran out 240 minutes ago, dated from the plan's capture",
+    );
+    // A stamp this attempt writes (after the entry) counts from then on.
+    stampRound(p, 4, NOW_MS - 700_000);
+    expect(expectedRoundSeconds(p, 5, NOW_MS, session)).toBe(700);
+    expect(expectedAdmissionSeconds(p, 5, 1, session, NOW_MS)).toBe(700);
+    // The in-flight window is read from this attempt's stamps too: a stamp
+    // from before the entry that happens to be recent is no predecessor
+    // in flight, so the pair price never rides on the dead attempt.
+    stampRound(p, 9, NOW_MS - 500_000);
+    const fresh = { QWEN_CODE_SESSION_ID: 'sess-fresh' };
+    appendRunSession(p, fresh, NOW_MS - 400_000);
+    expect(expectedAdmissionSeconds(p, 1, 1, fresh, NOW_MS)).toBe(
+      DEFAULT_ROUND_SECONDS,
+    );
+    // One stamp per round PER ATTEMPT: this attempt's rebuild of a round
+    // the dead attempt stamped is measured too — without the attempt in
+    // hand the guard would see the old stamp and leave the round unpriced.
+    stampRound(p, 1, NOW_MS - 300_000, fresh);
+    expect(expectedRoundSeconds(p, 2, NOW_MS, fresh)).toBe(600);
+    // …once per attempt: a second same-attempt admission of round 1 (a
+    // `--chunk` rebuild) writes nothing and moves no price.
+    stampRound(p, 1, NOW_MS - 250_000, fresh);
+    expect(readRoundStamps(p).filter((s) => s.round === 1)).toHaveLength(2);
+    expect(expectedRoundSeconds(p, 2, NOW_MS, fresh)).toBe(600);
+    stampRound(p, 2, NOW_MS - 60_000);
+    // …and without one it still dedupes on the whole file, as before.
+    expect(readRoundStamps(p).filter((s) => s.round === 2)).toHaveLength(1);
+  });
+
+  it('phrases what is left of the wall the same way on every line', () => {
+    expect(wallLeftText(4800)).toBe('80 minutes of the wall left');
+    expect(wallLeftText(60)).toBe('1 minute of the wall left');
+    expect(wallLeftText(66)).toBe('1.1 minutes of the wall left');
+    expect(wallLeftText(59)).toBe('under a minute of the wall left');
+    expect(wallLeftText(1)).toBe('under a minute of the wall left');
+    expect(wallLeftText(0)).toBe('the wall just ran out');
+    expect(wallLeftText(-59)).toBe('the wall just ran out');
+    expect(wallLeftText(-60)).toBe('the wall ran out 1 minute ago');
+    expect(wallLeftText(-7200)).toBe('the wall ran out 120 minutes ago');
+    expect(minutesPhrase(60)).toBe('1 minute');
+    expect(minutesPhrase(90)).toBe('1.5 minutes');
+  });
+
+  it('asks the verify gate its own question — a zero compose floor disables it, past the wall included', () => {
+    const spent = planWith(
+      { deadlineSeconds: 3600, deadlineSource: 'default' },
+      NOW_MS - 5400 * 1000,
+    );
+    expect(describeResumedWall({}, spent, NOW_MS)).toMatch(
+      /refuse every further reverse-audit round and the verify builder every shard\.$/,
+    );
+    expect(
+      describeResumedWall({ [COMPOSE_FLOOR_ENV]: '0' }, spent, NOW_MS),
+    ).toMatch(/refuse every further reverse-audit round\.$/);
+    // Left but under the reserve plus the round: the verify clause rides
+    // only when the floor would refuse a shard too (10 minutes left is
+    // under the 1200-second floor; 40 minutes is not).
+    const ten = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 6600 * 1000,
+    );
+    expect(describeResumedWall({}, ten, NOW_MS)).toMatch(
+      /refuse the next reverse-audit round and the verify builder every shard\.$/,
+    );
+    const forty = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 4800 * 1000,
+    );
+    expect(describeResumedWall({}, forty, NOW_MS)).toMatch(
+      /refuse the next reverse-audit round\.$/,
+    );
+  });
+
+  it('names the verify refusal even where the round builder admits — a reserve override below the compose floor', () => {
+    // RESERVE 0 with a 5000s floor: 61 minutes left clears the round gate
+    // (3673 ≥ 0 + 1800) and fails the verify gate (3673 ≤ 5000).
+    const env = { [RESERVE_ENV]: '0', [COMPOSE_FLOOR_ENV]: '5000' };
+    const p = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'default' },
+      NOW_MS - 3527 * 1000,
+    );
+    expect(describeResumedWall(env, p, NOW_MS)).toBe(
+      "the plan's 120-minute wall (the tier default) has 61.2 minutes left, dated from the plan's capture; the verify builder will refuse every shard.",
+    );
+    // Under the default reserve (2400) the round gate refuses the same
+    // state (3673 < 4200) and the verify gate admits (3673 > 1200).
+    expect(describeResumedWall({}, p, NOW_MS)).toMatch(
+      /under the reserve plus the round estimate: the round builder will refuse the next reverse-audit round\.$/,
+    );
+  });
+
+  it('counts one minute as one minute — and a minute and a half as minutes', () => {
+    const left = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 7140 * 1000,
+    );
+    expect(describeResumedWall({}, left, NOW_MS)).toContain(
+      'has 1 minute left,',
+    );
+    const ago = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 7260 * 1000,
+    );
+    expect(describeResumedWall({}, ago, NOW_MS)).toContain(
+      'ran out 1 minute ago,',
+    );
+    const half = planWith(
+      { deadlineSeconds: 7200, deadlineSource: 'flag' },
+      NOW_MS - 7110 * 1000,
+    );
+    expect(describeResumedWall({}, half, NOW_MS)).toContain(
+      'has 1.5 minutes left,',
     );
   });
 });

@@ -32,6 +32,7 @@ import {
   hasReviewDeadline,
   DEFAULT_DEADLINE_SECONDS,
   RESERVE_ENV,
+  COMPOSE_FLOOR_ENV,
 } from './lib/deadline.js';
 import { PREBUILD_BUDGET_S, PREBUILD_ENV } from './lib/prebuild.js';
 import type { MergeBaseResult } from './lib/merge-base.js';
@@ -896,9 +897,16 @@ describe('fetch-pr report assembly', () => {
     producerMocks.gitRaw.mockReturnValue(
       Buffer.from(makeDiff('src/huge.ts', 9000)),
     );
+    // Isolate the reserve / compose-floor overrides too: the shell-priced
+    // leg reads them from the ambient environment, and this repository's
+    // own review job exports a reserve.
     const before = process.env[DEADLINE_ENV];
+    const beforeReserve = process.env[RESERVE_ENV];
+    const beforeFloor = process.env[COMPOSE_FLOOR_ENV];
     try {
       delete process.env[DEADLINE_ENV];
+      delete process.env[RESERVE_ENV];
+      delete process.env[COMPOSE_FLOOR_ENV];
       producerMocks.writeFileSync.mockClear();
       const flagged = await reportFor({ deadline: '120' });
       expect(flagged.deadlineSeconds).toBe(7200);
@@ -914,6 +922,10 @@ describe('fetch-pr report assembly', () => {
     } finally {
       if (before === undefined) delete process.env[DEADLINE_ENV];
       else process.env[DEADLINE_ENV] = before;
+      if (beforeReserve === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = beforeReserve;
+      if (beforeFloor === undefined) delete process.env[COMPOSE_FLOOR_ENV];
+      else process.env[COMPOSE_FLOOR_ENV] = beforeFloor;
     }
   });
   it('refuses a malformed --deadline before any side effect', async () => {
@@ -4418,7 +4430,7 @@ describe('fetch-pr --resume', () => {
       // The grammar and the default rule still rule on a resume — and the
       // message's figure is the default rule's, the only bar applied here.
       await expect(run({ deadline: '90' })).rejects.toThrow(
-        /under the default rule need more than 90 minutes; the shortest wall that can hold one here is 91 minutes/,
+        /under the default rule need more than 90 minutes \(a longer wall keeps a larger reserve\); the shortest wall that can hold one here is 91 minutes/,
       );
     } finally {
       if (before === undefined) delete process.env[RESERVE_ENV];
@@ -4457,6 +4469,9 @@ describe('fetch-pr --resume', () => {
         /Cannot resume PR #42 \(head-moved\); the fresh review it falls through to refuses --deadline: .*shortest wall that can hold one here is 141 minutes/,
       );
       expect(reportWritten()).toBe(false);
+      // The destroyer itself: `cleanStale` frees the prior attempt's tree
+      // through `releaseWorktree` — the one call this test's name is about.
+      expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
       const gitCalls = producerMocks.git.mock.calls.map((c) => String(c[0]));
       expect(gitCalls).not.toContain('fetch');
       expect(gitCalls).not.toContain('worktree');
@@ -4473,6 +4488,24 @@ describe('fetch-pr --resume', () => {
   });
 
   it('says so when a --deadline rides a resume — the plan is not rewritten, so the flag cannot land', async () => {
+    // The inherited-wall notes are silent under a well-formed epoch, and
+    // this repository's own review job exports one: isolate it (and the
+    // reserve), or the case passes vacuously there and fails here.
+    const ambientEpoch = process.env[DEADLINE_ENV];
+    const ambientReserve = process.env[RESERVE_ENV];
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+    try {
+      await deadlineRidesAResume();
+    } finally {
+      if (ambientEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = ambientEpoch;
+      if (ambientReserve === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = ambientReserve;
+    }
+  });
+
+  async function deadlineRidesAResume(): Promise<void> {
     // The fixture plan records no wall (it predates the field, or was
     // captured with `--deadline none`): the note must say so, not assert a
     // wall the plan does not hold.
@@ -4485,6 +4518,10 @@ describe('fetch-pr --resume', () => {
     expect(err).toContain('--deadline is ignored on a resumed run');
     expect(err).toContain('the plan recorded no wall');
     expect(err).not.toContain('keeps the');
+    // The ledger is mocked away here, but with no wall to date there is
+    // nothing for the ledger note to say — it would contradict the line
+    // above.
+    expect(err).not.toContain('did not record this attempt');
 
     // A plan that DID record a wall names it, in minutes.
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
@@ -4508,6 +4545,92 @@ describe('fetch-pr --resume', () => {
       'the plan keeps the 480-minute default wall it recorded at capture',
     );
 
+    // A plan whose wall came from its own --deadline says so — the
+    // distinction the huge tier's reduction turns on.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT)
+        return prevReport({ deadlineSeconds: 14_400, deadlineSource: 'flag' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.writeStderrLine.mockClear();
+    await run({ deadline: '120' });
+    const flagNote = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(flagNote).toContain(
+      'the plan keeps the 240-minute wall its own --deadline recorded at capture',
+    );
+    expect(flagNote).not.toContain('default wall');
+    // The inherited-wall note rides the same resume: the fixture plan's
+    // mtime is a month old (the statSync mock), so the wall has run out and
+    // the note says so — and what to do — before any fan-out is spent.
+    expect(flagNote).toContain(
+      "the plan's 240-minute wall (its --deadline) ran out",
+    );
+    expect(flagNote).toContain(
+      'the round builder will refuse every further reverse-audit round',
+    );
+    // Information, not an instruction: the orchestrator reads this line.
+    expect(flagNote).not.toMatch(/drop --resume|--deadline none/);
+    // With a wall to date and the ledger mocked away, the resume says the
+    // attempt was not recorded — the wall dates from the first attempt.
+    expect(flagNote).toContain('did not record this attempt');
+
+    // "The environment's epoch takes precedence" only when the gates would
+    // honour it: a finite, positive value — never a malformed one.
+    const beforeEpoch = process.env[DEADLINE_ENV];
+    try {
+      for (const bad of ['soon', '0', '-5', '  ']) {
+        process.env[DEADLINE_ENV] = bad;
+        producerMocks.writeStderrLine.mockClear();
+        await run({ deadline: '120' });
+        const malformed = producerMocks.writeStderrLine.mock.calls
+          .map((c) => String(c[0]))
+          .join('\n');
+        expect(malformed).not.toContain('takes precedence');
+        // A malformed epoch is no clock: the plan's wall is described, and
+        // the ledger note rides with it exactly as under no epoch at all.
+        expect(malformed).toContain('did not record this attempt');
+        expect(malformed).toContain(
+          "the plan's 240-minute wall (its --deadline) ran out",
+        );
+      }
+      process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+      producerMocks.writeStderrLine.mockClear();
+      await run({ deadline: '120' });
+      const wallUnderEpoch = producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(wallUnderEpoch).toContain('takes precedence while it stands');
+      // A wall recorded but the epoch in force: the wall is not what
+      // bounds this continuation, so the ledger note has nothing to date.
+      expect(wallUnderEpoch).not.toContain('did not record this attempt');
+      // No wall recorded, epoch in force: the epoch bounds the continuation.
+      producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+        if (path === OUT) return prevReport();
+        if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+          return Buffer.from(DIFF_BYTES) as unknown as string;
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      producerMocks.writeStderrLine.mockClear();
+      await run({ deadline: '120' });
+      const noWallEpoch = producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(noWallEpoch).toContain(
+        "the plan recorded no wall; the environment's epoch bounds this continuation",
+      );
+      expect(noWallEpoch).not.toContain('round cap alone');
+      expect(noWallEpoch).not.toContain('did not record this attempt');
+    } finally {
+      if (beforeEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = beforeEpoch;
+    }
+
     // The default carries no such note: there is nothing being dropped.
     producerMocks.writeStderrLine.mockClear();
     await run();
@@ -4516,7 +4639,7 @@ describe('fetch-pr --resume', () => {
         .map((c) => String(c[0]))
         .join('\n'),
     ).not.toContain('--deadline is ignored');
-  });
+  }
 
   it('falls through to a fresh fetch when the head moved, and says so', async () => {
     producerMocks.gh.mockImplementation((...args: string[]) => {

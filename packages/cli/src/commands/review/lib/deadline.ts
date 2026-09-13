@@ -85,23 +85,28 @@ export const DEADLINE_ENV = 'QWEN_REVIEW_DEADLINE_EPOCH';
  *         stopped runs "before round 3" at 142–196 min, so it is below a
  *         healthy 3A run, and 6h is a thin margin over 293. 8h admits
  *         rounds until ~6.2h elapsed (the reserve plus the 30-minute
- *         round estimate must still remain at admission).
+ *         round-1 estimate must still remain at admission).
  *   3B    every POSTED run past ~4.5h was gate-stopped between rounds 3
  *         and 5 (270–337 min), two more were killed at the 6h wall with
  *         nothing posted, and the two that ran the cap of 5 out posted at
- *         328 and 333 min — a healthy 3B run is 5.5–8h. 12h.
+ *         328 and 333 min — a healthy 3B run is 5.5–8h. 12h admits rounds
+ *         until ~9.2h elapsed at a 90-minute round.
  *   huge  two of the four posted runs were stopped "before round 3" at
  *         the 6h wall, the others posted at 345 and 354 min; without an
  *         explicit clock the cap is 5 and a round is ~90 min, so a healthy
- *         run is ~10h or more. 16h.
+ *         run is ~10h or more. 16h admits rounds until ~13.2h elapsed.
  *
  * — 1.5–2× the longest healthy run: measured for 3A (293 min), PROJECTED
  * for 3B and huge from runs the CI wall itself cut (5.5–8h and ~10h are
  * inferences from where the gate stopped them, not observed finishes), in
- * whole hours a reader can hold in their head. 3A has no single CI budget:
- * its PRs straddle the 300-line band. Calibrated against the wall, not the round: the gate prices
- * rounds itself (#9243 is the size-aware first-round estimate that is still
- * open). An operator who knows better passes `--deadline`.
+ * whole hours a reader can hold in their head. The figure that bites is
+ * not the wall but the last admission — wall minus the reserve (a third,
+ * capped at 4800 s: 80 min on all three) minus the round estimate — and
+ * each of those sits above its tier's longest healthy run too. 3A has no
+ * single CI budget: its PRs straddle the 300-line band. Calibrated
+ * against the wall, not the round: the gate prices rounds itself (#9243 is
+ * the size-aware first-round estimate that is still open). An operator who
+ * knows better passes `--deadline`.
  */
 export const DEFAULT_DEADLINE_SECONDS: Readonly<Record<SizeTier, number>> = {
   small: 8 * 3600,
@@ -357,8 +362,10 @@ export function readRoundStamps(planPath: string): RoundStamp[] {
 }
 
 /**
- * Record an admission. One stamp per round: a per-chunk rebuild of a round
- * already admitted must not shrink the observed cost of the round before it.
+ * Record an admission. One stamp per round PER ATTEMPT: a per-chunk rebuild
+ * of a round already admitted must not shrink the observed cost of the
+ * round before it, while a dead attempt's stamp for the round (kept across
+ * a round-cap resume) must not hide this attempt's admission of it.
  * Write errors are swallowed for the same reason `recordPrompt` swallows
  * them — a read-only tmp dir must not stop a review being built.
  */
@@ -366,10 +373,20 @@ export function stampRound(
   planPath: string,
   round: number | undefined,
   nowMs: number = Date.now(),
+  env: NodeJS.ProcessEnv = {},
 ): void {
   try {
     const stamps = readRoundStamps(planPath);
-    if (round !== undefined && stamps.some((s) => s.round === round)) return;
+    // One per round PER ATTEMPT: a dead attempt's stamp for this round (kept
+    // across a round-cap resume) must not stop this attempt's admission of
+    // the same round from being measured — the pricers read only this
+    // attempt's stamps, and an unmeasured round prices at the constant.
+    if (
+      round !== undefined &&
+      attemptStamps(planPath, env).some((s) => s.round === round)
+    ) {
+      return;
+    }
     stamps.push({ round: round ?? null, atMs: nowMs });
     const dir = promptRecordDir(planPath);
     mkdirSync(dir, { recursive: true });
@@ -419,11 +436,31 @@ export function expectedRoundSeconds(
   planPath: string,
   round: number | undefined,
   nowMs: number = Date.now(),
+  env: NodeJS.ProcessEnv = {},
 ): number {
-  const stamps = readRoundStamps(planPath).filter(
+  const stamps = attemptStamps(planPath, env).filter(
     (s) => round === undefined || s.round !== round,
   );
   return costliestSpanSeconds(stamps, nowMs) ?? DEFAULT_ROUND_SECONDS;
+}
+
+/**
+ * The stamps that price THIS attempt's rounds: those at or after the
+ * attempt's start. A `--resume` from a new session keeps the stamps when a
+ * round-cap marker stands (they are the CLI's own record that the rounds
+ * were admitted, and `--chunk` rebuilds read them), but the span from the
+ * dead attempt's last admission to now crosses the death gap and would
+ * price a round at hours — refusing a rebuild on a wall the resume has
+ * just renewed. The wall restarts from the session's ledger entry; so does
+ * the pricing. Without an entry (the first attempt, or a same-session
+ * resume, whose pause the docs charge to the wall) every stamp counts.
+ */
+function attemptStamps(planPath: string, env: NodeJS.ProcessEnv): RoundStamp[] {
+  const stamps = readRoundStamps(planPath);
+  const session = currentSessionEntry(planPath, env);
+  if (session === null) return stamps;
+  const start = Math.round(session.atMs);
+  return stamps.filter((s) => s.atMs >= start);
 }
 
 /**
@@ -467,14 +504,14 @@ export function expectedAdmissionSeconds(
   env: NodeJS.ProcessEnv,
   nowMs: number = Date.now(),
 ): number {
-  const stamps = readRoundStamps(planPath).filter(
+  const stamps = attemptStamps(planPath, env).filter(
     (s) => round === undefined || s.round !== round,
   );
   const last = stamps.length > 0 ? stamps[stamps.length - 1] : undefined;
   const predecessorInFlight =
     last !== undefined && nowMs - last.atMs < MIN_OBSERVED_ROUND_SECONDS * 1000;
   if (!predecessorInFlight) {
-    return expectedRoundSeconds(planPath, round, nowMs);
+    return expectedRoundSeconds(planPath, round, nowMs, env);
   }
   const single =
     costliestSpanSeconds(stamps.slice(0, -1), last.atMs) ??
@@ -484,6 +521,41 @@ export function expectedAdmissionSeconds(
   const pairWaves = Math.ceil((2 * width) / pool);
   const roundWaves = Math.ceil(width / pool);
   return Math.ceil((single * pairWaves) / roundWaves);
+}
+
+/**
+ * The least a build the caller cannot name the round of could be priced
+ * at. `compose-review` waives a FIX that says `--round <k>` when the gate
+ * would refuse it, but k is the orchestrator's to fill in, and the estimate
+ * turns on it: `--round k` excludes round k's own stamps (a same-round
+ * rebuild's admission is no predecessor), which can raise the price
+ * (merging two spans), lower it (dropping the only measured span, or the
+ * in-flight state a narrow pool doubles) or leave it at the constant. No
+ * shortcut orders these — the stamps are in write order, a repair round
+ * appends a small round number after larger ones, and round-less stamps
+ * are priced but never named — so every k is priced: each stamped round,
+ * and "no exclusion" for every k without a stamp. The least is what the
+ * waiver may assume: it then fires only when the gate would refuse the
+ * rebuild whichever round it names, erring toward keeping the FIX.
+ */
+export function cheapestRebuildAdmissionSeconds(
+  planPath: string,
+  fanOutWidth: number,
+  env: NodeJS.ProcessEnv,
+  nowMs: number = Date.now(),
+): number {
+  const candidates = new Set<number | undefined>([undefined]);
+  for (const s of attemptStamps(planPath, env)) {
+    if (s.round !== null) candidates.add(s.round);
+  }
+  let least = Number.POSITIVE_INFINITY;
+  for (const round of candidates) {
+    least = Math.min(
+      least,
+      expectedAdmissionSeconds(planPath, round, fanOutWidth, env, nowMs),
+    );
+  }
+  return least;
 }
 
 export interface BudgetExhausted {
@@ -509,9 +581,33 @@ export function parseDeadlineOption(
   env: NodeJS.ProcessEnv = {},
 ): DeadlineOption {
   if (raw === undefined) return 'default';
+  // Echo the value back bounded: a 310-digit "number" — or the array a
+  // repeated flag arrives as — is a usage error, not a message to
+  // reproduce in full. A string is counted in code points, so the count
+  // is what the operator typed.
+  const shown = (() => {
+    if (typeof raw === 'string') {
+      const points = Array.from(raw);
+      return points.length > 40
+        ? `${JSON.stringify(points.slice(0, 40).join(''))}… (${points.length} characters)`
+        : JSON.stringify(raw);
+    }
+    let serialized: string;
+    try {
+      serialized = String(JSON.stringify(raw));
+    } catch {
+      try {
+        serialized = String(raw);
+      } catch {
+        serialized = Object.prototype.toString.call(raw);
+      }
+    }
+    const points = Array.from(serialized);
+    return points.length > 40 ? `${points.slice(0, 40).join('')}…` : serialized;
+  })();
   const usage = () =>
     new TypeError(
-      `--deadline must be a whole number of minutes or \`none\`, got ${JSON.stringify(raw)}`,
+      `--deadline must be a whole number of minutes or \`none\`, got ${shown}`,
     );
   // yargs hands `--no-deadline` over as `false`: a usage error, not a crash
   // on `.trim`. A blank value is one too — `--deadline "$UNSET"` in a script
@@ -585,9 +681,31 @@ export function validateDeadlineFlag(
 }
 
 /** Minutes for a message, floored to one decimal so sums never overshoot. */
-function minutesText(seconds: number): string {
+export function minutesText(seconds: number): string {
   const tenths = Math.floor(seconds / 6);
   return tenths % 10 === 0 ? String(tenths / 10) : (tenths / 10).toFixed(1);
+}
+
+/** `minutesText` with its noun: "1 minute", "1.5 minutes", "80 minutes". */
+export function minutesPhrase(seconds: number): string {
+  const n = minutesText(seconds);
+  return `${n} minute${n === '1' ? '' : 's'}`;
+}
+
+/**
+ * How much of the wall is left, or how long ago it ran out — one phrase
+ * for every stderr line that says it (the withheld-FIX notes, the resume
+ * note), so the boundary reads the same everywhere: under a minute is
+ * "under a minute", not "0 minutes", and the first minute past the wall is
+ * "just ran out".
+ */
+export function wallLeftText(remainingSeconds: number): string {
+  if (remainingSeconds >= 60) {
+    return `${minutesPhrase(remainingSeconds)} of the wall left`;
+  }
+  if (remainingSeconds > 0) return 'under a minute of the wall left';
+  if (remainingSeconds > -60) return 'the wall just ran out';
+  return `the wall ran out ${minutesPhrase(-remainingSeconds)} ago`;
 }
 
 /**
@@ -607,6 +725,19 @@ function deadlineTooShort(
 ): string {
   const reserve = floor - 2 * DEFAULT_ROUND_SECONDS;
   const shortest = shortestDeadlineMinutes(env);
+  // The "need more than N" figure is this wall's own; it moves with the
+  // wall only where the reserve does — a third of the wall — not in the
+  // floor band nor under a flat `RESERVE_ENV` override, so say so only
+  // when it is true.
+  const reserveFor = (wallSeconds: number): number =>
+    bar === 'default'
+      ? planReserveSeconds(wallSeconds)
+      : readNonNegativeSeconds(
+          env,
+          RESERVE_ENV,
+          planReserveSeconds(wallSeconds, env),
+        );
+  const grows = reserveFor(minutes * 60 + 60) > reserveFor(minutes * 60);
   return (
     `--deadline ${minutes} cannot hold a convergence: two rounds at the ` +
     `${DEFAULT_ROUND_SECONDS / 60}-minute estimate plus the ` +
@@ -614,7 +745,9 @@ function deadlineTooShort(
     (bar === 'default'
       ? 'under the default rule '
       : "under this shell's reserve / compose-floor overrides ") +
-    `need more than ${Math.floor(floor / 60)} minutes; ` +
+    `need more than ${Math.floor(floor / 60)} minutes` +
+    (grows ? ' (a longer wall keeps a larger reserve)' : '') +
+    '; ' +
     (shortest === null
       ? "no wall under 24 hours can hold one under this shell's reserve / " +
         'compose-floor overrides'
@@ -722,6 +855,88 @@ export function captureDeadline(
   };
 }
 
+/**
+ * What a `--resume` inherits: the plan's recorded wall, dated from THIS
+ * session's first attempt (the ledger entry, else the plan's mtime), with
+ * what is left of it — or that it has run out, in which case the round
+ * builder will refuse round 1 and the caller should know before the fan-out
+ * is spent. Null when there is nothing to say: no wall recorded, the
+ * environment's epoch in force (it bounds the run instead), or no attempt
+ * start resolvable.
+ */
+export function describeResumedWall(
+  env: NodeJS.ProcessEnv,
+  planPath: string,
+  nowMs: number = Date.now(),
+): string | null {
+  const recorded = readPlanDeadline(planPath, undefined);
+  if (recorded === null || envDeadlineInForce(env)) return null;
+  const resolved = resolveReviewDeadline(env, planPath);
+  if (resolved === null) return null;
+  const remaining = Math.floor(resolved.epochSeconds - nowMs / 1000);
+  const wall =
+    `the plan's ${minutesText(recorded.seconds)}-minute wall ` +
+    (recorded.source === 'flag' ? '(its --deadline)' : '(the tier default)');
+  // Dated the way `attemptStartMs` dates it: this session's ledger entry
+  // when there is one, else the plan's capture.
+  const dated =
+    currentSessionEntry(planPath, env) !== null
+      ? "dated from this session's first attempt"
+      : "dated from the plan's capture";
+  // What the gates will do — each asked its own question, so the note
+  // never claims a refusal a gate would not make (a zero compose floor
+  // disables the verify gate entirely, past the wall included) — and
+  // nothing about what to do instead. In a skill-driven run this line is
+  // read by the orchestrator, which SKILL.md forbids to add `--deadline` or
+  // to drop `--resume` (the fresh review it falls through to destroys the
+  // worktree the resume just saved); the operator's remedies live in the
+  // user docs.
+  const verifyRefusedToo = verifyBudgetExhausted(env, nowMs, planPath) !== null;
+  const verifyRefused = verifyRefusedToo
+    ? ' and the verify builder every shard'
+    : '';
+  if (remaining <= 0) {
+    const ago =
+      -remaining < 60
+        ? 'just ran out'
+        : `ran out ${minutesPhrase(-remaining)} ago`;
+    return (
+      `${wall} ${ago}, ${dated}: the round builder will refuse every ` +
+      `further reverse-audit round${verifyRefused}.`
+    );
+  }
+  // Left, but not enough: the same question the round builder asks for the
+  // next build, asked now so the fan-out is not spent on it. Priced like
+  // the compose-time waiver — the least any round could cost.
+  const refused =
+    reverseAuditBudgetExhausted(
+      env,
+      cheapestRebuildAdmissionSeconds(planPath, 1, env, nowMs),
+      nowMs,
+      planPath,
+    ) !== null;
+  return (
+    `${wall} has ${minutesPhrase(remaining)} left, ${dated}` +
+    (refused
+      ? ', which is under the reserve plus the round estimate: the round ' +
+        `builder will refuse the next reverse-audit round${verifyRefused}.`
+      : verifyRefusedToo
+        ? // A reserve override below the compose floor: rounds admitted,
+          // shards refused — the one gate that would fire is named.
+          '; the verify builder will refuse every shard.'
+        : '.')
+  );
+}
+
+/**
+ * Whether the environment's epoch is a clock the gates will honour: a
+ * finite, positive `DEADLINE_ENV`. The one predicate for "the env wins",
+ * so a note and a gate cannot disagree about a malformed value.
+ */
+export function envDeadlineInForce(env: NodeJS.ProcessEnv): boolean {
+  return readEnvDeadlineSeconds(env) !== null;
+}
+
 /** The environment's epoch, well-formed, or null. */
 function readEnvDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
   const raw = env[DEADLINE_ENV];
@@ -731,7 +946,6 @@ function readEnvDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
   return deadline;
 }
 
-/** The plan's recorded wall, well-formed, or null — read fail-open. */
 /**
  * The wall the plan itself recorded, if any — what a capture wrote, read
  * back without the environment and without an attempt start. For messages
@@ -744,6 +958,7 @@ export function recordedPlanDeadline(
   return readPlanDeadline(planPath, undefined);
 }
 
+/** The plan's recorded wall, well-formed, or null — read fail-open. */
 function readPlanDeadline(
   planPath: string | undefined,
   plan: unknown,
@@ -1282,12 +1497,17 @@ export function clearBudgetStop(planPath: string): void {
 
 /**
  * Remove the admission stamps beside the prompt records. Called by the
- * `--resume` path in `fetch-pr`: the span from the interrupted attempt's last
- * stamp to the continuation's first admission contains the death gap and the
- * retry backoff, which would price a "round" at hours and refuse round 1 of a
- * fresh deadline. Without stamps the gate falls back to its conservative
- * constant — the failure direction is an early stop with a disclosure, never
- * a kill-before-compose. Errors are swallowed like `clearBudgetStop`'s.
+ * `--resume` path in `fetch-pr` (unless a round-cap marker stands): on a
+ * SAME-session resume the pricers still read the interrupted attempt's
+ * stamps (`attemptStamps` scopes by the session's ledger entry, and the
+ * session is the same), and the span from its last stamp to the
+ * continuation's first admission contains the death gap and the retry
+ * backoff, which would price a "round" at hours and refuse the next round;
+ * a new session prices from its own stamps regardless, so there the clear
+ * is belt-and-braces. Without stamps the gate falls back to its
+ * conservative constant — the failure direction is an early stop with a
+ * disclosure, never a kill-before-compose. Errors are swallowed like
+ * `clearBudgetStop`'s.
  */
 export function clearRoundStamps(planPath: string): void {
   try {

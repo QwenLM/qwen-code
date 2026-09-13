@@ -179,7 +179,6 @@ export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
  * byte-identical copies that can silently diverge. `run` and `save-artifact`
  * keep their own shapes (per-target defaults; a resolved value without `low`).
  */
-
 export const EFFORT_OPTION = {
   type: 'string',
   choices: [...EFFORT_LEVELS],
@@ -196,23 +195,33 @@ export const EFFORT_OPTION = {
  * `--deadline`, shared by the three capture commands so the wall is one
  * option with one grammar everywhere: a whole number of minutes, or `none`.
  * Omitted, the capture records the tier's default wall (lib/deadline.ts).
+ * Only `fetch-pr` has a `--resume`, so only its help speaks of one: the
+ * other two commands' `--help` must not describe a flag they do not take.
  */
-export const DEADLINE_OPTION = {
+export const deadlineOption = (command: {
+  resumes: boolean;
+}): { type: 'string'; describe: string } => ({
   type: 'string',
   describe:
     "The review's wall, in minutes, recorded in the plan as a duration from " +
     "the attempt's start — the round builder refuses a reverse-audit round " +
-    'that no longer fits inside it plus the tail reserve, and a `--resume` ' +
-    "from a new session renews it. Omit for the topology's default (8h on a 3A diff, 12h on a " +
+    'that no longer fits inside it plus the tail reserve' +
+    (command.resumes ? ', and a `--resume` from a new session renews it' : '') +
+    ". Omit for the topology's default (8h on a 3A diff, 12h on a " +
     '3B one, 16h when huge), which bounds a run that has stopped converging ' +
     'without touching a healthy one; `none` records no wall; a wall that ' +
     'cannot hold a convergence (two rounds plus the reserve — at or under ' +
-    'ninety minutes) is refused up front, and the fan-out before round 1 ' +
-    'spends any wall too. A ' +
-    'QWEN_REVIEW_DEADLINE_EPOCH in the environment (CI) wins over both. An ' +
+    "ninety minutes under the default reserve, more under the shell's " +
+    'reserve / compose-floor overrides) is refused up front, and the ' +
+    'fan-out before round 1 spends any wall too. ' +
+    (command.resumes
+      ? 'Ignored on a resumed run once it parses (the grammar and the ' +
+        'default rule still apply; the plan keeps its recorded wall). '
+      : '') +
+    'A QWEN_REVIEW_DEADLINE_EPOCH in the environment (CI) wins over both. An ' +
     "explicit deadline, like the environment's, applies the huge tier's " +
     'round reduction; the default does not.',
-} as const;
+});
 
 export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
   'critical',

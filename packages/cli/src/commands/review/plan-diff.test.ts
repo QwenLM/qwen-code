@@ -23,7 +23,12 @@ import { join } from 'node:path';
 import { planDiffCommand } from './plan-diff.js';
 import { chunksCoverDiff } from './lib/diff-plan.js';
 import { makeDiff, seedParseArgs } from './lib/test-utils.js';
-import { DEADLINE_ENV, DEFAULT_DEADLINE_SECONDS } from './lib/deadline.js';
+import {
+  COMPOSE_FLOOR_ENV,
+  DEADLINE_ENV,
+  DEFAULT_DEADLINE_SECONDS,
+  RESERVE_ENV,
+} from './lib/deadline.js';
 
 let dir: string;
 let cwd: string;
@@ -95,9 +100,16 @@ describe('plan-diff — the round cap the handler actually records', () => {
 
   it('records an explicit --deadline as a flag wall, which flips the huge tier like an env clock', () => {
     writeFileSync(join(dir, 'huge.diff'), hugeDiff());
+    // The shell-priced leg reads the reserve / compose-floor overrides from
+    // the ambient environment — this repository's own review job exports a
+    // reserve — so isolate them beside the epoch.
     const before = process.env[DEADLINE_ENV];
+    const beforeReserve = process.env[RESERVE_ENV];
+    const beforeFloor = process.env[COMPOSE_FLOOR_ENV];
     try {
       delete process.env[DEADLINE_ENV];
+      delete process.env[RESERVE_ENV];
+      delete process.env[COMPOSE_FLOOR_ENV];
       const out = join(dir, 'flag.json');
       runWith(out, '120');
       const a = JSON.parse(readFileSync(out, 'utf8'));
@@ -114,6 +126,10 @@ describe('plan-diff — the round cap the handler actually records', () => {
     } finally {
       if (before === undefined) delete process.env[DEADLINE_ENV];
       else process.env[DEADLINE_ENV] = before;
+      if (beforeReserve === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = beforeReserve;
+      if (beforeFloor === undefined) delete process.env[COMPOSE_FLOOR_ENV];
+      else process.env[COMPOSE_FLOOR_ENV] = beforeFloor;
     }
   });
 

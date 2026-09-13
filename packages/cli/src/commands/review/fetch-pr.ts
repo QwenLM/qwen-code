@@ -45,7 +45,7 @@ import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
 import {
-  DEADLINE_OPTION,
+  deadlineOption,
   EFFORT_OPTION,
   type ReviewEffort,
 } from './parse-args.js';
@@ -99,6 +99,7 @@ import {
   recordResume,
   recordRestart,
   RESUME_MAX,
+  currentSessionEntry,
 } from './lib/run-ledger.js';
 import {
   assessResume,
@@ -107,7 +108,9 @@ import {
 } from './lib/resume.js';
 import {
   captureDeadline,
-  DEADLINE_ENV,
+  describeResumedWall,
+  envDeadlineInForce,
+  minutesText,
   parseDeadlineOption,
   recordedPlanDeadline,
   validateDeadlineFlag,
@@ -684,12 +687,6 @@ type ResumeOutcome =
  * run epoch that keeps the first attempt's records, stamps and transcripts
  * inside every reader's fence.
  */
-/** Minutes for a note: whole when whole, else one decimal. */
-function formatMinutes(seconds: number): string {
-  const m = seconds / 60;
-  return Number.isInteger(m) ? String(m) : m.toFixed(1);
-}
-
 function tryResume(
   args: FetchPrArgs,
   wt: string,
@@ -787,10 +784,13 @@ function tryResume(
   // not this run's, and is cleared.
   // A round-cap stop is about rounds, not time — it is the trusted CLI's own
   // record that the audit reached its round cap, so it stands, and the round
-  // stamps stay with it. Any other stop is cleared with the stamps: the span
-  // from the dead attempt's last stamp to the continuation's first admission
-  // spans the death gap and would price a round at hours; without the stamps
-  // the gate falls back to its conservative constant.
+  // stamps stay with it (the pricers read only this attempt's stamps, so a
+  // new session never prices the death gap from them). Any other stop is
+  // cleared with the stamps: a SAME-session resume continues the attempt,
+  // and there the span from the dead attempt's last stamp to the
+  // continuation's first admission would still cross the death gap and
+  // price a round at hours; without the stamps the gate falls back to its
+  // conservative constant.
   const stop = readBudgetStop(out);
   const roundCapStands = stop !== null && stop.cause === 'round-cap';
   if (stop !== null && !roundCapStands) {
@@ -801,26 +801,54 @@ function tryResume(
   }
   appendRunSession(out);
   recordResume(out);
+  // The wall a continuation runs under dates from THIS session's ledger
+  // entry; `appendRunSession` is bookkeeping that never throws, so say when
+  // it did not land — the wall then dates from the first attempt, and the
+  // note below says how much of it is left, or that it has run out, before
+  // the fan-out is spent on a round the builder will refuse. (A session id
+  // is always set here: the lease identity check above refuses to run
+  // without one, so a missing entry is a ledger that did not take, never
+  // a shell that keeps none.) Only where a plan wall would date from the
+  // entry: a plan without one, or a run the environment's epoch bounds,
+  // has no wall to date, and the note would contradict the one after it.
+  if (
+    recordedPlanDeadline(out) !== null &&
+    !envDeadlineInForce(process.env) &&
+    currentSessionEntry(out, process.env) === null
+  ) {
+    writeStderrLine(
+      'fetch-pr: the run-session ledger did not record this attempt, so ' +
+        "the plan's wall dates from the first attempt, not from now.",
+    );
+  }
+  const inherited = describeResumedWall(process.env, out);
+  if (inherited !== null) writeStderrLine(`fetch-pr: ${inherited}`);
   // The plan is not rewritten on resume, so a `--deadline` passed now cannot
   // land in it; say so — and say what the plan actually holds, read from the
   // plan alone, rather than assert a wall it may never have recorded.
   if (parseDeadlineOption(args.deadline) !== 'default') {
     const recorded = recordedPlanDeadline(out);
-    const minutes = recorded === null ? '' : formatMinutes(recorded.seconds);
-    const epoch = process.env[DEADLINE_ENV];
+    const minutes = recorded === null ? '' : minutesText(recorded.seconds);
+    // "In force" the way the gates decide it — a finite, positive epoch —
+    // not the presence of a string: a malformed value is no clock at all.
+    const epochInForce = envDeadlineInForce(process.env);
     writeStderrLine(
       'fetch-pr: --deadline is ignored on a resumed run — ' +
         (recorded === null
-          ? 'the plan recorded no wall, so this continuation is bounded by ' +
-            'the round cap alone unless the environment exports a deadline.'
-          : recorded.source === 'flag'
-            ? `the plan keeps the ${minutes}-minute wall its own --deadline ` +
-              'recorded at capture.'
-            : `the plan keeps the ${minutes}-minute default wall it recorded ` +
-              'at capture.') +
-        (epoch !== undefined && epoch.trim() !== ''
-          ? ' The environment exports an epoch, which takes precedence while it stands.'
-          : ''),
+          ? epochInForce
+            ? "the plan recorded no wall; the environment's epoch bounds " +
+              'this continuation.'
+            : 'the plan recorded no wall, so this continuation is bounded ' +
+              'by the round cap alone.'
+          : (recorded.source === 'flag'
+              ? `the plan keeps the ${minutes}-minute wall its own ` +
+                '--deadline recorded at capture.'
+              : `the plan keeps the ${minutes}-minute default wall it ` +
+                'recorded at capture.') +
+            (epochInForce
+              ? ' The environment exports an epoch, which takes precedence ' +
+                'while it stands.'
+              : '')),
     );
   }
   // Read the marker back: `recordResume` deduplicates by session, so a
@@ -2179,7 +2207,7 @@ export const fetchPrCommand: CommandModule = {
           'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
       .option('effort', EFFORT_OPTION)
-      .option('deadline', DEADLINE_OPTION)
+      .option('deadline', deadlineOption({ resumes: true }))
       .option('since', {
         type: 'string',
         describe:

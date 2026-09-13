@@ -26,7 +26,7 @@ import { REVIEW_TMP_DIR } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import { HOSTNAME_RE } from './lib/gh.js';
 import {
-  DEADLINE_OPTION,
+  deadlineOption,
   EFFORT_OPTION,
   type ReviewEffort,
 } from './parse-args.js';
@@ -209,7 +209,7 @@ export const planDiffCommand: CommandModule = {
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
       })
       .option('effort', EFFORT_OPTION)
-      .option('deadline', DEADLINE_OPTION),
+      .option('deadline', deadlineOption({ resumes: false })),
   handler: (argv) => {
     // The sibling handlers' contract: usage errors (a TypeError — the
     // malformed --host above) exit 2, everything else exits 1 — never an

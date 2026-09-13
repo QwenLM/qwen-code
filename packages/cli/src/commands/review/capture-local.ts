@@ -28,7 +28,11 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   repoRelativeOf,
   REVIEW_CACHE_DIR,
@@ -38,7 +42,7 @@ import {
 import { safeTarget } from '../../utils/paths.js';
 import { planEffortField } from './lib/effort.js';
 import {
-  DEADLINE_OPTION,
+  deadlineOption,
   EFFORT_OPTION,
   type ReviewEffort,
 } from './parse-args.js';
@@ -1447,7 +1451,7 @@ export const captureLocalCommand: CommandModule = {
           'Include untracked, non-ignored files. On by default: `git diff` cannot see them, so without this a brand-new file goes unreviewed.',
       })
       .option('effort', EFFORT_OPTION)
-      .option('deadline', DEADLINE_OPTION)
+      .option('deadline', deadlineOption({ resumes: false }))
       .option('cache', {
         type: 'string',
         describe:
@@ -1464,6 +1468,15 @@ export const captureLocalCommand: CommandModule = {
           'says why.',
       }),
   handler: (argv) => {
-    runCaptureLocal(argv as unknown as CaptureLocalArgs);
+    // plan-diff's contract: a usage error (a TypeError — the malformed
+    // --deadline this command can now throw) exits 2 with one stderr line,
+    // anything else exits 1 — never an uncaught crash banner with a stack
+    // for a repairable invocation.
+    try {
+      runCaptureLocal(argv as unknown as CaptureLocalArgs);
+    } catch (err) {
+      writeStderrLineSafe(`capture-local: ${(err as Error).message}`);
+      process.exitCode = err instanceof TypeError ? 2 : 1;
+    }
   },
 };

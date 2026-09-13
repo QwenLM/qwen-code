@@ -17,6 +17,7 @@ import yargs from 'yargs';
 import { join } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import {
+  deadlineOption,
   parseArgsCommand,
   parseReviewArgs,
   tokenizeArgs,
@@ -351,6 +352,16 @@ const CASES: Case[] = [
     },
   },
   {
+    name: '--deadline=90 (equals form, valid value) is consumed — the bare number never reaches the target pool',
+    raw: '--deadline=90',
+    expect: {
+      targetType: 'local',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
     name: '--deadline=none is consumed whole; a following flag is not its value',
     raw: '--deadline=none --deadline --comment 6711',
     expect: {
@@ -539,6 +550,22 @@ describe('parseReviewArgs', () => {
     const eq = parseReviewArgs('--deadline=90m');
     expect(eq.target).toEqual({ type: 'local' });
     expect(eq.warnings[0]).toContain('its value "90m" is not a deadline.');
+    // A quoted-empty value is consumed as missing, never a candidate target
+    // — the sibling arms' rule for the spaced form (an empty string would
+    // otherwise survive as the sole candidate and become an empty file
+    // target); the `=` form is stricter than the siblings' here, reading an
+    // empty value as missing too, since an unknown flag has no resolution
+    // to report an invalid value against.
+    for (const raw of ['--deadline ""', '--deadline=']) {
+      const empty = parseReviewArgs(raw);
+      expect(empty.target).toEqual({ type: 'local' });
+      expect(empty.unknownFlags).toEqual(['--deadline']);
+      expect(empty.warnings).toHaveLength(1);
+      expect(empty.warnings[0]).toContain('(it had no value)');
+    }
+    const emptyBeside = parseReviewArgs('--deadline "" 6711');
+    expect(emptyBeside.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(emptyBeside.warnings).toHaveLength(1);
   });
 
   it('a /pull/ URL on an AONE host is refused — Aone serves no /pull/ pages', () => {
@@ -604,6 +631,27 @@ describe('parseReviewArgs', () => {
     const got = parseReviewArgs('6711 --effort low --effort medium');
     expect(got.effort).toBe('medium');
     expect(got.effortSource).toBe('explicit');
+  });
+});
+
+describe('deadlineOption — one grammar, help that names only the flags each command takes', () => {
+  it('speaks of --resume only on the command that has one', () => {
+    const resumable = deadlineOption({ resumes: true }).describe;
+    const plain = deadlineOption({ resumes: false }).describe;
+    expect(resumable).toContain('a `--resume` from a new session renews it');
+    expect(resumable).toContain(
+      'Ignored on a resumed run once it parses (the grammar and the default rule still apply',
+    );
+    expect(plain).not.toMatch(/resume/i);
+    // Everything else — the default, `none`, the refusal rule, the
+    // environment's precedence, the huge tier's reduction — is shared.
+    for (const text of [resumable, plain]) {
+      expect(text).toContain("Omit for the topology's default");
+      expect(text).toContain('`none` records no wall');
+      expect(text).toContain('is refused up front');
+      expect(text).toContain('QWEN_REVIEW_DEADLINE_EPOCH');
+      expect(text).toContain('the default does not.');
+    }
   });
 });
 

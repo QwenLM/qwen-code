@@ -3310,7 +3310,7 @@ function runAllChunks(
   // Admitted AND built: stamp now, so the next round's gate can measure
   // this one — see the gate comment above for why never at admission.
   if (role === 'reverse-audit') {
-    stampRound(planPath, round);
+    stampRound(planPath, round, Date.now(), process.env);
   }
 }
 
@@ -3921,7 +3921,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // rebuilds after it are repairs the one-per-round guard in `stampRound`
   // keeps from shrinking the round's observed cost.
   if (args.role === 'reverse-audit') {
-    stampRound(args.plan, args.round);
+    stampRound(args.plan, args.round, Date.now(), process.env);
   }
 }
 
