@@ -252,8 +252,13 @@ async function buildForkedModelRuntime(
   contentGeneratorOwner: Config,
   modelSelector: string,
 ): Promise<ForkedModelRuntime> {
+  const endpointIndex = modelSelector.indexOf('\0');
+  const registryBaseUrl =
+    endpointIndex < 0
+      ? undefined
+      : modelSelector.slice(endpointIndex + 1) || null;
   const resolvedModel = resolveModelId(
-    modelSelector,
+    endpointIndex < 0 ? modelSelector : modelSelector.slice(0, endpointIndex),
     buildModelIdContext(base),
   );
   // When the selector cannot resolve (e.g. `fast` with no fast model
@@ -266,6 +271,7 @@ async function buildForkedModelRuntime(
     base,
     contentGeneratorOwner,
     resolvedModel,
+    registryBaseUrl,
   );
 
   return { model, runtimeView };
@@ -275,6 +281,7 @@ async function buildForkedRuntimeContentGeneratorView(
   base: Config,
   contentGeneratorOwner: Config,
   resolvedModel: ResolvedModelId | undefined,
+  registryBaseUrl?: string | null,
 ): Promise<RuntimeContentGeneratorView | undefined> {
   if (!resolvedModel?.authType) return undefined;
 
@@ -284,7 +291,8 @@ async function buildForkedRuntimeContentGeneratorView(
     currentContentGeneratorConfig?.model ?? base.getModel?.();
   if (
     resolvedModel.authType === currentAuthType &&
-    resolvedModel.modelId === currentModel
+    resolvedModel.modelId === currentModel &&
+    registryBaseUrl === undefined
   ) {
     return undefined;
   }
@@ -293,7 +301,10 @@ async function buildForkedRuntimeContentGeneratorView(
     base,
     contentGeneratorOwner,
     resolvedModel.modelId,
-    { authType: resolvedModel.authType },
+    {
+      authType: resolvedModel.authType,
+      ...(registryBaseUrl !== undefined ? { registryBaseUrl } : {}),
+    },
   );
 }
 

@@ -31,8 +31,19 @@ const sdkLibrary = resolveCuaSdkLibraryPath()
 const runtimePath = resolveCuaSdkRuntimePath()
 const resolveLibPath = () => sdkLibrary
 const require = createRequire(import.meta.url)
-const { UniffiNativeModule } = require(runtimePath) as {
+const { UniffiNativeModule, pumpMainRunLoop } = require(runtimePath) as {
   UniffiNativeModule: unknown
+  pumpMainRunLoop: () => void
+}
+
+export async function withMainRunLoop<T>(operation: () => Promise<T>): Promise<T> {
+  pumpMainRunLoop()
+  const timer = setInterval(pumpMainRunLoop, 10)
+  try {
+    return await operation()
+  } finally {
+    clearInterval(timer)
+  }
 }
 
 export default { FfiType, resolveLibPath, UniffiNativeModule }
