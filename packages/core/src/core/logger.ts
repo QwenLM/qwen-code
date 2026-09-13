@@ -488,6 +488,125 @@ export class Logger {
     });
   }
 
+  /**
+   * Purge every log-history row belonging to `sessionId` — used by the
+   * `/delete` flow so a removed session's prompts don't live on in the
+   * project-shared `<tmp>/<project-hash>/logs.json`, and stop resurfacing in
+   * ↑-history via {@link getPreviousUserMessages}.
+   *
+   * ↑-history is deliberately cross-session, so the fix for a deleted session
+   * is to drop its rows — NOT to filter {@link getPreviousUserMessages} by
+   * session id, which would also hide the prompts of sessions that still
+   * exist.
+   *
+   * Two-phase semantics mirror {@link removeLastUserMessage}:
+   *   1. Synchronous in-memory removal from `this.logs`, so the
+   *      `getPreviousUserMessages()` read triggered by the "Session deleted"
+   *      history item already omits the purged prompts.
+   *   2. Async serialized disk reconciliation (read → filter → write) on the
+   *      shared write queue, so a purge can't clobber a prompt `logMessage`
+   *      is appending concurrently.
+   *
+   * When the disk read or write throws, the optimistic removal is rolled
+   * back, so a `false` return never means "gone from memory but still on
+   * disk". Any session id is safe to pass, including this Logger's own:
+   * `_updateLogFile` recomputes the next messageId from disk on every append.
+   *
+   * @returns true when rows were actually removed from the file.
+   */
+  async removeSessionMessages(sessionId: string): Promise<boolean> {
+    if (!this.initialized || !this.logFilePath) {
+      return false;
+    }
+    const belongsToSession = (e: LogEntry): boolean =>
+      e.sessionId === sessionId;
+    const isSameRow = (a: LogEntry, b: LogEntry): boolean =>
+      a.sessionId === b.sessionId &&
+      a.messageId === b.messageId &&
+      a.timestamp === b.timestamp &&
+      a.message === b.message &&
+      a.type === b.type;
+
+    // Optimistic in-memory removal BEFORE the async serialize queue runs,
+    // for the same reason as removeLastUserMessage: AppContainer's
+    // userMessages effect re-runs on the history item the delete flow adds
+    // and reads `this.logs` through getPreviousUserMessages().
+    const optimisticallyRemoved: Array<[number, LogEntry]> = [];
+    this.logs.forEach((entry, index) => {
+      if (belongsToSession(entry)) optimisticallyRemoved.push([index, entry]);
+    });
+    if (optimisticallyRemoved.length > 0) {
+      this.logs = this.logs.filter((entry) => !belongsToSession(entry));
+    }
+    // An undo target from the purged session died with it; leaving it would
+    // point removeLastUserMessage at a row that no longer exists.
+    const droppedUndoTarget =
+      this.lastLoggedUserEntry !== null &&
+      belongsToSession(this.lastLoggedUserEntry)
+        ? this.lastLoggedUserEntry
+        : null;
+    if (droppedUndoTarget !== null) {
+      this.lastLoggedUserEntry = null;
+    }
+
+    const restoreOptimistic = () => {
+      // Re-insert each removed row at its original index unless a concurrent
+      // path already put an identical row back. Ascending index order keeps
+      // the restored rows in their original relative order.
+      for (const [index, entry] of optimisticallyRemoved) {
+        if (this.logs.some((e) => isSameRow(e, entry))) continue;
+        const insertAt = Math.min(index, this.logs.length);
+        this.logs = [
+          ...this.logs.slice(0, insertAt),
+          entry,
+          ...this.logs.slice(insertAt),
+        ];
+      }
+      if (droppedUndoTarget !== null && this.lastLoggedUserEntry === null) {
+        this.lastLoggedUserEntry = droppedUndoTarget;
+      }
+    };
+
+    const logFilePath = this.logFilePath;
+    return this.serialize(async () => {
+      let currentLogsOnDisk: LogEntry[];
+      try {
+        currentLogsOnDisk = await this._readLogFile();
+      } catch (error) {
+        this.debugLogger.debug(
+          'Failed to read log file while purging a deleted session:',
+          error,
+        );
+        restoreOptimistic();
+        return false;
+      }
+
+      const kept = currentLogsOnDisk.filter((e) => !belongsToSession(e));
+      if (kept.length === currentLogsOnDisk.length) {
+        // The session has nothing on disk (it never logged a prompt, or
+        // another instance already purged it). Adopt the disk snapshot so the
+        // cache doesn't diverge from a file that moved on underneath us.
+        this.logs = currentLogsOnDisk;
+        return false;
+      }
+
+      try {
+        await atomicWriteFile(logFilePath, JSON.stringify(kept, null, 2), {
+          encoding: 'utf-8',
+        });
+        this.logs = kept;
+        return true;
+      } catch (error) {
+        this.debugLogger.debug(
+          'Failed to write log file while purging a deleted session:',
+          error,
+        );
+        restoreOptimistic();
+        return false;
+      }
+    });
+  }
+
   private _checkpointPath(tag: string): string {
     if (!tag.length) {
       throw new Error('No checkpoint tag specified.');

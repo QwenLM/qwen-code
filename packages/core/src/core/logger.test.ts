@@ -1021,4 +1021,156 @@ describe('Logger', () => {
       expect(await readLogFile()).toEqual([]);
     });
   });
+
+  describe('removeSessionMessages', () => {
+    // `/delete` removes a session's transcript, but its prompts also sit in
+    // the project-shared logs.json that backs cross-session ↑-history —
+    // issue #11762. These cover the purge that closes that gap.
+
+    /** Write one prompt as `sessionId`, then advance the clock 1s. */
+    const logPromptAs = async (sessionId: string, message: string) => {
+      const sessionLogger = new Logger(sessionId, new Storage(process.cwd()));
+      await sessionLogger.initialize();
+      await sessionLogger.logMessage(MessageSenderType.USER, message);
+      sessionLogger.close();
+      vi.advanceTimersByTime(1000);
+    };
+
+    /** A logger for the session doing the deleting, started after the writes. */
+    const currentSessionLogger = async () => {
+      const current = new Logger('current-session', new Storage(process.cwd()));
+      await current.initialize();
+      return current;
+    };
+
+    it('purges the deleted session from disk and ↑-history, keeping the others', async () => {
+      await logPromptAs('doomed-session', 'ssh root@prod-db');
+      await logPromptAs('kept-session', 'what does this repo do?');
+      const current = await currentSessionLogger();
+      await current.logMessage(MessageSenderType.USER, 'current prompt');
+      expect(await current.getPreviousUserMessages()).toEqual([
+        'current prompt',
+        'what does this repo do?',
+        'ssh root@prod-db',
+      ]);
+
+      expect(await current.removeSessionMessages('doomed-session')).toBe(true);
+
+      // Gone from ↑-history — and only that session: cross-session history
+      // is deliberate, so the sessions that still exist must keep theirs.
+      expect(await current.getPreviousUserMessages()).toEqual([
+        'current prompt',
+        'what does this repo do?',
+      ]);
+      // Gone from the file too, which is the half `/delete` used to miss.
+      const onDisk = await readLogFile();
+      expect(onDisk.map((e) => e.sessionId)).toEqual([
+        'kept-session',
+        'current-session',
+      ]);
+      current.close();
+    });
+
+    it('drops the purged rows from the in-memory cache synchronously', async () => {
+      // The delete flow fires this without awaiting, and AppContainer's
+      // userMessages effect re-reads getPreviousUserMessages() on the render
+      // caused by the "Session deleted" history item — that read happens
+      // long before the disk write settles.
+      await logPromptAs('doomed-session', 'ssh root@prod-db');
+      const current = await currentSessionLogger();
+
+      const purge = current.removeSessionMessages('doomed-session');
+
+      expect(await current.getPreviousUserMessages()).toEqual([]);
+      expect(await purge).toBe(true);
+      expect(await readLogFile()).toEqual([]);
+      current.close();
+    });
+
+    it('returns false and leaves the file alone when the session has no rows', async () => {
+      await logger.logMessage(MessageSenderType.USER, 'kept');
+
+      expect(await logger.removeSessionMessages('never-logged')).toBe(false);
+
+      expect((await readLogFile()).map((e) => e.message)).toEqual(['kept']);
+      expect(await logger.getPreviousUserMessages()).toEqual(['kept']);
+    });
+
+    it('returns false when the logger is uninitialized', async () => {
+      const fresh = new Logger(testSessionId, new Storage(process.cwd()));
+      // No initialize() call.
+      expect(await fresh.removeSessionMessages('doomed-session')).toBe(false);
+    });
+
+    it('rolls back the optimistic removal when the disk write fails', async () => {
+      // Same contract as removeLastUserMessage: `false` must never mean
+      // "dropped from the cache but still on disk", or ↑-history would hide
+      // prompts the file still holds.
+      await logPromptAs('doomed-session', 'ssh root@prod-db');
+      const current = await currentSessionLogger();
+
+      vi.mocked(atomicWriteFile).mockRejectedValueOnce(new Error('Disk full'));
+      expect(await current.removeSessionMessages('doomed-session')).toBe(false);
+
+      expect(await current.getPreviousUserMessages()).toEqual([
+        'ssh root@prod-db',
+      ]);
+      expect((await readLogFile()).map((e) => e.message)).toEqual([
+        'ssh root@prod-db',
+      ]);
+      current.close();
+    });
+
+    it('rolls back the optimistic removal when the disk READ fails', async () => {
+      await logPromptAs('doomed-session', 'ssh root@prod-db');
+      const current = await currentSessionLogger();
+
+      vi.spyOn(fs, 'readFile').mockRejectedValueOnce(
+        new Error('Permission denied'),
+      );
+      expect(await current.removeSessionMessages('doomed-session')).toBe(false);
+
+      expect(await current.getPreviousUserMessages()).toEqual([
+        'ssh root@prod-db',
+      ]);
+      current.close();
+    });
+
+    it('serializes against a concurrent logMessage so a parallel prompt survives', async () => {
+      // The purge is fire-and-forget, so the user can type the next prompt
+      // while it is still in flight. Without the shared write queue the
+      // purge's read/filter/write would clobber that prompt.
+      await logPromptAs('doomed-session', 'ssh root@prod-db');
+      const current = await currentSessionLogger();
+
+      const purge = current.removeSessionMessages('doomed-session');
+      const logged = current.logMessage(
+        MessageSenderType.USER,
+        'typed while deleting',
+      );
+
+      const [purged] = await Promise.all([purge, logged]);
+      expect(purged).toBe(true);
+      expect((await readLogFile()).map((e) => e.message)).toEqual([
+        'typed while deleting',
+      ]);
+      current.close();
+    });
+
+    it('clears a pending undo target that belonged to the purged session', async () => {
+      // Otherwise removeLastUserMessage would still be pointing at a row the
+      // purge deleted. Also covers purging the logger's own session.
+      const doomed = new Logger('doomed-session', new Storage(process.cwd()));
+      await doomed.initialize();
+      await doomed.logMessage(MessageSenderType.USER, 'ssh root@prod-db');
+      expect(doomed['lastLoggedUserEntry']).not.toBeNull();
+
+      expect(await doomed.removeSessionMessages('doomed-session')).toBe(true);
+
+      expect(doomed['lastLoggedUserEntry']).toBeNull();
+      expect(await doomed.removeLastUserMessage()).toBe(false);
+      expect(await readLogFile()).toEqual([]);
+      doomed.close();
+    });
+  });
 });
