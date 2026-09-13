@@ -114,12 +114,20 @@ After performing one or more UI actions, call `app.getState()` before deciding
 what to do next. Batch actions whose target remains the same, then print only
 the state needed for the next decision:
 
+For replacing existing text in a writable field, start with `selectText` using
+that field's observed ID and exact current text:
+
 ```js
-await app.click(37);
+nodeRepl.write(
+  JSON.stringify(await app.selectText(37, 'draft', { prefix: 'Status: ' })),
+);
 nodeRepl.write((await app.getState()).text);
 ```
 
-Use the actual ID from your observation; `37` is only an example.
+Read the selection result and state before typing; resolve focus first if
+another control remains focused. The example assumes one `draft` immediately
+after `Status: ` in field 37. Use your actual observed ID and text.
+For buttons and pointer actions, use `app.click(37)` with the observed target ID.
 
 An observation is a decision boundary. When the current state already identifies
 the controls and the next actions are known, combine those actions and saving
@@ -140,21 +148,6 @@ call.
 
 ## Replace and select text
 
-To replace existing text in a writable field, prefer `selectText` with that
-field's observed ID and exact current text. It selects within the intended
-control. Read the selection result and state before typing; resolve focus first
-if another control remains focused. These text methods are available on macOS
-only.
-
-```js
-await app.selectText(37, 'draft', { prefix: 'Status: ' });
-nodeRepl.write((await app.getState()).text);
-```
-
-Use a real ID and text from your observation; the example assumes that the
-selected element contains exactly one matching `draft` immediately after
-`Status: `.
-
 After confirming the selection and intended field, replace it with short plain
 text:
 
@@ -163,7 +156,8 @@ await app.typeText('ready');
 nodeRepl.write((await app.getState()).text);
 ```
 
-Use `await app.paste('ready')` when clipboard insertion is appropriate.
+Use `await app.paste('ready')` when clipboard insertion is appropriate. These App
+text methods are available on macOS only.
 
 - `selectText(element, text)` selects one exact, case-sensitive match. Optional
   `prefix` and `suffix` must be immediately adjacent to that match. Missing or

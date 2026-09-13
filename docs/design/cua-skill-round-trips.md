@@ -33,6 +33,8 @@ connection after final verification in the same call when the task is complete.
 
 For replacing existing field text, prefer selecting the observed text through
 `selectText`. Confirm the selection and intended field before typing or pasting.
+Show this as the primary field-editing example, printing both its selection
+result and state. Keep ordinary button and pointer clicks documented separately.
 A pointer click alone may leave another editor focused, causing a select-all
 shortcut and subsequent typing to modify that editor. Keep focus uncertainty as
 an observation boundary. This guidance uses the existing text API and adds no
