@@ -127,14 +127,20 @@ describe('node_repl MCP server', () => {
     const { client, close } = await connected();
     try {
       expect(client.getInstructions()).toBe(NODE_REPL_INSTRUCTIONS);
-      expect(NODE_REPL_INSTRUCTIONS.length).toBeLessThan(2048);
+      expect(NODE_REPL_INSTRUCTIONS.length).toBeLessThan(256);
       expect(NODE_REPL_INSTRUCTIONS).not.toMatch(
         /Computer Use|cua-sdk|RecreationBench/,
       );
-      expect(NODE_REPL_INSTRUCTIONS).toContain('globalThis');
-      expect(NODE_REPL_INSTRUCTIONS).toContain('node_repl_cancel');
-      expect(NODE_REPL_INSTRUCTIONS).toContain('nodeRepl.signal');
-      expect(NODE_REPL_INSTRUCTIONS).toContain(
+      const { tools } = await client.listTools();
+      const description = tools.find(
+        (tool) => tool.name === 'node_repl',
+      )?.description;
+      expect(description).toContain('globalThis');
+      expect(description).toContain('node_repl_cancel');
+      expect(description).toContain('nodeRepl.signal');
+      expect(description).toContain('do not commit');
+      expect(description).toContain('cancellation does not roll back effects');
+      expect(description).toContain(
         'Runtime errors retain completed statement state',
       );
     } finally {

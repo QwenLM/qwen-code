@@ -172,7 +172,13 @@ export const useAuthCommand = (
         setIsAuthenticating(true);
         setAuthError(null);
 
-        const plan = buildInstallPlan(providerConfig, inputs);
+        const plan = buildInstallPlan(
+          providerConfig,
+          inputs,
+          settings.merged.modelProviders?.[
+            inputs.protocol ?? providerConfig.protocol
+          ],
+        );
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
@@ -183,14 +189,26 @@ export const useAuthCommand = (
           refreshAuth: (authType) => config.refreshAuth(authType),
         });
 
+        if (!plan.modelSelection && !config.getAuthType()) {
+          setIsAuthenticating(false);
+          setPendingAuthType(undefined);
+          onAuthError(
+            t(
+              'Service models saved. Configure a conversation model to start chatting.',
+            ),
+          );
+          return;
+        }
         completeAuthentication();
 
         const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
           type: MessageType.INFO,
-          text: t(
-            'Successfully configured {{provider}}. Use /model to switch models.',
-            { provider: providerConfig.label },
-          ),
+          text: !plan.modelSelection
+            ? t('Service models saved.')
+            : t(
+                'Successfully configured {{provider}}. Use /model to switch models.',
+                { provider: providerConfig.label },
+              ),
         };
         addItem(feedbackItem, Date.now());
         if (openedViaCommandRef.current) {
@@ -202,14 +220,22 @@ export const useAuthCommand = (
           });
         }
 
-        logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
+        if (plan.modelSelection)
+          logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
       } catch (error) {
         // Pass protocol explicitly so error telemetry is recorded even when
         // a synchronous throw beats the setPendingAuthType state update.
         handleAuthFailure(error, protocol);
       }
     },
-    [settings, config, completeAuthentication, addItem, handleAuthFailure],
+    [
+      settings,
+      config,
+      completeAuthentication,
+      addItem,
+      handleAuthFailure,
+      onAuthError,
+    ],
   );
 
   // -- Dialog open / close / cancel ----------------------------------------
