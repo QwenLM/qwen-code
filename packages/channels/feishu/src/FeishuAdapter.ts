@@ -2765,10 +2765,13 @@ export class FeishuChannel extends ChannelBase {
                   ? parentId
                   : sanitizeSenderName(parentId);
                 // An adapter placeholder ('(image)', '(file: …)') is not the
-                // parent author's original message, so it is never wrapped.
+                // parent author's original message, so it is never wrapped —
+                // while a parenthesized-but-real text like '(hello)' still is.
                 const isPlaceholder =
                   quotedContent !== undefined &&
-                  /^\([\s\S]*\)$/.test(quotedContent);
+                  /^\((?:image|video|audio|media|file: [\s\S]*|card message — not supported)\)$/.test(
+                    quotedContent,
+                  );
                 if (quotedContent && !isPlaceholder) {
                   const banner = isFromBot
                     ? '[引用内容 — 以下为本机器人此前发送的消息]'

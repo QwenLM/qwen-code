@@ -8750,6 +8750,32 @@ describe('Feishu inbound media delivery (#11554)', () => {
     expect(prompt).toContain('看看这个');
   });
 
+  it('wraps a quoted parent whose text is parenthesized but real', async () => {
+    const { bridge, receive } = setup();
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) =>
+      String(input).includes('/messages/om_parent?')
+        ? jsonResponse({
+            code: 0,
+            data: {
+              items: [
+                {
+                  message_id: 'om_parent',
+                  msg_type: 'text',
+                  sender: { sender_type: 'user' },
+                  body: { content: JSON.stringify({ text: '(hello)' }) },
+                },
+              ],
+            },
+          })
+        : jsonResponse({ code: 0 }),
+    );
+    receive('text', { text: 'what does this say' }, 'om_parent');
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = vi.mocked(bridge.prompt).mock.calls[0]![1];
+    expect(prompt).toContain('[引用内容');
+    expect(prompt).toContain('(hello)');
+  });
+
   it('labels an unrenderable quoted parent by type instead of claiming unavailability', async () => {
     const { bridge, receive } = setup();
     vi.spyOn(global, 'fetch').mockImplementation(async (input) =>
