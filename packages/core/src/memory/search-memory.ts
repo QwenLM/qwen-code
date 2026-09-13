@@ -456,6 +456,11 @@ async function getSnapshot(
         : undefined),
     teamMemoryEnabled: options.teamMemoryEnabled,
     trustedProject: options.trustedProject,
+    // Recall scans the corpus uncapped, so every ref the model can see in a
+    // tree or search result must resolve here. The file cap slices results
+    // after the full read, so dropping it adds no I/O — it only stops
+    // excluding the oldest memories from fetch/search/explore.
+    uncapped: true,
   });
 }
 

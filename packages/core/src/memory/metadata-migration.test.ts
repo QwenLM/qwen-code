@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -204,39 +205,43 @@ describe('memory metadata migration', () => {
   it.each([
     ['invalid YAML', '---\nname: [broken\n---\nBody'],
     ['non-object YAML', '---\n- item\n---\nBody'],
-  ])('repairs %s without dropping the original file', async (_, original) => {
-    const filePath = await write('project/broken.md', original);
-    const generateMetadata = vi.fn(
-      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
-        metadata(candidate),
-    );
+  ])(
+    'leaves %s byte-identical instead of wrapping it into a new head',
+    async (_, original) => {
+      // Unspliceable frontmatter is terminally malformed: the migration must
+      // not "repair" it by prepending a new head, which would bury the
+      // original frontmatter in the body and drop its fields from metadata.
+      const filePath = await write('project/broken.md', original);
+      const generateMetadata = vi.fn(
+        async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
+          metadata(candidate),
+      );
 
-    const result = await runMemoryMetadataMigration({
-      config: {} as Config,
-      projectRoot,
-      root: memoryRoot,
-      scope: 'project',
-      generateMetadata,
-    });
-
-    expect(result).toMatchObject({
-      legacyFiles: 1,
-      remainingLegacyFiles: 0,
-      attempted: 1,
-      committed: 1,
-    });
-    expect(generateMetadata).toHaveBeenCalledOnce();
-    expect(await fs.readFile(filePath, 'utf-8')).toContain(
-      `\n---\n${original}`,
-    );
-    await expect(
-      scanMemoryMetadataCorpusStatus({
+      const result = await runMemoryMetadataMigration({
+        config: {} as Config,
         projectRoot,
-        teamMemoryEnabled: false,
-        trustedProject: true,
-      }),
-    ).resolves.toMatchObject({ ready: true, legacyFiles: 0 });
-  });
+        root: memoryRoot,
+        scope: 'project',
+        generateMetadata,
+      });
+
+      expect(result).toMatchObject({
+        legacyFiles: 0,
+        remainingLegacyFiles: 0,
+        attempted: 0,
+        committed: 0,
+      });
+      expect(generateMetadata).not.toHaveBeenCalled();
+      await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe(original);
+      await expect(
+        scanMemoryMetadataCorpusStatus({
+          projectRoot,
+          teamMemoryEnabled: false,
+          trustedProject: true,
+        }),
+      ).resolves.toMatchObject({ ready: true, legacyFiles: 0 });
+    },
+  );
 
   it('requires every visible project, user, and enabled team file to be structured', async () => {
     const localProjectRoot = path.join(projectRoot, '.qwen', 'memory');
@@ -347,26 +352,68 @@ describe('memory metadata migration', () => {
     );
   });
 
-  it('refuses to rewrite frontmatter only the lenient parser accepts', async () => {
-    // Tab-indented frontmatter fails the strict parse; rebuilding it from the
-    // lenient parse would rewrite comments, block scalars, and other
-    // non-owned fields into wrong values, so the file stays untouched and the
-    // commit reports 'invalid' instead of a lossy 'committed'.
+  it('excludes frontmatter only the lenient parser accepts from candidacy', async () => {
+    // Tab-indented frontmatter fails the strict parse, so the migration can
+    // never splice it losslessly: the file is terminally malformed and never
+    // becomes a candidate, instead of failing the commit on every turn.
     const body = 'Real body\nwith trailing newline\n';
     const original = `---\ntype: project\n\tcategory: memory\n---\n${body}`;
     const filePath = await write('project/legacy.md', original);
-    const [candidate] = await scanMemoryMetadataMigrationCandidates(
-      memoryRoot,
-      'project',
-    );
 
+    await expect(
+      scanMemoryMetadataMigrationCandidates(memoryRoot, 'project'),
+    ).resolves.toEqual([]);
+    await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe(original);
+
+    // Defense in depth: even handed a candidate directly, the commit refuses
+    // to rebuild strict-invalid frontmatter from the lenient parse and leaves
+    // the file byte-identical instead of reporting a lossy 'committed'.
+    const candidate: MemoryMetadataMigrationCandidate = {
+      scope: 'project',
+      root: memoryRoot,
+      filePath,
+      relativePath: 'project/legacy.md',
+      content: original,
+      sourceHash: createHash('sha256').update(original).digest('hex'),
+      bodyChars: body.length,
+    };
     expect(
-      await commitMigratedMemoryMetadata(candidate!, metadata(candidate!)),
+      await commitMigratedMemoryMetadata(candidate, metadata(candidate)),
     ).toBe('invalid');
     await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe(original);
   });
 
-  it('reports tab-indented frontmatter as failed without touching the file', async () => {
+  it('does not wrap a delimited head it cannot recognize into the body', async () => {
+    // A delimiter-valid head with no in-vocabulary type and YAML the strict
+    // parser rejects satisfies neither recognition branch; migrating it would
+    // prepend a new head and turn the original frontmatter into body text.
+    // It is terminally malformed instead: untouched, never attempted, and no
+    // longer pinning the corpus to legacy mode.
+    const original = [
+      '---',
+      '\tname: Old Name',
+      '\tdescription: old desc',
+      '\tcustom_field: preserved',
+      '---',
+      'Body text here.',
+      '',
+    ].join('\n');
+    const filePath = await write('project/legacy.md', original);
+
+    await expect(
+      scanMemoryMetadataMigrationCandidates(memoryRoot, 'project'),
+    ).resolves.toEqual([]);
+    const status = await scanMemoryMetadataCorpusStatus({
+      projectRoot,
+      teamMemoryEnabled: false,
+      trustedProject: true,
+    });
+    expect(status.ready).toBe(true);
+    expect(status.legacyFiles).toBe(0);
+    await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe(original);
+  });
+
+  it('never attempts tab-indented frontmatter and leaves the file byte-identical', async () => {
     const original = [
       '---',
       '\tname: Old Name',
@@ -400,7 +447,10 @@ describe('memory metadata migration', () => {
       generateMetadata,
     });
 
-    expect(result.failed).toBe(1);
+    // Terminally malformed: no paid agent call, no attempt, no rewrite.
+    expect(generateMetadata).not.toHaveBeenCalled();
+    expect(result.attempted).toBe(0);
+    expect(result.failed).toBe(0);
     expect(result.committed).toBe(0);
     await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe(original);
   });

@@ -138,6 +138,34 @@ describe('executeSearchMemory', () => {
     expect(fetchResult.results[0]).not.toHaveProperty('category');
   });
 
+  it('rescans uncapped so a recall-visible ref beyond the file cap resolves', async () => {
+    // The production tool passes no snapshot, so getSnapshot rescans. Recall
+    // scans the corpus uncapped; capping this rescan made a ref the model
+    // was just shown return "Unknown ref" once its scope held over
+    // MAX_SCANNED_MEMORY_FILES files.
+    const target = doc('project/oldest.md', { body: 'B'.repeat(100) });
+    const scanMock = vi.mocked(scanAutoMemorySnapshot);
+    scanMock.mockClear();
+    scanMock.mockImplementationOnce(async (_projectRoot, opts) =>
+      // Emulate the file cap: without `uncapped` the oldest doc is sliced
+      // out of the pool before fetch builds its ref map.
+      snapshot(opts?.uncapped ? [target] : []),
+    );
+
+    const result = await executeSearchMemory(
+      { mode: 'fetch', refs: ['project:project/oldest.md'] },
+      { projectRoot: '/tmp/project' },
+    );
+
+    expect(scanMock).toHaveBeenCalledWith(
+      '/tmp/project',
+      expect.objectContaining({ uncapped: true }),
+    );
+    const fetchResult = expectContentResult(result, 'fetch');
+    expect(fetchResult.missingRefs).toBeUndefined();
+    expect(fetchResult.results[0]?.content).toBe('B'.repeat(100));
+  });
+
   it('uses a lossless encoded ref for paths with prompt punctuation', async () => {
     const docs = [doc('project/a] b.md', { body: 'encoded body' })];
     const ref = 'project:project/a%5D%20b.md';
@@ -832,6 +860,7 @@ describe('executeSearchMemory', () => {
       scopes: ['project', 'user', 'team'],
       teamMemoryEnabled: true,
       trustedProject: true,
+      uncapped: true,
     });
     expect(result.results.map((item) => item.ref)).toEqual(['team:shared.md']);
   });

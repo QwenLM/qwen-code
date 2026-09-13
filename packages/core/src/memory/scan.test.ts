@@ -161,6 +161,39 @@ describe('auto-memory topic scanning', () => {
     }
   });
 
+  it('reports a delimited head the strict parser cannot splice as terminally malformed', () => {
+    // Tab indentation is a strict YAML error and a scalar/empty head holds no
+    // mapping: migration can never splice owned keys into either losslessly,
+    // so the file is excluded from candidacy instead of being retried on
+    // every turn or wrapped into a new head that swallows the original one.
+    for (const malformed of [
+      '---\n\ttype: project\n\tname: Legacy\n---\nBody',
+      '---\n\tname: Old Name\n\tdescription: old desc\n---\nBody',
+      '---\njust a scalar\n---\nBody',
+      '---\n---\nBody',
+    ]) {
+      expect(validateStructuredAutoMemoryDocument(malformed)).toEqual({
+        valid: false,
+        missingOrInvalidFields: ['frontmatter-malformed'],
+      });
+    }
+    // A strict-valid map head missing fields stays a migration candidate:
+    // the CST splice fills the gaps without touching anything else.
+    expect(
+      validateStructuredAutoMemoryDocument(
+        '---\nname: Old name\ndescription: Old description\n---\nBody',
+      ),
+    ).toEqual({
+      valid: false,
+      missingOrInvalidFields: [
+        'type',
+        'category',
+        'keywords',
+        'usage_scenarios',
+      ],
+    });
+  });
+
   it('keeps legacy parsing permissive while strict validation reports fields', () => {
     const content = [
       '---',
