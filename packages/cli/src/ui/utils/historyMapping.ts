@@ -302,6 +302,12 @@ export function computeApiTruncationIndex(
         // existing demotion pins cover.
         const mark = getApiHistoryPromptId(entry);
         if (mark !== undefined && mark !== target.promptId) continue;
+        // A notification-provenance entry (a drained background-agent/cron
+        // submission) has a notification item as its UI half, never a user
+        // turn, so it cannot be the target's own and cannot impostor one:
+        // a cron entry whose raw prompt equals the target's text must not
+        // veto the proof (R40-3).
+        if (isApiHistoryNotification(entry)) continue;
         // For a placeholder-texted target, count the walk's own filtered
         // population: a cleared media-only entry carries the same text but
         // never had a UI turn, so counting it lets a same-mime cleared
@@ -397,13 +403,40 @@ export function computeApiTruncationIndex(
     // claimant-less re-send) makes the walk land early, but demoting onto
     // the walk's boundary is only honest when the cut drops nothing the UI
     // still shows (R40-3).
+    // The mark-independent half of the safe-cut scan: whether `entry` is a
+    // still-displayed pre-target turn's own, proven by the entry's prompt
+    // text equalling that turn's model-facing text. Only an UNMARKED entry
+    // needs it — a mark already settles the question, and text-pairing a
+    // marked entry would claim a same-text twin wearing another turn's id.
+    // Turns with no model-facing text (attachment-only) have nothing to
+    // pair by; their entries are text-less and pair by mark or not at all.
+    const isEntryClaimedByPreTargetTurnText = (entry: Content): boolean =>
+      uiHistory.some(
+        (item, index) =>
+          index < targetIndex &&
+          (compressionIndex === -1 || index > compressionIndex) &&
+          isRealUserTurn(item) &&
+          item.promptHasModelText !== false &&
+          isApiEntryOwnedByText(entry, item.promptOwnerText ?? item.text),
+      );
     const cutDropsDisplayedTurn = (
       boundary: number,
       matchIndex: number,
     ): boolean => {
       for (let i = boundary; i < matchIndex; i++) {
-        const mark = getApiHistoryPromptId(apiHistory[i]!);
-        if (mark !== undefined && isMarkClaimedByPreTargetTurn(mark)) {
+        const entry = apiHistory[i]!;
+        const mark = getApiHistoryPromptId(entry);
+        if (mark !== undefined) {
+          if (isMarkClaimedByPreTargetTurn(mark)) {
+            return true;
+          }
+          continue;
+        }
+        // An unmarked entry (a retry's re-push, a pre-identities
+        // transcript, a checkpoint restore) carries no mark to claim, so
+        // pair it by text — otherwise the scan is blind to exactly the
+        // displayed turns identity never learned (R40-3).
+        if (isEntryClaimedByPreTargetTurnText(entry)) {
           return true;
         }
       }
@@ -432,8 +465,12 @@ export function computeApiTruncationIndex(
         const ownable = isUserTextContent(entry);
         if (ownable) counted++;
         // The backstop counts only entries that can own a UI turn: a real
-        // prompt entry, or a text-less media entry (an attachment-only
-        // turn's uncleared entry). A wholly-structural reminder entry (the
+        // prompt entry, or an attachment-only turn's uncleared entry.
+        // Producers place a text part first unconditionally — `{ text: '' }`
+        // when the turn is attachment-only (live-turn.ts,
+        // atCommandProcessor.ts) — and nothing strips it, so the text-less
+        // clause keys on no NON-EMPTY text part rather than no text part at
+        // all (R46-1). A wholly-structural reminder entry (the
         // mid-history MCP added-tools notice) and a cleared media-only
         // entry both fail `isUserTextContent` yet still carry a text part —
         // counting either inflates the backstop with a position no UI turn
@@ -454,7 +491,12 @@ export function computeApiTruncationIndex(
           entry.role === 'user' &&
           !entry.parts?.some((part) => 'functionResponse' in part) &&
           (ownable ||
-            !entry.parts?.some((part) => 'text' in part) ||
+            !entry.parts?.some(
+              (part) =>
+                'text' in part &&
+                typeof part.text === 'string' &&
+                part.text.length > 0,
+            ) ||
             claimedBeforeTarget)
         ) {
           absolute++;
@@ -516,6 +558,18 @@ export function computeApiTruncationIndex(
       // when [positional, identifiedIndex) holds an entry a still-displayed
       // turn owns, the early walk is the unowned excess's doing and the
       // proven match stays (R40-3).
+      // The accepted boundary drops [identifiedIndex, ∞): when an entry
+      // AFTER the match is owned by a still-displayed turn BEFORE the
+      // target, the match cannot be the target's own — its true entry must
+      // follow that turn's. That is the claimant-less re-send wearing the
+      // target's id and text (R40-2), and the demotion below cannot catch
+      // it: the demotion runs only when the positional walk lands, and the
+      // absorbed target leaves the walk one short. Identity does not
+      // resolve; fall back to the walk, whose loud -1 is the pre-identity
+      // answer here.
+      if (cutDropsDisplayedTurn(identifiedIndex + 1, apiHistory.length)) {
+        return positionalTruncationIndex();
+      }
       const positional = positionalTruncationIndex();
       if (positional !== -1 && positional < identifiedIndex) {
         let countedBeforeMatch = 0;

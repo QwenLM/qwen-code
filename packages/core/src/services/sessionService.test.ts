@@ -4674,6 +4674,57 @@ describe('SessionService', () => {
       );
     });
 
+    it('restores notification provenance from a compression checkpoint (R40-3)', () => {
+      // The record subtype attaches provenance for ordinary records, but a
+      // compression snapshot holds bare Content entries — provenance must
+      // ride the payload's parallel notificationMarks array (derived from
+      // the live marks by recordChatCompression), or the resumed census can
+      // no longer pair the entry with its notification item.
+      const compressionRecord: ChatRecord = {
+        uuid: 'c1',
+        parentUuid: 'b2',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-02T03:00:00Z',
+        type: 'system',
+        subtype: 'chat_compression',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        gitBranch: 'main',
+        systemPayload: {
+          info: {
+            originalTokenCount: 100,
+            newTokenCount: 50,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            {
+              role: 'model',
+              parts: [{ text: 'Got it. Thanks for the additional context!' }],
+            },
+            { role: 'user', parts: [{ text: 'Run the nightly job' }] },
+          ],
+          promptIds: [null, null, 'session########7'],
+          notificationMarks: [false, false, true],
+        },
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-02T04:00:00Z',
+        messages: [compressionRecord],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(isApiHistoryNotification(history[0]!)).toBe(false);
+      expect(isApiHistoryNotification(history[1]!)).toBe(false);
+      expect(isApiHistoryNotification(history[2]!)).toBe(true);
+      expect(getApiHistoryPromptId(history[2]!)).toBe('session########7');
+    });
+
     it('keeps Realtime dialogue out of backend model history', () => {
       const realtimeUser: ChatRecord = {
         ...recordA1,

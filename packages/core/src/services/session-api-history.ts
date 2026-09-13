@@ -168,6 +168,9 @@ export class SessionApiHistoryAccumulator {
         ? payload.compressedHistory.map((content, index) => {
             const copy = copyContentForApiHistory(content);
             markApiHistoryPrompt(copy, payload.promptIds?.[index]);
+            if (payload.notificationMarks?.[index]) {
+              markApiHistoryNotification(copy);
+            }
             return copy;
           })
         : [];

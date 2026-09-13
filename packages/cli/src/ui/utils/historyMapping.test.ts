@@ -2030,6 +2030,114 @@ describe('owner-paired censuses close the unpaired-producer class (R40-3)', () =
     expect(computeApiTruncationIndex(ui, 5, api)).toBe(6);
   });
 
+  it('keeps the ownership-proven match when an inflated-walk displayed turn has an unmarked entry', () => {
+    // Same Goal-continuation shape as above, but the displayed turn's entry
+    // carries no mark (a retry's re-push, a pre-identities transcript, a
+    // checkpoint restore): a mark-only safe-cut scan cannot see its
+    // ownership, so the demotion fires and the cut at 4 drops the still
+    // displayed turn's prompt+response while its UI item stays. Pairing the
+    // unmarked entry by its prompt text keeps the proven match (6).
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const shownEntry = userContent('shown turn'); // unmarked: no mark survived
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########2');
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      withPromptId(3, 'shown turn', 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'target prompt', 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      userContent('goal continuation'), // claimant-less; no UI item
+      modelContent('r1'),
+      shownEntry, // a still-displayed turn's own entry, UNMARKED
+      modelContent('r2'),
+      targetEntry, // the target's own entry sits at index 6
+      modelContent('r3'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(6);
+  });
+
+  it('refuses (-1) a claimant-less re-send wearing the absorbed target id and text when the walk cannot land (R40-2)', () => {
+    // The target's own entry never landed (absorbed) and a claimant-less
+    // post-prefix re-send wears its id AND its text: the id match is
+    // unique, the text proof passes, and the same-text census sees only the
+    // re-send. An earlier absorbed turn leaves the positional walk one
+    // short, so the demotion — gated on the walk landing — never runs, and
+    // accepting the match cuts at the re-send's boundary (2), dropping the
+    // still-displayed 'c prompt' turn's own marked entry (4) with it. The
+    // suffix safe-cut scan sees that entry's owner behind the match and
+    // refuses the identity; the walk's loud -1 is the pre-identity answer.
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'absorbed earlier', 'session########3'), // entry absorbed
+      llmItem(2),
+      withPromptId(3, 'a prompt', 'session########0'),
+      llmItem(4),
+      withPromptId(5, 'c prompt', 'session########2'),
+      llmItem(6),
+      withPromptId(7, 'rerun me', 'session########1'), // target; own entry gone
+      llmItem(8),
+    ];
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+    const api: Content[] = [
+      markedUser('a prompt', 'session########0'),
+      modelContent('r0'),
+      markedUser('rerun me', 'session########1'), // claimant-less re-send
+      modelContent('r1'),
+      markedUser('c prompt', 'session########2'), // a displayed turn's own
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 7, api)).toBe(-1);
+  });
+
+  it('keeps the ownership-proven match when a cron entry shares the target text', () => {
+    // A cron fire submits its raw job prompt with no envelope; when that
+    // text equals the target's, a provenance-blind same-text census counts
+    // the cron entry as an impostor candidate and vetoes the unique,
+    // ownership-proven match — the rewind then demotes to the walk's
+    // boundary (2), dropping the still-displayed 'first prompt' turn's own
+    // entry. A notification-provenance entry's UI half is a notification
+    // item, never a user turn, so it cannot be the target's own and is
+    // exempt from the census.
+    const cronEntry = userContent('nightly report'); // no envelope, raw prompt
+    markApiHistoryNotification(cronEntry);
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const targetEntry = userContent('nightly report');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+
+    const ui: HistoryItem[] = [
+      notificationItem(1, 'Cron job fired'),
+      llmItem(2),
+      withPromptId(3, 'first prompt', 'session########0'),
+      llmItem(4),
+      withPromptId(5, 'nightly report', 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      cronEntry, // the cron turn's entry: same text, notification provenance
+      modelContent('r0'),
+      firstEntry,
+      modelContent('r1'),
+      targetEntry, // the target's own entry sits at index 4
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
+
   it('refuses (-1) a placeholder impostor behind a batch-of-2 drain', () => {
     // Two drained tasks render two notification items but submit ONE entry.
     // The unpaired backstop counted that entry while uiUserTurnCount counted
@@ -2478,8 +2586,8 @@ describe("this PR's own headline reproduction (#9437)", () => {
   });
 
   it('refuses (-1) a placeholder impostor admitted by a cancelled ordinal mismatch', () => {
-    // R32-1's witness shape. One attachment-only UI turn (no API text part,
-    // so the API count runs one BEHIND) and two cleared media-only entries
+    // R32-1's witness shape. One attachment-only UI turn (an empty API text
+    // part, so the API count runs one BEHIND) and two cleared media-only entries
     // (no UI turns, so the unfiltered API count runs two AHEAD) sit before
     // the target. Under the pre-fix unfiltered count the two divergences
     // cancel — 3 === uiUserTurnCount — at an entry that is NOT the target's
@@ -2531,11 +2639,12 @@ describe("this PR's own headline reproduction (#9437)", () => {
       {
         role: 'user',
         parts: [
+          { text: '' } as Part,
           {
             inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
           } as unknown as Part,
         ],
-      }, // the attachment-only turn's entry: no text part
+      }, // the attachment-only turn's entry: producers keep the empty text part
       modelContent('r1'),
       clearedEntry('image/jpeg'), // cleared media-only entry; no UI turn
       modelContent('r2'),
@@ -2588,6 +2697,7 @@ describe("this PR's own headline reproduction (#9437)", () => {
     const attachmentEntry: Content = {
       role: 'user',
       parts: [
+        { text: '' } as Part,
         {
           inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
         } as unknown as Part,
@@ -2604,7 +2714,7 @@ describe("this PR's own headline reproduction (#9437)", () => {
     const api: Content[] = [
       impostor, // cleared media-only entry wearing the target's re-minted id
       modelContent('r0'),
-      attachmentEntry, // the attachment-only turn's own entry: no text part
+      attachmentEntry, // the attachment-only turn's own entry: empty text part
       modelContent('r1'),
     ];
 
@@ -2647,6 +2757,7 @@ describe("this PR's own headline reproduction (#9437)", () => {
     const attachmentEntry: Content = {
       role: 'user',
       parts: [
+        { text: '' } as Part,
         {
           inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
         } as unknown as Part,
@@ -2671,7 +2782,7 @@ describe("this PR's own headline reproduction (#9437)", () => {
       ), // structural mid-history reminder; owns no UI turn
       impostor, // cleared media-only entry wearing the target's re-minted id
       modelContent('r0'),
-      attachmentEntry, // the attachment-only turn's own entry: no text part
+      attachmentEntry, // the attachment-only turn's own entry: empty text part
       modelContent('r1'),
     ];
 
@@ -2724,6 +2835,68 @@ describe("this PR's own headline reproduction (#9437)", () => {
     ];
 
     expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+  });
+
+  it('resolves a placeholder target behind an unmarked attachment-only predecessor (R46-1)', () => {
+    // A session recorded before prompt identities (its attachment-only
+    // turn's entry is unmarked) and continued after the upgrade. Producers
+    // place an empty text part first on an attachment-only entry
+    // (live-turn.ts, atCommandProcessor.ts) and nothing strips it, so the
+    // backstop's text-less clause must key on no NON-EMPTY text part.
+    // Keying on no text part at all never counts a real predecessor: the
+    // ordinal proof's absolute term then falls one short of
+    // uiUserTurnCount, and the gate refuses the target's unique,
+    // ownership-proven match (-1) where its own boundary is 2.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const attachmentOnlyItem = (id: number): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptHasModelText?: boolean };
+      item.promptHasModelText = false;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+
+    const ui: HistoryItem[] = [
+      attachmentOnlyItem(1),
+      llmItem(2),
+      withPromptId(3, PLACEHOLDER, 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'third prompt', 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: '' } as Part,
+          {
+            inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+          } as unknown as Part,
+        ],
+      }, // the pre-identities attachment-only turn's entry, unmarked
+      modelContent('r0'),
+      markedUser(PLACEHOLDER, 'session########1'), // the target's own entry
+      modelContent('r1'),
+      markedUser('third prompt', 'session########2'),
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
   });
 });
 
