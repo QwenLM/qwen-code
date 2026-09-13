@@ -24,6 +24,7 @@ import {
 import {
   consoleLevel,
   orderOpenTabs,
+  pageTitle,
   providerTab,
   providerTabs,
   pushBounded,
@@ -466,7 +467,7 @@ export class PlaywrightSession {
       id: tab.id,
       title:
         tab.dialog === undefined
-          ? await tab.page.title().catch(() => null)
+          ? await pageTitle(tab.page).catch(() => null)
           : null,
       url: tab.page.url() || null,
     };

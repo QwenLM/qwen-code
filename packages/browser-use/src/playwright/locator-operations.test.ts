@@ -594,9 +594,11 @@ describe('locator.downloadMedia', () => {
       ): Promise<{
         ok: boolean;
         status?: number;
+        headers: Headers;
         blob: () => Promise<Blob>;
       }> => ({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/octet-stream' }),
         blob: async () => new Blob(['bytes']),
       }),
     );
@@ -735,6 +737,57 @@ describe('locator.downloadMedia', () => {
     expect(f.anchor.download).toBe('report.pdf');
   });
 
+  it('downloads the file a located anchor links to when it wraps only an icon', async () => {
+    const f = downloadFixture({});
+    Object.assign(f.element, { href: 'https://example.com/files/annual.pdf' });
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ src: 'https://cdn.example.com/icons/pdf.png' }]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://example.com/files/annual.pdf',
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(f.anchor.download).toBe('annual.pdf');
+  });
+
+  it('falls back to the contained media when the located anchor links to a page', async () => {
+    const f = downloadFixture({});
+    Object.assign(f.element, { href: 'https://example.com/products/42' });
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ src: 'https://cdn.example.com/photo.jpg' }]
+        : [],
+    );
+    f.fetchMock.mockImplementation(async (url: string) => ({
+      ok: true,
+      headers: new Headers({
+        'content-type': url.endsWith('/42')
+          ? 'text/html; charset=utf-8'
+          : 'image/jpeg',
+      }),
+      blob: async () => new Blob(['bytes']),
+    }));
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'https://example.com/products/42',
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(f.fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'https://cdn.example.com/photo.jpg',
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(f.anchor.download).toBe('photo.jpg');
+  });
+
   it('reads the first srcset URL when a matched source exposes no src', async () => {
     const f = downloadFixture({});
     f.element.querySelectorAll.mockImplementation((selector: string) =>
@@ -858,6 +911,7 @@ describe('locator.downloadMedia', () => {
     f.fetchMock.mockResolvedValue({
       ok: false,
       status: 403,
+      headers: new Headers(),
       blob: async () => new Blob([]),
     });
     await expect(

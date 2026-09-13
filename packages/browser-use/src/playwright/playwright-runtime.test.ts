@@ -1568,6 +1568,58 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.page.goto).toHaveBeenCalledOnce();
   });
 
+  it('times out tab.title when the page never yields a title', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    fixture.page.title.mockReturnValue(new Promise<string>(() => {}));
+    vi.useFakeTimers();
+    try {
+      const result = fixture.runtime
+        .dispatch('tab.title', { tabId: tab.id })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await result).toMatchObject({ code: 'OPERATION_TIMEOUT' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lists a tab whose title read never settles with a null title', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    fixture.page.title.mockReturnValue(new Promise<string>(() => {}));
+    vi.useFakeTimers();
+    try {
+      const result = fixture.runtime
+        .dispatch('tabs.list', { browserId: 'chrome' })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await result).toEqual([
+        expect.objectContaining({ id: tab.id, title: null }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops the session while a registering tab’s title read never settles', async () => {
+    const fixture = await runtimeFixture();
+    fixture.page.title.mockReturnValue(new Promise<string>(() => {}));
+    vi.useFakeTimers();
+    try {
+      const created = fixture.runtime
+        .dispatch('tabs.new', { browserId: 'chrome' })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await created).toMatchObject({ title: null });
+      const stopped = fixture.runtime.stop().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await stopped).not.toBeInstanceOf(Error);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('clears the cached dialog when Chrome reports it already gone', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);

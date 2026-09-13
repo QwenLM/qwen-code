@@ -436,3 +436,12 @@ export async function withTimeout<T>(
     if (timer !== undefined) clearTimeout(timer);
   }
 }
+
+// page.title() accepts no timeout and never settles while the page has no
+// main-world execution context (a discarded tab or a dead renderer), so an
+// unbounded read wedges the caller — and, during registration, session stop.
+const TITLE_TIMEOUT_MS = 5_000;
+
+export async function pageTitle(page: Page): Promise<string> {
+  return await withTimeout(page.title(), TITLE_TIMEOUT_MS);
+}

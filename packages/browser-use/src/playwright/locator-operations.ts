@@ -99,10 +99,9 @@ export async function executeLocatorOperation(
           async (element, budgetMs) => {
             element.scrollIntoView({ block: 'center', inline: 'nearest' });
             // A located wrapper (picture/figure) must resolve to the media it
-            // contains, and a located anchor's own href must not win over the
-            // media inside it: probe media properties across every candidate
-            // first, and read an anchor's href only as the file-link fallback
-            // when no candidate exposes a media URL.
+            // contains: media properties are probed across every candidate
+            // before an anchor's href falls back as the file link. A located
+            // anchor's own href is the exception — it is fetched first below.
             const candidates = [
               element,
               ...element.querySelectorAll('img, video, source'),
@@ -130,47 +129,73 @@ export async function executeLocatorOperation(
                 ? new URL(candidate, document.baseURI).href
                 : null;
             };
-            let url: string | null = null;
-            for (const candidate of candidates) {
-              url =
-                readString(candidate, 'currentSrc') ??
-                readString(candidate, 'src') ??
-                readSrcset(candidate);
-              if (url !== null) break;
-            }
-            if (url === null)
-              for (const candidate of candidates) {
-                url = readString(candidate, 'href');
-                if (url !== null) break;
-              }
-            if (url === null)
-              throw new Error(
-                'Matched element does not expose a downloadable URL',
-              );
-            if (!/^(?:https?|blob|data):/.test(url))
-              throw new Error(
-                `Unsupported media URL scheme: ${url.slice(0, 200)}`,
-              );
             // The download attribute is honored only for same-origin URLs, so
             // clicking a cross-origin anchor would navigate the claimed tab
             // away instead; fetch the resource and download a same-origin
             // object URL, failing loudly when the fetch yields no body.
-            let response: Response;
-            try {
-              response = await fetch(url, {
-                signal: AbortSignal.timeout(budgetMs),
-              });
-            } catch (error) {
-              // A CORS rejection surfaces as an opaque TypeError; name the
-              // actual cause so the model stops retrying the same read.
-              if (error instanceof TypeError)
+            const fetchMedia = async (target: string): Promise<Response> => {
+              let fetched: Response;
+              try {
+                fetched = await fetch(target, {
+                  signal: AbortSignal.timeout(budgetMs),
+                });
+              } catch (error) {
+                // A CORS rejection surfaces as an opaque TypeError; name the
+                // actual cause so the model stops retrying the same read.
+                if (error instanceof TypeError)
+                  throw new Error(
+                    `Media download requires reading the resource, but the page origin cannot read it (cross-origin without CORS): ${target.slice(0, 200)}`,
+                  );
+                throw error;
+              }
+              if (!fetched.ok)
                 throw new Error(
-                  `Media download requires reading the resource, but the page origin cannot read it (cross-origin without CORS): ${url.slice(0, 200)}`,
+                  `Media download failed: HTTP ${fetched.status}`,
                 );
-              throw error;
+              return fetched;
+            };
+            let picked: { url: string; response: Response } | null = null;
+            // A located anchor names the file it links to, so its own href is
+            // fetched before the contained media and kept unless the server
+            // answers an HTML page (a card link, whose media still wins); a
+            // failed probe falls through to the candidate scan.
+            const ownHref = readString(element, 'href');
+            if (ownHref !== null && /^(?:https?|blob|data):/.test(ownHref)) {
+              const probe = await fetchMedia(ownHref).catch(() => null);
+              if (probe !== null) {
+                const type = probe.headers.get('content-type') ?? '';
+                if (type.toLowerCase().startsWith('text/html')) {
+                  void probe.body?.cancel().catch(() => undefined);
+                } else {
+                  picked = { url: ownHref, response: probe };
+                }
+              }
             }
-            if (!response.ok)
-              throw new Error(`Media download failed: HTTP ${response.status}`);
+            if (picked === null) {
+              let scanned: string | null = null;
+              for (const candidate of candidates) {
+                scanned =
+                  readString(candidate, 'currentSrc') ??
+                  readString(candidate, 'src') ??
+                  readSrcset(candidate);
+                if (scanned !== null) break;
+              }
+              if (scanned === null)
+                for (const candidate of candidates) {
+                  scanned = readString(candidate, 'href');
+                  if (scanned !== null) break;
+                }
+              if (scanned === null)
+                throw new Error(
+                  'Matched element does not expose a downloadable URL',
+                );
+              if (!/^(?:https?|blob|data):/.test(scanned))
+                throw new Error(
+                  `Unsupported media URL scheme: ${scanned.slice(0, 200)}`,
+                );
+              picked = { url: scanned, response: await fetchMedia(scanned) };
+            }
+            const { url, response } = picked;
             const objectUrl = URL.createObjectURL(await response.blob());
             const anchor = document.createElement('a');
             anchor.href = objectUrl;

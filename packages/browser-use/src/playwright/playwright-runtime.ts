@@ -45,6 +45,7 @@ import {
   loadState,
   navigationOptions,
   numberArg,
+  pageTitle,
   record,
   stringArg,
   stringArray,
@@ -203,7 +204,7 @@ export class PlaywrightRuntime {
       case 'tab.url':
         return this.tab(args).page.url();
       case 'tab.title':
-        return await this.tab(args).page.title();
+        return await pageTitle(this.tab(args).page);
       case 'tab.back':
         await this.tab(args).page.goBack({
           waitUntil: 'commit',
