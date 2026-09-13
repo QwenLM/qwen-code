@@ -9,6 +9,11 @@ import { EventEmitter } from 'node:events';
 import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
+import {
+  loadSettings as loadModelSettings,
+  resetHomeEnvBootstrapForTesting,
+} from '../config/settings.js';
+import { updateModelContextWindow } from './model-configuration.js';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -87,6 +92,8 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   ApprovalMode,
+  AuthType,
+  ProviderInstallError,
   BTW_MAX_INPUT_LENGTH,
   ExtensionManager,
   ExtensionUpdateState,
@@ -208,7 +215,6 @@ import {
   type DeviceFlowProvider,
   type DeviceFlowRegistry as DeviceFlowRegistryType,
 } from './auth/device-flow.js';
-import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import {
   resetTrustedFoldersForTesting,
   TRUSTED_FOLDERS_FILENAME,
@@ -39244,6 +39250,45 @@ describe('auth device-flow routes', () => {
     }
   });
 
+  it('POST /workspace/auth/provider reports model purpose conflicts as a client error', async () => {
+    const installAuthProvider = vi
+      .fn()
+      .mockRejectedValue(
+        new ProviderInstallError(
+          'This install would replace a model configured for another purpose.',
+          'modelPurpose',
+          AuthType.USE_OPENAI,
+        ),
+      );
+    const bridge = fakeBridge();
+    const invokeWorkspaceCommand = vi.spyOn(bridge, 'invokeWorkspaceCommand');
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.example.com/v1',
+        modelIds: ['image-01'],
+        advancedConfig: { purpose: 'image' },
+      });
+
+    expect(installAuthProvider).toHaveBeenCalledOnce();
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      code: 'model_purpose_conflict',
+      error:
+        'This install would replace a model configured for another purpose.',
+    });
+    expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+
   it('POST /workspace/auth/provider returns a warning state when runtime sync fails after persistence', async () => {
     const installAuthProvider = vi.fn().mockResolvedValue({
       v: 1,
@@ -43173,3 +43218,141 @@ describe('Live Appshot server integration', () => {
     }
   });
 });
+
+it.each(['patch', 'delete', 'delete-workspace'] as const)(
+  '%s /workspace/models reloads siblings after a user write beside a workspace bucket',
+  async (method) => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-r3-scope-'));
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    const sibling = path.join(root, 'sibling');
+    await fsp.mkdir(home);
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.mkdir(sibling);
+    const userPath = path.join(home, 'settings.json');
+    const workspacePath = path.join(workspace, '.qwen/settings.json');
+    for (const [k, v] of Object.entries({
+      QWEN_HOME: home,
+      QWEN_RUNTIME_DIR: path.join(root, 'runtime'),
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(root, 'system.json'),
+      QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(root, 'defaults.json'),
+      QWEN_CODE_TRUSTED_FOLDERS_PATH: path.join(home, 'trusted.json'),
+    }))
+      vi.stubEnv(k, v);
+    await fsp.writeFile(
+      userPath,
+      JSON.stringify({
+        $version: 4,
+        ...(method === 'delete-workspace'
+          ? { voiceModel: 'workspace-model' }
+          : {}),
+        modelProviders: {
+          openai: [
+            { id: 'user-model', generationConfig: { contextWindowSize: 8192 } },
+            { id: 'user-sibling' },
+          ],
+        },
+      }),
+    );
+    await fsp.writeFile(
+      workspacePath,
+      JSON.stringify({
+        $version: 4,
+        modelProviders: { gemini: [{ id: 'workspace-model' }] },
+      }),
+    );
+    const workspaceBefore = await fsp.readFile(workspacePath, 'utf8');
+    const primaryReload = vi.fn().mockResolvedValue({ status: 'applied' });
+    const siblingReload = vi.fn().mockResolvedValue({ status: 'applied' });
+    const bridge = fakeBridge();
+    const registry = createWorkspaceRegistry([
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-r3',
+        workspaceCwd: workspace,
+        primary: true,
+        bridge,
+        workspaceService: {
+          reloadModelProviders: primaryReload,
+        } as unknown as DaemonWorkspaceService,
+      }),
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'sibling-r3',
+        workspaceCwd: sibling,
+        primary: false,
+        bridge: fakeBridge(),
+        workspaceService: {
+          reloadModelProviders: siblingReload,
+        } as unknown as DaemonWorkspaceService,
+      }),
+    ]);
+    const load = () =>
+      loadModelSettings(workspace, {
+        skipLoadEnvironment: true,
+        workspaceTrusted: true,
+      });
+    const app = createServeApp(
+      { ...baseOpts, token: 'tkn', workspace },
+      undefined,
+      {
+        bridge,
+        workspaceRegistry: registry,
+        persistSettings: async (_cwd, writes, assertOpen) =>
+          load().setValues(writes, undefined, assertOpen),
+        updateModelContextWindow: async (_cwd, key, size, assertOpen) =>
+          updateModelContextWindow(load(), key, size, assertOpen),
+      },
+    );
+    try {
+      const listed = await request(app)
+        .get('/workspace/models')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', '127.0.0.1:4170');
+      expect(listed.status).toBe(200);
+      const target = listed.body.models.find(
+        (m: { modelId: string }) =>
+          m.modelId ===
+          (method === 'delete-workspace' ? 'workspace-model' : 'user-model'),
+      );
+      const query =
+        method === 'patch'
+          ? request(app).patch('/workspace/models')
+          : request(app).delete('/workspace/models');
+      const res = await query
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', '127.0.0.1:4170')
+        .send(
+          method === 'patch'
+            ? { key: target.key, contextWindowSize: 65536 }
+            : target,
+        );
+      const after = JSON.parse(await fsp.readFile(userPath, 'utf8'));
+      expect(res.status).toBe(200);
+      expect(res.body.runtimeSync.status).toBe('applied');
+      if (method === 'delete-workspace') {
+        expect(
+          JSON.parse(await fsp.readFile(workspacePath, 'utf8')).modelProviders,
+        ).toEqual({ gemini: [] });
+        expect(after.voiceModel).toBe('');
+        expect(
+          after.modelProviders.openai.map((m: { id: string }) => m.id),
+        ).toEqual(['user-model', 'user-sibling']);
+      } else {
+        expect(await fsp.readFile(workspacePath, 'utf8')).toBe(workspaceBefore);
+      }
+      if (method === 'patch')
+        expect(
+          after.modelProviders.openai[0].generationConfig.contextWindowSize,
+        ).toBe(65536);
+      else if (method === 'delete')
+        expect(
+          after.modelProviders.openai.map((m: { id: string }) => m.id),
+        ).toEqual(['user-sibling']);
+      expect(primaryReload).toHaveBeenCalledOnce();
+      expect(siblingReload).toHaveBeenCalledOnce();
+    } finally {
+      await stopCreatedApps();
+      vi.unstubAllEnvs();
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  },
+);

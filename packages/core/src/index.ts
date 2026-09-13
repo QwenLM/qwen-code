@@ -553,9 +553,9 @@ export * from './lsp/configHash.js';
 export * from './lsp/LspConfigLoader.js';
 export * from './lsp/LspConnectionFactory.js';
 export * from './lsp/LspResponseNormalizer.js';
-export * from './lsp/LspServerManager.js';
+export * from './lsp/lsp-server-manager.js';
 export * from './lsp/NativeLspClient.js';
-export * from './lsp/NativeLspService.js';
+export * from './lsp/native-lsp-service.js';
 export * from './lsp/types.js';
 
 // ============================================================================
@@ -798,7 +798,7 @@ export {
   resolveStopHookBlockingCap,
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
-export { type StopFailureErrorType } from './hooks/types.js';
+export type { StopFailureErrorType } from './hooks/types.js';
 export { buildContextUsage } from './hooks/context-usage.js';
 export {
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,

@@ -932,6 +932,42 @@ describe('package asset scripts', () => {
     expect(distPackageJson.optionalDependencies.sharp).toBe('0.35.3');
   });
 
+  it('derives every published node-pty pin from the core manifest', () => {
+    const rootDir = createFixtureRoot();
+    const corePath = path.join(rootDir, 'packages/core/package.json');
+    const core = JSON.parse(readFileSync(corePath, 'utf8'));
+    const pins = Object.fromEntries(
+      Object.entries(
+        JSON.parse(
+          readFileSync(
+            new URL('../../packages/core/package.json', import.meta.url),
+            'utf8',
+          ),
+        ).optionalDependencies,
+      )
+        .filter(([name]) => name.startsWith('@lydell/node-pty'))
+        .map(([name]) => [name, '1.2.0-test-pin']),
+    );
+    expect(Object.keys(pins)).toHaveLength(6);
+    core.optionalDependencies = pins;
+    writeFileSync(corePath, JSON.stringify(core));
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+
+    const published = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist/package.json'), 'utf8'),
+    );
+    expect(
+      Object.fromEntries(
+        Object.entries(published.optionalDependencies).filter(([name]) =>
+          name.startsWith('@lydell/node-pty'),
+        ),
+      ),
+    ).toEqual(pins);
+  });
+
   it('rejects a locked sharp version outside the core declaration', () => {
     const rootDir = createFixtureRoot();
     writeFile(
