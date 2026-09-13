@@ -295,6 +295,7 @@
     "cors": "^2.8.5",
     "dotenv": "^17.1.0",
     "express": "^5.1.0",
+    "lucide-react": "^1.24.0",
     "markdown-it": "^14.1.0",
     "punycode": "^2.3.1",
     "react": "^19.2.4",
