@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-network>
+        <exclude domain="sharedpref" path="qwen_profiles.xml"/>
+    </cloud-network>
+</data-extraction-rules>
