@@ -77,6 +77,22 @@ describe('scheduled task run metadata', () => {
     expect(name.endsWith('… · 01-05 09:07')).toBe(true);
   });
 
+  it('names sentinel-prompt run sessions after what they run, not the raw marker', () => {
+    // Mirrors the controller namer: a durable /loop task converted to per-run
+    // must not title its child sessions with the literal internal sentinel.
+    const at = new Date(2026, 8, 13, 12, 0).getTime();
+    expect(scheduledTaskRunSessionName('<<loop.md>>', at)).toBe(
+      'Loop (loop.md) · 09-13 12:00',
+    );
+    expect(scheduledTaskRunSessionName('<<autonomous-loop-dynamic>>', at)).toBe(
+      'Autonomous loop · 09-13 12:00',
+    );
+    // An ordinary prompt that merely mentions a marker is not a sentinel.
+    expect(scheduledTaskRunSessionName('check <<loop.md>> coverage', at)).toBe(
+      'check <<loop.md>> coverage · 09-13 12:00',
+    );
+  });
+
   it('builds a stable source id for the run session', () => {
     expect(scheduledTaskRunSourceId('task-3')).toBe(
       'scheduled_task_run:task-3',

@@ -744,6 +744,85 @@ describe('scheduled-task keepalive', () => {
     expect(names[0]![1].titleSource).toBe('auto');
   });
 
+  it('names a bound session from the task name, not its prompt', async () => {
+    await updateCronTasks(workspace, () => [
+      task({
+        id: 'named-1',
+        sessionId: 'sess-named',
+        name: 'Daily digest',
+        prompt: 'Summarize the overnight alerts and post to #ops',
+      }),
+      // Same precedence at the bind site: an unbound named task's fresh
+      // session is titled from its name, not its prompt.
+      task({
+        id: 'named-unbound',
+        name: 'Build check',
+        prompt: 'check the build',
+      }),
+    ]);
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
+    const naming = {
+      ...bridge,
+      spawnOrAttach: async () => ({ sessionId: 'new-sess-9' }),
+      closeSession: async () => {},
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
+        names.push([id, m]);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: naming,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(names).toHaveLength(2);
+    expect(names).toContainEqual([
+      'sess-named',
+      { displayName: 'Daily digest', titleSource: 'auto' },
+    ]);
+    expect(names).toContainEqual([
+      'new-sess-9',
+      { displayName: 'Build check', titleSource: 'auto' },
+    ]);
+  });
+
+  it('never reverts a session the user renamed (manual title)', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'bound-manual', sessionId: 'sess-manual', prompt: 'lint' }),
+    ]);
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
+    const naming = {
+      ...bridge,
+      getSessionSummary: (id: string) => ({
+        displayName: id === 'sess-manual' ? 'My own title' : undefined,
+        titleSource: 'manual' as const,
+      }),
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
+        names.push([id, m]);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: naming,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    await ka.tick();
+    ka.stop();
+    expect(names).toHaveLength(0);
+  });
+
   it('does not bind disabled unbound tasks', async () => {
     await updateCronTasks(workspace, () => [
       task({ id: 'disabled-unbound', enabled: false }),

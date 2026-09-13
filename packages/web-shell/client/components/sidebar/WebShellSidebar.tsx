@@ -1513,8 +1513,9 @@ export function WebShellSidebar({
     () =>
       sessionMenuOpenRef.current ||
       groupMenu !== null ||
-      deleteCandidate !== null,
-    [deleteCandidate, groupMenu],
+      deleteCandidate !== null ||
+      unarchiveCandidate !== null,
+    [deleteCandidate, groupMenu, unarchiveCandidate],
   );
   const previousRunningBySourceRef = useRef<
     Record<SidebarSessionSource, Map<string, boolean> | null>

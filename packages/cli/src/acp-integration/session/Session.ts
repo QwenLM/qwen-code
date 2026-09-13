@@ -9277,8 +9277,24 @@ export class Session implements SessionContext {
         await restoreOneShot();
         return;
       }
+      // The fallback runs in the task's controller conversation, so it gets
+      // the same run envelope every other fire there carries — except a /loop
+      // sentinel, which the drain below re-detects by whole-string match on
+      // the ENQUEUED prompt and which an envelope would hide forever. (The
+      // missed/@wakeup/autonomous exclusions can't occur here: this method's
+      // only call site already gated them out.)
       this.#enqueueCronPrompt({
-        prompt: job.prompt,
+        prompt: detectLoopSentinel(job.prompt)
+          ? job.prompt
+          : buildScheduledTaskRunPrompt({
+              id: taskId,
+              name: job.name,
+              cron: job.cronExpr ?? '',
+              prompt: job.prompt,
+              triggeredAt,
+              trigger: 'scheduled',
+              sessionMode: 'persistent',
+            }),
         source: 'cron',
         ...(job.id ? { taskId: job.id } : {}),
         ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),

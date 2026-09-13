@@ -741,6 +741,32 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
   });
 
+  it('marks the catalog when a LEGACY task converts to per_run', async () => {
+    // A task stored before `sessionMode` existed has no mode at all; the read
+    // side lists its controller because `task.sessionMode !== 'per_run'`, so
+    // converting it changes default-catalog membership exactly like a
+    // persistent -> per_run edit and must bump the revision.
+    await seedTask({
+      id: 'legacy-fixed',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+      sessionId: 'sess-legacy',
+    });
+    h.bridge.markSessionCatalogChanged.mockClear();
+
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/legacy-fixed')
+      .send({ sessionMode: 'per_run' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.sessionMode).toBe('per_run');
+    expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+  });
+
   it('restores a per-run one-shot when fresh-session admission fails', async () => {
     const created = await create({
       cron: '0 0 1 1 *',
@@ -2093,6 +2119,36 @@ describe('scheduled-tasks routes', () => {
     );
   });
 
+  it('marks the catalog when deleting a task whose controller is not resident', async () => {
+    // Faithful to bridge.ts: closeSession throws SessionNotFoundError BEFORE
+    // touching any map when the session is not resident, so the bridge's own
+    // catalog mark never runs — the route must mark unconditionally.
+    const realClose = h.bridge.closeSession.bind(h.bridge);
+    h.bridge.closeSession = async (sessionId: string) => {
+      if (!h.bridge.liveSessions.has(sessionId)) {
+        throw new SessionNotFoundError(sessionId);
+      }
+      return realClose(sessionId);
+    };
+    await seedTask({
+      id: 'gone-controller',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+      sessionId: 'sess-not-resident',
+    });
+    h.bridge.markSessionCatalogChanged.mockClear();
+
+    const res = await request(h.app).delete('/scheduled-tasks/gone-controller');
+
+    expect(res.status).toBe(200);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+    expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+  });
+
   it('preserves a missing DELETE response when no mutation committed', async () => {
     await teardown(h);
     let checks = 0;
@@ -2355,6 +2411,51 @@ describe('scheduled-tasks routes', () => {
     // The one-shot is gone from the store — its single fire already happened.
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks).toEqual([]);
+  });
+
+  it('closes the bound controller and marks the catalog when a manual run consumes a one-shot', async () => {
+    // A persistent one-shot's manual run executes in its controller session and
+    // consumes the task — the controller row leaves the default catalog with
+    // the store entry, so the daemon tears the session down (transcript kept
+    // on disk) and bumps the catalog revision exactly as at DELETE.
+    const created = await create({
+      cron: '0 9 1 1 *',
+      prompt: 'p',
+      recurring: false,
+    });
+    const id = created.body.id as string;
+    const sessionId = created.body.sessionId as string;
+    h.bridge.markSessionCatalogChanged.mockClear();
+
+    const res = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+
+    expect(res.status).toBe(200);
+    expect(h.bridge.closed).toEqual([sessionId]);
+    expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('marks but does not close a caller-owned session when a manual run consumes a one-shot', async () => {
+    addLiveSession(h.bridge, CALLER_SESSION_ID, h.workspace);
+    const created = await create({
+      cron: '0 9 1 1 *',
+      prompt: 'p',
+      recurring: false,
+      sessionId: CALLER_SESSION_ID,
+    });
+    const id = created.body.id as string;
+    h.bridge.markSessionCatalogChanged.mockClear();
+
+    const res = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+
+    expect(res.status).toBe(200);
+    // The user's own conversation must survive the task's consumption.
+    expect(h.bridge.closed).toEqual([]);
+    expect(h.bridge.getSessionSummary(CALLER_SESSION_ID).sessionId).toBe(
+      CALLER_SESSION_ID,
+    );
+    expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
   it('revokes channel delivery when a manual run consumes a one-shot task', async () => {

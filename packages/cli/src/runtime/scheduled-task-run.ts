@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { stripTerminalControlSequences } from '@qwen-code/qwen-code-core';
+import {
+  detectAutonomousSentinel,
+  detectLoopSentinel,
+  stripTerminalControlSequences,
+} from '@qwen-code/qwen-code-core';
 import { SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX } from '@qwen-code/acp-bridge';
 
 export { SCHEDULED_TASK_RUN_SOURCE_TYPE } from '@qwen-code/acp-bridge';
@@ -23,6 +27,20 @@ function cleanMetadataLine(value: string): string {
     .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
     .trim()
     .replace(/\s+/g, ' ');
+}
+
+/**
+ * The readable label for a sentinel-prompt task (/loop, autonomous loop), or
+ * undefined for an ordinary prompt. A tool-created loop task's prompt is the
+ * raw internal marker (`<<loop.md>>`) — name its sessions after what the
+ * sentinel runs instead of showing the marker in the session list. Shared by
+ * the controller namer and the per-run child namer so the two can never
+ * diverge on the same task.
+ */
+export function scheduledTaskSentinelLabel(label: string): string | undefined {
+  if (detectLoopSentinel(label)) return 'Loop (loop.md)';
+  if (detectAutonomousSentinel(label)) return 'Autonomous loop';
+  return undefined;
 }
 
 /** Same ceiling the scheduled-task route and the sub-session launcher apply
@@ -48,7 +66,7 @@ export function scheduledTaskRunSessionName(
   const suffix = ` · ${pad2(at.getMonth() + 1)}-${pad2(at.getDate())} ${pad2(
     at.getHours(),
   )}:${pad2(at.getMinutes())}`;
-  const cleaned = cleanMetadataLine(label);
+  const cleaned = cleanMetadataLine(scheduledTaskSentinelLabel(label) ?? label);
   const budget = MAX_RUN_SESSION_NAME_LENGTH - suffix.length;
   let short = cleaned;
   if (cleaned.length > budget) {

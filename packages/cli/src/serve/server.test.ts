@@ -24003,6 +24003,19 @@ describe('createServeApp', () => {
             (session: { sessionId: string }) => session.sessionId,
           ),
         ).toEqual([defaultId]);
+
+        // An exact source-id lookup keeps exact type semantics: asking the
+        // default catalog for a TASK id must not return the scheduled_task
+        // controller the unqualified default listing includes.
+        const exactTaskId = await get('sourceType=default&sourceId=task-1');
+        expect(exactTaskId.status).toBe(200);
+        expect(exactTaskId.body.sessions).toEqual([]);
+
+        const organizedExactTaskId = await get(
+          'view=organized&group=all&sourceType=default&sourceId=task-1',
+        );
+        expect(organizedExactTaskId.status).toBe(200);
+        expect(organizedExactTaskId.body.sessions).toEqual([]);
       });
 
       it('includes a legacy fixed-session task controller in the default source filter', async () => {
@@ -24085,6 +24098,60 @@ describe('createServeApp', () => {
             (session: { sessionId: string }) => session.sessionId,
           ),
         ).toEqual([defaultId]);
+      });
+
+      it('drops the controller row once a consumed one-shot leaves the task store', async () => {
+        // Companion to the POST /scheduled-tasks/:id/run consumption: the
+        // store write that route commits is exactly this removal, and the
+        // membership predicate must then evict the controller from the
+        // default catalog on the very next read.
+        const controllerId = '550e8400-e29b-41d4-a716-446655440207';
+        await writeStoredSession({
+          sessionId: controllerId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'one-shot controller',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          sourceType: 'scheduled_task',
+          sourceId: 'task-consumed',
+        });
+        await qwenCore.updateCronTasks(WS_BOUND, () => [
+          {
+            id: 'task-consumed',
+            cron: '0 9 1 1 *',
+            prompt: 'one-shot task',
+            recurring: false,
+            createdAt: 1,
+            lastFiredAt: null,
+            enabled: true,
+            sessionId: controllerId,
+          },
+        ]);
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+        );
+        const get = () =>
+          request(app)
+            .get(
+              `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?sourceType=default`,
+            )
+            .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        const before = await get();
+        expect(before.status).toBe(200);
+        expect(
+          before.body.sessions.map(
+            (session: { sessionId: string }) => session.sessionId,
+          ),
+        ).toEqual([controllerId]);
+
+        await qwenCore.updateCronTasks(WS_BOUND, () => []);
+
+        const after = await get();
+        expect(after.status).toBe(200);
+        expect(after.body.sessions).toEqual([]);
       });
 
       it('returns persisted sessions matching sourceType and sourceId', async () => {

@@ -93,6 +93,15 @@ export interface KeepaliveBridge {
     sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
+  /** Read a resident session's current title, so the naming pass never
+   * reverts a user's own rename. Optional so existing structural test fakes
+   * stay source-compatible; the production bridge always provides it and
+   * throws for a session that is not resident (the naming pass then skips
+   * that tick rather than naming blind). */
+  getSessionSummary?(sessionId: string): {
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  };
   /** Advance the in-memory session-catalog revision after a successful
    * persisted removal driven by keepalive cleanup. Optional so existing
    * structural test fakes stay source-compatible; the production bridge
@@ -196,7 +205,7 @@ async function bindAndNameSessions(
       spawnedSessionId = sessionId;
       try {
         bridge.updateSessionMetadata(sessionId, {
-          displayName: scheduledTaskSessionName(task.prompt),
+          displayName: scheduledTaskSessionName(task.name ?? task.prompt),
           titleSource: 'auto',
         });
         renamed.add(sessionId);
@@ -245,8 +254,18 @@ async function bindAndNameSessions(
   for (const task of needsName) {
     const sessionId = task.sessionId!;
     try {
+      // "Not yet been named" scope: a session whose live summary carries a
+      // MANUAL title was renamed by the user — leave it alone, or the next
+      // tick (or a daemon restart, which resets `renamed`) would silently
+      // revert the rename. Name from the task's effective label (its name,
+      // or its prompt when unnamed) exactly like the create/PATCH writers.
+      const summary = bridge.getSessionSummary?.(sessionId);
+      if (summary?.titleSource === 'manual' && summary.displayName) {
+        renamed.add(sessionId);
+        continue;
+      }
       bridge.updateSessionMetadata(sessionId, {
-        displayName: scheduledTaskSessionName(task.prompt),
+        displayName: scheduledTaskSessionName(task.name ?? task.prompt),
         titleSource: 'auto',
       });
       renamed.add(sessionId);

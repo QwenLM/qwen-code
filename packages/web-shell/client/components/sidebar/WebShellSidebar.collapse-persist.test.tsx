@@ -786,6 +786,94 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(switcher?.dataset.state).toBe('open');
   });
 
+  it('keeps the collapsed session switcher open when restoring an archived scheduled-task controller', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_archive'],
+    };
+    workspace.capabilities = connection.capabilities;
+    archived.sessions = [
+      makeSession('archived-controller', {
+        displayName: 'Archived digest',
+        isArchived: true,
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      }),
+    ];
+    archived.data = archived.sessions;
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    act(() => {
+      trigger?.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    const archivedHeader = Array.from(
+      switcher?.querySelectorAll<HTMLButtonElement>('button') ?? [],
+    ).find((button) => button.textContent?.includes('Archived'));
+    expect(archivedHeader).not.toBeNull();
+    act(() => click(archivedHeader!));
+    await flushSidebar();
+
+    const row = Array.from(
+      switcher?.querySelectorAll<HTMLElement>(
+        '[data-web-shell-session-title]',
+      ) ?? [],
+    )
+      .find((title) => title.textContent === 'Archived digest')
+      ?.closest<HTMLElement>('[class*="archivedRow"]');
+    const moreActions = row?.querySelector<HTMLButtonElement>(
+      'button[aria-label="More actions"]',
+    );
+    expect(moreActions).not.toBeNull();
+    act(() => {
+      moreActions!.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    await flushSidebar();
+
+    const restoreItem = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.trim() === 'Restore');
+    expect(restoreItem).not.toBeUndefined();
+    act(() => click(restoreItem!));
+    await flushSidebar();
+
+    // The task-coupled confirm is up; it portals outside the flyout.
+    expect(
+      document.querySelector('[data-slot="dialog-content"]')?.textContent,
+    ).toContain('Its scheduled task will start running again.');
+
+    // The pointer leaving the flyout must not unmount the surface under the
+    // open confirm — the same guard the delete confirm already had.
+    act(() => {
+      switcher?.dispatchEvent(
+        new PointerEvent('pointerout', { bubbles: true }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+
+    const openSwitcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(openSwitcher?.dataset.state).toBe('open');
+    expect(
+      document.querySelector('[data-slot="dialog-content"]'),
+    ).not.toBeNull();
+  });
+
   it('renders the complete session name', async () => {
     renderSidebar();
     await flushSidebar();

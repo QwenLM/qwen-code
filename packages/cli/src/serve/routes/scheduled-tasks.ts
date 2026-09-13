@@ -48,8 +48,6 @@ import {
   SessionService,
   Storage,
   stripTerminalControlSequences,
-  detectLoopSentinel,
-  detectAutonomousSentinel,
   isValidCronTaskRoutingId,
   MAX_JOBS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
@@ -81,6 +79,7 @@ import type { ConversationRuntimeActivityGate } from '../conversations/conversat
 import {
   buildScheduledTaskRunPrompt,
   scheduledTaskRunSessionName,
+  scheduledTaskSentinelLabel,
   scheduledTaskRunSourceId,
   SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from '../../runtime/scheduled-task-run.js';
@@ -157,11 +156,8 @@ const MAX_SESSION_NAME_LENGTH = 60;
  * the session list — and truncates on a code-point boundary so slicing can't
  * leave a lone surrogate rendered as `�`. */
 export function scheduledTaskSessionName(label: string): string {
-  // A tool-created /loop task's prompt is a sentinel marker, not a readable
-  // label — name the session after what the sentinel runs instead of showing
-  // a literal `<<loop.md>>` row in the session list.
-  if (detectLoopSentinel(label)) return 'Loop (loop.md)';
-  if (detectAutonomousSentinel(label)) return 'Autonomous loop';
+  const sentinel = scheduledTaskSentinelLabel(label);
+  if (sentinel !== undefined) return sentinel;
   const cleaned = stripTerminalControlSequences(label)
     // Unicode Bidi_Control marks: ALM (U+061C), LRM/RLM (U+200E/200F), the
     // embedding/override set (U+202A..U+202E), and the isolates (U+2066..U+2069).
@@ -1882,7 +1878,13 @@ function registerScheduledTaskCrudRoutes(
           if (sendActivityGateError(res, error)) return;
         }
       }
+      // Default-catalog membership is derived from the task store, so the
+      // controller row vanished with this removal even when the session was
+      // not resident (closeSession above throws before the bridge's own mark
+      // runs). Bump the revision unconditionally — a conservative extra
+      // increment is safe, a missed one leaves the row stale in every client.
       if (boundSessionId) {
+        bridge?.markSessionCatalogChanged?.();
         channelDeliveryAuthorizations?.revokeScheduledTask(
           workspaceCwd,
           boundSessionId,
@@ -1901,7 +1903,7 @@ function registerScheduledTaskCrudRoutes(
     `${base}/:id/run`,
     mutate(),
     withTarget(async (req, res, target) => {
-      const { workspaceCwd } = target;
+      const { workspaceCwd, bridge } = target;
       const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
       if (id.length === 0) {
         res
@@ -1919,6 +1921,11 @@ function registerScheduledTaskCrudRoutes(
       let blockedDisabled = false;
       let blockedLegacy = false;
       let updated: DurableCronTask | undefined;
+      // A consumed one-shot's bound controller becomes an orphan exactly as at
+      // DELETE: capture it inside the mutator, before the filter drops the
+      // task, so it can be closed and the catalog bumped after the commit.
+      let consumedBoundSessionId: string | undefined;
+      let consumedSessionOwnedByTask = true;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
       let removalGenerations: ReadonlyMap<string, number> | undefined;
@@ -1966,6 +1973,16 @@ function registerScheduledTaskCrudRoutes(
               // so the scheduler doesn't ALSO fire it at its original scheduled time
               // (its slot is still in the future, so stamping lastFiredAt=now wouldn't
               // stop that fire). The response still returns the recorded run.
+              if (
+                !current.recurring &&
+                current.sessionMode !== 'per_run' &&
+                typeof current.sessionId === 'string' &&
+                current.sessionId.length > 0
+              ) {
+                consumedBoundSessionId = current.sessionId;
+                consumedSessionOwnedByTask =
+                  current.sessionOwnedByTask !== false;
+              }
               rollbackBefore = tasks;
               const nextTasks = !current.recurring
                 ? tasks.filter((_, i) => i !== idx)
@@ -2099,6 +2116,24 @@ function registerScheduledTaskCrudRoutes(
             `qwen serve: POST ${base}/${id}/run could not attribute fresh session ${childSessionId}: ${error instanceof Error ? error.message : String(error)}`,
           );
         });
+      }
+      if (!updated.recurring && consumedBoundSessionId) {
+        // The manual run consumed this one-shot, so its fixed controller is
+        // now orphaned exactly as at DELETE: stop a task-owned session (its
+        // transcript stays on disk as history) — a caller-owned session
+        // survives — and bump the catalog revision, since membership in the
+        // default catalog ended with the store entry even when the session
+        // was not resident and closeSession threw before the bridge's mark.
+        if (consumedSessionOwnedByTask && bridge) {
+          try {
+            await runWithScheduledTaskTarget(target, () =>
+              bridge.closeSession(consumedBoundSessionId!),
+            );
+          } catch (error) {
+            if (sendActivityGateError(res, error)) return;
+          }
+        }
+        bridge?.markSessionCatalogChanged?.();
       }
       if (!updated.recurring && updated.sessionId) {
         channelDeliveryAuthorizations?.revokeScheduledTask(

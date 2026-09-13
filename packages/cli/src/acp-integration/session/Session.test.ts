@@ -4959,12 +4959,74 @@ describe('Session', () => {
     await vi.waitFor(() => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
     });
-    expect(
-      JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls[0]),
-    ).toContain('review the next PR');
-    expect(
-      JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls[0]),
-    ).not.toContain('Scheduled task:');
+    const fallbackPayload = JSON.stringify(
+      vi.mocked(mockChat.sendMessageStream).mock.calls[0],
+    );
+    expect(fallbackPayload).toContain('review the next PR');
+    // The fallback runs in the controller conversation, so it carries the same
+    // run envelope and instruction guard as every other fire that lands there.
+    expect(fallbackPayload).toContain('Scheduled task: task-1');
+    expect(fallbackPayload).toContain(
+      'This is a scheduled task run. Execute the instructions below now.',
+    );
+    expect(fallbackPayload).toContain('Session: reuse the task conversation');
+  });
+
+  it('keeps a per-run loop sentinel bare when the daemon cannot create a fresh session', async () => {
+    // The drain re-detects a /loop sentinel by whole-string match on the
+    // enqueued prompt — enveloping it would hide the marker and the loop
+    // would never tick, so the fallback must leave it bare.
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-loop',
+            prompt: '<<loop.md>>',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    vi.mocked(mockClient.extMethod).mockRejectedValueOnce(
+      new Error('Method not found'),
+    );
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(annotateRunSession).toHaveBeenCalledWith('task-loop', 123, {
+        sessionId: 'test-session-id',
+        dispatchFailed: true,
+      });
+    });
+    await vi.waitFor(() => {
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    const payload = JSON.stringify(
+      vi.mocked(mockChat.sendMessageStream).mock.calls[0],
+    );
+    // The bare sentinel reached the drain and was expanded into the loop tick
+    // (an enveloped sentinel would never match and the loop would not tick).
+    expect(payload).toContain('# /loop tick');
+    expect(payload).not.toContain('Scheduled task:');
   });
 
   it('does not fall back to the task session when a routed dispatch fails', async () => {
