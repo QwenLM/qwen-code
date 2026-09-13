@@ -276,6 +276,7 @@ import {
 } from '../commands/extensions/consent.js';
 import {
   findLastUserItemIndex,
+  hasUserAuthoredLeadingReminders,
   isOnlyLeadingSystemReminders,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
@@ -2730,9 +2731,30 @@ export const AppContainer = (props: AppContainerProps) => {
         // envelope included) from the model text instead; a leading-only
         // split would leave a mid-string envelope in the composer and
         // drop its re-arm. Without a producer decomposition the leading
-        // split is all that is safe to remove.
-        reminders = submission.reminders ?? split.reminders;
-        displayText = omitSystemReminderBlocks(submission.modelText, reminders);
+        // split is all that is safe to remove — and even that only when
+        // the projection does not itself lead with the same run: a leading
+        // run the model text shares with the projection is user-authored
+        // content (a pasted note ahead of the collapsed paste), which the
+        // shape split must not delete and the re-arm must not consume.
+        if (submission.reminders !== undefined) {
+          reminders = submission.reminders;
+          displayText = omitSystemReminderBlocks(
+            submission.modelText,
+            reminders,
+          );
+        } else if (
+          producerDisplay !== undefined &&
+          hasUserAuthoredLeadingReminders(producerDisplay, submission.modelText)
+        ) {
+          reminders = '';
+          displayText = submission.modelText;
+        } else {
+          reminders = split.reminders;
+          displayText = omitSystemReminderBlocks(
+            submission.modelText,
+            reminders,
+          );
+        }
       }
       restoredSubmissionRef.current = { displayText };
       // Merge, don't overwrite: a restore carrying no envelope of its own

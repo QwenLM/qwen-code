@@ -5136,6 +5136,70 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('keeps a queue-popped user-authored envelope when a collapsed paste forces the model-text fallback', async () => {
+      // The aggregate leads with the user's own <system-reminder> note
+      // ahead of a large paste that collapsed to a placeholder: the
+      // producer projection is no suffix of the model text, so the restore
+      // falls to its shape fallback. The projection leads with the same
+      // envelope run the model text leads with, so that run is
+      // user-authored content — the composer keeps it and nothing is armed
+      // as a consumed notice.
+      const userEnvelope =
+        '<system-reminder>\nuser pasted note\n</system-reminder>\n\n';
+      const aggregateModelText = `${userEnvelope}X\n\n@src/b.ts\n\nY`;
+      const mockSetText = vi.fn();
+      const mockQueueMessage = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: vi.fn().mockResolvedValue(true),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [aggregateModelText],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(aggregateModelText),
+        popAllMessages: vi.fn().mockReturnValue({
+          kind: 'user',
+          modelText: aggregateModelText,
+          submittedPrompt: `${userEnvelope}[Pasted Content 12 chars]`,
+          turnKey: 'k1',
+        }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const poppedText = capturedUIActions.popAllQueuedMessages();
+      expect(poppedText).toBe(aggregateModelText);
+
+      capturedUIActions.handleFinalSubmit(poppedText as string, {
+        submittedPrompt: poppedText as string,
+      });
+      // The user's own note was never armed as a consumed notice: the
+      // resubmit carries the text verbatim, with nothing re-injected.
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        aggregateModelText,
+        false,
+        aggregateModelText,
+      );
+    });
+
     it('re-arms a mid-aggregate envelope carried by the queue producer decomposition', async () => {
       // Two queued members aggregate with '\n\n': the second member's
       // injected envelope sits mid-string, invisible to the restore path's

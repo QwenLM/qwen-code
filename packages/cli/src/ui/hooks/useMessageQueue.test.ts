@@ -164,7 +164,6 @@ describe('useMessageQueue', () => {
       kind: 'user',
       modelText: 'first prompt\n\nsecond prompt',
       turnKey: firstPeek,
-      submittedPrompt: 'first prompt\n\nsecond prompt',
     });
     expect(result.current.messageQueue).toEqual(['/help']);
     expect(queue.peekNextUserBatchKey!()).toBeUndefined();
@@ -238,7 +237,6 @@ describe('useMessageQueue', () => {
       kind: 'user',
       modelText: 'user goes first',
       turnKey: userTurnKey,
-      submittedPrompt: 'user goes first',
     });
     expect(result.current.pendingSubmissionCount).toBe(1);
     let claimedGoal;
@@ -601,6 +599,38 @@ describe('useMessageQueue', () => {
       });
     });
 
+    it('arms nothing when an earlier projection-less member carries a byte-identical block', () => {
+      // The first member is projection-less (a vim submit) and its text
+      // begins with a <system-reminder> block the user pasted themselves;
+      // the second member carries the same block, injected. The restore
+      // path removes each armed block by first byte-match, so arming the
+      // second member's prefix would delete the USER's copy and keep the
+      // injected one. The second member reads as projection-less instead:
+      // nothing is armed and nothing is hidden.
+      const { result } = renderHook(() => useMessageQueue());
+      const envelope =
+        '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\n';
+
+      act(() => {
+        result.current.addMessage(`${envelope}user pasted note`);
+        result.current.addMessage(`${envelope}second`, false, 'second');
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      // Exact shape: a `reminders` key here means the restore would
+      // byte-match the user's leading copy and delete it.
+      expect(popped).toEqual({
+        kind: 'user',
+        modelText: `${envelope}user pasted note\n\n${envelope}second`,
+        submittedPrompt: `${envelope}user pasted note\n\n${envelope}second`,
+        turnKey: expect.any(String),
+      });
+    });
+
     it('arms no reminders for a user-authored leading envelope carried as its own projection', () => {
       // The projection equals the model text, so nothing was injected —
       // the user's own <system-reminder> block is content, not a reminder.
@@ -649,11 +679,12 @@ describe('useMessageQueue', () => {
       });
 
       // Exact shape: a `reminders` key would mean the user's own block was
-      // mis-classified as an injected prefix.
+      // mis-classified as an injected prefix, and a `submittedPrompt` key
+      // would fabricate a producer projection the member never carried —
+      // the dispatch gate would trust its byte-identity and skip the strip.
       expect(popped).toEqual({
         kind: 'user',
         modelText: text,
-        submittedPrompt: text,
         turnKey: expect.any(String),
       });
     });
@@ -828,7 +859,6 @@ describe('useMessageQueue', () => {
       kind: 'user',
       modelText: 'queued user',
       turnKey: reservedKey,
-      submittedPrompt: 'queued user',
     });
   });
 
@@ -1138,10 +1168,11 @@ describe('useMessageQueue', () => {
       expect(drained).toEqual(['steer now']);
     });
 
-    it('reconstructs the projection from the restored texts when restoring multiple messages', () => {
+    it('fabricates no projection when restoring multiple messages', () => {
       // The single original prompt cannot be attributed across several
-      // restored messages, so it is dropped; the per-member fallback then
-      // reconstructs a projection equal to the restored texts.
+      // restored messages, so it is dropped; with no member carrying
+      // producer provenance, the aggregate emits none rather than
+      // synthesizing a byte-identical one the dispatch gate would trust.
       const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
@@ -1153,10 +1184,10 @@ describe('useMessageQueue', () => {
         popped = result.current.popAllMessages();
       });
 
-      expect(popped).toMatchObject({
+      expect(popped).toEqual({
         kind: 'user',
         modelText: 'first\n\nsecond',
-        submittedPrompt: 'first\n\nsecond',
+        turnKey: expect.any(String),
       });
     });
   });
@@ -1210,7 +1241,9 @@ describe('useMessageQueue', () => {
         kind: 'user',
         modelText: 'typed text',
       });
-      expect(submission && 'submittedPrompt' in submission).toBe(true);
+      // No member carried producer provenance, so the batch fabricates
+      // none: the dispatch gate falls through to the strip.
+      expect(submission && 'submittedPrompt' in submission).toBe(false);
 
       act(() => {
         submission = result.current.popNextSubmission();

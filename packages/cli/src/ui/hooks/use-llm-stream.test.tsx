@@ -1203,6 +1203,48 @@ describe('useLlmStream', () => {
     expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(expanded);
   });
 
+  it('keeps a user-authored leading envelope ahead of a collapsed paste', async () => {
+    // The typed text leads with a <system-reminder> block the user pasted
+    // themselves, followed by a large paste that collapsed to a
+    // placeholder: the projection is no suffix of the expanded model text,
+    // so no adoption leg fires. But the projection's leading run is the
+    // user's own words and the model text carries it too, so the shape
+    // strip must not delete it from the transcript row or the ↑-recall
+    // log.
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const userEnvelope =
+      '<system-reminder>\nuser pasted note\n</system-reminder>\n\n';
+    const modelText = `${userEnvelope}line1\nline2\nline3`;
+    const projection = `${userEnvelope}[Pasted Content 12 chars]`;
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: projection },
+      );
+    });
+
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(modelText);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      modelText,
+    );
+  });
+
   it('keeps an attachment @ref prefix visible when provenance holds only the typed text', async () => {
     // '@src/a.ts\n\nexplain this file' is the model text; submittedPrompt
     // is 'explain this file'. Their difference is an attachment reference,

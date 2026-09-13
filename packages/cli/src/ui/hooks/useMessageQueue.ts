@@ -6,10 +6,12 @@
 
 import { randomUUID } from 'node:crypto';
 import { useCallback, useRef, useState } from 'react';
-import type {
-  GoalContinuationTurn,
-  GoalTurnHost,
-  GoalTurnPermit,
+import {
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
+  type GoalContinuationTurn,
+  type GoalTurnHost,
+  type GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
 import { isOnlyLeadingSystemReminders } from '../utils/historyUtils.js';
@@ -144,22 +146,63 @@ function aggregateUserMessages(
   // envelope prefix. A user-authored leading block (projection carried
   // verbatim) contributes nothing — and neither does a projection-less
   // member, whose verbatim projection leaves no difference to arm.
+  //
+  // A run is armed only when every block in it occurs for the FIRST time
+  // exactly at its own offset in the joined text: the restore path removes
+  // each armed block by first byte-match, so an armed block whose
+  // byte-identical twin sits earlier in the aggregate (a projection-less
+  // member's user-pasted copy) would delete the user's block and leave the
+  // injected one. A member failing that check is treated as
+  // projection-less — its text stays verbatim in the projection and
+  // nothing is armed, failing safe toward keeping text.
+  let memberOffset = 0;
   const reminders = messages
     .map((message, index) => {
+      const start = memberOffset;
+      memberOffset += message.text.length + '\n\n'.length;
       const projection = projections[index];
       if (!message.text.endsWith(projection)) return '';
       const prefix = message.text.slice(
         0,
         message.text.length - projection.length,
       );
-      return isOnlyLeadingSystemReminders(prefix) ? prefix : '';
+      if (!isOnlyLeadingSystemReminders(prefix)) return '';
+      let blockOffset = start;
+      let rest = prefix;
+      while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
+        const close = rest.indexOf(
+          SYSTEM_REMINDER_CLOSE,
+          SYSTEM_REMINDER_OPEN.length,
+        );
+        if (close === -1) return '';
+        const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
+        if (text.indexOf(rest.slice(0, blockEnd)) !== blockOffset) {
+          projections[index] = message.text;
+          return '';
+        }
+        const afterBlock = rest.slice(blockEnd);
+        const trimmed = afterBlock.replace(/^\s+/, '');
+        blockOffset += blockEnd + (afterBlock.length - trimmed.length);
+        rest = trimmed;
+      }
+      return prefix;
     })
     .join('');
+  // No member carried producer provenance: the joined texts are not a
+  // projection, and emitting one would fabricate a byte-identity the
+  // dispatch path's adoption gate would trust. A projection-less aggregate
+  // must read as 'no provenance' so the read-back falls through to the
+  // strip, exactly like a direct projection-less submit.
+  const hasProducerProjection = messages.some(
+    (message) => message.submittedPrompt !== undefined,
+  );
   return {
     kind: 'user',
     modelText: text,
     turnKey: messages[0].key,
-    submittedPrompt: projections.join('\n\n'),
+    ...(hasProducerProjection
+      ? { submittedPrompt: projections.join('\n\n') }
+      : {}),
     ...(reminders === '' ? {} : { reminders }),
   };
 }

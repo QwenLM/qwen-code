@@ -101,6 +101,7 @@ import {
 } from '../utils/commandUtils.js';
 import {
   findLastUserItemIndex,
+  hasUserAuthoredLeadingReminders,
   isOnlyLeadingSystemReminders,
   omitSystemReminderBlocks,
   stripLeadingSystemReminders,
@@ -1652,9 +1653,12 @@ export const useLlmStream = (
         // content) or differing from it by a pure leading-envelope prefix.
         // A collapsed large-paste placeholder or an attachment `@ref`
         // prefix is neither and would displace the real prompt on every
-        // read-back surface, so those fall back to the shape strip — which
-        // never returns empty for non-empty input, so an envelope-only
-        // prompt stays visible as-is.
+        // read-back surface, so those fall back to the shape strip —
+        // unless the projection's own leading envelope run is one the
+        // model text carries too: that run is user-authored content (a
+        // pasted note), which the strip must not delete, so the model
+        // text stands as-is. The strip never returns empty for non-empty
+        // input, so an envelope-only prompt stays visible as-is.
         const trimmedSubmittedPrompt = submittedPrompt?.trim() || undefined;
         const strippedQuery = stripLeadingSystemReminders(trimmedQuery);
         // A queue aggregate's injected envelope can sit mid-string (a
@@ -1681,7 +1685,13 @@ export const useLlmStream = (
               )) ||
             adoptedReminders !== undefined)
             ? trimmedSubmittedPrompt
-            : strippedQuery;
+            : trimmedSubmittedPrompt !== undefined &&
+                hasUserAuthoredLeadingReminders(
+                  trimmedSubmittedPrompt,
+                  trimmedQuery,
+                )
+              ? trimmedQuery
+              : strippedQuery;
 
         // Notification messages (e.g. background agent completions) are
         // pre-processed by the notification drain loop which already
