@@ -204,12 +204,15 @@ describe('local files footer entry', () => {
   });
 });
 
-it('withholds browser-local files on a standalone remote connection without changing embedded hosts', () => {
+it('withholds browser-local files on a remote daemon for standalone and embedded hosts alike', () => {
   workspace.baseUrl = 'https://remote.example';
   renderSidebar(undefined, true);
   expect(localFilesTrigger()).toBeNull();
+  // The gate keys on the connected daemon's origin, never on how the page is
+  // hosted, so an embedded shell pointed at a remote daemon withholds the
+  // bridge too — a client directory must not be handed to a remote daemon.
   renderSidebar();
-  expect(localFilesTrigger()).not.toBeNull();
+  expect(localFilesTrigger()).toBeNull();
   workspace.baseUrl = window.location.origin;
   renderSidebar(undefined, true);
   expect(localFilesTrigger()).not.toBeNull();
