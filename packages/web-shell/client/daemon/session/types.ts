@@ -206,6 +206,17 @@ export interface DaemonSessionProviderProps {
   suppressOwnUserEcho?: boolean;
   /** Attach raw daemon events to normalized transcript blocks for debugging. */
   includeRawEvent?: boolean;
+  /**
+   * Fetch the branch during initialization and session loading. Defaults to
+   * true; disable when the UI owns Git status loading. Changing this option
+   * reconnects the session.
+   */
+  prefetchGitBranch?: boolean;
+  /**
+   * Preload sessionless Skills. Defaults to true; disable when the UI loads
+   * Skills on demand. Changing this option reconnects the session.
+   */
+  prefetchSkills?: boolean;
   /** Connect to the daemon automatically on mount. */
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */

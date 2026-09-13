@@ -310,7 +310,7 @@ impl Tool for PressKeyTool {
         let display_key = key_raw.clone();
         // delivery_mode gates the raise: background (default) never fronts the
         // window (auth-envelope post, even with window_id); foreground is the
-        // explicit NSMenu-activation rung. Matches click/type_text/hotkey.
+        // explicit guarded HID rung. Matches click/type_text/hotkey.
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
         let fg = delivery_mode.is_foreground();
 
@@ -412,10 +412,15 @@ impl Tool for PressKeyTool {
         // so any reflex activations it triggers are caught by both the
         // wildcard snapshot suppressor and the targeted FocusGuard lease.
         let prior_front = apps::frontmost_pid();
-        let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let foreground = fg && window_id.is_some();
+        let snapshot = if foreground {
+            WindowChangeDetector::snapshot_without_suppression(prior_front)
+        } else {
+            WindowChangeDetector::snapshot(prior_front)
+        };
 
         let result = focus_guard::with_focus_suppressed(
-            Some(pid),
+            if foreground { None } else { Some(pid) },
             prior_front,
             "press_key.CGEvent",
             || async move {
@@ -456,13 +461,30 @@ impl Tool for PressKeyTool {
                                         let _ =
                                             crate::input::ax_actions::focus_element(element_ptr);
                                     }
-                                    crate::input::keyboard::press_key_bare_global(&key, &m)
+                                    if m.is_empty()
+                                        || crate::input::keyboard::is_screen_sharing_pid(pid)
+                                    {
+                                        // Standalone keys retain their native flags (notably
+                                        // CapsLock's AlphaShift); remote forwarding also
+                                        // requires the original bare event sequence.
+                                        crate::input::keyboard::press_key_bare_global(&key, &m)
+                                    } else {
+                                        // Preconstructed bare base-key events do not inherit
+                                        // modifiers posted later. Native apps need explicit
+                                        // flags as well as the physical modifier transitions.
+                                        crate::input::keyboard::press_key_global(&key, &m)
+                                    }
                                 },
                             )
                         });
                     }
                     // background (default): auth-envelope post, no raise.
                     dispatch_with_ax_oracle(pid, window_id, pre_focus_ptr, || {
+                        if !fg {
+                            if let Some(wid) = window_id {
+                                crate::input::skylight::prepare_background_keyboard(pid, wid)?;
+                            }
+                        }
                         crate::input::keyboard::press_key(pid, &key, &m)
                     })
                 })
