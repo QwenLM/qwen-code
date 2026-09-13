@@ -13,6 +13,15 @@ import type {
   AgentViewSessionStateFile,
 } from './protocol.js';
 
+/**
+ * Title shown for a session that has produced nothing to name it by.
+ *
+ * Exported because a caller that cannot afford an unidentifiable row —
+ * a one-line listing, where there is nothing to arrow onto — has to be
+ * able to recognize the placeholder and substitute the session id.
+ */
+export const AGENT_VIEW_UNTITLED_TITLE = 'Untitled session';
+
 export type AgentViewTaskState =
   | 'running'
   | 'waiting'
@@ -326,7 +335,7 @@ function deriveTitle(
     cleanText(rosterEntry?.displayName) ??
     cleanRuntimeSummary(activity?.summary) ??
     cleanText(launch?.initialPrompt) ??
-    'Untitled session'
+    AGENT_VIEW_UNTITLED_TITLE
   );
 }
 

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
+
 export const AGENT_VIEW_PROTOCOL_VERSION = 1;
 
 export type AgentViewOwnership =
@@ -115,6 +117,28 @@ export interface AgentViewWorkerFile {
   schemaVersion: 1;
   hostPid?: number;
   workerPid?: number;
+  /**
+   * Process start tokens for the pids above, and the PID namespace they
+   * were recorded in.
+   *
+   * A pid number does not identify a process. Nothing reaps this store
+   * while no supervisor runs, so a crash or a reboot leaves recorded pids
+   * behind that the OS later recycles to unrelated processes; and a
+   * shared `~/.qwen` — an NFS home, a devcontainer with the home mounted
+   * — puts another machine's pids in front of a reader who would resolve
+   * them in its own namespace. A reader pairs these with `isSameProcess`
+   * to answer the question the live-session registry already answers for
+   * its own records.
+   *
+   * All three are optional on purpose: this is a durable
+   * `schemaVersion: 1` record, and a file written before these fields
+   * existed must stay readable. A reader that finds them absent degrades
+   * to a bare liveness check — the same rule `isSameProcess` applies on a
+   * platform that has no start token.
+   */
+  hostProcStart?: string | null;
+  workerProcStart?: string | null;
+  pidNs?: number | null;
   endpoint?: string;
   hostEndpoint?: string;
   hostAuthToken?: string;
@@ -232,3 +256,25 @@ export type AgentViewWorkerAnswerOutcome =
   | 'modify_with_editor'
   | 'restore_previous'
   | 'cancel';
+
+/**
+ * The directory name a session id is filed under.
+ *
+ * This lives with the on-disk shapes rather than with the store because
+ * it *is* one: it defines the identity two readers must agree on. The
+ * store files a session under this name and reports it back as the
+ * session's id, while the live-session registry keeps the raw spelling
+ * the worker registered with — adoption deliberately keeps both, because
+ * the native session store is case-sensitive. Anything that joins the two
+ * sources has to canonicalize through this one function, or a mixed-case
+ * session is two sessions to whichever half is comparing raw strings.
+ */
+export function sanitizeSessionId(sessionId: string): string {
+  const safe = path
+    .basename(sessionId.replace(/\\/g, '/'))
+    .toLowerCase()
+    .replace(/^\.+/g, '_')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[<>:"|?*\x00-\x1F]/g, '_');
+  return safe || '_';
+}
