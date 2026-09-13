@@ -23,6 +23,16 @@ export interface DiscoveredTab extends BrowserUserTabInfo {
   providerTabId: number;
 }
 
+/**
+ * One dialog the bridge reported opening, marked when the bridge reports it
+ * closed and when Playwright delivers it; see PlaywrightSession's dialog
+ * observers for the pairing rule.
+ */
+export interface DialogTraceEntry {
+  closed: boolean;
+  delivered: boolean;
+}
+
 export interface TabState {
   id: string;
   providerTabId: number;
@@ -30,6 +40,7 @@ export interface TabState {
   stale: false | 'tab' | 'session';
   logs: LogEntry[];
   dialog?: Dialog;
+  dialogTrace: DialogTraceEntry[];
   fileChoosers: Map<string, FileChooser>;
   navigationWaiters: Map<string, Promise<unknown>>;
 }

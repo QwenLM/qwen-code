@@ -84,7 +84,7 @@ Locator plan 的每个数组最多包含 32 步，最多嵌套 32 层，顶层�
 
 Playwright 公共 CDP session API 提供坐标 CUA 的按钮 4（后退）和 5（前进）；较高层的 Playwright mouse API 不暴露它们。快照截断、截图编码和预算、会话失效检测及 JSON 传输封装属于运行时实现细节，不作为面向模型的选项。
 
-视口截图返回 `nodeRepl.emitImage()` 可接受的图像对象。元数据包含原始 JPEG 尺寸、视口、设备像素比和 CSS 像素坐标空间，使模型客户端缩放预览后视觉坐标仍可用。视口截图根据编码字节数限制，不会仅因视口尺寸而拒绝。显式 clip 和整页截图保留像素预算，因为其尺寸由调用方控制或可能无界。
+视口截图返回 `nodeRepl.emitImage()` 可接受的图像对象。元数据包含原始 JPEG 尺寸、视口、设备像素比和 CSS 像素坐标空间，使模型客户端缩放预览后视觉坐标仍可用。视口截图根据编码字节数限制，不会仅因视口尺寸而拒绝。显式 clip 和整页截图保留像素预算，因为其尺寸由调用方控制或可能无界。从页面脚本探测到的设备像素比只在真实 Chrome 窗口可能报告的范围内被信任；当截图像素与请求的 CSS 区域不一致时，运行时根据 Chrome 自身的输出推算真实像素比并重拍一次。
 
 截图获取采用 Codex Browser Use 策略，独立于 Playwright 的截图准备。短暂且有上限的渲染同步让待处理绘制在截图前完成。普通视口截图请求新的 CDP screencast 帧，帧期限为两秒，然后回退到命令超时为五秒的 `Page.captureScreenshot`。Clip 和整页截图直接使用后者。请求之前的旧帧会被丢弃；每个标签页的截图串行执行，事件监听器和 screencast 均会清理。运行时拥有这些事件，Playwright 不会重复确认同一帧。图像采用 JPEG quality 80，保留 CSS 像素坐标，不需要激活标签页或将 Chrome 置于前台。单次截图超时不会断开浏览器会话。
 
@@ -169,7 +169,7 @@ Browser Use 包独立固定 `playwright-core@1.62.1`，因为自定义 CDP trans
 
 对话框句柄标识 `getJsDialog` 返回的具体对话框实例。Accept 或 dismiss 已过期句柄以 `NOT_FOUND` 失败，不能作用于替代对话框。Dialog id 属于 SDK 内部协议；公共句柄只保留其支持的操作。Before-unload 对话框支持接受导航和取消导航。
 
-Chrome 的 dialog-close 事件清理运行时缓存，包括 SDK 之外的用户操作。事件交付必须保留 Playwright 相对于后续对话框打开事件的异步顺序。`expectNavigation` waiter 在 action 或等待失败时释放，包括在等待实现运行前被 dialog gate 拒绝的情况。
+Chrome 的 dialog-close 事件清理运行时缓存，包括 SDK 之外的用户操作。Playwright 交付对话框的时机晚于 bridge 上报其 CDP 事件的轮次，因此运行时按 bridge 顺序记录每个标签页的对话框打开与关闭事件，并丢弃 bridge 已报告关闭的对话框；没有对应打开记录的关闭事件（标签页附着前就已打开的对话框）不会被记到后续对话框头上。`expectNavigation` waiter 在 action 或等待失败时释放，包括在等待实现运行前被 dialog gate 拒绝的情况。
 
 ## 输入完成
 

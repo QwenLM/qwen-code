@@ -28,6 +28,12 @@ import type { Args, TabState } from './runtime-state.js';
 const FRAME_TIMEOUT_MS = 2_000;
 const CAPTURE_TIMEOUT_MS = 5_000;
 const CLEANUP_TIMEOUT_MS = 1_000;
+// window.devicePixelRatio is page script: a spoofed or stale value would
+// become an unbounded clip.scale, so only ratios a real Chrome window can
+// report (25%–500% zoom on displays of a few device pixels per CSS pixel)
+// are trusted, and Chrome's own pixels correct whatever the page reported.
+const MIN_DEVICE_PIXEL_RATIO = 0.25;
+const MAX_DEVICE_PIXEL_RATIO = 8;
 const screenshotQueues = new WeakMap<TabState, Promise<unknown>>();
 
 type SendCdp = (
@@ -102,12 +108,7 @@ async function capture(
         )
       ).result,
     ).value;
-    if (
-      typeof pixelRatio === 'number' &&
-      Number.isFinite(pixelRatio) &&
-      pixelRatio > 0
-    )
-      probedRatio = pixelRatio;
+    if (isPlausibleRatio(pixelRatio)) probedRatio = pixelRatio;
   } catch {
     probedRatio = undefined;
   }
@@ -160,50 +161,38 @@ async function capture(
     }
   }
   if (data === undefined) {
-    data = await captureRegion(
-      send,
-      constrained,
-      origin,
-      width,
-      height,
-      1 / devicePixelRatio,
-    );
-    if (probedRatio === undefined) {
-      // The settle probe failed, so the capture above assumed a ratio of 1;
-      // measure what Chrome actually produced and re-capture on HiDPI hosts
-      // instead of failing the capture or shipping rescaled pixels.
-      const measured = jpegDimensions(Buffer.from(data, 'base64'));
-      const implied = measured.width / width;
-      if (
-        (Math.abs(measured.width - Math.round(width)) > 1 ||
-          Math.abs(measured.height - Math.round(height)) > 1) &&
-        Number.isFinite(implied) &&
-        implied > 0 &&
-        Math.abs(implied - 1) > 0.01
-      ) {
-        devicePixelRatio = implied;
-        data = await captureRegion(
-          send,
-          constrained,
-          origin,
-          width,
-          height,
-          1 / implied,
-        );
-      }
+    const scale = 1 / devicePixelRatio;
+    data = await captureRegion(send, constrained, origin, width, height, scale);
+    // The ratio behind clip.scale came from page script (or defaulted to 1
+    // when the probe failed), so Chrome's own output is the authority: when
+    // the pixels disagree with the requested CSS region, derive the real
+    // ratio from what Chrome produced and re-capture once instead of
+    // failing the capture or shipping rescaled pixels.
+    const measured = jpegDimensions(Buffer.from(data, 'base64'));
+    const implied = measured.width / (width * scale);
+    if (
+      regionMismatch(measured, width, height) &&
+      isPlausibleRatio(implied) &&
+      Math.abs(implied - devicePixelRatio) > 0.01
+    ) {
+      devicePixelRatio = implied;
+      data = await captureRegion(
+        send,
+        constrained,
+        origin,
+        width,
+        height,
+        1 / implied,
+      );
     }
   }
 
   const buffer = Buffer.from(data, 'base64');
   const dimensions = jpegDimensions(buffer);
   // The css-pixels contract requires the capture to come back 1:1 with the
-  // requested CSS region. The pixel ratio behind clip.scale is probed from
-  // page script, so a page-controlled or stale ratio must not silently ship
-  // a rescaled image; ±1 covers Chrome's rounding of fractional CSS sizes.
-  if (
-    Math.abs(dimensions.width - Math.round(width)) > 1 ||
-    Math.abs(dimensions.height - Math.round(height)) > 1
-  )
+  // requested CSS region; a ratio Chrome's pixels did not confirm must not
+  // silently ship a rescaled image.
+  if (regionMismatch(dimensions, width, height))
     throw new BrowserRuntimeError(
       'OPERATION_FAILED',
       'Chrome returned a screenshot that does not match the viewport; retry',
@@ -355,4 +344,25 @@ async function viewportFrame(
 
 function scrollOffset(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function isPlausibleRatio(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= MIN_DEVICE_PIXEL_RATIO &&
+    value <= MAX_DEVICE_PIXEL_RATIO
+  );
+}
+
+// ±1 covers Chrome's rounding of fractional CSS sizes.
+function regionMismatch(
+  actual: { width: number; height: number },
+  width: number,
+  height: number,
+): boolean {
+  return (
+    Math.abs(actual.width - Math.round(width)) > 1 ||
+    Math.abs(actual.height - Math.round(height)) > 1
+  );
 }

@@ -56,13 +56,21 @@ export class PlaywrightSession {
     this.bridge = options.bridge;
     this.removeEventListener = this.bridge.onEvent((event) => {
       if (this.stopped) return;
+      if (event.method === 'Page.javascriptDialogOpening') {
+        for (const tab of this.tabs.values())
+          if (tab.providerTabId === event.tabId) traceDialogOpening(tab);
+      }
       if (event.method === 'Page.javascriptDialogClosed') {
-        // Playwright delivers dialog openings in microtasks; preserve CDP order.
         for (const tab of this.tabs.values()) {
-          if (tab.providerTabId === event.tabId)
-            queueMicrotask(() => {
-              tab.dialog = undefined;
-            });
+          if (tab.providerTabId !== event.tabId) continue;
+          traceDialogClosed(tab);
+          // Playwright hands a dialog over on a later turn than the bridge
+          // reports its CDP events: the microtask keeps this clear behind an
+          // opening delivered from the same drain, and the trace above
+          // covers an opening Playwright has not delivered yet.
+          queueMicrotask(() => {
+            tab.dialog = undefined;
+          });
         }
       }
       if (event.method === 'qwenBrowser.derivedTabTracked') {
@@ -331,6 +339,7 @@ export class PlaywrightSession {
         page,
         stale: false,
         logs: [],
+        dialogTrace: [],
         fileChoosers: new Map(),
         navigationWaiters: new Map(),
       };
@@ -371,6 +380,7 @@ export class PlaywrightSession {
       released = true;
       if (tab.stale === false) tab.stale = 'tab';
       tab.dialog = undefined;
+      tab.dialogTrace.length = 0;
       tab.fileChoosers.clear();
       tab.navigationWaiters.clear();
       this.tabs.delete(tab.id);
@@ -380,6 +390,11 @@ export class PlaywrightSession {
     page.on('close', release);
     page.on('crash', release);
     page.on('dialog', (dialog) => {
+      // The bridge saw this dialog's CDP events before Playwright delivered
+      // it; once it has already reported the dialog closed, caching the
+      // handle would leave a phantom that blocks the tab until the next
+      // close.
+      if (takeDeliveredDialog(tab)) return;
       tab.dialog = dialog;
     });
     page.on('framenavigated', (frame) => {
@@ -499,4 +514,44 @@ async function pageTargetId(page: Page): Promise<string | undefined> {
   } finally {
     await session?.detach().catch(() => undefined);
   }
+}
+
+// A page shows one dialog at a time, so the bridge's opening and closed
+// events and Playwright's deliveries all describe one sequence, and the
+// trace pairs them by position. An entry stays until both sides have seen
+// it; the bound keeps an opening Playwright never delivers from growing the
+// trace forever.
+const MAX_DIALOG_TRACE = 16;
+
+function traceDialogOpening(tab: TabState): void {
+  pushBounded(
+    tab.dialogTrace,
+    { closed: false, delivered: false },
+    MAX_DIALOG_TRACE,
+  );
+}
+
+// A close with no traced opening belongs to a dialog that was already open
+// when the tab was attached; it must not be charged to a later dialog.
+function traceDialogClosed(tab: TabState): void {
+  const entry = tab.dialogTrace.find((item) => !item.closed);
+  if (entry !== undefined) entry.closed = true;
+  pruneDialogTrace(tab);
+}
+
+// True when the bridge already reported the delivered dialog closed. An
+// untraced delivery (its opening arrived before the tab was registered)
+// trusts Playwright.
+function takeDeliveredDialog(tab: TabState): boolean {
+  const entry = tab.dialogTrace.find((item) => !item.delivered);
+  if (entry === undefined) return false;
+  entry.delivered = true;
+  const { closed } = entry;
+  pruneDialogTrace(tab);
+  return closed;
+}
+
+function pruneDialogTrace(tab: TabState): void {
+  while (tab.dialogTrace[0]?.closed && tab.dialogTrace[0]?.delivered)
+    tab.dialogTrace.shift();
 }

@@ -42,7 +42,11 @@ afterEach(async () => {
 describe('ensureSocketDirectory', () => {
   it('creates a missing directory with owner-only permissions', async () => {
     if (process.platform === 'win32') return;
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-dir-'));
+    // The ancestor sweep rejects symlinks, and macOS reaches its temp root
+    // through one (/var -> /private/var), so resolve the real path first.
+    const root = fs.mkdtempSync(
+      path.join(fs.realpathSync(os.tmpdir()), 'qbu-dir-'),
+    );
     roots.push(root);
     const dir = path.join(root, 'qwen-browser-use', '1000');
     await ensureSocketDirectory(dir);
@@ -51,7 +55,9 @@ describe('ensureSocketDirectory', () => {
 
   it('tightens a permissive owned directory and rejects a non-directory', async () => {
     if (process.platform === 'win32') return;
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-dir-'));
+    const root = fs.mkdtempSync(
+      path.join(fs.realpathSync(os.tmpdir()), 'qbu-dir-'),
+    );
     roots.push(root);
     const dir = path.join(root, 'loose');
     fs.mkdirSync(dir, { mode: 0o755 });
@@ -64,7 +70,9 @@ describe('ensureSocketDirectory', () => {
 
   it('rejects a socket directory behind a symlinked parent', async () => {
     if (process.platform === 'win32') return;
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-dir-'));
+    const root = fs.mkdtempSync(
+      path.join(fs.realpathSync(os.tmpdir()), 'qbu-dir-'),
+    );
     roots.push(root);
     const target = path.join(root, 'target');
     fs.mkdirSync(target);
@@ -76,7 +84,9 @@ describe('ensureSocketDirectory', () => {
 
   it('rejects a socket directory under a group/other-writable ancestor', async () => {
     if (process.platform === 'win32') return;
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-dir-'));
+    const root = fs.mkdtempSync(
+      path.join(fs.realpathSync(os.tmpdir()), 'qbu-dir-'),
+    );
     roots.push(root);
     const loose = path.join(root, 'loose');
     fs.mkdirSync(loose);

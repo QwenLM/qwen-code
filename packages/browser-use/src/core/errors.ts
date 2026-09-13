@@ -78,15 +78,15 @@ export function sanitizeOperationError(
   if (!pageChannel && /^(?:target|page) crashed/i.test(firstLine))
     return new BrowserRuntimeError('STALE_TAB', message);
   // A genuine strict-mode failure crosses CDP as the raw exception
-  // description, so Playwright's own phrase sits behind an "Error: " layer;
-  // requiring the element count keeps a page-thrown lookalike from matching.
-  if (
-    /^(?:Error: )?strict mode violation: .* resolved to \d+ elements:/i.test(
-      firstLine,
-    )
-  ) {
+  // description, so Playwright's own phrase sits behind an "Error: " layer.
+  // On the evaluate channel only that wrapped form may classify: a
+  // page-thrown primitive arrives unwrapped, and the element count is one
+  // character of page-authored text, so it cannot tell a lookalike apart.
+  const strictMode = pageChannel
+    ? /^Error: strict mode violation: .* resolved to \d+ elements:/i
+    : /^(?:Error: )?strict mode violation: .* resolved to \d+ elements:/i;
+  if (strictMode.test(firstLine))
     return new BrowserRuntimeError('LOCATOR_NOT_UNIQUE', message);
-  }
   if (
     !pageChannel &&
     /^(?:target (?:page|context|browser).*closed|page has been closed|no tab with id)/i.test(

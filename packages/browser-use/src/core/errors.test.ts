@@ -197,6 +197,34 @@ describe('operation error classification', () => {
         new Error('locator.evaluateHandle: no tab with id 7'),
       ),
     ).toMatchObject({ code: 'OPERATION_FAILED' });
+    // A strict-mode lookalike thrown as a primitive carries no wrapper, and
+    // its element count is page-authored text, so it must not classify.
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error(
+          "locator.evaluate: strict mode violation: locator('button') resolved to 2 elements:",
+        ),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'playwright.evaluate',
+        new Error(
+          "page.evaluate: strict mode violation: locator('button') resolved to 2 elements:",
+        ),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    // The genuine failure reaches that channel behind Playwright's
+    // "Error: " layer and keeps its code.
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error(
+          "locator.evaluate: Error: strict mode violation: locator('button') resolved to 2 elements:",
+        ),
+      ),
+    ).toMatchObject({ code: 'LOCATOR_NOT_UNIQUE' });
     // The same phrases stay classified on channels that never run page code.
     expect(
       sanitizeOperationError('locator.click', new Error('Target crashed ')),

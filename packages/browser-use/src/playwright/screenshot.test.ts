@@ -285,6 +285,50 @@ describe('Chrome screenshot acquisition', () => {
     expect(bridge.listeners.size).toBe(0);
   });
 
+  it('recovers the real ratio when the page-probed ratio disagrees with Chrome pixels', async () => {
+    const bridge = new ScreenshotBridge();
+    // A page (or a privacy extension) reports devicePixelRatio 3 on a real
+    // DPR-2 host, so the first fallback capture lands at two-thirds size.
+    bridge.pixelRatio = 3;
+    bridge.onStart = () => {
+      throw new Error('Screencast unavailable');
+    };
+    bridge.captureData = jpeg(533, 400).toString('base64');
+    let captures = 0;
+    bridge.onCapture = () => {
+      captures += 1;
+      if (captures === 2)
+        bridge.captureData = jpeg(800, 600).toString('base64');
+    };
+    const image = await captureTabScreenshot(tab(), {}, bridge);
+    expect(image).toMatchObject({ width: 800, height: 600 });
+    expect(image.devicePixelRatio).toBeCloseTo(2, 2);
+    const scales = captureScales(bridge);
+    expect(scales).toHaveLength(2);
+    expect(scales[0]).toBeCloseTo(1 / 3, 5);
+    expect(scales[1]).toBeCloseTo(0.5, 2);
+    expect(bridge.listeners.size).toBe(0);
+  });
+
+  it.each([0.01, 100, -2, 0])(
+    'ignores a page-probed ratio of %s outside the device range',
+    async (ratio) => {
+      const bridge = new ScreenshotBridge();
+      bridge.pixelRatio = ratio;
+      bridge.onStart = () => {
+        throw new Error('Screencast unavailable');
+      };
+      const image = await captureTabScreenshot(tab(), {}, bridge);
+      expect(image).toMatchObject({
+        width: 800,
+        height: 600,
+        devicePixelRatio: 1,
+      });
+      // The rejected value never reaches clip.scale.
+      expect(captureScales(bridge)).toEqual([1]);
+    },
+  );
+
   it('stops an idle screencast after two seconds, then uses bounded capture', async () => {
     const bridge = new ScreenshotBridge();
     bridge.onStart = () => undefined;
@@ -565,3 +609,11 @@ describe('Chrome screenshot acquisition', () => {
     expect(() => jpegDimensions(image.subarray(0, 12))).toThrow('invalid JPEG');
   });
 });
+
+function captureScales(bridge: ScreenshotBridge): number[] {
+  return bridge.request.mock.calls
+    .filter(([, args]) => args?.method === 'Page.captureScreenshot')
+    .map(
+      ([, args]) => (args?.params as { clip: { scale: number } }).clip.scale,
+    );
+}

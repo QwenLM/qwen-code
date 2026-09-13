@@ -153,7 +153,10 @@ and CSS-pixel coordinate space so visual coordinates remain usable when a model
 client resizes the preview. Viewport screenshots are limited by their encoded
 byte size rather than rejected from viewport dimensions alone. Explicit clips
 and full-page captures retain a pixel budget because their dimensions are
-caller-controlled or potentially unbounded.
+caller-controlled or potentially unbounded. The device pixel ratio probed
+from page script is trusted only within the range a real Chrome window can
+report; when a capture's pixels disagree with the requested CSS region, the
+runtime derives the real ratio from Chrome's own output and re-captures once.
 
 Screenshot acquisition follows the Codex Browser Use strategy independently of
 Playwright's screenshot preparation. A short, bounded rendering synchronization
@@ -313,8 +316,12 @@ the public handle retains only its supported actions. Before-unload dialogs
 support both accepting the navigation and dismissing it.
 
 Chrome dialog-close events clear the runtime cache, including user actions
-outside the SDK. Their delivery must preserve Playwright's asynchronous
-ordering relative to subsequent dialog openings. An `expectNavigation` waiter
+outside the SDK. Playwright hands a dialog over on a later turn than the
+bridge reports its CDP events, so the runtime traces each tab's dialog
+openings and closes in bridge order and drops a delivered dialog the bridge
+has already reported closed; a close with no traced opening (a dialog open
+before the tab was attached) is never charged to a later dialog. An
+`expectNavigation` waiter
 is released when either its action or its wait fails, including rejection by
 the dialog gate before the wait implementation runs.
 

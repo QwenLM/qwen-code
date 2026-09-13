@@ -1290,6 +1290,73 @@ describe('PlaywrightRuntime command contracts', () => {
     ).resolves.toBeNull();
   });
 
+  it('drops a dialog the bridge already reported closed before Playwright delivered it', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    // Chrome reported the opening and the close in one chunk, so both bridge
+    // events run before Playwright hands the dialog over from a later
+    // macrotask (its in-process dispatcher hops through setImmediate).
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogOpening'));
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogClosed'));
+    await new Promise<void>((resolve) =>
+      setImmediate(() => {
+        openDialog(fixture, 'alert', 'Already gone');
+        resolve();
+      }),
+    );
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toBeNull();
+    await expect(
+      fixture.runtime.dispatch('tab.title', { tabId: tab.id }),
+    ).resolves.toBe('Fixture');
+  });
+
+  it('keeps a dialog whose close the bridge has not reported', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    // A close belonging to a dialog that was open before the tab was
+    // attached must not be charged to the dialog that opens next.
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogClosed'));
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogOpening'));
+    await new Promise<void>((resolve) =>
+      setImmediate(() => {
+        openDialog(fixture, 'confirm', 'Still open');
+        resolve();
+      }),
+    );
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toMatchObject({ message: 'Still open' });
+    await expect(
+      fixture.runtime.dispatch('tab.title', { tabId: tab.id }),
+    ).rejects.toMatchObject({ code: 'DIALOG_OPEN' });
+  });
+
+  it('pairs batched dialog events with their deliveries in order', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    // [opening, closed, opening] in one chunk: the first delivery is the
+    // closed dialog and the second is live.
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogOpening'));
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogClosed'));
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogOpening'));
+    await new Promise<void>((resolve) =>
+      setImmediate(() => {
+        openDialog(fixture, 'alert', 'First');
+        openDialog(fixture, 'confirm', 'Second');
+        resolve();
+      }),
+    );
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toMatchObject({ message: 'Second' });
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogClosed'));
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toBeNull();
+  });
+
   it('fails page operations immediately while a JavaScript dialog is open', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);
@@ -1794,6 +1861,13 @@ async function dialogArgs(runtime: PlaywrightRuntime, tabId: string) {
     dialogId: string;
   };
   return { tabId, dialogId: descriptor.dialogId };
+}
+
+function dialogEvent(
+  method: 'Page.javascriptDialogOpening' | 'Page.javascriptDialogClosed',
+  tabId = 17,
+): BridgeEvent {
+  return { type: 'event', tabId, method, params: {} };
 }
 
 function openDialog(
