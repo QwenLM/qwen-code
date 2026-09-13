@@ -323,6 +323,65 @@ describe('parseArguments', () => {
     }
   });
 
+  it('does not let a sessions-answer payload quote help into the help intercept', async () => {
+    // Issue #11193: a free-text answer that quotes `--help` (or ends in a
+    // bare `help`) made the root parser print the usage block and exit 0,
+    // so the driving script read success while the answer was never
+    // delivered. The separator fences the payload off, so the parse takes
+    // the strict unknown-command failure instead — loud, non-zero. (The
+    // yargs parser holds the test runner's process.exit stub, so the
+    // rejection message itself carries the exit code it asked for.)
+    const swallowArgv = [
+      'sessions',
+      'answer',
+      '0f8e1c42',
+      'please',
+      '--help',
+      'me',
+    ];
+    const bareHelpArgv = [
+      'sessions',
+      'answer',
+      '0f8e1c42',
+      'yes',
+      'please',
+      'help',
+    ];
+    for (const answerArgv of [swallowArgv, bareHelpArgv]) {
+      process.argv = ['node', 'script.js', ...answerArgv];
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "1"',
+      );
+    }
+  });
+
+  it('keeps a bare --help answer showing help rather than delivering it', async () => {
+    // The carve-out the answer command's positional documents: a payload
+    // that is exactly `--help` keeps reaching the parser as the help
+    // flag, so it still shows help (exit 0) instead of answering with the
+    // literal text `--help`.
+    process.argv = [
+      'node',
+      'script.js',
+      'sessions',
+      'answer',
+      '0f8e1c42',
+      '--help',
+    ];
+    const output: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((...args) => {
+      output.push(args.join(' '));
+    });
+    try {
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      expect(output.join('')).toContain('qwen sessions');
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('should throw an error when both --prompt and --prompt-interactive are used together', async () => {
     process.argv = [
       'node',

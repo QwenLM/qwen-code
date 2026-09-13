@@ -24,6 +24,7 @@ import {
 } from './config/top-level-options.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
+import { insertSessionAnswerSeparator } from './utils/session-answer-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
 import {
@@ -322,7 +323,16 @@ function normalizeMcpFastPathArgv(argv: readonly string[]): readonly string[] {
 export function resolveBootstrapRoute(
   rawArgv: readonly string[],
 ): BootstrapRoute {
-  const argv = normalizeServeFastPathArgv(rawArgv);
+  // Fence the `sessions answer <session> <free text...>` payload off from
+  // the scans below before they run: an answer that quotes `--help`,
+  // `--version` or ends in a bare `help` would otherwise be swallowed by
+  // an intercept that prints help/version and exits 0, telling the driving
+  // script the answer was delivered when it was not (issue #11193). After
+  // the separator every later token is positional data to these scans by
+  // construction, so no intercept fires on the payload.
+  const argv = insertSessionAnswerSeparator(
+    normalizeServeFastPathArgv(rawArgv),
+  );
 
   // Base-parity version intercept (structural close). Base printed the
   // version for any `-v`/`--version` token its hasFlag scan reached, no
