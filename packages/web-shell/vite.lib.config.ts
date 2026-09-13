@@ -5,6 +5,7 @@ import tailwindcss from '@tailwindcss/vite';
 import postcss from 'postcss';
 import selectorParser from 'postcss-selector-parser';
 import pkg from './package.json' with { type: 'json' };
+import { WEB_SHELL_BUILD_TARGET } from './vite.config';
 
 const COMPONENT_SCOPE =
   ':where([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn], [data-web-shell-root][data-web-shell-shadcn] *, [data-web-shell-portal-root][data-web-shell-shadcn] *)';
@@ -169,6 +170,11 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     emptyOutDir: false,
+    // Same floor as the app build: the lib bundle minifies the same xterm
+    // (it is not external), and Vite 5's default target lowers its logical
+    // assignments into code that throws on the first mode query. Also covers
+    // the transcript entry inlined into /export html documents.
+    target: WEB_SHELL_BUILD_TARGET,
     lib: {
       entry:
         mode === 'transcript'

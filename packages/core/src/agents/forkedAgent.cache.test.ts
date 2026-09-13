@@ -12,6 +12,7 @@ import {
   clearCacheSafeParams,
   createForkedChat,
   runForkedAgent,
+  runWithForkedChatModel,
 } from './forkedAgent.js';
 import type { Content, GenerateContentConfig } from '@google/genai';
 import type { Config } from '../config/config.js';
@@ -255,6 +256,36 @@ describe('runForkedAgent (cache path)', () => {
     vi.mocked(LlmChat).mockReset();
     vi.mocked(createRuntimeContentGeneratorView).mockReset();
   });
+
+  it.each(['https://second.example/v1', ''])(
+    'resolves an endpoint-qualified selector without passing its suffix as the model ID: %s',
+    async (endpoint) => {
+      const config = {
+        getModel: () => 'shared',
+        getContentGeneratorConfig: () => ({
+          model: 'shared',
+          authType: AuthType.USE_OPENAI,
+        }),
+      } as unknown as Config;
+      vi.mocked(createRuntimeContentGeneratorView).mockResolvedValue(
+        makeRuntimeView('shared'),
+      );
+      const request = vi.fn(async (model: string) => model);
+      await expect(
+        runWithForkedChatModel(config, `openai:shared\0${endpoint}`, request),
+      ).resolves.toBe('shared');
+      expect(request).toHaveBeenCalledWith('shared');
+      expect(createRuntimeContentGeneratorView).toHaveBeenCalledWith(
+        config,
+        config,
+        'shared',
+        {
+          authType: AuthType.USE_OPENAI,
+          registryBaseUrl: endpoint || null,
+        },
+      );
+    },
+  );
 
   it('passes tools: [] in per-request config so the model cannot produce function calls', async () => {
     // Save cache params with real tools to simulate a normal conversation

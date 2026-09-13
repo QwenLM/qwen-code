@@ -348,6 +348,8 @@ function WorkspaceSessionProviderWorkspace({
       clientId={clientId}
       historyPageSize={historyPageSize}
       subagentTranscriptMode="summary"
+      prefetchGitBranch={false}
+      prefetchSkills={false}
       maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
       suppressOwnUserEcho
       restartEventStreamOnPrompt={restartSseOnPrompt}
