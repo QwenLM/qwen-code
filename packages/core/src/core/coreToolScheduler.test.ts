@@ -38,6 +38,7 @@ import {
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fsSync from 'node:fs';
+import { writeFile as fsWriteFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
@@ -3776,6 +3777,17 @@ describe('CoreToolScheduler', () => {
       return onAllToolCallsComplete;
     }
 
+    function persistedFilesOfFirstCall(
+      onAllToolCallsComplete: ReturnType<typeof vi.fn>,
+    ): string[] | undefined {
+      const completionCalls = onAllToolCallsComplete.mock
+        .calls as unknown as Array<[ToolCall[]]>;
+      const call = completionCalls[0]?.[0]?.[0];
+      return call && 'response' in call
+        ? call.response.persistedOutputFiles
+        : undefined;
+    }
+
     it('skips the spill gate for a body the producer already sized', async () => {
       const onAllToolCallsComplete = await runBudgetedTool({
         llmContent: BODY,
@@ -3849,6 +3861,9 @@ describe('CoreToolScheduler', () => {
       // The timeout detail travels as the response's error field; the
       // operational error.message stays the short summary by design.
       expect(outputOfFirstCall(onAllToolCallsComplete, 'error')).toBe(BODY);
+      // Nothing was cut and no file written: the persistence tri-state stays
+      // `undefined`, so finalization remains free to persist the body.
+      expect(persistedFilesOfFirstCall(onAllToolCallsComplete)).toBeUndefined();
     });
 
     // Control for the case above: an unmarked timeout detail of the same size
@@ -3893,14 +3908,29 @@ describe('CoreToolScheduler', () => {
 
       // The spill file the bound produced must survive into the recorded
       // call, not be dropped by the timeout branch's plumbing.
-      const completionCalls = onAllToolCallsComplete.mock
-        .calls as unknown as Array<[ToolCall[]]>;
-      const call = completionCalls[0]?.[0]?.[0];
-      expect(
-        call && 'response' in call
-          ? call.response.persistedOutputFiles
-          : undefined,
-      ).toHaveLength(1);
+      expect(persistedFilesOfFirstCall(onAllToolCallsComplete)).toHaveLength(1);
+    });
+
+    // The truncated-but-no-spill-file arm: a failed spill write returns a
+    // bounded preview with no file, and the tri-state must report `[]` (a
+    // decision was made) so finalization does not persist the bounded body a
+    // second time.
+    it('re-bounds a marked timeout detail without a file when the spill write fails', async () => {
+      vi.mocked(fsWriteFile).mockRejectedValueOnce(new Error('disk full'));
+
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: 'a'.repeat(200_000),
+        outputBudgetApplied: true,
+        error: {
+          message: 'Command timed out before it could complete.',
+          type: ToolErrorType.EXECUTION_TIMEOUT,
+        },
+      });
+
+      const error = outputOfFirstCall(onAllToolCallsComplete, 'error');
+      expect(error.length).toBeLessThan(200_000);
+      expect(error).toContain('Could not save full output to file');
+      expect(persistedFilesOfFirstCall(onAllToolCallsComplete)).toEqual([]);
     });
 
     // The error gate stands down only while error.message IS the marked body.

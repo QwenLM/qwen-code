@@ -54,9 +54,10 @@ the text.
    body the producer left in memory.
 5. The marker bounds nothing on its own. The per-tool budget still applies — on
    the success path directly, and on the timeout path as a re-bound of the
-   detail at the producer's declared budget — together with the combined pass
-   over appended metadata, the aggregate batch budget, and the no-I/O cap at the
-   send boundary.
+   detail at the producer's declared budget — together with the aggregate batch
+   budget and the no-I/O cap at the send boundary. The combined pass over
+   appended metadata runs on the success path only, so failure-hook context
+   appended to a timeout detail is bounded only by those two.
 6. A failure message is only exempt while it _is_ the marked body.
 
 ## Design
@@ -91,10 +92,12 @@ The generic gate stands down for a marked body:
   failure-hook context appended beforehand both change the string, so those
   retain the gate.
 
-Nothing else about the ordering changes. Hook context and skill or rule
-reminders are still appended after the body is bounded, the combined pass still
-bounds the assembled string against the doubled budget, and aggregate batch
-finalization still runs afterwards.
+Nothing else about the ordering changes. On the success path, hook context and
+skill or rule reminders are still appended after the body is bounded, and the
+combined pass still bounds the assembled string against the doubled budget. The
+timeout branch runs no combined pass after appending failure-hook context, so
+that context is bounded only by the aggregate batch budget and the
+send-boundary cap. Aggregate batch finalization still runs afterwards.
 
 ### Metadata appended outside the budget
 
@@ -125,4 +128,5 @@ step and is not attempted here.
 
 This change also does not add per-call size or token telemetry, does not touch
 the aggregate allocation algorithm, and does not revisit the same window for
-other tools that declare a budget below the generic gate.
+the other tools whose budget sits above the generic gate (agent 32k,
+web-search 102k, MCP 500k).

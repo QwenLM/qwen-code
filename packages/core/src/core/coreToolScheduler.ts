@@ -265,6 +265,23 @@ const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.ENTER_PLAN_MODE,
 ]);
 
+// The tri-state persistedOutputFiles mapping every truncation pass reports
+// through: a written spill file is reusable; a changed-but-fileless body
+// decided "no reusable file"; an untouched body made no decision, so
+// finalization may still persist it. Compare content identity rather than
+// `outputFile` so a truncated-but-unsaved result (a disk-write failure
+// returns a bounded preview with no file) still counts as bounded. One owner
+// keeps the success, combined, and timeout passes in agreement.
+function persistedOutputFilesForTruncation(
+  beforeContent: PartListUnion,
+  truncated: { content: PartListUnion; outputFile?: string },
+): string[] | undefined {
+  if (truncated.outputFile) {
+    return [truncated.outputFile];
+  }
+  return truncated.content !== beforeContent ? [] : undefined;
+}
+
 const OPT_IN_TOOL_MESSAGES: Record<
   string,
   { setting: string; defaultUnavailableMessage: string }
@@ -5846,11 +5863,10 @@ export class CoreToolScheduler {
           );
           content = truncated.content;
           mergePersistedOutputFiles(
-            truncated.outputFile
-              ? [truncated.outputFile]
-              : truncated.content !== contentBeforeTruncation
-                ? []
-                : undefined,
+            persistedOutputFilesForTruncation(
+              contentBeforeTruncation,
+              truncated,
+            ),
           );
         } catch (truncErr) {
           // A truncation/IO failure must never demote a successful tool call
@@ -5909,11 +5925,10 @@ export class CoreToolScheduler {
               );
               content = recombined.content;
               mergePersistedOutputFiles(
-                recombined.outputFile
-                  ? [recombined.outputFile]
-                  : recombined.content !== contentBeforeRecombination
-                    ? []
-                    : undefined,
+                persistedOutputFilesForTruncation(
+                  contentBeforeRecombination,
+                  recombined,
+                ),
               );
             } catch (truncErr) {
               debugLogger.warn(
@@ -6131,11 +6146,10 @@ export class CoreToolScheduler {
               );
               timeoutContent = {
                 content: truncated.content,
-                persistedOutputFiles: truncated.outputFile
-                  ? [truncated.outputFile]
-                  : truncated.content !== toolResult.llmContent
-                    ? []
-                    : undefined,
+                persistedOutputFiles: persistedOutputFilesForTruncation(
+                  toolResult.llmContent,
+                  truncated,
+                ),
               };
             } catch (truncErr) {
               // A truncation/IO failure must never demote the result — keep

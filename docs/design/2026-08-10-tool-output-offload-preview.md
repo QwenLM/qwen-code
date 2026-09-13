@@ -1,5 +1,7 @@
 # Tool Output Offload/Preview: State Transitions and Privacy Model
 
+[English](2026-08-10-tool-output-offload-preview.md) | [简体中文](2026-08-10-tool-output-offload-preview.zh-CN.md)
+
 > Design note required by [#4184](https://github.com/QwenLM/qwen-code/issues/4184)
 > (acceptance criterion: "A design note documents the offload/preview state
 > transition and privacy model"). Mitigation implemented in #4880; retention
@@ -53,8 +55,11 @@ Key properties:
   already sized that body against its own declared budget, so the gate stands
   down and the per-tool pass becomes the single authority — see
   [Shell Output Budget: One Decision Per Body](./shell-output-budget-single-entry.md).
-  Unmarked Shell paths (explicit background launches, aborts) still pass
-  through the gate normally. Shell output over 30k and MCP output over 500k
+  Unmarked Shell paths (an explicit background launch and the
+  foreground→background promote handoff, both of which return before the
+  truncation block) still pass through the gate normally; timed-out and
+  cancelled foreground bodies that reach the truncation block are marked.
+  Shell output over 30k and MCP output over 500k
   truncate in-tool during `execute()` before the gate sees the result; the
   sentinel check at entry then routes them past the gate. Consequently,
   per-tool budgets above 28k (agent 32k, web-search 102k) are second-level
