@@ -244,6 +244,8 @@ describe('ShellExecutionService', () => {
     };
   };
   let onOutputEventMock: Mock<(event: ShellOutputEvent) => void>;
+  let mockPtyNativeKill: Mock;
+  let mockConoutWorkerDispose: Mock;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -269,6 +271,19 @@ describe('ShellExecutionService', () => {
     };
     mockPtyProcess.pid = 12345;
     mockPtyProcess.kill = vi.fn();
+    // node-pty's WindowsPtyAgent internals. releaseConPtyHost drives these
+    // directly instead of ptyProcess.kill(), which would also fork a helper to
+    // enumerate the console process list and then TerminateProcess a pid that
+    // ClosePseudoConsole has already freed for reuse. See #11303.
+    mockPtyNativeKill = vi.fn();
+    mockConoutWorkerDispose = vi.fn();
+    (mockPtyProcess as unknown as { _agent: Record<string, unknown> })._agent =
+      {
+        _pty: 777,
+        _useConptyDll: true,
+        _ptyNative: { kill: mockPtyNativeKill },
+        _conoutSocketWorker: { dispose: mockConoutWorkerDispose },
+      };
     // node-pty's onData/onExit return IDisposable; the production
     // background-promote path calls .dispose() on those handles to detach
     // its listeners cleanly. Mock them to return a disposable stub so the
@@ -302,7 +317,7 @@ describe('ShellExecutionService', () => {
     simulation: (
       ptyProcess: typeof mockPtyProcess,
       ac: AbortController,
-    ) => void,
+    ) => void | Promise<void>,
     config: ShellExecutionConfig = shellExecutionConfig,
     options: ShellExecuteOptions = {},
   ) => {
@@ -318,7 +333,7 @@ describe('ShellExecutionService', () => {
     );
 
     await new Promise((resolve) => process.nextTick(resolve));
-    simulation(mockPtyProcess, abortController);
+    await simulation(mockPtyProcess, abortController);
     const result = await handle.result;
     return { result, handle, abortController };
   };
@@ -1244,13 +1259,15 @@ describe('ShellExecutionService', () => {
       postPromoteExitHandler({ exitCode: 0 });
     });
 
-    it('PR-2.5 backwards compat: without postPromote, listeners stay fully detached (no regression on PR-2 contract)', async () => {
-      // Pin that omitting `postPromote` preserves the PR-2 detach-
-      // everything contract. The pre-existing post-promote test at
-      // line ~680 already covers this for the data path; this one
-      // adds the symmetric guarantee for the exit path — natural
-      // post-promote exit must NOT invoke any callback the caller
-      // didn't provide.
+    it('PR-2.5 backwards compat: without postPromote, no data listener is re-attached and no caller callback fires', async () => {
+      // Pin the caller-visible half of the PR-2 detach-everything contract:
+      // omitting `postPromote` re-attaches no data listener and invokes no
+      // callback the caller didn't provide. The settle listener itself IS
+      // attached — it is the only path left that can release a promoted
+      // shell's conout worker (#11303), and `firePostSettle`
+      // early-returns before any forwarding when there is no onSettle handler.
+      // Pinned by 'releases the conout worker when a promote passed no
+      // postPromote handlers' below.
       const onDataCalls: ShellOutputEvent[] = [];
       const onSettleCalls: ShellPostPromoteSettleInfo[] = [];
       const { result } = await simulateExecution(
@@ -1272,7 +1289,9 @@ describe('ShellExecutionService', () => {
       // registration count stays at 1.
       expect(onDataRegistrations.length).toBe(1);
       const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-      expect(onExitRegistrations.length).toBe(1);
+      // TWO: the foreground handler (disposed at promote) plus the
+      // unconditional settle/release handler.
+      expect(onExitRegistrations.length).toBe(2);
       // Caller-provided handlers were never invoked.
       expect(onDataCalls).toHaveLength(0);
       expect(onSettleCalls).toHaveLength(0);
@@ -1794,6 +1813,14 @@ describe('ShellExecutionService', () => {
         ['/f', '/pid', String(mockPtyProcess.pid)],
         HIDDEN_WINDOW,
       );
+      // The ConPTY release (#11303) sits in the same spot for the same
+      // reason: above firePostSettle's `!postPromote?.onSettle` early return.
+      // This assertion is what goes red if it is ever slid below it — with
+      // onData but no onSettle, every backgrounded command would leak its
+      // conout worker. (mockPtyNativeKill only pins that the call is made; the
+      // real native no-ops after a natural exit — see releaseConPtyHost.)
+      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
     });
 
     it('win32 promoted shell skips the post-settle reap when the pty already exited', async () => {
@@ -1838,6 +1865,463 @@ describe('ShellExecutionService', () => {
       } finally {
         mockProcessKill.mockImplementation(() => true);
       }
+    });
+  });
+
+  describe('Windows ConPTY release (#11303)', () => {
+    // Bundled ConPTY releases its host reference after spawn, but node-pty's JS
+    // still leaves the conout worker running after a natural shell exit. Inbox
+    // ConPTY users such as web terminals can leave both resources behind.
+    //
+    // The release deliberately does NOT go through ptyProcess.kill(): the inbox
+    // backend can terminate a recycled pid through its helper fallback, while
+    // the bundled backend waits for more output before disposing the worker.
+    //
+    // These cases certify the worker release only. Host lifecycle coverage for
+    // the shell path belongs to the bundled ConPTY tests below.
+
+    beforeEach(() => {
+      mockCpSpawn.mockReturnValue(new EventEmitter());
+      mockSpawnSync.mockReturnValue({ status: 0 });
+    });
+
+    it('releases the conout worker on a clean win32 completion (the leaking path)', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // The shell exited cleanly: isPtyActive is false, so the taskkill reap is
+      // (correctly) skipped — and that is exactly the path that leaked.
+      mockProcessKill.mockImplementation(
+        (_pid: number, signal?: string | number) => {
+          if (signal === 0) {
+            throw new Error('ESRCH');
+          }
+          return true;
+        },
+      );
+
+      try {
+        const { result } = await simulateExecution('echo hi', (pty) => {
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        });
+
+        expect(result.exitCode).toBe(0);
+        // No taskkill (the shell is already gone)...
+        expect(mockCpSpawn).not.toHaveBeenCalledWith(
+          TASKKILL,
+          expect.anything(),
+          HIDDEN_WINDOW,
+        );
+        // ...but the stranded conout worker is still released.
+        expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
+        expect(mockConoutWorkerDispose).toHaveBeenCalled();
+        // Never through kill(): see the block comment above.
+        expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+      } finally {
+        mockProcessKill.mockImplementation(() => true);
+      }
+    });
+
+    it('releases them even when the shell lingers and taskkill fires', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // Default liveness mock: node-pty reported exit but the shell lingers.
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
+      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+    });
+
+    it('does not fail the result when the native pty kill throws', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockPtyNativeKill.mockImplementation(() => {
+        throw new Error('pty already gone');
+      });
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.error).toBeNull();
+      // A throwing host close must not skip the worker teardown.
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+    });
+
+    it('still drops the pid from activePtys when the conout worker dispose throws', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // The second guard in releaseConPtyHost — the one around
+      // _conoutSocketWorker.dispose(). The release runs in finalize()'s
+      // finally, immediately before activePtys.delete(pid) and after the result
+      // has already settled, so an escaping throw would leave a finished pid
+      // registered for the process-exit `taskkill /f /t` — against a pid
+      // Windows may have recycled by then.
+      mockConoutWorkerDispose.mockImplementation(() => {
+        throw new Error('dispose boom');
+      });
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      // Direct witness for the guard, and the one that survives a refactor of
+      // how the process-exit reap spawns taskkill: `resolve(...)` sits in
+      // finalize()'s try and `disposeForegroundPtyResources()` — which owns
+      // both the release and activePtys.delete — is in its finally, so the
+      // finally body has already run by the time the awaited result resumes.
+      // Remove the try/catch around _conoutSocketWorker.dispose() in
+      // conpty-host.ts and this comes back true.
+      expect(ShellExecutionService['activePtys'].has(mockPtyProcess.pid)).toBe(
+        false,
+      );
+
+      ShellExecutionService.cleanup();
+      ShellExecutionService['activePtys'].delete(mockPtyProcess.pid);
+
+      // End-to-end consequence of the same invariant: the pid was already
+      // dropped, so the exit cleanup has nothing to tree-kill.
+      expect(mockSpawnSync).not.toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
+    });
+
+    it('degrades to the pre-fix leak, not to kill(), if node-pty internals change', async () => {
+      mockPlatform.mockReturnValue('win32');
+      delete (mockPtyProcess as unknown as { _agent?: unknown })._agent;
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      // Leaking is recoverable by restarting the CLI; killing a recycled pid is
+      // not, so the fallback must never be ptyProcess.kill().
+      expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+    });
+
+    it('still disposes the worker when only the native-kill shape drifts', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // A node-pty bump that renames _pty / _ptyNative must not cost the worker
+      // dispose — the only teardown that frees anything today. The fused guard
+      // used to skip both on a native-shape drift; see releaseConPtyHost.
+      (mockPtyProcess as unknown as { _agent: unknown })._agent = {
+        _conoutSocketWorker: { dispose: mockConoutWorkerDispose },
+      };
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+      // Never fall back to kill(): leaking is recoverable, killing a recycled
+      // pid is not.
+      expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+    });
+
+    it('does not close the pseudo-console twice and still disposes the bundled worker after cancel', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // performCancelKill closes the pseudo-console itself. With bundled
+      // ConPTY, node-pty waits for more output before disposing the worker, so
+      // the finalizer must skip the native close but still start the worker's
+      // drain timeout in case no more data arrives.
+      const { result } = await simulateExecution('sleep 100', (pty, ac) => {
+        ac.abort();
+        pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
+      });
+
+      expect(result.aborted).toBe(true);
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
+      expect(mockPtyNativeKill).not.toHaveBeenCalled();
+      expect(mockConoutWorkerDispose).toHaveBeenCalledOnce();
+    });
+
+    it('never touches the pty on non-win32 (no ConPTY host, no conout worker)', async () => {
+      // Default platform is 'linux'.
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(mockPtyNativeKill).not.toHaveBeenCalled();
+      expect(mockConoutWorkerDispose).not.toHaveBeenCalled();
+      expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+    });
+
+    it('releases the conout worker of a promoted shell when it settles', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      const { result } = await simulateExecution(
+        'long-running-command',
+        (_pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_11303_settle',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        { postPromote: { onSettle: () => {} } },
+      );
+      expect(result.promoted).toBe(true);
+      // Promote itself must not tear anything down — the caller owns the child.
+      expect(mockPtyNativeKill).not.toHaveBeenCalled();
+
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+
+      // The promote branch already dropped this pid from activePtys, so the
+      // process-exit cleanup() cannot reach it: settle is the last chance.
+      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+    });
+
+    it('releases the conout worker when a promote passed no postPromote handlers', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      const { result } = await simulateExecution(
+        'long-running-command',
+        (_pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_11303_no_handlers',
+          } satisfies ShellAbortReason);
+        },
+        // No options arg → postPromote unset → PR-2 detach contract.
+      );
+      expect(result.promoted).toBe(true);
+      // Promote itself must not tear anything down — the caller owns the child.
+      expect(mockPtyNativeKill).not.toHaveBeenCalled();
+
+      // The settle listener is attached even without postPromote: it is the
+      // only path that can still reach this PTY, because the promote branch
+      // dropped the pid from activePtys and disposed exitDisposable. Wrapping
+      // the attach in `if (postPromote)` again must turn this red.
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      expect(onExitRegistrations.length).toBe(2);
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+
+      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+    });
+
+    it('still releases after a cancel that landed before the terminal was ready', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // WindowsTerminal.kill() runs its whole teardown through _deferNoArgs,
+      // which queues it until `_isReady` — and that flag flips only on the
+      // conout socket's first data byte. A cancel before that point (Esc during
+      // pwsh startup, `timeout /t 30 >nul`) queues a teardown that may never
+      // run, so it must not be recorded as a release: the finalizer still owes
+      // the conout worker. Noting it unconditionally — the previous code —
+      // makes both release assertions below fail.
+      (mockPtyProcess as unknown as { _isReady: boolean })._isReady = false;
+
+      const { result } = await simulateExecution('timeout /t 30', (pty, ac) => {
+        ac.abort();
+        pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
+      });
+
+      expect(result.aborted).toBe(true);
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
+      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+    });
+  });
+
+  describe('Windows bundled ConPTY backend (#11303)', () => {
+    // With the inbox ConPTY backend a natural shell exit orphans the
+    // `conhost.exe --headless` it spawned (microsoft/node-pty#965); #11303
+    // measured that growth gone once node-pty loads the conpty.dll it ships
+    // instead of the one built into Windows.
+
+    let capturedReplyListener: ((data: string) => void) | undefined;
+
+    // Capture the forwarder for the error-containment and platform-gate tests.
+    // The device-attributes test below uses xterm's real parser and emitter.
+    class ReplyCapturingTerminal extends pkg.Terminal {
+      override onData: pkg.IEvent<string> = (listener) => {
+        capturedReplyListener = listener;
+        return { dispose: () => undefined };
+      };
+    }
+
+    beforeEach(() => {
+      capturedReplyListener = undefined;
+    });
+
+    it('spawns PTYs with the bundled ConPTY backend on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(mockPtySpawn.mock.calls[0][2]).toMatchObject({
+        useConptyDll: true,
+      });
+    });
+
+    it('falls back to child_process when the bundled ConPTY spawn throws on Windows', async () => {
+      // node-pty throws synchronously out of spawn when the conpty.dll it
+      // ships is missing or cannot be loaded, and none of those messages
+      // contain `posix_spawnp failed`. Without the spawn-phase branch in
+      // executeWithPty's catch this resolved exitCode 1 / executionMethod
+      // 'none', so the child_process fallback in execute() never ran.
+      mockPlatform.mockReturnValue('win32');
+      mockPtySpawn.mockImplementationOnce(() => {
+        throw new Error('Failed to load conpty.dll, error code: 126');
+      });
+      const fallbackChild = new EventEmitter() as EventEmitter &
+        Partial<ChildProcess>;
+      fallbackChild.stdout = new EventEmitter() as Readable;
+      fallbackChild.stderr = new EventEmitter() as Readable;
+      fallbackChild.kill = vi.fn();
+      Object.defineProperty(fallbackChild, 'pid', {
+        value: 4242,
+        configurable: true,
+      });
+      mockCpSpawn.mockReturnValue(fallbackChild);
+
+      try {
+        const handle = await ShellExecutionService.execute(
+          'echo hi',
+          '/test/dir',
+          onOutputEventMock,
+          new AbortController().signal,
+          true,
+          shellExecutionConfig,
+        );
+
+        await new Promise((resolve) => process.nextTick(resolve));
+        fallbackChild.stdout?.emit('data', Buffer.from('FALLBACK_MARKER'));
+        fallbackChild.emit('exit', 0, null);
+        fallbackChild.emit('close', 0, null);
+        const result = await handle.result;
+
+        expect(mockCpSpawn).toHaveBeenCalled();
+        expect(result.executionMethod).toBe('child_process');
+        expect(result.exitCode).toBe(0);
+        expect(result.output).toContain('FALLBACK_MARKER');
+        // The sandbox-specific PTY warning is POSIX wording and must not be
+        // emitted for a Windows DLL-load failure.
+        expect(
+          onOutputEventMock.mock.calls.some(
+            ([event]) =>
+              event.type === 'data' &&
+              String(event.chunk).includes('sandbox restrictions'),
+          ),
+        ).toBe(false);
+      } finally {
+        // vi.clearAllMocks() does not drop implementations, so restore the
+        // default (undefined) this describe block's other tests rely on.
+        mockCpSpawn.mockReturnValue(undefined);
+      }
+    });
+
+    it('does not run the fallback after the PTY has already spawned', async () => {
+      mockPlatform.mockReturnValue('win32');
+      let pidReads = 0;
+      Object.defineProperty(mockPtyProcess, 'pid', {
+        configurable: true,
+        get: () => {
+          pidReads++;
+          if (pidReads === 1) return 12345;
+          throw new Error('post-spawn handle setup failed');
+        },
+      });
+
+      try {
+        const handle = await ShellExecutionService.execute(
+          'echo hi',
+          '/test/dir',
+          onOutputEventMock,
+          new AbortController().signal,
+          true,
+          shellExecutionConfig,
+        );
+        const result = await handle.result;
+
+        expect(mockPtySpawn).toHaveBeenCalledOnce();
+        expect(mockCpSpawn).not.toHaveBeenCalled();
+        expect(result.executionMethod).toBe('none');
+        expect(result.error?.message).toBe('post-spawn handle setup failed');
+      } finally {
+        ShellExecutionService['activePtys'].delete(12345);
+      }
+    });
+
+    it('leaves the inbox ConPTY backend alone off Windows', async () => {
+      // beforeEach pins the platform to linux.
+      await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(mockPtySpawn.mock.calls[0][2]).toMatchObject({
+        useConptyDll: false,
+      });
+    });
+
+    it("writes xterm's device-attributes reply back to the PTY on Windows", async () => {
+      // Bundled ConPTY answers no queries itself, so an unanswered DA probe
+      // stalls the shell for its full ~2s timeout; the forwarder must carry
+      // the reply generated by xterm's real parser back to the PTY.
+      mockPlatform.mockReturnValue('win32');
+
+      await simulateExecution('echo hi', async (pty) => {
+        pty.onData.mock.calls[0][0]('\x1b[c');
+        await vi.waitFor(() => {
+          expect(mockPtyProcess.write).toHaveBeenCalledWith('\x1b[?1;2c');
+        });
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+    });
+
+    it('drops a terminal query reply whose PTY write throws on Windows', async () => {
+      // A reply racing shell exit finds a dead PTY. The forwarder's try/catch
+      // has to contain that throw: deleting it lets the error escape the
+      // terminal's onData listener and this test goes red.
+      mockPlatform.mockReturnValue('win32');
+      mockLoadXtermHeadless.mockResolvedValueOnce({
+        Terminal: ReplyCapturingTerminal,
+      });
+      mockPtyProcess.write.mockImplementationOnce(() => {
+        throw new Error('pty gone');
+      });
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        capturedReplyListener!('\x1b[?64;1;22c');
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(mockPtyProcess.write).toHaveBeenCalledWith('\x1b[?64;1;22c');
+      expect(result.exitCode).toBe(0);
+      expect(result.error).toBeNull();
+    });
+
+    it('registers no terminal reply forwarder off Windows', async () => {
+      // The gate must not change POSIX behavior at all: no onData
+      // subscription, so nothing can reach pty.write.
+      mockLoadXtermHeadless.mockResolvedValueOnce({
+        Terminal: ReplyCapturingTerminal,
+      });
+
+      await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(capturedReplyListener).toBeUndefined();
+      expect(mockPtyProcess.write).not.toHaveBeenCalled();
     });
   });
 

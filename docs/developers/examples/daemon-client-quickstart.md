@@ -1,19 +1,21 @@
-# DaemonClient quickstart (TypeScript)
+# API-only DaemonClient quickstart (TypeScript)
 
-A minimal end-to-end example: start a `qwen serve` daemon in another terminal, then drive it from a Node script with the SDK's `DaemonClient`. See also: [Daemon mode user guide](../../users/qwen-serve.md) and [HTTP protocol reference](../qwen-serve-protocol.md).
+A minimal end-to-end example: start an API-only `qwen serve` daemon in another terminal, then drive it from a Node script with the SDK's `DaemonClient`. See also: [Daemon mode user guide](../../users/qwen-serve.md) and [HTTP protocol reference](../qwen-serve-protocol.md).
 
 ## Setup
 
 In one terminal:
 
 ```bash
-qwen serve --port 4170 \
+qwen serve --no-web --port 4170 \
   --workspace /path/to/project-a \
   --workspace /path/to/project-b
 # → qwen serve listening on http://127.0.0.1:4170 (mode=http-bridge, workspace=/path/to/project-a)
 ```
 
-Each `--workspace` value must be an absolute directory. The first startup workspace is primary and remains the compatibility default for requests that omit `cwd`; `/capabilities.workspaces[]` is the catalog clients should use when selecting any runtime explicitly.
+`--no-web` removes the Web Shell assets and the surfaces bound to them: `POST /workspace/local-control/enable` then fails closed with `409 local_control_web_shell_unavailable` on every platform, and on macOS the `/live/*` routes, the `/live/host` WebSocket and the `experimental.liveVoice.*` settings keys are not registered — so an integration that drives the SDK's Live methods must run without `--no-web`. It is not a feature-profile switch: the session, prompt, workspace, permission and SSE routes are unchanged. Each `--workspace` value must be an absolute directory. The first startup workspace is primary and remains the compatibility default for requests that omit `cwd`; `/capabilities.workspaces[]` is the catalog clients should use when selecting any runtime explicitly.
+
+The token-less loopback default is intended for a single-user workstation. On a shared host, set `QWEN_SERVER_TOKEN` and add `--require-auth`; non-loopback binds require a token.
 
 In another:
 

@@ -61,6 +61,7 @@ import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.j
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -358,6 +359,7 @@ export const DialogManager = ({
       <Box flexDirection="column">
         <EffortDialog
           currentEffort={config.getReasoningEffort()}
+          efforts={getReasoningEffortsForConfig(config)}
           onSelect={uiActions.handleEffortSelect}
         />
       </Box>

@@ -76,6 +76,33 @@ describe('tool response finalization', () => {
     }));
   });
 
+  it('fits exec output to a batch budget without persisting known-empty artifacts', async () => {
+    const result = await finalizeToolResponses(config(1000), [
+      {
+        ...entry(
+          'exec-inline',
+          [
+            {
+              functionResponse: {
+                id: 'exec-inline',
+                name: 'exec',
+                response: { output: 'x'.repeat(32_000) },
+              },
+            },
+          ],
+          [],
+        ),
+        toolName: 'exec',
+      },
+    ]);
+    expect(persist).not.toHaveBeenCalled();
+    expect(result[0].persistedOutputFiles).toEqual([]);
+    expect(toolResponseTextLength(result[0].responseParts)).toBeLessThanOrEqual(
+      1000,
+    );
+    expect(JSON.stringify(result[0].responseParts)).not.toContain('Persisted');
+  });
+
   it('leaves a batch within budget unchanged', async () => {
     const entries = [
       entry('small', [

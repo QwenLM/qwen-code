@@ -1661,6 +1661,16 @@ export class SessionWriterLease {
           `transcriptPath=${JSON.stringify(path.resolve(options.transcriptPath))} ` +
           `error=${describeDiagnosticError(error)}`,
       );
+      if (
+        error instanceof SessionWriterConflictError ||
+        error instanceof SessionWriterUnavailableError
+      ) {
+        debugLogger.info(
+          `Session writer fence blocks access; it does not prove that a writer is still alive. ` +
+            `sessionId=${JSON.stringify(options.sessionId)} lockPath=${JSON.stringify(lockPath)} ` +
+            `Close the owning session normally and retry. For residual locks, fence all writers including ACP children before recovery; see docs/users/conversations-recovery.md.`,
+        );
+      }
       throw error;
     }
   }

@@ -33,6 +33,23 @@ const toolResult = (): Content => ({
   parts: [{ functionResponse: { name: 'x', response: { output: 'ok' } } }],
 });
 
+/**
+ * A summarizing-compressed session's prefix, matching
+ * `detectCompressedPrefixLength`'s exact sentinels: the reminder prelude, a
+ * user entry whose text contains 'Resume the prior task', and a model ack
+ * whose first part is exactly 'Got it. Thanks for the additional context!'.
+ * Both walks skip it via `includeCompressed: true`; without that flag the
+ * synthetic summary entry counts as a real prompt and every ordinal shifts.
+ */
+const compressedPrefix = (): Content[] => [
+  reminder('startup'),
+  user('<summary>…</summary>\nResume the prior task from where it left off.'),
+  {
+    role: 'model',
+    parts: [{ text: 'Got it. Thanks for the additional context!' }],
+  },
+];
+
 const CLEARED_MEDIA = '[Old inline media cleared: image/png]';
 const TODO_GUARD = '[Todo Stop Guard] continue';
 const isTodoGuard = (text: string) => text.startsWith('[Todo Stop Guard] ');
@@ -151,6 +168,15 @@ describe('findApiRewindCutPoint', () => {
     expect(findApiRewindCutPoint(withTools, 1)).toBe(4);
   });
 
+  it('skips a summarizing-compressed prefix', () => {
+    // The compressed prefix ends at index 3, so the only real prompt is the
+    // one after it. Dropping `includeCompressed: true` counts the synthetic
+    // summary entry too and returns 1 here instead of 3.
+    const history: Content[] = [...compressedPrefix(), user('real prompt')];
+    expect(findApiRewindCutPoint(history, 0)).toBe(3);
+    expect(findApiRewindCutPoint(history, 1)).toBe(-1);
+  });
+
   it('shifts the boundary when the two bindings disagree', () => {
     // The same history yields different cut points under the TUI and ACP
     // bindings — which is why the divergence is an explicit option instead
@@ -183,6 +209,14 @@ describe('countApiUserPrompts', () => {
     ];
     expect(countApiUserPrompts(history)).toBe(2);
     expect(countApiUserPrompts([])).toBe(0);
+  });
+
+  it('does not count a summarizing-compressed prefix as a prompt', () => {
+    // Same guard on the counting side: without `includeCompressed: true` the
+    // synthetic summary entry counts and this returns 2.
+    expect(
+      countApiUserPrompts([...compressedPrefix(), user('real prompt')]),
+    ).toBe(1);
   });
 
   it('honours the binding options', () => {

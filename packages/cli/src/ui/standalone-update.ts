@@ -63,6 +63,31 @@ function escapePS(s: string): string {
   return s.replace(/'/g, "''");
 }
 
+function resolveUpdateBaseUrl(): string | undefined {
+  const value = process.env['QWEN_UPDATE_BASE_URL']?.trim();
+  if (!value) return undefined;
+
+  const invalidUrl = () =>
+    new Error(
+      'QWEN_UPDATE_BASE_URL must be an absolute HTTPS URL without credentials, query parameters, or a fragment.',
+    );
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw invalidUrl();
+  }
+  if (
+    !/^https:\/\//i.test(value) ||
+    url.username ||
+    url.password ||
+    /[?#\s]/.test(value)
+  ) {
+    throw invalidUrl();
+  }
+  return url.href.replace(/\/+$/, '');
+}
+
 async function tryFetch(
   url: string,
   timeoutMs = FETCH_TIMEOUT_MS,
@@ -91,7 +116,19 @@ async function downloadWithFallback(
   versionPath: string,
   filename: string,
   timeoutMs = FETCH_TIMEOUT_MS,
+  baseUrl?: string,
 ): Promise<UndiciResponse> {
+  if (baseUrl) {
+    const result = await tryFetch(
+      `${baseUrl}/${versionPath}/${filename}`,
+      timeoutMs,
+    );
+    if (result.response) return result.response;
+    throw new Error(
+      `Failed to download ${filename} from QWEN_UPDATE_BASE_URL: ${result.error.message}`,
+    );
+  }
+
   const ossUrl = `${OSS_BASE}/${versionPath}/${filename}`;
   const ossResult = await tryFetch(ossUrl, timeoutMs);
   if (ossResult.response) return ossResult.response;
@@ -109,8 +146,14 @@ async function verifyChecksum(
   actualHash: string,
   filename: string,
   versionPath: string,
+  baseUrl?: string,
 ): Promise<void> {
-  const response = await downloadWithFallback(versionPath, 'SHA256SUMS');
+  const response = await downloadWithFallback(
+    versionPath,
+    'SHA256SUMS',
+    FETCH_TIMEOUT_MS,
+    baseUrl,
+  );
   const text = await response.text();
 
   // Ed25519 signature verification of SHA256SUMS.
@@ -120,7 +163,12 @@ async function verifyChecksum(
   const requireSig = process.env['QWEN_REQUIRE_SIGNATURE'] === '1';
   let sigResponse: UndiciResponse | undefined;
   try {
-    sigResponse = await downloadWithFallback(versionPath, 'SHA256SUMS.sig');
+    sigResponse = await downloadWithFallback(
+      versionPath,
+      'SHA256SUMS.sig',
+      FETCH_TIMEOUT_MS,
+      baseUrl,
+    );
   } catch (err) {
     debugLogger.debug('SHA256SUMS.sig not available:', err);
   }
@@ -164,11 +212,13 @@ async function downloadToFile(
   versionPath: string,
   filename: string,
   destPath: string,
+  baseUrl?: string,
 ): Promise<string> {
   const response = await downloadWithFallback(
     versionPath,
     filename,
     ARCHIVE_TIMEOUT_MS,
+    baseUrl,
   );
   const body = response.body;
   if (!body) throw new Error('Empty response body');
@@ -950,6 +1000,7 @@ export async function performStandaloneUpdate(
   newVersion: string,
 ): Promise<'done' | 'deferred'> {
   const versionPath = normalizeVersion(newVersion);
+  const baseUrl = resolveUpdateBaseUrl();
 
   let target: string;
   let isFirstTimeMigration = false;
@@ -1022,10 +1073,11 @@ export async function performStandaloneUpdate(
       versionPath,
       filename,
       archivePath,
+      baseUrl,
     );
 
     debugLogger.info('Verifying checksum...');
-    await verifyChecksum(archiveHash, filename, versionPath);
+    await verifyChecksum(archiveHash, filename, versionPath, baseUrl);
 
     debugLogger.info('Extracting archive...');
     await extractArchive(archivePath, extractDir, target);

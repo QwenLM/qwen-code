@@ -112,7 +112,9 @@ test('shows channel sessions in the sidebar channel catalog', async ({
   });
 
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   const connection = await daemon.sse.waitForConnection(scenario.sessionId);
   await daemon.sendEvent(
     replayCompleteEvent({ sessionId: connection.sessionId }),
@@ -297,7 +299,9 @@ test('creates and deletes a typed Channel configuration', async ({
   });
 
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   const connection = await daemon.sse.waitForConnection(scenario.sessionId);
   await daemon.sendEvent(
     replayCompleteEvent({ sessionId: connection.sessionId }),

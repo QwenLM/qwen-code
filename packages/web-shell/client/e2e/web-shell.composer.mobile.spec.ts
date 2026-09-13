@@ -292,7 +292,9 @@ test('?composer=codemirror escape hatch forces the CodeMirror path', async ({
   await page.goto(
     `/session/${encodeURIComponent(scenario.sessionId)}?composer=codemirror`,
   );
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await completeReplay(page, daemon, scenario.sessionId);
 
   await expect(page.locator('.cm-editor')).toBeVisible();
@@ -315,7 +317,9 @@ async function gotoSession(
   daemon: MockDaemonController,
 ): Promise<void> {
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await completeReplay(page, daemon, scenario.sessionId);
 }
 

@@ -6,6 +6,7 @@ import {
   useWorkspaceEventSignals,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import { setBoundedMapEntry } from '../utils/bounded-map';
 
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
 const MAX_CACHED_SESSIONS = 20;
@@ -19,13 +20,12 @@ function cacheArtifacts<Owner>(
   artifacts: DaemonSessionArtifact[],
   hydratedOwner?: Owner,
 ): void {
-  cache.delete(sessionKey);
-  cache.set(sessionKey, { artifacts, hydratedOwner });
-  while (cache.size > MAX_CACHED_SESSIONS) {
-    const oldest = cache.keys().next().value;
-    if (!oldest) break;
-    cache.delete(oldest);
-  }
+  setBoundedMapEntry(
+    cache,
+    sessionKey,
+    { artifacts, hydratedOwner },
+    MAX_CACHED_SESSIONS,
+  );
 }
 
 // A stable empty array for sessions whose artifact list cannot load (e.g. a

@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
+import { displayLiveMessage } from '../i18n/messages.js';
 import {
   downloadLiveHostRelease,
   isExpectedLiveHostSignature,
@@ -268,7 +269,10 @@ describe('LiveHostInstaller', () => {
   });
 
   it('launches an existing verified installation without downloading', async () => {
-    const inspectInstalled = vi.fn(async () => ({ version: '0.1.0' }));
+    const inspectInstalled = vi.fn(async () => ({
+      version: '0.1.0',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+    }));
     const installLatest = vi.fn();
     const launch = vi.fn(async () => {});
     const installer = new LiveHostInstaller({
@@ -287,15 +291,43 @@ describe('LiveHostInstaller', () => {
     expect(launch).toHaveBeenCalledOnce();
   });
 
+  it('replaces an installed Host with an incompatible protocol', async () => {
+    const installLatest = vi.fn(async () => ({
+      version: '0.2.0',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+    }));
+    const installer = new LiveHostInstaller({
+      platform: 'darwin',
+      architecture: 'arm64',
+      inspectInstalled: async () => ({
+        version: '0.1.0',
+        protocolVersion: LIVE_HOST_PROTOCOL_VERSION - 1,
+      }),
+      installLatest,
+      launch: async () => {},
+    });
+
+    await expect(installer.ensureInstalled()).resolves.toEqual({
+      state: 'installed',
+      version: '0.2.0',
+    });
+    expect(installLatest).toHaveBeenCalledOnce();
+  });
+
   it('coalesces concurrent installs and exposes progress', async () => {
-    let finish: ((value: { version: string }) => void) | undefined;
+    let finish:
+      | ((value: { version: string; protocolVersion: number }) => void)
+      | undefined;
     const installLatest = vi.fn(
       async (
         _architecture: 'arm64' | 'x64',
         onStatus: (status: { state: 'downloading'; progress: number }) => void,
       ) => {
         onStatus({ state: 'downloading', progress: 0.5 });
-        return await new Promise<{ version: string }>((resolve) => {
+        return await new Promise<{
+          version: string;
+          protocolVersion: number;
+        }>((resolve) => {
           finish = resolve;
         });
       },
@@ -316,7 +348,10 @@ describe('LiveHostInstaller', () => {
         progress: 0.5,
       });
     });
-    finish?.({ version: '0.1.0' });
+    finish?.({
+      version: '0.1.0',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+    });
     await expect(first).resolves.toMatchObject({ state: 'installed' });
     await expect(second).resolves.toMatchObject({ state: 'installed' });
     expect(installLatest).toHaveBeenCalledOnce();
@@ -333,6 +368,9 @@ describe('LiveHostInstaller', () => {
       state: 'error',
       retryable: false,
     });
+    expect(displayLiveMessage('zh-CN', linux.getStatus().message ?? '')).toBe(
+      'Qwen Live Host 仅支持 macOS。',
+    );
 
     const unsupported = new LiveHostInstaller({
       platform: 'darwin',
@@ -344,6 +382,12 @@ describe('LiveHostInstaller', () => {
       state: 'error',
       retryable: true,
     });
+    expect(
+      displayLiveMessage('en', unsupported.getStatus().message ?? ''),
+    ).toContain('architecture ia32');
+    expect(
+      displayLiveMessage('zh-CN', unsupported.getStatus().message ?? ''),
+    ).toContain('不支持 ia32 架构');
     expect(installLatest).not.toHaveBeenCalled();
   });
 

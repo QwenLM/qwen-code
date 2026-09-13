@@ -58,6 +58,7 @@ export interface ComputerUseElement {
   element_token?: string;
   role?: string;
   label?: string;
+  automation_id?: string;
   value?: JsonValue;
   enabled?: boolean;
   actions?: string[];
@@ -69,11 +70,28 @@ export interface ComputerUseScreenshot {
   height?: number;
   mimeType?: string;
   filePath?: string;
-  images: unknown[];
+  images: Array<{
+    mimeType: string;
+    dataBase64: string;
+  }>;
+}
+
+export interface ComputerUseObservationDiagnostics {
+  revisionSupported: boolean;
+  stableElementIds: boolean;
+  captureComplete?: boolean;
+  serializerVersion?: string;
+  projectionVersion?: string;
+  selectedBytes?: number;
+  fullBytes?: number;
+  estimatedTokens?: number;
+  serializerDurationUs?: number;
+  cacheEstimateBytes?: number;
 }
 
 export interface ObserveWindowOptions extends WindowRef, CallOptions {
-  baseRevisionId?: string;
+  disableDiff?: boolean;
+  /** @deprecated Use disableDiff. */
   forceFull?: boolean;
   includeScreenshot?: boolean;
   screenshotOutFile?: string;
@@ -84,24 +102,12 @@ export interface ObserveWindowOptions extends WindowRef, CallOptions {
 export interface WindowObservation {
   pid: number;
   windowId: number;
-  revisionSupported: boolean;
   mode: "full" | "diff" | "no_change";
-  revisionId?: string;
-  lineageId?: string;
-  baseRevisionId?: string;
-  serializerVersion?: string;
-  projectionVersion?: string;
   resyncReason?: string;
-  stableElementIds: boolean;
-  selectedBytes?: number;
-  fullBytes?: number;
-  estimatedTokens?: number;
-  serializerDurationUs?: number;
-  cacheEstimateBytes?: number;
   text: string;
   elements: ComputerUseElement[];
   screenshot?: ComputerUseScreenshot;
-  structured?: JsonObject;
+  diagnostics: ComputerUseObservationDiagnostics;
 }
 
 export interface VerifyStateOptions extends WindowRef, CallOptions {

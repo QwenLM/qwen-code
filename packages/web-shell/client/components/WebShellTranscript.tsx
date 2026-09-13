@@ -13,6 +13,7 @@ import { CompactModeContext, TodoContextsProvider } from '../WebShellContexts';
 import {
   WebShellCustomizationProvider,
   type AssistantTurnFooterRenderer,
+  type WebShellArtifactCustomization,
   type ComposerTagRenderer,
   type MarkdownTableMode,
   type ToolHeaderExtraRenderer,
@@ -65,6 +66,7 @@ export interface WebShellTranscriptProps {
   markdown?: WebShellMarkdownCustomization;
   composerTagIcons?: WebShellComposerTagIconMap;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
+  artifact?: WebShellArtifactCustomization;
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   renderComposerTag?: ComposerTagRenderer;
@@ -117,6 +119,7 @@ function WebShellTranscriptContent({
   virtualScrollThreshold,
   markdown,
   composerTagIcons,
+  artifact,
   renderToolHeaderExtra,
   parseUserMessageContent,
   renderUserMessageContent,
@@ -139,6 +142,7 @@ function WebShellTranscriptContent({
   const todoTimeline = useMemo(() => computeTodoTimeline(messages), [messages]);
   const customization = useMemo(
     () => ({
+      artifact,
       composerTagIcons,
       renderToolHeaderExtra,
       parseUserMessageContent,
@@ -152,6 +156,7 @@ function WebShellTranscriptContent({
       markdown,
     }),
     [
+      artifact,
       effectiveCollapseCompletedTurns,
       compactThinking,
       composerTagIcons,

@@ -42,10 +42,12 @@ const KNOWN_AGENT_OPTS = [
   'phase',
   'schema',
   'model',
+  'effort',
   'isolation',
   'agentType',
   'stallMs',
   'workingDir',
+  'disallowedTools',
 ];
 
 async function runScript(
@@ -115,7 +117,7 @@ const AGENTS: WorkflowAgentSpec[] = [
   { key: '7', prompt: 'PROMPT-7' },
 ];
 
-describe('the generated Step 3A fan-out script', () => {
+describe('the generated review batch script', () => {
   it('opens with a meta block the sandbox will accept as a pure literal', () => {
     const script = buildReviewWorkflowScript(AGENTS);
     expect(script.startsWith('export const meta = {')).toBe(true);
@@ -146,6 +148,34 @@ describe('the generated Step 3A fan-out script', () => {
     expect(phases).toEqual(['Review']);
     expect((result as { rosterSize: number }).rosterSize).toBe(3);
     expect((result as { missingRoles: string[] }).missingRoles).toEqual([]);
+  });
+
+  it('starts both agents before either one can finish', async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started: string[] = [];
+    const completed: string[] = [];
+    const run = runScript(
+      buildReviewWorkflowScript(AGENTS.slice(0, 2)),
+      async (prompt) => {
+        started.push(prompt);
+        await barrier;
+        completed.push(prompt);
+        return `said:${prompt}`;
+      },
+    );
+    try {
+      // Neither dispatch can finish until the test releases the barrier.
+      // A serial await loop reaches this assertion with only its first agent.
+      expect(started).toEqual(['PROMPT-1a', 'PROMPT-2']);
+      expect(completed).toEqual([]);
+    } finally {
+      release();
+      await run;
+    }
+    expect(completed).toHaveLength(2);
   });
 
   it('passes each prompt through untouched, having survived serialization', async () => {
@@ -247,7 +277,9 @@ describe('the generated Step 3A fan-out script', () => {
         if (prompt === 'PROMPT-2') throw new Error('agent died');
         return `said:${prompt}`;
       }),
-    ).rejects.toThrow(/required agents failed to deliver \(2\)/);
+    ).rejects.toThrow(
+      /required agents failed to deliver \(2\).*Recover completed results.*retry the missing agents/s,
+    );
   });
 
   it('rejects on an undefined return, not a shorter finding set', async () => {
@@ -288,14 +320,7 @@ describe('the generated Step 3A fan-out script', () => {
     ]);
   });
 
-  // A fan-out where nothing came back is the all-missing case of the same
-  // fail-closed rule: a failed step, never an empty result the caller could
-  // aggregate over a diff no agent read. But the partial-failure remedy —
-  // re-emit and dispatch again — loops here: a rebuild writes the identical
-  // script with the identical baked-in pin, measured against a real bad-pin
-  // run where every dispatch was rejected before the first request. The
-  // message must name the dispatch, not prescribe the loop.
-  it('throws when every agent failed, naming the dispatch rather than a re-emit', async () => {
+  it('reports an all-missing batch as incomplete and directs recovery to evidence', async () => {
     const run = runScript(buildReviewWorkflowScript(AGENTS), async () => {
       throw new Error('all dead');
     });
@@ -303,8 +328,9 @@ describe('the generated Step 3A fan-out script', () => {
       /every agent failed to deliver \(1a, 2, 7\)/,
     );
     const message = await run.catch((err: Error) => err.message);
-    expect(message).toContain('writes the identical script');
-    expect(message).not.toContain('and dispatch again');
+    expect(message).toContain('workflow journal and agent transcripts');
+    expect(message).toContain('Do not treat this batch as a clean review');
+    expect(message).not.toContain('emit-workflow');
   });
 
   it('throws on an empty roster rather than reporting a clean review', async () => {
@@ -334,5 +360,25 @@ describe('the generated Step 3A fan-out script', () => {
     const generated = script.slice(0, script.length - FAN_OUT_BODY.length);
     expect(generated).not.toContain('parallel(');
     expect(generated).not.toContain('agent(');
+  });
+});
+
+// The harness mirrors the runtime allowlist, so it has to accept what the
+// runtime accepts: otherwise the first generated script to use one of these
+// options fails here while production runs it.
+describe('the review harness option mirror', () => {
+  it('accepts the effort and disallowedTools options the runtime accepts', async () => {
+    const script = [
+      'export const meta = {',
+      "  name: 'probe',",
+      '};',
+      "await agent('p', { effort: 'low', disallowedTools: ['write_file'] });",
+      "return 'ok';",
+    ].join('\n');
+    const { result, dispatched } = await runScript(script, async () => 'done');
+    expect(result).toBe('ok');
+    expect(dispatched).toEqual([
+      { prompt: 'p', opts: { effort: 'low', disallowedTools: ['write_file'] } },
+    ]);
   });
 });

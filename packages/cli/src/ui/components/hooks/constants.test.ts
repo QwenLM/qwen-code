@@ -235,7 +235,7 @@ describe('hooks constants', () => {
       expect(desc).toContain('"prompt"');
       expect(desc).toContain('model-bound');
       expect(desc).toContain('"submitted_prompt"');
-      expect(desc).toContain('interactive TUI');
+      expect(desc).toContain('submission boundary');
     });
 
     it('should return description for PostCompact', () => {

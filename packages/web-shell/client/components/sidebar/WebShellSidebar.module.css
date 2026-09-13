@@ -211,10 +211,17 @@
   user-select: none;
 }
 
-.brandLogo svg {
+.brandLogo svg,
+.brandLogo img {
   width: 26px;
   height: 26px;
   display: block;
+}
+
+/* A custom logo arrives as an <img>, which stretches to the box; the built-in
+   inline <svg> keeps its ratio through its viewBox instead. */
+.brandLogo img {
+  object-fit: contain;
 }
 
 .brandName {
@@ -1029,15 +1036,6 @@
   animation: sidebarPulse 1.6s ease-in-out infinite;
 }
 
-.sessionStatusDotOverlay {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 5px;
-  height: 5px;
-  box-shadow: 0 0 0 1.5px var(--sidebar-background);
-}
-
 /* A running turn gets the same pulsing dot in green, so busy sessions are
    scannable without waiting for the right-edge spinner. */
 .sessionStatusDotRunning {
@@ -1045,8 +1043,8 @@
 }
 
 .sessionSourceIcon {
-  width: 18px;
-  height: 18px;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1124,7 +1122,7 @@
 }
 
 .sessionMetaSlot:not(
-  :has(.sessionLoading, .sessionAttention, .sessionGitIcon)
+  :has(.sessionLoading, .sessionAttention, .sessionGitIcon, .sessionSourceIcon)
 ) {
   padding-right: 10px;
 }
@@ -1146,13 +1144,6 @@
 .sessionAttentionUserInput {
   background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
   color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
-}
-
-.sessionRow:hover .sessionMetaSlot,
-.sessionRow:focus-within .sessionMetaSlot,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible),
-.sessionMetaSlot:has([data-state='open']) {
-  min-width: var(--session-actions-width, 78px);
 }
 
 .sessionGitIcon {
@@ -1182,22 +1173,6 @@
   animation: sidebarSpin 0.8s linear infinite;
 }
 
-.sessionRow:hover:not(.runningSession) .sessionGitIcon,
-.sessionRow:focus-within:not(.runningSession) .sessionGitIcon,
-.sessionRow:hover:not(.runningSession) .sessionAttention,
-.sessionRow:focus-within:not(.runningSession) .sessionAttention,
-.sessionMetaSlot:hover .sessionGitIcon,
-.sessionMetaSlot:hover .sessionLoading,
-.sessionMetaSlot:hover .sessionAttention,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionGitIcon,
-.sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionLoading,
-.sessionMetaSlot:has([data-state='open']) .sessionLoading,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionAttention,
-.sessionMetaSlot:has([data-state='open']) .sessionAttention {
-  opacity: 0;
-}
-
 .sessionActions {
   position: absolute;
   inset: 0;
@@ -1206,14 +1181,66 @@
   justify-content: flex-end;
   gap: 0;
   opacity: 0;
+  pointer-events: none;
 }
 
-.sessionRow:hover:not(.runningSession) .sessionActions,
-.sessionRow:focus-within:not(.runningSession) .sessionActions,
-.sessionMetaSlot:hover .sessionActions,
-.sessionActions:has(.sessionActionButton:focus-visible),
+.sessionActions:focus-within,
 .sessionActions:has([data-state='open']) {
   opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: hover) {
+  .sessionMetaSlot:has(.sessionActions:focus-within),
+  .sessionMetaSlot:has([data-state='open']) {
+    min-width: var(--session-actions-width, 78px);
+  }
+
+  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionGitIcon,
+  .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
+  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionLoading,
+  .sessionMetaSlot:has([data-state='open']) .sessionLoading,
+  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionAttention,
+  .sessionMetaSlot:has([data-state='open']) .sessionAttention,
+  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionSourceIcon,
+  .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
+    opacity: 0;
+  }
+
+  .sessionRow:hover .sessionMetaSlot {
+    min-width: var(--session-actions-width, 78px);
+  }
+
+  .sessionRow:hover:not(.runningSession) .sessionGitIcon,
+  .sessionRow:hover:not(.runningSession) .sessionAttention,
+  .sessionMetaSlot:hover .sessionGitIcon,
+  .sessionMetaSlot:hover .sessionLoading,
+  .sessionMetaSlot:hover .sessionAttention,
+  .sessionRow:hover:not(.runningSession)
+    .sessionMetaSlot:has(.sessionActions)
+    .sessionSourceIcon,
+  .sessionMetaSlot:has(.sessionActions):hover .sessionSourceIcon {
+    opacity: 0;
+  }
+
+  .sessionRow:hover:not(.runningSession) .sessionActions,
+  .sessionMetaSlot:hover .sessionActions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* Touch devices get no hover reveal, so the actions stay in the flow and
+   share the slot with the markers instead of overlaying and hiding them. */
+@media (hover: none) and (pointer: coarse) {
+  .sessionActions {
+    position: static;
+    opacity: 1;
+  }
+
+  .sessionActionButton {
+    pointer-events: auto;
+  }
 }
 
 @keyframes sidebarSpin {
@@ -1493,35 +1520,6 @@
   cursor: pointer;
 }
 
-.manageWorkspacesRow {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 8px;
-  margin-top: 2px;
-  padding: 6px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted-foreground);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  cursor: pointer;
-}
-
-.manageWorkspacesRow:hover,
-.manageWorkspacesRow:focus-visible {
-  background: var(--secondary);
-  color: var(--foreground);
-}
-
-.manageWorkspacesRow svg {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
-}
-
 .confirmContent {
   display: flex;
   flex-direction: column;
@@ -1688,20 +1686,16 @@
   text-overflow: ellipsis;
 }
 
-.footerCompact,
-.footerTight {
+.footerCompact {
   gap: 4px;
 }
 
 .footerCompact .footerPrimary,
-.footerCompact .footerActions,
-.footerTight .footerPrimary,
-.footerTight .footerActions {
+.footerCompact .footerActions {
   gap: 4px;
 }
 
-.footerCompact .footerButton,
-.footerTight .footerButton {
+.footerCompact .footerButton {
   width: 26px;
   height: 28px;
   flex: 0 0 26px;
@@ -1709,13 +1703,11 @@
   padding: 0;
 }
 
-.footerCompact .footerButtonLabel,
-.footerTight .footerButtonLabel {
+.footerCompact .footerButtonLabel {
   display: none;
 }
 
-.footerCompact .collapseButton,
-.footerTight .collapseButton {
+.footerCompact .collapseButton {
   width: 26px;
   height: 28px;
 }

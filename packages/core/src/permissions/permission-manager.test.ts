@@ -3847,6 +3847,38 @@ describe('PermissionManager.findMatchingDenyRule', () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('cites the deny rule for a compound command segment', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['Bash(npm view *)'] }),
+    );
+    pm.initialize();
+
+    // evaluate() splits the compound command and denies on the `npm view`
+    // segment, so findMatchingDenyRule must cite that same rule (issue #11405).
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'run_shell_command',
+        command: 'cd /tmp && npm view foo',
+      }),
+    ).toBe('Bash(npm view *)');
+  });
+
+  it('cites the deny rule when a shell command is denied via a virtual file op', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['Read(//**/node_modules/**)'] }),
+    );
+    pm.initialize();
+
+    // A `cat` of a node_modules file is denied through the shell virtual-op
+    // pass (Read rule), not a Bash rule. findMatchingDenyRule must cite it.
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'run_shell_command',
+        command: 'cat /app/node_modules/lodash/index.js',
+      }),
+    ).toBe('Read(//**/node_modules/**)');
+  });
 });
 
 // ─── AUTO mode dangerous-rule stash ────────────────────────────────────

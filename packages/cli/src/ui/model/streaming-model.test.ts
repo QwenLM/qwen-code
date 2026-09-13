@@ -96,11 +96,11 @@ describe('streamingModel', () => {
   });
 
   describe('tool start / output / end', () => {
-    it('accumulates tool output by id and closes with success and summary', () => {
+    it('tracks the latest tool output snapshot by id and closes with success and summary', () => {
       const state = reduceAll([
         { type: 'tool-start', id: 't1', tool: 'Bash', title: 'ls -la' },
-        { type: 'tool-output', id: 't1', delta: 'drwxr-xr-x\n' },
-        { type: 'tool-output', id: 't1', delta: 'total 0\n' },
+        { type: 'tool-output', id: 't1', output: 'drwxr-xr-x\n' },
+        { type: 'tool-output', id: 't1', output: 'drwxr-xr-x\ntotal 0\n' },
         { type: 'tool-end', id: 't1', success: true, summary: '2 lines' },
       ]);
       const tool = selectItemById(state, 't1');
@@ -134,7 +134,7 @@ describe('streamingModel', () => {
       ]);
       const after = reduceAll([
         { type: 'tool-start', id: 't1', tool: 'Bash', title: 'ls' },
-        { type: 'tool-output', id: 'ghost', delta: 'nope' },
+        { type: 'tool-output', id: 'ghost', output: 'nope' },
         { type: 'tool-end', id: 'ghost', success: true, summary: 'nope' },
       ]);
       expect(after.items).toEqual(before.items);
@@ -157,9 +157,9 @@ describe('streamingModel', () => {
       // the ghost at done:false forever.
       const state = reduceAll([
         { type: 'tool-start', id: 't1', tool: 'Bash', title: 'ls' },
-        { type: 'tool-output', id: 't1', delta: 'stale' },
+        { type: 'tool-output', id: 't1', output: 'stale' },
         { type: 'tool-start', id: 't1', tool: 'Bash', title: 'ls -la' },
-        { type: 'tool-output', id: 't1', delta: 'fresh' },
+        { type: 'tool-output', id: 't1', output: 'fresh' },
         { type: 'tool-end', id: 't1', success: true, summary: 'ok' },
       ]);
       expect(
@@ -324,7 +324,7 @@ describe('streamingModel', () => {
         { type: 'thinking-end' },
         { type: 'text', delta: 'let me look' },
         { type: 'tool-start', id: 't1', tool: 'Read', title: 'Read a.ts' },
-        { type: 'tool-output', id: 't1', delta: 'contents' },
+        { type: 'tool-output', id: 't1', output: 'contents' },
         { type: 'tool-end', id: 't1', success: true, summary: 'ok' },
         { type: 'text', delta: 'found it' },
         {
@@ -374,7 +374,7 @@ describe('streamingModel', () => {
       ],
       [
         { type: 'tool-start', id: 't1', tool: 'Bash', title: 'ls' },
-        { type: 'tool-output', id: 't1', delta: 'x' },
+        { type: 'tool-output', id: 't1', output: 'x' },
       ],
       [
         { type: 'tool-start', id: 't1', tool: 'Bash', title: 'ls' },

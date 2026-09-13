@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   Config,
   GoalRuntime,
@@ -18,23 +18,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { goalCommand, parseGoalCommand } from './goalCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-
-const mockRegisterGoalHook = vi.hoisted(() => vi.fn());
-const mockGetActiveGoal = vi.hoisted(() => vi.fn());
-const mockGetLastGoalTerminal = vi.hoisted(() => vi.fn());
-const mockUnregisterGoalHook = vi.hoisted(() => vi.fn());
-
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
-  return {
-    ...actual,
-    registerGoalHook: mockRegisterGoalHook,
-    getActiveGoal: mockGetActiveGoal,
-    getLastGoalTerminal: mockGetLastGoalTerminal,
-    unregisterGoalHook: mockUnregisterGoalHook,
-  };
-});
 
 function goalSnapshot(
   overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
@@ -143,13 +126,6 @@ describe('parseGoalCommand', () => {
 });
 
 describe('goalCommand', () => {
-  beforeEach(() => {
-    mockRegisterGoalHook.mockReset();
-    mockGetActiveGoal.mockReset();
-    mockGetLastGoalTerminal.mockReset();
-    mockUnregisterGoalHook.mockReset();
-  });
-
   it('is available in interactive, non-interactive, and ACP modes', () => {
     expect(goalCommand.supportedModes).toEqual([
       'interactive',
@@ -197,7 +173,6 @@ describe('goalCommand', () => {
 
       expect(dispatch).toHaveBeenCalledWith(expectedRequest);
       expect(result).toMatchObject({ type: 'goal_control' });
-      expect(mockRegisterGoalHook).not.toHaveBeenCalled();
     },
   );
 
@@ -242,8 +217,6 @@ describe('goalCommand', () => {
         cause: request.action,
       });
       expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
-      expect(mockRegisterGoalHook).not.toHaveBeenCalled();
-      expect(mockUnregisterGoalHook).not.toHaveBeenCalled();
     },
   );
 

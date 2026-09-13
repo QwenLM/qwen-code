@@ -72,6 +72,7 @@ import {
   reviewMode,
   type RosterPlan,
 } from './lib/roster.js';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import { repositoryContextOf } from './lib/repository-context.js';
 import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
@@ -79,7 +80,8 @@ import { ledgerDedupFacts } from './dedup-candidates.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_BODY_FILE,
-  LEDGER_ID_READBACK,
+  canonicalLedgerId,
+  LEDGER_ID_SHAPE,
   LEDGER_MAX_CLOSED,
   LEDGER_MAX_ID,
   LEDGER_MAX_TITLE,
@@ -91,6 +93,7 @@ import {
   LEDGER_MAX_BYTES,
   LEDGER_MAX_ROUND,
   LEDGER_UNKNOWN_FILE,
+  readClaim,
   serializeLedger,
   streakOf,
   volumeOf,
@@ -506,11 +509,15 @@ function openLedgerCriticalEntries(
       ) {
         return null;
       }
-      if (seenIds.has(e.id)) return null;
-      seenIds.add(e.id);
+      // Deduplicated on the CANONICAL spelling: two rows that differ only
+      // in leading zeros are one id, and a grant keyed on one of them
+      // would silently cover the other (#9940 review, round 28).
+      const id = canonicalLedgerId(e.id);
+      if (seenIds.has(id)) return null;
+      seenIds.add(id);
       if (e.severity === 'Critical' && e.status === 'open') {
         entries.push({
-          id: e.id,
+          id,
           ...(typeof e.title === 'string' && e.title.trim() !== ''
             ? { title: e.title.trim() }
             : {}),
@@ -542,6 +549,26 @@ function planNamesPr(planPath: string | undefined): boolean {
     // `'0'` this one rejects, so the budget reserved marker room on a plan
     // the anchor consumers read as PR-less.
     return isPositivePrNumber(plan?.prNumber);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does this plan carry the focused navigation profile? Read for the
+ * mechanism-health note alone: that profile withholds the ledger anchor BY
+ * DESIGN on every round (its disclosed coverage gap caps the verdict), so
+ * an unanchored recovered round is the profile working, not a stopped
+ * chain — the note must not report it as a malfunction on every round of a
+ * navigation-only PR.
+ */
+function planIsFocusedNavigation(planPath: string | undefined): boolean {
+  try {
+    if (!planPath) return false;
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      reviewProfile?: unknown;
+    };
+    return plan?.reviewProfile === DOCS_NAV_PROFILE;
   } catch {
     return false;
   }
@@ -770,7 +797,7 @@ function boundDeferredLine(rendered: string): string {
   return oneLine;
 }
 
-function toDeferredEntries(value: unknown): DeferredEntry[] {
+export function toDeferredEntries(value: unknown): DeferredEntry[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
     throw new TypeError(
@@ -1169,9 +1196,23 @@ export function floorEnforcedReroute(
     const stripped = markerStrippedBody(body) ?? '';
     const nl = stripped.indexOf('\n');
     const first = nl === -1 ? stripped : stripped.slice(0, nl);
-    const record = critical
-      ? readClaimHead(first).stripped.replace(head.sourceText ?? '', '')
-      : first;
+    // A body whose content opens as an indented code block has NO claim
+    // line (`carriedClaimLine` reads none, the thread matcher carries no
+    // id) — the record says so in front, so the collapsed title cannot
+    // lead with an id token the other readers never read (#9940 review,
+    // round 28).
+    // Decided on the same projection the TITLE is built from, not on the
+    // first PHYSICAL line: `collapseToLine` drops trim-empty segments, so
+    // a body whose first line is only an NBSP or a BOM put no prefix in
+    // front and let the NEXT line's ledger id lead the title — a title
+    // claiming an id the claim-line read cannot see, which the repost
+    // join then refuses the whole post over (#9940 review, round 31).
+    const quotedCode = claim === '' && stripped.trim() !== '';
+    const record = quotedCode
+      ? `(quoted code) ${first.trim()}`
+      : critical
+        ? readClaimHead(first).stripped.replace(head.sourceText ?? '', '')
+        : first;
     // Strip again AFTER the fold — the collapsed line is the shape that
     // posts, for the reason toDeferredEntries states.
     const title = stripReviewFooterLine(
@@ -1207,6 +1248,17 @@ export function floorEnforcedReroute(
  * to recover the Han signal from the live PR when the plan does not carry it.
  */
 export type PrBodyFetcher = (ownerRepo: string, prNumber: string) => string;
+
+/**
+ * One Step 6 `fixed` ruling: the retired entry's ledger id, and what closed
+ * its mechanism — the `<what>` of the status table's `R1-2 fixed by <what>`.
+ * `by` is a single line, capped like a ledger title: it becomes PR-facing
+ * text (the reply `submit` leaves in the thread it resolves).
+ */
+export interface FixedFinding {
+  id: string;
+  by?: string;
+}
 
 export interface ComposeReviewInput {
   /**
@@ -1312,6 +1364,29 @@ export interface ComposeReviewInput {
    * presence forbids an approval.
    */
   cannotTellCriticals?: string[];
+  /**
+   * Step 6's `fixed` rulings — one `{id, by}` per finding whose mechanism
+   * can no longer fire, the same ruling the status table renders as
+   * `R1-2 fixed by <what>`. The id names the finding's thread: a
+   * previous-round ledger entry, or any open thread whose root leads with
+   * a ledger id — a blocker the open-Criticals re-check rules fixed
+   * reaches here too, whether or not the ledger still carries it.
+   *
+   * Decides nothing HERE: a fixed entry already weighs nothing in the
+   * verdict by its absence from every findings channel. The field exists
+   * for `submit`'s thread lifecycle, which turns each ruling into the
+   * one-line reply `R1-2 fixed by <what>` in the finding's original
+   * thread and resolves that thread, in the same posting pass — without
+   * it, a fixed finding retired from the ledger but left its thread open
+   * forever, and the PR's unresolved list stopped meaning "still
+   * standing" (#9906). Only a `fixed` ruling rides it — never a
+   * `still stands`, `cannot tell`, `superseded`, or `fix-induced`
+   * disposition, and never an id this round also re-reports as standing
+   * (a drafted comment or body Critical leading with it — submit refuses
+   * that contradiction; a mere mention of the id elsewhere in the state
+   * is a cross-reference and is fine).
+   */
+  fixedFindings?: FixedFinding[];
   /** Uncoverable chunks, e.g. `"chunk 5 (src/big.min.js)"`. */
   uncoverableChunks?: string[];
   /**
@@ -1467,11 +1542,44 @@ export interface ComposeReviewResult {
    */
   floorEnforced: number[];
   /**
-   * How many inline comments this round will post — the posting set after
-   * floor enforcement, i.e. what `submit` sends. Convergence telemetry: it
-   * rides the ledger marker for the next round to read, and the terminal
-   * report states it so the operator sees this round's contribution to the
-   * PR's comment volume without counting threads by hand. Decides nothing.
+   * The deferral entries the floor enforcement constructed for exactly
+   * those comments — index-aligned with `floorEnforced` (entry k records
+   * the comment at `floorEnforced[k]`). The retitled record is where a
+   * rerouted Critical's carried id SURFACES: the title collapses the
+   * whole marker-stripped body, so an id the claim line hid on a later
+   * line leads the record. `submit`'s contradiction gate scans the
+   * Critical entries against the `fixed` rulings — a rerouted blocker
+   * still lands in the body's deferral list as a standing assertion, and
+   * the closure mint reads its title as a re-post, so ruling its id
+   * fixed in the same pass is the two-way ruling the gate refuses
+   * (#9940 review, round 14).
+   */
+  floorEnforcedEntries: DeferredEntry[];
+  /**
+   * The same body rendered WITHOUT the inline-Suggestions opener clause —
+   * present whenever the body carries that clause. `submit` posts this
+   * one when the thread lifecycle diverts every inline Suggestion into
+   * its original thread, so the body does not say "Suggestions are
+   * inline" beside an empty comment set. Rendered here, by the same
+   * budget ladder, rather than edited in `submit`: the clause's position
+   * in the body is not fixed (budget notices and the blocking-findings
+   * prefix precede it), and any text search for it — by phrase, by
+   * paragraph, by fold anchor — found model text quoting the same words
+   * (a duplicate note, a downgrade reason) or nothing at all once a cut
+   * landed in the opener (#9940 review, audit). Live-only, like
+   * `draftedIds`.
+   */
+  bodyWithoutInlineClause?: string;
+  /**
+   * How many findings this round posts as comments — the posting set after
+   * floor enforcement, i.e. what `submit` sends to the PR, whether a
+   * comment opens a new thread or (a carried re-report) lands as a reply
+   * in its original one; the split between the two is decided at post
+   * time by the thread lifecycle, and `submit`'s receipt reports it.
+   * Convergence telemetry: it rides the ledger marker for the next round
+   * to read, and the terminal report states it so the operator sees this
+   * round's contribution to the PR's comment volume without counting
+   * threads by hand. Decides nothing.
    */
   postedInline: number;
   /**
@@ -1481,6 +1589,33 @@ export interface ComposeReviewResult {
    * beside the total so the next round can compare like with like.
    */
   postedFresh: number;
+  /**
+   * Step 6's `fixed` rulings, validated — the field decides nothing in the
+   * verdict, but `submit` consumes exactly this list for its thread
+   * lifecycle (reply `R<id> fixed by <by>` + resolve), so it rides the
+   * result rather than being re-read from the raw state: one validation,
+   * one list, and the two consumers can never disagree about its shape.
+   */
+  fixedFindings: FixedFinding[];
+  /**
+   * The ledger id this round's marker records for each drafted comment —
+   * index-aligned with the posting set AFTER floor enforcement (the set
+   * the marker itself describes), undefined at unmarked slots. Present
+   * only when a ledger marker rides the body: the ids exist to be
+   * carried, and `submit` stamps each id-less draft with its minted id
+   * before posting, so every posted thread root leads with the id the
+   * thread lifecycle matches (#9940 review).
+   */
+  draftedIds?: Array<string | undefined>;
+  /**
+   * The ids this round's ledger MINTS fresh — never the carried ones.
+   * Present only when a ledger marker rides the body, like `draftedIds`.
+   * `submit`'s contradiction gate refuses a `fixed` ruling naming one:
+   * a ruling retires a PREVIOUS round's entry, so naming an id the same
+   * pass mints would resolve nothing on the PR while the pass opens the
+   * id's thread as a standing defect (#9940 review).
+   */
+  mintedIds?: string[];
   /**
    * The convergence paragraph, when a signal fired — the SAME text the body
    * carries, returned so a terminal copy exists.
@@ -1970,14 +2105,20 @@ function formatCannotTell(
   // post lists the unresolved entries without it.
   const marker = attribution ? `${CRITICAL_PREFIX} ` : '';
   for (const { reason, heads } of groups) {
+    // Escaped per rendered LINE (see the duplicate list): `</li>` closes a
+    // `<details>` but not a RAWTEXT element, so one `<textarea>` in an
+    // entry folded the rest of the body away (#9940 review, round 30
+    // reverse audit).
     if (heads.length === 1) {
       lines.push(
-        `- ${marker}${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
+        escapeTagOpeners(
+          `- ${marker}${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
+        ),
       );
     } else {
       lines.push(
-        `- ${marker}${heads.length} entries — ${reason}:`,
-        ...heads.map((head) => `  - ${head}`),
+        escapeTagOpeners(`- ${marker}${heads.length} entries — ${reason}:`),
+        ...heads.map((head) => escapeTagOpeners(`  - ${head}`)),
       );
     }
   }
@@ -2425,12 +2566,14 @@ export function composeReview(
   const repostedIds = new Set<string>();
   let repostUnidentified = false;
   for (const e of repostEntries) {
-    // Through the same head-slot strip the ledger builder applies: an
-    // entry whose title leads with the axis tags before its id still
-    // names the claim it re-posts (#10291).
-    const carried = LEDGER_ID_READBACK.exec(
-      readClaimHead(e.title).stripped,
-    )?.[1];
+    // Through the head-slot tokeniser's own id read — the same read the
+    // contradiction gate applies to this channel: an entry whose title
+    // leads with the axis tags before its id still names the claim it
+    // re-posts (#10291), and so does one leading with a SOURCE tag
+    // (`[probe] R1-1: …`) — the anchored read over `.stripped` kept the
+    // source tag at position 0 and read no id there (#9940 review,
+    // round 15).
+    const carried = readClaimHead(e.title).id;
     // The same membership test `isCarry` applies in the build: an id the
     // complete previous list never held is a stray — a renumbered or
     // re-minted token, not a carry — and reading it as one would shield a
@@ -2516,7 +2659,7 @@ export function composeReview(
   // count, one origin, so the marker and the reported number cannot drift
   // apart under a later edit to either.
   const postedInline = result.postedInline;
-  const marker = ledgerMarkerFor(
+  const { marker, draftedIds, mintedIds } = ledgerMarkerFor(
     effective,
     result.cappedBy,
     result.scopeUnproven ?? true,
@@ -2543,7 +2686,19 @@ export function composeReview(
       : { prevPostedInline: prevFacts.posted }),
   };
   return marker
-    ? { ...withVolume, body: `${withVolume.body}\n\n${marker}` }
+    ? {
+        ...withVolume,
+        draftedIds,
+        mintedIds,
+        body: `${withVolume.body}\n\n${marker}`,
+        // The variant posts in the body's place, so it carries the marker
+        // the same way.
+        ...(withVolume.bodyWithoutInlineClause === undefined
+          ? {}
+          : {
+              bodyWithoutInlineClause: `${withVolume.bodyWithoutInlineClause}\n\n${marker}`,
+            }),
+      }
     : withVolume;
 }
 
@@ -3072,7 +3227,12 @@ function buildPostedLedger(
   carriedWorkList: { ids: ReadonlySet<string>; complete: boolean },
   /** The enforcement reading of the floor — the Critical deferral licence. */
   criticalDeferralLicensed: boolean,
-): Ledger | null {
+):
+  | (Ledger & {
+      draftedIds: Array<string | undefined>;
+      mintedIds: string[];
+    })
+  | null {
   const planPath = input.planPath;
   if (planPath === undefined || !planNamesPr(planPath)) return null;
   const split = splitDeferralChannel(
@@ -3156,9 +3316,14 @@ function ledgerMarkerFor(
    * with the closure mint and the successor-chain check, never a second
    * build that could disagree with either. Null exactly when this review
    * has no PR to carry a marker — the same condition this function's own
-   * `null` return names.
+   * `marker: null` return names.
    */
-  postedLedger: Ledger | null,
+  postedLedger:
+    | (Ledger & {
+        draftedIds: Array<string | undefined>;
+        mintedIds: string[];
+      })
+    | null,
   /**
    * The closures the caller minted over the recovered previous list. The
    * marker carries them so the next round's sentinel reads one generation
@@ -3172,11 +3337,21 @@ function ledgerMarkerFor(
   churnRounds: number,
   flatRounds: number,
   recommendations: readonly Recommendation[] | undefined,
-): string | null {
+): {
+  marker: string | null;
+  draftedIds: Array<string | undefined>;
+  mintedIds: string[];
+} {
   try {
-    if (!input.planPath) return null;
-    if (!planNamesPr(input.planPath)) return null;
-    if (postedLedger === null) return null;
+    if (!input.planPath) {
+      return { marker: null, draftedIds: [], mintedIds: [] };
+    }
+    if (!planNamesPr(input.planPath)) {
+      return { marker: null, draftedIds: [], mintedIds: [] };
+    }
+    if (postedLedger === null) {
+      return { marker: null, draftedIds: [], mintedIds: [] };
+    }
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       fetchedSha?: unknown;
       srcDiffLines?: unknown;
@@ -3285,66 +3460,72 @@ function ledgerMarkerFor(
       attribution && certifying !== '' && !identityDrifted
         ? certifying
         : undefined;
-    return serializeLedger({
-      ...postedLedger,
-      // Gated by the SAME predicate the diagnosis applies (composeReviewBody):
-      // one shared decision, evaluated once per consumer, over the one set
-      // of cap inputs the caller passes both.
-      ...(!failClosed && closed.length > 0 ? { closed } : {}),
-      // The pair falls together: a sha with no model reads to the next
-      // round as a pre-field marker rather than as "nobody certified this".
-      ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
-      ...(model ? { model } : {}),
-      // Carry the baseline forward unchanged once one exists; only measure a
-      // full-range diff when there is none. Re-measuring every round would let
-      // a diff that shrinks rewrite its own baseline and erase the growth it
-      // already accumulated.
-      ...(src0 > 0 ? { src0 } : {}),
-      // Volume telemetry: unconditional, unlike everything above it. The
-      // anchor pair is withheld whenever the round could not certify its
-      // scope, but "how many comments did this round post" stays true on a
-      // fail-closed round — and a trend that goes blank exactly when a PR
-      // starts capping would be blind on the rounds it exists to describe.
-      posted: postedInline,
-      ...(prevPostedInline === undefined
-        ? {}
-        : { prevPosted: prevPostedInline }),
-      // The posture that volume was produced under. Without it, the next
-      // round measures a FLOOR change as loop divergence: the volume under a
-      // critical floor and the volume under an open one are not two points
-      // on one trend. Decides nothing, sheds with the volume it qualifies.
-      // The RESOLVED posture, folded the way every consumer folds it: an
-      // ABSENT floor reads as `auto` in the REPORTING reading (a present but
-      // unrecognisable one reads as nothing at all — see
-      // `criticalFloorKind`), and `auto` resolves determinately from the
-      // round number and the context state. The ENFORCEMENT reading folds
-      // nothing and fails open on both; the gap between the two is what the
-      // mechanism-health check discloses. Recording it only when the state NAMED a floor
-      // left the guard blind under the DEFAULT configuration — where the
-      // posture genuinely transitions at round 6 and again on a transient
-      // context failure — so a real posture change read as loop divergence,
-      // which is the misreading the field exists to prevent. What must not
-      // be invented is a posture nobody can derive; this one is derived from
-      // the same fold the advice and the enforcement backstop already use.
-      floor: floorKind === undefined ? 'o' : 'c',
-      // The part of that volume the trend is about — see `Ledger.fresh`.
-      fresh: freshInline,
-      ...(churnRounds > 0 ? { churnRounds } : {}),
-      // The floor trigger's streak rides beside the churn streak — same
-      // rung, same zero-omission; see the field's own note in `Ledger`.
-      ...(flatRounds > 0 ? { flatRounds } : {}),
-      // The diagnosis's matched codes, off the SAME derivation the posted
-      // paragraph and `result.recommendations` render from — one origin, so
-      // the codes an outside consumer wires (#10107) and the sentences a
-      // human reads cannot describe different rounds. Absent when the round
-      // produced no diagnosis, exactly as the result field is.
-      ...(recommendations !== undefined && recommendations.length > 0
-        ? { rec: recommendations.map((r) => r.code) }
-        : {}),
-    });
+    return {
+      // `serializeLedger` picks the fields it writes; the stamp ids ride
+      // the returned ledger object but never the marker.
+      marker: serializeLedger({
+        ...postedLedger,
+        // Gated by the SAME predicate the diagnosis applies
+        // (composeReviewBody): one shared decision, evaluated once per
+        // consumer, over the one set of cap inputs the caller passes both.
+        ...(!failClosed && closed.length > 0 ? { closed } : {}),
+        // The pair falls together: a sha with no model reads to the next
+        // round as a pre-field marker rather than as "nobody certified this".
+        ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
+        ...(model ? { model } : {}),
+        // Carry the baseline forward unchanged once one exists; only measure a
+        // full-range diff when there is none. Re-measuring every round would let
+        // a diff that shrinks rewrite its own baseline and erase the growth it
+        // already accumulated.
+        ...(src0 > 0 ? { src0 } : {}),
+        // Volume telemetry: unconditional, unlike everything above it. The
+        // anchor pair is withheld whenever the round could not certify its
+        // scope, but "how many comments did this round post" stays true on a
+        // fail-closed round — and a trend that goes blank exactly when a PR
+        // starts capping would be blind on the rounds it exists to describe.
+        posted: postedInline,
+        ...(prevPostedInline === undefined
+          ? {}
+          : { prevPosted: prevPostedInline }),
+        // The posture that volume was produced under. Without it, the next
+        // round measures a FLOOR change as loop divergence: the volume under a
+        // critical floor and the volume under an open one are not two points
+        // on one trend. Decides nothing, sheds with the volume it qualifies.
+        // The RESOLVED posture, folded the way every consumer folds it: an
+        // ABSENT floor reads as `auto` in the REPORTING reading (a present but
+        // unrecognisable one reads as nothing at all — see
+        // `criticalFloorKind`), and `auto` resolves determinately from the
+        // round number and the context state. The ENFORCEMENT reading folds
+        // nothing and fails open on both; the gap between the two is what the
+        // mechanism-health check discloses. Recording it only when the state NAMED a floor
+        // left the guard blind under the DEFAULT configuration — where the
+        // posture genuinely transitions at round 6 and again on a transient
+        // context failure — so a real posture change read as loop divergence,
+        // which is the misreading the field exists to prevent. What must not
+        // be invented is a posture nobody can derive; this one is derived from
+        // the same fold the advice and the enforcement backstop already use.
+        floor: floorKind === undefined ? 'o' : 'c',
+        // The part of that volume the trend is about — see `Ledger.fresh`.
+        fresh: freshInline,
+        ...(churnRounds > 0 ? { churnRounds } : {}),
+        // The floor trigger's streak rides beside the churn streak — same
+        // rung, same zero-omission; see the field's own note in `Ledger`.
+        ...(flatRounds > 0 ? { flatRounds } : {}),
+        // The diagnosis's matched codes, off the SAME derivation the posted
+        // paragraph and `result.recommendations` render from — one origin, so
+        // the codes an outside consumer wires (#10107) and the sentences a
+        // human reads cannot describe different rounds. Absent when the round
+        // produced no diagnosis, exactly as the result field is.
+        ...(recommendations !== undefined && recommendations.length > 0
+          ? { rec: recommendations.map((r) => r.code) }
+          : {}),
+      }),
+      draftedIds: postedLedger.draftedIds,
+      mintedIds: postedLedger.mintedIds,
+    };
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
-    return null;
+    return { marker: null, draftedIds: [], mintedIds: [] };
   }
 }
 
@@ -3357,13 +3538,22 @@ function ledgerMarkerFor(
 // with no length cap — one such entry stalled a measured probe for seconds
 // at 80k characters.
 function collapseEntry(entry: string): string {
-  return entry.includes('\n')
+  // Trimmed on the one-line shape too: an entry indented four columns
+  // renders as code inside its list item, and every id reader takes the
+  // id off the trimmed text (#9940 review, round 28).
+  // Every line ending, not just LF: `ingestEntryList` normalises `\r\n?`
+  // before calling this, but the disclosure channel does not, and a lone
+  // interior CR that survived the fold reached the per-line escape as TWO
+  // lines — where a backtick on each paired into a span the renderer never
+  // forms and the tag between them went out live (#9940 review, round 31
+  // reverse audit). `trim()` does not touch an interior CR.
+  return /[\r\n]/.test(entry)
     ? entry
-        .split('\n')
+        .split(/\r\n?|\n/)
         .map((seg) => seg.trim())
         .filter((seg) => seg !== '')
         .join(' ')
-    : entry;
+    : entry.trim();
 }
 
 /** A line that is a code-fence delimiter: a ``` or ~~~ run, any info string. */
@@ -3461,6 +3651,1116 @@ export function tryIngestBodyCriticals(value: unknown): string[] | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The longest `by` a fixed ruling carries — the clause becomes the one-line
+ * reply `R<id> fixed by <by>` that `submit` leaves in the thread it
+ * resolves, and that channel cannot carry an essay. Sliced, not refused:
+ * the ruling itself — the id — is the load-bearing half, and refusing the
+ * round over a verbose one would lose it.
+ */
+export const FIXED_BY_MAX = 240;
+
+/** Longest downgrade reason the opener carries verbatim, in code points. */
+export const DOWNGRADE_REASON_MAX_CHARS = 400;
+
+/** Longest run of downgrade reasons the opener carries, in code points. */
+export const DOWNGRADE_REASONS_TOTAL_MAX_CHARS = 2000;
+
+/**
+ * Raw HTML tag openers made inert — `<` before a tag name, `/` or `?`
+ * becomes `&lt;`, which renders as `<`. For model prose the body or a
+ * reply carries verbatim after a length cap: a cut inside a balanced
+ * `<details>…</details>` left the element open over everything after it
+ * (#9940 review, audit 5). Comment grammar (`<!`) is not touched — the
+ * gates and retreats govern it, and a balanced comment stays the
+ * render-nothing it was. A code span (`` `Map<string, number>` ``) and a
+ * URI or e-mail autolink keep their `<`: inside a code span an entity is
+ * literal text, and an escaped autolink is no link (#9940 review, audit
+ * 6). Applied at the POST, after every projection strip: an escape made
+ * before the attribution-off strip pushed a forged footer span past the
+ * span cap that strip enforces.
+ */
+export function escapeTagOpeners(text: string): string {
+  // ONE LINE AT A TIME, and that is the whole model. Every channel that
+  // reaches here is a single line by construction — `ingestEntryList`
+  // folds the entry channels, compose refuses a line break in `by`, the
+  // downgrade reasons are `\s+`-normalised, and the `Not reviewed:`
+  // disclosures are folded at their own call site — so there is no block
+  // structure left to model: no fence, no indented block, no HTML block
+  // interrupting a paragraph, no lazy continuation. Four review rounds
+  // were spent on hand-built and parser-built models of exactly those,
+  // each closing one hole and opening the next; a line is the unit the
+  // rule below can decide exactly (#9940 review, round 31 reverse audit).
+  //
+  // The channels are folded at several sites, not one: `collapseEntry` for
+  // the entry channels and the `Not reviewed:` disclosures (the `\r\n?`
+  // normalisation `ingestEntryList` does first folds nothing on its own),
+  // the `\s+` pass for downgrade reasons, `collapseToLine` for the
+  // duplicate-drop leg and — at `toDeferredEntries` and again through
+  // `boundDeferredLine` — for a Critical deferral's relocation exit, and
+  // `scriptLintGate`'s own push. The
+  // relocation exit and the gate push join `bodyCriticals` AFTER
+  // `ingestEntryList` has run, so the shared fold never sees them. (The
+  // deferral LIST line is folded by `mdField` and posts without coming
+  // here at all.) `every model-written channel reaches the escape as ONE
+  // line` in the tests drives every one of these EXCEPT the gate push,
+  // which needs a report fixture and is pinned by `folds its own entry`;
+  // it also says which legs are held more than once.
+  // Per-line is NOT a conservative fallback — it is the model that the
+  // fold makes correct. Handed a multi-line string anyway it differs from
+  // the renderer in BOTH directions: it pairs backticks the renderer keeps
+  // apart (two paragraphs, a table's cells) and so escapes LESS, and it
+  // refuses to pair across a soft break the renderer honours and so
+  // escapes MORE. The fold at each call site is the invariant; this pass
+  // only relies on it.
+  return text
+    .split(/(\r\n|[\r\n])/)
+    .map((part, i) => (i % 2 === 1 ? part : escapeLine(part)))
+    .join('');
+}
+
+/**
+ * A CommonMark autolink at the start of the slice — URI or e-mail.
+ *
+ * The `{1,31}` is the spec's 2-to-32-character scheme, and it is fidelity
+ * only: an autolink's body admits no `<`, so however this alternative's
+ * end is placed it can never carry a tag opener across. A wrong bound
+ * costs an escape on text that renders as its own characters either way.
+ */
+const AUTOLINK_RE =
+  /^<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/;
+
+/**
+ * Where a GFM *extended autolink literal* can START — CANDIDATES only. Each
+ * one is then put through the boundary and domain tests cmark-gfm itself
+ * runs, because BOTH directions of a wrong answer leak.
+ *
+ * GFM's "Autolinks (extension)" is not a postprocess — cmark-gfm registers it
+ * as an INLINE construct, so it takes part in the same leftmost-first race as
+ * code spans and raw HTML, and it runs to the next whitespace. Whichever
+ * construct starts EARLIER consumes the other:
+ *
+ *   MEASURED  a `http://x/<details>` b
+ *          -> <p>a <code>http://x/&lt;details&gt;</code> b</p>   (span wins)
+ *   MEASURED  a http://y.test/`<details>` b
+ *          -> <p>a <a href="…%60">http://y.test/`</a><details>` b</p>
+ *             (the URL wins and EATS the opening backtick — the code span
+ *              this pass believed in never forms, and the `<details>` it
+ *              sheltered is a LIVE element)
+ *
+ * …and believing in a link the renderer does NOT form leaks the same way,
+ * because the run then eats a backtick the renderer left as a delimiter and
+ * every later pairing shifts by one:
+ *
+ *   MEASURED  see http://` `<details>` and stop
+ *          -> <p>see http://<code> </code><details>` and stop</p>
+ *             (no domain, so cmark forms no link; the first backtick opens a
+ *              real code span and the `<details>` is a LIVE element)
+ *
+ * The three schemes are cmark's and they are matched case-INSENSITIVELY,
+ * while `www.` is matched case-SENSITIVELY. MEASURED, `z Xy.test/ q`:
+ *   http:// https:// ftp:// HTTP:// FTP:// Http:// fTp://  -> LINK
+ *   www.                                                   -> LINK
+ *   WWW. Www. wWw. ftps:// sftp:// file:// mailto: irc://  -> no link
+ */
+const LINK_CANDIDATE_RE = /(?:[Hh][Tt][Tt][Pp][Ss]?|[Ff][Tt][Pp]):\/\/|www\./g;
+
+/**
+ * What may stand in front of a `www.` literal — cmark-gfm's
+ * `is_valid_www_boundary`, which is a WHITELIST where the scheme form has a
+ * blacklist. MEASURED over 39 preceding characters (`z Xwww.y.test/ q`):
+ * start-of-line, space, tab, `(`, `*`, `_` and `~` allow it; every other
+ * character tested — `)`, `]`, `-`, `.`, `/`, `<`, `>`, a digit and a
+ * non-ASCII letter included — blocks it.
+ */
+const WWW_BOUNDARY = new Set([
+  '',
+  ' ',
+  '\t',
+  '\n',
+  '\v',
+  '\f',
+  '\r',
+  '(',
+  '*',
+  '_',
+  '~',
+]);
+
+/**
+ * Everything CommonMark lets stand in front of a line's CONTENT that the
+ * inline phase never sees — block-quote markers and their indentation.
+ *
+ * Deliberately NOT the whole container grammar: a list marker needs a space
+ * after it, which already puts whitespace in front of the candidate, so
+ * block quotes are the whole of the difference. It also does not model the
+ * four-space indent that makes a line indented CODE, where the inline phase
+ * never runs at all — that direction only escapes MORE, and `trim()` on
+ * every channel puts the shape out of reach anyway.
+ */
+const BLOCKQUOTE_PREFIX_RE = /^ {0,3}(?:>[ \t]?)*$/;
+
+/**
+ * Longest backtick run cmark-gfm will pair — `MAXBACKTICKS` in inlines.c.
+ * MEASURED, `x` + n backticks + `a` + n backticks + `y`: n = 79 and n = 80
+ * form a code span, n = 81 and n = 82 do not.
+ */
+const MAX_BACKTICKS = 80;
+
+/** Every index at which `needle` occurs in `line`, ascending. */
+function occurrences(line: string, needle: string): number[] {
+  const out: number[] = [];
+  for (
+    let k = line.indexOf(needle);
+    k !== -1;
+    k = line.indexOf(needle, k + 1)
+  ) {
+    out.push(k);
+  }
+  return out;
+}
+
+/**
+ * One line's tag openers made inert, leaving CommonMark code spans, autolinks
+ * and the `<!` constructs that really do hide their content alone.
+ *
+ * Two rules make the model self-consistent, and every arm below is written to
+ * keep them:
+ *
+ *  1. A construct is skipped exactly as far as the RENDERER carries it raw —
+ *     and the part of that raw span the HTML parser stops hiding is RAW TEXT,
+ *     where no backtick is a delimiter and every `<X` is live.
+ *  2. Whether a construct forms is decided by cmark-gfm's own grammar, not by
+ *     an approximation of it. Guessing wrong in EITHER direction leaks: a
+ *     construct wrongly skipped hides a live tag, and a construct wrongly
+ *     REFUSED hands its backticks back to the delimiter pool, where they
+ *     re-pair and shelter one (#9940 round 11 F1/F6).
+ *
+ * Code spans are cmark-gfm's ACTUAL algorithm, not CommonMark 6.1. The spec
+ * says a maximal run opens a span the next run of the same length closes;
+ * cmark's `scan_to_closing_backticks` additionally carries a memo
+ * (`subj->backticks[len]` plus `subj->scanned_for_backticks`) that a
+ * SUCCESSFUL scan overwrites, so a later opener of the same length can
+ * wrongly conclude there is no closer and stay literal. The spans cmark forms
+ * are therefore a strict SUBSET of the spec's, and a span this pass believes
+ * in but the renderer does not shelters a live tag:
+ *
+ *   MEASURED  a ``b` `c`<summary>` here
+ *          -> <p>a ``b<code> </code>c`<summary>` here</p>   LIVE <summary>
+ *   MEASURED  a `b` `c`<summary>` here                      (control)
+ *          -> <p>a <code>b</code> <code>c</code>&lt;summary&gt;` here</p>
+ *
+ * The leading UNMATCHED run is what arms it: its scan runs to end-of-subject,
+ * which sets `scanned_for_backticks`; the next scan succeeds and rewrites
+ * `backticks[1]` to ITS closer; the opener after that sees a memo entry at or
+ * before its own position and returns "no closer" (#9940 round 11 F9).
+ * MEASURED confirmations of each half:
+ *   'a ``b`` `c`d` e' -> two spans  (the len-2 opener SUCCEEDS, so its scan
+ *                                    never reaches EOF and the memo is not
+ *                                    armed)
+ *   'a `` `c`d` e'    -> one span   (armed, then one success, then literal)
+ * The whole model was differentialled against cmark-gfm over 32,800 generated
+ * backtick lines: 0 mismatches in which letters land inside a `<code>`.
+ *
+ * Backslash escapes run BEFORE the code-span rule and take exactly one
+ * backtick, so an opener is the `n - 1` that is left (and opens nothing at
+ * `n = 1`) — but a CLOSER and the memo use the RAW run length, because the
+ * scan is a raw character walk that knows nothing about backslashes.
+ * MEASURED, not assumed:
+ *   'x \``a`` y'  -> '<p>x ``a`` y</p>'            opener shrank 2 -> 1
+ *   'x \``a` y'   -> '<p>x `<code>a</code> y</p>'  …and paired with a len-1
+ *   'x \`a` y'    -> '<p>x `a` y</p>'              n = 1 opens nothing
+ *   'x \\`a` y'   -> '<p>x \<code>a</code> y</p>'  even run: full length
+ *   'x `a\`` y'   -> '<p>x `a`` y</p>'             CLOSER used raw length 2
+ *   'x ``a\`` y'  -> '<p>x <code>a\</code> y</p>'  …and closed a len-2 opener
+ *
+ * ONE left-to-right pass, which IS the precedence rule: code spans, autolinks,
+ * raw HTML and GFM autolink literals are resolved leftmost-first, so at each
+ * step the construct that starts earlier consumes the others.
+ *
+ * Linear: the CDATA scanner and the link-destination regions are one backward
+ * pass each, the comment scanner walks disjoint regions plus at most one
+ * failing scan (the first failure poisons the family), the code-span memo
+ * walks each run O(1) times amortised, `<`/link-start positions are scanned
+ * once, and the remaining terminators are read through monotone cursors.
+ */
+function escapeLine(line: string): string {
+  // A `<!` at the START of a line's CONTENT opens a CommonMark HTML BLOCK —
+  // type 2 (`<!--`), type 4 (`<!` + a letter) and type 5 (`<![CDATA[`) — and a
+  // block is passed through RAW, so the code span and the backslash escape
+  // this pass reads to decide an opener is inert DO NOT EXIST there. Escaping
+  // the `<` makes the line ordinary text and the rest is rescanned as inline.
+  // "Line content" is after the container prefixes, which is why the test is
+  // on the characters before the `<`: block-quote markers, list markers and
+  // whitespace are the only things CommonMark lets stand there. Only the
+  // FIRST `<!` can qualify — a later one has a `<` in front of it — and the
+  // remainder handed to the recursion starts with `!`, which fails this class,
+  // so the recursion is at most two deep (#9940 review, round 31).
+  // UNCHANGED by rounds 10 and 11, and re-verified: 13 container prefixes over
+  // four fuzz corpora leaked nothing through cmark-gfm + parse5.
+  // The BOM is in the allowed prefix set because cmark strips one at
+  // DOCUMENT position 0, which turns a line-leading `<!` behind it into an
+  // HTML block while a raw read sees it mid-line. Everywhere else the BOM
+  // is ordinary text and this only escapes more, which is free (#9940
+  // review, round 31 reverse audit).
+  const bang = line.indexOf('<!');
+  if (bang !== -1 && !/[^\uFEFF \t>*+\-.)0-9]/.test(line.slice(0, bang))) {
+    return `${line.slice(0, bang)}&lt;${escapeLine(line.slice(bang + 1))}`;
+  }
+
+  // ---- one linear pass to collect every scan event -------------------------
+  const runs: Array<{
+    start: number;
+    end: number;
+    len: number;
+    opens: number;
+  }> = [];
+  for (const m of line.matchAll(/`+/g)) {
+    let slashes = 0;
+    while (line[m.index - 1 - slashes] === '\\') slashes += 1;
+    const len = m[0].length;
+    runs.push({
+      start: m.index,
+      end: m.index + len,
+      len,
+      opens: slashes % 2 === 1 ? len - 1 : len,
+    });
+  }
+  const angles = occurrences(line, '<');
+  const commentEnds = occurrences(line, '-->');
+  const bangCloses = occurrences(line, '--!>');
+  const gts = occurrences(line, '>');
+
+  // A CommonMark inline link's DESTINATION is scanned as RAW characters at the
+  // `]`, so a backtick run inside `](…)` is not a delimiter — the last
+  // backtick-eating construct this walk does not otherwise resolve. MEASURED:
+  //   '[](``)<summary>``' -> <p><a href="%60%60"></a><summary>``</p>
+  //                          the destination ate the first run, the second is
+  //                          literal, and the <summary> is a LIVE element.
+  // Rather than parse link syntax, a span whose OPENER starts inside a
+  // permissive `](` … `)`-or-whitespace region is not allowed to SHELTER a tag
+  // opener: the span is still walked and the code-span memo still advances
+  // exactly as cmark's does, only the openers inside it are escaped. Both
+  // readings are then inert, at the cost of a literal `&lt;` inside a code
+  // span in the rare case the destination did not in fact eat the run.
+  // ONE backward pass gives every region's end, because scanning forward from
+  // each `](` is QUADRATIC on `[x](a[x](a…`, which has neither a `)` nor a
+  // space to stop at.
+  const destish: Array<[number, number]> = [];
+  if (line.includes('](')) {
+    const stopAt = new Int32Array(line.length + 1);
+    stopAt[line.length] = line.length;
+    for (let p = line.length - 1; p >= 0; p -= 1) {
+      // The same four characters, for the same reason: CommonMark ends an
+      // unbracketed destination at an ASCII space or control, and `\s`
+      // cut it short at U+3000 and U+FEFF, so a span opener the
+      // destination really ate was read as a real span.
+      const c = line[p]!;
+      stopAt[p] =
+        c === ')' || c === ' ' || c === '\t' || c === '\n' || c === '\r'
+          ? p
+          : stopAt[p + 1]!;
+    }
+    for (let p = line.indexOf(']('); p !== -1; p = line.indexOf('](', p + 1)) {
+      destish.push([p + 2, stopAt[Math.min(p + 2, line.length)]!]);
+    }
+  }
+  // Region starts and ends are both non-decreasing and the walk asks in
+  // ascending order, so one cursor answers in O(1).
+  let destAt = 0;
+  /** End of the `](…)` region holding `k`, or -1 when `k` is in none. */
+  const destishEnd = (k: number): number => {
+    while (destAt < destish.length && destish[destAt]![1] <= k) destAt += 1;
+    return destAt < destish.length && destish[destAt]![0] <= k
+      ? destish[destAt]![1]
+      : -1;
+  };
+
+  // Built once per line, and only when a candidate reaches the domain test.
+  // `runEnd[k]` ends the maximal domain-character run at `k`; `prevDot` and
+  // `prevUnderscore` are the nearest such character at or before `k`.
+  let domainIndex: {
+    runEnd: Int32Array;
+    prevDot: Int32Array;
+    prevUnderscore: Int32Array;
+  } | null = null;
+  const buildDomainIndex = () => {
+    const n = line.length;
+    const runEnd = new Int32Array(n + 1);
+    const prevDot = new Int32Array(n + 1).fill(-1);
+    const prevUnderscore = new Int32Array(n + 1).fill(-1);
+    runEnd[n] = n;
+    for (let k = n - 1; k >= 0; k -= 1) {
+      runEnd[k] = /[A-Za-z0-9_.-]/.test(line[k]!) ? runEnd[k + 1]! : k;
+    }
+    let dot = -1;
+    let underscore = -1;
+    for (let k = 0; k < n; k += 1) {
+      if (line[k] === '.') dot = k;
+      else if (line[k] === '_') underscore = k;
+      prevDot[k] = dot;
+      prevUnderscore[k] = underscore;
+    }
+    return { runEnd, prevDot, prevUnderscore };
+  };
+  const linkStarts: number[] = [];
+  for (const m of line.matchAll(LINK_CANDIDATE_RE)) {
+    const www = line[m.index] === 'w';
+    // cmark's boundary test, per entry point. MEASURED over 39 preceding
+    // characters: only an ASCII letter blocks a scheme literal
+    // (`z ahttp://y.test/ q` -> no link); a digit, `]`, `)`, `-`, `.` and a
+    // non-ASCII letter all allow it. An unmatched `[` blocks it too, but that
+    // is a STACK, not a character — see `brackets` in the walk.
+    // …and the character it looks at is the one before the line's CONTENT,
+    // not before the raw line: the block phase strips block-quote markers
+    // before the inline phase runs, so `>www.z.test/p` links while
+    // `-www.z.test/p` does not. MEASURED: `>`, `>>`, `> >`, `   >` and
+    // `>\twww.` all link, and `>-` does not. Four spaces make the line
+    // indented CODE, where cmark runs no inline phase at all and this test
+    // therefore over-escapes — the safe direction, and unreachable once
+    // every channel has trimmed (#9940 review, round 31 reverse audit).
+    const pre = BLOCKQUOTE_PREFIX_RE.test(line.slice(0, m.index))
+      ? ''
+      : (line[m.index - 1] ?? '');
+    if (www ? !WWW_BOUNDARY.has(pre) : /[A-Za-z]/.test(pre)) continue;
+    // cmark-gfm's `check_domain`. MEASURED after `http://`: the first
+    // character must be ALPHANUMERIC (`a` and `1` link; `-`, `_`, `.`, `%`
+    // and every other punctuation do not), the domain then runs over
+    // `[A-Za-z0-9_.-]` to the first character outside it, and it is refused
+    // when a `_` appears in either of the LAST TWO labels — `a_b.c`,
+    // `a.b.c_d`, `a_.b` and `a._b` do not link, `a_b.c.d` does. The `www.`
+    // form runs the same test over `www.` + the tail, which is why `www.`
+    // alone, `www.-a` and `www..` all link while `www._` does not.
+    const domain = www ? m.index : m.index + m[0].length;
+    if (!/[A-Za-z0-9]/.test(line[domain] ?? '')) continue;
+    // Answered from three prefix/suffix arrays rather than by scanning the
+    // domain per candidate: `www.a_www.a_…` puts a candidate every six
+    // characters, `_` is IN the domain class, and each scan then ran to the
+    // end of the line — quadratic, and it did not finish at 75k (#9940
+    // review, round 31 reverse audit). The last two labels are what the
+    // rule needs, and both are one lookup.
+    if (domainIndex === null) domainIndex = buildDomainIndex();
+    const { runEnd, prevDot, prevUnderscore } = domainIndex;
+    const end = runEnd[domain]!;
+    // The last `.` in the domain run, then the one before it: the labels
+    // the rule looks at are `(lastDot, end)` and `(prevDot, lastDot)`.
+    const lastDot = end > domain ? prevDot[end - 1]! : -1;
+    const inLast = lastDot >= domain ? lastDot : domain - 1;
+    if (end > domain && prevUnderscore[end - 1]! > inLast) continue;
+    if (lastDot >= domain) {
+      const before = lastDot > domain ? prevDot[lastDot - 1]! : -1;
+      const inPrev = before >= domain ? before : domain - 1;
+      if (lastDot > domain && prevUnderscore[lastDot - 1]! > inPrev) continue;
+    }
+    linkStarts.push(m.index);
+  }
+
+  // Monotone cursors: `skipsFrom` is only ever called with `i` ascending, and
+  // each `from` derives from `i`, so every cursor advances at most `line`
+  // length times over the whole pass.
+  const cursors = [0, 0, 0];
+  const firstAt = (which: number, list: number[], from: number): number => {
+    let at = cursors[which]!;
+    while (at < list.length && list[at]! < from) at += 1;
+    cursors[which] = at;
+    return at < list.length ? list[at]! : -1;
+  };
+
+  // cmark-gfm's CDATA scanner is
+  //   "<![CDATA[" ( [^\]] | "]" [^\]] | "]]" [^>] )* "]]>"
+  // and it is modelled EXACTLY, as one backward pass: `cdataFrom(k)` is the
+  // index just past the `]]>` the scanner reaches from `k`, or -1. "Is there a
+  // `]]>` anywhere later" is a DIFFERENT predicate — it accepts two thirds of
+  // all trailing-`]` counts cmark refuses, and the escape then skips a section
+  // the renderer never formed. MEASURED, `<![CDATA[a` + k x `]` + `>`:
+  //   k= 2 forms  k= 3 no  k= 4 no  k= 5 forms  k= 6 no  k= 7 no
+  //   k= 8 forms  k= 9 no  k=10 no  k=11 forms               (k ≡ 2 mod 3)
+  //   the fixture <![CDATA[<details>arr[0]]]> is mis-parsed
+  //     -> <p>the fixture &lt;![CDATA[<details>arr[0]]]&gt; …</p>
+  //        a LIVE <details> that folds the rest of the body away
+  //        (#9940 round 11 F1).
+  // Differentialled against cmark over 10,922 generated sections: 0
+  // mismatches.
+  let cdataReach: Int32Array | null = null;
+  const cdataFrom = (k: number): number => {
+    if (cdataReach === null) {
+      const t = new Int32Array(line.length + 1).fill(-1);
+      for (let p = line.length - 1; p >= 0; p -= 1) {
+        if (line.startsWith(']]>', p)) {
+          t[p] = p + 3;
+        } else if (line[p] === ']') {
+          // `]` [^\]] consumes two characters; `]]` [^>] consumes three.
+          const next = line[p + 1] === ']' ? p + 3 : p + 2;
+          t[p] = next <= line.length ? t[next]! : -1;
+        } else {
+          t[p] = t[p + 1]!;
+        }
+      }
+      cdataReach = t;
+    }
+    return k <= line.length ? cdataReach[k]! : -1;
+  };
+
+  /**
+   * Where cmark-gfm's comment scanner stops, or -1 — the SAME arithmetic the
+   * CDATA scanner has, on dashes instead of brackets.
+   *
+   * The scanner was derived, not read off the spec: over the alphabet
+   * {`-`, `>`, other} its residual language has SIX states, and they are
+   * "length of the dash run just passed, mod 3", with `>` closing the comment
+   * only from a run ≡ 2. MEASURED, `x <!--a` + k x `-` + `>`:
+   *   k=0 no  k=1 no  k=2 COMMENT  k=3 no  k=4 no  k=5 COMMENT
+   *   k=6 no  k=7 no  k=8 COMMENT
+   * and the two abrupt closings are their own alternatives at the very start:
+   *   MEASURED  x <!-->z--> y  -> <p>x <!-->z--&gt; y</p>
+   *   MEASURED  x <!--->z--> y -> <p>x <!--->z--&gt; y</p>
+   * Reading it as "the first `-->` whose text does not end with `-`" refuses
+   * eight strings cmark accepts, and a wrong REFUSAL is not safe here (rule 2
+   * in the header). Derived exhaustively over 21,845 strings: 0 mismatches.
+   */
+  const commentEndFrom = (i: number): number => {
+    if (line.startsWith('<!-->', i)) return i + 5;
+    if (line.startsWith('<!--->', i)) return i + 6;
+    let dashes = 0;
+    for (let k = i + 4; k < line.length; k += 1) {
+      const c = line[k]!;
+      if (c === '-') {
+        dashes += 1;
+      } else if (c === '>' && dashes % 3 === 2) {
+        return k + 1;
+      } else {
+        dashes = 0;
+      }
+    }
+    return -1;
+  };
+
+  // ONE line-wide flag, and ONLY a failed COMMENT sets it. MEASURED, the full
+  // 4 x 4 cross-poisoning matrix:
+  //   a failed comment makes cmark read a later COMMENT, a later `<![CDATA[`
+  //   and a later `<!X ` as literal text too —
+  //     z <!--F <![CDATA[c]]> q -> <p>z &lt;!--F &lt;![CDATA[c]]&gt; q</p>
+  //     z <!--F <!D d> q        -> <p>z &lt;!--F &lt;!D d&gt; q</p>
+  //     x <!--a<!--->           -> <p>x &lt;!--a&lt;!---&gt;</p>
+  //   while a failed CDATA, a failed declaration and a failed processing
+  //   instruction poison NOTHING — all twelve of those pairs stay raw:
+  //     z <![CDATA[x <!--c--> q -> <p>z &lt;![CDATA[x <!--c--> q</p>
+  // Setting the flag on a failed CDATA or declaration as well is the shape
+  // that leaks: the refused construct's backticks rejoin the delimiter pool
+  // and re-pair around a tag (#9940 round 11 F6).
+  let noBangConstruct = false;
+
+  /**
+   * Where a `<` construct this escape LEAVES ALONE stops HIDING, or -1; the
+   * renderer's raw span can run FURTHER, and `rawSpanEnd` says how far.
+   */
+  let rawSpanEnd = -1;
+  const skipsFrom = (i: number): number => {
+    rawSpanEnd = -1;
+    // A backslash-escaped `<` is a literal character: it opens no comment, no
+    // CDATA, no declaration and no autolink, and it is already inert.
+    let slashes = 0;
+    while (line[i - 1 - slashes] === '\\') slashes += 1;
+    if (slashes % 2 === 1) return i + 1;
+
+    // `?` is a legal e-mail local-part character, so `<?x@y.test>` matches the
+    // autolink alternative — but CommonMark reads a line opening `<?` as HTML
+    // block type 3 in the BLOCK phase, before autolinks exist, and an inline
+    // `<?…>` is a raw processing instruction either way. Escaping covers both,
+    // and escaping is also what stops the renderer forming the instruction
+    // whose interior this pass would otherwise have to model.
+    if (line[i + 1] === '?') return -1;
+
+    // Autolinks are tried BEFORE the `<!` family because cmark-gfm's
+    // `handle_pointy_brace` tries them first (URI, then e-mail, then the HTML
+    // scanners). `!` and `-` are legal e-mail local-part characters, so a `<!`
+    // sequence carrying an `@` is an AUTOLINK to the renderer and no comment
+    // forms. MEASURED:
+    //   '`<!--@t><div>-->' -> <p>`<a href="mailto:!--@t">!--@t</a><div>--&gt;</p>
+    //                         the <div> behind it is a LIVE element
+    //   '`<!--a><div>-->'  -> <p>`<!--a><div>--></p>       (no `@`: a comment)
+    const link = AUTOLINK_RE.exec(line.slice(i));
+    if (link !== null) return i + link[0].length;
+
+    if (line.startsWith('<!--', i)) {
+      if (noBangConstruct) return -1;
+      const end = commentEndFrom(i);
+      if (end === -1) {
+        noBangConstruct = true;
+        return -1;
+      }
+      // The RENDERER carries the whole comment raw…
+      rawSpanEnd = end;
+      // …but what the HTML PARSER hides stops at the earlier of the comment's
+      // own close and `--!>` (HTML5 comment-end-bang), and the rest of the raw
+      // span is RAW TEXT that no markdown construct lives in:
+      //   MEASURED  x <!-- a --!> <details> --> y
+      //          -> cmark passes the whole span raw; parse5 closes the comment
+      //             at `--!>` and the <details> is a LIVE element
+      //   MEASURED  x <!-- a --!>` --> <details>` here
+      //          -> the backtick this pass read as a delimiter is raw text to
+      //             the renderer, and the phantom span sheltered a LIVE
+      //             <details> (#9940 round 11 F5)
+      // The HTML5 tokenizer's own comment-end is NOT cmark's: it closes at
+      // the FIRST `--`(`-`*)`>` or `--`(`-`*)`!>`, i.e. at the first `-->` or
+      // `--!>` SUBSTRING, with no mod-3 arithmetic anywhere. MEASURED:
+      //   'c<!-----><details>-->'
+      //     -> cmark carries the WHOLE span raw (the closing dash run is 2),
+      //        parse5 closes the comment at the `>` after `----->`, and the
+      //        <details> behind it is a LIVE element.
+      const htmlEnd = firstAt(0, commentEnds, i + 4);
+      const bangClose = firstAt(1, bangCloses, i + 4);
+      let hide = end;
+      if (htmlEnd !== -1 && htmlEnd + 3 < hide) hide = htmlEnd + 3;
+      if (bangClose !== -1 && bangClose + 4 < hide) hide = bangClose + 4;
+      return hide;
+    }
+
+    if (line.startsWith('<![CDATA[', i)) {
+      const cdataEnd = noBangConstruct ? -1 : cdataFrom(i + 9);
+      if (cdataEnd === -1) {
+        // MEASURED  x <![CDATA[ y <details> z
+        //        -> <p>x &lt;![CDATA[ y <details> z</p>   (NOT a construct,
+        //           and the <details> is live, so -1 and escape it)
+        return -1;
+      }
+      rawSpanEnd = cdataEnd;
+      // What it HIDES ends at the FIRST `>`, not at `]]>`: cmark hands the
+      // whole span to the HTML parser, which closes a BOGUS COMMENT there, and
+      // everything after it is live HTML.
+      //   MEASURED  x <![CDATA[ a > b <details> ]]> y
+      //          -> cmark passes it raw; parse5 yields a LIVE <details>
+      //   MEASURED  x <![CDATA[>`]]><details>` here
+      //          -> the tail's backtick is raw text to the renderer, so the
+      //             span this pass believed in never formed (round 11 F5)
+      // `<![CDATA[` holds no `>`, so a formed section always has one.
+      const gt = firstAt(2, gts, i + 2);
+      return gt === -1 ? cdataEnd : gt + 1;
+    }
+
+    if (/^<![A-Za-z]/.test(line.slice(i, i + 3))) {
+      // cmark-gfm's inline declaration is `<!`, one or more UPPERCASE ASCII
+      // letters, WHITESPACE, `[^>]*`, `>`. Derived exhaustively over 11,110
+      // strings: no disagreement. MEASURED:
+      //   x <!A <div> y   -> declaration (raw)
+      //   x <!A<div> y    -> <p>x &lt;!A<div> y</p>   — NOT a declaration,
+      //                      and the <div> inside is LIVE
+      //   x <!a <div> y   -> <p>x &lt;!a <div> y</p>  — lowercase: NOT one
+      //   x <!A1 <div> y  -> NOT one — the name is [A-Z]+ and nothing else
+      //   x <!AB\t<div> y -> declaration (tab counts as whitespace)
+      if (noBangConstruct || !/^<![A-Z]+[ \t\n\v\f\r]/.test(line.slice(i))) {
+        return -1;
+      }
+      const end = firstAt(2, gts, i + 2);
+      // A declaration's raw span and its hidden span end at the same `>`.
+      return end === -1 ? -1 : end + 1;
+    }
+
+    return -1;
+  };
+
+  // ---- cmark-gfm's code-span scanner ---------------------------------------
+  // `backticks[n]` is the START of the last run of length `n` any scan has
+  // walked over (the closer included); `scannedForBackticks` is set only when
+  // a scan reaches end-of-subject. The early return then reads a stale memo,
+  // which is the whole of F9. `escapeTagOpeners` is applied one LINE at a time
+  // and every channel folds to a line before it, so the line IS the subject
+  // the memo lives on.
+  const backticks = new Int32Array(MAX_BACKTICKS + 1);
+  let scannedForBackticks = false;
+  /** cmark-gfm inlines.c `scan_to_closing_backticks`, over the run array. */
+  const closerFor = (openLen: number, fromRun: number, at: number): number => {
+    if (openLen < 1 || openLen > MAX_BACKTICKS) return -1;
+    if (scannedForBackticks && backticks[openLen]! <= at) return -1;
+    for (let k = fromRun; k < runs.length; k += 1) {
+      const r = runs[k]!;
+      if (r.len <= MAX_BACKTICKS) backticks[r.len] = r.start;
+      if (r.len === openLen) return r.end;
+    }
+    scannedForBackticks = true;
+    return -1;
+  };
+
+  // ---- the leftmost-first walk --------------------------------------------
+  let angle = 0;
+  let linkAt = 0;
+  let out = '';
+  let at = 0;
+  let run = 0;
+  let i = 0;
+  // cmark-gfm suppresses a GFM autolink literal while a link opener is still
+  // unmatched — a STACK, not the preceding character. MEASURED:
+  //   'z [http://y.test/ q'    -> no link    'z [x] http://y.test/ q'  -> LINK
+  //   'z [x http://y.test/ q'  -> no link    'z [x](y) http://…'       -> LINK
+  //   'z [[ http://y.test/ q'  -> no link    'z ] http://y.test/ q'    -> LINK
+  //   'z ![x http://y.test/ q' -> no link    'z \\[x http://y.test/ q' -> LINK
+  //   'z [x www.y.test/ q'     -> no link    'z `[`x http://y.test/ q' -> LINK
+  // Believing in a link cmark does not form steals a backtick from the
+  // delimiter pool and shifts every later pairing, which is how it leaks:
+  //   MEASURED  see [http://y.test/` `<details>` and stop
+  //          -> <p>see [http://y.test/<code> </code><details>` and stop</p>
+  //             a LIVE <details> (#9940 round 11 F8).
+  // Only brackets in ORDINARY TEXT count: one inside a code span, a raw span,
+  // a URL run or behind a backslash never opened anything for cmark either.
+  let brackets = 0;
+  /**
+   * Ordinary text and URL runs: `<` before a tag name, `/` or `?` goes inert.
+   * `<!` is NOT escaped here — `skipsFrom` has already decided the construct
+   * with cmark's own grammar, so a `<!` it refused is one the renderer refuses
+   * too, and both sides then read the characters after it the same way.
+   */
+  const escapeAngleAt = (k: number): void => {
+    if (/[A-Za-z/?]/.test(line[k + 1] ?? '')) {
+      out += line.slice(at, k) + '&lt;';
+      at = k + 1;
+    }
+  };
+  /**
+   * A RAW-TEXT tail — the part of a construct's raw span the HTML parser has
+   * stopped hiding. `<!` IS escaped here: the text reaches the HTML parser
+   * directly, where `<!--` opens a comment that runs to the END OF THE
+   * DOCUMENT and takes every later blocker and the footer with it.
+   *   MEASURED  x <![CDATA[a><!--]]>
+   *          -> <p>x <![CDATA[a><!--]]></p>, and parse5 hides everything
+   *             after it — no leaked ELEMENT at all, so an element scan
+   *             misses it (#9940 round 11 F3).
+   */
+  const escapeRawAngleAt = (k: number): void => {
+    if (/[A-Za-z/?!]/.test(line[k + 1] ?? '')) {
+      out += line.slice(at, k) + '&lt;';
+      at = k + 1;
+    }
+  };
+  const escapeRegion = (
+    from: number,
+    to: number,
+    one: (k: number) => void,
+  ): void => {
+    while (angle < angles.length && angles[angle]! < from) angle += 1;
+    while (angle < angles.length && angles[angle]! < to) {
+      one(angles[angle]!);
+      angle += 1;
+    }
+  };
+  while (i < line.length) {
+    while (run < runs.length && runs[run]!.start < i) run += 1;
+    while (angle < angles.length && angles[angle]! < i) angle += 1;
+    while (linkAt < linkStarts.length && linkStarts[linkAt]! < i) linkAt += 1;
+    const nextRun = run < runs.length ? runs[run]!.start : line.length;
+    const nextAngle = angle < angles.length ? angles[angle]! : line.length;
+    const nextLink =
+      linkAt < linkStarts.length ? linkStarts[linkAt]! : line.length;
+    const next = Math.min(nextRun, nextAngle, nextLink);
+    if (i < next) {
+      // Ordinary text up to the next construct that can start — the only
+      // region whose brackets are link openers.
+      for (let k = i; k < next; k += 1) {
+        const c = line[k]!;
+        if (c !== '[' && c !== ']') continue;
+        let slashes = 0;
+        while (line[k - 1 - slashes] === '\\') slashes += 1;
+        if (slashes % 2 === 1) continue;
+        if (c === '[') brackets += 1;
+        else if (brackets > 0) brackets -= 1;
+      }
+      i = next;
+      continue;
+    }
+    if (i === nextAngle) {
+      const skipTo = skipsFrom(i);
+      if (skipTo !== -1) {
+        // A construct that STARTS inside a link destination may not exist at
+        // all — the destination is raw characters to the renderer. MEASURED:
+        //   '[](><!--)<summary>-->'
+        //     -> <p><a href="%3E%3C!--"></a><summary>--&gt;</p>
+        //        the destination ate the `<!--`, so no comment forms and the
+        //        <summary> behind it is a LIVE element.
+        // Both readings are covered by capping what the skip may HIDE at the
+        // destination's own end and escaping the rest of the span: under the
+        // link reading everything past the `)` is ordinary text, and under the
+        // comment reading the extra escapes land inside a comment, where they
+        // are invisible either way.
+        const span = rawSpanEnd > skipTo ? rawSpanEnd : skipTo;
+        const dest = destishEnd(i);
+        const hide = dest === -1 ? skipTo : Math.min(skipTo, dest);
+        if (hide < span) escapeRegion(hide, span, escapeRawAngleAt);
+        i = span;
+        continue;
+      }
+      escapeAngleAt(i);
+      i += 1;
+      continue;
+    }
+    if (i === nextLink) {
+      if (brackets > 0) {
+        // An unmatched link opener is still on the stack: cmark forms no
+        // literal here, so this is ordinary text and its backticks are
+        // delimiters again.
+        linkAt += 1;
+        continue;
+      }
+      // A GFM autolink literal, consumed to the next WHITESPACE — not to the
+      // next `<`, which is where cmark stops it. Escaping a `<` that ended the
+      // URL turns it into `&lt;`, which is not a `<` any more, so on the
+      // POSTED text the run keeps going and swallows whatever followed —
+      // measured as a live element two escapes later. Consuming to whitespace
+      // and making every opener inside the run inert is the fixpoint: a run
+      // with no `<` in it cannot host a tag, and the reader sees the same
+      // characters either way (`&lt;` decodes to `<` in the link text).
+      //   MEASURED  a http://y.test/\<details> b
+      //          -> <p>a <a href="…%5C">http://y.test/\</a><details> b</p>
+      //             (the URL ate the backslash, so it escaped nothing)
+      // A `<` this pass will NOT escape does still end the run, because on the
+      // posted text it still ends the renderer's link; the text after it is
+      // ordinary inline again and its backticks are delimiters again. `<!` is
+      // escaped INSIDE the run, so a `<!--` there never becomes a construct
+      // for either side — which is how F4 (a `<!--` in a URL run that failed
+      // for cmark and poisoned the line, while this pass never saw it) closes.
+      // It must be escaped rather than left to `skipsFrom`: the URL literal
+      // ate the backslash in front of it, so `skipsFrom` would read
+      // `ftp://y\\<!--<!A <select>` as a backslash-escaped `<` and skip the
+      // poison entirely — MEASURED, a LIVE <select>.
+      // The run ends at the four characters cmark stops on, NOT at `\s`:
+      // MEASURED by sweeping every ASCII code point and fourteen Unicode
+      // spaces through `www.z.test/pX<c>ENDZ q`, the literal stops only at
+      // space, tab, LF, CR and `<`. Reading `\s` cut the run short at
+      // U+000B, U+000C, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029,
+      // U+202F, U+205F, U+3000 and U+FEFF — thirteen characters after which
+      // this pass went back to ordinary inline reading of text cmark is
+      // still carrying as a raw URL, so a backslash it thought made a `<`
+      // inert (the URL ate it) or a backtick pair it thought was a span
+      // (the URL ate the opener) let the tag out LIVE (#9940 review, round
+      // 31 reverse audit).
+      let end = i;
+      while (end < line.length) {
+        const c = line[end]!;
+        if (c === ' ' || c === '\t' || c === '\n' || c === '\r') break;
+        if (c === '<' && !/[A-Za-z/?!]/.test(line[end + 1] ?? '')) break;
+        end += 1;
+      }
+      escapeRegion(i, end, escapeRawAngleAt);
+      i = end;
+      continue;
+    }
+    // A backtick run: it opens a span iff cmark's scanner finds a closer.
+    const r = runs[run]!;
+    const closer = closerFor(r.opens, run + 1, r.end);
+    // A span consumes its content; nothing inside it is escaped — unless the
+    // opener sits in a link destination, where the renderer may never have
+    // formed the span at all (see `destish`).
+    if (closer !== -1 && destishEnd(r.start) !== -1) {
+      escapeRegion(r.end, closer - r.opens, escapeAngleAt);
+    }
+    i = closer === -1 ? r.end : closer;
+  }
+  return out + line.slice(at);
+}
+
+/**
+ * `fixedFindings` through the boundary's shape gate: an array of
+ * `{id, by?}` where the id is a WHOLE ledger id (`LEDGER_ID_SHAPE` — the
+ * same admission test the marker's serializer applies) and `by`, when
+ * present, is one non-empty line. Anything else is a malformed state and
+ * refuses the compose, like a NaN count — a ruling that cannot name the
+ * entry it retires must not silently resolve nothing, or everything it
+ * half-matched.
+ *
+ * One ruling per id: a model that records the same entry fixed twice
+ * (once per location of a multi-site finding, say) would otherwise post
+ * two near-identical `fixed by` replies into the thread and resolve it
+ * twice. Well-shaped duplicates are not a refusal — the FIRST ruling
+ * stands, exactly the dedup the ledger builder applies to a second draft
+ * under a carried id.
+ */
+/**
+ * Where the bilingual body's Chinese half begins — the English half, then
+ * this fold opener, then the Chinese half. Named once because `submit`
+ * splits the posted body on it: the opener clause it reconciles after the
+ * thread-lifecycle diversion exists in BOTH halves, and a whole-body
+ * first-occurrence replace of the Chinese clause hit model text in the
+ * English half (a duplicate-drop note quoting the phrase) while the real
+ * Chinese opener kept it (#9940 review, audit).
+ */
+export const BILINGUAL_FOLD_OPEN =
+  '\n\n<details>\n<summary>中文说明</summary>\n\n';
+
+/**
+ * The opener's inline-Suggestions clause, named once because TWO ends act
+ * on it: this module writes it off the posting count, and `submit` strips
+ * it again when the thread lifecycle's diversion — which runs AFTER the
+ * compose — drains every inline Suggestion into thread replies, so the
+ * clause would otherwise post beside an empty comments array (#9940
+ * review, round 23). A restated string at either end is the drift class
+ * this file's header describes.
+ */
+export const INLINE_SUGGESTIONS_CLAUSE = {
+  en: 'Suggestions are inline.',
+  zh: '建议见行内评论。',
+} as const;
+
+/** Non-overlapping occurrences of `needle` in `text`. */
+/**
+ * Whether the text opens an HTML comment it never closes — an opener left
+ * after every closed comment is removed. A count comparison passed
+ * `--> <!--` (one of each, the opener still open) (#9940 review, audit).
+ */
+function opensUnclosedComment(text: string): boolean {
+  // One forward pass — each opener is closed by the first `-->` after its
+  // four characters, and the scan resumes past that close (the shape a
+  // lazy `<!--[\s\S]*?-->` match takes, without re-scanning to the end
+  // from every opener: a hundred thousand `<!--` cost seconds) (#9940
+  // review, audit 4).
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf('<!--', from);
+    if (open === -1) return false;
+    // `<!-->` and `<!--->` are empty comments (CommonMark 0.31, HTML).
+    if (text.startsWith('>', open + 4)) {
+      from = open + 5;
+      continue;
+    }
+    if (text.startsWith('->', open + 4)) {
+      from = open + 6;
+      continue;
+    }
+    const close = text.indexOf('-->', open + 4);
+    if (close === -1) return true;
+    from = close + 3;
+  }
+}
+
+export function ingestFixedFindings(value: unknown): FixedFinding[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(
+      'compose-review: `fixedFindings` must be an array of ' +
+        '`{"id": "R<round>-<n>", "by": "<what fixed it>"}` entries — one ' +
+        'per Step 6 `fixed` ruling.',
+    );
+  }
+  const seen = new Set<string>();
+  const out: FixedFinding[] = [];
+  value.forEach((entry, i) => {
+    const at = `fixedFindings[${i}]`;
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(
+        `compose-review: ${at} is not an object — a fixed ruling is ` +
+          '`{"id": "R<round>-<n>", "by": "<what fixed it>"}`.',
+      );
+    }
+    const { id, by } = entry as { id?: unknown; by?: unknown };
+    if (typeof id !== 'string' || !LEDGER_ID_SHAPE.test(id)) {
+      throw new Error(
+        `compose-review: ${at} carries no ledger id — a fixed ruling ` +
+          `names the entry it retires (R<round>-<n>), got ` +
+          `${JSON.stringify(id)}.`,
+      );
+    }
+    // The serializer's bounds beside its shape — `isLedgerFinding` also
+    // caps the id's length and its round, so an id past either names an
+    // entry no ledger ever held: the ruling would resolve nothing while
+    // the unbounded token rides the receipt, the artifact, and (when a
+    // forged thread matches) the reply body verbatim. A refusal, not a
+    // slice — a cut id is a different id (#9940 review, round 14). The
+    // spelling must be CANONICAL too: the shape tolerates leading zeros
+    // (`R01-2`, `Number('01')` is 1) that no minted entry or posted root
+    // ever carries, and every downstream join — the gate's fixedIds set,
+    // the dedup below, the thread matcher's map — is raw-string
+    // equality, so such a ruling passed every gate, retired nothing, and
+    // defeated the two-way refusal beside a still-standing `R1-2`
+    // re-post. Tightened HERE, not in the shared token (#9940 review,
+    // round 25).
+    const idRound = Number(id.slice(1).split('-')[0]);
+    if (
+      !/^R[1-9]\d*-[1-9]\d*$/.test(id) ||
+      id.length > LEDGER_MAX_ID ||
+      !Number.isSafeInteger(idRound) ||
+      idRound < 1 ||
+      idRound > LEDGER_MAX_ROUND
+    ) {
+      const canonical = canonicalLedgerId(id);
+      throw new Error(
+        canonical !== id && /^R[1-9]\d*-[1-9]\d*$/.test(canonical)
+          ? `compose-review: ${at} spells its id non-canonically — ` +
+            `${JSON.stringify(id)} carries leading zeros no ledger entry ` +
+            `has; write ${canonical}.`
+          : `compose-review: ${at} carries no ledger id — an id is at most ` +
+            `${LEDGER_MAX_ID} characters and its round sits in ` +
+            `1..${LEDGER_MAX_ROUND}; got ${JSON.stringify(id)}, which no ` +
+            `ledger entry can carry.`,
+      );
+    }
+    if (by !== undefined && typeof by !== 'string') {
+      throw new Error(
+        `compose-review: ${at}.by must be ONE non-empty line — it ` +
+          `becomes the reply \`${id} fixed by <by>\` left in the resolved ` +
+          `thread.`,
+      );
+    }
+    // `by` is PROSE — what fixed the finding — never a finding: a leading
+    // severity marker is machine grammar the reply would post verbatim
+    // under attribution on, so it is stripped like every posted body
+    // strips it (#9940 review, audit).
+    // Trimmed FIRST: `severityOf` reads no marker off an indented line —
+    // it is code there — but the cut below takes `prose.trim()` and the
+    // reply builder trims again, so the indentation that made it code is
+    // gone by the time it posts and the marker went out live under
+    // attribution on, which is exactly what this strip exists to stop
+    // (#9940 review, round 31 reverse audit).
+    const prose = by === undefined ? undefined : stripSeverityPrefix(by.trim());
+    // `by` becomes the visible half of the reply — a clause that renders
+    // as nothing (a bare HTML comment, a Cf run `trim` keeps, a bare
+    // marker) posts `R<id> fixed by` with no account of what fixed it, on
+    // the thread this same pass resolves; the body-Criticals boundary
+    // already refuses the identical texts (#9940 review, round 14) —
+    // through the EXIT projection, not the plain render test: `submit`
+    // strips the reply through the attribution-off chain and the footer
+    // strip before posting, and `rendersAsNothingAtExit` is the one
+    // statement of what the exit empties (#9940 review, round 21).
+    // Residue AHEAD of visible text stays admitted, like everywhere else.
+    if (
+      prose !== undefined &&
+      (prose.trim() === '' ||
+        /[\r\n\u2028\u2029]/.test(prose) ||
+        rendersAsNothingAtExit(prose))
+    ) {
+      throw new Error(
+        `compose-review: ${at}.by must be ONE non-empty line — it ` +
+          `becomes the reply \`${id} fixed by <by>\` left in the resolved ` +
+          `thread.`,
+      );
+    }
+    // Two grammars a clause may not carry: the pipeline's own comment
+    // marker (`<!-- qwen-review … -->`), which under attribution off
+    // would end the posted reply and make presubmit read the fixed
+    // ruling as a posted FINDING that carries its id — a re-post carrier
+    // for an id the ruling just retired — and an unterminated HTML
+    // comment, which swallows the attribution footer appended after the
+    // clause (#9940 review, audit). Residue between visible text is
+    // still admitted: a BALANCED comment is not either of these.
+    // Both grammars are tested on the clause as written AND on what the
+    // attribution-off exit posts (`stripReviewFooter(stripForUnattributedPost)`):
+    // a forged footer span splitting `<!-` from `- qwen-review …` carried
+    // no marker at the entry and posted one at the exit (#9940 review,
+    // audit).
+    for (const view of prose === undefined
+      ? []
+      : [prose, stripReviewFooter(stripForUnattributedPost(prose))]) {
+      if (/<!--\s*qwen-review\b/i.test(view)) {
+        throw new Error(
+          `compose-review: ${at}.by carries the pipeline's comment-marker ` +
+            `grammar (\`<!-- qwen-review\`) — the clause is prose, and the ` +
+            `marker would make the posted reply read as a finding.`,
+        );
+      }
+      if (opensUnclosedComment(view)) {
+        throw new Error(
+          `compose-review: ${at}.by opens an HTML comment it never closes — ` +
+            `the opener would post as literal text in the thread.`,
+        );
+      }
+    }
+    if (seen.has(id)) return;
+    seen.add(id);
+    // Cut by code point, not UTF-16 unit: a slice landing inside a
+    // surrogate pair would post a lone surrogate into the thread. The
+    // cap is applied AFTER the gate, so the gate must run again on what
+    // the cap left: a clause whose visible tail sat past the cap (forty
+    // `&nbsp;` entities then `fixed it`, or a long comment ahead of the
+    // text) passed the gate as written and sliced to invisible-only —
+    // exactly the reply the gate refuses. That shape is the tool's own
+    // cut, not the model's draft, so it degrades to a by-less ruling
+    // (`R<id> fixed`) rather than refusing the round (#9940 review,
+    // round 21). A cut that lands INSIDE a comment leaves a dangling
+    // `<!--` that would swallow the footer — the cut retreats to before
+    // that comment first (#9940 review, audit).
+    const points = prose === undefined ? undefined : [...prose.trim()];
+    const cut = points !== undefined && points.length > FIXED_BY_MAX;
+    let slicedBy =
+      points === undefined ? undefined : points.slice(0, FIXED_BY_MAX).join('');
+    // Both retreats belong to the CUT alone: an uncut clause passed the
+    // gate whole, and its own trailing `<` (`compare with <`) is its prose
+    // (#9940 review, audit 4).
+    if (slicedBy !== undefined && cut) {
+      while (opensUnclosedComment(slicedBy)) {
+        slicedBy = slicedBy.slice(0, slicedBy.lastIndexOf('<!--')).trimEnd();
+      }
+      // A cut that lands one to three characters into `<!--` leaves a
+      // visible `<!-` / `<!` / `<` stub — retreat past it too.
+      slicedBy = slicedBy.replace(/<(?:!-?)?$/, '').trimEnd();
+    }
+    // The marker grammar is tested AGAIN on what the cap left, on both
+    // projections: a cut landing right after `qwen-review` inside a
+    // `<!-- qwen-reviewer -->` the gate passed leaves the marker's opening
+    // — and the exit projection can assemble it from a forged footer span
+    // the cut split. That is the tool's own cut, so it degrades to a
+    // by-less ruling like the invisible-only cut does (#9940 review,
+    // audit 2).
+    if (
+      slicedBy !== undefined &&
+      [slicedBy, stripReviewFooter(stripForUnattributedPost(slicedBy))].some(
+        (view) =>
+          /<!--\s*qwen-review\b/i.test(view) || opensUnclosedComment(view),
+      )
+    ) {
+      slicedBy = '';
+    }
+    out.push({
+      id,
+      ...(slicedBy === undefined ||
+      slicedBy.trim() === '' ||
+      rendersAsNothingAtExit(slicedBy)
+        ? {}
+        : { by: slicedBy }),
+    });
+  });
+  return out;
+}
+
+/**
+ * Two private-use characters absent from `haystack` — the placeholders the
+ * inline-Suggestions clause renders as (see the render site). Undefined
+ * when the text holds every private-use character, which no real body
+ * does; the variant is then simply not offered.
+ */
+function placeholderPair(
+  haystack: string,
+): { en: string; zh: string } | undefined {
+  const free: string[] = [];
+  for (let code = 0xe000; code <= 0xf8ff && free.length < 2; code++) {
+    const ch = String.fromCharCode(code);
+    if (!haystack.includes(ch)) free.push(ch);
+  }
+  return free.length === 2 ? { en: free[0]!, zh: free[1]! } : undefined;
+}
+
+/** The rendered body with each placeholder run replaced by the clause it stands for — a run the cut shortened by the clause's same-length prefix. */
+function restoreClause(
+  rendered: string,
+  sentinel: { en: string; zh: string },
+  clause: { en: string; zh: string },
+): string {
+  return rendered
+    .replace(new RegExp(`${sentinel.en}+`, 'g'), (run) =>
+      clause.en.slice(0, run.length),
+    )
+    .replace(new RegExp(`${sentinel.zh}+`, 'g'), (run) =>
+      clause.zh.slice(0, run.length),
+    );
+}
+
+/** The rendered body with each placeholder run removed along with the space that joined it to its neighbour (both spaces collapse to one). */
+function dropClause(
+  rendered: string,
+  sentinel: { en: string; zh: string },
+): string {
+  const drop = (text: string, ch: string): string =>
+    text.replace(new RegExp(`( ?)${ch}+( ?)`, 'g'), (_m, before, after) =>
+      before !== '' && after !== '' ? ' ' : '',
+    );
+  return drop(drop(rendered, sentinel.en), sentinel.zh);
 }
 
 function composeReviewBody(
@@ -3641,6 +4941,7 @@ function composeReviewBody(
     input.cannotTellCriticals,
     'cannotTellCriticals',
   );
+  const fixedFindings = ingestFixedFindings(input.fixedFindings);
   // The same gate in the same order: an entry the render leg would reduce
   // to nothing must fail the draft, not vanish — silently dropping it lifts
   // the `cannot-tell-existing-critical` cap and flips the verdict.
@@ -3994,12 +5295,19 @@ function composeReviewBody(
             'of still-stands, fixed, or superseded.',
         );
       }
-      if (stopRulings.has(d.id)) {
+      // The grant keys join the claim ids the readback canonicalizes, so
+      // they are canonical too — a disposition copied from a padded-id
+      // cache binds; two spellings of one id are a duplicate (#9940
+      // review, round 28).
+      const id = canonicalLedgerId(d.id);
+      if (stopRulings.has(id)) {
         throw new Error(
-          `stopReRule refused: duplicate disposition for ${d.id}.`,
+          `stopReRule refused: duplicate disposition for ${d.id}` +
+            (id === d.id ? '' : ` (${id})`) +
+            '.',
         );
       }
-      stopRulings.set(d.id, d.ruling as string);
+      stopRulings.set(id, d.ruling as string);
     }
     const ledgerSet = new Set(ledger.map((e) => e.id));
     for (const id of ledgerSet) {
@@ -4628,10 +5936,54 @@ function composeReviewBody(
     presubmitObj['downgradeRequestChanges'],
     'presubmit.downgradeRequestChanges',
   );
-  const downgradeReasons = toStringList(
+  // Display prose the model wrote, quoted like every other model-written
+  // line the body carries (`quotedProse`: comment grammar, marker lines
+  // and footer spans go inert — a `<!--` in a reason swallowed the rest
+  // of the body, a forged footer posted as attribution), then capped: a
+  // reason is a sentence, and one sixty thousand characters long pushed
+  // the body onto the truncation rung by itself (#9940 review, audit 3
+  // and 4). Cut by code point, with the cut disclosed.
+  // The LIST is capped as well as each entry: three hundred capped reasons
+  // pushed the body onto the truncation rung as surely as one long one
+  // (#9940 review, audit 5). Raw HTML openers go inert (`&lt;`): a cut
+  // that lands inside `<details>…</details>` leaves the element open over
+  // the rest of the body.
+  const cappedReasons = toStringList(
     presubmitObj['downgradeReasons'],
     'presubmit.downgradeReasons',
-  );
+  ).map((raw) => {
+    // One line of prose, like `by`: a line break in a reason put a fence
+    // or a `<!DOCTYPE` at a line start, and the block it opened ran over
+    // the footer and the ledger marker (#9940 review, audit 6).
+    const reason = quotedProse(raw.replace(/\s+/g, ' ').trim(), attribution);
+    const points = [...reason];
+    // The per-reason cap bounds the MODEL's text, before any escape
+    // lengthens it (#9940 review, audit 7).
+    return points.length <= DOWNGRADE_REASON_MAX_CHARS
+      ? reason
+      : `${points.slice(0, DOWNGRADE_REASON_MAX_CHARS).join('').trimEnd()}…`;
+  });
+  // The total budget is charged against the string that actually POSTS —
+  // the joined run, escaped once over the join (backtick runs pair across
+  // the `; `, so escaping fragment by fragment both misses openers and
+  // mis-prices them). Charging the fragments instead let the join's own
+  // `&lt;` expansion run 41% past the budget the accounting believed it
+  // had spent (#9940 review, round 30 reverse audit).
+  const downgradeReasons: string[] = [];
+  for (const reason of cappedReasons) {
+    const next = [...downgradeReasons, reason];
+    if (
+      [...escapeTagOpeners(next.join('; '))].length >
+      DOWNGRADE_REASONS_TOTAL_MAX_CHARS
+    ) {
+      // Skipped, not `break`: one oversized reason used to drop every
+      // shorter one after it while the disclosure blamed the budget for
+      // all of them (#9940 review, round 30 reverse audit).
+      continue;
+    }
+    downgradeReasons.push(reason);
+  }
+  const reasonsLeftOut = cappedReasons.length - downgradeReasons.length;
   const modelId: unknown = input.modelId;
   let footer = '';
   if (attribution) {
@@ -5204,7 +6556,7 @@ function composeReviewBody(
     const zh = parts.map((p) => p.zh).join(sep);
     const text =
       bilingual && zh !== en
-        ? `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>`
+        ? `${en}${BILINGUAL_FOLD_OPEN}${zh}\n\n</details>`
         : en;
     return footer === '' ? text : `${text}\n\n${footer}`;
   };
@@ -5837,7 +7189,24 @@ function composeReviewBody(
   // together, until neither has work left (`quotedProse`).
   const bodyCriticalBlock: Bi[] = bodyCriticals
     .map((l) => {
-      const quoted = quotedProse(l, attribution);
+      // …and stops at raw HTML openers too: an entry is a top-level
+      // PARAGRAPH, so one unbalanced `<details>` in blocker prose — an
+      // ordinary sentence naming a tag without backticks — left the
+      // element open over every later paragraph and folded the remaining
+      // blockers, the disclosures and the footer into a collapsed
+      // triangle. Per entry is the right unit: a code span cannot cross
+      // the blank line between two entries, so the spans this computes
+      // are the spans that render (#9940 review, round 30).
+      //
+      // Every other channel that carries model prose is escaped the same
+      // way, at its own render unit: `formatCannotTell`'s list lines, the
+      // duplicate-drop list, and the `Not reviewed:` disclosure
+      // paragraphs. A list item bounds a `<details>` at its `</li>` but
+      // NOT a RAWTEXT element (`<textarea>`, `<style>`, `<script>`),
+      // whose content model runs to a matching close tag that never
+      // comes — measured swallowing the footer from all three channels
+      // (#9940 review, round 30 reverse audit).
+      const quoted = escapeTagOpeners(quotedProse(l, attribution));
       return attribution ? withMarker(quoted) : quoted;
     })
     .map((l) => ({ keep: 2, en: l, zh: l }));
@@ -5858,7 +7227,14 @@ function composeReviewBody(
   // overflow item names what the cap cut.
   const duplicatesShown = suggestionsDroppedAsDuplicates
     .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
-    .map((entry) => asListLine(boundDeferredLine(entry), pr));
+    .map((entry) =>
+      // After the wrap, not before: `escapeTagOpeners` reads code spans,
+      // so a line `boundDeferredLine` already wrapped keeps its `<`
+      // literal while an unwrapped one goes inert. A RAWTEXT opener here
+      // is not bounded by its `</li>` — it swallows the footer (#9940
+      // review, round 30 reverse audit).
+      escapeTagOpeners(asListLine(boundDeferredLine(entry), pr)),
+    );
   const duplicatesMore =
     suggestionsDroppedAsDuplicates.length - duplicatesShown.length;
   const duplicatesBlock: Bi[] =
@@ -6220,8 +7596,26 @@ function composeReviewBody(
   // which the verdict's own cap already carries, so trimming them costs
   // detail rather than the claim. (`notReviewedParts` itself stays untagged
   // — the length checks below ask about presence, not about rank.)
+  // Each part is its own PARAGRAPH of model-named subjects and reasons, so
+  // an unbalanced raw opener in one — `<details>`, or a RAWTEXT element
+  // like `<textarea>`/`<style>`/`<script>` whose content model swallows
+  // markup wholesale — left the element open over the blockers, the
+  // disclosures and the footer, exactly as it did for `bodyCriticals`
+  // before the escape moved there (#9940 review, round 30 reverse audit).
+  //
+  // FOLDED FIRST, the way `ingestEntryList` folds every sibling channel.
+  // These parts interpolate model-written names and reasons that reach
+  // them through `toStringList` and `stripCommentGrammar`, neither of
+  // which gates a newline — the ONE multi-line string this escape is ever
+  // handed, and the one every block-structure hole four review rounds
+  // found needed: an HTML block interrupting a paragraph, a fence, an
+  // indented block, a lazy continuation. A disclosure sentence has no use
+  // for a line break, and folding it leaves the escape the single-line
+  // problem it can actually decide (#9940 review, round 31 reverse audit).
   const notReviewedForBody: Bi[] = notReviewedParts.map((p) => ({
     ...p,
+    en: escapeTagOpeners(collapseEntry(p.en)),
+    zh: escapeTagOpeners(collapseEntry(p.zh)),
     trim: 2,
   }));
 
@@ -6306,6 +7700,7 @@ function composeReviewBody(
         // Two consecutive withholds — this round's decision read through the
         // marker's OWN predicate, and the recovered round's recorded anchor.
         anchorChainBroken:
+          !planIsFocusedNavigation(input.planPath) &&
           !convergence.prev.anchored &&
           (convergence.prev.round ?? 0) > 0 &&
           anchorFailsClosed(cappedBy, scopeUnproven, dimensionGapsAreDepthOnly),
@@ -6408,8 +7803,10 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
+      floorEnforcedEntries: reroute.entries,
       postedInline,
       postedFresh,
+      fixedFindings,
       ...(convergenceNote === undefined
         ? {}
         : { convergence: convergenceNote }),
@@ -6502,8 +7899,10 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
+      floorEnforcedEntries: reroute.entries,
       postedInline,
       postedFresh,
+      fixedFindings,
       ...(convergenceNote === undefined
         ? {}
         : { convergence: convergenceNote }),
@@ -6526,7 +7925,32 @@ function composeReviewBody(
 
   // 1. Downgrade sentence (only when a presubmit flag changed the event).
   if (downgraded && downgradedFrom) {
-    const reasons = downgradeReasons.join('; ');
+    // Disclosed only where the sentence renders — an event that stayed
+    // put shows no reasons, so none were "left out" (#9940 review, audit 6).
+    if (reasonsLeftOut > 0) {
+      remediation.push(
+        `downgrade reasons: ${reasonsLeftOut} of ${cappedReasons.length} ` +
+          `reason(s) did not fit the body's ` +
+          `${DOWNGRADE_REASONS_TOTAL_MAX_CHARS}-character budget for them ` +
+          `and were left out — read them in the presubmit report.`,
+      );
+    }
+    // Escaped over the JOIN, once: the reasons render as ONE paragraph and
+    // backtick runs pair across the `; `, so a reason that leaves an odd
+    // run re-pairs the next reason's opening backtick — a `<` a
+    // fragment-local escape reads as span-interior is then live in the
+    // posted body, and one `<details>` there folds every later paragraph
+    // (the blockers, the disclosures, the footer) away (#9940 review,
+    // round 30).
+    //
+    // The escape's unit is this join; the RENDER's unit is the paragraph
+    // it sits in. They agree only while the opener's other clauses carry
+    // no backtick — they are static, backtick-free strings today, and
+    // `unlicensedDeferralBlock` (the one opener-adjacent clause that has
+    // any) is pushed as its own paragraph, which a code span cannot
+    // cross. A clause added here WITH a backtick reopens the same hole
+    // one level up: escape the assembled paragraph instead.
+    const reasons = escapeTagOpeners(downgradeReasons.join('; '));
     const fromZh = downgradedFrom === 'Approve' ? '批准' : '请求修改';
     clauses.push({
       keep: 1,
@@ -6631,13 +8055,11 @@ function composeReviewBody(
   //    the discarded sentence says the opposite is the round-6 collision
   //    this module exists to kill. (`s` stays right for the event — see
   //    above.)
-  if (suggestionsInline > 0) {
-    clauses.push({
-      keep: 1,
-      en: 'Suggestions are inline.',
-      zh: '建议见行内评论。',
-    });
-  }
+  const inlineClause: Bi | undefined =
+    suggestionsInline > 0
+      ? { keep: 1, ...INLINE_SUGGESTIONS_CLAUSE }
+      : undefined;
+  if (inlineClause !== undefined) clauses.push(inlineClause);
   if (suggestionsDiscarded > 0) {
     // Self-contained: this lands in the posted body, and "see the terminal
     // output" pointed the PR author at a terminal only the operator has —
@@ -6741,8 +8163,8 @@ function composeReviewBody(
   }
 
   const openerParts = clauses.slice(0, openerCount);
-  const paragraphs: Bi[] = [
-    ...(openerParts.length > 0
+  const paragraphsWith = (opener: Bi[]): Bi[] => [
+    ...(opener.length > 0
       ? [
           {
             // The merge is a rendering detail; it must not launder away the
@@ -6752,27 +8174,63 @@ function composeReviewBody(
             // it to 3 made it the FIRST thing the tail cut spent. No `trim`
             // rank rides here: an opener clause never carries one, and
             // inheriting one would drop untagged text with it.
-            keep: openerParts.reduce(
+            keep: opener.reduce(
               (lowest, c) => Math.min(lowest, c.keep ?? 3),
               3,
             ),
-            en: openerParts.map((c) => c.en).join(' '),
-            zh: openerParts.map((c) => c.zh).join(' '),
+            en: opener.map((c) => c.en).join(' '),
+            zh: opener.map((c) => c.zh).join(' '),
           },
         ]
       : []),
     ...clauses.slice(openerCount),
   ];
-  const body = render(paragraphs, '\n\n');
   // Critical-only consumers use a body-leading marker. This must happen after
   // rendering because budget notices can otherwise precede the marked details.
-  const visibleBody =
+  const finish = (rendered: string): string =>
     attribution &&
     event === 'COMMENT' &&
     (bodyCriticalBlock.length > 0 || cannotTellBlock.length > 0) &&
-    !body.startsWith(CRITICAL_PREFIX)
-      ? `${CRITICAL_PREFIX} Blocking finding(s) follow.\n\n${body}`
-      : body;
+    !rendered.startsWith(CRITICAL_PREFIX)
+      ? `${CRITICAL_PREFIX} Blocking finding(s) follow.\n\n${rendered}`
+      : rendered;
+  // ONE render, two bodies. The inline-Suggestions clause renders as a run
+  // of a placeholder character of the clause's exact length (per
+  // language), so every budget decision — the fold, the trimmed ranks,
+  // the last-resort cut — is made once, on one string, and the two bodies
+  // differ by the clause alone. A second render of the shorter variant
+  // landed on a different rung at a knife-edge budget (the variant kept
+  // the fold or the deferral list the body dropped) while `bodyTrim`, the
+  // verdict line and `remediation` described the body — and pushed its
+  // trim disclosures twice (#9940 review, audit 4). The placeholder is a
+  // private-use character absent from every part and the footer; when
+  // none is free the variant is not offered.
+  const sentinel =
+    inlineClause !== undefined && openerParts.includes(inlineClause)
+      ? placeholderPair(
+          `${clauses.map((c) => `${c.en}${c.zh}`).join('')}${footer}`,
+        )
+      : undefined;
+  const renderParts =
+    sentinel === undefined
+      ? openerParts
+      : openerParts.map((c) =>
+          c === inlineClause
+            ? {
+                ...c,
+                en: sentinel.en.repeat(c.en.length),
+                zh: sentinel.zh.repeat(c.zh.length),
+              }
+            : c,
+        );
+  const rendered = render(paragraphsWith(renderParts), '\n\n');
+  const visibleBody = finish(
+    sentinel === undefined
+      ? rendered
+      : restoreClause(rendered, sentinel, inlineClause!),
+  );
+  const bodyWithoutInlineClause =
+    sentinel === undefined ? undefined : finish(dropClause(rendered, sentinel));
   return {
     event,
     body: visibleBody,
@@ -6783,8 +8241,13 @@ function composeReviewBody(
     remediation,
     deferredCount: deferredSuggestions.length,
     floorEnforced: reroute.indices,
+    floorEnforcedEntries: reroute.entries,
+    ...(bodyWithoutInlineClause === undefined
+      ? {}
+      : { bodyWithoutInlineClause }),
     postedInline,
     postedFresh,
+    fixedFindings,
     ...(convergenceNote === undefined ? {} : { convergence: convergenceNote }),
     ...(recommendations === undefined ? {} : { recommendations }),
     ...(healthNote === null || healthNote === undefined
@@ -7156,8 +8619,18 @@ export function scriptLintGate(planPath: string): {
   for (const file of report.checked ?? []) {
     for (const f of file.findings ?? []) {
       if (f.inDiff && f.level !== 'style') {
+        // Folded HERE. This channel joins `bodyCriticals` AFTER
+        // `ingestEntryList` ran, so it is the one entry channel the shared
+        // fold never sees — and `f.line` and `f.code` are interpolated
+        // raw out of a side file the review agent can rewrite, which
+        // `structurallyValidReport` only checks for plain-objectness. A
+        // fenced block in `f.code` reached the per-line escape as several
+        // lines and had its `<` rendered to the reader as a literal
+        // `&amp;lt;` (#9940 review, round 31 reverse audit).
         criticals.push(
-          `${mdField(file.path)}:${f.line} ${f.code} — ${mdField(f.message)} [lint]`,
+          collapseToLine(
+            `${mdField(file.path)}:${f.line} ${f.code} — ${mdField(f.message)} [lint]`,
+          ),
         );
       }
     }
@@ -7616,7 +9089,7 @@ export const composeReviewCommand: CommandModule = {
     // posting runs: a report-only round's volume is what the NEXT round's
     // trend is measured against.)
     writeStderrLine(
-      `VOLUME: ${result.postedInline} inline comment(s) this round` +
+      `VOLUME: ${result.postedInline} comment(s) this round` +
         ` (${result.postedFresh} reported for the first time)` +
         (result.prevPostedInline === undefined
           ? ''
@@ -7666,46 +9139,36 @@ export const composeReviewCommand: CommandModule = {
   },
 };
 
-// The `(fix-induced)` marking's grammar (`FIX_INDUCED_READBACK`) and the
-// claim-head tokeniser that reads it live in lib/inline-counts.ts; the
-// placement rules are documented there.
+/**
+ * A body Critical entry's claim — the id it leads with, when it leads with
+ * one, and the title past it. The entry strips through the same fixpoint
+ * chain the visible list uses — the ledger marker rides the posted body as
+ * an HTML comment, and the autofix grep reads the whole body, comments
+ * included. Leading render-nothing residue goes too, for the same reason as
+ * the drafted-comment leg: residue before a carried id would defeat the id
+ * anchor and silently renumber the finding. Stated once: the ledger builder
+ * carries the id this reads, and submit's contradiction gate refuses a
+ * `fixed` ruling on it through the same read (#9940 review).
+ */
+export function bodyCriticalClaim(
+  entry: unknown,
+): ReturnType<typeof readClaim> {
+  return readClaim(bodyEntryHead(typeof entry === 'string' ? entry : ''));
+}
 
 /**
- * The id a claim line carries, whether that id fronts a NEW defect, and the
- * claim itself with both stripped.
- *
- * `fixInduced` is the answer to a question the id alone cannot settle. Step 6
- * re-reports two different things under a previous entry's id: a finding that
- * STILL STANDS — the same claim, re-asserted — and a fix-induced defect, which
- * is new work wearing the id of the entry whose fix produced it. The volume
- * trend counts comments posted for the first time, and reading the id alone
- * called both of them re-posts, so the trend's baseline fell on exactly the
- * churning pull requests where new work was not falling at all.
- *
- * Module-level rather than a closure inside the ledger builder, because the
- * builder is no longer its only consumer: the convergence diagnosis reads the
- * same id to tell a re-posted still-standing finding from fresh activity, and
- * a second restatement would let one end call a comment carried while the
- * other calls it new.
+ * A body-Critical entry's head as EVERY reader of the one-line channel
+ * takes it — the ledger builder's body leg and `bodyCriticalClaim` alike,
+ * stated once (#9940 review, round 28: two readers with two strips let the
+ * contradiction gate miss a re-post the same round's ledger recorded).
+ * The entry strips through the fixpoint chain the visible list uses, then
+ * loses its leading render-nothing residue: residue before a carried id
+ * would defeat the id anchor and silently renumber the finding. No
+ * indented-code rule applies here — the channel is ONE line rendered as a
+ * list item, where leading indentation is not a block.
  */
-function readClaim(rest: string): {
-  id?: string;
-  fixInduced: boolean;
-  title: string;
-} {
-  // ONE reader for the claim's head slot (#10291): the id, the
-  // `(fix-induced)` marking and the axis tags are tokenised wherever the
-  // model placed them in the slot — a source tag between the id and the
-  // marking included — and the title is what is left past the slot, the
-  // source tag kept as the finding's own text. A second derivation here
-  // (an anchored readback over the stripped line) once disagreed with the
-  // tokeniser on exactly that placement.
-  const head = readClaimHead(rest.split('\n')[0].trim());
-  return {
-    ...(head.id === undefined ? {} : { id: head.id }),
-    fixInduced: head.fixInduced,
-    title: head.claim,
-  };
+function bodyEntryHead(text: string): string {
+  return stripForUnattributedPost(text).replace(LEADING_INVISIBLE_RE, '');
 }
 
 /**
@@ -7714,9 +9177,11 @@ function readClaim(rest: string): {
  * lines removed, leading render-nothing residue gone. Residue or a forged
  * span between the marker and a carried id defeats the id anchor — the
  * ledger would silently renumber the finding, and the diagnosis would count
- * a re-post as new work. Stated once so the projections cannot diverge.
+ * a re-post as new work. Stated once so the projections cannot diverge:
+ * the submit's contradiction gate and the thread matcher both read carried
+ * ids through this same function (#9940 review).
  */
-function ledgerClaimLine(body: unknown): string {
+export function ledgerClaimLine(body: unknown): string {
   const claim = carriedClaimLine(typeof body === 'string' ? body : '');
   return claim === null
     ? ''
@@ -7851,8 +9316,22 @@ export function buildLedger(
    * this cannot be told apart, so the id is retained and continuity wins.
    */
   carriedWorkList?: { ids: ReadonlySet<string>; complete: boolean },
-): Ledger {
+): Ledger & {
+  draftedIds: Array<string | undefined>;
+  mintedIds: string[];
+} {
   const findings: LedgerFinding[] = [];
+  // The stamp `submit` applies before posting: index-aligned with
+  // `drafted`, undefined at unmarked slots. The ledger marker records the
+  // ids; the stamp makes the posted thread roots lead with them — the
+  // position the thread lifecycle matches (#9940 review).
+  const draftedIds: Array<string | undefined> = [];
+  // The ids minted FRESH this round — never the carried ones. A fixed
+  // ruling retires a previous round's entry, so a minted id colliding
+  // with one is the round-off-by-one the submit's contradiction gate
+  // polices: the ruling would resolve nothing on the PR while this same
+  // pass opens the id's thread as a standing defect (#9940 review).
+  const mintedIds: string[] = [];
   const taken = new Set<string>();
   let next = 0;
   /** Is this claimed id one the previous round actually recorded? */
@@ -7889,6 +9368,7 @@ export function buildLedger(
       id = `R${round}-${++next}`;
     } while (taken.has(id));
     taken.add(id);
+    mintedIds.push(id);
     return id;
   };
   /**
@@ -7904,7 +9384,7 @@ export function buildLedger(
   const locatable = (title: string, where: string): string =>
     title || `(comment carried no text — see the posted finding at ${where})`;
 
-  for (const c of drafted) {
+  drafted.forEach((c, i) => {
     // ONE severity predicate for the whole package. `severityOf` trims leading
     // whitespace before matching, and it is what `countInlineFindings` — the
     // count the verdict is computed from — and the unmarked-comment gate both
@@ -7912,7 +9392,7 @@ export function buildLedger(
     // Critical whose body opened with a newline was counted, was posted, and
     // was silently absent from the ledger, shifting every id after it.
     const sev = severityOf(c);
-    if (!sev) continue;
+    if (!sev) return;
     // `ledgerClaimLine` is the shared projection — `carriedClaimLine` (the ONE
     // readback statement, also used by presubmit's carried-id extractor) with
     // forged footer spans and leading render-nothing residue stripped off it.
@@ -7922,8 +9402,10 @@ export function buildLedger(
     const claimLine = ledgerClaimLine(c.body);
     const { id: carried, title } = readClaim(claimLine);
     const file = typeof c.path === 'string' ? c.path : LEDGER_UNKNOWN_FILE;
+    const id = idFor(carried);
+    draftedIds[i] = id;
     findings.push({
-      id: idFor(carried),
+      id,
       sev: sev === 'critical' ? 'C' : 'S',
       // The axes ride as fields and leave the title (#10291): the next
       // round's routing reads them off the side file, and the title's job
@@ -7950,7 +9432,7 @@ export function buildLedger(
         `${file}${typeof c.line === 'number' ? `:${c.line}` : ''}`,
       ),
     });
-  }
+  });
   for (const entry of bodyCriticals) {
     const b = typeof entry === 'string' ? entry : entry.text;
     // The title strips through the same fixpoint chain the visible list
@@ -7959,7 +9441,7 @@ export function buildLedger(
     // Leading render-nothing residue goes too, for the same reason as the
     // drafted-comment leg: residue between the marker and a carried id
     // would defeat the id anchor and silently renumber the finding.
-    const head = stripForUnattributedPost(b).replace(LEADING_INVISIBLE_RE, '');
+    const head = bodyEntryHead(b);
     const { id: carried, title } = readClaim(head);
     findings.push({
       id: idFor(carried),
@@ -7981,7 +9463,7 @@ export function buildLedger(
       title: locatable(quotedProse(title, false), 'the review body'),
     });
   }
-  return { v: 1, round, findings };
+  return { v: 1, round, findings, draftedIds, mintedIds };
 }
 
 /** The terminal verdict, in the words Step 6 is told to print. */

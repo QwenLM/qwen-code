@@ -116,6 +116,7 @@ export interface PermissionRequest {
   };
   content: ContentBlock[];
   options: PermissionOption[];
+  contentIsInput?: boolean;
   rawInput?: Record<string, unknown>;
   kind?: string;
 }

@@ -9,7 +9,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const listLiveSessions = vi.fn();
 const probePeerSocketVerdict = vi.fn();
 
-vi.mock('../services/session-registry.js', () => ({
+// Only the enumeration is stubbed; everything else this module reads from
+// the registry — how a `kind` reads back, above all — stays real, so a
+// projection test is checking the projection rather than a copy of it.
+vi.mock('../services/session-registry.js', async () => ({
+  ...(await vi.importActual<typeof import('../services/session-registry.js')>(
+    '../services/session-registry.js',
+  )),
   listLiveSessions: (...args: unknown[]) => listLiveSessions(...args),
 }));
 vi.mock('./uds-client.js', () => ({
@@ -106,9 +112,23 @@ describe('toPeerSessionInfo', () => {
       ref: peerRef('s1'),
       cwd: '/w/app',
       pid: 100,
+      kind: 'tui',
       ipcPath: '/tmp/s1.sock',
       startedAt: 1_000,
     });
+  });
+
+  it("carries the record's own kind, and reads a record without one as tui", () => {
+    expect(
+      toPeerSessionInfo(
+        record({ ipcPath: '/tmp/s1.sock', kind: 'serve' }) as never,
+      )?.kind,
+    ).toBe('serve');
+    // A record written before the field existed came from the interactive
+    // UI: nothing else registered then.
+    expect(
+      toPeerSessionInfo(record({ ipcPath: '/tmp/s1.sock' }) as never)?.kind,
+    ).toBe('tui');
   });
 });
 
@@ -265,6 +285,50 @@ describe('listMessageablePeers', () => {
 
     const peers = await listMessageablePeers();
     expect(peers.map((p) => p.sessionId)).toEqual(['s1']);
+  });
+
+  it('probes each inbox address once, not once per record', async () => {
+    // A process hosting several sessions advertises one inbox in every
+    // one of their records. Dialling per record would open a fistful of
+    // simultaneous connections to a single socket on every listing and
+    // every send, from every session on the machine — and the answer is
+    // a property of the address, so asking twice cannot differ.
+    listLiveSessions.mockResolvedValue([
+      record({ sessionId: 'a', cwd: '/w/a', ipcPath: '/tmp/hosted.sock' }),
+      record({ sessionId: 'b', cwd: '/w/b', ipcPath: '/tmp/hosted.sock' }),
+      record({ sessionId: 'c', cwd: '/w/c', ipcPath: '/tmp/hosted.sock' }),
+      record({ sessionId: 'd', cwd: '/w/d', ipcPath: '/tmp/other.sock' }),
+    ]);
+    probePeerSocketVerdict.mockResolvedValue('alive');
+
+    const peers = await listMessageablePeers();
+
+    expect(probePeerSocketVerdict).toHaveBeenCalledTimes(2);
+    expect(
+      probePeerSocketVerdict.mock.calls.map(([path]) => path).sort(),
+    ).toEqual(['/tmp/hosted.sock', '/tmp/other.sock']);
+    // Every record behind the one answer is still advertised.
+    expect(peers.map((peer) => peer.sessionId).sort()).toEqual([
+      'a',
+      'b',
+      'c',
+      'd',
+    ]);
+  });
+
+  it('drops every record behind an address that does not answer', async () => {
+    listLiveSessions.mockResolvedValue([
+      record({ sessionId: 'a', cwd: '/w/a', ipcPath: '/tmp/hosted.sock' }),
+      record({ sessionId: 'b', cwd: '/w/b', ipcPath: '/tmp/hosted.sock' }),
+      record({ sessionId: 'd', cwd: '/w/d', ipcPath: '/tmp/other.sock' }),
+    ]);
+    probePeerSocketVerdict.mockImplementation(async (path: string) =>
+      path === '/tmp/other.sock' ? 'alive' : 'dead',
+    );
+
+    expect(
+      (await listMessageablePeers()).map((peer) => peer.sessionId),
+    ).toEqual(['d']);
   });
 
   it('probes concurrently rather than one at a time', async () => {

@@ -248,6 +248,7 @@ async function main() {
       ['subSessionConstants', 'tools/sub-session-constants.ts'], ['toolWriteOrigin', 'services/tool-write-origin.ts'],
       ['userPromptSubmitContext', 'hooks/user-prompt-submit-context.ts'], ['noFollowOpen', 'utils/no-follow-open.ts'],
       ['conversationsRuntimeMarker', 'utils/conversations-runtime-marker.ts'],
+      ['subagentRuntime', 'subagent-runtime.ts'],
       ['storage', 'config/storage.ts'], ['atomicFileWrite', 'utils/atomicFileWrite.ts'],
       ['debugLogger', 'utils/debugLogger.ts'],
     ]);

@@ -5,7 +5,6 @@
  */
 
 import type { ConversationWorkspace } from './conversation-workspace.js';
-import type { ConversationRuntimeOwnership } from './conversation-runtime-ownership.js';
 import {
   ConversationRuntimeOwnershipError,
   conversationRootCompromisedError,
@@ -22,7 +21,7 @@ export type ConversationRuntimeQuarantineReason =
   | 'missing_mandatory_lease_attestation';
 
 export interface ConversationRuntimeManagerOptions {
-  ownership: ConversationRuntimeOwnership;
+  checkLegacyOwner: () => Promise<void>;
   workspace: Pick<ConversationWorkspace, 'revalidate' | 'assertExactRoot'>;
   registry: WorkspaceRegistry;
   publishRuntime: (
@@ -112,7 +111,7 @@ export class ConversationRuntimeManager {
 
   private async ensureOnce(): Promise<WorkspaceRuntime> {
     this.assertNotTerminal();
-    await this.options.ownership.acquire();
+    if (!this.runtime) await this.options.checkLegacyOwner();
     this.assertNotTerminal();
     const root = await this.revalidateRoot();
     this.assertNotTerminal();

@@ -24,6 +24,7 @@ import type {
   DaemonUserMessage,
 } from './messageTypes.js';
 import {
+  isActiveToolStatus,
   isSubAgentToolCall,
   projectTerminalBackgroundAgentTool,
 } from './toolClassification.js';
@@ -393,6 +394,7 @@ export function transcriptBlocksToDaemonMessages(
   // Subagent-owned assistant/thought/tool blocks are expected to carry
   // parentToolCallId; unparented blocks are rendered as top-level transcript.
   const toolsByCallId = new Map<string, DaemonMessageToolCall>();
+  const serverStartTimes = new Map<string, number>();
   const permissionToolInfoByCallId = new Map<string, PermissionToolInfo>();
   const backgroundAgentTaskUpdates = collectBackgroundAgentTaskUpdates(blocks);
   let currentAssistantIdx: number | null = null;
@@ -708,12 +710,8 @@ export function transcriptBlocksToDaemonMessages(
           backgroundAgentUpdate?.endTime,
           safeToolProjection,
         );
-        const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
-        if (permissionInfo?.title) {
-          toolCall.title = permissionInfo.title;
-        }
-        if (!toolCall.args && permissionInfo?.args) {
-          toolCall.args = permissionInfo.args;
+        if (toolBlock.serverTimestamp !== undefined) {
+          serverStartTimes.set(toolCall.callId, toolBlock.serverTimestamp);
         }
         const parentSubAgent = toolCall.parentToolCallId
           ? toolsByCallId.get(toolCall.parentToolCallId)
@@ -829,6 +827,15 @@ export function transcriptBlocksToDaemonMessages(
           safeToolProjection,
         );
         if (!permissionToolCall) break;
+        if (
+          permBlock.serverTimestamp !== undefined &&
+          !serverStartTimes.has(permissionToolCall.callId)
+        ) {
+          serverStartTimes.set(
+            permissionToolCall.callId,
+            permBlock.serverTimestamp,
+          );
+        }
         const isSubAgentPermission = isSubAgentToolCall(permissionToolCall);
         // Pending permissions are rendered by the dedicated permission UI.
         if (!permBlock.resolved) {
@@ -1011,6 +1018,9 @@ export function transcriptBlocksToDaemonMessages(
           content: promptCancelledText,
           variant: 'info',
           source: 'prompt_cancelled',
+          ...(block.elapsedMs !== undefined
+            ? { data: { elapsedMs: block.elapsedMs } }
+            : {}),
           timestamp: blockTime,
           sourceBlockIds: [block.id],
         });
@@ -1019,6 +1029,21 @@ export function transcriptBlocksToDaemonMessages(
 
       default:
         break;
+    }
+  }
+
+  for (const tool of toolsByCallId.values()) {
+    const permissionInfo = permissionToolInfoByCallId.get(tool.callId);
+    if (permissionInfo?.title) tool.title = permissionInfo.title;
+    if (!Array.isArray(tool.args?.questions) && permissionInfo?.args) {
+      tool.args = permissionInfo.args;
+    }
+    if (
+      isSubAgentToolCall(tool) &&
+      isActiveToolStatus(tool.status) &&
+      tool.endTime === undefined
+    ) {
+      tool.startTime = serverStartTimes.get(tool.callId) ?? tool.startTime;
     }
   }
 
@@ -1181,6 +1206,10 @@ function mergeToolCall(
     target.args = source.args ?? target.args;
   }
   target.executionMode = source.executionMode ?? target.executionMode;
+  target.subagentSessionReady =
+    target.subagentSessionReady === true
+      ? true
+      : (source.subagentSessionReady ?? target.subagentSessionReady);
   target.locations = source.locations ?? target.locations;
 }
 
@@ -1272,6 +1301,7 @@ function daemonToolBlockToToolCall(
     executionMode: isTaskExecutionMode(executionMode)
       ? executionMode
       : undefined,
+    subagentSessionReady: block.subagentSessionReady,
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
     endTime:
@@ -1464,6 +1494,13 @@ function daemonToolResultPreviewToOutput(
   preview: DaemonToolTranscriptBlock['resultPreview'],
 ): unknown {
   if (!preview) return undefined;
+  if (preview.kind === 'question_answers') {
+    return {
+      type: 'ask_user_question_answers',
+      text: preview.text,
+      answers: preview.answers,
+    };
+  }
   if (preview.kind === 'text') return preview.text;
   if (preview.kind === 'generic') return preview.summary;
   return {
@@ -1720,7 +1757,7 @@ function extractJsonObject(text: string, start: number): string | null {
   return null;
 }
 
-function splitInsightSegments(text: string): InsightSegment[] | null {
+export function splitInsightSegments(text: string): InsightSegment[] | null {
   const segments: InsightSegment[] = [];
   let lastIndex = 0;
   let pos = 0;

@@ -23,7 +23,12 @@ import {
 } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { CommandModule } from 'yargs';
-import type { ComposeReviewResult, ReviewEvent } from './compose-review.js';
+import {
+  ingestFixedFindings,
+  type ComposeReviewResult,
+  type FixedFinding,
+  type ReviewEvent,
+} from './compose-review.js';
 import {
   buildReport,
   type FindingsReport,
@@ -44,7 +49,21 @@ import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 interface PersistedVerdict
   extends Omit<
     ComposeReviewResult,
-    'postedInline' | 'postedFresh' | 'prevPostedInline'
+    | 'postedInline'
+    | 'postedFresh'
+    | 'prevPostedInline'
+    | 'fixedFindings'
+    // Submit-time stamp inputs, live-only: the validator neither reads
+    // nor writes them, so carrying them here would advertise fields no
+    // artifact contains (the `prevPostedInline` precedent).
+    | 'draftedIds'
+    | 'mintedIds'
+    // Submit-time gate input, live-only for the same reason: the
+    // contradiction gate consumes the reroute entries in the same pass
+    // that composed them, and the indices already persist.
+    | 'floorEnforcedEntries'
+    // The clause-less body variant is the same live-only input.
+    | 'bodyWithoutInlineClause'
   > {
   verdictLine: string;
   /**
@@ -79,6 +98,13 @@ interface PersistedVerdict
    * a round that recorded no fresh count is not a round that produced none.
    */
   postedFresh?: number;
+  /**
+   * Optional for the same reason as its siblings: an artifact written
+   * before the thread lifecycle shipped carries no fixed rulings. Absence
+   * is preserved rather than defaulted to `[]` — "no rulings recorded" is
+   * not "recorded: none".
+   */
+  fixedFindings?: FixedFinding[];
 }
 
 export interface ReviewArtifactV1 {
@@ -471,6 +497,22 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.postedFresh must be a non-negative integer.',
     );
   }
+  // Absent reads as "not recorded", like the sibling counts: a composed
+  // file written before the thread lifecycle shipped carries no rulings.
+  // A PRESENT value goes through the compose boundary's own shape table —
+  // one acceptance for the field, here and at compose time.
+  const rawFixed = verdict['fixedFindings'];
+  let fixedFindings: FixedFinding[] | undefined;
+  if (rawFixed !== undefined && rawFixed !== null) {
+    try {
+      fixedFindings = ingestFixedFindings(rawFixed);
+    } catch {
+      throw new Error(
+        'Composed verdict.fixedFindings must be an array of ' +
+          '`{"id": "R<round>-<n>", "by": "<what fixed it>"}` rulings.',
+      );
+    }
+  }
   // Absent reads as "no trim", the same absence semantics the sibling count
   // gets: a composed file written before the body budget shipped carries no
   // `bodyTrim`, and a mid-upgrade save must not fail over a record of
@@ -522,6 +564,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
     floorEnforced: floorEnforced as number[],
     ...(postedInline === undefined ? {} : { postedInline }),
     ...(postedFresh === undefined ? {} : { postedFresh }),
+    ...(fixedFindings === undefined ? {} : { fixedFindings }),
     ...(convergence === undefined ? {} : { convergence }),
     ...(recommendations === undefined ? {} : { recommendations }),
     ...(health === undefined ? {} : { health }),

@@ -15,7 +15,11 @@ import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import { ToolNames } from '../tool-names.js';
-import { type Config, ApprovalMode } from '../../config/config.js';
+import {
+  Config,
+  ApprovalMode,
+  deriveApprovalModeConfig,
+} from '../../config/config.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
@@ -216,6 +220,7 @@ describe('AgentTool', () => {
       isAgentTeamEnabled: vi.fn().mockReturnValue(false),
       isTodoWriteEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      getSessionApprovalMode: Config.prototype.getSessionApprovalMode,
       getSessionWorkflowPlanRevision: vi.fn().mockReturnValue(undefined),
       getModel: vi.fn().mockReturnValue('parent-model'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -393,6 +398,22 @@ describe('AgentTool', () => {
       expect(tool.description).toContain("Don't peek");
       expect(tool.description).toContain("Don't race");
       expect(tool.description).toContain('Writing a fork prompt');
+    });
+
+    it('states the background-agent discipline outside the fork section', async () => {
+      const tool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).toContain('## Working with background agents');
+      expect(tool.description).toContain("Don't relaunch");
+      // The rules are stated once for every background agent; the fork
+      // section defers to them instead of carrying a fork-scoped copy.
+      expect(tool.description).toContain(
+        'The background-agent rules above apply to background forks unchanged.',
+      );
+      expect(tool.description).not.toContain(
+        'For a background fork, do not read or tail its output',
+      );
     });
 
     it('advertises background execution as the default with a foreground opt-out', async () => {
@@ -5290,6 +5311,30 @@ describe('AgentTool', () => {
       );
     });
 
+    it('reports a blocking Stop hook without rerunning a one-shot executor', async () => {
+      Object.assign(mockAgent, {
+        continuationBlockedReason: 'Codex agents are one-shot.',
+      });
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue({
+        isBlockingDecision: () => true,
+        shouldStopExecution: () => false,
+        getEffectiveReason: () => 'Continue working',
+      } as never);
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Inspect files',
+        prompt: 'Inspect',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      const result = await invocation.execute();
+      expect(mockAgent.execute).toHaveBeenCalledTimes(1);
+      expect(partToString(result.llmContent)).toContain(
+        'Codex agents are one-shot.',
+      );
+    });
+
     it('should re-execute subagent when stop hook returns blocking decision', async () => {
       const mockBlockOutput = {
         isBlockingDecision: vi
@@ -6073,6 +6118,273 @@ describe('AgentTool', () => {
       });
     });
 
+    it.each([true, false])(
+      'omits parent attribution and unknown usage for external agents (background=%s)',
+      async (background) => {
+        const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...bgSubagent,
+          executor: { kind: 'acp', command: 'claude' },
+        });
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'External task',
+          prompt: 'Do the task',
+          subagent_type: 'monitor',
+          run_in_background: background,
+        });
+        const result = await invocation.execute();
+        expect(partToString(result.llmContent)).toContain(
+          background ? 'Background agent launched' : 'Monitor done',
+        );
+        const meta = writeMetaSpy.mock.calls.at(-1)?.[1];
+        expect(meta?.executor).toBe('acp');
+        expect(meta?.persistedCliFlags).toBeUndefined();
+        expect(meta?.model).toBeUndefined();
+        expect(
+          (result.returnDisplay as AgentResultDisplay).executionSummary,
+        ).toBeUndefined();
+        if (background) {
+          await vi.waitFor(() =>
+            expect(mockRegistry.complete).toHaveBeenCalled(),
+          );
+          expect(mockRegistry.complete.mock.calls[0]?.[2]).toBeUndefined();
+          expect(mockRegistry.complete.mock.calls[0]?.[1]).toContain(
+            'token usage and cost are unavailable',
+          );
+          expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
+            undefined,
+            null,
+          );
+          const resident = mockRegistry.registerResidentAgent.mock
+            .calls[0]?.[1] as {
+            continue: (message: string) => boolean;
+          };
+          expect(resident.continue('Continue externally')).toBe(true);
+          await vi.waitFor(() =>
+            expect(mockAgent.execute).toHaveBeenCalledTimes(2),
+          );
+          expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(
+            1,
+          );
+        }
+      },
+    );
+
+    it.each([
+      ['codex', ApprovalMode.DEFAULT, undefined, ApprovalMode.DEFAULT],
+      ['codex', ApprovalMode.AUTO, undefined, ApprovalMode.AUTO],
+      ['codex', ApprovalMode.DEFAULT, 'auto', ApprovalMode.AUTO],
+      ['codex', ApprovalMode.PLAN, 'auto', ApprovalMode.AUTO],
+      ['acp', ApprovalMode.DEFAULT, 'auto', ApprovalMode.AUTO],
+      [undefined, ApprovalMode.DEFAULT, 'auto', ApprovalMode.AUTO],
+      [undefined, ApprovalMode.AUTO, undefined, ApprovalMode.AUTO],
+      ['codex', ApprovalMode.PLAN, undefined, ApprovalMode.PLAN],
+      ['codex', ApprovalMode.AUTO_EDIT, undefined, ApprovalMode.AUTO_EDIT],
+      ['codex', ApprovalMode.YOLO, undefined, ApprovalMode.YOLO],
+      ['codex', ApprovalMode.DEFAULT, 'auto-edit', ApprovalMode.AUTO_EDIT],
+      ['codex', ApprovalMode.AUTO, 'auto-edit', ApprovalMode.AUTO_EDIT],
+      ['codex', ApprovalMode.AUTO, 'yolo', ApprovalMode.YOLO],
+      ['codex', ApprovalMode.AUTO, 'default', ApprovalMode.DEFAULT],
+      ['codex', ApprovalMode.YOLO, 'default', ApprovalMode.YOLO],
+      ['acp', ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO_EDIT],
+      [undefined, ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO_EDIT],
+    ] as const)(
+      'resolves %s parent=%s override=%s to %s at the child runtime',
+      async (kind, parentMode, approvalMode, expectedMode) => {
+        const strip = vi.fn();
+        const restore = vi.fn();
+        Object.assign(config, {
+          getPermissionManager: () => ({
+            stripDangerousRulesForAutoMode: strip,
+            restoreDangerousRules: restore,
+          }),
+        });
+        vi.mocked(config.getApprovalMode).mockReturnValue(parentMode);
+        Object.assign(config, { getPrePlanMode: () => ApprovalMode.DEFAULT });
+        vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...bgSubagent,
+          approvalMode,
+          executor: kind ? { kind, command: kind } : undefined,
+        });
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({
+            description: 'Permission test',
+            prompt: 'Inspect',
+            subagent_type: 'monitor',
+            run_in_background: false,
+          })
+          .execute();
+        expect(partToString(result.llmContent)).toContain('Monitor done');
+        const childConfig = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0]?.[1];
+        expect(childConfig?.getApprovalMode()).toBe(expectedMode);
+        const autoOverrideCount =
+          !kind &&
+          parentMode !== ApprovalMode.AUTO &&
+          expectedMode === ApprovalMode.AUTO
+            ? 1
+            : 0;
+        expect(strip).toHaveBeenCalledTimes(autoOverrideCount);
+        expect(restore).toHaveBeenCalledTimes(autoOverrideCount);
+      },
+    );
+
+    it.each([
+      [
+        ApprovalMode.DEFAULT,
+        ApprovalMode.AUTO_EDIT,
+        undefined,
+        ApprovalMode.DEFAULT,
+      ],
+      [
+        ApprovalMode.DEFAULT,
+        ApprovalMode.YOLO,
+        undefined,
+        ApprovalMode.DEFAULT,
+      ],
+      [ApprovalMode.AUTO, ApprovalMode.AUTO_EDIT, undefined, ApprovalMode.AUTO],
+      [ApprovalMode.YOLO, ApprovalMode.AUTO_EDIT, undefined, ApprovalMode.YOLO],
+      [
+        ApprovalMode.DEFAULT,
+        ApprovalMode.AUTO_EDIT,
+        'auto-edit',
+        ApprovalMode.AUTO_EDIT,
+      ],
+    ] as const)(
+      'keeps nested Codex inside session=%s despite intermediate=%s (override=%s)',
+      async (sessionMode, intermediateMode, approvalMode, expectedMode) => {
+        vi.mocked(config.getApprovalMode).mockReturnValue(sessionMode);
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...bgSubagent,
+          approvalMode,
+          executor: { kind: 'codex', command: 'codex' },
+        });
+        const intermediate = deriveApprovalModeConfig(config, intermediateMode);
+        try {
+          const nestedTool = new AgentTool(intermediate.config);
+          const result = await (nestedTool as AgentToolWithProtectedMethods)
+            .createInvocation({
+              description: 'Nested permission test',
+              prompt: 'Inspect',
+              subagent_type: 'monitor',
+              run_in_background: false,
+            })
+            .execute();
+          expect(partToString(result.llmContent)).toContain('Monitor done');
+          const childConfig = vi.mocked(mockSubagentManager.createAgentHeadless)
+            .mock.calls[0]?.[1];
+          expect(childConfig?.getApprovalMode()).toBe(expectedMode);
+        } finally {
+          intermediate.cleanup();
+        }
+      },
+    );
+
+    it.each([true, false, undefined])(
+      'keeps one-shot tasks out of messaging and resident continuation (background=%s)',
+      async (background) => {
+        Object.assign(mockAgent, {
+          continuationBlockedReason: 'Codex agents are one-shot.',
+        });
+        const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...bgSubagent,
+          background: false,
+          executor: { kind: 'codex', command: 'codex' },
+        });
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({
+            description: 'Codex task',
+            prompt: 'Inspect',
+            subagent_type: 'monitor',
+            run_in_background: background,
+          })
+          .execute();
+        await vi.waitFor(() => expect(mockSubagentDispose).toHaveBeenCalled());
+        expect(mockRegistry.register.mock.calls[0]?.[0]).toMatchObject({
+          resumeBlockedReason: 'Codex agents are one-shot.',
+        });
+        expect(mockRegistry.registerResidentAgent).not.toHaveBeenCalled();
+        expect(mockAgent.setExternalMessageProvider).not.toHaveBeenCalled();
+        expect(mockAgent.setExternalMessageWaiter).not.toHaveBeenCalled();
+        expect(writeMetaSpy.mock.calls.at(-1)?.[1]).toMatchObject({
+          executor: 'codex',
+        });
+        expect(partToString(result.llmContent)).toContain(
+          background ? 'Background agent launched' : 'Monitor done',
+        );
+        if (background) {
+          expect(partToString(result.llmContent)).toContain(
+            'Codex agents are one-shot.',
+          );
+          expect(partToString(result.llmContent)).not.toContain(
+            `Use ${ToolNames.SEND_MESSAGE} to continue`,
+          );
+          await vi.waitFor(() =>
+            expect(mockRegistry.complete).toHaveBeenCalled(),
+          );
+          const completionText = mockRegistry.complete.mock.calls[0]?.[1];
+          expect(completionText).toContain('Monitor done');
+          expect(completionText).toContain(
+            'token usage and cost are unavailable',
+          );
+          expect(completionText).not.toContain('next turn boundary');
+        }
+      },
+    );
+
+    it('publishes the real failure reason, not just the usage notice, for a background external agent that produced no text', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        executor: { kind: 'acp', command: 'claude' },
+      });
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.TIMEOUT,
+      );
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'External task',
+        prompt: 'Do the task',
+        subagent_type: 'monitor',
+        run_in_background: true,
+      });
+      await invocation.execute();
+      await vi.waitFor(() => expect(mockRegistry.fail).toHaveBeenCalled());
+      const failureMessage = mockRegistry.fail.mock.calls[0]?.[1] as string;
+      // The notice must be appended AFTER the fallback, never in place of it.
+      expect(failureMessage).toContain('Agent terminated with mode: TIMEOUT');
+      expect(failureMessage).toContain('token usage and cost are unavailable');
+    });
+
+    it('surfaces that mid-turn input is unavailable for a background external agent (R3-6)', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        executor: { kind: 'acp', command: 'claude' },
+      });
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'External task',
+        prompt: 'Do the task',
+        subagent_type: 'monitor',
+        run_in_background: true,
+      });
+      await invocation.execute();
+      await vi.waitFor(() => expect(mockRegistry.complete).toHaveBeenCalled());
+      const completionText = mockRegistry.complete.mock.calls[0]?.[1] as string;
+      // ACP v1 has no mid-turn injection primitive, so a steer sent while a turn
+      // is running reaches the peer only at the next turn boundary. The result
+      // must say so, not present a queued steer as delivered mid-turn. Dropping
+      // EXTERNAL_MID_TURN_INPUT_NOTICE turns the second assertion red.
+      expect(completionText).toContain('token usage and cost are unavailable');
+      expect(completionText).toContain('next turn boundary');
+    });
+
     it('should run in background when agent definition has background: true', async () => {
       const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
       const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
@@ -6087,7 +6399,13 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       const updates: AgentResultDisplay[] = [];
       const result = await invocation.execute(undefined, (output) => {
-        updates.push(output as AgentResultDisplay);
+        const display = output as AgentResultDisplay;
+        if (display.subagentSessionReady) {
+          expect(mockRegistry.register).toHaveBeenCalled();
+          expect(attachSpy).toHaveBeenCalled();
+          expect(writeMetaSpy).toHaveBeenCalled();
+        }
+        updates.push(display);
       });
 
       const llmText = partToString(result.llmContent);
@@ -6099,6 +6417,16 @@ describe('AgentTool', () => {
       expect(llmText).toContain(`or ${ToolNames.TASK_STOP} to cancel.`);
       expect(llmText).not.toContain('with to:');
       expect(llmText).not.toContain('Use send_message with task_id:');
+      // The result must not invite the parent to poll the transcript: the
+      // completion notification is the only supported way to read a result.
+      expect(llmText).not.toContain('check progress');
+      expect(llmText).not.toContain('tail on the output file');
+      expect(llmText).toContain('<task-notification>');
+      expect(llmText).toContain(
+        'Do not treat the agent as cancelled or relaunch it',
+      );
+      // The path is still reported, for review once the agent is done.
+      expect(llmText).toContain('output_file:');
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({
           description: 'Start monitor',
@@ -6128,7 +6456,14 @@ describe('AgentTool', () => {
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('background');
       expect(display.executionMode).toBe('background');
+      expect(
+        (result.returnDisplay as AgentResultDisplay).subagentSessionReady,
+      ).toBe(true);
+      expect(
+        updates.some((update) => update.subagentSessionReady === true),
+      ).toBe(true);
       expect(updates[0]).toMatchObject({
+        subagentSessionReady: false,
         status: 'running',
         executionMode: 'background',
       });
@@ -6671,6 +7006,8 @@ describe('AgentTool', () => {
     });
 
     it('runs in the foreground when run_in_background is false', async () => {
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation({
@@ -6681,14 +7018,27 @@ describe('AgentTool', () => {
       });
       const updates: AgentResultDisplay[] = [];
       const result = await invocation.execute(undefined, (output) => {
-        updates.push(output as AgentResultDisplay);
+        const display = output as AgentResultDisplay;
+        if (display.subagentSessionReady) {
+          expect(mockRegistry.register).toHaveBeenCalled();
+          expect(attachSpy).toHaveBeenCalled();
+          expect(writeMetaSpy).toHaveBeenCalled();
+        }
+        updates.push(display);
       });
 
       expect(partToString(result.llmContent)).toBe('Monitor done');
       expect((result.returnDisplay as AgentResultDisplay).executionMode).toBe(
         'foreground',
       );
+      expect(
+        (result.returnDisplay as AgentResultDisplay).subagentSessionReady,
+      ).toBe(true);
+      expect(
+        updates.some((update) => update.subagentSessionReady === true),
+      ).toBe(true);
       expect(updates[0]).toMatchObject({
+        subagentSessionReady: false,
         status: 'running',
         executionMode: 'foreground',
       });
@@ -6822,6 +7172,9 @@ describe('AgentTool', () => {
         expect((result.returnDisplay as AgentResultDisplay).status).toBe(
           'failed',
         );
+        expect(
+          (result.returnDisplay as AgentResultDisplay).subagentSessionReady,
+        ).toBe(false);
         expect(attachSpy).not.toHaveBeenCalled();
         expect(mockAgent.execute).not.toHaveBeenCalled();
         expect(mockRegistry.complete).not.toHaveBeenCalled();

@@ -18,6 +18,7 @@ import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { getRenderableGradientColors } from '../utils/gradientUtils.js';
 import { pickAsciiArtTier } from '../utils/customBanner.js';
 import { t } from '../../i18n/index.js';
+import { formatVersionLabel } from '../../utils/version.js';
 
 /**
  * Auth display type for the Header component.
@@ -50,16 +51,6 @@ function formatAuthDisplayType(
     default:
       return authDisplayType;
   }
-}
-
-/**
- * Format the version for display. Real semver releases get a "v" prefix
- * ("v0.19.4"); a non-semver fallback such as "unknown" (from getCliVersion when
- * the package version can't be resolved) is shown as-is so we never render a
- * bogus "vunknown".
- */
-function formatVersionLabel(version: string): string {
-  return /^\d/.test(version) ? `v${version}` : version;
 }
 
 interface HeaderProps {

@@ -35,11 +35,44 @@
   overflow-y: hidden;
 }
 
+.floatingWorkflow > :not(.planContent):not(.workflow) {
+  flex-shrink: 0;
+}
+
 .workflow {
   flex: 1 1 auto;
   min-height: 0;
   margin-top: 12px;
   overflow-y: auto;
+}
+
+.explainRow {
+  margin: 16px 0 0 24px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.explainButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+}
+
+.explainButton:hover,
+.explainButton:focus-visible {
+  color: var(--primary);
+}
+
+.explainButton svg {
+  width: 14px;
+  height: 14px;
 }
 
 .header {
@@ -118,6 +151,7 @@
 
 .planContent {
   display: block;
+  min-height: 0;
   max-height: min(240px, 25vh);
   -webkit-line-clamp: unset;
 }

@@ -1417,6 +1417,8 @@ describe('SessionWriterLease', () => {
           'stage=acquire errorKind=session_writer_unavailable',
         );
         expect(log).toContain(`lockPath=${JSON.stringify(lockPath)}`);
+        expect(log).toContain('it does not prove that a writer is still alive');
+        expect(log).toContain('docs/users/conversations-recovery.md');
         expect(log).toContain(
           'cause=Error: Existing session writer lock is malformed',
         );

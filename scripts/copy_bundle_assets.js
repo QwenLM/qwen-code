@@ -292,6 +292,36 @@ function stampReviewSourceDigest(root, distDir) {
 }
 
 /**
+ * Whether this host's Node.js links against musl rather than glibc. The
+ * report header only carries `glibcVersionRuntime` on a glibc runtime.
+ */
+function hostUsesMusl() {
+  if (process.platform !== 'linux') return false;
+  try {
+    return !process.report?.getReport?.()?.header?.glibcVersionRuntime;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether an `@opentui/core-*` package holds a native library this host
+ * cannot load: the Linux packages ship one library per libc, and npm
+ * installs both flavors on a glibc host because only `libc` (not `os`/`cpu`)
+ * separates them.
+ *
+ * Shipping the foreign one is not merely dead weight. Both are ELF files, so
+ * AppImage packaging walks them with `ldd` while deploying dependencies; the
+ * musl library needs `libc.so`, which no glibc system resolves, so `ldd`
+ * exits non-zero and aborts linuxdeploy. That is what broke the Linux job of
+ * desktop release 0.2.3-preview.0, which bundles this dist tree verbatim.
+ */
+function isForeignLibcPackage(entry, musl = hostUsesMusl()) {
+  if (!entry.startsWith('core-linux-')) return false;
+  return entry.endsWith('-musl') !== musl;
+}
+
+/**
  * OpenTUI renderer runtime assets (tree-sitter grammars, the parser worker,
  * `web-tree-sitter` runtime and the native render library) relocated next to
  * the bundle.
@@ -314,7 +344,11 @@ function stampReviewSourceDigest(root, distDir) {
  * callers/tests can assert on it. Never fails the bundle: a missing
  * @opentui/core (e.g. an install without the renderer) only warns.
  */
-export function copyOpenTuiAssets({ root = defaultRoot, distDir } = {}) {
+export function copyOpenTuiAssets({
+  root = defaultRoot,
+  distDir,
+  musl = hostUsesMusl(),
+} = {}) {
   distDir ??= join(root, 'dist');
   const destRoot = join(distDir, 'opentui-assets');
   // Start from a clean tree: the runtime gate below checks key existence
@@ -402,17 +436,19 @@ export function copyOpenTuiAssets({ root = defaultRoot, distDir } = {}) {
   }
 
   // 4. Native render libraries for every installed @opentui platform package
-  //    (core-darwin-arm64, core-linux-x64-musl, …). The runtime only needs
-  //    the current platform's, but shipping the installed set keeps the
-  //    completeness check satisfiable wherever the bundle runs next. The
-  //    platform packages live beside @opentui/core or hoisted at the repo
-  //    root; scan both scope directories.
+  //    (core-darwin-arm64, core-win32-x64, …), minus the Linux packages built
+  //    for the other libc (see isForeignLibcPackage). The runtime only needs
+  //    the current platform's, but shipping the rest of the installed set
+  //    keeps the completeness check satisfiable wherever the bundle runs
+  //    next. The platform packages live beside @opentui/core or hoisted at
+  //    the repo root; scan both scope directories.
   const scopeDirs = [dirname(coreDir), join(root, 'node_modules', '@opentui')];
   const seenPackages = new Set();
   for (const scopeDir of scopeDirs) {
     if (!existsSync(scopeDir)) continue;
     for (const entry of fs.readdirSync(scopeDir)) {
       if (!entry.startsWith('core-') || seenPackages.has(entry)) continue;
+      if (isForeignLibcPackage(entry, musl)) continue;
       const packageDir = join(scopeDir, entry);
       if (!statSync(packageDir).isDirectory()) continue;
       let copiedFromPackage = false;
@@ -574,15 +610,34 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     'dist',
     'export-transcript-document.js',
   );
-  if (existsSync(exportTranscriptRenderer)) {
+  const exportTranscriptCss = join(
+    root,
+    'packages',
+    'web-templates',
+    'src',
+    'export-html',
+    'dist',
+    'export-transcript-document.css',
+  );
+  if (existsSync(exportTranscriptRenderer) && existsSync(exportTranscriptCss)) {
     copyFileSync(
       exportTranscriptRenderer,
       join(distDir, 'export-transcript-document.js'),
     );
+    copyFileSync(
+      exportTranscriptCss,
+      join(distDir, 'export-transcript-document.css'),
+    );
     console.log('Copied HTML export renderer to dist/');
   } else {
+    const missingExportTranscriptAssets = [
+      exportTranscriptRenderer,
+      exportTranscriptCss,
+    ].filter((assetPath) => !existsSync(assetPath));
     console.warn(
-      'Warning: HTML export renderer not found; run a full `npm run build` before bundling.',
+      `Warning: HTML export renderer assets not found at ${missingExportTranscriptAssets.join(', ')}; ` +
+        'dist/ will carry no HTML export renderer. ' +
+        'Run a full `npm run build` before bundling to include it.',
     );
   }
 

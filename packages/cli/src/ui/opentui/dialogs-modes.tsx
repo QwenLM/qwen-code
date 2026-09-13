@@ -37,6 +37,7 @@ import {
 } from '../commands/output-style-utils.js';
 import { toOriginalKey } from './key-map.js';
 import { C } from './theme.js';
+import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 function useEsc(onClose: () => void) {
   const renderer = useRenderer();
@@ -73,7 +74,7 @@ function RadioList({
       {items.map((it, i) => (
         <box key={it.key} flexDirection="row">
           <text fg={i === selected ? C.accent : C.dim}>
-            {i === selected ? '● ' : '○ '}
+            {i === selected ? '› ' : '  '}
           </text>
           <text
             fg={i === selected ? C.text : C.dim}
@@ -185,13 +186,14 @@ export function OpenTuiEffortDialog(props: {
   onClose: () => void;
 }) {
   const { config, settings, onClose } = props;
-  const tiers = REASONING_EFFORT_TIERS as ReasoningEffort[];
-  // Pre-select the live tier only when one is configured; an unset effort
-  // starts at the top (ink EffortDialog initialIndex parity).
+  const tiers = config
+    ? [...getReasoningEffortsForConfig(config)]
+    : (REASONING_EFFORT_TIERS as ReasoningEffort[]);
+  // Pre-select the live tier only when this model exposes it; an unset or
+  // out-of-range effort starts at the top (ink EffortDialog parity).
   const currentEffort = config?.getReasoningEffort?.();
-  const [sel, setSel] = useState(
-    currentEffort ? Math.max(0, tiers.indexOf(currentEffort)) : 0,
-  );
+  const configuredIndex = currentEffort ? tiers.indexOf(currentEffort) : -1;
+  const [sel, setSel] = useState(Math.max(0, configuredIndex));
   useEsc(onClose);
   const pick = () => {
     const effort = tiers[sel];
@@ -228,6 +230,11 @@ export function OpenTuiEffortDialog(props: {
         }
         onPick={pick}
       />
+      {currentEffort && configuredIndex === -1 ? (
+        <text fg={C.dim}>
+          {`${currentEffort} is not available for this model — using the model/provider default.`}
+        </text>
+      ) : null}
     </Shell>
   );
 }
@@ -295,7 +302,7 @@ export function OpenTuiOutputStyleDialog(props: {
   // The catalog is re-read on every open and skips a file it cannot parse, so
   // the active style can be absent from it (edited into an invalid state,
   // renamed, grown past the size cap, a dangling dotfiles symlink) while the
-  // session still runs it. Listing the live definition keeps the `●` marker
+  // session still runs it. Listing the live definition keeps the `›` marker
   // truthful; falling back to index 0 would mark `default` as active and one
   // Enter would persist it over the user's setting.
   const catalog =

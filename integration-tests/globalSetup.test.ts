@@ -12,11 +12,14 @@ import {
   readFile,
   readdir,
   rm,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { ACP_HOME_PREFIX } from './scratch-dir.js';
 
 // The env keys globalSetup's setup() writes, saved so a case can restore the
 // suite-wide values after re-importing the module and running its lifecycle.
@@ -139,6 +142,25 @@ describe('globalSetup hermetic qwen home', () => {
 
     await expect(teardown()).resolves.toBeUndefined();
     expect(existsSync(home!)).toBe(false);
+  });
+
+  it('sweeps a stale per-agent ACP home a torn-down run left behind', async () => {
+    // cli/acp-integration.test.ts gives each spawned agent its own QWEN_HOME
+    // directly under the OS temp dir, and a worker torn down mid-test never
+    // runs the cleanup that removes it. The home is reclaimed only while its
+    // prefix stays nested under the sweeper's — ACP_HOME_PREFIX is the exact
+    // string the creation site builds the name from.
+    const leakedHome = join(tmpRoot, `${ACP_HOME_PREFIX}leaked`);
+    await mkdir(leakedHome, { recursive: true });
+    const leakedAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await utimes(leakedHome, leakedAt, leakedAt);
+
+    const { setup, teardown } = await loadGlobalSetup();
+    await setup();
+
+    expect(existsSync(leakedHome)).toBe(false);
+
+    await teardown();
   });
 
   it('does not exit an all-green run red when the scratch home cannot be removed', async () => {

@@ -265,6 +265,15 @@ export interface HookInput {
   cwd: string;
   hook_event_name: string;
   timestamp: string;
+  /**
+   * Approval mode of the session. Tool and subagent events report the mode
+   * that applied to them instead.
+   */
+  permission_mode?: PermissionMode;
+  /** Present only when the event fires inside a subagent. */
+  agent_id?: string;
+  /** Prompt id of the model turn the event belongs to, when known. */
+  prompt_id?: string;
 }
 
 export type InstructionMemoryType = 'user' | 'project' | 'local' | 'extension';
@@ -776,6 +785,7 @@ export interface PostToolUseInput extends HookInput {
   tool_response: Record<string, unknown>;
   tool_use_id: string; // Unique identifier for this tool use instance (internal format, e.g., toolu_xxx)
   tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
+  duration_ms?: number; // Tool execution time in milliseconds, when execution started
 }
 
 /**
@@ -803,6 +813,7 @@ export interface PostToolUseFailureInput extends HookInput {
   tool_input: Record<string, unknown>;
   error: string; // Error message describing the failure
   is_interrupt?: boolean; // Whether the failure was caused by user interruption
+  duration_ms?: number; // Tool execution time in milliseconds, when execution started
 }
 
 /**

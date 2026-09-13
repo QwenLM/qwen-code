@@ -21,48 +21,93 @@ function loadComputerUseSkill() {
 }
 
 describe('bundled computer-use skill', () => {
-  it('uses the public typed SDK contract and requires fresh verification', () => {
+  it('preserves the Codex API-surface and workflow structure', () => {
+    const { body } = loadComputerUseSkill();
+
+    expect(body).toContain('## API surface');
+    expect(body).toContain('## Workflow');
+    expect(body).toContain('### 1. Initialize');
+    expect(body).toContain('### 2. Actions using app');
+    expect(body).not.toContain('## Essential API');
+    expect(body).not.toContain('## Observe and act');
+  });
+
+  it('maps the Codex action-batch workflow onto the typed SDK', () => {
     const { body } = loadComputerUseSkill();
 
     expect(body).toContain("import('@qwen-code/cua-sdk/computer-use')");
     expect(body).toContain('ComputerUse.create()');
-    expect(body).toContain('computer.actAndVerify');
-    expect(body).toContain('computer.verifyState');
-    expect(body).toContain('stableSamples: 2');
-    expect(body).toContain('globalThis.lastCuaOutcome');
-    expect(body).toContain('JSON.stringify(lastCuaOutcome)');
-    expect(body).toContain('error?.details');
-    expect(
-      body.match(/signal: ?nodeRepl\.signal/g)?.length,
-    ).toBeGreaterThanOrEqual(5);
-    expect(body).toContain('delivery evidence, not task completion');
-    expect(body).toContain('`unknown` and `stable:false` are not success');
-    expect(body).toContain('`effect`');
-    expect(body).toContain('`operation`');
-    expect(body).toContain('Do not use generic `callTool`');
+    expect(body).toContain('computer.listApps()');
+    expect(body).toContain('computer.listWindows({ pid: matches[0].pid })');
+    expect(body).toContain('computer.observeWindow(target)');
+    expect(body).toMatch(/After performing one or more UI actions/);
+    expect(body).toMatch(/Perform one or more actions, and then fetch/);
+    expect(body).toContain('hotkey:');
+    expect(body).toContain('modifiers?: string[]');
+    expect(body).not.toMatch(/after every action/i);
   });
 
-  it('keeps one revision cursor per surface and forceFull recovery one-shot', () => {
+  it('maps Codex diff guidance to automatic cursors and disableDiff', () => {
     const { body } = loadComputerUseSkill();
 
-    expect(body).toContain('`${target.pid}:${target.windowId}`');
-    expect(body).toContain('baseRevisionId: cuaRevisions.get(key)');
-    expect(body).toContain('same surface');
-    expect(body.match(/forceFull/g)).toHaveLength(1);
-    expect(body).toContain('one observation with `forceFull: true`');
-    expect(body).toContain('Do not make full observations the default');
+    expect(body).toMatch(/accessibility tree will be returned\s+as a diff/);
+    expect(body).toContain('Prefer this default diff output');
+    expect(body).toContain('disableDiff?: boolean');
+    expect(body).toContain('`disableDiff: true` only when');
+    expect(body.match(/disableDiff/g)).toHaveLength(2);
+    expect(body).toMatch(
+      /`state\.elements` remains the current full actionable/,
+    );
+    expect(body).not.toMatch(/full response replaces the previous token set/i);
+    expect(body).not.toMatch(/discard tokens from before/i);
+    expect(body).toContain('automation_id?: string');
+    expect(body).toMatch(
+      /disregard the text[\s\S]*get the full tree next time/,
+    );
+    expect(body).not.toMatch(/baseRevisionId|revisionId|cuaRevisions/);
+    expect(body).not.toContain('forceFull');
   });
 
-  it('stays minimal, generic, and separate from Node REPL runtime guidance', () => {
+  it('exposes only real typed SDK names and screenshot data', () => {
     const { config, body } = loadComputerUseSkill();
 
     expect(config.name).toBe('computer-use');
-    expect(body.length).toBeLessThanOrEqual(6000);
+    expect(body).toContain('type ComputerUse =');
+    expect(body).toContain('elementToken: string');
+    expect(body).toContain('doubleClick:');
+    expect(body).toContain('rightClick:');
+    expect(body).toContain('modifier?: string[]');
+    expect(body).toContain('deliveryMode?: DeliveryMode');
+    expect(body).toContain('includeScreenshot?: boolean');
+    expect(body).toContain('image.dataBase64');
+    expect(body).toContain(
+      'Reset the Node REPL only when no other persistent state is needed.',
+    );
+    expect(body).not.toMatch(/sky\.|get_app_state|element_index/);
+    expect(body).not.toMatch(/computer\.(?:paste|selectText)/);
+    expect(body).not.toMatch(/verifyState|actAndVerify|callTool/);
+  });
+
+  it('keeps screenshot capture independent from full AX observations', () => {
+    const { body } = loadComputerUseSkill();
+    const screenshotSection = body.split('## Reading screenshots')[1];
+    const screenshotExample =
+      screenshotSection.match(/```js([\s\S]*?)```/)?.[1];
+
+    expect(screenshotSection).toContain(
+      '`includeScreenshot: true` is the parameter that requests a screenshot.',
+    );
+    expect(screenshotSection).not.toContain('disableDiff');
+    expect(screenshotExample).toContain('includeScreenshot: true');
+    expect(screenshotExample).not.toContain('disableDiff');
+    expect(screenshotExample).toContain('nodeRepl.write(state.text)');
+  });
+
+  it('stays generic and free of benchmark-specific policy', () => {
+    const { body } = loadComputerUseSkill();
+
     expect(body).not.toMatch(
       /RecreationBench|benchmark|evaluator|score|bcrypt|ovonote|failure count/i,
-    );
-    expect(body).not.toMatch(
-      /top-level (?:const|let|var)|lexical binding|cannot be redeclared|dynamic import/i,
     );
   });
 });

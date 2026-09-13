@@ -43,8 +43,10 @@ export interface ApiUserPromptOptions {
    * Matching is on the FULL generated placeholder shape, so a genuine prompt
    * that merely begins with the prefix keeps counting. A prompt whose entire
    * text equals a generated placeholder is indistinguishable from a cleared
-   * entry once serialized; resolving that collision is what prompt identity
-   * (`findApiHistoryPromptIndex`) is for.
+   * entry once serialized, and this classifier drops it — a known, still-open
+   * limitation, pinned as a loud rewind block by `historyMapping.test.ts`.
+   * Disambiguating it durably needs a structural sentinel on cleared parts;
+   * the prompt-identity anchoring tracked in #9437 is the intended fix.
    */
   excludeClearedMediaPlaceholders?: boolean;
 
@@ -112,6 +114,20 @@ export function isApiUserPrompt(
  * first turn keeps only the prelude. Returns -1 when the history holds fewer
  * user prompts than requested, e.g. the target turn was absorbed by chat
  * compression.
+ *
+ * Two CLI-side walks are not yet delegated here and are near-twins of this
+ * one, so a change to the walk semantics below — `includeCompressed`, a new
+ * structural entry kind to skip, the -1 convention — has to be re-applied to
+ * both or ink/OpenTUI rewind computes a different boundary than ACP for the
+ * same history:
+ *
+ * - `computeApiTruncationIndex` (`ui/utils/historyMapping.ts`) walks UI items
+ *   alongside the API history, so it cannot call this directly.
+ * - `rewindApiCutPoint` (`ui/opentui/session-rewind-model.ts`) is 1-based and
+ *   returns -1 for `occurrence <= 0`, where this function is 0-based and
+ *   returns `startIndex` for `turnIndex <= 0`. They agree on the first turn
+ *   only because nothing sits between the startup prelude and the first user
+ *   prompt today.
  */
 export function findApiRewindCutPoint(
   apiHistory: Content[],

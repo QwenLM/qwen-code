@@ -27,7 +27,12 @@ export function getLocalCommands(
       argumentHint: 'ui [en|zh-CN]',
       subcommands: ['ui'],
     },
-    { name: 'plan', description: t('local.plan'), argumentHint: '<prompt>' },
+    {
+      name: 'plan',
+      description: t('local.plan'),
+      argumentHint: '[on|off|exit|<prompt>]',
+      subcommands: ['on', 'off', 'exit'],
+    },
     {
       name: 'btw',
       description: t('local.btw'),

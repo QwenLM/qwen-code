@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { getSubagentDetailsUnavailableReason } from '../messages/toolFormatting';
 import { formatRuntime } from '../../utils/formatRuntime';
 import {
   buildSessionWorkflowProjection,
@@ -77,6 +78,10 @@ export function SessionWorkflowInspector({
       onSelectedTodoIdChange(effectiveSelectedTodoId);
     }
   }, [effectiveSelectedTodoId, onSelectedTodoIdChange, selectedTodoId]);
+
+  const openSubagentDetails = (tool: ACPToolCall) => {
+    if (!getSubagentDetailsUnavailableReason(tool)) onOpenSubagent(tool);
+  };
 
   if (todos.length === 0) {
     return (
@@ -197,7 +202,14 @@ export function SessionWorkflowInspector({
             return (
               <button
                 key={tool.callId}
-                onClick={() => onOpenSubagent(tool)}
+                aria-disabled={
+                  !!getSubagentDetailsUnavailableReason(tool) || undefined
+                }
+                title={t(
+                  getSubagentDetailsUnavailableReason(tool) ??
+                    'planExecution.openDetails',
+                )}
+                onClick={() => openSubagentDetails(tool)}
                 type="button"
               >
                 <span className={styles.itemText}>
@@ -391,7 +403,14 @@ export function SessionWorkflowInspector({
             return tool ? (
               <button
                 key={task.id}
-                onClick={() => onOpenSubagent(tool)}
+                aria-disabled={
+                  !!getSubagentDetailsUnavailableReason(tool) || undefined
+                }
+                title={t(
+                  getSubagentDetailsUnavailableReason(tool) ??
+                    'planExecution.openDetails',
+                )}
+                onClick={() => openSubagentDetails(tool)}
                 type="button"
               >
                 {content}

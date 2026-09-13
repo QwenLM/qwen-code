@@ -12,6 +12,14 @@ const listLiveSessions = vi.fn();
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   listLiveSessions: (...args: unknown[]) => listLiveSessions(...args),
+  // Stated rather than imported: this suite mocks the whole package to
+  // stay a fast command test, and pulling the real barrel in for one pure
+  // function would undo that. What the function *means* — an absent kind
+  // is the interactive UI, an unknown one is shown as written — is pinned
+  // where it lives, in the registry's own suite; here it only has to be
+  // something to lay out in a column.
+  describeSessionKind: (kind: string | undefined) =>
+    kind === undefined || kind.length === 0 ? 'tui' : kind,
 }));
 
 const stdout: string[] = [];
@@ -22,9 +30,8 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: (line: string) => stderr.push(line),
 }));
 
-const { psCommand, formatAge, NAME_COL, PID_COL, AGE_COL } = await import(
-  './ps.js'
-);
+const { psCommand, formatAge, NAME_COL, KIND_COL, PID_COL, AGE_COL } =
+  await import('./ps.js');
 
 function record(
   over: Partial<SessionRegistryRecord> = {},
@@ -85,7 +92,7 @@ describe('qwen sessions ps', () => {
     listLiveSessions.mockResolvedValue([record()]);
     await run({ json: false });
 
-    expect(stdout[0]).toMatch(/^NAME\s+PID\s+AGE\s+DIRECTORY$/);
+    expect(stdout[0]).toMatch(/^NAME\s+KIND\s+PID\s+AGE\s+DIRECTORY$/);
     expect(stdout[1]).toContain('app-ab');
     expect(stdout[1]).toContain('4242');
     expect(stdout[1]).toContain('/w/app');
@@ -98,7 +105,7 @@ describe('qwen sessions ps', () => {
     try {
       vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
       listLiveSessions.mockResolvedValue([
-        record({ startedAt: Date.now() - 5_000 }),
+        record({ startedAt: Date.now() - 5_000, kind: 'serve' }),
       ]);
       await run({ json: false });
     } finally {
@@ -107,25 +114,48 @@ describe('qwen sessions ps', () => {
 
     expect(stdout[0]).toBe(
       'NAME'.padEnd(NAME_COL) +
+        'KIND'.padEnd(KIND_COL) +
         'PID'.padEnd(PID_COL) +
         'AGE'.padEnd(AGE_COL) +
         'DIRECTORY',
     );
     expect(stdout[1]).toBe(
       'app-ab'.padEnd(NAME_COL) +
+        'serve'.padEnd(KIND_COL) +
         '4242'.padEnd(PID_COL) +
         '5s'.padEnd(AGE_COL) +
         '/w/app',
     );
-    expect([NAME_COL, PID_COL, AGE_COL]).toEqual([22, 9, 10]);
+    expect([NAME_COL, KIND_COL, PID_COL, AGE_COL]).toEqual([22, 10, 9, 10]);
   });
 
-  it('says so plainly when nothing else is running', async () => {
+  it('shows a record with no kind as the interactive UI', async () => {
+    listLiveSessions.mockResolvedValue([record()]);
+    await run({ json: false });
+    expect(stdout[1].slice(NAME_COL, NAME_COL + KIND_COL)).toBe(
+      'tui'.padEnd(KIND_COL),
+    );
+  });
+
+  it('truncates an over-long kind instead of shifting the columns after it', async () => {
+    // A newer build can write a kind up to sixteen characters, which is
+    // wider than this column: without the truncation the PID, AGE and
+    // DIRECTORY cells of that one row would all slide right.
+    listLiveSessions.mockResolvedValue([record({ kind: 'abcdefghijklmnop' })]);
+    await run({ json: false });
+    expect(stringWidth(stdout[1].slice(0, NAME_COL + KIND_COL))).toBe(
+      NAME_COL + KIND_COL,
+    );
+    expect(stdout[1]).toContain('abcdefg…');
+    expect(stdout[1].slice(NAME_COL + KIND_COL)).toBe(
+      '4242'.padEnd(PID_COL) + formatAge(90_000).padEnd(AGE_COL) + '/w/app',
+    );
+  });
+
+  it('says so plainly when nothing is registered', async () => {
     listLiveSessions.mockResolvedValue([]);
     await run({ json: false });
-    expect(stdout).toEqual([
-      'No other interactive Qwen Code sessions are running.',
-    ]);
+    expect(stdout).toEqual(['No Qwen Code sessions are registered right now.']);
   });
 
   it('emits one JSON object per line with no header', async () => {
@@ -152,6 +182,15 @@ describe('qwen sessions ps', () => {
 
     expect(stdout).toEqual([expected]);
     expect(stdout[0]).not.toContain('\n');
+  });
+
+  it('carries the kind into the JSON output, unfiltered', async () => {
+    // This is the surface an aggregator reads to tell a user's own
+    // terminals from sessions something else is driving, so the field has
+    // to survive the projection the token strip does.
+    listLiveSessions.mockResolvedValue([record({ kind: 'external' })]);
+    await run({ json: true });
+    expect(JSON.parse(stdout[0]).kind).toBe('external');
   });
 
   it('strips the inbox auth token from the JSON output', async () => {
@@ -248,6 +287,8 @@ describe('qwen sessions ps', () => {
     // Padding is measured in terminal cells, not code units: a 2-cell CJK
     // character must not push the PID column one cell right per character.
     const row = stdout[1];
-    expect(stringWidth(row.slice(0, row.indexOf('4242')))).toBe(22);
+    expect(stringWidth(row.slice(0, row.indexOf('4242')))).toBe(
+      NAME_COL + KIND_COL,
+    );
   });
 });
