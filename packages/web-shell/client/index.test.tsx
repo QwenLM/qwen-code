@@ -216,6 +216,8 @@ describe('WebShellWithProviders top-level boundary', () => {
     render(<WebShellWithProviders />);
     expect(sessionProviderProps[0]).toMatchObject({
       sessionId: undefined,
+      prefetchGitBranch: false,
+      prefetchSkills: false,
     });
     expect(sessionProviderProps[0]).not.toHaveProperty('deferSessionCreation');
   });

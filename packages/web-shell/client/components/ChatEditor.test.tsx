@@ -418,6 +418,10 @@ interface ChatEditorRenderProps {
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
   skills?: Array<{ name: string; description: string }>;
+  onSkillsOpenChange?: (open: boolean) => void;
+  skillsLoading?: boolean;
+  skillsLoadError?: boolean;
+  skillsLoaded?: boolean;
   reasoning?: DaemonReasoningControls;
   onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
 }
@@ -2320,6 +2324,75 @@ describe('ChatEditor toolbar popovers', () => {
 });
 
 describe('ChatEditor slash command popovers', () => {
+  it('keeps Skill status messages out of populated local command menus', () => {
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      from: 0,
+      to: 3,
+      query: 'th',
+      selectedIndex: 0,
+      items: [{ id: 'theme', label: '/theme', apply: '/theme ' }],
+    };
+    const container = renderChatEditor({ skillsLoading: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('/theme');
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).not.toContain('Loading skills...');
+    rerenderChatEditor(container, { skillsLoadError: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).not.toContain('Failed to load results');
+  });
+
+  it('requests Skills when slash suggestions open and shows loading and failure states', () => {
+    const onSkillsOpenChange = vi.fn();
+    const props = { onSkillsOpenChange, skillsLoading: true };
+    const container = renderChatEditor(props);
+    expect(onSkillsOpenChange).not.toHaveBeenCalledWith(true);
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      from: 0,
+      to: 7,
+      query: 'review',
+      selectedIndex: 0,
+      items: [],
+    };
+    rerenderChatEditor(container, props);
+    expect(onSkillsOpenChange).toHaveBeenLastCalledWith(true);
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('Loading...');
+    expect(
+      document
+        .querySelector('[data-web-shell-slash-menu]')
+        ?.getAttribute('role'),
+    ).toBeNull();
+    rerenderChatEditor(container, {
+      ...props,
+      skillsLoading: false,
+      skillsLoadError: true,
+    });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('Failed to load results');
+    rerenderChatEditor(container, { onSkillsOpenChange, skillsLoaded: false });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu] [role="status"]'),
+    ).toBeNull();
+    // A settled catalog renders no status row: the composed app closes an
+    // empty panel via allowEmptySlashMenu, so a "no results" arm would only
+    // ever flash for one frame.
+    rerenderChatEditor(container, { onSkillsOpenChange, skillsLoaded: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu] [role="status"]'),
+    ).toBeNull();
+    composerCoreState.slashMenu = null;
+    rerenderChatEditor(container, props);
+    expect(onSkillsOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('uses shadcn popovers for the command panel and hover detail', () => {
     composerCoreState.slashMenu = {
       kind: 'command',

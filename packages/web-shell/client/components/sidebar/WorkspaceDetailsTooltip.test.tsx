@@ -68,6 +68,38 @@ function facetRow(details: HTMLElement, item: string): HTMLElement | null {
 }
 
 describe('WorkspaceDetailsTooltip', () => {
+  it('reports opening, closing, and unmounting to its consumer', async () => {
+    const onOpenChange = vi.fn();
+    await openDetails(
+      <WorkspaceDetailsTooltip
+        label="workspace"
+        cwd="/workspace"
+        overview={undefined}
+        items={[]}
+        onOpenChange={onOpenChange}
+      >
+        <button>Workspace</button>
+      </WorkspaceDetailsTooltip>,
+    );
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+    await act(async () => {
+      container
+        .querySelector('button')!
+        .dispatchEvent(new MouseEvent('pointerout', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    await act(async () => {
+      container
+        .querySelector('button')!
+        .dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+    act(() => root.render(null));
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('shows the path, branch and non-zero facets on hover', async () => {
     const details = await openDetails(
       <WorkspaceDetailsTooltip

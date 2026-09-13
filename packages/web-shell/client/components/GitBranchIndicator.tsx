@@ -100,7 +100,7 @@ function badgeTone(s: DerivedStatus): BadgeTone | null {
 
 type TranslateFn = ReturnType<typeof useI18n>['t'];
 
-function statusPhrases(s: DerivedStatus, t: TranslateFn): string[] {
+export function gitStatusPhrases(s: DerivedStatus, t: TranslateFn): string[] {
   const phrases: string[] = [];
   if (s.operation) phrases.push(t(`git.operation.${s.operation}`));
   if (s.detached) phrases.push(t('git.detached'));
@@ -125,7 +125,7 @@ export function gitBranchAriaLabel(
   status: DaemonWorkspaceGitStatus | undefined,
   t: TranslateFn,
 ): string {
-  const phrases = statusPhrases(deriveStatus(status), t);
+  const phrases = gitStatusPhrases(deriveStatus(status), t);
   if (phrases.length > 0) {
     return `${t('git.currentBranch', { branch })} — ${phrases.join(', ')}`;
   }
@@ -225,7 +225,7 @@ export function GitBranchIndicator({
 
   // Localized state phrases drive both the accessible label and the tooltip,
   // so the two never drift apart.
-  const phrases = statusPhrases(s, t);
+  const phrases = gitStatusPhrases(s, t);
   const ariaLabel = gitBranchAriaLabel(branch, status, t);
 
   const chipClassName = `${styles.gitBranchChip} ${

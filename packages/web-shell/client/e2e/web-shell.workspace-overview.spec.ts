@@ -176,38 +176,6 @@ function overviewRequests(
     .map((request) => request.path.slice(prefix.length));
 }
 
-/**
- * Waits until `count()` reports the same value for a quiet window of real
- * time, then returns it. Startup fires several request bursts that the fake
- * clock cannot gate (the StrictMode double mount, the composer skill loader,
- * and one more facet round when the connection settles), so the polling
- * baseline must be taken after those bursts have landed.
- */
-async function waitForStableOverviewCount(
-  count: () => number,
-  quietWindowMs = 2_000,
-): Promise<number> {
-  const deadline = Date.now() + 15_000;
-  let last = count();
-  let quietSince = Date.now();
-  for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const now = Date.now();
-    const current = count();
-    if (current !== last) {
-      last = current;
-      quietSince = now;
-    } else if (now - quietSince >= quietWindowMs) {
-      return current;
-    }
-    if (now > deadline) {
-      throw new Error(
-        `overview request count never stabilised (last count: ${current})`,
-      );
-    }
-  }
-}
-
 test('shows workspace details on hover and no counts in the header', async ({
   page,
 }, testInfo) => {
@@ -285,9 +253,9 @@ test('shows workspace details on hover and no counts in the header', async ({
   await page.mouse.move(0, 0);
   await expect(secondaryDetails).toBeHidden();
 
-  // Every expanded workspace is asked for exactly the default facet set
-  // (hooks stay opt-in). The dev build runs effects twice under StrictMode,
-  // so count distinct facets rather than requests.
+  // Each opened details popover requests exactly the default facet set
+  // (hooks stay opt-in). The section owns the fetch and it is gated on open
+  // state, so one open is one round and raw request counts are exact.
   const facets = (cwd: string) =>
     [...new Set(overviewRequests(daemon, cwd))].sort();
   await expect
@@ -302,15 +270,21 @@ test('shows workspace details on hover and no counts in the header', async ({
   await page.waitForTimeout(1_500);
   expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(settled);
 
-  // Collapsing a row stops its facet fetch; the next open refetches.
+  // Expanding a row alone does not read facets; reopening its details does.
   const beforeCollapse = overviewRequests(daemon, SECONDARY_CWD).length;
   await secondaryHeader.click();
   await expect(secondaryHeader).toHaveAttribute('aria-expanded', 'false');
   await secondaryHeader.click();
   await expect(secondaryHeader).toHaveAttribute('aria-expanded', 'true');
+  await expect(secondaryDetails).toBeHidden();
+  await page.waitForTimeout(500);
+  expect(overviewRequests(daemon, SECONDARY_CWD)).toHaveLength(beforeCollapse);
+  await page.mouse.move(0, 0);
+  await secondaryHeader.hover();
+  await expect(secondaryDetails).toBeVisible();
   await expect
     .poll(() => overviewRequests(daemon, SECONDARY_CWD).length)
-    .toBeGreaterThan(beforeCollapse);
+    .toBe(beforeCollapse + 5);
   expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(settled);
 });
 
@@ -366,46 +340,87 @@ test('opens the workspace menu with management entries on the primary workspace 
   await expect(page.getByRole('region', { name: 'MCP Servers' })).toBeVisible();
 });
 
-test('polls an expanded workspace once per 30 s tick and not faster @smoke', async ({
+test('reads workspace metadata only while details or its menu are open @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createScenario();
   const daemon = await installScenario(page, scenario, testInfo);
-  // A fake clock lets the spec observe the 30 s cadence without waiting.
-  // Pausing it keeps startup (StrictMode double mount, the composer skill
-  // loader, any connection-settle re-fetch) from eating into the interval
-  // the assertions measure: every startup timer is pinned to one fake
-  // instant, and nothing fires until runFor below.
   await page.clock.install({ time: new Date('2026-01-01T00:00:00.000Z') });
   await page.clock.pauseAt(new Date('2026-01-01T01:00:00.000Z'));
   await gotoSession(page, scenario, daemon);
-  const facets = (cwd: string) =>
-    [...new Set(overviewRequests(daemon, cwd))].sort();
-  await expect
-    .poll(() => facets(PRIMARY_CWD))
-    .toEqual(['channels', 'extensions', 'mcp', 'memory', 'skills']);
-  // Let the real-time startup bursts land before counting.
-  await waitForStableOverviewCount(
-    () => overviewRequests(daemon, PRIMARY_CWD).length,
-  );
-  // Flush everything the paused startup scheduled below one cadence,
-  // including the first poll tick itself, so the baseline sits on a known
-  // interval phase.
-  await page.clock.runFor(30_500);
-  const settled = await waitForStableOverviewCount(
-    () => overviewRequests(daemon, PRIMARY_CWD).length,
-  );
+  const header = page.getByRole('complementary').getByRole('button', {
+    name: /^qwen-web-shell-e2e/,
+  });
+  const details = page.getByRole('dialog', { name: 'qwen-web-shell-e2e' });
+  const gitRequests = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'GET' &&
+        request.path === `/workspaces/${encodeURIComponent(PRIMARY_CWD)}/git`,
+    ).length;
 
-  // Just short of the next tick: no new facet requests.
+  await expect(header).toHaveAttribute('aria-expanded', 'true');
+  await page.clock.runFor(60_000);
+  await page.waitForTimeout(200);
+  expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(0);
+  expect(gitRequests()).toBe(0);
+
+  await header.hover();
+  await page.clock.runFor(300);
+  await expect(details).toBeVisible();
+  await expect.poll(() => overviewRequests(daemon, PRIMARY_CWD).length).toBe(5);
+  await expect.poll(gitRequests).toBe(1);
+  expect([...new Set(overviewRequests(daemon, PRIMARY_CWD))].sort()).toEqual([
+    'channels',
+    'extensions',
+    'mcp',
+    'memory',
+    'skills',
+  ]);
   await page.clock.runFor(29_000);
   await page.waitForTimeout(200);
-  expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(settled);
-
-  // Past the tick: exactly one more round of the default facets.
+  expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(5);
   await page.clock.runFor(2_000);
   await expect
     .poll(() => overviewRequests(daemon, PRIMARY_CWD).length)
-    .toBe(settled + 5);
+    .toBe(10);
+
+  await page.mouse.move(0, 0);
+  await page.clock.runFor(150);
+  await expect(details).toBeHidden();
+  await page.clock.runFor(60_000);
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.waitForTimeout(200);
+  expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(10);
+  expect(gitRequests()).toBe(1);
+
+  await header.hover();
+  await header
+    .locator('..')
+    .getByRole('button', { name: 'Workspace actions' })
+    .click();
+  const menu = page.getByRole('menu');
+  await expect(menu).toBeVisible();
+  await expect
+    .poll(() => overviewRequests(daemon, PRIMARY_CWD).length)
+    .toBe(15);
+  await expect.poll(gitRequests).toBe(2);
+  await page.clock.runFor(60_000);
+  await expect
+    .poll(() => overviewRequests(daemon, PRIMARY_CWD).length)
+    .toBe(25);
+  await expect.poll(gitRequests).toBe(3);
+
+  await page.keyboard.press('Escape');
+  await page.locator('[data-web-shell-composer-editor] .cm-content').click();
+  await page.clock.runFor(150);
+  await expect(menu).toBeHidden();
+  await expect(details).toBeHidden();
+  await page.clock.runFor(60_000);
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.waitForTimeout(200);
+  expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(25);
+  expect(gitRequests()).toBe(3);
 });
 
 test('opens the workspace folder and terminal locally when the daemon is loopback', async ({
