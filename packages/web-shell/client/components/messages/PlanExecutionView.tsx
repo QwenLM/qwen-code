@@ -1293,14 +1293,29 @@ export function PlanExecutionView({
                 // Agents, not bare executions: a nested subagent counts too,
                 // matching the rows this node renders and the inspector's
                 // Subagents list for the same step. The runtime above stays
-                // on roots, so nested time is not summed twice.
-                const agentCount = executions.reduce(
-                  (count, tool) =>
+                // on roots, so nested time is not summed twice. Count from
+                // the same two sources renderExecution draws the rows from —
+                // live child tasks from the task index plus transcript
+                // subTools, deduped by toolUseId exactly as the rows are —
+                // otherwise a live child task with no transcript entry
+                // renders a row the count never sees.
+                const agentCount = executions.reduce((count, tool) => {
+                  const liveNested = nestedTasksFromIndex(tool, taskIndex);
+                  const liveCallIds = new Set(
+                    liveNested.flatMap(({ task }) =>
+                      task.toolUseId ? [task.toolUseId] : [],
+                    ),
+                  );
+                  const transcriptOnly = nestedAgentToolsForTool(tool).filter(
+                    ({ tool: nested }) => !liveCallIds.has(nested.callId),
+                  );
+                  return (
                     count +
                     (isSubAgentToolCall(tool) ? 1 : 0) +
-                    nestedAgentToolsForTool(tool).length,
-                  0,
-                );
+                    liveNested.length +
+                    transcriptOnly.length
+                  );
+                }, 0);
                 // blockedBy is model-authored and can repeat an id — or name
                 // the todo itself. Dedup and drop self-references like the
                 // topology builder; ghost ids stay, because above the edge

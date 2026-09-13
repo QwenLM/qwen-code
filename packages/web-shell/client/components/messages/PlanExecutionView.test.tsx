@@ -586,10 +586,14 @@ describe('PlanExecutionView', () => {
     // the dependency chips, and the agent count and elapsed carry the "is
     // this alive" signal onto the face.
     expect(buildNode?.textContent).toContain('Build');
-    expect(buildNode?.textContent).toContain('1 agent');
+    // Root agent plus the live child task below (parentAgentId set, no
+    // transcript entry): the node renders two agent rows, so the face tally
+    // must read 2 — counting only transcript subTools is the R8-2 divergence.
+    expect(buildNode?.textContent).toContain('2 agents');
     expect(buildNode?.textContent).toContain('1m 5s');
-    // The singular branch above and the plural branch here are separate
-    // formatter paths; `1 agents` would ship green with only one of them.
+    // The plural branch is pinned above; `1 agents` would ship green without
+    // the negative assertion here. The singular branch is pinned in
+    // 'the node-face agent tally matches the rows it renders'.
     const researchNode = container
       .querySelector('[data-plan-node-id="research"]')
       ?.closest('article');
@@ -1834,6 +1838,62 @@ describe('PlanExecutionView', () => {
     // The same node renders both agent rows the tally names.
     expect(buildNode?.textContent).toContain('Agent build');
     expect(buildNode?.textContent).toContain('Nested agent');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('the node-face agent tally matches the rows it renders', () => {
+    // R8-2 witness: a live child task whose toolUseId matches no subTools
+    // callId renders a row (via toolForNestedTask) while the transcript-only
+    // tally never saw it — the node read "1 agent" beside two agent rows.
+    const rootTool: ACPToolCall = {
+      ...agentTool('build'),
+      subTools: [
+        {
+          callId: 'call-nested',
+          toolName: 'Agent',
+          title: 'Nested agent',
+          status: 'in_progress',
+        },
+      ],
+    };
+    const rootTask = task('running');
+    const liveChild = task('running', {
+      id: 'agent-live-child',
+      label: 'Live child',
+      toolUseId: 'call-live-child',
+      parentAgentId: rootTask.id,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={todos}
+            tools={[rootTool, agentTool('research')]}
+            tasks={[rootTask, liveChild]}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buildNode = container
+      .querySelector('[data-plan-node-id="build"]')
+      ?.closest('article');
+    // Three rows render: root, the transcript nested agent, and the live
+    // child — and the tally counts the same three.
+    expect(buildNode?.textContent).toContain('3 agents');
+    expect(buildNode?.textContent).toContain('Nested agent');
+    expect(buildNode?.textContent).toContain('Live child');
+    // The lone root on the research node keeps the singular path pinned.
+    const researchNode = container
+      .querySelector('[data-plan-node-id="research"]')
+      ?.closest('article');
+    expect(researchNode?.textContent).toContain('1 agent');
+    expect(researchNode?.textContent).not.toContain('1 agents');
 
     act(() => root.unmount());
     container.remove();
