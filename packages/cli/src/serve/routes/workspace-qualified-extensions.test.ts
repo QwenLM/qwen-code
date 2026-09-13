@@ -3592,6 +3592,78 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('supersedes a parked install registered in the same millisecond', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    // Both operations share one wall-clock stamp, so the sweep can only
+    // tell older from newer by registration order, not by createdAt.
+    vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockImplementation(async function (this: ExtensionManager, options) {
+      if (options.installMetadata.source === '@scope/older') {
+        await requestApiKey(this);
+      }
+      return {} as never;
+    });
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'demo' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    try {
+      const older = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/older',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+      expect(older.status).toBe(202);
+      await vi.waitFor(async () => {
+        const waiting = await auth(
+          request(h.app).get(
+            `/extensions/operations/${older.body.operationId}`,
+          ),
+        );
+        expect(waiting.body.status).toBe('waiting_for_input');
+      });
+
+      const newer = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/newer',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+      expect(newer.status).toBe(202);
+
+      await expect(
+        pollOperation(h.app, older.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'failed',
+        error: 'Extension installation cancelled by a new install request',
+      });
+      await expect(
+        pollOperation(h.app, newer.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('re-drives the runtime when a mutation receipt observes a reused generation', async () => {
     const h = await makeHarness();
     const extension = mockExtensionManager();

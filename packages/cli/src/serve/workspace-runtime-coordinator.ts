@@ -544,9 +544,22 @@ export class WorkspaceRuntimeCoordinator {
     const appliedEpochBefore = this.appliedExtensionRuntimeEpoch;
     let result: ServeWorkspaceExtensionsRefreshResult | undefined;
     try {
-      result = await this.queueExtensionsWork(() =>
-        this.prepareExtensionsRevision(revision, generation, options),
-      );
+      result = await this.queueExtensionsWork(async () => {
+        // A reconcile queued behind an in-flight prepare re-checks readiness
+        // at execution time: the prepare may have certified this generation
+        // while the reconcile waited, making a second physical apply moot.
+        const queued = this.status();
+        const queuedExtensions = queued.capabilities?.extensions;
+        if (
+          queuedExtensions?.state === 'ready' &&
+          queuedExtensions.runtimeEpoch === queued.runtimeEpoch &&
+          queuedExtensions.desiredGeneration === generation &&
+          queuedExtensions.appliedGeneration === generation
+        ) {
+          return undefined;
+        }
+        return this.prepareExtensionsRevision(revision, generation, options);
+      });
     } catch (error) {
       if (this.draining && !this.disposed) {
         this.deferExtensionsReconciliation(options);

@@ -266,6 +266,55 @@ describe('WorkspaceRuntimeCoordinator', () => {
     ).toHaveLength(1);
   });
 
+  it('re-checks readiness in the queue when a reconcile lands behind an in-flight prepare', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    let applyStarted!: () => void;
+    let releaseApply!: (result: ServeWorkspaceExtensionsRefreshResult) => void;
+    const started = new Promise<void>((resolve) => {
+      applyStarted = resolve;
+    });
+    harness.invokeWorkspaceCommand.mockImplementationOnce(
+      () =>
+        new Promise<ServeWorkspaceExtensionsRefreshResult>((resolve) => {
+          applyStarted();
+          releaseApply = resolve;
+        }),
+    );
+    coordinator.observeExtensionGeneration(1);
+    const ensured = coordinator.ensure({});
+    await started;
+    expect(coordinator.status().capabilities?.extensions?.state).toBe(
+      'starting',
+    );
+
+    // The prepare is still in flight, so the reconcile misses the pre-queue
+    // fast path and queues behind it; by the time the queued body runs, the
+    // prepare has certified the generation and must not be applied twice.
+    const reconciliation = coordinator.reconcileExtensionGeneration(1);
+    releaseApply({
+      sessionsRefreshed: 2,
+      sessionsFailed: 0,
+      configsRefreshed: 1,
+      configsFailed: 0,
+    });
+
+    await expect(reconciliation).resolves.toEqual({
+      state: 'reconciled',
+      refreshed: 0,
+      failed: 0,
+    });
+    await ensured;
+    expect(
+      harness.invokeWorkspaceCommand.mock.calls.filter(
+        (call) =>
+          (call as unknown[])[0] ===
+          'qwen/control/workspace/extensions/reconcile',
+      ),
+    ).toHaveLength(1);
+  });
+
   it.each([6, 0])(
     'adopts fresh backup recovery to generation %i',
     async (generation) => {

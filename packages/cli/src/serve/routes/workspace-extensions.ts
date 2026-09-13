@@ -610,14 +610,18 @@ export function registerWorkspaceExtensionRoutes(
       targetName === undefined
         ? 'Extension installation cancelled by a new install request'
         : 'Extension operation cancelled by a new update request';
-    const current = controller.getOperation(currentOperationId);
-    for (const operation of controller.getActiveOperations()) {
-      if (operation.operationId === currentOperationId) continue;
+    // getActiveOperations() yields registration order (the operation map is
+    // insertion-ordered and updates do not move keys), which — unlike a
+    // wall-clock createdAt — always breaks ties between two operations
+    // registered in the same millisecond.
+    const active = controller.getActiveOperations();
+    const currentIndex = active.findIndex(
+      (operation) => operation.operationId === currentOperationId,
+    );
+    for (const [index, operation] of active.entries()) {
       // An operation registered after this one runs its own sweep when it
       // prepares; this late-running sweep must not cancel that newer work.
-      if (current !== undefined && operation.createdAt >= current.createdAt) {
-        continue;
-      }
+      if (currentIndex !== -1 && index >= currentIndex) continue;
       if (targetName === undefined) {
         if (operation.operation !== 'install') continue;
       } else if (
