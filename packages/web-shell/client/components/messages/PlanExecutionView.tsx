@@ -62,6 +62,12 @@ const EMPTY_GRAPH_LAYOUT: PlanGraphLayout = {
 const EDGE_LANE_HEIGHT = 9;
 /** Corner radius where an orthogonal edge turns. */
 const EDGE_CORNER = 6;
+/**
+ * Widest horizontal shoulder a layer-spanning edge runs before turning down
+ * into its return lane. It is a ceiling, never a floor: a narrow gutter takes
+ * half of its own run instead. See the router for why.
+ */
+const EDGE_SHOULDER = 24;
 
 const MAX_RENDERED_PLAN_EDGES = 500;
 
@@ -791,6 +797,9 @@ export function PlanExecutionView({
           ? graphRect.height / graphElement.offsetHeight
           : 1;
       const measuredNodes = new Map<string, DOMRect>();
+      // Horizontal extent of every topological layer, so an edge that skips
+      // a layer can size its shoulders from the gutter it really crosses.
+      const layerBounds = new Map<number, { left: number; right: number }>();
       let maxNodeBottom = 0;
       for (const [todoId, node] of nodeRefs.current) {
         const rect = node.getBoundingClientRect();
@@ -805,6 +814,17 @@ export function PlanExecutionView({
         } as DOMRect;
         measuredNodes.set(todoId, normalizedRect);
         maxNodeBottom = Math.max(maxNodeBottom, normalizedRect.bottom);
+        const layer = layerByTodoRef.current.get(todoId) ?? 0;
+        const bounds = layerBounds.get(layer);
+        if (bounds) {
+          bounds.left = Math.min(bounds.left, normalizedRect.left);
+          bounds.right = Math.max(bounds.right, normalizedRect.right);
+        } else {
+          layerBounds.set(layer, {
+            left: normalizedRect.left,
+            right: normalizedRect.right,
+          });
+        }
       }
       const edges: PlanEdgePath[] = [];
       const spanning: Array<{
@@ -868,8 +888,40 @@ export function PlanExecutionView({
           maxNodeBottom + 14 + lane * EDGE_LANE_HEIGHT,
           Math.max(graphHeight - 6, maxNodeBottom + 14),
         );
-        const dropX = edge.startX + 24;
-        const riseX = edge.endX - 24;
+        // Shoulders derived from the gutter each side actually has, the same
+        // way the adjacent-layer edge already does it — not a fixed 24px. The
+        // ≤480px gutter is 18px, so a 24px shoulder left a 10px run and put
+        // the vertical segment inside the intervening lane: a dependency from
+        // step 3 to step 5 looked like it entered step 4, and the SVG paints
+        // under the nodes so the lane just vanished into it. Halving the run
+        // centres the segment in its own gutter. EDGE_SHOULDER still wins
+        // wherever the gutter can afford it (the 64px desktop tier has a 56px
+        // run), so wide lanes keep the exact curve they had.
+        const sourceLayer = layerByTodoRef.current.get(edge.from) ?? 0;
+        const targetLayer = layerByTodoRef.current.get(edge.to) ?? 0;
+        // An unmeasured neighbouring layer falls back to the full shoulder.
+        const nextLayerLeft =
+          layerBounds.get(sourceLayer + 1)?.left ?? Number.POSITIVE_INFINITY;
+        const prevLayerRight =
+          layerBounds.get(targetLayer - 1)?.right ?? Number.NEGATIVE_INFINITY;
+        const dropShoulder = Math.min(
+          EDGE_SHOULDER,
+          (nextLayerLeft - 4 - edge.startX) / 2,
+        );
+        const riseShoulder = Math.min(
+          EDGE_SHOULDER,
+          (edge.endX - prevLayerRight - 4) / 2,
+        );
+        // The corner has to fit inside both shoulders. At 18px the shoulder
+        // is 5, so the unhalved 6px radius left a zero-length final segment
+        // and the arrowhead lost its direction again.
+        const corner = Math.min(
+          EDGE_CORNER,
+          dropShoulder / 2,
+          riseShoulder / 2,
+        );
+        const dropX = edge.startX + dropShoulder;
+        const riseX = edge.endX - riseShoulder;
         const down = routeY > edge.startY ? 1 : -1;
         const up = edge.endY > routeY ? 1 : -1;
         edges.push({
@@ -877,14 +929,14 @@ export function PlanExecutionView({
           to: edge.to,
           d:
             `M ${edge.startX} ${edge.startY} ` +
-            `H ${dropX - EDGE_CORNER} ` +
-            `Q ${dropX} ${edge.startY} ${dropX} ${edge.startY + EDGE_CORNER * down} ` +
-            `V ${routeY - EDGE_CORNER * down} ` +
-            `Q ${dropX} ${routeY} ${dropX + EDGE_CORNER} ${routeY} ` +
-            `H ${riseX - EDGE_CORNER} ` +
-            `Q ${riseX} ${routeY} ${riseX} ${routeY + EDGE_CORNER * up} ` +
-            `V ${edge.endY - EDGE_CORNER * up} ` +
-            `Q ${riseX} ${edge.endY} ${riseX + EDGE_CORNER} ${edge.endY} ` +
+            `H ${dropX - corner} ` +
+            `Q ${dropX} ${edge.startY} ${dropX} ${edge.startY + corner * down} ` +
+            `V ${routeY - corner * down} ` +
+            `Q ${dropX} ${routeY} ${dropX + corner} ${routeY} ` +
+            `H ${riseX - corner} ` +
+            `Q ${riseX} ${routeY} ${riseX} ${routeY + corner * up} ` +
+            `V ${edge.endY - corner * up} ` +
+            `Q ${riseX} ${edge.endY} ${riseX + corner} ${edge.endY} ` +
             `H ${edge.endX}`,
         });
       });

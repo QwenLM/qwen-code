@@ -1511,6 +1511,121 @@ describe('PlanExecutionView', () => {
     }
   });
 
+  it('keeps a layer-skipping lane out of the step it passes', () => {
+    // The other half of R6-3. The router gave every layer-skipping edge a
+    // fixed 24px shoulder, which is wider than the ≤480px gutter (18px, a
+    // 10px run). At 390/430px the rise sat 10px inside the intervening step,
+    // so a dependency from step 1 to step 3 read as one into step 2 — and the
+    // SVG paints under the nodes, so the lane simply disappeared into it.
+    // Restoring `startX + 24` / `endX - 24` turns the 18px tier red.
+    const skip: TodoItem[] = [
+      { id: 'one', content: 'One', status: 'completed' },
+      { id: 'two', content: 'Two', status: 'pending', blockedBy: ['one'] },
+      {
+        id: 'three',
+        content: 'Three',
+        status: 'pending',
+        // The layer-skipping edge: `one` is layer 0, `three` is layer 2.
+        blockedBy: ['two', 'one'],
+      },
+    ];
+    // The lane width the 700px tier narrows to; only the gutter varies.
+    const lane = 168;
+    // gutter → 64px (≥721px), 32px (≤720px), 18px (≤480px).
+    for (const gap of [64, 32, 18]) {
+      const rect = (left: number, top: number, width: number, height: number) =>
+        ({
+          x: left,
+          y: top,
+          left,
+          top,
+          width,
+          height,
+          right: left + width,
+          bottom: top + height,
+          toJSON: () => ({}),
+        }) as DOMRect;
+      // One node per layer here, so the step the lane passes is all of layer 1.
+      const leftOf = (layer: number) => layer * (lane + gap);
+      const rectSpy = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockImplementation(function () {
+          if (this.parentElement?.hasAttribute('data-plan-workflow')) {
+            return rect(100, 50, 1100, 300);
+          }
+          if (this.tagName === 'ARTICLE') {
+            const id = this.querySelector('[data-plan-node-id]')!.getAttribute(
+              'data-plan-node-id',
+            )!;
+            const layer = id === 'one' ? 0 : id === 'two' ? 1 : 2;
+            return rect(100 + leftOf(layer), 60, lane, 80);
+          }
+          return rect(0, 0, 0, 0);
+        });
+      const widthSpy = vi
+        .spyOn(HTMLElement.prototype, 'offsetWidth', 'get')
+        .mockReturnValue(1100);
+      const heightSpy = vi
+        .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+        .mockReturnValue(300);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() => {
+          root.render(
+            <I18nProvider language="en">
+              <PlanExecutionView todos={skip} tools={[]} tasks={[]} />
+            </I18nProvider>,
+          );
+        });
+
+        const d = container
+          .querySelector('[data-from="one"][data-to="three"]')
+          ?.getAttribute('d');
+        expect(d, `${gap}px gutter drew no lane`).toBeTruthy();
+        // The route's four turns, as [control x, end x]: Q1/Q2 carry dropX,
+        // Q3/Q4 carry riseX. Those are the two vertical segments' columns.
+        const turns = [
+          ...d!.matchAll(/Q ([-\d.]+) [-\d.]+ ([-\d.]+) [-\d.]+/g),
+        ].map((match) => [Number(match[1]), Number(match[2])]);
+        expect(turns).toHaveLength(4);
+        const dropX = turns[0][0];
+        const riseX = turns[2][0];
+        const startX = lane + 4;
+        const endX = leftOf(2) - 4;
+        // The lane may only turn inside its own gutter, never inside layer 1.
+        expect(dropX, `${gap}px drop column`).toBeGreaterThan(startX);
+        expect(dropX, `${gap}px drop column`).toBeLessThan(leftOf(1));
+        expect(riseX, `${gap}px rise column`).toBeGreaterThan(leftOf(1) + lane);
+        expect(riseX, `${gap}px rise column`).toBeLessThan(endX);
+        // The corner is halved at 18px so the run into the arrowhead keeps a
+        // positive length; at zero the head flips back at its source.
+        expect(Number(/H ([-\d.]+)$/.exec(d!)![1])).toBe(endX);
+        expect(
+          endX - turns[3][1],
+          `${gap}px gutter end tangent x`,
+        ).toBeGreaterThan(0);
+
+        if (gap === 64) {
+          // A 64px gutter affords the full 24px shoulder on both sides, so
+          // desktop geometry is untouched. Pinned as a golden path because
+          // the requirement is byte-identical, not merely non-crossing.
+          expect(d).toBe(
+            'M 172 50 H 190 Q 196 50 196 56 V 98 Q 196 104 202 104 ' +
+              'H 430 Q 436 104 436 98 V 56 Q 436 50 442 50 H 460',
+          );
+        }
+      } finally {
+        act(() => root.unmount());
+        container.remove();
+        rectSpy.mockRestore();
+        widthSpy.mockRestore();
+        heightSpy.mockRestore();
+      }
+    }
+  });
+
   it('does not synchronously remeasure unchanged topology on task polling', () => {
     const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
     const container = document.createElement('div');
@@ -1894,6 +2009,61 @@ describe('PlanExecutionView', () => {
       ?.closest('article');
     expect(researchNode?.textContent).toContain('1 agent');
     expect(researchNode?.textContent).not.toContain('1 agents');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('counts an agent seen as both a live task and a transcript sub-tool once', () => {
+    // The tally counts the same deduped union the rows render from, so an
+    // agent observed through BOTH a live child task and a persisted subTools
+    // entry is one agent, not two. Dropping the `!liveCallIds.has(…)` filter
+    // reads "3 agents" beside two rows and turns this red (mutant M20).
+    const rootTool: ACPToolCall = {
+      ...agentTool('build'),
+      subTools: [
+        {
+          callId: 'call-nested',
+          toolName: 'Agent',
+          title: 'Nested agent',
+          status: 'in_progress',
+        },
+      ],
+    };
+    const rootTask = task('running');
+    // The live child carries the same toolUseId as the sub-tool above: one
+    // agent, two observations of it.
+    const liveChild = task('running', {
+      id: 'agent-live-child',
+      label: 'Nested agent',
+      toolUseId: 'call-nested',
+      parentAgentId: rootTask.id,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={todos}
+            tools={[rootTool]}
+            tasks={[rootTask, liveChild]}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buildNode = container
+      .querySelector('[data-plan-node-id="build"]')
+      ?.closest('article');
+    expect(buildNode?.textContent).toContain('2 agents');
+    // Root row plus one nested row: the tally and the rows agree because they
+    // dedup the same way.
+    expect(buildNode?.textContent).toContain('Nested agent');
+    expect(
+      buildNode?.querySelectorAll(`.${styles.nestedExecution}`),
+    ).toHaveLength(1);
 
     act(() => root.unmount());
     container.remove();
