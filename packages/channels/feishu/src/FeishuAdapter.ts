@@ -193,7 +193,7 @@ const MAX_RESOURCE_MARKERS = 4;
  * bracket-less. New marker templates must be added here when emitted.
  */
 const QUOTED_MARKER_LINE_RE =
-  /^[^\S\r\n]*\[?\/?(?:引用内容|引用附件|message_id=|Unavailable |Omitted |Quoted message |Attachments unavailable|\d+ more )[^\n]*$/gm;
+  /^[^\S\r\n]*\[?\/?(?:引用内容[^\]\n]*|引用附件 message_id=[A-Za-z0-9_.:-]+|message_id=[A-Za-z0-9_.:-]+|Unavailable \w+ resource:|Omitted \w+ resource:|Quoted message (?:unavailable|of type)|Attachments unavailable:|\d+ more (?:unavailable resources|resource references) omitted)[^\n]*$/gm;
 
 /** At-mention markup in quoted `md` text (shared grammar with the parser). */
 const MD_AT_TAG_G_RE = new RegExp(MD_AT_TAG_SOURCE, 'g');
