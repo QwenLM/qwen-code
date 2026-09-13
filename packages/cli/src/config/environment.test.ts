@@ -155,6 +155,45 @@ afterEach(() => {
 });
 
 describe('relaunch environment provenance', () => {
+  it('preserves ancestor-only values and provenance across child reloads', async () => {
+    vi.resetModules();
+    const parent = await import('./environment.js');
+    const ancestor = makeWorkspace();
+    const workspace = makeWorkspace();
+    fs.writeFileSync(path.join(ancestor, '.env'), 'RUNTIME_DOTENV=ancestor\n');
+    parent.loadEnvironment(
+      testSettings({ env: { RUNTIME_SETTINGS: 'ancestor-settings' } }),
+      ancestor,
+    );
+    vi.resetModules();
+    const child = await import('./environment.js');
+    fs.writeFileSync(path.join(workspace, '.env'), 'RUNTIME_EMPTY=child\n');
+    child.loadEnvironment(testSettings({}), workspace);
+    fs.writeFileSync(path.join(workspace, '.env'), '');
+    const reload = child.reloadEnvironment(testSettings({}), workspace);
+    expect(reload.removedKeys).toEqual(['RUNTIME_EMPTY']);
+    expect(process.env['RUNTIME_EMPTY']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('ancestor');
+    expect(process.env['RUNTIME_SETTINGS']).toBe('ancestor-settings');
+    for (const key of ['RUNTIME_DOTENV', 'RUNTIME_SETTINGS']) {
+      expect(child.isFileSourcedEnvKey(key)).toBe(true);
+    }
+    vi.resetModules();
+    const grandchild = await import('./environment.js');
+    expect(grandchild.getRelaunchEnvProvenance()).toEqual(
+      child.getRelaunchEnvProvenance(),
+    );
+    grandchild.loadEnvironment(
+      testSettings({ env: { RUNTIME_SETTINGS: 'local' } }),
+      workspace,
+    );
+    grandchild.reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['RUNTIME_SETTINGS']).toBeUndefined();
+    expect(grandchild.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(false);
+    grandchild.resetEnvironmentTrackingForTesting();
+    child.resetEnvironmentTrackingForTesting();
+  });
+
   beforeEach(() => resetEnvironmentTrackingForTesting());
 
   it('preserves frozen file provenance and publishes newly loaded keys after a partial read failure', () => {
@@ -214,13 +253,13 @@ describe('relaunch environment provenance', () => {
     fs.writeFileSync(path.join(workspace, '.env'), 'RUNTIME_DOTENV=updated\n');
     child.reloadEnvironment(testSettings({}), workspace);
     expect(process.env['RUNTIME_DOTENV']).toBe('updated');
-    expect(process.env['RUNTIME_SETTINGS']).toBeUndefined();
+    expect(process.env['RUNTIME_SETTINGS']).toBe('settings');
     expect(child.isFileSourcedEnvKey('RUNTIME_DOTENV')).toBe(true);
-    expect(child.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(false);
+    expect(child.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(true);
     vi.resetModules();
     const grandchild = await import('./environment.js');
     expect(grandchild.isFileSourcedEnvKey('RUNTIME_DOTENV')).toBe(true);
-    expect(grandchild.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(false);
+    expect(grandchild.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(true);
     grandchild.resetEnvironmentTrackingForTesting();
     child.resetEnvironmentTrackingForTesting();
   });

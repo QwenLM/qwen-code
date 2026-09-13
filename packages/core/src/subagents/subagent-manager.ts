@@ -119,6 +119,18 @@ function isNamedExecutionRefusal(error: unknown): error is SubagentError {
   );
 }
 
+const acceptedRefusalNames = new WeakMap<SubagentError, string>();
+
+function recordExecutionRefusal(
+  refusals: Map<string, SubagentError>,
+  error: unknown,
+): void {
+  if (!isNamedExecutionRefusal(error)) return;
+  for (const name of [error.subagentName, acceptedRefusalNames.get(error)]) {
+    if (name) refusals.set(name.toLowerCase(), error);
+  }
+}
+
 /**
  * Manages subagent configurations stored as Markdown files with YAML frontmatter.
  * Provides CRUD operations, validation, and integration with the runtime system.
@@ -1804,12 +1816,7 @@ export class SubagentManager {
           // lower-precedence in-process definition of the same name. Scoped to
           // execution declarations (not parse failures generally) so an arbitrary
           // malformed repo file cannot disable an unrelated builtin at dispatch.
-          if (
-            isNamedExecutionRefusal(error) &&
-            error.subagentName !== undefined
-          ) {
-            refusals.set(error.subagentName.toLowerCase(), error);
-          }
+          recordExecutionRefusal(refusals, error);
           continue;
         }
       }
@@ -1910,13 +1917,7 @@ export async function loadSubagentFromDir(
         subagents.push(config);
       } catch (error) {
         warnInvalidSubagentFile(filePath, error);
-        if (
-          refusals &&
-          isNamedExecutionRefusal(error) &&
-          error.subagentName !== undefined
-        ) {
-          refusals.set(error.subagentName.toLowerCase(), error);
-        }
+        if (refusals) recordExecutionRefusal(refusals, error);
         continue;
       }
     }
@@ -1948,6 +1949,7 @@ function parseSubagentContent(
   let claimsExecutor = false;
   let executionBackend: 'container' | undefined;
   let declaredName: string | undefined;
+  let acceptedName: string | undefined;
   try {
     const normalizedContent = normalizeContent(content);
 
@@ -1963,6 +1965,13 @@ function parseSubagentContent(
 
     // Parse YAML frontmatter
     const frontmatter = parseYaml(frontmatterYaml) as Record<string, unknown>;
+    if (frontmatter['name'] != null) {
+      try {
+        acceptedName = String(frontmatter['name']) || undefined;
+      } catch {
+        // Keep the AST name when the lenient value cannot name a definition.
+      }
+    }
 
     // Real-AST executor claim + trusted declared name, computed BEFORE any
     // validation can throw so the catch can route an executor-claiming file's
@@ -2327,6 +2336,13 @@ function parseSubagentContent(
 
     return config;
   } catch (error) {
+    const refuse = (refusal: SubagentError): never => {
+      // Malformed YAML can make the AST and the accepted lenient name differ.
+      if (isNamedExecutionRefusal(refusal) && acceptedName) {
+        acceptedRefusalNames.set(refusal, acceptedName);
+      }
+      throw refusal;
+    };
     // Preserve a SubagentError as-is: an execution refusal already carries
     // the declared agent name (subagentName), which loadSubagent needs to refuse
     // a by-name dispatch instead of falling through (R10-2). Re-wrapping would
@@ -2337,15 +2353,17 @@ function parseSubagentContent(
         !error.subagentName &&
         declaredName
       ) {
-        throw new SubagentError(error.message, error.code, declaredName);
+        refuse(new SubagentError(error.message, error.code, declaredName));
       }
-      throw error;
+      refuse(error);
     }
     if (executionBackend !== undefined && declaredName) {
-      throw new SubagentError(
-        `Agent file ${filePath} has an invalid executionBackend declaration: the definition failed to load (${error instanceof Error ? error.message : 'Unknown error'}). Refusing to fall through to a local substitute.`,
-        SubagentErrorCode.INVALID_CONFIG,
-        declaredName,
+      refuse(
+        new SubagentError(
+          `Agent file ${filePath} has an invalid executionBackend declaration: the definition failed to load (${error instanceof Error ? error.message : 'Unknown error'}). Refusing to fall through to a local substitute.`,
+          SubagentErrorCode.INVALID_CONFIG,
+          declaredName,
+        ),
       );
     }
     // R11-1: a file that CLAIMS an executor but failed to load for ANY reason —
@@ -2355,12 +2373,14 @@ function parseSubagentContent(
     // (A file whose own name is unparseable stays undefined-keyed and falls
     // through to the generic wrap; it cannot be matched by name anyway.)
     if (claimsExecutor && declaredName) {
-      throw new SubagentError(
-        `Agent file ${filePath} has an invalid executor block: it declares an ` +
-          `executor but failed to load (${error instanceof Error ? error.message : 'Unknown error'}). ` +
-          `Refusing to fall through to a lower-precedence in-process substitute.`,
-        SubagentErrorCode.INVALID_CONFIG,
-        declaredName,
+      refuse(
+        new SubagentError(
+          `Agent file ${filePath} has an invalid executor block: it declares an ` +
+            `executor but failed to load (${error instanceof Error ? error.message : 'Unknown error'}). ` +
+            `Refusing to fall through to a lower-precedence in-process substitute.`,
+          SubagentErrorCode.INVALID_CONFIG,
+          declaredName,
+        ),
       );
     }
     throw new SubagentError(

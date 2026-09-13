@@ -32,6 +32,106 @@ const shutdownOptions = {
 };
 
 describe('execution environment ownership', () => {
+  it('aborts startup before other shutdown work and refuses new factory lookups', async () => {
+    let startupSignal!: AbortSignal;
+    const factory = vi.fn((_config: Config, signal: AbortSignal) => {
+      startupSignal = signal;
+      return new Promise<ExecutionEnvironment>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        });
+      });
+    });
+    const config = new Config({
+      ...params,
+      executionEnvironmentFactory: factory,
+    });
+    const caller = new AbortController();
+    const pending = config.getExecutionEnvironmentFactory()!(
+      config,
+      caller.signal,
+    );
+    config.registerExecutionEnvironment(pending);
+    const rejected = pending.catch((error: unknown) => error);
+    const shutdown = config.shutdown(shutdownOptions);
+    expect(startupSignal.aborted).toBe(true);
+    expect(caller.signal.aborted).toBe(false);
+    expect(config.getExecutionEnvironmentFactory()).toBeUndefined();
+    expect(await rejected).toBeInstanceOf(Error);
+    await shutdown;
+  });
+
+  it.each([false, true])(
+    'bounds stalled startup and visibly retains cleanup ownership (strict=%s)',
+    async (strictResourceCleanup) => {
+      vi.useFakeTimers();
+      const warning = vi
+        .spyOn(console, 'warn')
+        .mockImplementation(() => undefined);
+      const config = new Config(params);
+      let finishStartup!: (environment: ExecutionEnvironment) => void;
+      const dispose = vi.fn().mockResolvedValue(undefined);
+      config.registerExecutionEnvironment(
+        new Promise((resolve) => {
+          finishStartup = resolve;
+        }),
+      );
+      const shutdown = config
+        .shutdown({
+          ...shutdownOptions,
+          strictResourceCleanup,
+        })
+        .catch((error: unknown) => error);
+      try {
+        await vi.advanceTimersByTimeAsync(1_000);
+        const result = await shutdown;
+        if (strictResourceCleanup) {
+          expect(result).toMatchObject({
+            message: expect.stringContaining(
+              'Container execution cleanup failed',
+            ),
+          });
+        } else {
+          expect(result).toBeUndefined();
+        }
+        expect(warning).toHaveBeenCalledWith(
+          expect.stringContaining('workspace /tmp'),
+        );
+        expect(dispose).not.toHaveBeenCalled();
+        finishStartup({ dispose } as unknown as ExecutionEnvironment);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(dispose).toHaveBeenCalledOnce();
+      } finally {
+        warning.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('does not wait for unrelated session resources before starting container disposal', async () => {
+    const config = new Config(params);
+    (config as unknown as { initialized: boolean }).initialized = true;
+    let finishRegistry!: () => void;
+    const stop = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRegistry = resolve;
+        }),
+    );
+    (
+      config as unknown as { toolRegistry: { stop: typeof stop } }
+    ).toolRegistry = { stop };
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    config.registerExecutionEnvironment(
+      Promise.resolve({ dispose } as unknown as ExecutionEnvironment),
+    );
+    const shutdown = config.shutdown(shutdownOptions);
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+    expect(stop).toHaveBeenCalledOnce();
+    finishRegistry();
+    await shutdown;
+  });
+
   it('preserves the operator requirement through derivation and shutdown without a factory', async () => {
     const config = new Config({
       ...params,

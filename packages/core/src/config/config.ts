@@ -2820,6 +2820,8 @@ export class Config {
   private readonly agentExecutionBackend?: 'container';
   private readonly executionEnvironmentFactory?: ExecutionEnvironmentFactory;
   private executionEnvironments?: Set<Promise<ExecutionEnvironment>>;
+  private readonly executionShutdown = new AbortController();
+  private executionCleanupPromise?: Promise<void>;
   private readonly modelProposedGoals: ModelProposedGoalsMode;
   private goalProposalHostSupported = false;
   private goalProposalTurnKey: string | undefined;
@@ -2932,7 +2934,14 @@ export class Config {
 
   constructor(params: ConfigParameters) {
     this.agentExecutionBackend = params.agentExecutionBackend;
-    this.executionEnvironmentFactory = params.executionEnvironmentFactory;
+    const executionFactory = params.executionEnvironmentFactory;
+    this.executionEnvironmentFactory = executionFactory
+      ? (config, signal) =>
+          executionFactory(
+            config,
+            AbortSignal.any([signal, this.executionShutdown.signal]),
+          )
+      : undefined;
     this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
     this.provisionalWorkspace = params.provisionalWorkspace === true;
     this.sessionId = params.sessionId ?? randomUUID();
@@ -6582,6 +6591,7 @@ export class Config {
     // installs is owned and cleaned up by that profile.
     if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
+    void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
     const closeWriter = () =>
       this.closeSessionWriter().catch((error) => {
@@ -6726,32 +6736,18 @@ export class Config {
       resourceError = error;
       this.debugLogger.error('Error during Config shutdown:', error);
     }
-    if (this.executionEnvironments?.size) {
-      const results = await Promise.allSettled(
-        [...this.executionEnvironments].map(async (pending) => {
-          let environment: ExecutionEnvironment;
-          try {
-            environment = await pending;
-          } catch (error) {
-            if (error instanceof ExecutionCleanupError) throw error;
-            return;
-          }
-          await environment.dispose();
-          this.executionEnvironments?.delete(pending);
-        }),
+    try {
+      await this.shutdownExecutionEnvironments();
+    } catch (cleanupError) {
+      const errors =
+        cleanupError instanceof AggregateError
+          ? ([...cleanupError.errors] as unknown[])
+          : [cleanupError];
+      if (resourceError !== undefined) errors.unshift(resourceError);
+      throw new AggregateError(
+        errors,
+        'Container execution cleanup failed during session shutdown.',
       );
-      const errors = results.flatMap((result) =>
-        result.status === 'rejected' ? [result.reason as unknown] : [],
-      );
-      if (errors.length > 0) {
-        if (resourceError !== undefined) errors.unshift(resourceError);
-        const error = new AggregateError(
-          errors,
-          'Container execution cleanup failed during session shutdown.',
-        );
-        this.debugLogger.error(error.message, error);
-        throw error;
-      }
     }
     if (resourceError !== undefined) throw resourceError;
     if (!this.initialized) return;
@@ -8745,13 +8741,66 @@ export class Config {
   }
 
   getExecutionEnvironmentFactory(): ExecutionEnvironmentFactory | undefined {
-    return this.shutdownRequested
+    return this.shutdownRequested || this.executionShutdown.signal.aborted
       ? undefined
       : this.executionEnvironmentFactory;
   }
 
   getExecutionEnvironment(): ExecutionEnvironment | undefined {
     return undefined;
+  }
+
+  shutdownExecutionEnvironments(): Promise<void> {
+    if (isDerivedConfig(this)) {
+      return (
+        Object.getPrototypeOf(this) as Config
+      ).shutdownExecutionEnvironments();
+    }
+    this.executionShutdown.abort();
+    if (this.executionCleanupPromise) return this.executionCleanupPromise;
+    const cleanup = Promise.allSettled(
+      [...(this.executionEnvironments ?? [])].map(async (pending) => {
+        let environment: ExecutionEnvironment;
+        try {
+          environment = await pending;
+        } catch (error) {
+          if (error instanceof ExecutionCleanupError) throw error;
+          this.executionEnvironments?.delete(pending);
+          return;
+        }
+        await environment.dispose();
+        this.executionEnvironments?.delete(pending);
+      }),
+    ).then((results) => {
+      const errors = results.flatMap((result) =>
+        result.status === 'rejected' ? [result.reason as unknown] : [],
+      );
+      if (errors.length)
+        throw new AggregateError(errors, errors.map(String).join('; '));
+    });
+    let timer: ReturnType<typeof setTimeout>;
+    // Finish or report before the CLI's 2-second per-cleanup exit deadline.
+    this.executionCleanupPromise = new Promise<void>((resolve, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new ExecutionCleanupError(
+              `Container cleanup is still pending for workspace ${this.getWorkingDir()}. Keep its workspace and inspect qwen-agent-* containers and qwen-agent-executor-* temporary directories before manual removal.`,
+            ),
+          ),
+        1_000,
+      );
+      cleanup.then(resolve, reject);
+    })
+      .catch((error: unknown) => {
+        // eslint-disable-next-line no-console -- exit cleanup errors must survive debug-only and best-effort callers
+        console.warn(
+          `Container execution cleanup incomplete: ${String(error)}`,
+        );
+        throw error;
+      })
+      .finally(() => clearTimeout(timer));
+    return this.executionCleanupPromise;
   }
 
   registerExecutionEnvironment(

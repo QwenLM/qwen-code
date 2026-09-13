@@ -75,6 +75,9 @@ function isReloadExcludedKey(key: string): boolean {
 
 const dotEnvSourcedKeys = new Set<string>();
 const settingsEnvSourcedKeys = new Set<string>();
+// Inherited provenance marks trust, not ownership of this process's reload scope.
+const inheritedDotEnvKeys = new Set<string>();
+const inheritedSettingsEnvKeys = new Set<string>();
 
 // Validate inherited metadata before loading files, then preserve it for child CLIs.
 const inheritedProvenance = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
@@ -93,16 +96,18 @@ if (inheritedProvenance) {
   ) {
     throw new Error('Invalid inherited environment provenance.');
   }
-  for (const key of sources.dotEnv) dotEnvSourcedKeys.add(key);
-  for (const key of sources.settingsEnv) settingsEnvSourcedKeys.add(key);
+  for (const key of sources.dotEnv) inheritedDotEnvKeys.add(key);
+  for (const key of sources.settingsEnv) inheritedSettingsEnvKeys.add(key);
   Object.assign(process.env, getRelaunchEnvProvenance());
 }
 
 export function getRelaunchEnvProvenance(): Record<string, string> {
   return {
     [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({
-      dotEnv: [...dotEnvSourcedKeys],
-      settingsEnv: [...settingsEnvSourcedKeys],
+      dotEnv: [...new Set([...inheritedDotEnvKeys, ...dotEnvSourcedKeys])],
+      settingsEnv: [
+        ...new Set([...inheritedSettingsEnvKeys, ...settingsEnvSourcedKeys]),
+      ],
     }),
   };
 }
@@ -201,6 +206,8 @@ export function resetEnvironmentTrackingForTesting(): void {
   resetLoaderKeyRejectionReportingForTesting();
   dotEnvSourcedKeys.clear();
   settingsEnvSourcedKeys.clear();
+  inheritedDotEnvKeys.clear();
+  inheritedSettingsEnvKeys.clear();
   delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
   lastReloadSnapshot.clear();
   lastReloadSnapshotSeeded = false;
@@ -225,7 +232,13 @@ export function resetEnvironmentTrackingForTesting(): void {
  * variable and not file-sourced.
  */
 export function isFileSourcedEnvKey(key: string): boolean {
-  if (dotEnvSourcedKeys.has(key) || settingsEnvSourcedKeys.has(key)) {
+  const sources = [
+    dotEnvSourcedKeys,
+    settingsEnvSourcedKeys,
+    inheritedDotEnvKeys,
+    inheritedSettingsEnvKeys,
+  ];
+  if (sources.some((keys) => keys.has(key))) {
     return true;
   }
   // Case-INSENSITIVELY on Windows, where env lookup is: a `.env` committed as
@@ -236,11 +249,10 @@ export function isFileSourcedEnvKey(key: string): boolean {
   // question rather than a bookkeeping one.
   if (process.platform !== 'win32') return false;
   const lower = key.toLowerCase();
-  for (const tracked of dotEnvSourcedKeys) {
-    if (tracked.toLowerCase() === lower) return true;
-  }
-  for (const tracked of settingsEnvSourcedKeys) {
-    if (tracked.toLowerCase() === lower) return true;
+  for (const keys of sources) {
+    for (const tracked of keys) {
+      if (tracked.toLowerCase() === lower) return true;
+    }
   }
   return false;
 }
@@ -799,6 +811,8 @@ export function reloadEnvironment(
     for (const key of previouslyKnown) {
       if (!allNewKeys.has(key) && !isReloadExcludedKey(key)) {
         delete process.env[key];
+        inheritedDotEnvKeys.delete(key);
+        inheritedSettingsEnvKeys.delete(key);
         removedKeys.push(key);
       }
     }

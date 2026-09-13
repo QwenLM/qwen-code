@@ -156,6 +156,61 @@ describe('execution tool facade', () => {
     },
   );
 
+  it('bounds release when a cancelled permission request also loses its cleanup reply', async () => {
+    const file = path.join(workspace, 'file.txt');
+    await writeFile(file, 'content');
+    const deadline = new AbortController();
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(deadline.signal);
+    const timeoutError = new Error('release timed out');
+    let permissionSignal!: AbortSignal;
+    let releaseSignal!: AbortSignal;
+    let rejectRelease: ((error: Error) => void) | undefined;
+    const permission = vi.spyOn(environment, 'permission').mockImplementation(
+      (_id, signal) =>
+        new Promise((_resolve, reject) => {
+          permissionSignal = signal;
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const release = vi.spyOn(environment, 'release').mockImplementation(
+      (_id, signal) =>
+        new Promise((_resolve, reject) => {
+          releaseSignal = signal;
+          rejectRelease = reject;
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const invocation = wrapExecutionTool(
+      new ReadFileTool(config),
+      environment,
+      config,
+    ).build({ file_path: file });
+    const controller = new AbortController();
+    const cancelled = invocation
+      .getDefaultPermission(controller.signal)
+      .catch((error: unknown) => error);
+    try {
+      await vi.waitFor(() => expect(permission).toHaveBeenCalledOnce());
+      controller.abort();
+      await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+      expect(timeout).toHaveBeenCalledWith(30_000);
+      expect(releaseSignal.aborted).toBe(false);
+      deadline.abort(timeoutError);
+      expect(await cancelled).toBe(permissionSignal.reason);
+      await expect(invocation.release!()).rejects.toBe(timeoutError);
+    } finally {
+      rejectRelease?.(timeoutError);
+      await cancelled;
+      timeout.mockRestore();
+    }
+  });
+
   it('routes the retained editor confirmation callback to the rebuilt invocation', async () => {
     const file = path.join(workspace, 'edited.txt');
     const facade = wrapExecutionTool(

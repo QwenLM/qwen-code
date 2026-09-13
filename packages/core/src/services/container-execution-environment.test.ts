@@ -42,6 +42,8 @@ describe('container execution boundary', () => {
       Object.create(ContainerExecutionEnvironment.prototype),
       {
         primary,
+        options: { runtime: 'docker' },
+        temporaryDirectory: '/tmp/failed-container',
         workers: new Set([primary]),
         invocations: new Map(),
       },
@@ -88,6 +90,7 @@ describe('container execution boundary', () => {
         Object.create(ContainerExecutionEnvironment.prototype),
         {
           primary,
+          options: { runtime: 'docker' },
           temporaryDirectory,
           workers: new Set([primary, install]),
           invocations: new Map([['install', install]]),

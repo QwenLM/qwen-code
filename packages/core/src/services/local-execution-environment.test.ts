@@ -162,7 +162,7 @@ describe('LocalExecutionEnvironment', () => {
 
   it('executes and cancels shell commands without a model or auth initialization', async () => {
     const result = await execute('shell', ToolNames.SHELL, {
-      command: 'printf worker-ok',
+      command: `node -e "process.stdout.write('worker-ok')"`,
       is_background: false,
     });
     expect(result.error).toBeUndefined();
@@ -171,7 +171,10 @@ describe('LocalExecutionEnvironment', () => {
       {
         id: 'cancel',
         toolName: ToolNames.SHELL,
-        params: { command: 'printf started; sleep 30', is_background: false },
+        params: {
+          command: `node -e "console.log('started'); setTimeout(function(){}, 30000)"`,
+          is_background: false,
+        },
       },
       signal,
     );

@@ -100,7 +100,7 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
         await this.prepared.catch(() => undefined);
         await this.owner.environment.release(
           this.id,
-          new AbortController().signal,
+          AbortSignal.timeout(30_000),
         );
       }
     } finally {

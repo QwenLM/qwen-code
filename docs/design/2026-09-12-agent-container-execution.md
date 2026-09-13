@@ -111,7 +111,7 @@ operator floor.
 Affected areas are Config and CLI activation, Agent resolution, definition
 types/parser/serializer, plugin conversion, SDK type parity, direct runtime
 construction and both daemon mutation protocols. Transport and worker lifecycle
-remain unchanged by this revision.
+follow the ownership and cancellation rules below.
 
 Acceptance requires actual dispatch checks: omitted/forged model selectors cannot
 run a required-container child locally; factory-unavailable cases fail loudly;
@@ -225,6 +225,12 @@ those handoffs do not preserve environment provenance. A forced container
 request fails as unavailable; the Docker socket
 is never automatically mounted.
 
+Inherited file provenance marks trust without giving the child ownership of the
+ancestor's reload scope. Reload only removes keys known from the child's own
+files or settings; surviving ancestor values retain their provenance in later
+child CLIs. A malformed definition whose AST and lenient parser disagree on its
+name reserves both names when refusing an execution declaration.
+
 ## Lifecycle and recovery
 
 The selected environment owns every container name before startup and performs
@@ -244,9 +250,17 @@ An invalidation failure is logged without abandoning the already compressed
 history and token bookkeeping; the next tool still requires successful cache
 synchronization. Memory-only cache eviction does not invalidate worker reads.
 Permission preparation receives the caller cancellation signal, and releasing
-an invocation cancels pending preparation. Container creation may pull a cold
+an invocation cancels pending preparation. Its release RPC has an independent
+30-second timeout so an unresponsive worker cannot strand cancellation cleanup.
+Container creation may pull a cold
 image and has no fixed 30-second limit; it remains cancellable. Runtime metadata
-and removal commands retain their 30-second limit.
+and removal commands retain their 30-second limit. Session shutdown aborts
+pending startup and begins container disposal before other exit cleanups. Its
+wait is bounded at one second, within the CLI's unchanged two-second per-step
+and five-second overall exit limits. A timeout or removal failure remains
+visible and preserves resource/workspace ownership; unfinished disposal reports
+the container names and temporary directory. Cleanup can continue until the
+process exits, but successful removal is not claimed when the deadline expires.
 
 The first version does not resume a disposed container subagent. Both discovery
 and direct resume must reject it. Persist a container isolation marker in the
@@ -257,9 +271,13 @@ insufficient because old readers ignore unknown properties.
 
 Container loss becomes a tool error. A lost response after a possible write is
 reported as an unknown outcome; the harness never automatically replays it.
-Cancellation and malformed protocol responses fail the whole worker session.
-Current product cancellation also stops the owning agent. Silently skipping
-protocol corruption would hide a possibly lost result, so recovery is deferred.
+Cancellation rejects only its request and sends a scoped cancellation message;
+other requests and later tool calls remain usable. An interrupted execution
+still warns about possible writes, and no operation is automatically replayed.
+A housekeeping timeout can be followed by another cache synchronization attempt.
+Malformed protocol responses and broken transports still fail the whole worker;
+silently skipping corruption would hide a possibly lost result, so transport
+recovery is deferred.
 
 A hard host exit such as `SIGKILL` cannot run this cleanup. Exited containers and
 temporary output directories may remain; there is no startup sweeper in this

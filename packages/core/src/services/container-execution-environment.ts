@@ -269,10 +269,15 @@ class ContainerWorker {
     const id = randomUUID();
     return new Promise<T>((resolveResult, reject) => {
       const aborted = () => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
         this.process?.stdin.write(`${JSON.stringify({ cancel: id })}\n`);
-        this.fail(
+        pending.reject(
           new Error(
-            'Container execution cancelled; an interrupted write may have completed. Do not automatically retry.',
+            request.method === 'execute'
+              ? 'Container execution cancelled; an interrupted write may have completed. Do not automatically retry. No operation was replayed.'
+              : `Container ${request.method} cancelled. No operation was replayed.`,
           ),
         );
       };
@@ -626,14 +631,32 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
   }
   dispose(): Promise<void> {
     this.disposal ??= (async () => {
-      const results = await Promise.allSettled(
-        [...this.workers].map((worker) => worker.dispose()),
-      );
-      const failure = results.find((result) => result.status === 'rejected');
-      if (failure?.status === 'rejected') throw failure.reason;
-      this.invocations.clear();
-      this.workers.clear();
-      await rm(this.temporaryDirectory, { recursive: true, force: true });
+      const resources = `${[...this.workers].map((worker) => worker.name).join(', ')} (${this.options.runtime}); temporary directory ${this.temporaryDirectory}`;
+      const notice = setTimeout(() => {
+        // eslint-disable-next-line no-console -- report owned resources before bounded CLI exit abandons cleanup
+        console.warn(
+          `Container cleanup is still pending: ${resources}. Keep the workspace and verify these containers have stopped before manual removal.`,
+        );
+      }, 500);
+      notice.unref?.();
+      try {
+        const results = await Promise.allSettled(
+          [...this.workers].map((worker) => worker.dispose()),
+        );
+        const failure = results.find((result) => result.status === 'rejected');
+        if (failure?.status === 'rejected') throw failure.reason;
+        this.invocations.clear();
+        this.workers.clear();
+        await rm(this.temporaryDirectory, { recursive: true, force: true });
+      } catch (error) {
+        // eslint-disable-next-line no-console -- report the exact retained resources on startup and shutdown failure
+        console.warn(
+          `Container cleanup failed: ${resources}: ${String(error)}`,
+        );
+        throw error;
+      } finally {
+        clearTimeout(notice);
+      }
     })();
     return this.disposal;
   }

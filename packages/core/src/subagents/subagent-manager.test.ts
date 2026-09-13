@@ -397,6 +397,43 @@ You are a helpful assistant.
     });
 
     it.each([
+      'executionBackend: container',
+      'executor: {kind: invalid, command: runner}',
+    ])('reserves both duplicate names on refusal: %s', async (declaration) => {
+      const projectDir = path.join(
+        mockConfig.getProjectRoot(),
+        '.qwen',
+        'agents',
+      );
+      const content = `---\nname: Reviewer\nname: Explore\ndescription: Project agent\n${declaration}\n---\nReview the project.\n`;
+      vi.mocked(fs.readdir).mockImplementation(
+        async (directory) =>
+          (directory === projectDir ? ['reviewer.md'] : []) as never,
+      );
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      for (const name of ['Reviewer', 'Explore']) {
+        await expect(manager.loadSubagent(name)).rejects.toMatchObject({
+          message: expect.stringMatching(
+            /invalid (executionBackend declaration|executor block)/,
+          ),
+        });
+      }
+      const refusals = new Map<string, SubagentError>();
+      expect(await loadSubagentFromDir(projectDir, refusals)).toEqual([]);
+      expect([...refusals.keys()].sort()).toEqual(['explore', 'reviewer']);
+
+      vi.mocked(fs.readFile).mockResolvedValue(
+        content.replace(`${declaration}\n`, ''),
+      );
+      const local = await manager.loadSubagent('Explore');
+      expect(local).toMatchObject({
+        name: 'Explore',
+        level: 'project',
+      });
+      expect(local?.executionBackend).toBeUndefined();
+    });
+
+    it.each([
       { yamlName: '123', name: '123' },
       { yamlName: 'true', name: 'true' },
       { yamlName: '[Explore]', name: 'Explore' },
