@@ -55,6 +55,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: vi.fn(),
 }));
 
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 import { fetchDiffCommand, runFetchDiff } from './fetch-diff.js';
 
 const OUT = '/tmp/diff.txt';
@@ -199,6 +200,24 @@ describe('fetchDiffCommand handler', () => {
     // The usage error must preempt the auth gate — `gh auth login` can
     // never repair the invocation.
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('a repeated --out is a usage error before anything is fetched', () => {
+    // yargs hands a repeated flag over as an array; joined with String() it
+    // became the single path "a,b" and the output was written there.
+    (fetchDiffCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: ['/tmp/a.txt', '/tmp/b.txt'],
+    });
+    expect(process.exitCode).toBe(2);
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
+      'fetch-diff: --out must be given once, as a file path',
+    );
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+    expect(ghRawMock).not.toHaveBeenCalled();
   });
 
   it('exits 2 on a non-positive or non-integer pr_number, without calling gh or auth', () => {
