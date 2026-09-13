@@ -204,7 +204,7 @@ index 0000000..745a4ba
 +export const getFrameController = (stdout) => instances.get(stdout)?.frameController;
 +//# sourceMappingURL=frame-controller.js.map
 diff --git a/node_modules/ink/build/hooks/use-box-metrics.js b/node_modules/ink/build/hooks/use-box-metrics.js
-index c4386e4..d88bb2d 100644
+index c4386e4..d1921ca 100644
 --- a/node_modules/ink/build/hooks/use-box-metrics.js
 +++ b/node_modules/ink/build/hooks/use-box-metrics.js
 @@ -1,4 +1,4 @@
@@ -213,46 +213,33 @@ index c4386e4..d88bb2d 100644
  import { addLayoutListener } from '../dom.js';
  import useStdout from './use-stdout.js';
  const emptyMetrics = {
-@@ -50,8 +50,25 @@ const useBoxMetrics = (
+@@ -50,8 +50,26 @@ const useBoxMetrics = (
  ref) => {
      const [metrics, setMetrics] = useState(emptyMetrics);
      const [hasMeasured, setHasMeasured] = useState(false);
 +    // Per-instance budget breaking the commit -> layout listener -> setState
 +    // feedback loop. A box whose measured size feeds back into its own layout
 +    // can oscillate, re-measuring and re-rendering until React throws error
-+    // #185 and the process dies. The budget refills on the next macrotask, so
-+    // mount, resize, and content-driven measuring are unaffected.
-+    const guardRef = useRef({ count: 0, timer: null });
++    // #185 and the process dies. The budget refills as wall-clock time passes,
++    // so mount, resize, and content-driven measuring are unaffected. A timer
++    // based refill would leave a pending handle that fake-timer tests never
++    // drain, which stalls React's act queue.
++    const guardRef = useRef({ count: 0, windowStart: 0 });
      const { stdout } = useStdout();
      const updateMetrics = useCallback(() => {
 +        const guard = guardRef.current;
++        const now = performance.now();
++        if (now - guard.windowStart >= 16) {
++            guard.count = 0;
++            guard.windowStart = now;
++        }
 +        if (guard.count >= 32) {
 +            return;
 +        }
 +        guard.count += 1;
-+        if (guard.timer === null) {
-+            guard.timer = setImmediate(() => {
-+                guard.count = 0;
-+                guard.timer = null;
-+            });
-+        }
          const layout = ref.current?.yogaNode?.getComputedLayout() ?? emptyMetrics;
          setMetrics(previousMetrics => {
              const hasChanged = previousMetrics.width !== layout.width ||
-@@ -62,6 +79,13 @@ ref) => {
-         });
-         setHasMeasured(Boolean(ref.current));
-     }, [ref]);
-+    // Release the pending budget-refill timer when this instance unmounts.
-+    useEffect(() => () => {
-+        if (guardRef.current.timer !== null) {
-+            clearImmediate(guardRef.current.timer);
-+            guardRef.current.timer = null;
-+        }
-+    }, []);
-     // Runs after every render of this component.
-     // This keeps metrics fresh when local state/props in this subtree change.
-     useEffect(updateMetrics);
 diff --git a/node_modules/ink/build/index.d.ts b/node_modules/ink/build/index.d.ts
 index f3e7349..cce56fe 100644
 --- a/node_modules/ink/build/index.d.ts
