@@ -622,6 +622,15 @@ const EN: Messages = {
   'common.invalid': 'invalid',
   'common.loading': 'Loading...',
   'common.retry': 'Try again',
+  'session.recovery.interrupted_prompt':
+    'The previous request was interrupted before the response completed.',
+  'session.recovery.interrupted_turn':
+    'The previous task was interrupted. Some tool results were not saved.',
+  'session.recovery.degraded_history':
+    'Conversation history is incomplete. The interrupted task cannot be continued.',
+  'session.recovery.continue': 'Continue execution',
+  'session.recovery.continuing': 'Continuing…',
+  'session.recovery.failed': 'Could not continue the conversation.',
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -1428,6 +1437,31 @@ const EN: Messages = {
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
+  'webPreview.title': 'Web preview',
+  'webPreview.openHint': 'Preview a running web app',
+  'webPreview.address': 'Development URL',
+  'webPreview.open': 'Open',
+  'webPreview.refresh': 'Refresh preview',
+  'webPreview.desktop': 'Desktop width',
+  'webPreview.mobile': 'Mobile width (390 px)',
+  'webPreview.external': 'Open externally',
+  'webPreview.frame': 'Web preview frame',
+  'webPreview.saved': 'Saved version',
+  'webPreview.savedFrame': 'Saved webpage version',
+  'webPreview.savedUnavailable':
+    'This saved version is missing or has changed. It cannot be opened.',
+  'webPreview.savedLoadFailed': 'Could not load this saved version. Try again.',
+  'webPreview.page': 'Application preview',
+  'webPreview.empty':
+    'Start your development server, then enter its URL above.',
+  'webPreview.reachable':
+    'Use an address this browser can reach. For a remote server, use its accessible URL or an existing port forward.',
+  'webPreview.fallback':
+    'Blank page? Check the server or open externally. The address and refresh use the entry URL.',
+  'webPreview.live':
+    'Live page. Opening a link from an earlier message shows its current content, not a saved version.',
+  'webPreview.invalidUrl':
+    'Use a separate HTTP/HTTPS development address with a hostname or IPv4 address, without login credentials. Web Shell and daemon addresses cannot be previewed.',
   'terminal.title': 'Terminal',
   'terminal.open': 'Open a terminal',
   'terminal.notice.exited': (v) =>
@@ -1435,6 +1469,8 @@ const EN: Messages = {
   'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
   'terminal.notice.unknownError': 'Unknown error',
   'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+  'terminal.notice.protocolMismatch':
+    'Terminal protocol changed; restart the daemon and reload this page.',
   'localFiles.title': 'Local files',
   'localFiles.trigger': 'Local files',
   'localFiles.hint':
@@ -1455,6 +1491,7 @@ const EN: Messages = {
   'localFiles.status.needsGesture': 'Reconnect to continue',
   'localFiles.status.failed': 'Failed',
   'localFiles.status.unavailable': 'Unavailable here',
+  'localFiles.status.resolving': 'Resolving…',
   'localFiles.needsSessionHint':
     'Start a session first. The bridge binds to exactly one session, so no other session can reach your files.',
   'localFiles.blocker.insecureContext':
@@ -1465,6 +1502,10 @@ const EN: Messages = {
     'This browser has no File System Access API. Use Chrome or Edge to connect a local directory.',
   'localFiles.blocker.workspaceIneligible':
     "This conversation's workspace cannot host a local directory (untrusted or live workspace).",
+  'localFiles.blocker.workspaceResolving':
+    'Which workspace this conversation belongs to is not known yet.',
+  'localFiles.blocker.unsupportedDaemon':
+    'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -1965,7 +2006,7 @@ const EN: Messages = {
   'auth.documentation': 'Documentation',
   'auth.modelsRequired': 'Model IDs cannot be empty.',
   'auth.review': 'Review',
-  'auth.reviewText': 'The following JSON will be saved to settings.json:',
+  'auth.reviewText': 'Review the connection and model settings before saving.',
   'auth.save': 'Save',
   'auth.saving': 'Saving...',
   'auth.termsTitle': 'Terms of Services and Privacy Notice',
@@ -1975,7 +2016,7 @@ const EN: Messages = {
   'auth.advanced.prompt': 'Optional: configure advanced generation settings.',
   'auth.advanced.thinking': 'Enable thinking',
   'auth.advanced.thinkingDesc':
-    'Allows the model to perform extended reasoning before responding.',
+    'Enable extended reasoning. Leave off to use the model default.',
   'auth.advanced.modality': 'Enable modality',
   'auth.advanced.modalityDesc':
     'Enables multimodal input capabilities (image, video, etc.).',
@@ -1985,8 +2026,17 @@ const EN: Messages = {
   'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': 'Context window',
   'auth.advanced.contextDesc':
-    'Max input tokens (leave empty to auto-detect from model name).',
+    'Context window capacity in tokens. Leave empty to infer the limit from the model ID.',
   'auth.advanced.contextPlaceholder': 'Context window (optional)',
+  'auth.advanced.maxTokens': 'Maximum output tokens',
+  'auth.advanced.maxTokensDesc':
+    'Maximum tokens per response. Leave empty to infer the limit from the model ID.',
+  'auth.advanced.tokenLimitInvalid': (v) =>
+    `${v?.field ?? 'Token limit'} must be a whole number between 1 and 10,000,000.`,
+  'auth.advanced.modalitiesRequired':
+    'Select at least one input type or turn off modality.',
+  'auth.advanced.defaults': 'Use model defaults',
+  'auth.apiKeySet': 'Set (hidden)',
   'local.btw':
     'Ask a quick side question without affecting the main conversation. Usage: /btw <your question>',
   'btw.empty': 'Please provide a question. Usage: /btw <your question>',
@@ -2360,6 +2410,7 @@ const EN: Messages = {
   'mcp.userMcp': 'Global MCP',
   'mcp.workingDirectory': 'Working Directory',
   'goal.aborted': 'Goal aborted',
+  'goal.blocked': 'Goal blocked',
   'goal.usageLimited': 'Goal usage limited',
   'goal.paused': 'Goal paused',
   'goal.achieved': 'Goal achieved',
@@ -2369,6 +2420,10 @@ const EN: Messages = {
   'goal.judge': 'Judge',
   'goal.label': 'Goal',
   'goal.lastCheck': 'Last check',
+  'goal.checkpoint': 'Checkpoint',
+  'goal.checkpointStalled': (v) =>
+    `${v?.count ?? 0}/${v?.limit ?? 0} checks stalled`,
+  'goal.checkpointFailed': 'last evidence checkpoint failed',
   'goal.notYetMet': 'not yet met',
   'goal.set': 'Goal set',
   'goal.statusActive': '/goal active',
@@ -2572,6 +2627,36 @@ const EN: Messages = {
   'reasoning.updateFailed': 'Failed to update reasoning options',
   'model.setFast': 'Set Fast Model',
   'model.setVoice': 'Set Voice Model',
+  'auth.purpose.label': 'Model purpose',
+  'auth.purpose.chat': 'Conversation',
+  'auth.purpose.chatHint':
+    'Use this provider for conversation. The current model is retained when it is included in the configuration.',
+  'auth.purpose.image': 'Image generation',
+  'auth.purpose.voice': 'Voice transcription',
+  'auth.purpose.imageHint':
+    'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
+  'auth.purpose.voiceHint':
+    'Use OpenAI protocol with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
+  'settings.models.editWindow': 'Edit context window',
+  'settings.models.windowHint':
+    'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
+  'settings.models.windowSaved': 'Saved. Restart existing sessions to apply.',
+  'settings.models.saved': 'Saved',
+  'model.setAdvisor': 'Set Advisor Model',
+  'settings.label.advisorModel': 'Advisor Model',
+  'settings.label.imageModel': 'Image Model',
+  'settings.label.voiceModel': 'Voice Model',
+  'settings.description.advisorModel':
+    'Model used to review recent conversation progress. Leave empty to use the main model.',
+  'settings.description.imageModel':
+    'Model used for image generation. Add a custom model with Image generation purpose, then select it here.',
+  'settings.description.voiceModel':
+    'Model used for voice transcription. Add a custom model with Voice transcription purpose, then select it here.',
+
+  'model.setImage': 'Set Image Model',
+  'model.useMain': 'Use main model',
+  'model.disabled': 'Disabled',
+
   'model.setVision': 'Set Vision Model',
   'model.switch': 'Switch Model',
   'model.unknown': 'unknown',
@@ -2922,6 +3007,18 @@ const EN: Messages = {
   'userMessage.showLess': 'Collapse',
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
+  'userMessage.edit': 'Edit message',
+  'userMessage.editSubmit': 'Send',
+  'userMessage.editSending': 'Sending…',
+  'userMessage.editBusy': 'Wait for the current turn to finish before editing.',
+  'userMessage.editStale':
+    'The message changed. Reopen the editor and try again.',
+  'userMessage.editAttachmentUnavailable':
+    'An attachment is unavailable. The message was not rewound.',
+  'userMessage.editSyncFailed':
+    'Could not confirm the rewind. Your edit is retained while waiting for synchronization.',
+  'userMessage.editFailed': (v) =>
+    `Could not resend the edited message: ${v?.reason ?? ''}`,
   'turn.processed': 'Processed',
   'turn.processing': 'Processing',
   'turn.collapse': 'Collapse steps',
@@ -3574,10 +3671,15 @@ const EN: Messages = {
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
   'settings.models.title': 'Models',
+  'settings.models.context': (v) => `Context: ${v?.tokens ?? ''} tokens`,
+  'settings.models.credentialEnv': 'Key environment variable',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
   'settings.models.current': 'Current',
   'settings.models.runtime': 'Runtime',
+  'settings.models.savedConfiguration': 'Saved configuration',
+  'settings.models.ambiguousWindow':
+    'Multiple configurations share this route. Its context window cannot be edited here.',
   'settings.models.delete': 'Delete',
   'settings.models.confirmDelete': 'Confirm',
   'settings.models.cancel': 'Cancel',
@@ -4290,6 +4392,12 @@ const ZH: Messages = {
   'common.invalid': '无效',
   'common.loading': '加载中...',
   'common.retry': '重试',
+  'session.recovery.interrupted_prompt': '上次请求在回答完成前中断。',
+  'session.recovery.interrupted_turn': '上次任务已中断，部分工具结果未保存。',
+  'session.recovery.degraded_history': '会话历史不完整，无法继续中断的任务。',
+  'session.recovery.continue': '继续执行',
+  'session.recovery.continuing': '正在继续…',
+  'session.recovery.failed': '无法继续此会话。',
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
@@ -5029,12 +5137,37 @@ const ZH: Messages = {
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
+  'webPreview.title': '网页预览',
+  'webPreview.openHint': '预览正在运行的网页应用',
+  'webPreview.address': '开发地址',
+  'webPreview.open': '打开',
+  'webPreview.refresh': '刷新预览',
+  'webPreview.desktop': '桌面宽度',
+  'webPreview.mobile': '手机宽度（390 px）',
+  'webPreview.external': '外部打开',
+  'webPreview.frame': '网页预览容器',
+  'webPreview.saved': '当时保存的版本',
+  'webPreview.savedFrame': '历史网页版本',
+  'webPreview.savedUnavailable': '这份历史版本已丢失或被修改，无法打开。',
+  'webPreview.savedLoadFailed': '暂时无法加载这份历史版本，请重试。',
+  'webPreview.page': '应用预览',
+  'webPreview.empty': '启动开发服务器，然后在上方输入地址。',
+  'webPreview.reachable':
+    '使用当前浏览器可访问的地址。远程服务器请使用可访问的 URL 或已有的端口转发。',
+  'webPreview.fallback':
+    '页面空白？请检查服务器或外部打开。地址栏和刷新使用最初打开的地址。',
+  'webPreview.live':
+    '实时页面：从历史消息打开链接，也会显示当前内容，不是当时保存的版本。',
+  'webPreview.invalidUrl':
+    '请使用独立开发服务器的 HTTP/HTTPS 地址，主机名或 IPv4 均可，且不含登录凭据。不能预览 Web Shell 或 daemon 地址。',
   'terminal.title': '终端',
   'terminal.open': '打开终端',
   'terminal.notice.exited': (v) => `进程已退出，退出码 ${v?.exitCode ?? '?'}`,
   'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
   'terminal.notice.unknownError': '未知错误',
   'terminal.notice.reconnecting': '连接已断开，正在重连…',
+  'terminal.notice.protocolMismatch':
+    '终端协议已更新，请重启 daemon 并刷新页面。',
   'localFiles.title': '本地文件',
   'localFiles.trigger': '本地文件',
   'localFiles.hint':
@@ -5055,6 +5188,7 @@ const ZH: Messages = {
   'localFiles.status.needsGesture': '需要重新连接',
   'localFiles.status.failed': '连接失败',
   'localFiles.status.unavailable': '当前环境不可用',
+  'localFiles.status.resolving': '解析中…',
   'localFiles.needsSessionHint':
     '请先创建一个会话。桥只绑定一个会话，因此其他会话无法访问你的文件。',
   'localFiles.blocker.insecureContext':
@@ -5065,6 +5199,9 @@ const ZH: Messages = {
     '当前浏览器没有 File System Access API。请使用 Chrome 或 Edge 连接本地目录。',
   'localFiles.blocker.workspaceIneligible':
     '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。',
+  'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
+  'localFiles.blocker.unsupportedDaemon':
+    '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -5518,7 +5655,7 @@ const ZH: Messages = {
   'auth.documentation': '文档',
   'auth.modelsRequired': '模型 ID 不能为空。',
   'auth.review': '确认',
-  'auth.reviewText': '以下 JSON 将保存到 settings.json：',
+  'auth.reviewText': '保存前请确认连接信息和模型参数。',
   'auth.save': '保存',
   'auth.saving': '正在保存...',
   'auth.termsTitle': '服务条款和隐私声明',
@@ -5527,7 +5664,7 @@ const ZH: Messages = {
     `输入以逗号分隔的模型 ID。例如：${v?.modelIds ?? ''}`,
   'auth.advanced.prompt': '可选：配置高级生成设置。',
   'auth.advanced.thinking': '启用 thinking',
-  'auth.advanced.thinkingDesc': '允许模型在回复前进行扩展推理。',
+  'auth.advanced.thinkingDesc': '启用扩展推理；不勾选时保留模型默认行为。',
   'auth.advanced.modality': '启用多模态',
   'auth.advanced.modalityDesc': '启用图片、视频等多模态输入能力。',
   'auth.advanced.modalityImage': '图片',
@@ -5536,8 +5673,17 @@ const ZH: Messages = {
   'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': '上下文窗口',
   'auth.advanced.contextDesc':
-    '最大输入 token 数（留空则根据模型名称自动检测）。',
+    '模型的上下文窗口 Token 容量，留空根据模型 ID 自动推断。',
   'auth.advanced.contextPlaceholder': '上下文窗口（可选）',
+  'auth.advanced.maxTokens': '最大输出 Token',
+  'auth.advanced.maxTokensDesc':
+    '每次回复的最大 Token 数，留空根据模型 ID 自动推断。',
+  'auth.advanced.tokenLimitInvalid': (v) =>
+    `${v?.field ?? 'Token 上限'}必须是 1 到 10,000,000 之间的整数。`,
+  'auth.advanced.modalitiesRequired':
+    '请至少选择一种输入类型，或关闭多模态选项。',
+  'auth.advanced.defaults': '使用模型默认值',
+  'auth.apiKeySet': '已设置（隐藏）',
   'local.btw': '快速问一个不影响主对话的侧边问题。用法：/btw <your question>',
   'btw.empty': '请提供一个问题。用法：/btw <你的问题>',
   'btw.side.empty': '请提供一个问题。用法：/btw side <你的问题>',
@@ -5879,6 +6025,7 @@ const ZH: Messages = {
   'mcp.userMcp': '全局 MCP',
   'mcp.workingDirectory': '工作目录',
   'goal.aborted': '目标已中止',
+  'goal.blocked': '目标已阻塞',
   'goal.usageLimited': '目标用量受限',
   'goal.paused': '目标已暂停',
   'goal.achieved': '目标已达成',
@@ -5888,6 +6035,10 @@ const ZH: Messages = {
   'goal.judge': '判断',
   'goal.label': '目标',
   'goal.lastCheck': '上次检查',
+  'goal.checkpoint': '检查点',
+  'goal.checkpointStalled': (v) =>
+    `连续 ${v?.count ?? 0}/${v?.limit ?? 0} 次检查停滞`,
+  'goal.checkpointFailed': '最近一次证据检查点失败',
   'goal.notYetMet': '尚未满足',
   'goal.set': '目标已设置',
   'goal.statusActive': '/goal 运行中',
@@ -6078,6 +6229,35 @@ const ZH: Messages = {
   'reasoning.updateFailed': '更新思考选项失败',
   'model.setFast': '设置 Fast Model',
   'model.setVoice': '设置语音模型',
+  'auth.purpose.label': '模型用途',
+  'auth.purpose.chat': '对话',
+  'auth.purpose.chatHint':
+    '将此提供商用于对话。配置包含当前模型时会保留当前选择。',
+  'auth.purpose.image': '生图',
+  'auth.purpose.voice': '语音转写',
+  'auth.purpose.imageHint':
+    '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
+  'auth.purpose.voiceHint':
+    '请选择 OpenAI 协议，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
+  'settings.models.editWindow': '配置窗口大小',
+  'settings.models.windowHint':
+    '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
+  'settings.models.windowSaved': '已保存，重启已有会话后生效。',
+  'settings.models.saved': '已保存',
+  'model.setAdvisor': '设置顾问模型',
+  'settings.label.advisorModel': '顾问模型',
+  'settings.label.imageModel': '生图模型',
+  'settings.label.voiceModel': '语音转写模型',
+  'settings.description.advisorModel': '用于复查近期对话进展，默认使用主模型。',
+  'settings.description.imageModel':
+    '用于生成图片。添加自定义模型时选择“生图”用途，再在这里选择。',
+  'settings.description.voiceModel':
+    '用于将语音转成文字。添加自定义模型时选择“语音转写”用途，再在这里选择。',
+
+  'model.setImage': '设置生图模型',
+  'model.useMain': '使用主模型',
+  'model.disabled': '不启用',
+
   'model.setVision': '设置视觉模型',
   'model.switch': '切换模型',
   'model.unknown': '未知',
@@ -6410,6 +6590,15 @@ const ZH: Messages = {
   'userMessage.showLess': '收起',
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
+  'userMessage.edit': '编辑消息',
+  'userMessage.editSubmit': '发送',
+  'userMessage.editSending': '发送中…',
+  'userMessage.editBusy': '请先等待当前轮次结束再编辑。',
+  'userMessage.editStale': '消息已发生变化，请重新打开编辑器后再试。',
+  'userMessage.editAttachmentUnavailable': '附件内容不可用，消息尚未回退。',
+  'userMessage.editSyncFailed':
+    '无法确认回退已同步。编辑内容已暂存，正在等待同步。',
+  'userMessage.editFailed': (v) => `无法重发编辑的消息：${v?.reason ?? ''}`,
   'turn.processed': '已处理',
   'turn.processing': '处理中',
   'turn.collapse': '折叠步骤',
@@ -7018,10 +7207,15 @@ const ZH: Messages = {
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
   'settings.models.title': '模型',
+  'settings.models.context': (v) => `上下文：${v?.tokens ?? ''} Token`,
+  'settings.models.credentialEnv': '密钥环境变量',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',
   'settings.models.current': '当前',
   'settings.models.runtime': '运行时',
+  'settings.models.savedConfiguration': '已保存配置',
+  'settings.models.ambiguousWindow':
+    '多个配置共用此模型端点，无法在此修改窗口大小。',
   'settings.models.delete': '删除',
   'settings.models.confirmDelete': '确认删除',
   'settings.models.cancel': '取消',

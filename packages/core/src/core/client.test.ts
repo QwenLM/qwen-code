@@ -591,10 +591,13 @@ describe('Gemini Client (client.ts)', () => {
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      getActiveTodoPlanWriterOwner: vi.fn().mockReturnValue(undefined),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
       endAutomaticActiveTodoWorkChain: vi.fn(),
+      clearActiveTodoReminders: vi.fn(),
       getProxy: vi.fn().mockReturnValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
       getFileService: vi.fn().mockReturnValue(fileService),
@@ -2220,8 +2223,11 @@ describe('Gemini Client (client.ts)', () => {
 
       await runTurn(SendMessageType.UserQuery);
 
+      // No reminder is registered here (getActiveTodoReminder returns
+      // undefined), so the ordinary user turn still starts a fresh chain.
       expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
         'prompt-userQuery',
+        undefined,
       );
 
       await runTurn(SendMessageType.Cron);
@@ -2239,6 +2245,154 @@ describe('Gemini Client (client.ts)', () => {
       expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
         'prompt-retry',
         'prompt-userQuery',
+      );
+    });
+
+    it.each(['agent', 'task'])(
+      'forces the active todo reminder due when a %s tool result returns',
+      async (agentToolName) => {
+        const reminder =
+          '<system-reminder>unfinished todo: follow up on the delegated node</system-reminder>';
+        vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'response' };
+          })(),
+        );
+
+        const stream = client.sendMessageStream(
+          [
+            {
+              functionResponse: {
+                name: agentToolName,
+                response: { ok: true },
+              },
+            },
+          ],
+          new AbortController().signal,
+          'prompt-agent-result',
+          { type: SendMessageType.ToolResult },
+        );
+        for await (const _ of stream) {
+          // drain
+        }
+
+        // A delegated execution returning is the progress signal the
+        // turn budget cannot see (#10953): the reminder must be due now,
+        // not after three parent tool turns that never come.
+        expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+          'prompt-agent-result',
+          true,
+        );
+        const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+        expect(request).toContain(reminder);
+      },
+    );
+
+    it('keeps the turn budget for tool results without an Agent execution', async () => {
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(undefined);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ functionResponse: { name: 'shell', response: { ok: true } } }],
+        new AbortController().signal,
+        'prompt-plain-result',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+        'prompt-plain-result',
+      );
+    });
+
+    it('continues the todo work chain on a user turn while a reminder is registered', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      await runTurn(SendMessageType.UserQuery);
+      // A registered reminder means the plan still has unfinished items
+      // (todo_write deletes it on completion).
+      const reminder =
+        '<system-reminder>unfinished todo: delegated node</system-reminder>';
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+      // The reminder comes back only when the caller forces it, so the
+      // absence assertion below is what discriminates the turn-start gate.
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+        (_promptId, force = false) => (force ? reminder : undefined),
+      );
+      // The foreground head still owns the session plan file, so the
+      // continuation guard's owner-equality conjunct holds.
+      vi.mocked(mockConfig.getActiveTodoPlanWriterOwner).mockReturnValue(
+        'prompt-userQuery',
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'how is progress going?' }],
+        new AbortController().signal,
+        'prompt-user-followup',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      // The follow-up turn must continue the previous chain instead of
+      // discarding the plan context it asks about (#10953).
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+        'prompt-user-followup',
+        'prompt-userQuery',
+      );
+
+      // Carrying the chain must not splice the plan ahead of the user's own
+      // text: turn-start injection stays reserved for machine continuations
+      // (the Retry | Cron | Notification | Teammate gate), so an ordinary
+      // UserQuery turn's request must not carry it.
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      expect(request).not.toContain(reminder);
+
+      // Once the plan completes (todo_write deleted the reminder), the next
+      // ordinary turn must start a fresh chain — the cleared-reminder branch
+      // of the continuation guard must not keep carrying the previous chain.
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(undefined);
+      await runTurn(SendMessageType.UserQuery);
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+        'prompt-userQuery',
+        undefined,
+      );
+    });
+
+    it('does not continue the todo work chain when the plan was last written by a foreign owner', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      await runTurn(SendMessageType.UserQuery);
+      // A reminder is registered, but an isolated cron/notification turn last
+      // wrote the session plan under its own owner — the foreground head no
+      // longer owns the authoritative plan, so the continuation guard must
+      // not carry (and must not re-deliver the stale foreground snapshot).
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(
+        '<system-reminder>unfinished todo: delegated node</system-reminder>',
+      );
+      vi.mocked(mockConfig.getActiveTodoPlanWriterOwner).mockReturnValue(
+        'prompt-cron',
+      );
+
+      await runTurn(SendMessageType.UserQuery);
+
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+        'prompt-userQuery',
+        undefined,
       );
     });
 
@@ -3288,6 +3442,40 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(getHistoryLength).toHaveBeenCalled();
       expect(getHistory).not.toHaveBeenCalled();
+    });
+
+    it('setHistory clears active-todo reminder state', () => {
+      mockFileReadCacheClear();
+      client['chat'] = { setHistory: vi.fn() } as unknown as LlmChat;
+      // Pretend a chain is active so the reset is observable.
+      client['activeTodoWorkChainPromptId'] = 'prompt-old';
+
+      client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
+
+      expect(mockConfig.clearActiveTodoReminders).toHaveBeenCalled();
+      expect(client['activeTodoWorkChainPromptId']).toBeUndefined();
+    });
+
+    it('truncateHistory clears active-todo reminder state when entries are actually removed', () => {
+      mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(3, 2);
+      client['activeTodoWorkChainPromptId'] = 'prompt-old';
+
+      client.truncateHistory(2);
+
+      expect(mockConfig.clearActiveTodoReminders).toHaveBeenCalled();
+      expect(client['activeTodoWorkChainPromptId']).toBeUndefined();
+    });
+
+    it('truncateHistory does NOT clear active-todo reminder state when nothing was removed', () => {
+      mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(2, 2);
+      client['activeTodoWorkChainPromptId'] = 'prompt-old';
+
+      client.truncateHistory(2);
+
+      expect(mockConfig.clearActiveTodoReminders).not.toHaveBeenCalled();
+      expect(client['activeTodoWorkChainPromptId']).toBe('prompt-old');
     });
 
     it('stripOrphanedUserEntriesFromHistory forces full IDE context only when entries were removed', async () => {
@@ -12311,6 +12499,319 @@ Other open files:
         expect(
           mockInteractionTelemetry.endInteractionSpan,
         ).toHaveBeenCalledWith('ok', { promptId: 'prompt-stop-hook-budget' });
+      });
+
+      it('reports stop_hook_active only when a Stop hook blocked the previous turn', async () => {
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'not done' }] },
+            ]),
+        } as unknown as LlmChat;
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-stop-hook-active',
+          ),
+        );
+
+        const stopInputs = mockMessageBus.request.mock.calls
+          .filter(([request]) => request.eventName === 'Stop')
+          .map(([request]) => request.input);
+        expect(stopInputs).toHaveLength(2);
+        expect(stopInputs[0]).toMatchObject({ stop_hook_active: false });
+        expect(stopInputs[1]).toMatchObject({ stop_hook_active: true });
+      });
+
+      describe('stop_hook_active across top-level sends', () => {
+        const blockOnceThenAllow = () => {
+          const mockMessageBus = {
+            request: vi
+              .fn()
+              .mockResolvedValueOnce({
+                output: { decision: 'block', reason: 'Keep working' },
+                stopHookCount: 1,
+              })
+              .mockResolvedValue({ output: undefined }),
+            response: vi.fn(),
+          };
+          vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+          vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+            mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+          );
+          vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+            (event: string) => event === 'Stop',
+          );
+          client['chat'] = {
+            addHistory: vi.fn(),
+            getHistory: vi
+              .fn()
+              .mockReturnValue([
+                { role: 'model', parts: [{ text: 'not done' }] },
+              ]),
+          } as unknown as LlmChat;
+          return mockMessageBus;
+        };
+        const stopFlags = (mockMessageBus: {
+          request: ReturnType<typeof vi.fn>;
+        }) =>
+          mockMessageBus.request.mock.calls
+            .filter(([request]) => request.eventName === 'Stop')
+            .map(([request]) => request.input.stop_hook_active);
+        // Run `toolRun` of the model returns a tool call; every run yields
+        // plain content.
+        const mockRunsWithToolCallOn = (toolRun: number) => {
+          let runs = 0;
+          mockTurnRunFn.mockImplementation(function (this: {
+            pendingToolCalls: unknown[];
+          }) {
+            runs++;
+            if (runs === toolRun) {
+              this.pendingToolCalls.push({
+                callId: 'tool-1',
+                name: 'read_file',
+                args: {},
+              });
+            }
+            return (async function* () {
+              yield { type: LlmEventType.Content, value: 'not done' };
+            })();
+          });
+          return () => runs;
+        };
+        const toolResult = [
+          {
+            functionResponse: {
+              id: 'tool-1',
+              name: 'read_file',
+              response: {},
+            },
+          },
+        ];
+
+        it('keeps stop_hook_active across a tool round trip', async () => {
+          const mockMessageBus = blockOnceThenAllow();
+          // Run 2 is the hook-forced continuation; it calls a tool, so the
+          // caller runs it and re-enters with the result.
+          mockRunsWithToolCallOn(2);
+          const signal = new AbortController().signal;
+
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'Hi' }],
+              signal,
+              'prompt-stop-tool-round-trip',
+            ),
+          );
+          await fromAsync(
+            client.sendMessageStream(
+              toolResult,
+              signal,
+              'prompt-stop-tool-round-trip',
+              { type: SendMessageType.ToolResult },
+            ),
+          );
+
+          expect(stopFlags(mockMessageBus)).toEqual([false, true]);
+        });
+
+        it('keys stop_hook_active by prompt id when another prompt stops on the same client', async () => {
+          const mockMessageBus = blockOnceThenAllow();
+          mockRunsWithToolCallOn(2);
+          const signal = new AbortController().signal;
+
+          await fromAsync(
+            client.sendMessageStream([{ text: 'Hi' }], signal, 'prompt-a'),
+          );
+          // A second prompt (e.g. a concurrent side question) runs to an
+          // allowed stop while prompt-a is waiting on its tool result.
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'side question' }],
+              signal,
+              'prompt-b',
+            ),
+          );
+          await fromAsync(
+            client.sendMessageStream(toolResult, signal, 'prompt-a', {
+              type: SendMessageType.ToolResult,
+            }),
+          );
+
+          expect(stopFlags(mockMessageBus)).toEqual([false, false, true]);
+        });
+
+        it('reports stop_hook_active false when a retry reuses a hook-forced prompt id', async () => {
+          const mockMessageBus = blockOnceThenAllow();
+          Object.assign(client['chat'] as object, {
+            getHistoryLength: vi.fn(() => 1),
+            stripOrphanedUserEntriesFromHistory: vi.fn(() => []),
+          });
+          mockRunsWithToolCallOn(2);
+          const signal = new AbortController().signal;
+
+          await fromAsync(
+            client.sendMessageStream([{ text: 'Hi' }], signal, 'prompt-retry'),
+          );
+          // The tool result never comes back; the user retries instead,
+          // which reuses the prompt id.
+          await fromAsync(
+            client.sendMessageStream([{ text: 'Hi' }], signal, 'prompt-retry', {
+              type: SendMessageType.Retry,
+            }),
+          );
+
+          expect(stopFlags(mockMessageBus)).toEqual([false, false]);
+        });
+
+        it('reports stop_hook_active false after a hook-forced continuation ends in an error', async () => {
+          const mockMessageBus = blockOnceThenAllow();
+          let runs = 0;
+          mockTurnRunFn.mockImplementation(() => {
+            runs++;
+            if (runs === 2) {
+              // The hook-forced continuation fails with a provider error.
+              return (async function* () {
+                yield {
+                  type: LlmEventType.Error,
+                  value: { error: { message: 'provider failed' } },
+                };
+              })();
+            }
+            return (async function* () {
+              yield { type: LlmEventType.Content, value: 'not done' };
+            })();
+          });
+          const signal = new AbortController().signal;
+
+          await fromAsync(
+            client.sendMessageStream([{ text: 'Hi' }], signal, 'prompt-error'),
+          );
+          // A later send on the same prompt id that does not start a new
+          // interaction must not inherit the failed chain.
+          await fromAsync(
+            client.sendMessageStream(toolResult, signal, 'prompt-error', {
+              type: SendMessageType.ToolResult,
+            }),
+          );
+
+          expect(runs).toBe(3);
+          expect(stopFlags(mockMessageBus)).toEqual([false, false]);
+        });
+
+        it('reports stop_hook_active false after steer input replaces a hook-forced continuation', async () => {
+          const mockMessageBus = blockOnceThenAllow();
+          const runs = mockRunsWithToolCallOn(0);
+          let steerDelivered = false;
+          // Steer input arrives while the hook-forced continuation (run 2)
+          // is ending, so it replaces that turn before its Stop check.
+          const getSteerInput = vi.fn(
+            async (): Promise<SteerInput | undefined> => {
+              if (runs() !== 2 || steerDelivered) return undefined;
+              steerDelivered = true;
+              return {
+                parts: [{ text: 'focus on error handling' }],
+                accept: vi.fn(),
+                restore: vi.fn(),
+              };
+            },
+          );
+
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'Hi' }],
+              new AbortController().signal,
+              'prompt-stop-steer',
+              { type: SendMessageType.UserQuery, getSteerInput },
+            ),
+          );
+
+          expect(steerDelivered).toBe(true);
+          expect(runs()).toBe(3);
+          expect(stopFlags(mockMessageBus)).toEqual([false, false]);
+        });
+      });
+
+      it('reports stop_hook_active false on a next-speaker continuation after an allowed stop', async () => {
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        vi.mocked(mockConfig.getSkipNextSpeakerCheck).mockReturnValue(false);
+        const { checkNextSpeaker } = await import(
+          '../utils/nextSpeakerChecker.js'
+        );
+        vi.mocked(checkNextSpeaker)
+          .mockResolvedValueOnce({
+            reasoning: 'more to do',
+            next_speaker: 'model',
+          })
+          .mockResolvedValue(null);
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'not done' }] },
+            ]),
+        } as unknown as LlmChat;
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-stop-next-speaker',
+          ),
+        );
+
+        const stopFlags = mockMessageBus.request.mock.calls
+          .filter(([request]) => request.eventName === 'Stop')
+          .map(([request]) => request.input.stop_hook_active);
+        expect(stopFlags).toEqual([false, true, false]);
       });
 
       it('should not skip hooks when hasHooksForEvent returns true', async () => {

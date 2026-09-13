@@ -32,6 +32,17 @@ function render(node: ReactNode): HTMLElement {
   return container;
 }
 
+// React tracks a controlled field's value internally, so writing `.value`
+// directly is ignored; go through the prototype setter and fire `input`.
+function setTextareaValue(el: HTMLTextAreaElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    'value',
+  )?.set;
+  setter?.call(el, value);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 function referenceAnnotation(
   content: string,
   text: string,
@@ -69,6 +80,216 @@ describe('UserMessage', () => {
   it('renders content', () => {
     const container = render(<UserMessage content="hello world" />);
     expect(container.textContent).toContain('hello world');
+  });
+
+  it('edits the message in place and submits the edited text', () => {
+    const onEditSubmit = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          editing
+          onEditSubmit={onEditSubmit}
+          onEditCancel={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+
+    expect(textarea).not.toBeNull();
+    expect(textarea?.value).toBe('hello world');
+    const send = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Send',
+    );
+
+    act(() => {
+      setTextareaValue(textarea!, 'edited text');
+    });
+    act(() => {
+      send?.click();
+    });
+
+    expect(onEditSubmit).toHaveBeenCalledWith('edited text');
+  });
+
+  it('cancels the in-place editor on Escape', () => {
+    const onEditCancel = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          editing
+          onEditSubmit={vi.fn()}
+          onEditCancel={onEditCancel}
+        />
+      </I18nProvider>,
+    );
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+
+    act(() => {
+      textarea?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+
+    expect(onEditCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows progress and ignores input while the edit is being sent', () => {
+    const onEditSubmit = vi.fn();
+    const onEditCancel = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          editing
+          submittingEdit
+          onEditSubmit={onEditSubmit}
+          onEditCancel={onEditCancel}
+        />
+      </I18nProvider>,
+    );
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+    const buttons = [...container.querySelectorAll('button')];
+    const send = buttons.find((button) => button.textContent === 'Sending…');
+
+    expect(send).not.toBeUndefined();
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(textarea?.readOnly).toBe(true);
+
+    act(() => {
+      textarea?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      send?.click();
+    });
+
+    expect(onEditSubmit).not.toHaveBeenCalled();
+    expect(onEditCancel).not.toHaveBeenCalled();
+  });
+
+  it('submits on Enter and keeps Shift+Enter for a newline', () => {
+    const onEditSubmit = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          editing
+          onEditSubmit={onEditSubmit}
+          onEditCancel={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+
+    act(() => {
+      textarea?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(onEditSubmit).not.toHaveBeenCalled();
+
+    act(() => {
+      textarea?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    expect(onEditSubmit).toHaveBeenCalledWith('hello world');
+  });
+
+  it('disables Send while the draft is empty', () => {
+    const onEditSubmit = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          editing
+          onEditSubmit={onEditSubmit}
+          onEditCancel={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+    const send = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Send',
+    );
+
+    act(() => {
+      setTextareaValue(textarea!, '   ');
+    });
+    expect(send?.disabled).toBe(true);
+
+    act(() => {
+      send?.click();
+    });
+    expect(onEditSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(['Enter', 'Escape'])(
+    'ignores IME-owned %s after compositionend',
+    (key) => {
+      const onEditSubmit = vi.fn();
+      const onEditCancel = vi.fn();
+      const container = render(
+        <I18nProvider language="en">
+          <UserMessage
+            content="中文草稿"
+            editing
+            onEditSubmit={onEditSubmit}
+            onEditCancel={onEditCancel}
+          />
+        </I18nProvider>,
+      );
+      const event = new KeyboardEvent('keydown', {
+        key,
+        keyCode: 229,
+        isComposing: false,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        container.querySelector('textarea')!.dispatchEvent(event);
+      });
+      expect(onEditSubmit).not.toHaveBeenCalled();
+      expect(onEditCancel).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    },
+  );
+
+  it('can edit and resend an attachment-only message', () => {
+    const onEditSubmit = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content=""
+          images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
+          editing
+          onEditSubmit={onEditSubmit}
+        />
+      </I18nProvider>,
+    );
+    expect(container.querySelector('textarea')).not.toBeNull();
+    const send = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Send',
+    )!;
+    expect(send.disabled).toBe(false);
+    act(() => {
+      send.click();
+    });
+    expect(onEditSubmit).toHaveBeenCalledWith('');
+  });
+
+  it('does not render an in-place editor by default', () => {
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage content="hello world" />
+      </I18nProvider>,
+    );
+    expect(container.querySelector('textarea')).toBeNull();
   });
 
   it('does not visually clip an overflowing message in document mode', () => {

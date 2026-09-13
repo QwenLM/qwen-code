@@ -435,9 +435,12 @@ function extractText(response: unknown): string {
 }
 
 function parseJudgeReply(text: string): JudgeWireResult | null {
-  const cleaned = stripCodeFence(text).trim();
   // Accept the JSON anywhere in the reply: tolerant to chatty preambles when
-  // the model ignores structured-output mode.
+  // the model ignores structured-output mode. A markdown fence (backticks or
+  // tildes) and its info string carry no braces, so the index scan finds the
+  // payload without unwrapping first, and stays linear (no backtracking) on
+  // unbounded model output.
+  const cleaned = text.trim();
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start === -1 || end === -1 || end < start) return null;
@@ -556,9 +559,4 @@ function toJudgeResult(
     };
   }
   return { kind: 'not_met', ok: false, reason: result.reason };
-}
-
-function stripCodeFence(s: string): string {
-  const m = s.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return m ? m[1] : s;
 }

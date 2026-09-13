@@ -8,6 +8,7 @@ import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
   DaemonCapabilities,
+  DaemonEvent,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
   DaemonAvailableCommand,
@@ -73,7 +74,7 @@ export interface DaemonSessionOwnerSnapshot {
 }
 
 export interface DaemonSessionOwnerGuard {
-  capture(): DaemonSessionOwnerSnapshot;
+  capture(options?: { includeRecovery?: boolean }): DaemonSessionOwnerSnapshot;
 }
 
 export type DaemonProductSessionContext =
@@ -205,6 +206,17 @@ export interface DaemonSessionProviderProps {
   suppressOwnUserEcho?: boolean;
   /** Attach raw daemon events to normalized transcript blocks for debugging. */
   includeRawEvent?: boolean;
+  /**
+   * Fetch the branch during initialization and session loading. Defaults to
+   * true; disable when the UI owns Git status loading. Changing this option
+   * reconnects the session.
+   */
+  prefetchGitBranch?: boolean;
+  /**
+   * Preload sessionless Skills. Defaults to true; disable when the UI loads
+   * Skills on demand. Changing this option reconnects the session.
+   */
+  prefetchSkills?: boolean;
   /** Connect to the daemon automatically on mount. */
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
@@ -250,6 +262,7 @@ export type DaemonNoticeCategory =
 
 export type DaemonNoticeOperation =
   | 'send_prompt'
+  | 'continue_session'
   | 'send_shell_command'
   | 'switch_model'
   | 'set_reasoning_effort'
@@ -449,6 +462,7 @@ export interface DaemonSessionActions {
     owner?: Pick<DaemonActivePromptState, 'workspaceCwd' | 'sessionId'>,
   ): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
+  continueSession(): Promise<void>;
   /**
    * Non-blocking prompt submission. POSTs to the daemon and returns
    * immediately with the `promptId`. The daemon queues the prompt in its
@@ -705,6 +719,7 @@ export interface DaemonWorkspaceEventSignals {
 export interface ActivePrompt {
   controller: AbortController;
   promptId?: string;
+  replayedTurnEvents?: Map<string, DaemonEvent>;
   resolve?: (result: PromptResult) => void;
   reject?: (error: unknown) => void;
 }

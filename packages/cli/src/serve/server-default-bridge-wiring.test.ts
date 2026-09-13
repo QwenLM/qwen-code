@@ -16,6 +16,7 @@ import {
 } from './acp-session-bridge.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
+import { Storage } from '@qwen-code/qwen-code-core';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 
 const WS_BOUND = path.resolve('/work/bound');
@@ -98,6 +99,7 @@ describe('createServeApp default bridge wiring', () => {
     expect(sessionLifecycle).toBeDefined();
     expect(bridgeOptions).toMatchObject({
       delegateReadTextFileToClient: false,
+      artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
     });
     await expect(
       bridgeOptions!.fileSystem!.writeText({

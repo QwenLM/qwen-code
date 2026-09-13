@@ -100,6 +100,7 @@ import {
 } from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
+import { approvalModeToPermissionMode } from '../../hooks/permission-mode.js';
 import type { StopHookOutput } from '../../hooks/types.js';
 import {
   appendStopHookBlockingCapWarning,
@@ -324,25 +325,6 @@ const TEAM_AGENT_READ_ONLY_PROPERTY = {
     'named teammate in an active team. Cannot be combined with ' +
     'plan_mode_required.',
 };
-
-/**
- * Maps ApprovalMode to PermissionMode for hook events.
- */
-function approvalModeToPermissionMode(mode: ApprovalMode): PermissionMode {
-  switch (mode) {
-    case ApprovalMode.YOLO:
-      return PermissionMode.Yolo;
-    case ApprovalMode.AUTO_EDIT:
-      return PermissionMode.AutoEdit;
-    case ApprovalMode.AUTO:
-      return PermissionMode.Auto;
-    case ApprovalMode.PLAN:
-      return PermissionMode.Plan;
-    case ApprovalMode.DEFAULT:
-    default:
-      return PermissionMode.Default;
-  }
-}
 
 /**
  * Resolves the effective permission mode for a sub-agent.
