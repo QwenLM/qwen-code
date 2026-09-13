@@ -59,7 +59,6 @@ import {
   extractErrorMessage,
   extractErrorCode,
 } from './bridge.js';
-import { SessionAttachmentStore } from './sessionAttachments.js';
 import { NdJsonQueueLimitError } from './ndJsonStream.js';
 import { BridgeClient } from './bridgeClient.js';
 import {
