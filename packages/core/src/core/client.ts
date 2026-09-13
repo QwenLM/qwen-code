@@ -3900,6 +3900,26 @@ export class LlmClient {
     let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
     let memoryDeliveryStateInvalidated = false;
     let modelRequestAccepted = false;
+    // The delivery was prepared before the request went out, so commit vs
+    // discard rides on whether the model accepted the request (any streamed
+    // event). A loop-detection halt after acceptance must commit: the memory
+    // text is in history either way, and discarding would re-inject the same
+    // router block and focused leaves on the next turn. The LlmEventType.Error
+    // early return is the exception — it keeps discarding via the finally,
+    // since a failed request may have left nothing in history.
+    const settleMemoryDelivery = () => {
+      if (!memoryDeliveryToCommit) return;
+      if (modelRequestAccepted) {
+        this.commitManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
+        memoryDeliveryToCommit = null;
+        if (memoryDeliveryStateInvalidated) {
+          this.resetManagedAutoMemoryAfterCompression();
+        }
+      } else {
+        this.discardManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
+        memoryDeliveryToCommit = null;
+      }
+    };
     // Declared outside the try so the finally block can close it out on
     // uncaught-exception exits too; created (when the hook is registered)
     // right before the turn's streaming loop below.
@@ -4568,6 +4588,7 @@ export class LlmClient {
             endCurrentInteraction('error', 'loop detected', 'loop_detected');
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
             this.fireLoopDetectedStopFailure(loopType);
+            settleMemoryDelivery();
             return turn;
           }
 
@@ -4606,6 +4627,7 @@ export class LlmClient {
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
             this.fireLoopDetectedStopFailure(loopType);
+            settleMemoryDelivery();
             return turn;
           }
           // Update arena status on Finished events — stats are derived
@@ -4700,16 +4722,7 @@ export class LlmClient {
             return turn;
           }
         }
-        if (memoryDeliveryToCommit && modelRequestAccepted) {
-          this.commitManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
-          memoryDeliveryToCommit = null;
-          if (memoryDeliveryStateInvalidated) {
-            this.resetManagedAutoMemoryAfterCompression();
-          }
-        } else if (memoryDeliveryToCommit) {
-          this.discardManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
-          memoryDeliveryToCommit = null;
-        }
+        settleMemoryDelivery();
       } finally {
         // Fires on every exit from the loop above: normal completion, any of
         // the three early returns, or an uncaught exception -- instead of one

@@ -759,14 +759,32 @@ export async function scanAutoMemoryTopicDocuments(
 export async function scanAllAutoMemoryTopicDocuments(
   projectRoot: string,
   documentCache?: AutoMemoryDocumentCache,
+  trustedProject = true,
 ): Promise<ScannedAutoMemoryDocument[]> {
   // ponytail: reuse the existing O(n) parsed scan; add a catalog only if
   // measured topic counts make recall scanning too slow.
-  return scanAutoMemoryDocumentsFromRoot(getAutoMemoryRoot(projectRoot), {
-    scope: 'project',
-    uncapped: true,
-    documentCache,
-  });
+  //
+  // "Project scope" is the same root set scanAutoMemorySnapshot uses: the
+  // configured runtime root plus, for a trusted project, the repo-local
+  // `<projectRoot>/.qwen/memory` root. Forget enumerates its candidate
+  // universe through this scan, so a narrower universe here leaves a
+  // repo-local document injectable by recall yet impossible to forget.
+  // Dedupe on the same scope:relativePath key the snapshot uses so two
+  // files sharing one relative path collapse to a single candidate id.
+  const roots = getProjectAutoMemoryRoots(projectRoot, trustedProject);
+  const perRoot = await Promise.all(
+    // An untrusted project in local-memory mode has no trusted root at all;
+    // fall back to the configured root so the legacy callers that never
+    // gated on trust keep scanning it.
+    (roots.length > 0 ? roots : [getAutoMemoryRoot(projectRoot)]).map((root) =>
+      scanAutoMemoryDocumentsFromRoot(root, {
+        scope: 'project',
+        uncapped: true,
+        documentCache,
+      }),
+    ),
+  );
+  return dedupeScannedDocuments(sortScannedDocuments(perRoot.flat()));
 }
 
 /**

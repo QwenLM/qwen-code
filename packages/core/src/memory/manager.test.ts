@@ -1569,6 +1569,50 @@ describe('MemoryManager', () => {
       await fs.rm(tempDir, { recursive: true, force: true });
     });
 
+    it('runs a manual dream through the managed path and releases the lock', async () => {
+      const mgr = new MemoryManager();
+      const config = makeMockConfig();
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
+        touchedTopics: ['project'],
+        createdEntries: 1,
+        updatedEntries: 0,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+        systemMessage: 'Managed auto-memory dream (agent): consolidated',
+      });
+
+      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+
+      expect(result.systemMessage).toContain('consolidated');
+      expect(runManagedAutoMemoryDream).toHaveBeenCalledWith(
+        projectRoot,
+        expect.any(Date),
+        config,
+        undefined,
+        { trigger: 'manual', recordMetadata: true, sessionId: 'sess-1' },
+      );
+      // The consolidation lock is released after the run.
+      await expect(
+        fs.stat(getAutoMemoryConsolidationLockPath(projectRoot)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('skips a manual dream while another dream holds the lock', async () => {
+      const mgr = new MemoryManager();
+      const config = makeMockConfig();
+      await fs.writeFile(
+        getAutoMemoryConsolidationLockPath(projectRoot),
+        String(process.pid),
+      );
+
+      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+
+      expect(result.systemMessage).toContain('already running');
+      expect(runManagedAutoMemoryDream).not.toHaveBeenCalled();
+    });
+
     it('skips when dream is disabled in config', async () => {
       const mgr = new MemoryManager(async () => [
         'sess-0',

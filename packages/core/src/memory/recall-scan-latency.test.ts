@@ -8,7 +8,6 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 import type { Config } from '../config/config.js';
 import { getAutoMemoryFilePath } from './paths.js';
 import { resolveRelevantAutoMemoryPromptForQuery } from './recall.js';
@@ -62,10 +61,14 @@ const FAST_RESULT_CEILING_MS = SHARED_CI
 // even at one YAML parse per file (~104ms measured) — the budget was sized for
 // the warm path — so its ceiling is the measured cost with ~20% slack, which
 // still reddens if the frontmatter rescue's second CST parse returns (~+48%
-// at 1000 files). On the shared pool expectWithinLatencyBudget loosens the
-// bound rather than measuring the neighbours.
+// at 1000 files). The shared pool faces the same loosened bound as the warm
+// path's, keyed off the same SHARED_CI switch — ci.yml already exports
+// QWEN_SKIP_LATENCY_BUDGETS=1 there, so routing through
+// expectWithinLatencyBudget's poolMultiplier would stack a second 10x.
 function coldScanCeilingMs(topicCount: number): number {
-  return topicCount >= 1000 ? INITIAL_BUDGET_MS * 1.25 : INITIAL_BUDGET_MS;
+  const bound =
+    topicCount >= 1000 ? INITIAL_BUDGET_MS * 1.25 : INITIAL_BUDGET_MS;
+  return SHARED_CI ? bound * 10 : bound;
 }
 
 let tempDir: string;
@@ -252,9 +255,7 @@ describe('auto-memory recall scan latency', () => {
       // without waiting. Every documented corpus size must fit. The
       // assertion faces the best sample: the one least contaminated by
       // contention when the suite shares a machine.
-      expectWithinLatencyBudget(best, coldScanCeilingMs(topicCount), {
-        poolMultiplier: 10,
-      });
+      expect(best).toBeLessThan(coldScanCeilingMs(topicCount));
     }
 
     console.log(

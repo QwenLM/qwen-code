@@ -64,7 +64,10 @@ import {
 } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { runAutoMemoryExtract } from './extract.js';
-import { runManagedAutoMemoryDream } from './dream.js';
+import {
+  runManagedAutoMemoryDream,
+  type AutoMemoryDreamResult,
+} from './dream.js';
 import {
   forgetManagedAutoMemoryEntries,
   forgetManagedAutoMemoryMatches,
@@ -2210,6 +2213,53 @@ export class MemoryManager {
     now?: Date,
   ): Promise<void> {
     return writeDreamManualRunToMetadata(projectRoot, sessionId, now);
+  }
+
+  /**
+   * Run a manual `/dream` through the runtime-managed path: the forked dream
+   * agent plus the `.dream-operations.json` apply and index rebuild. The
+   * prompt-submission variant cannot work in structured recall mode — the
+   * structured session prompt forbids the main model from touching
+   * managed-memory paths with the file tools the consolidation task needs.
+   * Takes the same consolidation lock the scheduled path does so a manual
+   * run never writes concurrently with a background dream.
+   */
+  async runManualDream(
+    projectRoot: string,
+    config: Config,
+    sessionId: string,
+    now = new Date(),
+  ): Promise<AutoMemoryDreamResult> {
+    await ensureAutoMemoryScaffold(projectRoot, now);
+    try {
+      await acquireDreamLock(projectRoot);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        return {
+          touchedTopics: [],
+          createdEntries: 0,
+          updatedEntries: 0,
+          deletedEntries: 0,
+          dedupedEntries: 0,
+          splitEntries: 0,
+          keywordBackfilled: 0,
+          systemMessage:
+            'Managed auto-memory dream skipped: another dream is already running.',
+        };
+      }
+      throw error;
+    }
+    try {
+      return await runManagedAutoMemoryDream(
+        projectRoot,
+        now,
+        config,
+        undefined,
+        { trigger: 'manual', recordMetadata: true, sessionId },
+      );
+    } finally {
+      await releaseDreamLock(projectRoot);
+    }
   }
 
   /**

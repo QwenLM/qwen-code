@@ -573,7 +573,11 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   const teamMemoryEnabled = options.config?.getTeamMemoryEnabled?.() ?? false;
   const snapshot = legacy
     ? await Promise.all([
-        scanAllAutoMemoryTopicDocuments(projectRoot, options.documentCache),
+        scanAllAutoMemoryTopicDocuments(
+          projectRoot,
+          options.documentCache,
+          options.config?.isTrustedFolder?.() ?? false,
+        ),
         scanAllUserAutoMemoryTopicDocuments(options.documentCache).catch(
           (error: unknown) => {
             debugLogger.warn(

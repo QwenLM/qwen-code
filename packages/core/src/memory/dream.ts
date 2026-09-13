@@ -254,6 +254,10 @@ export async function runManagedAutoMemoryDream(
     trigger?: 'auto' | 'manual';
     recordMetadata?: boolean;
     suppressChatRecording?: boolean;
+    // Manual runs pass the session so the metadata's same-session dedupe
+    // (lastDreamSessionId / recentSessionIdsSinceDream) suppresses a
+    // redundant auto-dream right after, matching writeDreamManualRunToMetadata.
+    sessionId?: string;
   } = {},
 ): Promise<AutoMemoryDreamResult> {
   await ensureAutoMemoryScaffold(projectRoot, now);
@@ -326,7 +330,7 @@ export async function runManagedAutoMemoryDream(
       projectRoot,
       now,
       agentResult.touchedTopics,
-      undefined,
+      options.sessionId,
       hasChanges,
     );
   }

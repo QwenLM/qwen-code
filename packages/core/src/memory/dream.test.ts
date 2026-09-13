@@ -470,6 +470,36 @@ describe('managed auto-memory dream', () => {
     expect(result.systemMessage).not.toContain('migration is pending');
   });
 
+  it('records the manual-run session in dream metadata when sessionId is passed', async () => {
+    // The manual /dream path passes the session so the scheduler's
+    // same-session dedupe suppresses a redundant auto-dream right after.
+    const metadataPath = getAutoMemoryMetadataPath(projectRoot);
+    const seeded = JSON.parse(
+      await fs.readFile(metadataPath, 'utf-8'),
+    ) as AutoMemoryMetadata;
+    seeded.recentSessionIdsSinceDream = ['sess-old'];
+    await fs.writeFile(metadataPath, JSON.stringify(seeded, null, 2), 'utf-8');
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runManagedAutoMemoryDream(
+      projectRoot,
+      new Date('2026-04-02T00:00:00.000Z'),
+      mockConfig,
+      undefined,
+      { trigger: 'manual', recordMetadata: true, sessionId: 'sess-manual' },
+    );
+
+    const metadata = JSON.parse(
+      await fs.readFile(metadataPath, 'utf-8'),
+    ) as AutoMemoryMetadata;
+    expect(metadata.lastDreamSessionId).toBe('sess-manual');
+    expect(metadata.recentSessionIdsSinceDream).toEqual([]);
+  });
+
   it('propagates planner failures', async () => {
     vi.mocked(planManagedAutoMemoryDreamByAgent).mockRejectedValue(
       new Error('agent failed'),

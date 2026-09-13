@@ -928,6 +928,90 @@ describe('auto-memory topic scanning', () => {
     }
   });
 
+  it('scans the same project universe for forget as for structured recall', async () => {
+    // scanAllAutoMemoryTopicDocuments (the forget universe) and
+    // scanAutoMemorySnapshot (the structured-recall universe) must cover the
+    // same project roots, or a repo-local document becomes injectable but
+    // impossible to forget.
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const previousBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'global');
+    clearAutoMemoryRootCache();
+    try {
+      const runtimeFile = path.join(
+        getAutoMemoryRoot(projectRoot),
+        'project',
+        'runtime.md',
+      );
+      const localFile = path.join(
+        projectRoot,
+        '.qwen',
+        'memory',
+        'feedback',
+        'local.md',
+      );
+      const collidingRuntime = path.join(
+        getAutoMemoryRoot(projectRoot),
+        'project',
+        'collision.md',
+      );
+      const collidingLocal = path.join(
+        projectRoot,
+        '.qwen',
+        'memory',
+        'project',
+        'collision.md',
+      );
+      const content = (name: string) =>
+        `---\ntype: project\nname: ${name}\ndescription: universe fixture\n---\nbody`;
+      for (const [filePath, name, day] of [
+        [runtimeFile, 'Runtime', '2026-08-26'],
+        [localFile, 'Local', '2026-08-26'],
+        [collidingRuntime, 'Older runtime', '2026-08-26'],
+        [collidingLocal, 'Newer local', '2026-08-27'],
+      ] as const) {
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.writeFile(filePath, content(name));
+        await fs.utimes(filePath, new Date(day), new Date(day));
+      }
+
+      const [forgetUniverse, recallUniverse] = await Promise.all([
+        scanAllAutoMemoryTopicDocuments(projectRoot),
+        scanAutoMemorySnapshot(projectRoot, { scopes: ['project'] }),
+      ]);
+
+      const relativePaths = (docs: Array<{ relativePath: string }>) =>
+        docs.map((doc) => doc.relativePath).sort();
+      expect(relativePaths(forgetUniverse)).toEqual([
+        'feedback/local.md',
+        'project/collision.md',
+        'project/runtime.md',
+      ]);
+      expect(relativePaths(forgetUniverse)).toEqual(
+        relativePaths(recallUniverse.docs),
+      );
+      // The colliding pair resolves to the newer copy in both universes.
+      expect(
+        forgetUniverse.find(
+          (doc) => doc.relativePath === 'project/collision.md',
+        )?.title,
+      ).toBe('Newer local');
+    } finally {
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+      if (previousBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBase;
+      }
+      clearAutoMemoryRootCache();
+    }
+  });
+
   it('applies one project file cap after merging runtime and local roots', async () => {
     const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
     const previousBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];

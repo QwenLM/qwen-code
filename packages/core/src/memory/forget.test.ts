@@ -240,6 +240,91 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     );
   });
 
+  it('enumerates repo-local project memory so injectable documents stay forgettable', async () => {
+    // The corpus readiness scan and structured recall both treat
+    // `<projectRoot>/.qwen/memory` as project scope (getProjectAutoMemoryRoots),
+    // so a repo-shipped document is injectable. Forget must enumerate the same
+    // universe or that document can never be forgotten.
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forget-local-'));
+    const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const originalMemoryLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'runtime');
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    clearAutoMemoryRootCache();
+    const realScan =
+      await vi.importActual<typeof import('./scan.js')>('./scan.js');
+    try {
+      const projectRoot = path.join(tempDir, 'project');
+      const localFile = path.join(
+        projectRoot,
+        '.qwen',
+        'memory',
+        'feedback',
+        'no-contact.md',
+      );
+      await fs.mkdir(path.dirname(localFile), { recursive: true });
+      await fs.writeFile(
+        localFile,
+        [
+          '---',
+          'type: feedback',
+          'name: No weekend contact',
+          'description: Contact preference',
+          '---',
+          '',
+          'the user asked for no contact on weekends',
+        ].join('\n'),
+        'utf-8',
+      );
+      vi.mocked(scanAllAutoMemoryTopicDocuments).mockImplementation(
+        realScan.scanAllAutoMemoryTopicDocuments,
+      );
+      vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+
+      const result = await selectManagedAutoMemoryForgetCandidates(
+        projectRoot,
+        'no contact on weekends',
+      );
+
+      expect(result.matches.map((match) => match.filePath)).toContain(
+        localFile,
+      );
+    } finally {
+      if (originalMemoryBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+      }
+      if (originalMemoryLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = originalMemoryLocal;
+      }
+      clearAutoMemoryRootCache();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('threads folder trust into the project scan universe', async () => {
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([]);
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+    const untrustedConfig = {
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getFastModel: vi.fn().mockReturnValue('test-model'),
+      isTrustedFolder: vi.fn().mockReturnValue(false),
+    } as unknown as Config;
+
+    await selectManagedAutoMemoryForgetCandidates('/tmp/project', 'anything', {
+      config: untrustedConfig,
+    });
+
+    expect(scanAllAutoMemoryTopicDocuments).toHaveBeenCalledWith(
+      '/tmp/project',
+      undefined,
+      false,
+    );
+  });
+
   it('bounds how much the unconfirmed forget path can delete at once', async () => {
     // forgetManagedAutoMemoryEntries (MemoryManager.forget, the ACP path)
     // deletes without confirmation. With an uncapped scan and a heuristic

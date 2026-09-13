@@ -6279,6 +6279,68 @@ hello
       );
     });
 
+    it('commits the delivered tree revision when an always-on loop guard ends the turn', async () => {
+      // The router block and focused leaves went out with the request and the
+      // model streamed a response, so the delivery is in history; the
+      // loop-detection halt must commit it, or the next turn re-injects the
+      // same tree.
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          treeSnapshot: fastTreeSnapshot('loop-revision'),
+          focusedPrompt: '## Memory focus for this turn\n\nCurrent focus',
+          prompt: '## Memory focus for this turn\n\nCurrent focus',
+          selectedDocs: [fastDoc('/m/focus.md', '- focus')],
+          strategy: 'heuristic',
+        });
+        return new Promise(() => {});
+      });
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'checkAlwaysOnSafeties').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+      mockTurnRunFn.mockImplementation(() =>
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as LlmChat;
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'first' }],
+          new AbortController().signal,
+          'prompt-tree-loop',
+        ),
+      );
+
+      expect(JSON.stringify(mockTurnRunFn.mock.calls.at(-1)?.[1])).toContain(
+        'Router loop-revision',
+      );
+      expect(client['lastDeliveredMemoryTreeRevision']).toBe('loop-revision');
+      expect(logMemoryRecallDelivery).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'fast',
+          delivery_point: 'discarded',
+        }),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'second' }],
+          new AbortController().signal,
+          'prompt-tree-loop-2',
+        ),
+      );
+      expect(
+        JSON.stringify(mockTurnRunFn.mock.calls.at(-1)?.[1]),
+      ).not.toContain('Router loop-revision');
+    });
+
     it('does not commit a tree revision from an attempt superseded by retry', async () => {
       mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
         options.onFastResult?.({
