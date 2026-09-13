@@ -127,6 +127,40 @@ describe('GoalPill', () => {
     unmount();
   });
 
+  it('warns about stalled checkpoints before the stall breaker stops the Goal', () => {
+    vi.setSystemTime(NOW);
+    const { lastFrame, unmount } = renderPill({
+      snapshot: snapshot('active', 'running', {
+        checkpointStalls: 2,
+        lastCheckpointFailure: 'Error: provider failed',
+      }),
+    });
+
+    expect(lastFrame()).toContain('! /goal checkpoint 2/3 stalled');
+    // The footer has no room for the failure itself; the status card has it.
+    expect(lastFrame()).not.toContain('provider failed');
+    unmount();
+  });
+
+  it('keeps the plain labels when no checkpoint has stalled', () => {
+    vi.setSystemTime(NOW);
+    // A failure on a window with room spends no stall and is the card's to
+    // show; the footer stays quiet until the streak starts.
+    const quiet = renderPill({
+      snapshot: snapshot('active', 'running', {
+        lastCheckpointFailure: 'Error: provider failed',
+      }),
+    });
+    expect(quiet.lastFrame()).toContain('/goal active');
+    quiet.unmount();
+
+    const checking = renderPill({
+      snapshot: snapshot('active', 'verifying', { checkpointStalls: 1 }),
+    });
+    expect(checking.lastFrame()).toContain('/goal checking');
+    checking.unmount();
+  });
+
   it('adds the current active span to persisted active time', () => {
     vi.setSystemTime(NOW);
     const { lastFrame, unmount } = renderPill({

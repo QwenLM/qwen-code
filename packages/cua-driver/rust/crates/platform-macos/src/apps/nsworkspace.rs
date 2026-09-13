@@ -10,7 +10,7 @@
 //!
 //! Both share an `OpenConfig` builder that mirrors the subset of
 //! `NSWorkspaceOpenConfiguration` properties Swift sets:
-//!   * `activates = false`         (background launch — no focus steal)
+//!   * `activates`                 (false for normal background launch)
 //!   * `addsToRecentItems = false` (don't pollute the Apple menu)
 //!   * `createsNewApplicationInstance = …`
 //!   * `arguments = …` / `environment = …`
@@ -45,17 +45,19 @@ const fn fourcc(s: &[u8; 4]) -> u32 {
 
 const K_CORE_EVENT_CLASS: u32 = fourcc(b"aevt"); // kCoreEventClass
 const K_AE_OPEN_APPLICATION: u32 = fourcc(b"oapp"); // kAEOpenApplication
+const K_AE_REOPEN_APPLICATION: u32 = fourcc(b"rapp"); // kAEReopenApplication
 const K_AUTO_GENERATE_RETURN_ID: i16 = -1; // kAutoGenerateReturnID
 const K_ANY_TRANSACTION_ID: i32 = 0; // kAnyTransactionID
 
 /// Caller-friendly launch options. Mirrors the subset of
 /// `NSWorkspaceOpenConfiguration` properties Swift `AppLauncher` sets.
 ///
-/// Always sends `activates = false` + `addsToRecentItems = false`. The
-/// optional fields are applied only when present so the builder doesn't
-/// override an inherited default.
+/// Always avoids recent-item updates. Normal launch callers keep `activates`
+/// false; app observation can briefly activate a hidden surface.
 #[derive(Default, Debug, Clone)]
 pub struct OpenConfig {
+    pub activates: bool,
+    pub reopens_running_application: bool,
     /// `--args` for the launched process. Passed as argv entries (no shell
     /// expansion).
     pub arguments: Vec<String>,
@@ -188,12 +190,12 @@ pub fn open_urls_with_application(
 
 /// Build an `NSWorkspaceOpenConfiguration` from `cfg`.
 ///
-/// Always sets `activates = false` and `addsToRecentItems = false` to match
-/// Swift's background-launch invariant.
+/// Always keeps recent items untouched and applies the caller's activation
+/// choice.
 fn build_configuration(cfg: &OpenConfig) -> Retained<NSWorkspaceOpenConfiguration> {
     let config = unsafe { NSWorkspaceOpenConfiguration::configuration() };
     unsafe {
-        config.setActivates(false);
+        config.setActivates(cfg.activates);
         config.setAddsToRecentItems(false);
         config.setCreatesNewApplicationInstance(cfg.creates_new_instance);
 
@@ -230,7 +232,14 @@ fn build_configuration(cfg: &OpenConfig) -> Retained<NSWorkspaceOpenConfiguratio
 
         if let Some(bid) = &cfg.apple_event_bundle_id {
             if !bid.is_empty() {
-                let event = apple_event::open_application_event(bid);
+                let event = apple_event::application_event(
+                    bid,
+                    if cfg.reopens_running_application {
+                        K_AE_REOPEN_APPLICATION
+                    } else {
+                        K_AE_OPEN_APPLICATION
+                    },
+                );
                 config.setAppleEvent(Some(&event));
             }
         }
@@ -535,15 +544,14 @@ mod tests {
 /// is not exposed by `objc2-foundation 0.2.2`.
 mod apple_event {
     use super::{
-        NSAppleEventDescriptor, NSString, Retained, K_AE_OPEN_APPLICATION, K_ANY_TRANSACTION_ID,
+        NSAppleEventDescriptor, NSString, Retained, K_ANY_TRANSACTION_ID,
         K_AUTO_GENERATE_RETURN_ID, K_CORE_EVENT_CLASS,
     };
     use objc2::msg_send_id;
     use objc2::rc::Allocated;
     use objc2::ClassType;
 
-    /// Build an `aevt/oapp` AppleEvent addressed to the bundle id `bid`.
-    pub fn open_application_event(bid: &str) -> Retained<NSAppleEventDescriptor> {
+    pub fn application_event(bid: &str, event_id: u32) -> Retained<NSAppleEventDescriptor> {
         let target_string = NSString::from_str(bid);
         let target: Retained<NSAppleEventDescriptor> =
             unsafe { NSAppleEventDescriptor::descriptorWithBundleIdentifier(&target_string) };
@@ -554,7 +562,7 @@ mod apple_event {
             let event: Retained<NSAppleEventDescriptor> = msg_send_id![
                 alloc,
                 initWithEventClass: K_CORE_EVENT_CLASS,
-                eventID: K_AE_OPEN_APPLICATION,
+                eventID: event_id,
                 targetDescriptor: &*target,
                 returnID: K_AUTO_GENERATE_RETURN_ID,
                 transactionID: K_ANY_TRANSACTION_ID,

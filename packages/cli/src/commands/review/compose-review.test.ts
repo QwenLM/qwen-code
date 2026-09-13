@@ -19,11 +19,14 @@ import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import {
+  DEADLINE_ENV,
   budgetStopEntry,
   budgetStopEntryZh,
   roundCapStopEntry,
   roundCapStopEntryZh,
   writeBudgetStop,
+  clearRoundStamps,
+  stampRound,
   writeRoundCapStop,
 } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
@@ -1883,9 +1886,11 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // marker with zero reverse-audit records must not suppress the not-built
     // gap the way a time-budget stop does: the cap gate refuses only
     // `round > cap`, so the gap's FIX (rebuild `--round 1`) is admitted, and
-    // a local run has no deadline to refuse it at all. Reading the marker
-    // cause-blind would silently drop both the gap and its rebuild
-    // remediation for a run that audited nothing.
+    // a run whose wall still holds — this one has no wall at all — has
+    // nothing to refuse it either. Reading the marker cause-blind would
+    // silently drop both the gap and its rebuild remediation for a run that
+    // audited nothing. (The sibling below is the one exception: a wall that
+    // has since closed refuses the rebuild too.)
     const plan = coveredPlan([]); // no reverse-audit ran — the not-built shape
     writeRoundCapStop(plan, 3, 4);
     const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
@@ -1893,6 +1898,166 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(r.event).toBe('COMMENT');
     expect(r.body).toContain('reverse-audit round cap of 3');
     // …but the not-built gap and its rebuild remediation are still owed.
+    expect(r.remediation.join(' ')).toContain('reverse audit:');
+  });
+
+  it('a round-cap stop beside a closed wall waives the rebuild FIX but keeps the not-built gap', () => {
+    // Same shape, but the plan carries a wall the gate can no longer admit
+    // a round under (the trigger is `remaining < reserve + round`, which
+    // opens before the wall itself closes): the remediation `--round 1`
+    // would meet the budget gate's refusal as deterministically as a
+    // time-budget stop's, so naming it is a FIX that cannot run. A 3600s
+    // wall is below what `--deadline` records — a hand-written or pre-rule
+    // plan — which is fine for the arithmetic under test.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    // Captured two hours ago: the hour-long wall is spent. Backdating the
+    // plan keeps every record and the marker below newer than it.
+    const captured = new Date(Date.now() - 2 * 3600 * 1000);
+    utimesSync(plan, captured, captured);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    // The FIX is waived; the disclosure is NOT — a run that burned its wall
+    // without building an auditor still says so in the body, beside the
+    // round-cap line that would otherwise imply rounds ran, and its scope
+    // stays unproven.
+    expect(r.body).toContain('no auditor was launched');
+    expect(r.scopeUnproven).toBe(true);
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+  });
+
+  it('a closed wall waives every unrunnable FIX — rebuild, verify shard and `[unverified]` relaunch — and keeps both disclosures', () => {
+    // No stop marker at all: a 3600s wall captured 3000s ago (600s left,
+    // under the 1200s compose floor), findings to post, no verifier and no
+    // auditor ever built. The rebuild and the verify build would both exit
+    // 4 at the gates, so neither FIX is owed — but the two gaps are, and
+    // the unverified findings still cap the verdict.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    const captured = new Date(Date.now() - 3000 * 1000);
+    utimesSync(plan, captured, captured);
+    // A Critical to post, so the verifier is owed and its FIX is ruled on
+    // — and a findings file still carrying `[unverified]` tags, whose
+    // relaunch FIX is a verify build the same floor refuses.
+    const r = composeReview({
+      planPath: plan,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      findingsPath: findingsFile(TAGGED),
+    });
+    expect(r.event).toBe('COMMENT');
+    // With a finding to post the two gaps merge into one sentence with two
+    // subjects (COMBINED_STEP45_GAP): both disclosures reach the body.
+    expect(r.body).toContain(
+      'neither the verifier nor the reverse auditor was launched',
+    );
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+    expect(r.remediation.join(' ')).not.toContain('verification:');
+    expect(r.remediation.join(' ')).not.toContain('findings still tagged');
+    // Withheld FIXes are named beside the FIX lines, never in the body.
+    expect(r.waivedFixes.map((w) => w.split(':')[0])).toEqual([
+      'reverse audit',
+      'verification',
+      'findings still tagged `— [unverified]`',
+    ]);
+    expect(r.waivedFixes[2]).toMatch(
+      /the relaunch FIX is withheld — the plan's wall is at or under the compose floor \((?:10|9\.9) minutes of the wall left, floor 20 minutes\)/,
+    );
+    expect(r.body).not.toContain('withheld');
+  });
+
+  it('a round-cap stop is priced like the gate would price the rebuild — from the round stamps, not a flat constant', () => {
+    // ~6,900s remain on a 14,400s flag wall (reserve 4,800). A flat 1,800s
+    // round price would say the rebuild fits (6,900 ≥ 6,600) and keep the
+    // remediation; the gate itself prices from the stamps, and the waiver
+    // takes the least any `--round <k>` could be priced at: `--round 1`
+    // excludes nothing and keeps the costliest closed span (4,450s, rounds
+    // 2→3, with round 3 long enough ago that nothing is in flight),
+    // `--round 3` leaves round 2's span open to now (7,450s), and
+    // `--round 2` prices only round 3's open span (3,000s) — the least,
+    // 3,000s, is still refused (6,900 < 7,800). The waiver must agree with
+    // the gate, or it names a FIX that cannot run. The flat price stays on
+    // its admitting side for 300s of wall clock after the fixture is
+    // dated, so the discrimination does not depend on the test's own
+    // runtime.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 14400,
+        deadlineSource: 'flag',
+      }),
+    );
+    const now = Date.now();
+    const captured = new Date(now - 7500 * 1000);
+    utimesSync(plan, captured, captured);
+    stampRound(plan, 2, now - 7450 * 1000);
+    stampRound(plan, 3, now - 3000 * 1000);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+    // Move round 3's stamp to 1,000s ago and the least candidate changes:
+    // a `--round 2` rebuild excludes round 2's own stamp and prices only
+    // round 3's open 1,000s, which the gate would ADMIT (6,900 ≥ 5,800),
+    // while `--round 1` (6,450) and `--round 3` (7,450) would be refused.
+    // Compose does not know which k the orchestrator names, so the FIX
+    // stays owed.
+    clearRoundStamps(plan);
+    stampRound(plan, 2, now - 7450 * 1000);
+    stampRound(plan, 3, now - 1000 * 1000);
+    const kept = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(kept.remediation.join(' ')).toContain('reverse audit:');
+    expect(kept.waivedFixes).toEqual([]);
+  });
+
+  it('a round-cap stop beside an OPEN plan wall still owes the not-built gap — the rebuild it names would be admitted', () => {
+    // The wall every real capture records (here a `--deadline 120`-shaped
+    // 7200s flag wall, captured now): the gate would admit `--round 1`, so
+    // the round-cap marker exempts nothing and the remediation stands. The
+    // wall-less sibling above never reaches the arithmetic; this one does.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 7200,
+        deadlineSource: 'flag',
+      }),
+    );
+    // Rewriting the plan moved its mtime past the records coveredPlan()
+    // wrote; date it a few seconds back so they stay this run's, and the
+    // wall stays open with hours to spare.
+    const captured = new Date(Date.now() - 5000);
+    utimesSync(plan, captured, captured);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    expect(r.body).toContain('no auditor was launched');
     expect(r.remediation.join(' ')).toContain('reverse audit:');
   });
 
@@ -5991,6 +6156,90 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.body).toContain('never opened its brief, so it reviewed without');
   });
 
+  it('the handler prints a withheld FIX as a NOTE line beside the FIX lines, before the verdict, never to stdout', async () => {
+    // Step 5 never built, on a 3600s wall captured 3000s ago: the rebuild
+    // FIX is withheld by the wall, and the command says so where the
+    // orchestrator reads — a disclosed gap with no FIX is never silent.
+    const p = plan({ step45: false });
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    const captured = new Date(Date.now() - 3000 * 1000);
+    utimesSync(p, captured, captured);
+    const input = join(dir, 'input.json');
+    writeFileSync(
+      input,
+      JSON.stringify({
+        planPath: p,
+        modelId: MODEL,
+        findingsPath: findingsFile(TAGGED),
+      }),
+    );
+    const commentsPath = join(dir, 'comments.json');
+    writeFileSync(commentsPath, '[]', 'utf8');
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    const prevEpoch = process.env[DEADLINE_ENV];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    delete process.env[DEADLINE_ENV];
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      vi.mocked(writeStdoutLine).mockClear();
+      await runComposeReviewCommand({ input, comments: commentsPath });
+      const stderr = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]));
+      const noteIdx = stderr.findIndex((l) =>
+        l.startsWith('NOTE: reverse audit: the rebuild FIX is withheld'),
+      );
+      const verdictIdx = stderr.findIndex((l) => l.startsWith('Verdict:'));
+      expect(noteIdx).toBeGreaterThanOrEqual(0);
+      expect(verdictIdx).toBeGreaterThan(noteIdx);
+      expect(stderr.some((l) => l.startsWith('FIX: reverse audit:'))).toBe(
+        false,
+      );
+      // The `[unverified]` relaunch is a verify build the same floor
+      // refuses: withheld and explained too, never printed as a FIX
+      // beside a NOTE that says the builder would refuse it.
+      expect(
+        stderr.some((l) => l.startsWith('FIX: findings still tagged')),
+      ).toBe(false);
+      expect(
+        stderr.some((l) =>
+          l.startsWith(
+            'NOTE: findings still tagged `— [unverified]`: the relaunch FIX is withheld',
+          ),
+        ),
+      ).toBe(true);
+      const stdout = vi
+        .mocked(writeStdoutLine)
+        .mock.calls.map((c) => String(c[0]))
+        .join('\n');
+      expect(stdout).not.toContain('NOTE: ');
+      const parsedOut = JSON.parse(stdout) as { waivedFixes?: string[] };
+      expect(parsedOut.waivedFixes?.length).toBe(2);
+    } finally {
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+      if (prevEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = prevEpoch;
+    }
+  });
+
   it('the handler prints every FIX to stderr, before the verdict, never to stdout', async () => {
     // The array on the result is data; the command boundary is the interface the
     // orchestrator actually reads. Without this, rerouting FIX lines to stdout
@@ -6485,6 +6734,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       postedFresh: 0,
       downgradedFrom: null,
       remediation: [],
+      waivedFixes: [],
       deferredCount: 0,
       fixedFindings: [],
       bodyTrim: {
@@ -12330,6 +12580,16 @@ describe('composeReview — the findings file tag check', () => {
     expect(r.baseEvent).toBe('APPROVE');
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    // No wall on this plan: the relaunch FIX is owed, and nothing is
+    // withheld — the compose floor waives it only on a wall it refuses.
+    expect(
+      r.remediation.some((fix) =>
+        fix.startsWith(
+          'findings still tagged `— [unverified]`: relaunch the verifier',
+        ),
+      ),
+    ).toBe(true);
+    expect(r.waivedFixes).toEqual([]);
     expect(r.body).toContain(
       '1 finding(s) still carried the `— [unverified]` tag when the loop ' +
         'ended',
