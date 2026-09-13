@@ -463,6 +463,63 @@ describe('createDaemonSessionActions', () => {
       }
     });
 
+    it.each([true, false])(
+      'ignores an older active=%s response after SSE starts B in a standalone session',
+      (active) => {
+        const harness = startBackgroundTurn(true);
+        harness.replaceConnection({
+          ...harness.getConnection(),
+          sessionContext: { kind: 'standalone' },
+          workspaceCwd: undefined,
+        });
+        expect(harness.sessionRef.current?.workspaceCwd).toBe(
+          owner.workspaceCwd,
+        );
+        const authorityBefore = harness.daemonActivePromptRef.current;
+        harness.actions.setDaemonActivePrompt(
+          active,
+          owner,
+          active ? oldTurn : undefined,
+          harness.observedAt - 1,
+        );
+        expect(harness.getConnection().backgroundTurn).toEqual(newTurn);
+        expect(harness.daemonActivePromptRef.current).toBe(authorityBefore);
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
+
+        harness.actions.setDaemonActivePrompt(
+          false,
+          owner,
+          undefined,
+          harness.observedAt + 1,
+        );
+        expect(harness.getConnection().backgroundTurn).toBeUndefined();
+        expect(harness.setPromptStatus).toHaveBeenCalledWith('idle');
+      },
+    );
+
+    it.each([
+      { ...owner, sessionId: 'another-session' },
+      { ...owner, workspaceCwd: '/another-workspace' },
+    ])(
+      'does not settle a standalone background turn for mismatched owner %j',
+      (otherOwner) => {
+        const harness = startBackgroundTurn(true);
+        harness.replaceConnection({
+          ...harness.getConnection(),
+          sessionContext: { kind: 'standalone' },
+          workspaceCwd: undefined,
+        });
+        harness.actions.setDaemonActivePrompt(
+          false,
+          otherOwner,
+          undefined,
+          harness.observedAt + 1,
+        );
+        expect(harness.getConnection().backgroundTurn).toEqual(newTurn);
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
+      },
+    );
+
     it('ignores malformed live-state execution metadata', () => {
       const harness = createActionsHarness({
         session: createMockSession(owner.sessionId),

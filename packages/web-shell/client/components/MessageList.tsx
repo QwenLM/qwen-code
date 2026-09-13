@@ -1580,7 +1580,7 @@ function completedBackgroundShellTaskIds(
       typeof data === 'object' &&
       'backgroundTask' in data
     ) {
-      data = data.backgroundTask;
+      data = data.backgroundTask ?? data;
     }
     if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
     if (!('kind' in data) || data.kind !== 'shell') continue;
@@ -1684,7 +1684,7 @@ function backgroundAgentCompletionForMessage(message: Message): {
     typeof data === 'object' &&
     'backgroundTask' in data
   ) {
-    data = data.backgroundTask;
+    data = data.backgroundTask ?? data;
   }
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
     return identifiesAgent

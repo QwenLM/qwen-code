@@ -71,3 +71,5 @@ Review 修复确保折叠时保留仅被被动任务完成标记分隔的所有�
 在 RPC 与后台执行交接期间，取消及共享的插入消息队列归属于活跃 RPC。只有后台执行时，它仍可使用已准入的执行 ID 消费插入消息并申请 Todo Stop Guard 续跑。非 daemon ACP host 对不支持的准入方法返回 JSON-RPC method-not-found，保留现有兼容降级。回复收集器排除后台状态文案；自动执行的终态不会结束其他消费端的主 prompt。Web Shell 暂存提前到达的终态，待 prompt 准入响应确认归属后再结算；旧终态只跳过执行收尾，仍保留其转录错误。
 
 同一 session 的 load 快照清空后台执行时，Web Shell 保留其已结束 ID，避免回放的 start 事件使其再次变为运行中。
+
+后台终态到达时，如果当前 session 摘要显示已无活跃 prompt，则唤醒 `wait_threads`；其他 prompt 仍活跃时不唤醒。标记缺少任务记录时，使用执行描述符判断任务完成。无论 workspace 还是 standalone 界面，live-state 的新旧检查都采用实际 session 的路由归属。

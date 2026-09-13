@@ -1013,16 +1013,17 @@ export function createDaemonSessionActions({
     ) {
       backgroundTurn = parseDaemonBackgroundTurn(backgroundTurn);
       const connection = getConnection();
+      const backstopSession = sessionRef.current;
       if (
         connection.sessionId === owner.sessionId &&
-        connection.workspaceCwd === owner.workspaceCwd &&
+        backstopSession?.sessionId === owner.sessionId &&
+        backstopSession?.workspaceCwd === owner.workspaceCwd &&
         requestStartedAt !== undefined &&
         requestStartedAt <= (connection.backgroundTurnObservedAt ?? -Infinity)
       )
         return;
       const previous = daemonActivePromptRef.current;
       daemonActivePromptRef.current = { active, ...owner };
-      const backstopSession = sessionRef.current;
       if (
         active !== undefined &&
         backstopSession?.sessionId === owner.sessionId &&

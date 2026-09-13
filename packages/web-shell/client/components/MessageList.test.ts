@@ -2893,6 +2893,78 @@ it('retains a complete main reply when a later background tool-only execution en
 
 describe('background completion markers', () => {
   it.each(['agent', 'shell'] as const)(
+    'reconciles a consumed %s completion from the transcript producer without a task record',
+    async (kind) => {
+      const {
+        normalizeDaemonEvent,
+        createDaemonTranscriptState,
+        reduceDaemonTranscriptEvents,
+      } = await import('@qwen-code/sdk/daemon');
+      const { transcriptBlocksToDaemonMessages } = await import(
+        '../adapters/transcriptToMessages'
+      );
+      const backgroundTurn = {
+        turnId: 'auto-without-task-record',
+        taskId: 'bg_1234abcd',
+        kind,
+        toolUseId: 'call-a1',
+        startedAt: 100,
+      };
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({ now: 1 }),
+        normalizeDaemonEvent({
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          promptId: backgroundTurn.turnId,
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'Task result received' },
+              _meta: {
+                source: 'background_notification_turn_started',
+                backgroundTurn,
+              },
+            },
+          },
+        }),
+        { now: 100 },
+      );
+      const markers = transcriptBlocksToDaemonMessages(state.blocks);
+      expect(markers).toHaveLength(1);
+      expect(markers[0]).toMatchObject({
+        source: 'background_notification_turn_started',
+        data: { ...backgroundTurn, backgroundTask: undefined },
+      });
+      const launch =
+        kind === 'agent'
+          ? makeBackgroundAgentToolGroup('a1')
+          : makeBackgroundShellToolGroup('shell', backgroundTurn.taskId);
+      const messages: Message[] = [
+        makeUserMessage('u1'),
+        launch,
+        makeAssistantMessage('launched'),
+        makeUserMessage('u2'),
+        makeMultiToolGroup('other'),
+        makeAssistantMessage('other-answer'),
+      ];
+      expect(
+        collapseOf(collapseItems(groupParallelAgents(messages)), 'u1')
+          ?.collapsed,
+      ).toBe(false);
+      const collapsed = collapseItems(
+        groupParallelAgents([
+          ...messages,
+          ...markers,
+          makeAssistantMessage('summary'),
+        ]),
+      );
+      expect(collapseOf(collapsed, 'u1')?.collapsed).toBe(true);
+      expect(rowIds(collapsed)).toContain(markers[0]!.id);
+    },
+  );
+
+  it.each(['agent', 'shell'] as const)(
     'reconciles a consumed %s completion from marker metadata',
     (kind) => {
       const launch =
