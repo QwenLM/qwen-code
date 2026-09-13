@@ -1784,6 +1784,7 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          git config --global core.autocrlf false
           # ENOSPC has failed test steps mid-suite while the host looks
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample the routed temp filesystem every 10s so the

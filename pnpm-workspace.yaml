@@ -46,6 +46,7 @@ overrides:
   '@types/react': '^19.2.0'
   '@types/react-dom': '^19.2.0'
   axios: '^1.19.0'
+  '@tybys/wasm-util': '0.10.4'
   react-markdown: '^9.0.0'
 
 allowBuilds:
@@ -63,3 +64,4 @@ allowBuilds:
 
 minimumReleaseAgeExclude:
   - '@qwen-code/channel-base'
+  - '@tybys/wasm-util@0.10.4'

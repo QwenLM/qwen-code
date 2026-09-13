@@ -13269,7 +13269,7 @@ describe('runQwenServe channel worker supervisor', () => {
       started = await runQwenServe(
         {
           port: 0,
-          hostname: '0',
+          hostname: '0.0.0.0',
           mode: 'http-bridge',
           serveWebShell: false,
           workspace: tmpDir,
@@ -13280,7 +13280,7 @@ describe('runQwenServe channel worker supervisor', () => {
       const arg = mockRemoteQuickstart.print.mock.calls[0][0];
       // The operator spelling and the socket address differ here, so this
       // pins that boot reports what the socket bound, not what was typed.
-      expect(arg.bind).toBe('0');
+      expect(arg.bind).toBe('0.0.0.0');
       expect(arg.boundAddress).toBe('0.0.0.0');
     } finally {
       vi.unstubAllEnvs();

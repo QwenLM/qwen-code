@@ -57,6 +57,10 @@ function perturbedStats(
   );
 }
 
+function differentIdentity(value: number): number {
+  return value === 1 ? 2 : 1;
+}
+
 // Install a node:fs mock with O_NOFOLLOW removed so the module under test
 // takes the lstat/open/fstat fallback path. The `default` member is
 // LOAD-BEARING: no-follow-open.ts binds node:fs through a DEFAULT import,
@@ -205,7 +209,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     mockNoFollowFs((actual) => ({
       fstatSync: ((fd: number) => {
         const stats = actual.fstatSync(fd);
-        return perturbedStats(stats, { ino: stats.ino + 1 });
+        return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
       }) as typeof actual.fstatSync,
       // Pin the rejection-path fd close: without it every sync fallback
       // refusal leaks the raw fd it opened for the identity re-check.
@@ -236,7 +240,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     mockNoFollowFs((actual) => ({
       fstatSync: ((fd: number) => {
         const stats = actual.fstatSync(fd);
-        return perturbedStats(stats, { dev: stats.dev + 1 });
+        return perturbedStats(stats, { dev: differentIdentity(stats.dev) });
       }) as typeof actual.fstatSync,
     }));
 
@@ -268,7 +272,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
         ...actual.promises,
         lstat: (async (p: string) => {
           const stats = await actual.promises.lstat(p);
-          return perturbedStats(stats, { ino: stats.ino + 1 });
+          return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
         }) as typeof actual.promises.lstat,
         open: (async (...args: Parameters<typeof actual.promises.open>) => {
           const handle = await actual.promises.open(...args);
@@ -297,7 +301,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
         lstatCalls += 1;
         return lstatCalls === 1
           ? stats
-          : perturbedStats(stats, { ino: stats.ino + 1 });
+          : perturbedStats(stats, { ino: differentIdentity(stats.ino) });
       };
       return {
         lstatSync: ((p: string) =>
@@ -403,7 +407,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     mockNoFollowFs((actual) => ({
       fstatSync: ((fd: number) => {
         const stats = actual.fstatSync(fd);
-        return perturbedStats(stats, { ino: stats.ino + 1 });
+        return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
       }) as typeof actual.fstatSync,
       closeSync: (() => {
         throw Object.assign(new Error('close failed'), { code: 'EBADF' });
@@ -464,7 +468,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
         ...actual.promises,
         lstat: (async (p: string) => {
           const stats = await actual.promises.lstat(p);
-          return perturbedStats(stats, { ino: stats.ino + 1 });
+          return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
         }) as typeof actual.promises.lstat,
         open: (async (...args: Parameters<typeof actual.promises.open>) => {
           const handle = await actual.promises.open(...args);

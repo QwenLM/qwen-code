@@ -1001,7 +1001,7 @@ describe('resolveWebShellBrand', () => {
       vi.mocked(fs.fstatSync).mockImplementationOnce(((fd: number) => {
         const stat = fsActual.fstatSync(fd);
         const fake = Object.create(Object.getPrototypeOf(stat)) as fs.Stats;
-        Object.assign(fake, stat, { ino: stat.ino + 1 });
+        Object.assign(fake, stat, { ino: stat.ino === 1 ? 2 : 1 });
         return fake;
       }) as never);
       const { brand, warnings } = resolveWebShellBrand(
