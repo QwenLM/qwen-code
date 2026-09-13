@@ -36,6 +36,7 @@ import {
   a2aGetTask,
   a2aListTasks,
   a2aSendMessage,
+  checkA2AGrant,
   type A2AAgentCard,
   type A2ACaller,
   type A2AFailure,
@@ -97,9 +98,16 @@ async function buildUser(
   ) {
     return new UnauthenticatedUser();
   }
+  const caller = { callerId, secret: authorization[1] };
+  const grant = await checkA2AGrant(runtime.workspaceCwd, {
+    ...caller,
+    agentId,
+    required: 'analysis',
+  });
+  if (!grant.ok) return new UnauthenticatedUser();
   return new AuthenticatedA2AUser(
     runtime.workspaceCwd,
-    { callerId, secret: authorization[1] },
+    caller,
     agentId,
     baseUrl(req),
   );

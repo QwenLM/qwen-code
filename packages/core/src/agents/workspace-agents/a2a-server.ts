@@ -168,8 +168,8 @@ export async function a2aSendMessage(
 /**
  * `getTask` — poll one task.
  *
- * `not_found` covers both "no such task" and "not yours", because a caller
- * able to tell them apart can enumerate another client's task ids.
+ * `not_found` covers missing tasks, ownership and credential failures so an
+ * unauthorised caller cannot distinguish them by their error codes.
  */
 export async function a2aGetTask(
   projectRoot: string,
@@ -191,7 +191,7 @@ export async function a2aGetTask(
   );
   // A revoked caller loses its own history too. Otherwise revocation would
   // stop new work while leaving the old readable indefinitely.
-  if (!auth.ok) return { ok: false, kind: 'refused' };
+  if (!auth.ok) return { ok: false, kind: 'not_found' };
   return { ok: true, value: taskView(thread) };
 }
 
@@ -241,7 +241,7 @@ export async function a2aCancelTask(
     existing.externalIntake.targetAgentId,
     'analysis',
   );
-  if (!auth.ok) return { ok: false, kind: 'refused' };
+  if (!auth.ok) return { ok: false, kind: 'not_found' };
   const cancelled = await cancelExternalThreadForCaller(
     projectRoot,
     caller.callerId,
