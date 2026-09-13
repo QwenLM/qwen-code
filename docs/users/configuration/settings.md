@@ -279,7 +279,7 @@ The `extra_body` field allows you to add custom parameters to the request body s
 
 **enableRequestMetadata notes:**
 
-- A side model (`fastModel`, compaction, title generation, a subagent on another model) that sets no `enableRequestMetadata` of its own falls back to the automatic qwen-family gate. It does not inherit the main model's explicit `true` or `false`, so a vendor-forwarded side model is never sent the tracing object because the main model asked for it. A side model that is not listed in `modelProviders` still inherits the main model's value.
+- A side model (`fastModel`, compaction, title generation, a subagent on another model) that sets no `enableRequestMetadata` of its own falls back to the automatic qwen-family gate. It does not inherit the main model's explicit `true` or `false`, so a vendor-forwarded side model is never sent the tracing object because the main model asked for it. A `fastModel` id that is not listed in `modelProviders` is not used at all; those calls run on the main model and its configuration.
 - Under Qwen OAuth the `model.generationConfig` block is not applied to requests, so this switch has no effect on that route.
 
 **model.openAILoggingDir examples:**
