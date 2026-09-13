@@ -645,13 +645,16 @@ export class QwenAgentManager {
         mtime: new Date(s.lastUpdated).getTime(),
       }));
       // The local fallback only ever produces bare-mtime cursors, so a
-      // numeric parse round-trips; a composite cursor here means the caller
-      // mixed servers mid-pagination; fail closed to an empty next page.
+      // numeric parse round-trips. A composite cursor here means the caller
+      // mixed servers mid-pagination; fail closed with an empty page rather
+      // than re-serving page one.
       const cursorMtime = cursor !== undefined ? Number(cursor) : undefined;
       const filtered =
-        cursorMtime !== undefined && Number.isFinite(cursorMtime)
-          ? allWithMtime.filter((x) => x.mtime < cursorMtime)
-          : allWithMtime;
+        cursor === undefined
+          ? allWithMtime
+          : cursorMtime !== undefined && Number.isFinite(cursorMtime)
+            ? allWithMtime.filter((x) => x.mtime < cursorMtime)
+            : [];
       const page = filtered.slice(0, size);
       const sessions = page.map((x) => ({
         id: x.raw.sessionId,

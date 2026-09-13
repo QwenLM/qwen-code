@@ -2939,11 +2939,12 @@ export class SessionService {
   /**
    * Enumerates every persisted session id of this project for one archive
    * state by reading the chats dir directly, in deterministic filename
-   * order. Unlike {@link listSessions} there is no mtime cursor and no
-   * page size: an exhaustive sweep paged by the strict `mtime < cursor`
-   * filter would silently skip sessions that share an mtime with a page's
-   * last entry, on every run. Membership is checked the same way as
-   * {@link listSessions}.
+   * order. Unlike {@link listSessions} there is no cursor and no page size:
+   * an exhaustive sweep is one pass, with no pagination state to carry.
+   * (listSessions paginates losslessly across mtime ties since the
+   * composite-cursor fix; this direct scan predates it and stays because a
+   * sweep is still cheaper than paging here.) Membership is checked the same
+   * way as {@link listSessions}.
    */
   async listAllProjectSessionIds(
     archiveState: SessionArchiveState,
@@ -4420,9 +4421,10 @@ export class SessionService {
     const chatsDir = this.getChatsDir();
 
     // Scan all session files directly rather than paging through
-    // listSessions(): the mtime-only cursor there uses a strict `<` boundary,
-    // so sessions that share an mtime with the page's last entry are skipped,
-    // which would silently drop valid title matches.
+    // listSessions(): title search needs an exhaustive sweep anyway, and the
+    // paginated path offers no filter hook. (listSessions has paginated
+    // losslessly across mtime ties since the composite-cursor fix; whether to
+    // route this back through it is separate cleanup.)
     let fileNames: string[];
     try {
       fileNames = fs.readdirSync(chatsDir);

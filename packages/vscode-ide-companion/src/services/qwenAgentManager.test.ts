@@ -111,6 +111,83 @@ describe('QwenAgentManager.getSessionListPaged', () => {
     expect(page.nextCursor).toBe('1755000000000');
     expect(page.hasMore).toBe(true);
   });
+
+  it('fails closed when a composite cursor reaches the filesystem fallback', async () => {
+    // Regression: a composite "<mtimeMs>:<sessionId>" cursor parses to NaN;
+    // the fallback must return an empty page, not the unfiltered list
+    // (which would re-serve page one and duplicate rows in the webview).
+    const manager = new QwenAgentManager();
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions: vi.fn().mockRejectedValue(new Error('ACP unavailable')),
+    };
+    const stored = [
+      {
+        sessionId: '550e8400-e29b-41d4-a716-446655440000',
+        projectHash: 'p',
+        startTime: '2026-08-17T00:00:00.000Z',
+        lastUpdated: '2026-08-17T00:00:00.000Z',
+        messages: [],
+      },
+      {
+        sessionId: '550e8400-e29b-41d4-a716-446655440001',
+        projectHash: 'p',
+        startTime: '2026-08-17T00:01:00.000Z',
+        lastUpdated: '2026-08-17T00:01:00.000Z',
+        messages: [],
+      },
+    ];
+    (manager as unknown as { sessionReader: unknown }).sessionReader = {
+      getAllSessions: vi.fn().mockResolvedValue(stored),
+      getSessionTitle: vi.fn().mockReturnValue('t'),
+    };
+
+    const page = await manager.getSessionListPaged({
+      cursor: '1755000000000:550e8400-e29b-41d4-a716-446655440000',
+      size: 1,
+    });
+
+    expect(page.sessions).toEqual([]);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursor).toBeUndefined();
+  });
+
+  it('filters by a legacy numeric cursor in the filesystem fallback', async () => {
+    const manager = new QwenAgentManager();
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions: vi.fn().mockRejectedValue(new Error('ACP unavailable')),
+    };
+    const stored = [
+      {
+        sessionId: '550e8400-e29b-41d4-a716-446655440000',
+        projectHash: 'p',
+        startTime: '2026-08-17T00:00:00.000Z',
+        lastUpdated: '2026-08-17T00:00:00.000Z',
+        messages: [],
+      },
+      {
+        sessionId: '550e8400-e29b-41d4-a716-446655440001',
+        projectHash: 'p',
+        startTime: '2026-08-17T00:01:00.000Z',
+        lastUpdated: '2026-08-17T00:01:00.000Z',
+        messages: [],
+      },
+    ];
+    (manager as unknown as { sessionReader: unknown }).sessionReader = {
+      getAllSessions: vi.fn().mockResolvedValue(stored),
+      getSessionTitle: vi.fn().mockReturnValue('t'),
+    };
+
+    const boundary = new Date('2026-08-17T00:00:30.000Z').getTime();
+    const page = await manager.getSessionListPaged({
+      cursor: String(boundary),
+      size: 10,
+    });
+
+    expect(page.sessions.map((session) => session.sessionId)).toEqual([
+      '550e8400-e29b-41d4-a716-446655440000',
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
 });
 
 describe('QwenAgentManager.setModelFromUi', () => {
