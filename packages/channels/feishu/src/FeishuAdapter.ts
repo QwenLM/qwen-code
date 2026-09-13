@@ -2985,6 +2985,19 @@ export class FeishuChannel extends ChannelBase {
                       markUnavailable(resource);
                       continue;
                     }
+                    if (
+                      totalFileBytes + media.buffer.byteLength >
+                      MAX_TOTAL_FILE_BYTES
+                    ) {
+                      process.stderr.write(
+                        `[Feishu:${this.name}] omitted ${resource.type} resource ${sanitizeSenderName(resource.key)}: over the per-message file budget\n`,
+                      );
+                      markUnavailable(
+                        resource,
+                        'over the per-message file budget',
+                      );
+                      continue;
+                    }
                     totalFileBytes += media.buffer.byteLength;
                     envelope.attachments = [
                       ...(envelope.attachments ?? []),

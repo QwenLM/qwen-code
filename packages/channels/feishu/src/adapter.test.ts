@@ -8657,6 +8657,42 @@ describe('Feishu inbound media delivery (#11554)', () => {
       rmSync(dirname(dirMatch[1]), { recursive: true, force: true });
   });
 
+  it('omits a file that overflows the budget mid-message after downloading', async () => {
+    const { bridge, receive } = setup();
+    // 40 MiB each: 40+40 fits, the third overflows after its download.
+    const fortyMiB = 'g'.repeat(40 * 1024 * 1024);
+    const fetches: string[] = [];
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/resources/')) {
+        fetches.push(url);
+        return new Response(fortyMiB, {
+          headers: { 'content-type': 'text/plain' },
+        });
+      }
+      return jsonResponse({ code: 0 });
+    });
+    receive('post', {
+      title: '',
+      content: [
+        [{ tag: 'text', text: 'three files' }],
+        [{ tag: 'media', file_key: 'file_0' }],
+        [{ tag: 'media', file_key: 'file_1' }],
+        [{ tag: 'media', file_key: 'file_2' }],
+      ],
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const args = vi.mocked(bridge.prompt).mock.calls[0]!;
+    expect(args[1].match(/User sent a video/g)).toHaveLength(2);
+    expect(args[1]).toContain(
+      '[Omitted video resource: file_2; message_id=om_current — over the per-message file budget]',
+    );
+    expect(fetches).toHaveLength(3);
+    const dirMatch = args[1].match(/saved to: ([^\n]+)/);
+    if (dirMatch)
+      rmSync(dirname(dirMatch[1]), { recursive: true, force: true });
+  });
+
   it('closes an unterminated fence in the sender text before appending markers', async () => {
     const { bridge, receive } = setup();
     vi.spyOn(global, 'fetch').mockImplementation(async (input) =>
