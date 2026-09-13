@@ -374,6 +374,38 @@ describe('OpenTuiTranscriptView', () => {
     expect(text).not.toContain('N8_MARKER');
   });
 
+  it('keeps an args sliver when the sibling floor drops the budget to one row (R7-2)', () => {
+    // Two parked mcp calls whose raw display name is wider than the row:
+    // the sibling division floors the budget at 1, where
+    // descRows * cols - nameCols = 34 - 42 <= 0 — a zero-column slice
+    // DELETES the description node, and the card is the only surface
+    // carrying the call's arguments (the mcp dialog shows just the server
+    // and tool names). Terminal height is not part of the binding condition
+    // (nameCols >= cols is what zeroes the slice), so the 24-row viewport
+    // is incidental. The one-row floor keeps a full row of description
+    // columns: the marker survives, and the label still counts 7 hidden
+    // rows — a lifted sibling floor (5 rows) would read '... last 4'.
+    const description = 'ARGS_MARKER ' + 'x'.repeat(200);
+    const parked = (id: string) =>
+      toolItem({
+        id,
+        tool: 'mcp__github_enterprise__create_repository',
+        description,
+        confirm: 'pending',
+        confirmType: 'mcp',
+      });
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={36}
+        availableTerminalHeight={24}
+        items={[parked('t1'), parked('t2')]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('ARGS_MARKER');
+    expect(text).toContain('... last 7 lines hidden ...');
+  });
+
   it('memoizes the pending-card measure across sibling re-renders', () => {
     // A sibling call's stream events re-render the whole transcript, and the
     // pending card's dialog-body measure scans the whole confirmation body —

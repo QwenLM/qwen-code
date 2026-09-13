@@ -34,6 +34,31 @@ import { sanitizeSensitiveText } from '../utils/textUtils.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 
+/** The ask_user_question questions the mounted flow paints, shape-checked. */
+interface AskQuestionLike {
+  question: string;
+  header: string;
+  options: Array<{ label: string }>;
+  multiSelect?: boolean;
+}
+
+/** Version-skew guard: one malformed question fails the whole extra back. */
+function isAskQuestion(value: unknown): value is AskQuestionLike {
+  if (typeof value !== 'object' || value === null) return false;
+  const question = value as Record<string, unknown>;
+  return (
+    typeof question['question'] === 'string' &&
+    typeof question['header'] === 'string' &&
+    Array.isArray(question['options']) &&
+    (question['options'] as unknown[]).every(
+      (option) =>
+        typeof option === 'object' &&
+        option !== null &&
+        typeof (option as Record<string, unknown>)['label'] === 'string',
+    )
+  );
+}
+
 /**
  * What a confirmation dialog paints, split the way dialogs-confirm's
  * ConfirmationBody render switch lays it out: `body` is the windowed text
@@ -42,10 +67,14 @@ import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
  * collapsed window), and `extra` is the rows the dialog renders OUTSIDE
  * that window — info's `URLs to fetch:` block (a margin row, a header row
  * and one row per URL, gated by the same displayUrls predicate) and exec's
- * one row per warning. Every other type's body renders no measurable text:
- * mcp shows two fixed lines, edit a tail-windowed diff below an unbounded
- * warnings list, ask_user_question a fixed question/options list. The two
- * fields feed the pending card's dialog-body measure (pendingCardMaxRows),
+ * one row per warning. mcp shows two fixed lines and carries nothing.
+ * edit's windowed body is a tail-windowed diff, so it carries only the rows
+ * painted ABOVE the diff window: the fileName row plus one ⚠ row per
+ * warning (a PreToolUse 'ask' bounce can prepend hook-authored text of
+ * arbitrary length there). ask_user_question has no window at all — the
+ * flow paints one block per question (header, question text, option
+ * labels) — so every question's block joins the extra. The two fields feed
+ * the pending card's dialog-body measure (pendingCardMaxRows),
  * which charges extra IN ADDITION to the windowed body — the same split the
  * render makes, so a body filling the collapsed window can never swallow
  * the block's rows. This lives here, not in dialogs-confirm, so this module
@@ -58,7 +87,9 @@ export function confirmationDialogBody(details: {
   command?: unknown;
   urls?: unknown;
   warnings?: unknown;
-}): { body: string; extra?: string } | undefined {
+  fileName?: unknown;
+  questions?: unknown;
+}): { body?: string; extra?: string } | undefined {
   // Version-skew guard: a field present in an unexpected shape fails the
   // whole body back to undefined, so the card keeps its payload proxy.
   const skewedStrings = (v: unknown): v is string[] =>
@@ -99,6 +130,49 @@ export function confirmationDialogBody(details: {
         ? warnings.map((warning) => `⚠ ${warning}`).join('\n')
         : undefined,
     };
+  }
+  if (details.type === 'edit') {
+    if (typeof details.fileName !== 'string') return undefined;
+    if (details.warnings !== undefined && !skewedStrings(details.warnings)) {
+      return undefined;
+    }
+    // The edit dialog paints the fileName row and one ⚠ row per warning
+    // ABOVE its tail-windowed diff — outside the collapsed body window the
+    // pending card prices — so they ride as the extra (R7-1).
+    return {
+      extra: [
+        details.fileName,
+        ...(details.warnings ?? []).map((warning) => `⚠ ${warning}`),
+      ].join('\n'),
+    };
+  }
+  if (details.type === 'ask_user_question') {
+    const questions = details.questions;
+    if (
+      !Array.isArray(questions) ||
+      !questions.every(isAskQuestion) ||
+      questions.length === 0
+    ) {
+      return undefined;
+    }
+    // The flow paints one question block at a time — header, question text,
+    // option labels — and the card's static price must cover whichever step
+    // is showing, so every block joins the extra (the safe side is
+    // yielding). The footer and title stay in the chrome reserve.
+    const rows: string[] = [''];
+    questions.forEach((question, index) => {
+      rows.push(
+        `${question.header} (${index + 1}/${questions.length})`,
+        question.question,
+        '',
+      );
+      for (const option of question.options) {
+        rows.push(
+          question.multiSelect === true ? `[ ] ${option.label}` : option.label,
+        );
+      }
+    });
+    return { extra: rows.join('\n') };
   }
   return undefined;
 }
@@ -153,7 +227,8 @@ export type OpenTuiStreamEvent =
        * command). */
       confirmBody?: string;
       /** Rows the dialog renders outside the body window: info's urls
-       * block, exec's warnings (LiveToolItem.confirmExtra). */
+       * block, exec's warnings, edit's fileName row and warnings,
+       * ask_user_question's question blocks (LiveToolItem.confirmExtra). */
       confirmExtra?: string;
     }
   /** The call left awaiting_approval (approved, declined, or bounced):

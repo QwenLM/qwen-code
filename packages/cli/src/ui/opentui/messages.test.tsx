@@ -377,6 +377,36 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     ).toBe(35);
   });
 
+  it('charges the edit and ask_user_question rows painted outside the collapsed window (R7-1)', () => {
+    // The edit dialog paints the fileName row and one row per warning ABOVE
+    // its tail-windowed diff, and the ask flow paints its question block
+    // with no window at all: both charge in addition to the collapsed body.
+    // A 3-row extra drops the shared fixed-body price from
+    // (80-26-20)*0.7 = 23 to (80-26-23)*0.7 = 21 — one site prices both
+    // types, so the charge must reach each (and the strict drop is the pin:
+    // today both calls return the identical number).
+    const extra = '⚠ a\n⚠ b\n⚠ c';
+    expect(pendingCardMaxRows(80, 2000, 108, { type: 'edit' }, 1)).toBe(23);
+    expect(pendingCardMaxRows(80, 2000, 108, { type: 'edit', extra }, 1)).toBe(
+      21,
+    );
+    expect(
+      pendingCardMaxRows(80, 2000, 108, { type: 'ask_user_question' }, 1),
+    ).toBe(23);
+    expect(
+      pendingCardMaxRows(
+        80,
+        2000,
+        108,
+        { type: 'ask_user_question', extra },
+        1,
+      ),
+    ).toBe(21);
+    // mcp renders no outside-window rows and its price must not move:
+    // (80-26-5)*0.7 = 34 with or without the extra term wired.
+    expect(pendingCardMaxRows(80, 2000, 108, { type: 'mcp' }, 1)).toBe(34);
+  });
+
   it('keeps the sibling sum inside the shared region when the divided bound drops below the settled cap (R4-8, R4-1)', () => {
     // The settled 5-row floor must not lift the divided bound back up, and
     // each sibling past the first spends its hidden-tail and awaiting rows

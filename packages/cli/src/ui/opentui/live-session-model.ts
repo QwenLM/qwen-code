@@ -38,7 +38,8 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
    * (info's prompt, plan's plan, exec's command). */
   confirmBody?: string;
   /** Rows the dialog renders outside the body window (info's urls block,
-   * exec's warnings) — charged in addition to the windowed body. */
+   * exec's warnings, edit's fileName row and warnings, ask_user_question's
+   * question blocks) — charged in addition to the windowed body. */
   confirmExtra?: string;
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */

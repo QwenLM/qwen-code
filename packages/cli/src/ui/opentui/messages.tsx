@@ -314,7 +314,8 @@ const CARD_DESC_WRAP_RATIO = 0.7;
  * plan, exec's command — see event-adapter's confirmationDialogBody, which
  * mirrors dialogs-confirm's ConfirmationBody switch); `extra` is the rows
  * the dialog renders OUTSIDE the body window (info's urls block, exec's
- * warnings).
+ * warnings, edit's fileName row and warnings, ask_user_question's question
+ * blocks).
  */
 export interface PendingDialogBody {
   type?: string;
@@ -342,13 +343,17 @@ export interface PendingDialogBody {
  * renders every line. Rows the dialog renders OUTSIDE the body window —
  * info's urls block and exec's warnings, carried as `extra` — charge in
  * addition to the measured body, the same split the render makes (TextBody
- * windows only the prompt). The named
- * fixed-body types return a null expansion: mcp's dialog body is two fixed
- * lines and the card is the only surface carrying the call's arguments
- * (R5-9); edit's dialog is a tail-windowed diff below an UNBOUNDED warnings
- * list, but edit-kind cards carry a one-row description (the edit tools
- * return just the path), so there is nothing to yield; ask_user_question's
- * question/options list is fixed at ask time. Everything else — a typed
+ * windows only the prompt). The named fixed-body types return a null
+ * expansion: mcp's dialog body is two fixed lines and the card is the only
+ * surface carrying the call's arguments (R5-9); edit's dialog is a
+ * tail-windowed diff — charged the collapsed window — painted BELOW the
+ * fileName row and an unbounded warnings list, and ask_user_question's
+ * flow paints one unwindowed question block per step. Both carry those
+ * outside-the-window rows as `extra`, charged in addition to the collapsed
+ * window: a PreToolUse 'ask' bounce can prepend hook-authored warnings of
+ * arbitrary length to an edit confirmation, and unpriced those rows push
+ * the mounted dialog's outcome list off the alt screen while the parked
+ * cards keep their budget (R7-1). Everything else — a typed
  * confirmation whose body text never arrived, and any type this module does
  * not know (a future ToolCallConfirmationDetails variant, a version-skewed
  * wire event) — keeps the folded card-payload proxy: there the yield is
@@ -362,36 +367,33 @@ function dialogBodyMeasure(
   measureCap: number,
 ): { expanded: number | null; collapsed?: number } {
   const type = dialog?.type;
+  const cols = Math.max(dialogWidth - 2, 10);
+  // String widths count TAB as 0 columns while the renderer advances it
+  // exactly 2 (customBanner's detab convention), so measure the detabbed
+  // text — the same detabbed rows TextBody windows in dialogs-confirm.
+  const detabbed = (text: string) =>
+    sanitizeTerminalText(text).replace(/\t/g, '  ');
+  const extraRows = (extra: string | undefined): number =>
+    extra === undefined
+      ? 0
+      : physicalRowsTotal(detabbed(extra).split('\n'), cols, measureCap);
   if (
     (type === 'info' || type === 'plan' || type === 'exec') &&
     dialog?.body !== undefined
   ) {
-    const cols = Math.max(dialogWidth - 2, 10);
-    // String widths count TAB as 0 columns while the renderer advances it
-    // exactly 2 (customBanner's detab convention), so measure the detabbed
-    // text — the same detabbed rows TextBody windows in dialogs-confirm.
-    const detabbed = (text: string) =>
-      sanitizeTerminalText(text).replace(/\t/g, '  ');
     const rows = physicalRowsTotal(
       detabbed(dialog.body).split('\n'),
       cols,
       measureCap,
     );
-    const extra =
-      dialog.extra === undefined
-        ? 0
-        : physicalRowsTotal(
-            detabbed(dialog.extra).split('\n'),
-            cols,
-            measureCap,
-          );
-    return { expanded: rows + extra };
+    return { expanded: rows + extraRows(dialog.extra) };
   }
   if (type === 'mcp' || type === 'edit' || type === 'ask_user_question') {
     return {
       expanded: null,
       collapsed:
-        type === 'mcp' ? MCP_CONFIRM_BODY_ROWS : CONFIRM_BODY_COLLAPSED_ROWS,
+        (type === 'mcp' ? MCP_CONFIRM_BODY_ROWS : CONFIRM_BODY_COLLAPSED_ROWS) +
+        extraRows(dialog?.extra),
     };
   }
   return { expanded: payloadRows, collapsed: CONFIRM_BODY_COLLAPSED_ROWS };
@@ -523,7 +525,12 @@ export function capToolCardDescription(
   const rows = Math.ceil((nameCols + getCachedStringWidth(description)) / cols);
   if (rows <= maxRows) return { description, hiddenRows: 0 };
   const descRows = Math.max(maxRows - 1, 1);
-  const visibleCols = Math.max(descRows * cols - nameCols, 0);
+  // Floor at one full row of columns: the sibling division can drop the
+  // budget to a single row, where a display name wider than the row would
+  // otherwise zero the slice and DELETE the description — the only surface
+  // carrying an mcp call's arguments (R7-2). The name then shares the row
+  // with whatever description fits instead of consuming it.
+  const visibleCols = Math.max(descRows * cols - nameCols, cols);
   return {
     description: sliceRowToWidth(description, visibleCols, 'head'),
     hiddenRows: Math.max(rows - descRows, 1),

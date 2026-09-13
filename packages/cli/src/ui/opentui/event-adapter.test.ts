@@ -251,6 +251,65 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         confirmExtra: '⚠ Command substitution detected',
       },
     ]);
+    // An edit dialog paints the fileName row and one ⚠ row per warning
+    // ABOVE its tail-windowed diff — outside the collapsed body window the
+    // pending card prices — so they travel as the extra (R7-1). The diff is
+    // no windowed text body, so confirmBody stays absent.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c8', name: 'edit' },
+          details: {
+            title: 'Apply this change?',
+            type: 'edit',
+            fileName: 'a.txt',
+            fileDiff: '@@ -1,1 +1,1 @@',
+            warnings: ['Exact shell command: `ls`'],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c8',
+        tool: 'edit',
+        title: 'Apply this change?',
+        confirmType: 'edit',
+        confirmExtra: 'a.txt\n⚠ Exact shell command: `ls`',
+      },
+    ]);
+    // An ask_user_question dialog has no body window at all: the flow
+    // paints one block per question (header, question text, option labels),
+    // so the blocks travel as the extra.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c9', name: 'ask_user_question' },
+          details: {
+            title: 'Answer?',
+            type: 'ask_user_question',
+            questions: [
+              {
+                header: 'Scope',
+                question: 'Which scope?',
+                options: [{ label: 'This file' }, { label: 'Workspace' }],
+              },
+            ],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c9',
+        tool: 'ask_user_question',
+        title: 'Answer?',
+        confirmType: 'ask_user_question',
+        confirmExtra: '\nScope (1/1)\nWhich scope?\n\nThis file\nWorkspace',
+      },
+    ]);
   });
 
   it('fails the dialog body back to the payload proxy on version-skewed details (R5-2)', () => {
@@ -280,6 +339,16 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       [{ type: 'plan', plan: null }, 'plan'],
       [{ type: 'exec', command: 'ls', warnings: 'nope' }, 'exec'],
       [{ type: 'exec', command: 42 }, 'exec'],
+      [{ type: 'edit', fileName: 42 }, 'edit'],
+      [{ type: 'edit', fileName: 'a.txt', warnings: 'nope' }, 'edit'],
+      [{ type: 'ask_user_question', questions: 'nope' }, 'ask_user_question'],
+      [
+        {
+          type: 'ask_user_question',
+          questions: [{ question: 'q', header: 'h', options: [42] }],
+        },
+        'ask_user_question',
+      ],
     ] as const) {
       const ev = confirmOf(details);
       expect(ev.confirmType).toBe(type);
