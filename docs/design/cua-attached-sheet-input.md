@@ -5,11 +5,13 @@
 ## Problem and scope
 
 An App observation can select an attached macOS file sheet whose CGWindowID is
-absent from the application's direct AXWindows array. The mutation validator
-currently rejects that observed sheet as `off_space_or_ax_unresolved`. A fresh
-VM reproduction confirmed this for both keyboard input and an observed Search
-element in VLC. An earlier AXPress error had already opened the sheet; this
-change does not retry or reinterpret that separate uncertain dispatch.
+absent from the application's direct AXWindows array. The background mutation
+validator then rejects that observed sheet as `off_space_or_ax_unresolved`.
+The original VLC reproduction used the earlier App keyboard and pointer routes.
+Current App keyboard, pointer and paste operations use the upstream activation
+route. App semantic operations (`setValue`, `performSecondaryAction` and
+`selectText`), observation capability checks and programmatic background input
+still use the exact-window validator and need attached-sheet membership.
 
 ## Proposed behavior
 
@@ -18,11 +20,13 @@ from its AX records, use the existing bounded attached-sheet discovery on those
 retained roots. Add a sheet only when both root and sheet discovery are complete, its own window ID
 is mapped, and its root window has a mapped record. Sheets minimize with that
 root, so inherit its minimized state; an unknown root state remains unknown.
-Do not duplicate an already mapped record or infer a window from geometry.
+Do not duplicate an already mapped record. Reuse the upstream window-ID mapping
+contract; attached-sheet discovery adds no separate geometry heuristic.
 
 WindowServer ownership, element ancestry, hidden/minimized state and keyboard
-focus/competing-destination checks remain in force. Delivery stays in the
-background; there is no foreground fallback, retry or broader app-level target.
+focus/competing-destination checks remain in force where applicable. Delivery
+selection remains with the caller, including the upstream App activation route.
+This change adds no delivery fallback, retry or broader app-level target.
 Unmapped or incompletely discovered sheets remain refused. Existing direct
 targets avoid an additional discovery traversal.
 
@@ -31,8 +35,8 @@ targets avoid an additional discovery traversal.
 Test mapped and unmapped attachments, unknown/minimized roots and duplicate
 records. Retain existing sibling-window keyboard-ambiguity checks. Build and
 run focused native unit tests without host desktop interaction. In a separate
-guest Qwen MCP session, repeat the observed file-sheet action sequence with
-native error capture and confirm actions affect the intended sheet. Then run
-the unchanged conversion benchmark in a clean clone and verify the exported
-MP3. Preserve failed attempts and record time/tokens; improved correctness is
-required before treating a shorter run as a performance improvement.
+guest Qwen MCP session, select or edit an observed field through an App semantic
+operation and confirm the effect belongs to the intended attached sheet.
+Programmatic background keyboard input requires separate delivery validation.
+Preserve failed attempts and record time/tokens in any later benchmark;
+the earlier VLC results do not establish behavior under the updated App route.

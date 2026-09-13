@@ -114,20 +114,15 @@ After performing one or more UI actions, call `app.getState()` before deciding
 what to do next. Batch actions whose target remains the same, then print only
 the state needed for the next decision:
 
-For replacing existing text in a writable field, start with `selectText` using
-that field's observed ID and exact current text:
-
 ```js
-nodeRepl.write(
-  JSON.stringify(await app.selectText(37, 'draft', { prefix: 'Status: ' })),
-);
+await app.click(37);
+await app.hotkey(['super', 'a']);
+await app.typeText('hello');
+await app.pressKey('Return');
 nodeRepl.write((await app.getState()).text);
 ```
 
-Read the selection result and state before typing; resolve focus first if
-another control remains focused. The example assumes one `draft` immediately
-after `Status: ` in field 37. Use your actual observed ID and text.
-For buttons and pointer actions, use `app.click(37)` with the observed target ID.
+Use the actual ID from your observation; `37` is only an example.
 
 An observation is a decision boundary. When the current state already identifies
 the controls and the next actions are known, combine those actions and saving
@@ -142,22 +137,30 @@ call.
 - An action error can occur after the UI already changed. Read state before deciding whether to retry. Partial, unconfirmed or cancelled actions must not be blindly repeated.
 - Coordinate actions use pixels in this app's current screenshot, with `(0, 0)` at its top-left. Every App observation refreshes that frame internally. Request `includeScreenshot: true` when you need to inspect the image, especially after a window change. Do not infer coordinates from another window or desktop screenshot.
 - `pressKey` sends one key, optionally with modifiers. `hotkey` sends a combination such as `['super', 's']`. Use the platform's appropriate shortcut.
-- App input activates the exact target internally for one dispatch and restores the previous foreground app. There is no delivery-mode choice and no automatic replay after an uncertain result.
+- App input activates the exact target internally for one dispatch and restores the previously active app. There is no delivery-mode choice and no automatic replay after an uncertain result.
 - Literal `\n` or `\r` in `typeText` sends Return. In a composer or form this may submit rather than insert a newline.
 - If AX is incomplete or does not explain the interface, request a screenshot and inspect it. Only currently captured actionable IDs can be used for element actions.
 
-## Replace and select text
+## Paste and select text
 
-After confirming the selection and intended field, replace it with short plain
-text:
+These App methods are available on macOS only. Read current state first and use
+an observed element ID for selection.
 
 ```js
-await app.typeText('ready');
+await app.selectText(37, 'draft', { prefix: 'Status: ' });
 nodeRepl.write((await app.getState()).text);
 ```
 
-Use `await app.paste('ready')` when clipboard insertion is appropriate. These App
-text methods are available on macOS only.
+Use a real ID and text from your observation; the example assumes that the
+selected element contains exactly one matching `draft` immediately after
+`Status: `.
+
+After confirming the selection, replace it with plain text:
+
+```js
+await app.paste('ready');
+nodeRepl.write((await app.getState()).text);
+```
 
 - `selectText(element, text)` selects one exact, case-sensitive match. Optional
   `prefix` and `suffix` must be immediately adjacent to that match. Missing or

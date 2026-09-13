@@ -442,26 +442,25 @@ test("getState keeps a selected untitled app window", async () => {
   assert.equal((await app.getState()).text, compactState);
 });
 
-for (const code of ["off_space_or_ax_unresolved", "same_pid_keyboard_ambiguity"]) {
-  test(`a known ${code} refusal remains readable in an uncaught error message`, async () => {
-    const { computer, calls } = fixture({ action: () => result({
-      code, effect: "refused", reason: "private native target details",
-      escalation: { recommended: "foreground" },
-    }, { isError: true }) });
-    const app = await computer.getApp("Fixture");
-    await app.getState();
-    await assert.rejects(app.pressKey("Return"), (error) => {
-      assert.match(error.message, new RegExp(`Native input refused \\(${code}\\)`));
-      assert.match(error.message, /may already have affected the app/);
-      assert.match(error.message, /Call app.getState\(\)/);
-      assert.doesNotMatch(error.message, /private native|foreground/);
-      assert.equal(error.details.operation.dispatched, true);
-      assert.equal(error.details.operation.committed, false);
-      return error.code === code;
-    });
-    assert.equal(calls.filter((call) => call.method === "windowPressKey").length, 1);
+test("an exact-target refusal remains readable for an app semantic action", async () => {
+  const code = "off_space_or_ax_unresolved";
+  const { computer, calls } = fixture({ action: () => result({
+    code, effect: "refused", reason: "private native target details",
+    escalation: { recommended: "foreground" },
+  }, { isError: true }) });
+  const app = await computer.getApp("Fixture");
+  await app.getState();
+  await assert.rejects(app.setValue(37, "ready"), (error) => {
+    assert.match(error.message, new RegExp(`Native input refused \\(${code}\\)`));
+    assert.match(error.message, /may already have affected the app/);
+    assert.match(error.message, /Call app.getState\(\)/);
+    assert.doesNotMatch(error.message, /private native|foreground/);
+    assert.equal(error.details.operation.dispatched, true);
+    assert.equal(error.details.operation.committed, false);
+    return error.code === code;
   });
-}
+  assert.equal(calls.filter((call) => call.method === "setValue").length, 1);
+});
 
 for (const effect of [undefined, "partial", "unverifiable", "suspected_noop"]) {
   test(`a known code with effect ${effect} does not claim refusal`, async () => {
@@ -470,12 +469,12 @@ for (const effect of [undefined, "partial", "unverifiable", "suspected_noop"]) {
     }, { isError: true }) });
     const app = await computer.getApp("Fixture");
     await app.getState();
-    await assert.rejects(app.pressKey("Return"), (error) => {
+    await assert.rejects(app.setValue(37, "ready"), (error) => {
       assert.doesNotMatch(error.message, /Native input refused/);
       assert.match(error.message, /may already have affected the app/);
       return true;
     });
-    assert.equal(calls.filter((call) => call.method === "windowPressKey").length, 1);
+    assert.equal(calls.filter((call) => call.method === "setValue").length, 1);
   });
 }
 
