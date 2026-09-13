@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 import { commandSchemas, locatorStepsSchema } from './schemas.js';
+import { MAX_SCREENSHOT_PIXELS } from './screenshot-budget.js';
 
 describe('recursive locator plans', () => {
   it.each(['and', 'or', 'has', 'hasNot'])(
@@ -335,6 +336,68 @@ describe('browser command schemas', () => {
         tabId: 'tab-1',
         steps: [{ kind: 'locator', selector: 'img' }],
         timeoutMs: 1_000,
+      }).success,
+    ).toBe(true);
+  });
+
+  it('enforces every refine predicate without over-rejecting legal shapes', () => {
+    const screenshot = commandSchemas['tab.screenshot'];
+    const width = 2_048;
+    const height = MAX_SCREENSHOT_PIXELS / width;
+    const clip = { x: 0, y: 0, width, height };
+    expect(
+      screenshot.safeParse({ tabId: 'tab-1', clip, fullPage: true }).success,
+    ).toBe(false);
+    expect(
+      screenshot.safeParse({
+        tabId: 'tab-1',
+        clip: { ...clip, height: height + 1 },
+      }).success,
+    ).toBe(false);
+    expect(screenshot.safeParse({ tabId: 'tab-1', clip }).success).toBe(true);
+    expect(
+      screenshot.safeParse({ tabId: 'tab-1', clip, fullPage: false }).success,
+    ).toBe(true);
+    expect(
+      screenshot.safeParse({ tabId: 'tab-1', fullPage: true }).success,
+    ).toBe(true);
+
+    const selectOption = commandSchemas['locator.selectOption'];
+    const steps = [{ kind: 'locator', selector: 'select' }];
+    for (const value of [{}, [{}]]) {
+      expect(
+        selectOption.safeParse({ tabId: 'tab-1', steps, value }).success,
+      ).toBe(false);
+    }
+    expect(
+      selectOption.safeParse({
+        tabId: 'tab-1',
+        steps,
+        value: [{ index: 0 }, 'b'],
+      }).success,
+    ).toBe(true);
+
+    const history = commandSchemas['browser.user.history'];
+    expect(
+      history.safeParse({ browserId: 'b-1', options: { queries: [' '] } })
+        .success,
+    ).toBe(false);
+    for (const bound of ['from', 'to']) {
+      expect(
+        history.safeParse({
+          browserId: 'b-1',
+          options: { [bound]: 'not-a-date' },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      history.safeParse({
+        browserId: 'b-1',
+        options: {
+          queries: ['qwen'],
+          from: '2026-01-01T00:00:00Z',
+          to: new Date('2026-02-01T00:00:00Z'),
+        },
       }).success,
     ).toBe(true);
   });

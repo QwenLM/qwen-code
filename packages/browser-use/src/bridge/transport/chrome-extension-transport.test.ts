@@ -26,6 +26,7 @@ import {
   ChromeExtensionTransport,
   ensureSocketDirectory,
   isAddressInUse,
+  type ChromeExtensionTransportOptions,
 } from './chrome-extension-transport.js';
 import { encodeFrame, FrameDecoder } from './framing.js';
 
@@ -315,6 +316,17 @@ describe('ChromeExtensionTransport', () => {
       }),
     ).not.toBe('/tmp/legacy.sock');
     expect(CHROME_BRIDGE_PROTOCOL_VERSION).toBe(1);
+  });
+
+  it('honours an explicit QWEN_BROWSER_USE_SOCKET_PATH and ignores a blank one', () => {
+    expect(
+      defaultChromeBridgeSocketPath({
+        QWEN_BROWSER_USE_SOCKET_PATH: '/run/qbu/x.sock',
+      }),
+    ).toBe('/run/qbu/x.sock');
+    expect(
+      defaultChromeBridgeSocketPath({ QWEN_BROWSER_USE_SOCKET_PATH: ' ' }),
+    ).toBe(defaultChromeBridgeSocketPath({}));
   });
 
   it('prefers an owned per-user runtime directory over world-writable /tmp', () => {
@@ -653,13 +665,187 @@ describe('ChromeExtensionTransport', () => {
       expect(fs.statSync(transport.socketPath).isSocket()).toBe(true);
     },
   );
+
+  it.skipIf(process.platform === 'win32').each([
+    [
+      'protocolVersion',
+      {
+        protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION + 1,
+        extensionId: CHROME_EXTENSION_ID,
+      },
+    ],
+    [
+      'extensionId',
+      {
+        protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+        extensionId: 'wrong-extension-id',
+      },
+    ],
+  ] as const)(
+    'rejects a hello with a mismatched %s',
+    async (_field, identity) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      const transport = new ChromeExtensionTransport({
+        socketPath: path.join(root, 'bridge.sock'),
+      });
+      transports.push(transport);
+      await transport.start();
+      const impostor = connect(transport.socketPath);
+      impostor.on('error', () => undefined);
+      await new Promise<void>((resolve) => impostor.once('connect', resolve));
+      impostor.write(encodeFrame({ type: 'hello', ...identity }));
+      await new Promise<void>((resolve) => impostor.once('close', resolve));
+      expect(transport.isConnected()).toBe(false);
+
+      // The same server still promotes a matching hello afterwards.
+      const extension = connect(transport.socketPath);
+      await new Promise<void>((resolve) => extension.once('connect', resolve));
+      extension.write(
+        encodeFrame({
+          type: 'hello',
+          protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+          extensionId: CHROME_EXTENSION_ID,
+        }),
+      );
+      await vi.waitFor(() => expect(transport.isConnected()).toBe(true));
+      extension.destroy();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'notifies validated connection changes and honours unsubscribe',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      const transport = new ChromeExtensionTransport({
+        socketPath: path.join(root, 'bridge.sock'),
+      });
+      transports.push(transport);
+      await transport.start();
+      const states: boolean[] = [];
+      const unsubscribe = transport.onConnectionChange((connected) => {
+        states.push(connected);
+      });
+      const first = connect(transport.socketPath);
+      await new Promise<void>((resolve) => first.once('connect', resolve));
+      first.write(
+        encodeFrame({
+          type: 'hello',
+          protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+          extensionId: CHROME_EXTENSION_ID,
+        }),
+      );
+      await vi.waitFor(() => expect(states).toEqual([true]));
+      first.destroy();
+      await vi.waitFor(() => expect(states).toEqual([true, false]));
+
+      unsubscribe();
+      const second = connect(transport.socketPath);
+      await new Promise<void>((resolve) => second.once('connect', resolve));
+      second.write(
+        encodeFrame({
+          type: 'hello',
+          protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+          extensionId: CHROME_EXTENSION_ID,
+        }),
+      );
+      await vi.waitFor(() => expect(transport.isConnected()).toBe(true));
+      expect(states).toEqual([true, false]);
+      second.destroy();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'fails an in-flight request closed when the extension disconnects',
+    async () => {
+      const { transport, socket, requests } = await connectedTransport();
+      const slow = transport.request('slow');
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      socket.destroy();
+      await expect(slow).rejects.toMatchObject({
+        code: 'BROWSER_DISCONNECTED',
+      });
+      expect(transport.isConnected()).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'times out an unanswered request with the configured budget',
+    async () => {
+      const { transport, socket, requests } = await connectedTransport({
+        requestTimeoutMs: 10,
+      });
+      const stalled = transport
+        .request('stalled')
+        .catch((error: unknown) => error);
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      await expect(stalled).resolves.toMatchObject({
+        code: 'OPERATION_TIMEOUT',
+        message: expect.stringContaining('stalled'),
+      });
+      expect(transport.isConnected()).toBe(true);
+      socket.destroy();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32').each([
+    ['NOT_GRANTED', 'TAB_NOT_GRANTED'],
+    ['STALE_TAB', 'STALE_TAB'],
+    ['UNSUPPORTED_TAB', 'UNSUPPORTED_TAB'],
+    ['PERMISSION_REQUIRED', 'PERMISSION_REQUIRED'],
+    ['SOMETHING_NEW', 'OPERATION_FAILED'],
+    [undefined, 'OPERATION_FAILED'],
+  ] as const)('maps extension error code %s to %s', async (code, expected) => {
+    const { transport, socket, requests } = await connectedTransport();
+    const failing = transport.request('tabs.attach');
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    socket.write(
+      encodeFrame({
+        type: 'response',
+        id: requests[0].id,
+        ok: false,
+        error: { code, message: 'tab not granted' },
+      }),
+    );
+    await expect(failing).rejects.toMatchObject({
+      code: expected,
+      message: 'tab not granted',
+    });
+    socket.destroy();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'falls back to a generic message for an extension error without one',
+    async () => {
+      const { transport, socket, requests } = await connectedTransport();
+      const failing = transport.request('tabs.attach');
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      socket.write(
+        encodeFrame({
+          type: 'response',
+          id: requests[0].id,
+          ok: false,
+          error: {},
+        }),
+      );
+      await expect(failing).rejects.toMatchObject({
+        code: 'OPERATION_FAILED',
+        message: 'Chrome extension operation failed',
+      });
+      socket.destroy();
+    },
+  );
 });
 
-async function connectedTransport() {
+async function connectedTransport(
+  options: Omit<ChromeExtensionTransportOptions, 'socketPath'> = {},
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
   roots.push(root);
   const transport = new ChromeExtensionTransport({
     socketPath: path.join(root, 'bridge.sock'),
+    ...options,
   });
   transports.push(transport);
   await transport.start();

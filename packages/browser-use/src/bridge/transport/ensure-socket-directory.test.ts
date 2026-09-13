@@ -5,7 +5,7 @@
  */
 
 import fs from 'node:fs';
-import { connect } from 'node:net';
+import { connect, type Socket } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,9 +14,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // between the existence check and the create, owned by someone else or with
 // permissive bits.
 const lstatMock = vi.hoisted(() => vi.fn());
+// A scripted chmod fails the post-listen step of start() while the socket is
+// already bound and accepting.
+const chmodMock = vi.hoisted(() => vi.fn());
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, lstat: lstatMock };
+  return { ...actual, lstat: lstatMock, chmod: chmodMock };
 });
 
 // The transport deliberately imports its timers from node:timers (the global
@@ -85,6 +88,10 @@ beforeEach(() => {
   lstatMock.mockImplementation(
     async (target: string) => await fs.promises.lstat(target),
   );
+  chmodMock.mockImplementation(
+    async (target: string, mode: number) =>
+      await fs.promises.chmod(target, mode),
+  );
 });
 
 afterEach(async () => {
@@ -92,6 +99,7 @@ afterEach(async () => {
   for (const root of roots.splice(0))
     fs.rmSync(root, { recursive: true, force: true });
   lstatMock.mockReset();
+  chmodMock.mockReset();
   requestTimers.reset();
 });
 
@@ -149,6 +157,41 @@ describe('ensureSocketDirectory create race', () => {
         return await fs.promises.lstat(target);
       });
       await expect(ensureSocketDirectory(leaf)).rejects.toThrow('not usable');
+    },
+  );
+});
+
+describe('start failure after listen', () => {
+  it.skipIf(process.platform === 'win32')(
+    'tears down a validated peer when start fails after listen',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      const socketPath = path.join(root, 'bridge.sock');
+      const transport = new ChromeExtensionTransport({ socketPath });
+      transports.push(transport);
+      let peer: Socket | undefined;
+      chmodMock.mockImplementationOnce(async () => {
+        peer = connect(socketPath);
+        peer.on('error', () => undefined);
+        await new Promise<void>((resolve) => peer!.once('connect', resolve));
+        peer.write(
+          encodeFrame({
+            type: 'hello',
+            protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+            extensionId: CHROME_EXTENSION_ID,
+          }),
+        );
+        await vi.waitFor(() => expect(transport.isConnected()).toBe(true));
+        throw Object.assign(new Error('read-only socket'), { code: 'EPERM' });
+      });
+
+      await expect(transport.start()).rejects.toMatchObject({
+        code: 'TRANSPORT_UNAVAILABLE',
+      });
+      expect(fs.existsSync(socketPath)).toBe(false);
+      expect(transport.isConnected()).toBe(false);
+      await vi.waitFor(() => expect(peer?.destroyed).toBe(true));
     },
   );
 });

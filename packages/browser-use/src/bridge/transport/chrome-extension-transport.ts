@@ -243,6 +243,10 @@ export class ChromeExtensionTransport implements ChromeBridge {
       }
     } catch (error) {
       if (this.server === server) this.server = undefined;
+      // A peer validated between listen and a failing post-listen check
+      // would otherwise keep server.close() waiting on it indefinitely.
+      for (const socket of this.acceptedSockets) socket.destroy();
+      this.acceptedSockets.clear();
       await closeServer(server);
       await unlinkOwnedSocket(this.socketPath, this.socketIdentity);
       this.socketIdentity = undefined;

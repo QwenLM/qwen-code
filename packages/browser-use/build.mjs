@@ -6,7 +6,7 @@
 
 import { rmSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -24,10 +24,11 @@ await build({
   platform: 'node',
   target: 'node22',
   format: 'esm',
-  banner: {
-    js: "import { createRequire as __qwenCreateRequire } from 'node:module'; import { fileURLToPath as __qwenFileURLToPath } from 'node:url'; import { dirname as __qwenDirname } from 'node:path'; const require = __qwenCreateRequire(import.meta.url); const __filename = __qwenFileURLToPath(import.meta.url); const __dirname = __qwenDirname(__filename); const process = require('node:process');",
-  },
   packages: 'bundle',
   external: ['playwright-core', 'playwright-core/*'],
-  loader: { '.wasm': 'binary' },
 });
+
+// esbuild only proves the bundle parses; a load-time failure (a duplicate
+// top-level binding, an unresolved external) would otherwise surface first in
+// the Node kernel that imports the published artifact.
+await import(pathToFileURL(path.join(dist, 'index.js')).href);
