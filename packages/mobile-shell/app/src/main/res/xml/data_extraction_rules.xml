@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
-    <cloud-network>
+    <cloud-backup>
         <exclude domain="sharedpref" path="qwen_profiles.xml"/>
-    </cloud-network>
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="qwen_profiles.xml"/>
+    </device-transfer>
 </data-extraction-rules>

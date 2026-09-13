@@ -1,110 +1,52 @@
-# Android 移动端壳（技术验证）
+# Android 移动端 Shell（技术验证）
 
 [English](mobile-android-shell.md) | [简体中文](mobile-android-shell.zh-CN.md)
 
-状态：已在本地实现并验证（2026 年 9 月）。依据：QwenLM/qwen-code 议题
-#11704 中维护者的方向指示。
+状态：遵循 [issue #11704](https://github.com/QwenLM/qwen-code/issues/11704) 的开发用途技术验证，正在评审。它不是生产级移动客户端。
 
-## 问题
+## 问题与目标
 
-为 `qwen serve` 做一个手机客户端。要求的形态是包住现有 Web Shell 的原生
-壳，而不是第二套 UI：H5 已经带有受维护的移动端支持（mobile-chromium
-Playwright 项目、触屏 composer、移动端抽屉、响应式断点、浏览器回合通知），
-所以原生层只能补浏览器确实做不到的东西。
+在 Android WebView 中使用 daemon 已提供的 Web Shell，不创建第二套原生会话 UI，也不本地打包 H5。在添加生产凭据和后台连接前，建立可构建的原生启动流程和准确的 origin 边界。
 
-## 现状
+## 已实现范围
 
-- 仓库没有 Android 客户端包；`packages/desktop-shell`（Tauri 2）是唯一的
-  原生壳先例，其 Android 工程仍是空白。
-- Web Shell 的浏览器下限在兼容性工作之后才有声明（见
-  `web-shell-pwa-installability.md`）：Chrome 107+ 语法、`@supports`
-  回退、`dvh`。
-- daemon 侧：主 listener 上还没有逐设备可撤销凭据（维护者前置项）；
-  目前唯一的客户端侧缓解是把 bearer token 存进 Keystore。
-
-## 目标
-
-1. 在 WebView 中加载 daemon 提供的 Web Shell：不本地打包、不需要
-   `--allow-origin` 配置。
-2. 支持 N 组 (URL, token, 显示名) 配置文件；切换 daemon 就是把 WebView
-   导航到另一个 origin（同源路径，与现有扫码手机接入一致）。
-3. 启动时检测 WebView 引擎版本，低于 Chrome 107 时显示明确的「请更新
-   Android System WebView」页面。
-4. Keystore 凭据存储与前台服务的骨架（Phase 2）：保活 SSE、弹原生通知。
-
-## 不在范围内
-
-- 任何原生（Compose）UI；会话、权限、工具活动、diff 等画面全部留在
-  Web Shell。
-- 让一个已加载页面同时连多个 daemon（代价高且今天不支持）；切换走导航。
-- 基于 `/acp` 构建；客户端只用 H5 的文档化 REST+SSE 面。
-
-## 方案
-
-`packages/mobile-shell`（不加入 npm workspace；Gradle Kotlin DSL）：
-
-- `MainActivity`：WebView 壳，同源导航留在 WebView，外部链接交给系统
-  浏览器；token 由 URL fragment 传入（`#token=<value>`，Web Shell 从
-  `window.location.hash` 读取，永不上送服务器）；返回键驱动 WebView
-  历史。
-- 配置文件存 `SharedPreferences`：`(daemon_url, daemon_token,
-profile_name)`；Phase 2 把 token 移入 Android Keystore。
-- `QwenForegroundService`（`dataSync` 前台服务类型）、通知渠道，由
-  Activity 启动；SSE 客户端在 Phase 2 落地。
-- `network_security_config.xml`：全局禁止明文，仅 loopback 放行；LAN 主机
-  由运维显式添加（Android 自 API 28 起默认禁止明文）。
-- WebView 版本检查：`WebViewCompat.getCurrentWebViewPackage`，在加载任何
-  网页内容前把主版本号与 107 比较。
+- `qwen_profiles` SharedPreferences 中的一个开发配置：`daemon_url` 和可选 `daemon_token`。尚无配置编辑器、稳定配置键或多配置切换。
+- 保存的 URL 必须是 HTTP(S) origin，不能包含用户信息、非根路径、查询或 fragment。编码后的令牌通过 `#token=` 传入；fragment 不包含在导航请求中，Web Shell 随后会在已认证 API 请求中发送令牌。
+- WebView 内导航比较解析后的 scheme、host 和有效端口。相似域名前缀、用户信息和不同端口不属于同源。仅 HTTP(S) 和 mailto 的外部主框架链接可打开其他应用；缺少处理程序或设备策略限制不使 Activity 崩溃。
+- 在创建 WebView 前检查 provider。缺失或低于 111 的 provider 显示原生升级提示。缺少/无效配置和连接失败也显示原生启动提示；连接失败提供 Retry。
+- 保留浏览器返回历史和缩放，禁用 file/content 访问及 mixed content。网络安全配置全局拒绝明文，仅明确允许 loopback。
+- 云备份和设备迁移均排除开发凭据，同时保留 `allowBackup=false`。
+- 从 npm 和 pnpm workspaces 中排除这个 Gradle 包。使用 JDK 17、Android SDK 34，以及固定版本且含分发校验和的 Gradle 8.2.1 wrapper 构建。
 
 ## 设计决策
 
-- 加载 profile 指向的任意 daemon：不本地打包 H5，因此每个请求与 daemon
-  自带的 Web Shell 同源，零跨域配置。
-- profile 自己生成稳定 key：`/capabilities` 不携带 daemon 身份，`runId`
-  每次重启都会重新生成，所以 app 必须自己持久化 profile key 与显示名。
-- 每台 daemon 用静态 token（`--token` / `QWEN_SERVER_TOKEN`）：自动生成
-  的 token 每次重启都会轮换，会让已存 profile 失效。
-- 公网 TLS 是文档化的主路径（安全上下文可让 SW 与语音输入生效）；HTTP
-  LAN 需要 network security config 条目。
-- WebView 下限 107 与 Web Shell 的 `browserslist` 一致；原生检查比支持旧
-  引擎便宜一个数量级，但承认无法更新 WebView 的设备无法补救。
+WebView 直接导航到 daemon origin，因此沿用同源 API 行为，直接同源 HTTP API 无需 `--allow-origin`。反向代理和远程 terminal/voice WebSocket 连接仍须遵守 [qwen serve](../users/qwen-serve.md) 的 origin 要求。Chrome/WebView 111 是基于 Tailwind v4 的 CSS 最低版本，与 ES2021 JavaScript target 独立。
 
-## 约束
+开发时静态 daemon 令牌（`--token` 或 `QWEN_SERVER_TOKEN`）避免重启后失效。SharedPreferences 只是临时开发方案，并不具备 Keystore 支持的生产凭据保护。远程连接应使用 HTTPS；额外的 HTTP 局域网主机需要显式网络安全配置。
 
-- `denyBrowserOriginCors` 会拒绝跨域请求，除非白名单化；同源导航避开
-  整类问题。
-- daemon token 在其宿主机上等同于代码执行权限；一部手机存 N 个静态
-  bearer，在 daemon 侧逐设备撤销出现之前风险更高。
-- workspace id 跨主机会碰撞（`sha256(cwd).slice(0,16)`）；任何原生缓存
-  或草稿都必须以 `(profile, workspaceId)` 为键。
-- 能力探测必须按 profile、按连接进行，绝不能全局缓存。
+本技术验证不启动前台服务。没有 SSE 连接的服务只会消耗资源并显示误导性的持续通知，因此占位服务及其权限推迟到后续阶段。
 
-## 风险
+## 约束与生产前提
 
-- WebView 版本由设备决定；原生检查覆盖下限，但救不了无法更新的设备。
-- 无条件启动前台服务会在没有 profile 时也常驻通知；spike 阶段可接受，
-  Phase 2 加开关。
+Daemon 的按设备可撤销凭据属于维护者负责的前提，不能将本技术验证描述为已经解决。仅使用 Android Keystore 并不能使共享静态 bearer 按设备撤销。
 
-## 验证
+第二阶段需要 N 个配置，包含客户端生成的稳定键和显示名；切换时导航到新的 origin。原生工作区缓存必须按配置和工作区 ID 隔离，capability 检查必须按配置和连接执行。迁移至批准的凭据存储后，必须删除开发阶段明文令牌。
 
-- 手动：模拟器/真机用 loopback daemon profile 启动；在 daemon 访问日志
-  中确认 `#token=` 片段不会上送。
-- 版本门：强制低 WebView 版本，确认在任何网页内容加载前出现更新页。
-- `npm run build` 不得触碰本包（已排除出 workspace）。
-- Kotlin 文件对照维护者的「壳形态」清单评审：无第二 UI、无本地 H5
-  打包、不用 `/acp`。
+文件选择器、麦克风权限桥接、下载、生命周期感知 SSE 和通知尚未实现。H5 能在浏览器运行，不意味着这些原生集成已经可用。
 
-## 验收标准
+## 评审测试计划
 
-1. 已存 profile 加载 daemon 提供的 Web Shell，token 从 URL fragment 读取。
-2. WebView 低于 107 时显示更新页；达到或超过时加载壳。
-3. profile 是 (URL, token, 显示名) 元组；切换即导航到另一个 origin。
-4. 运维添加 LAN 主机之前，明文只对 loopback 放行。
-5. 前台服务运行并显示通知；SSE 尚未实现（Phase 2）。
+1. 使用提交的 wrapper 构建 debug APK 并运行 JVM origin-policy 测试。
+2. 在 WebView 111+ 模拟器/真机上配置开发 origin，确认加载 daemon 提供的 UI，并确认发往 daemon 的导航 URL 不含令牌 fragment。
+3. 同源链接保留在 WebView；域名后缀、userinfo 和不同端口不视为同源。没有对应应用的外链不能造成崩溃。
+4. 无配置或可用 WebView provider 时启动，应看到不依赖网页渲染的原生提示。
+5. 停止 daemon 后导航，恢复服务并点击 Retry。主框架错误提供恢复入口；子资源错误不替换整个 UI。
+6. 打开或关闭 Activity 时均不运行前台服务或通知。
 
-## 后续
+## 验证证据
 
-- Phase 2：profile 选择 UI、Android Keystore 存储、前台服务内的 OkHttp
-  SSE 客户端、回合/权限的原生通知、带说明的 POST_NOTIFICATIONS 运行时
-  申请。
-- daemon 逐设备凭据工作落地后（维护者前置项），把客户端工作重放到其上。
+JVM 测试覆盖 origin 比较、配置根 URL 验证和外链 scheme 限制。构建结果及准确版本记录在 PR 验证报告中。模拟器/真机交互和 provider 升级行为需要设备证据，本文不声明已经完成。
+
+## 后续工作
+
+生产配置 UI 和凭据迁移；维护者提供按设备撤销；Keystore 存储；capability 协商；生命周期感知 SSE、原生通知及运行时权限；文件选择、麦克风和下载。

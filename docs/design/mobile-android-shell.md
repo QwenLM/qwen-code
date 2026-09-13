@@ -2,127 +2,51 @@
 
 [English](mobile-android-shell.md) | [简体中文](mobile-android-shell.zh-CN.md)
 
-Status: implemented and verified locally (Sep 2026). Source: maintainer
-direction in QwenLM/qwen-code issue #11704.
+Status: development-only spike under review, following [issue #11704](https://github.com/QwenLM/qwen-code/issues/11704). It is not a production mobile client.
 
-## Problem
+## Problem and Goals
 
-A phone client for `qwen serve`. The desired shape is a native shell around
-the existing Web Shell, not a second UI: the H5 already carries maintained
-mobile support (mobile-chromium Playwright project, touch composer, mobile
-drawer, responsive breakpoints, browser turn notifications), so the native
-layer must add only what a browser genuinely cannot do.
+Use the existing daemon-served Web Shell in an Android WebView, with no second native session UI and no locally bundled H5. Establish a buildable native bootstrap and a precise origin boundary before adding production credentials or background connectivity.
 
-## Current State
+## Implemented Scope
 
-- No Android client package exists; `packages/desktop-shell` (Tauri 2) is the
-  only native shell precedent and its Android project is greenfield.
-- The Web Shell declares its browser floor only after the compatibility work
-  (see `web-shell-pwa-installability.md`): Chrome 107+ syntax, `@supports`
-  fallbacks, `dvh`.
-- Daemon side: per-device revocable credentials on the primary listener do
-  not exist yet (maintainer-owned prerequisite); the only client-side
-  mitigation today is keystore-bound storage of the bearer token.
-
-## Goals
-
-1. Load the daemon-served Web Shell in a WebView, no local bundling, no
-   `--allow-origin` configuration.
-2. Support N profiles of (URL, token, display name); switching daemons means
-   navigating the WebView to a different origin (same-origin path, the way
-   QR-code phone access already works).
-3. Detect the WebView engine version at startup and show an explicit
-   "update Android System WebView" screen below Chrome 107.
-4. Skeletons for keystore-bound token storage and a foreground service that
-   keeps SSE alive and raises native notifications (Phase 2).
-
-## Out of Scope
-
-- A native (Compose) UI of any kind; every session, permission, tool-activity
-  and diff screen stays the Web Shell's.
-- Multi-daemon from one loaded page (expensive, unsupported today); switching
-  is by navigation.
-- Building on `/acp`; the client uses the documented REST+SSE surface of the
-  H5 only.
-
-## Proposed Solution
-
-`packages/mobile-shell` (excluded from the npm workspace; Gradle Kotlin DSL):
-
-- `MainActivity`: WebView shell with same-origin navigation and external
-  links opened in the system browser; token passed in the URL fragment
-  (`#token=<value>`, read from `window.location.hash` by the Web Shell, never
-  sent to the server); back button drives WebView history.
-- Profiles in `SharedPreferences` as `(daemon_url, daemon_token,
-profile_name)`; Phase 2 moves the token to the Android Keystore.
-- `QwenForegroundService` (`dataSync` foreground-service type), notification
-  channel, started from the activity; SSE client lands in Phase 2.
-- `network_security_config.xml`: cleartext blocked globally, allowed for
-  loopback only; operators add LAN hosts explicitly (Android blocks
-  cleartext from API 28).
-- WebView version check via `WebViewCompat.getCurrentWebViewPackage`, major
-  component compared against 107 before any web content loads.
+- One development profile in `qwen_profiles` SharedPreferences: `daemon_url` and optional `daemon_token`. There is no profile editor, stable profile key or multi-profile switching yet.
+- Validate that the saved URL is an HTTP(S) origin with no user information, non-root path, query or fragment. Pass an encoded token via `#token=`. The fragment is absent from the navigation request; the Web Shell subsequently sends the token in authenticated API requests.
+- Compare parsed scheme, host and effective port for in-WebView navigation. Similar domain prefixes, user information and different ports are not same-origin. Only HTTP(S) and mailto external main-frame links may launch another app; missing handlers and device restrictions do not crash the activity.
+- Check the WebView provider before constructing a WebView. Missing or pre-111 providers get a native update message. Missing/invalid profiles and connection failures also use native bootstrap messages; a connection failure offers Retry.
+- Keep browser back history and zoom support. Disable file/content access and mixed content. Globally reject cleartext, with explicit loopback exceptions in the network security configuration.
+- Exclude development credentials from cloud backup and device transfer. `allowBackup=false` is retained as well.
+- Exclude this Gradle package from both npm and pnpm workspaces. Build using JDK 17, Android SDK 34 and the pinned Gradle 8.2.1 wrapper with its distribution checksum.
 
 ## Design Decisions
 
-- Load whatever daemon the profile names: no local H5 copy, so every request
-  is same-origin with the daemon's own served shell, zero cross-origin
-  configuration.
-- Profiles mint their own stable key: `/capabilities` carries no daemon
-  identity and `runId` regenerates on every restart, so the app must persist
-  its own profile key and display name.
-- Static tokens per daemon (`--token` / `QWEN_SERVER_TOKEN`): auto-generated
-  tokens rotate on every restart and would invalidate saved profiles.
-- Public TLS is the primary documented path (secure context for SW and voice
-  input); HTTP LAN needs the network-security-config entries.
-- WebView floor 107 matches the Web Shell `browserslist`; a native check is
-  cheaper than supporting old engines, with the honest caveat that devices
-  that cannot update WebView cannot be helped.
+The WebView navigates to the daemon origin, so direct same-origin HTTP API behavior applies without `--allow-origin`. Reverse proxies and remote terminal/voice WebSocket upgrades still follow the origin requirements documented in [qwen serve](../users/qwen-serve.md). Chrome/WebView 111 is the Web Shell's CSS support floor, derived from Tailwind v4, independently of the ES2021 JavaScript target.
 
-## Constraints
+A static daemon token (`--token` or `QWEN_SERVER_TOKEN`) avoids restart invalidation during development. SharedPreferences storage is a temporary development mechanism, not Keystore-backed production security. HTTPS is the intended remote connection path. Additional HTTP LAN hosts require explicit network-security entries.
 
-- `denyBrowserOriginCors` rejects cross-origin requests unless allowlisted;
-  same-origin navigation avoids the whole class.
-- The daemon token grants code execution on its host; N static bearers on one
-  phone raise the risk until per-device revocation exists daemon-side.
-- Workspace ids collide across hosts (`sha256(cwd).slice(0,16)`); any native
-  cache or draft must be keyed by `(profile, workspaceId)`.
-- Capability preflight must be per profile and per connection, never cached
-  globally.
+No foreground service starts in this spike. A service with no SSE connection would merely consume resources and show a misleading persistent notification, so its placeholder and permissions are deferred.
 
-## Risks
+## Constraints and Production Prerequisites
 
-- WebView versions are device-controlled; the native check covers the floor
-  but not devices that cannot update.
-- Starting the foreground service unconditionally keeps a notification up
-  with no profile; acceptable for the spike, gated in Phase 2.
+Per-device revocable daemon credentials are a maintainer-owned prerequisite. This spike must not be presented as resolving that requirement. Android Keystore storage alone cannot make a shared static bearer revocable per device.
 
-## Validation
+Phase 2 must implement N profiles with client-minted stable keys and display names; switching profiles navigates to a new origin. Native cached workspace state must be keyed by profile and workspace ID, and capability checks must be performed per profile and connection. Migration must remove the development plaintext token after moving it into the approved credential store.
 
-- Manual: emulator/device launch with a loopback daemon profile
-  (`#token=` fragment verified in the daemon access log as absent).
-- Version gate: force a low WebView version and confirm the update screen
-  appears before any web content.
-- `npm run build` must not touch this package (excluded from the workspace).
-- Kotlin file reviewed against the maintainer's shell shape checklist:
-  no second UI, no local H5 bundle, no `/acp`.
+File chooser, microphone permission bridging, download handling, lifecycle-aware SSE and notifications are not implemented here. Browser H5 availability does not imply those native integrations already work.
 
-## Acceptance Criteria
+## Reviewer Test Plan
 
-1. A saved profile loads the daemon-served Web Shell with the token read
-   from the URL fragment.
-2. Below WebView 107 the app shows the update screen; above it, the shell
-   loads.
-3. Profiles are (URL, token, display name) tuples; switching navigates to a
-   different origin.
-4. Cleartext is allowed only for loopback until an operator adds a LAN host.
-5. The foreground service runs and shows its notification; no SSE yet
-   (Phase 2).
+1. Build the debug APK and run the JVM origin-policy tests using the committed wrapper.
+2. On an emulator/device with WebView 111+, provision a development profile and confirm the daemon-served UI loads. Check that the navigation URL sent to the daemon has no token fragment.
+3. Verify same-origin links stay in WebView; suffix domains, userinfo tricks and changed ports do not. External links without a matching app must not crash.
+4. Launch without a profile or usable WebView provider; expect a readable native message, without relying on web rendering.
+5. Stop the daemon, navigate, then restore it and press Retry. Confirm main-frame errors offer recovery and subresource errors do not replace the entire UI.
+6. Confirm no foreground service or notification runs when opening or closing the activity.
+
+## Validation Evidence
+
+JVM tests cover origin comparison, saved-root validation and external scheme restrictions. Build results and exact revisions belong in the PR verification report. Emulator/device interaction and provider-update behavior require device evidence and are not claimed as completed by this design.
 
 ## Follow-ups
 
-- Phase 2: profile picker UI, Android Keystore storage, OkHttp SSE client in
-  the foreground service, native turn/permission notifications,
-  POST_NOTIFICATIONS runtime request with rationale.
-- Rebase the client work onto the daemon per-device credential work when it
-  lands (maintainer prerequisite).
+Production profile UI and credential migration; maintainer-provided per-device revocation; Keystore-backed storage; capability negotiation; lifecycle-aware SSE and native notifications with runtime permission handling; file selection, microphone and downloads.

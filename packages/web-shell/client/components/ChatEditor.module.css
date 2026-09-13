@@ -884,10 +884,6 @@
     calc(100vh - 16px),
     var(--radix-tooltip-content-available-height, calc(100vh - 16px))
   );
-  max-height: min(
-    calc(100dvh - 16px),
-    var(--radix-tooltip-content-available-height, calc(100dvh - 16px))
-  );
   padding: 8px 10px;
   border: 1px solid var(--chat-editor-border-color);
   border-radius: 6px;
@@ -2591,4 +2587,13 @@
   flex: 0 0 auto;
   margin-left: 8px;
   color: var(--muted-foreground);
+}
+
+@supports (height: 100dvh) {
+  .tagTooltip {
+    max-height: min(
+      calc(100dvh - 16px),
+      var(--radix-tooltip-content-available-height, calc(100dvh - 16px))
+    );
+  }
 }

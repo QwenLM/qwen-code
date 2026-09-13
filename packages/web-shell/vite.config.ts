@@ -65,7 +65,7 @@ export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
 export const WEB_SHELL_BUILD_TARGET = 'es2021';
 
 export default defineConfig(({ command }) => ({
-  root: 'client',
+  root: resolve(__dirname, 'client'),
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
@@ -96,17 +96,14 @@ export default defineConfig(({ command }) => ({
   build: {
     // Avoid esbuild lowering xterm's logical assignments into invalid code.
     target: WEB_SHELL_BUILD_TARGET,
-    outDir: '../dist',
+    outDir: resolve(__dirname, 'dist'),
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        // Main SPA entry point (index.html — Vite default).
-        index: 'client/index.html',
-        // Service worker: a separate non-module IIFE script so it can be
-        // registered at the root scope. Vite's define() replaces
-        // __WEB_SHELL_VERSION__ at build time; the IIFE format ensures the
-        // output is a plain script even if an import is accidentally added.
-        sw: 'client/sw.js',
+        index: resolve(__dirname, 'client/index.html'),
+        // This entry deliberately has no imports or exports: the resulting
+        // root-scoped worker is registered as a classic script.
+        sw: resolve(__dirname, 'client/sw.js'),
       },
       output: {
         // Keep sw.js at the root (no hash) — the browser byte-compares the file
@@ -114,11 +111,8 @@ export default defineConfig(({ command }) => ({
         // hashed name under assets/.
         entryFileNames: (chunk) =>
           chunk.name === 'sw' ? '[name].js' : 'assets/[name]-[hash].js',
-        // Keep the SW chunk in ESM output: the single chunk has no imports/exports,
-        // so it emits as a plain classic script — the only kind a service
-        // worker can be. IIFE is not usable here: Vite forces
-        // inlineDynamicImports for that format, which is invalid with
-        // multiple inputs.
+        // Vite's IIFE format cannot have multiple inputs. The worker's
+        // import-free entry still emits as a classic script with ES output.
         format: 'es',
       },
     },

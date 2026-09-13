@@ -1103,8 +1103,6 @@ importers:
         specifier: 5.8.2
         version: 5.8.2
 
-  packages/mobile-shell: {}
-
   packages/node-repl:
     dependencies:
       '@modelcontextprotocol/sdk':

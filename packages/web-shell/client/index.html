@@ -26,78 +26,40 @@
       The manifest itself is served by the daemon's static handler at /manifest.webmanifest.
     -->
     <link rel="manifest" href="/manifest.webmanifest" />
-    <!--
-      Browser engine floor check (ES5, dependency-free).
-
-      Minimum supported matrix declared in package.json `browserslist`:
-        Chrome/Edge 107+, Firefox 104+, Safari 16+.
-
-      On Chrome/Chromium (including Android System WebView) we can read a
-      reliable integer from userAgentData.brands or fall back to the legacy
-      UA string. Engines below the floor get an explicit "please update"
-      screen instead of a white blank or silent layout breakage.
-
-      This check runs before any module is loaded so it fires even if the
-      module graph fails. It deliberately only acts on Chromium because:
-        - Firefox/Safari version strings are harder to parse reliably in ES5;
-        - those engines auto-update far more aggressively than Android WebView;
-        - the Android shell scenario — where WebView can be years stale on
-          devices without Play Store — is the primary risk this guard targets.
-
-      Kept on one line: this comment ships verbatim in the built index.html.
-    -->
+    <!-- The CSS floor follows Tailwind v4, independently of the ES2021 JS target.
+         Keep this guard ES5 so unsupported engines can still show the fallback. -->
+    <!-- prettier-ignore -->
     <script>
       !(function () {
-        // Minimum Chromium version we support (matches Vite baseline-widely-available).
-        var MIN_CHROMIUM = 107;
         try {
-          var chromiumVersion = 0;
-          // Prefer the structured brands API (Chrome 90+, WebView 90+).
-          var uad = navigator.userAgentData;
-          if (uad && uad.brands) {
-            for (var i = 0; i < uad.brands.length; i++) {
-              var b = uad.brands[i];
-              if (b.brand === 'Chromium' || b.brand === 'Google Chrome') {
-                var v = parseInt(b.version, 10);
-                if (!isNaN(v) && v > chromiumVersion) chromiumVersion = v;
-              }
-            }
+          var ua = navigator.userAgent;
+          var chromium = ua.match(/Chrom(?:e|ium)\/(\d+)/);
+          var firefox = ua.match(/Firefox\/(\d+)/);
+          var safari = ua.match(/Version\/(\d+)(?:\.(\d+))?.*Safari\//);
+          var unsupported =
+            (chromium && parseInt(chromium[1], 10) < 111) ||
+            (firefox && parseInt(firefox[1], 10) < 128) ||
+            (safari &&
+              (parseInt(safari[1], 10) < 16 ||
+                (parseInt(safari[1], 10) === 16 &&
+                  parseInt(safari[2] || '0', 10) < 4)));
+          if (window.CSS && typeof window.CSS.supports === 'function') {
+            unsupported =
+              unsupported ||
+              !window.CSS.supports('color', 'oklch(0.5 0.1 90)') ||
+              !window.CSS.supports('color', 'color-mix(in srgb, red, blue)') ||
+              !window.CSS.supports('height', '100dvh') ||
+              !window.CSS.supports('container-type', 'inline-size') ||
+              !window.CSS.supports('selector(:has(*))');
           }
-          // Fallback: parse the legacy UA string.
-          if (chromiumVersion === 0) {
-            var m = navigator.userAgent.match(/Chrom(?:e|ium)\/(\d+)/);
-            if (m) chromiumVersion = parseInt(m[1], 10);
-          }
-          if (chromiumVersion > 0 && chromiumVersion < MIN_CHROMIUM) {
-            var dark =
-              document.documentElement.classList.contains('theme-dark');
-            var bg = dark ? '#0d0d0d' : '#ffffff';
-            var fg = dark ? '#e5e5e5' : '#1a1a1a';
-            document.write(
-              '<style>html,body{margin:0;padding:0;background:' +
-                bg +
-                ';color:' +
-                fg +
-                ';font-family:system-ui,sans-serif}</style>' +
-                '<div style="min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center;box-sizing:border-box">' +
-                '<div style="font-size:40px">⚠️</div>' +
-                '<h1 style="margin:0;font-size:20px;font-weight:600">Browser update required</h1>' +
-                '<p style="margin:0;font-size:14px;opacity:.75;max-width:360px">' +
-                'Qwen Code requires Chrome ' +
-                MIN_CHROMIUM +
-                ' or newer (or Android System WebView ' +
-                MIN_CHROMIUM +
-                '+). ' +
-                'Your browser reports version ' +
-                chromiumVersion +
-                '.</p>' +
-                '<p style="margin:0;font-size:13px;opacity:.6;max-width:360px">' +
-                'On Android, open the Play Store and search for <strong>Android System WebView</strong> to update.</p>' +
-                '</div>',
+          if (unsupported) {
+            document.documentElement.setAttribute(
+              'data-web-shell-unsupported-browser',
+              'Please update your browser. Qwen Code requires Chrome/Edge or Android System WebView 111+, Firefox 128+, or Safari/iOS 16.4+.'
             );
           }
         } catch (e) {
-          // Ignore — if we cannot determine the version, let the app try to load.
+          // Unknown engines can try to load; the boot watchdog reports failures.
         }
       })();
     </script>
@@ -117,7 +79,7 @@
     </script>
     <!--
       Favicon is inlined as a data: URI rather than a /favicon.svg file because
-      the daemon's static server only exposes /assets/* and / (see
+      the daemon's public static routes explicitly allow shell/PWA paths (see
       packages/cli/src/serve/web-shell-static.ts) — a file at the dist root
       would never be reachable. The data: URI is allowed by the shell CSP
       (img-src 'self' data: blob:). The encodeURIComponent(svg) encoding
@@ -215,6 +177,7 @@
       a settled boot. The fallback box, once shown, is sticky, so a late
       timer never overwrites a more specific earlier reason.
     -->
+    <!-- prettier-ignore -->
     <script>
       !(function () {
         var GRACE_MS = 15000;
@@ -271,10 +234,13 @@
             (dark ? '#e5e5e5' : '#1a1a1a');
           var h = document.createElement('h1');
           h.style.cssText = 'font-size:18px;margin:0';
-          h.textContent = 'Web Shell 加载失败 / failed to load';
+          h.textContent = document.documentElement.hasAttribute(
+            'data-web-shell-unsupported-browser'
+          )
+            ? 'Browser update required / 请更新浏览器'
+            : 'Web Shell 加载失败 / failed to load';
           var p = document.createElement('p');
-          p.style.cssText =
-            'margin:0;font-size:13px;opacity:.75;max-width:560px';
+          p.style.cssText = 'margin:0;font-size:13px;opacity:.75;max-width:560px';
           p.textContent = reason;
           box.appendChild(h);
           box.appendChild(p);
@@ -335,16 +301,14 @@
             show(
               'A required resource failed to load: ' +
                 msg +
-                '. This usually happens right after a dev-server or daemon restart — reload the page.',
+                '. This usually happens right after a dev-server or daemon restart — reload the page.'
             );
           }
         }
         function onRejection(e) {
           var reason = e && e.reason;
           pushError(
-            String(
-              (reason && reason.message) || reason || 'unhandled rejection',
-            ),
+            String((reason && reason.message) || reason || 'unhandled rejection')
           );
         }
         function installObserver() {
@@ -362,6 +326,13 @@
               pendingInstall = true;
               document.addEventListener('DOMContentLoaded', installObserver);
             }
+            return;
+          }
+          var unsupported = document.documentElement.getAttribute(
+            'data-web-shell-unsupported-browser'
+          );
+          if (unsupported) {
+            show(unsupported);
             return;
           }
           // A mount that beat this install would never produce a record.
@@ -383,7 +354,7 @@
             show(
               'The app did not start within ' +
                 GRACE_MS / 1000 +
-                's. The daemon may be restarting or its access token may have rotated — reload the page.',
+                's. The daemon may be restarting or its access token may have rotated — reload the page.'
             );
           }
           // The grace period is over either way: mounted, fallback shown, or

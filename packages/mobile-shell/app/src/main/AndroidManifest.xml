@@ -5,20 +5,6 @@
     <!-- Required for the WebView to reach the daemon (loopback or LAN or public) -->
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!--
-      FOREGROUND_SERVICE keeps the SSE connection alive when Android would
-      otherwise suspend the app. foregroundServiceType="dataSync" is mandatory
-      on Android 14+ for services that maintain network streams.
-    -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-
-    <!--
-      POST_NOTIFICATIONS is required on Android 13+ to show the foreground
-      service notification. We request it at runtime before starting the service.
-    -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -40,15 +26,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!--
-          QwenForegroundService keeps the SSE stream alive in the background.
-          foregroundServiceType="dataSync" is required on Android 14+ (API 34+).
-        -->
-        <service
-            android:name=".QwenForegroundService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
 
     </application>
 </manifest>

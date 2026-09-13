@@ -2,135 +2,62 @@
 
 [English](web-shell-pwa-installability.md) | [简体中文](web-shell-pwa-installability.zh-CN.md)
 
-Status: implemented and verified locally (Sep 2026). Source: maintainer
-direction in QwenLM/qwen-code issue #11704.
+Status: implementation under review. Follows the optional PWA direction in [issue #11704](https://github.com/QwenLM/qwen-code/issues/11704).
 
 ## Problem
 
-The Web Shell is not installable as an app (no PWA manifest, no service
-worker) and declares no browser support floor. A thin Android shell (see
-`mobile-android-shell.md`) embeds the same H5 on Android System WebView
-engines we do not control, where a stale engine fails as a white screen (JS
-syntax below Chrome 107) or as silently broken layout (`:has()` /
-`@container` below Chrome 105, `100vh` with the Android URL bar).
-
-## Current State
-
-- No `browserslist`, no runtime engine detection, no "unsupported browser"
-  screen anywhere in the package.
-- `:has()` and `@container` are used in the mobile-critical components
-  (sidebar session list, message timeline, workspace sections, manager
-  panels) with no `@supports` fallbacks.
-- 22 uses of `100vh`, zero of `dvh`; on Android `100vh` is the large
-  viewport, so the composer sits under the URL bar. The `mobile-chromium`
-  Playwright project cannot catch this (fixed viewport = false green).
+The daemon-served Web Shell needs install metadata and an explicit browser support contract. An unsupported engine must show an update message instead of a blank page. Publishing the CLI must preserve the PWA files emitted by the Web Shell build.
 
 ## Goals
 
-1. Make the Web Shell installable: manifest + service worker on the daemon
-   origin, no new toolchain, pre-auth routes side-by-side with existing
-   shell assets.
-2. Declare a support matrix (`browserslist` + README) and make degradation
-   explicit: `@supports` fallbacks for `:has()`/`@container`, `dvh` pairs,
-   and a runtime engine floor screen.
+- Add same-origin install metadata and a service worker to the standalone shell.
+- Declare a floor that covers both JavaScript and the generated CSS.
+- Keep daemon state, tokens, event streams and HTML out of worker caches.
 
 ## Out of Scope
 
-- Offline work, Web Push delivery, notifications while the app is closed.
-- A second UI of any kind; the native shell remains the only extra surface.
-- Polyfilling missing CSS/JS features below the declared floor; engines below
-  the floor get the explicit update screen instead.
+Offline sessions, Web Push delivery, notifications after closing the app, and polyfills for engines below the declared floor. The embedded component library does not register a service worker or install the standalone browser guard.
 
-## Proposed Solution
+## Design
 
-### PWA installability
+### Build and public routes
 
-- `public/manifest.webmanifest`: `start_url: "/"`, standalone display, PNG
-  icons 192/512 plus the SVG mark, Qwen brand colors.
-- `client/sw.js`: classic (non-module) script built by Vite as a second
-  entry, emitted at the root as `sw.js` (no hash). Cache-first for
-  `/assets/*` only; versioned by `qwen-code-shell-v1-<version>`; daemon API
-  routes, SSE, non-GET and requests with an `Authorization` header are always
-  network-only. No pre-caching, no offline app shell.
-- Registration in `main.tsx` is deferred to the `load` event, scoped to the
-  standalone entry (the embedded library does not register a worker).
-- Daemon routes `GET /manifest.webmanifest` and `GET /sw.js` are mounted
-  before `bearerAuth`, send `no-cache` (and `Service-Worker-Allowed: /` for
-  the worker) and are mirrored in `isPreAuthWebShellRequest` so the cold
-  daemon answers them too.
+Vite emits the standalone UI to `packages/web-shell/dist`, including `index.html`, `manifest.webmanifest`, `sw.js` and `assets/`. The worker is a second entry with no imports or exports; although Rollup uses ES output, this entry remains usable as a classic worker. The bundle copier preserves both PWA files under `dist/web-shell`; the package release gate rejects missing files.
 
-### Browser compatibility
+The daemon serves GET/HEAD requests for the manifest and worker before bearer authentication. These process-global assets carry no workspace data or credentials. The cold-daemon predicate mirrors Express's case-insensitive paths and optional trailing slash. Manifest responses use `application/manifest+json`; worker responses use `application/javascript` and `Service-Worker-Allowed: /`. Both use `no-cache` and `nosniff`; missing files return 404 rather than shell HTML.
 
-- `browserslist` in `packages/web-shell/package.json`: Chrome/Edge 107+,
-  Firefox 104+, Safari 16+ (matches Vite's baseline-widely-available), and a
-  Browser Support Matrix section in the README.
-- Wrap every `:has()` selector in
-  `@supports (selector(:has(*)))` and every `@container` in
-  `@supports (container-type: inline-size)` — 40 `:has()` uses across 7
-  blocks and 23 `@container` uses across 12 blocks.
-- Give every `100vh` declaration a `100dvh` fallback on the next line
-  (15 pairs in 8 files, including the dialog shell).
-- Add an ES5, dependency-free engine check to `client/index.html` that runs
-  before the module graph: Chromium below 107 renders an explicit "update
-  your browser / Android System WebView" screen.
+### Worker lifetime and caching
 
-## Design Decisions
+Only the production standalone entry registers `/sw.js` after page load. Registration failure leaves ordinary online use available. HTTPS or a trustworthy loopback origin is required; arbitrary plain-HTTP LAN origins do not support registration.
 
-- Serve the PWA from the daemon origin rather than bundling it locally; a
-  locally bundled copy would make every API call cross-origin and force
-  `--allow-origin` operator configuration.
-- Cache only hashed `/assets/*`: content-addressed files cannot go stale, so
-  cache-first is safe and the cache-name version key handles upgrades.
-- Network-only for everything else keeps session state, SSE streams and
-  bearer auth out of any cache, matching the daemon's trust model.
-- Engine floor 107 is derived from Vite's baseline-widely-available, not
-  chosen independently; `dvh` is polyfilled by the paired fallback, `:has()`
-  and `@container` by `@supports` guards.
-- `format: 'es'` for the worker entry: a single chunk without imports emits
-  a plain classic script; Vite rejects `iife` with multiple inputs
-  (`inlineDynamicImports`).
+The worker activates immediately using `skipWaiting` and `clients.claim`. It removes older `qwen-code-shell-*` caches while preserving unrelated caches. The current namespace contains the package version; content-hashed chunk filenames distinguish builds made with the same version.
 
-## Constraints
+Only same-origin build assets are cache-first. Unhashed `icon.svg` and `icon-*.png` files bypass the worker cache and receive HTTP revalidation headers. The manifest also stays on the browser network path, so same-version deployments can update it. Non-GET, cross-origin, authorized and SSE requests are untouched. Ordinary API fetches are not intercepted. HTML navigation uses the network and returns a static 503 retry page on connection failure; it never restores cached session HTML. Cache reads or writes failing must not prevent an available network asset from loading.
 
-- The CSP already allows `worker-src 'self'`, so no policy change is needed.
-- The daemon only serves `/assets/*` and the root; manifest and worker must
-  live at those exact paths (`/manifest.webmanifest`, `/sw.js`).
-- SW registration requires a secure context; plain-HTTP LAN deployments do
-  not get the worker (documented; TLS is the primary path).
+### Browser contract and layout
 
-## Risks
+The support floor is Chrome/Edge/Android System WebView 111+, Firefox 128+, and Safari/iOS 16.4+. This follows [Tailwind v4's CSS requirements](https://tailwindcss.com/docs/compatibility), not Vite's default target. The explicit JavaScript build target remains ES2021, including compatibility with xterm's generated syntax; a syntax target alone does not establish CSS support.
 
-- An SW cache-first bug would serve stale JS to every client; mitigated by
-  hashed filenames, versioned cache names and eviction on activate.
-- SVG-only install icons are ignored by Android Chrome; PNG 192/512 are
-  shipped alongside the SVG.
+An ES5 inline guard checks known browser versions and, when available, required CSS capabilities before the module graph starts. It marks unsupported engines; the existing boot watchdog renders one themed update panel inside `#root`. Main boot preserves that panel. Unknown user agents may attempt to load, with the existing failure watchdog as a fallback.
 
-## Validation
+The modified viewport rules retain `vh` fallbacks and add `dvh` where the actual rendered element needs it. Dialog sizing applies to the current Radix dialog content, including fullscreen. Tooltip viewport custom properties use an `@supports` guard because an unsupported unit inside a custom property invalidates the whole computed declaration. Existing `:has` and container guards are progressive CSS behavior, not polyfills or a promise to support older engines.
 
-- Full monorepo `npm run build`; inspect `dist/sw.js` (version injected),
-  `dist/manifest.webmanifest`, `dist/assets/icon-192.png`,
-  `dist/assets/icon-512.png`.
-- `npx vitest run src/serve/web-shell-static.test.ts` in `packages/cli`
-  (pre-auth PWA routes); scan all client CSS for bare `:has()`/`@container`
-  and `100vh` without a `dvh` pair (braces-balanced parser check).
-- Screen check: install prompt appears on Chrome desktop/Android; stale
-  WebView shows the update screen.
+## Constraints and Risks
 
-## Acceptance Criteria
+- A manifest does not guarantee an automatic install prompt: browser policy, engagement, secure context and platform UI still apply.
+- Service worker activation affects open tabs immediately. Hashed assets retain their content identity; API state and HTML are never cached.
+- Dynamic viewport units cover toolbar resizing, but do not establish that every mobile keyboard behaves identically.
+- The browser matrix is a support contract, not a claim that every minimum engine or physical device was tested.
 
-1. All `:has()` and `@container` uses sit inside `@supports` blocks; every
-   `100vh` has a `dvh` partner line.
-2. `browserslist` and README matrix match Chrome/Edge 107+, Firefox 104+,
-   Safari 16+.
-3. `/manifest.webmanifest` and `/sw.js` answer pre-auth with `no-cache`.
-4. The worker caches only `/assets/*`; daemon routes and authorized requests
-   are never intercepted.
-5. Chromium below 107 renders the update screen instead of a blank page.
+## Reviewer Test Plan
 
-## Follow-ups
+1. Start a token-protected daemon from the packaged CLI. Open the shell and retrieve the manifest, worker and icons without a bearer. API requests without a bearer must remain unauthorized.
+2. Redeploy changed metadata at the same package version. Reload and check that the manifest and all public icons update; hashed chunks may remain cached.
+3. Stop the daemon and navigate. Expect a readable retry page, without restored sessions or cached API responses. Reconnect and retry.
+4. Simulate an unsupported browser version and a module-load failure independently. Expect one appropriate message inside the themed root, with no second message or blank page.
+5. On supported mobile browsers, inspect normal/fullscreen dialogs and composer tooltips while changing viewport height.
+6. Verify installation through the browser's available install/Add to Home Screen UI. Record the actual browser and device; an automated fixed viewport alone does not prove device installability.
 
-- Web Push registration is stubbed in `sw.js` and currently references the
-  shipped PNG icons; wire push delivery only when the daemon or the Android
-  shell raises notifications natively.
-- Re-verify installability on iOS (Safari needs explicit "Add to Home
-  Screen"; the web manifest is only partially honored there).
+## Validation Evidence
+
+Targeted automated tests cover HTTP routes, packaging, worker behavior and parsed-document boot. The PR verification report records commands, results and exact revision. Physical-device installation, minimum-engine rendering and mobile keyboard behavior require separate device evidence; they are not claimed here.

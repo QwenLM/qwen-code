@@ -1,55 +1,53 @@
 # Qwen Code Mobile Shell (Android)
 
-A thin Android WebView shell around the daemon-served Web Shell. It does not
-contain a second UI: every screen except two bootstrap placeholders is the
-same Web Shell the daemon already serves to browsers. The native layer adds
-only what a browser cannot do: keystore-bound credential storage and a
-foreground service for SSE (both Phase 2, skeletons in place).
-
-## Architecture
-
-- `MainActivity` loads the daemon origin in a `WebView` and passes the bearer
-  token in the URL fragment (`#token=<value>`). The Web Shell reads it from
-  `window.location.hash`, so the token is never sent to the server.
-- Profiles are stored in `SharedPreferences` as a `(URL, token, display
-name)` tuple (`daemon_url`, `daemon_token`, `profile_name`). Switching
-  daemons means navigating the WebView to a different origin; each
-  navigation loads a fresh same-origin document.
-- `QwenForegroundService` is a foreground-service skeleton (`dataSync` type)
-  that will keep the SSE stream alive and raise native notifications.
-
-## Daemon requirements
-
-- Every profile must point at a daemon started with a **static token**:
-  `--token <value>` or `QWEN_SERVER_TOKEN`. Auto-generated tokens rotate on
-  every restart and would silently invalidate saved profiles.
-- Prefer a public profile over real TLS (`--tls-cert` / `--tls-key`). Only a
-  secure context enables service workers and voice input in the H5.
-  Plain-HTTP LAN profiles work but need entries in
-  `app/src/main/res/xml/network_security_config.xml` (loopback is allowed by
-  default for development).
-- The H5 is served by the daemon. Do not bundle the Web Shell locally: a
-  locally bundled copy would make every request cross-origin and require
-  `--allow-origin` configuration.
-
-## WebView requirement
-
-The Web Shell targets Chrome 107+ (see `packages/web-shell/package.json`
-`browserslist`). On launch `MainActivity` checks the Android System WebView
-version and shows an explicit "update WebView" screen below that floor.
+A development-only WebView spike around the daemon-served Web Shell. It has one saved development profile and native bootstrap/error messages. Production profile management, Keystore storage, per-device revocation, background SSE and native notifications are future work. See the [design and reviewer test plan](../../docs/design/mobile-android-shell.md).
 
 ## Build
 
-Requires JDK 17+ and the Android SDK. From `packages/mobile-shell`:
+Use JDK 17 and Android SDK platform/build tools 34. Configure `ANDROID_HOME` or an untracked `local.properties` containing `sdk.dir=/path/to/android-sdk`. From this directory:
 
 ```bash
-gradle :app:assembleDebug
+./gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
 
-## Status
+On Windows use `gradlew.bat`. The committed wrapper pins Gradle 8.2.1 and verifies its distribution checksum. The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. This native package is excluded from npm and pnpm workspaces.
 
-- Phase 1: WebView shell, token fragment, profile storage, native WebView
-  version check, foreground-service skeleton.
-- Phase 2 (planned): profile picker UI, Android Keystore credential storage,
-  OkHttp SSE client in the foreground service, native turn/permission
-  notifications, request POST_NOTIFICATIONS with rationale.
+## Development Profile
+
+A debug installation can be provisioned through Android Studio Device Explorer in the application's private `shared_prefs/qwen_profiles.xml`:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<map>
+    <string name="daemon_url">https://daemon.example.com</string>
+    <string name="daemon_token">YOUR_DEVELOPMENT_TOKEN</string>
+</map>
+```
+
+Stop the application before changing preferences and relaunch afterward. Use an HTTP(S) origin with an optional trailing slash; paths, query strings, fragments and user information are rejected. There is no profile editor or multi-profile switching in this spike.
+
+The token is passed to the H5 in an encoded URL fragment, absent from the navigation request. The H5 uses it for authenticated API calls. A static `--token` or `QWEN_SERVER_TOKEN` avoids daemon-restart invalidation during development. This plaintext development storage is not a production credential solution; backup and device transfer exclude it.
+
+## Runtime Requirements
+
+Android API 26+ and Android System WebView 111+. The provider is checked before constructing a WebView, so unsupported or missing providers receive a native update message.
+
+Use HTTPS for remote daemons. Cleartext is disabled except for explicit loopback entries; LAN HTTP hosts need explicit network-security configuration. Secure web APIs require HTTPS or a trustworthy loopback origin.
+
+An emulator's localhost is the emulator itself. For a host daemon on port 4170,
+run `adb reverse tcp:4170 tcp:4170` and use `http://127.0.0.1:4170` in the
+profile. The app trusts system certificate authorities; a host-only or
+user-installed development CA is not automatically trusted by this WebView.
+Use a certificate chain trusted by the device. Certificate errors are not bypassed.
+The first Gradle build needs network access; offline builds require a populated
+Gradle and SDK cache.
+
+The H5 loads directly from the daemon, without a local copy. Direct same-origin HTTP API calls need no extra CORS
+configuration. Reverse proxies and remote terminal/voice WebSocket connections
+retain the daemon's [origin requirements](../../docs/users/qwen-serve.md#security-threat-model). Same-origin navigation compares scheme, host and effective port. Supported external main-frame links open in other apps; file/content and mixed-content access are disabled. Connection failures show a native Retry screen.
+
+## Limitations
+
+This is not a released mobile client. File selection, microphone permission bridging and downloads still need native integrations. No foreground service runs. Phase 2 also requires profile keys and switching, capability checks per connection, credential migration, maintainer-provided per-device revocation, Keystore storage, background SSE and notification permissions.
+
+JVM tests and APK compilation are separate from emulator/physical-device acceptance. Consult the PR verification report for actual completed checks; source presence does not establish device validation.

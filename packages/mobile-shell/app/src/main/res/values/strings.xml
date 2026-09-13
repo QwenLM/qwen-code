@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Qwen Code</string>
-    <string name="notification_connected">Connected to daemon — keeping session alive</string>
-    <string name="notification_channel_name">Daemon Connection</string>
-    <string name="notification_channel_description">Keeps the Qwen Code session alive in the background and delivers turn notifications</string>
+    <string name="retry">Retry</string>
 </resources>

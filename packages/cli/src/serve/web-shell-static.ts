@@ -157,6 +157,8 @@ function createSendIndex(
  *  - `GET /` — the HTML shell, always (so `curl /` shows the UI too).
  *  - `GET /session/:id` document navigations — the HTML shell, so a browser
  *    refresh can load before the front-end adds its bearer header.
+ *  - `GET /manifest.webmanifest` and `GET /sw.js` — public PWA metadata and
+ *    the origin-scoped worker, revalidated on every request.
  *
  * `GET /mcp-app-sandbox` is a separate pre-auth route mounted by
  * `mountMcpAppSandbox` (the iframe proxy, not the shell HTML).
@@ -178,6 +180,11 @@ export function mountWebShellAssets(
       index: false,
       immutable: true,
       maxAge: '1y',
+      setHeaders(res, filePath) {
+        if (/^icon(?:-|\.)/.test(path.basename(filePath))) {
+          res.setHeader('Cache-Control', 'no-cache');
+        }
+      },
     }),
   );
   // A request still under /assets here is a missing chunk (e.g. a stale hashed
@@ -201,29 +208,37 @@ export function mountWebShellAssets(
     if (!isDocumentNavigation(req)) return next();
     sendIndex(req, res);
   });
-  // PWA manifest — must be pre-auth: browsers fetch it during link parsing
-  // before any Authorization header can be attached. Served with no-cache so
-  // a redeployed daemon serves an updated manifest immediately.
-  app.get('/manifest.webmanifest', (_req: Request, res: Response) => {
-    const manifestPath = path.join(webShellDir, 'manifest.webmanifest');
-    res
-      .set('Content-Type', 'application/manifest+json')
-      .set('Cache-Control', 'no-cache')
-      .set('X-Content-Type-Options', 'nosniff')
-      .sendFile(manifestPath, { dotfiles: 'allow' });
-  });
-  // Service worker — must be at the scope root and must NOT be long-cached.
-  // `Service-Worker-Allowed: /` is implicit for a file served at `/sw.js` but
-  // we send it explicitly to be safe with any intermediary cache.
-  app.get('/sw.js', (_req: Request, res: Response) => {
-    const swPath = path.join(webShellDir, 'sw.js');
-    res
-      .set('Content-Type', 'application/javascript')
-      .set('Cache-Control', 'no-cache')
-      .set('Service-Worker-Allowed', '/')
-      .set('X-Content-Type-Options', 'nosniff')
-      .sendFile(swPath, { dotfiles: 'allow' });
-  });
+  // Process-global public PWA files carry no daemon credentials or workspace data.
+  for (const [route, contentType] of [
+    ['/manifest.webmanifest', 'application/manifest+json'],
+    ['/sw.js', 'application/javascript'],
+  ]) {
+    app.get(route, (_req: Request, res: Response) => {
+      res
+        .set('Content-Type', contentType)
+        .set('Cache-Control', 'no-cache')
+        .set('X-Content-Type-Options', 'nosniff');
+      if (route === '/sw.js') res.set('Service-Worker-Allowed', '/');
+      res.sendFile(
+        path.join(webShellDir, route.slice(1)),
+        { cacheControl: false, dotfiles: 'allow' },
+        (err) => {
+          if (!err) return;
+          if (res.headersSent) {
+            res.end();
+            return;
+          }
+          const status = 'status' in err && err.status === 404 ? 404 : 500;
+          res
+            .status(status)
+            .type('text/plain')
+            .send(
+              status === 404 ? 'Not found' : 'Failed to load Web Shell asset',
+            );
+        },
+      );
+    });
+  }
 }
 
 /**

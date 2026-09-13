@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import express from 'express';
+import request from 'supertest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  mountWebShellAssets,
   buildWebShellCsp,
   buildWebShellPermissionsPolicy,
 } from './web-shell-static.js';
@@ -41,22 +47,108 @@ describe('Web Shell sandbox framing', () => {
   });
 });
 
-import { isPreAuthWebShellRequest } from './web-shell-preauth.js';
-import type { Request } from 'express';
+describe('public PWA HTTP routes', () => {
+  let directory: string;
+  let app: express.Express;
 
-const pwaRequest = (path: string) =>
-  ({ method: 'GET', path, headers: {} }) as unknown as Request;
-
-describe('isPreAuthWebShellRequest', () => {
-  it('allows PWA files pre-auth', () => {
-    expect(isPreAuthWebShellRequest(pwaRequest('/manifest.webmanifest'))).toBe(
-      true,
+  beforeEach(async () => {
+    directory = await mkdtemp(path.join(tmpdir(), 'qwen-pwa-'));
+    await mkdir(path.join(directory, 'assets'));
+    await writeFile(
+      path.join(directory, 'manifest.webmanifest'),
+      '{"name":"Qwen Code"}',
     );
-    expect(isPreAuthWebShellRequest(pwaRequest('/sw.js'))).toBe(true);
-    expect(isPreAuthWebShellRequest(pwaRequest('/assets/icon.svg'))).toBe(true);
+    await writeFile(
+      path.join(directory, 'sw.js'),
+      'self.addEventListener("fetch", () => {});',
+    );
+    await writeFile(
+      path.join(directory, 'assets', 'index-abc123.js'),
+      'export {};',
+    );
+    await writeFile(path.join(directory, 'assets', 'icon-192.png'), 'icon');
+    await writeFile(path.join(directory, 'assets', 'icon.svg'), '<svg/>');
+    app = express();
+    mountWebShellAssets(app, directory);
+    app.use((_req, res) => {
+      res.status(401).send('Unauthorized');
+    });
+    app.use(
+      (
+        _err: Error,
+        _req: express.Request,
+        res: express.Response,
+        _next: express.NextFunction,
+      ) => {
+        res.status(500).send('Error');
+      },
+    );
   });
 
-  it('blocks API routes', () => {
-    expect(isPreAuthWebShellRequest(pwaRequest('/capabilities'))).toBe(false);
+  afterEach(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it.each(['/manifest.webmanifest', '/MANIFEST.WEBMANIFEST/'])(
+    'serves %s without a token and permits revalidation',
+    async (url) => {
+      const response = await request(app).get(url).expect(200);
+      expect(response.headers['content-type']).toContain(
+        'application/manifest+json',
+      );
+      expect(JSON.parse(response.text)).toEqual({ name: 'Qwen Code' });
+      expect(response.headers['cache-control']).toBe('no-cache');
+      expect(response.headers['x-content-type-options']).toBe('nosniff');
+      await request(app).head(url).expect(200);
+      await request(app)
+        .get(url)
+        .set('If-None-Match', response.headers['etag'])
+        .expect(304);
+    },
+  );
+
+  it('serves a root worker with the correct type and scope', async () => {
+    const response = await request(app).get('/sw.js').expect(200);
+    expect(response.headers['content-type']).toContain(
+      'application/javascript',
+    );
+    expect(response.headers['service-worker-allowed']).toBe('/');
+    expect(response.headers['cache-control']).toBe('no-cache');
+    expect(response.text).toContain('addEventListener');
+  });
+
+  it('revalidates unhashed icons but keeps hashed build assets immutable', async () => {
+    expect(
+      (await request(app).get('/assets/icon.svg').expect(200)).headers[
+        'cache-control'
+      ],
+    ).toBe('no-cache');
+    expect(
+      (await request(app).get('/assets/icon-192.png').expect(200)).headers[
+        'cache-control'
+      ],
+    ).toBe('no-cache');
+    expect(
+      (await request(app).get('/assets/index-abc123.js').expect(200)).headers[
+        'cache-control'
+      ],
+    ).toContain('immutable');
+  });
+
+  it.each(['/sw.js', '/manifest.webmanifest'])(
+    'returns 404, not HTML or a catch-all 500, when %s is absent',
+    async (url) => {
+      await rm(path.join(directory, url.slice(1)));
+      const response = await request(app).get(url).expect(404);
+      expect(response.headers['content-type']).toContain('text/plain');
+      expect(response.text).toBe('Not found');
+    },
+  );
+
+  it('retains authentication for API requests and writes', async () => {
+    await request(app).get('/capabilities').expect(401);
+    await request(app).post('/sw.js').expect(401);
+    await request(app).post('/manifest.webmanifest').expect(401);
+    await request(app).get('/sw.js/extra').expect(401);
   });
 });

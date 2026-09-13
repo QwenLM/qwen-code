@@ -56,7 +56,7 @@ const SESSION_DEEP_LINK_PATH = /^\/session\/[^/]+\/?$/u;
  * data: pre-auth answers serve only the public shell HTML or the MCP App
  * sandbox proxy, identical to `GET /` (or the startup-failure envelope).
  * Keep in sync with the routes registered in `mountWebShellAssets` and
- * `mountMcpAppSandbox`.
+ * `mountMcpAppSandbox`, including the public manifest and service worker.
  */
 export function isPreAuthWebShellRequest(req: Request): boolean {
   if (req.method !== 'GET' && req.method !== 'HEAD') return false;
@@ -73,9 +73,12 @@ export function isPreAuthWebShellRequest(req: Request): boolean {
     reqPath === '/mcp-app-sandbox' ||
     // PWA files: manifest must be pre-auth (browser fetches it during link
     // parsing before any Authorization header can be attached); sw.js is a
-    // no-credential subresource loaded by the browser's SW registration call.
+    // subresource loaded by the browser's SW registration call. Mirror
+    // Express's optional trailing slash as well as its case-insensitive paths.
     reqPath === '/manifest.webmanifest' ||
-    reqPath === '/sw.js'
+    reqPath === '/manifest.webmanifest/' ||
+    reqPath === '/sw.js' ||
+    reqPath === '/sw.js/'
   )
     return true;
   return SESSION_DEEP_LINK_PATH.test(reqPath) && isDocumentNavigation(req);

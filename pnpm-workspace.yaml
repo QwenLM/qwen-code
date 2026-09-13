@@ -18,6 +18,7 @@ packages:
   - 'integrations/external-context-mem0'
   - '!packages/desktop-shell'
   - '!packages/live-host'
+  - '!packages/mobile-shell'
 
 nodeLinker: 'hoisted'
 # The root postinstall runs patch-package, which rewrites files inside

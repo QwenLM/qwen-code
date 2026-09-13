@@ -355,6 +355,10 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
 }
 
 async function main() {
+  if (
+    document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
+  )
+    return;
   const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
   removeDaemonTokenFromUrl();
 
@@ -391,14 +395,20 @@ void main();
 //
 // The SW is served at /sw.js by the daemon's static handler (pre-auth, no-cache)
 // with `Service-Worker-Allowed: /` so its scope covers the whole origin.
-if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+if (
+  import.meta.env.PROD &&
+  !document.documentElement.hasAttribute(
+    'data-web-shell-unsupported-browser',
+  ) &&
+  typeof navigator !== 'undefined' &&
+  'serviceWorker' in navigator
+) {
   window.addEventListener('load', () => {
     navigator.serviceWorker
       .register('/sw.js', { scope: '/' })
       .catch((err: unknown) => {
         // Non-fatal: the SW is a progressive enhancement. Log to console so a
-        // developer running the shell locally can see the reason (e.g. HTTP
-        // on a non-localhost origin).
+        // developer can diagnose a missing worker or a registration policy failure.
         console.warn('qwen-code: service worker registration failed:', err);
       });
   });

@@ -50,6 +50,24 @@ describe('web shell boot', () => {
 
   afterEach(() => {
     document.body.innerHTML = '';
+    document.documentElement.removeAttribute(
+      'data-web-shell-unsupported-browser',
+    );
+  });
+
+  it('keeps the native HTML update message on unsupported browsers', async () => {
+    document.documentElement.setAttribute(
+      'data-web-shell-unsupported-browser',
+      'Update required',
+    );
+    document.body.innerHTML =
+      '<div id="root"><div data-boot-fallback>Update required</div></div>';
+    await import('./main');
+    expect(testState.containers).toHaveLength(0);
+    expect(testState.resolveToken).toBeUndefined();
+    expect(document.querySelector('[data-boot-fallback]')?.textContent).toBe(
+      'Update required',
+    );
   });
 
   it('clears the boot fallback when the app mounts after the grace period', async () => {
