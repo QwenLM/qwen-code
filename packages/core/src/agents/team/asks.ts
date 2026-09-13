@@ -23,6 +23,13 @@ const debug = createDebugLogger('BOARD_ASKS');
 export const ASKS_COLLECTION = 'asks';
 export const DEFAULT_ASK_TTL_MS = 15 * 60 * 1000;
 const MAX_TEXT_LENGTH = 65536;
+/**
+ * Listing opens one fd per record, so a single `Promise.all` over a large
+ * board has no fd ceiling and fails wholesale with EMFILE under a low *hard*
+ * `RLIMIT_NOFILE`. Read in batches instead; the final sort keeps the result
+ * order unchanged.
+ */
+const READ_BATCH_SIZE = 32;
 const ASK_FILE =
   /^a-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
 
@@ -81,9 +88,7 @@ function parseAsk(value: unknown): AskRecord {
     }
     assertItemId('task id', ask.aboutTask, 't');
   }
-  if (
-    !['open', 'answered', 'declined', 'timeout'].includes(ask.state ?? '')
-  ) {
+  if (!['open', 'answered', 'declined', 'timeout'].includes(ask.state ?? '')) {
     throw new Error('Invalid ask state.');
   }
   if (!Number.isFinite(ask.createdAt) || !Number.isFinite(ask.expiresAt)) {
@@ -199,13 +204,20 @@ export async function listAsks(board: string): Promise<AskRecord[]> {
     if (isNodeError(err) && err.code === 'ENOENT') return [];
     throw err;
   }
-  const asks = (
-    await Promise.all(
-      files
-        .filter((file) => ASK_FILE.test(file))
-        .map((file) => getAsk(board, file.slice(0, -5))),
-    )
-  ).filter((ask): ask is AskRecord => ask !== null);
+  const ids = files
+    .filter((file) => ASK_FILE.test(file))
+    .map((file) => file.slice(0, -5));
+  const asks: AskRecord[] = [];
+  for (let offset = 0; offset < ids.length; offset += READ_BATCH_SIZE) {
+    const batch = await Promise.all(
+      ids
+        .slice(offset, offset + READ_BATCH_SIZE)
+        .map((id) => getAsk(board, id)),
+    );
+    for (const ask of batch) {
+      if (ask !== null) asks.push(ask);
+    }
+  }
   return asks.sort((a, b) => a.createdAt - b.createdAt);
 }
 

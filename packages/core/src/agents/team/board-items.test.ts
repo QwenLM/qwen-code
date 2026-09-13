@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   answerAsk,
@@ -15,7 +16,7 @@ import {
   listAsks,
   pruneAsks,
 } from './asks.js';
-import { getCollectionDir, withItemLock } from './board-lock.js';
+import { getCollectionDir } from './board-lock.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
   const original =
@@ -28,6 +29,29 @@ vi.mock('../../config/storage.js', async (importOriginal) => {
       getGlobalQwenDir: () => globalDir,
       __setMockGlobalDir: (dir: string) => {
         globalDir = dir;
+      },
+    },
+  };
+});
+
+// Observability only: every `lockfile.lock` call still goes to the real
+// implementation. A prune that reaches for the item lock tells the test it has
+// finished scanning, which is what makes "the record is re-read under the lock"
+// a pinned guarantee rather than a timing coincidence.
+const lockProbe = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  reached: undefined as (() => void) | undefined,
+}));
+
+vi.mock('proper-lockfile', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('proper-lockfile')>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      lock(...args: Parameters<typeof actual.lock>) {
+        if (String(args[0]) === lockProbe.path) lockProbe.reached?.();
+        return actual.lock(...args);
       },
     },
   };
@@ -50,6 +74,8 @@ describe('board asks', () => {
   });
 
   afterEach(async () => {
+    lockProbe.path = undefined;
+    lockProbe.reached = undefined;
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -144,18 +170,39 @@ describe('board asks', () => {
     );
     const pruneNow = ask.expiresAt + 1;
 
-    let pruning: Promise<string[]> | undefined;
-    await withItemLock(target, async () => {
-      pruning = pruneAsks('demo', 0, pruneNow);
-      await new Promise((resolve) => setImmediate(resolve));
-      await fs.writeFile(
-        target,
-        JSON.stringify({
-          ...ask,
-          expiresAt: pruneNow + 1000,
-        }),
-      );
+    // Hold the cross-process lock the way a foreign runtime sharing the board
+    // would — through proper-lockfile directly, leaving the in-process mutex
+    // free so prune gets all the way to its own lock attempt.
+    const release = await lockfile.lock(target, { retries: 0 });
+    const pruneIsBlocked = new Promise<void>((resolve) => {
+      lockProbe.reached = resolve;
     });
+    lockProbe.path = target;
+
+    const pruning = pruneAsks('demo', 0, pruneNow);
+    // Reopen the ask only once prune is provably waiting on the lock. An
+    // implementation that reads before locking has already picked up the
+    // expired bytes by now, and goes on to delete a record a foreign runtime
+    // just reopened.
+    const finishedFirst = await Promise.race([
+      pruneIsBlocked.then(() => false),
+      // Both handlers attached so neither outcome can surface later as an
+      // unhandled rejection once the race has already settled.
+      pruning.then(
+        () => true,
+        () => true,
+      ),
+    ]);
+    if (finishedFirst) {
+      // Prune never blocked on the lock. Report whatever it actually did.
+      await expect(pruning).resolves.toEqual([]);
+      throw new Error('prune finished without waiting for the item lock');
+    }
+    await fs.writeFile(
+      target,
+      JSON.stringify({ ...ask, expiresAt: pruneNow + 1000 }),
+    );
+    await release();
 
     await expect(pruning).resolves.toEqual([]);
     await expect(listAsks('demo')).resolves.toMatchObject([{ state: 'open' }]);

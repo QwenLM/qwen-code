@@ -22,6 +22,14 @@ const debug = createDebugLogger('BOARD_TASKS');
 
 export const TASKS_COLLECTION = 'tasks';
 const MAX_TEXT_LENGTH = 65536;
+/**
+ * Listing opens one fd per record, so a single `Promise.all` over a large
+ * board has no fd ceiling: peak fds grow linearly with the entry count and the
+ * whole listing fails with EMFILE under a low *hard* `RLIMIT_NOFILE` (docker
+ * `--ulimit nofile=`, systemd `LimitNOFILE=`, CI runners). Read in batches
+ * instead; the final sort keeps the result order unchanged.
+ */
+const READ_BATCH_SIZE = 32;
 const TASK_FILE =
   /^t-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
 
@@ -150,13 +158,20 @@ export async function listBoardTasks(
     if (isNodeError(err) && err.code === 'ENOENT') return [];
     throw err;
   }
-  const tasks = (
-    await Promise.all(
-      files
-        .filter((file) => TASK_FILE.test(file))
-        .map((file) => getBoardTask(board, file.slice(0, -5))),
-    )
-  ).filter((task): task is BoardTaskRecord => task !== null);
+  const ids = files
+    .filter((file) => TASK_FILE.test(file))
+    .map((file) => file.slice(0, -5));
+  const tasks: BoardTaskRecord[] = [];
+  for (let offset = 0; offset < ids.length; offset += READ_BATCH_SIZE) {
+    const batch = await Promise.all(
+      ids
+        .slice(offset, offset + READ_BATCH_SIZE)
+        .map((id) => getBoardTask(board, id)),
+    );
+    for (const task of batch) {
+      if (task !== null) tasks.push(task);
+    }
+  }
   return tasks.sort((a, b) => a.createdAt - b.createdAt);
 }
 

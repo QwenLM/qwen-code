@@ -87,6 +87,85 @@ describe('board tasks', () => {
     expect(completed.notes).toEqual(['done']);
   });
 
+  it('gives a contended task to exactly one concurrent claimant', async () => {
+    const task = await createBoardTask({
+      board: 'demo',
+      createdBy: 'author',
+      subject: 'contended',
+    });
+    // Every claimant races for the same pending task. Without the
+    // `already claimed by` guard each serialized writer re-reads an
+    // in_progress record and overwrites its owner, so all eight "win" and the
+    // board hands the same work to eight agents.
+    const results = await Promise.allSettled(
+      Array.from({ length: 8 }, (_, index) =>
+        claimBoardTask('demo', task.id, `worker-${index}`),
+      ),
+    );
+    const winners = results.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : [],
+    );
+    const rejections = results.flatMap((result) =>
+      result.status === 'rejected' ? [String(result.reason)] : [],
+    );
+    expect(winners).toHaveLength(1);
+    expect(rejections).toHaveLength(7);
+    expect(
+      rejections.every((reason) => reason.includes('already claimed by')),
+    ).toBe(true);
+    await expect(listBoardTasks('demo')).resolves.toMatchObject([
+      { id: task.id, status: 'in_progress', owner: winners[0]?.owner },
+    ]);
+  });
+
+  it('lists every record on a board larger than one read batch', async () => {
+    // `listBoardTasks` reads in bounded batches so a large board cannot exhaust
+    // the process fd budget; a batch loop that drops or double-counts a slice
+    // shows up here as a short listing.
+    const total = 70;
+    const created = await Promise.all(
+      Array.from({ length: total }, (_, index) =>
+        createBoardTask({
+          board: 'demo',
+          createdBy: 'author',
+          subject: `task ${index}`,
+        }),
+      ),
+    );
+    const listed = await listBoardTasks('demo');
+    expect(listed).toHaveLength(total);
+    expect(new Set(listed.map((task) => task.id)).size).toBe(total);
+    expect(new Set(created.map((task) => task.id)).size).toBe(total);
+    for (const task of created) {
+      expect(listed.map((entry) => entry.id)).toContain(task.id);
+    }
+  });
+
+  it('treats board names that differ only by case as one board', async () => {
+    // APFS and NTFS fold case, ext4 does not, so the storage layer folds it
+    // itself: the same board name has to mean the same board everywhere.
+    const task = await createBoardTask({
+      board: 'Sprint',
+      createdBy: 'author',
+      subject: 'shared',
+    });
+    await expect(listBoardTasks('sprint')).resolves.toMatchObject([
+      { id: task.id },
+    ]);
+    await expect(
+      claimBoardTask('sprint', task.id, 'worker'),
+    ).resolves.toMatchObject({ owner: 'worker' });
+    await expect(listBoardTasks('SPRINT')).resolves.toMatchObject([
+      { owner: 'worker' },
+    ]);
+    const boardsRoot = path.resolve(
+      getCollectionDir('Sprint', 'tasks'),
+      '..',
+      '..',
+    );
+    await expect(fs.readdir(boardsRoot)).resolves.toEqual(['sprint']);
+  });
+
   it('skips a malformed foreign record without hiding healthy work', async () => {
     await createBoardTask({
       board: 'demo',

@@ -35,9 +35,20 @@ export function getBoardsRootDir(): string {
   return path.join(Storage.getGlobalQwenDir(), BOARDS_DIR);
 }
 
+/**
+ * Board names become directory names, and filesystems disagree about case:
+ * APFS and NTFS fold it, ext4 does not. Without folding here, `Sprint` and
+ * `sprint` are one board on macOS/Windows and two on Linux, so the same name
+ * does not mean the same board across the runtimes a board is shared between.
+ * `SAFE_NAME` is ASCII-only, so a plain `toLowerCase()` is the whole rule.
+ */
+function boardDirName(board: string): string {
+  return board.toLowerCase();
+}
+
 /** `~/.qwen/boards/{board}/` */
 export function getBoardDir(board: string): string {
-  return path.join(getBoardsRootDir(), board);
+  return path.join(getBoardsRootDir(), boardDirName(board));
 }
 
 /** `~/.qwen/boards/{board}/{collection}/` */

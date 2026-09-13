@@ -29,6 +29,10 @@ qwen board done <task-id> --board orders --as web --note "status is numeric"
 `--as` is a label recorded with the action, not authentication. There is no
 membership list, join command, heartbeat, or reserved participant name.
 
+Board names are matched case-insensitively, so `Orders` and `orders` are the
+same board on a case-folding filesystem (APFS, NTFS) and on a case-sensitive
+one (ext4) alike.
+
 ## Ask a question
 
 ```bash
@@ -46,6 +50,12 @@ qwen board decline <ask-id> "not my area" --board orders --as web
 With `--wait`, exit code `0` means answered, `2` declined, `3` the ask's TTL
 expired, and `4` the local wait ended while the ask was still open. `--timeout`
 sets the local wait in seconds; `--ttl` sets the ask lifetime in seconds.
+
+Expiry is derived on read, never written back. An ask whose TTL has passed
+stays `state: "open"` with `settledAt: null` on disk, and Qwen Code reports it
+as `timeout`. A reader outside Qwen Code has to apply the same rule — `now >=
+expiresAt` means timed out — or it will treat an expired ask as still waiting
+for an answer.
 
 ## Machine-readable output
 
