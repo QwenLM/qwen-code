@@ -409,8 +409,11 @@
 }
 
 /* The left rule is colour, which assistive tech cannot read, so the status
-   stays in the accessibility tree as words. */
-.nodeStatusText {
+   stays in the accessibility tree as words. The dependency summary shares the
+   channel: the interactive graph draws the dependency as an aria-hidden edge
+   rather than stating it, so the node's accessible name has to carry it. */
+.nodeStatusText,
+.nodeDependencyText {
   position: absolute;
   overflow: hidden;
   width: 1px;

@@ -183,4 +183,23 @@ describe('PlanExecutionView stylesheet', () => {
     expect(narrower).toMatch(/padding-right:\s*6px/);
     expect(narrower).toMatch(/padding-left:\s*6px/);
   });
+
+  it('keeps the sr-only dependency summary off screen', () => {
+    // The interactive graph states its dependencies to assistive tech only,
+    // because the visible chip row is deliberately off there and the drawn
+    // edges are aria-hidden. That only holds while the summary shares the
+    // status word's screen-reader clipping: dropping it from this selector
+    // list turns the summary into a visible row — the very thing the diff
+    // removed — with no test signal, since jsdom computes no cascade and the
+    // component test can only see the class name.
+    const srOnly = planCss.match(
+      /(^|\n)\.nodeStatusText,\s*\n\s*\.nodeDependencyText\s*\{[^}]*\}/,
+    )?.[0];
+    expect(srOnly).toBeTruthy();
+    expect(srOnly).toMatch(/position:\s*absolute/);
+    expect(srOnly).toMatch(/clip-path:\s*inset\(50%\)/);
+    expect(srOnly).toMatch(/width:\s*1px/);
+    expect(srOnly).toMatch(/height:\s*1px/);
+    expect(srOnly).toMatch(/overflow:\s*hidden/);
+  });
 });

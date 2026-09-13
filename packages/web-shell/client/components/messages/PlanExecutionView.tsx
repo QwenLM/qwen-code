@@ -840,7 +840,16 @@ export function PlanExecutionView({
             });
             continue;
           }
-          const controlX = startX + Math.max(24, (endX - startX) / 2);
+          // Half the run, not the old fixed 24px floor. The ≤720px gutter
+          // leaves a 24px run and the ≤480px gutter a 10px one, so a 24px
+          // shoulder put the control point exactly on the end point (zero
+          // tangent) or past it (negative tangent) — and `orient="auto"` then
+          // flips the arrowhead back at its source, which is the only
+          // direction cue left now that the input port is gone. Every gutter
+          // wide enough to afford the floor already resolved to run / 2, so
+          // wide lanes keep their exact curve while the end tangent's x stays
+          // strictly positive at every tier.
+          const controlX = startX + (endX - startX) / 2;
           edges.push({
             from: dependencyId,
             to: todoId,
@@ -1276,6 +1285,17 @@ export function PlanExecutionView({
                 const faceDependencies = [
                   ...new Set(todo.blockedBy ?? []),
                 ].filter((id) => id !== todo.id);
+                // Whether the visible chip row carries the dependency. It is
+                // rendered whenever nothing else can: drawn edges are
+                // aria-hidden, so they state it only visually; above
+                // MAX_RENDERED_PLAN_EDGES no edges draw at all; and with the
+                // details panel off (the cockpit) or selection disabled
+                // (document mode) the panel never states it either. When this
+                // is false the sr-only summary below carries the same fact to
+                // assistive tech instead, so the dependency is stated exactly
+                // once either way.
+                const statesDependenciesVisibly =
+                  !drawsDependencyEdges || !showStepDetails || documentMode;
                 return (
                   <article
                     className={styles.node}
@@ -1392,16 +1412,7 @@ export function PlanExecutionView({
                           <span>{formatRuntime(nodeRuntimeMs)}</span>
                         )}
                       </div>
-                      {/* Rendered whenever nothing else states the
-                          dependency: drawn edges are aria-hidden, so they
-                          state it only visually. Above
-                          MAX_RENDERED_PLAN_EDGES no edges draw at all, and
-                          with the details panel off (the cockpit) or
-                          selection disabled (document mode) the panel never
-                          states it either. */}
-                      {(!drawsDependencyEdges ||
-                        !showStepDetails ||
-                        documentMode) &&
+                      {statesDependenciesVisibly &&
                         faceDependencies.length > 0 && (
                           <div className={styles.dependencies}>
                             <span>{t('planExecution.dependsOn')}</span>
@@ -1416,6 +1427,28 @@ export function PlanExecutionView({
                               </span>
                             ))}
                           </div>
+                        )}
+                      {/* The interactive graph draws the dependency instead
+                          of stating it, and drawn edges are aria-hidden — so
+                          without this the node's accessible name stops
+                          naming its blockers and a screen-reader user has to
+                          activate every node to find out what blocks it.
+                          Same sr-only channel as the status word, same
+                          step-number-plus-title labels as the chips, and it
+                          never brings the visible row back. */}
+                      {!statesDependenciesVisibly &&
+                        faceDependencies.length > 0 && (
+                          <span className={styles.nodeDependencyText}>
+                            {t('planExecution.dependsOn')}{' '}
+                            {faceDependencies
+                              .map(
+                                (id) =>
+                                  `${(stepNumberByTodo.get(id) ?? 0) || '?'} ${
+                                    todosById.get(id)?.content ?? id
+                                  }`,
+                              )
+                              .join(', ')}
+                          </span>
                         )}
                     </button>
                     {executions.length > 0 && (

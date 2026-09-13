@@ -500,11 +500,14 @@ describe('PlanExecutionView', () => {
     });
 
     // The drawn edge is the dependency statement, so the node face does not
-    // restate it. The step-details panel still does, asserted below.
+    // restate it *visibly* — the chip row stays off. The step-details panel
+    // still states it, asserted below, and the sr-only summary carries it to
+    // assistive tech because the drawn edges are aria-hidden (asserted in
+    // 'names the blockers in the node accessible name…').
     const buildNode = container
       .querySelector('[data-plan-node-id="build"]')
       ?.closest('article');
-    expect(buildNode?.textContent).not.toContain('Depends on');
+    expect(buildNode?.querySelector(`.${styles.dependencies}`)).toBeNull();
     // Content leads the node; the step number matches the inspector list and
     // the dependency chips, and the agent count and elapsed carry the "is
     // this alive" signal onto the face.
@@ -525,10 +528,18 @@ describe('PlanExecutionView', () => {
     const verifyNode = container
       .querySelector('[data-plan-node-id="verify"]')
       ?.closest('article');
-    // `verify` has no linked tool call in this fixture, so its whole text is
-    // the status word, the number, the content and the status glyph.
-    expect(verifyNode?.textContent).toBe(
-      `Blocked3Verify${PLAN_STATUS_GLYPH.blocked}`,
+    expect(
+      verifyNode?.querySelector(`.${styles.nodeStatusText}`)?.textContent,
+    ).toBe('Blocked');
+    // `verify` has no linked tool call in this fixture, so its visible face
+    // is still just the number, the content and the status glyph; the two
+    // sr-only spans (status word, dependency summary) are the only other text
+    // the node carries.
+    expect(verifyNode?.querySelector(`.${styles.nodeTop}`)?.textContent).toBe(
+      '3Verify',
+    );
+    expect(verifyNode?.querySelector(`.${styles.nodeMeta}`)?.textContent).toBe(
+      PLAN_STATUS_GLYPH.blocked,
     );
     // The glyph is the non-colour status channel: the left rule that carries
     // status visually is colour only, so without a shape beside it the graph
@@ -1332,6 +1343,96 @@ describe('PlanExecutionView', () => {
     }
   });
 
+  it('keeps the arrowhead pointing at the target on every gutter tier', () => {
+    // The narrow gutters this PR adds are tighter than the router's 24px
+    // shoulder, so the control point landed on (32px tier) or past (18px
+    // tier) the end point. The curve then arrives with a zero or negative x
+    // tangent and `orient="auto"` flips the arrowhead back at its source —
+    // measured in the browser as (0, 0) at 700px and (-14, 0) at 430/390px
+    // against (28, 0) at 1440px. The input port is gone, so that arrowhead
+    // is the last direction cue the graph has. Restoring the fixed
+    // `Math.max(24, …)` shoulder turns the two narrow tiers red.
+    const chain: TodoItem[] = [
+      { id: 'source', content: 'Source', status: 'completed' },
+      {
+        id: 'target',
+        content: 'Target',
+        status: 'pending',
+        blockedBy: ['source'],
+      },
+    ];
+    // The lane width the 700px tier narrows to; only the gutter varies.
+    const lane = 168;
+    // gutter → 64px (≥721px), 32px (≤720px), 18px (≤480px).
+    for (const gap of [64, 32, 18]) {
+      const rect = (left: number, top: number, width: number, height: number) =>
+        ({
+          x: left,
+          y: top,
+          left,
+          top,
+          width,
+          height,
+          right: left + width,
+          bottom: top + height,
+          toJSON: () => ({}),
+        }) as DOMRect;
+      const rectSpy = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockImplementation(function () {
+          if (this.parentElement?.hasAttribute('data-plan-workflow')) {
+            return rect(100, 50, 1100, 300);
+          }
+          if (this.tagName === 'ARTICLE') {
+            const id = this.querySelector('[data-plan-node-id]')!.getAttribute(
+              'data-plan-node-id',
+            )!;
+            return rect(100 + (id === 'target' ? lane + gap : 0), 60, lane, 80);
+          }
+          return rect(0, 0, 0, 0);
+        });
+      const widthSpy = vi
+        .spyOn(HTMLElement.prototype, 'offsetWidth', 'get')
+        .mockReturnValue(1100);
+      const heightSpy = vi
+        .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+        .mockReturnValue(300);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() => {
+          root.render(
+            <I18nProvider language="en">
+              <PlanExecutionView todos={chain} tools={[]} tasks={[]} />
+            </I18nProvider>,
+          );
+        });
+
+        const d = container
+          .querySelector('[data-from="source"][data-to="target"]')
+          ?.getAttribute('d');
+        expect(d, `${gap}px gutter drew no edge`).toBeTruthy();
+        // `M startX startY C c1x c1y, c2x c2y, endX endY`.
+        const n = [...d!.matchAll(/-?[\d.]+/g)].map((m) => Number(m[0]));
+        expect(n).toHaveLength(8);
+        // Prove the fixture really reproduced the tier: the router insets
+        // both ends by 4px, so the run is the gutter minus 8 (56 / 24 / 10).
+        expect(n[6] - n[0], `${gap}px gutter run`).toBe(gap - 8);
+        // The end tangent is the end point minus the last control point, and
+        // it is what the arrowhead orients on. Its x must be strictly
+        // positive at every tier, or the head points back at the source.
+        expect(n[6] - n[4], `${gap}px gutter end tangent x`).toBeGreaterThan(0);
+      } finally {
+        act(() => root.unmount());
+        container.remove();
+        rectSpy.mockRestore();
+        widthSpy.mockRestore();
+        heightSpy.mockRestore();
+      }
+    }
+  });
+
   it('does not synchronously remeasure unchanged topology on task polling', () => {
     const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
     const container = document.createElement('div');
@@ -1564,6 +1665,63 @@ describe('PlanExecutionView', () => {
       ?.closest('article');
     expect(buildNode?.textContent).toContain('Depends on');
     expect(buildNode?.textContent).toContain('Research');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('names the blockers in the node accessible name when the graph draws them', () => {
+    // The other arm of the same gate. In the interactive graph the edges are
+    // drawn and the visible chip row is off by design, but the edge layer is
+    // aria-hidden — so the node's accessible name was the only place left to
+    // state the dependency, and it stopped stating it: base read
+    // `Blocked … Depends on: survey-api, read-tests`, head read
+    // `Blocked 4 Compare findings and draft the migration plan`. A
+    // screen-reader user had to activate every node to learn what blocks it.
+    // Dropping the sr-only summary turns this red.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    // showStepDetails defaults to true: the Plan & Review card and the
+    // Plan & tasks dialog both render the graph that way.
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView todos={todos} tools={[]} tasks={[]} />
+        </I18nProvider>,
+      );
+    });
+
+    // Nothing selected, so no details panel states the dependency either.
+    expect(container.querySelector('[data-plan-step-details]')).toBeNull();
+    expect(
+      container.querySelector('[data-from="research"][data-to="build"]'),
+    ).not.toBeNull();
+
+    const buildButton = container.querySelector<HTMLButtonElement>(
+      '[data-plan-node-id="build"]',
+    );
+    const summary = buildButton?.querySelector(`.${styles.nodeDependencyText}`);
+    // A button's accessible name is its descendant text in DOM order, so this
+    // span is what a screen reader appends after the step's own title.
+    expect(summary?.textContent).toContain('Depends on:');
+    // Human labels, matching the chips: step number plus title, not the id.
+    expect(summary?.textContent).toContain('1 Research');
+    expect(summary?.textContent).not.toContain('research');
+    // It restores the words only — the visible row stays off, which is the
+    // point of the diff.
+    expect(buildButton?.querySelector(`.${styles.dependencies}`)).toBeNull();
+    // And it reads after the step it belongs to, like the base name did.
+    const announced = buildButton?.textContent ?? '';
+    expect(announced.indexOf('Build')).toBeLessThan(
+      announced.indexOf('Depends on:'),
+    );
+    // Sibling nodes with no blockers announce nothing extra.
+    expect(
+      container
+        .querySelector('[data-plan-node-id="research"]')
+        ?.querySelector(`.${styles.nodeDependencyText}`),
+    ).toBeNull();
 
     act(() => root.unmount());
     container.remove();
