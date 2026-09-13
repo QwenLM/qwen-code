@@ -49,13 +49,13 @@
   flex-wrap: wrap;
   justify-content: space-between;
   gap: 4px 16px;
-  color: var(--muted-foreground);
+  color: var(--chat-editor-text-secondary);
 }
 
 .progress {
   display: flex;
   width: 100%;
-  height: 6px;
+  height: 10px;
   overflow: hidden;
   border-radius: 3px;
 }
@@ -65,8 +65,26 @@
   height: 100%;
 }
 
-.spacer {
-  height: 8px;
+.overview {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin: 8px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.total {
+  flex: 1 1 auto;
+}
+
+.remaining {
+  flex-basis: 100%;
+  color: var(--chat-editor-text-secondary);
+}
+
+.remaining strong {
+  color: var(--foreground);
 }
 
 .row,
@@ -84,7 +102,11 @@
 }
 
 .symbol {
-  width: 12px;
+  width: 8px;
+  height: 8px;
+  align-self: center;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 .label {
@@ -93,7 +115,7 @@
 
 .value {
   justify-self: end;
-  color: var(--muted-foreground);
+  color: var(--foreground);
   text-align: right;
 }
 
@@ -155,7 +177,15 @@
 }
 
 .secondary {
-  color: var(--muted-foreground);
+  color: var(--chat-editor-text-secondary);
+}
+
+.ratio {
+  color: var(--chat-editor-text-secondary);
+}
+
+.error .ratio {
+  color: inherit;
 }
 
 .warning {
@@ -191,25 +221,61 @@
 
 .disclosure {
   min-width: 0;
-  border-top: 1px solid var(--border);
 }
 
 .detailSummary {
-  padding: 10px 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 0;
   color: var(--foreground);
   font-weight: 600;
   cursor: pointer;
 }
 
-.detailSummary > .secondary {
+.detailSummary::before {
+  content: '\203A' / '';
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.disclosure[open] > .detailSummary::before {
+  transform: rotate(90deg);
+}
+
+.detailSummary .symbol {
+  display: none;
+}
+
+.detailSummary .row {
+  grid-template-columns: minmax(0, 1fr) fit-content(50%);
+}
+
+.advanced {
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+  padding-top: 6px;
+}
+
+.advancedSummary {
+  padding: 8px 0;
   color: var(--chat-editor-text-secondary);
+  cursor: pointer;
+}
+
+.categories {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .detailSummary:hover {
   color: var(--agent-blue-500);
 }
 
-.detailSummary:focus-visible {
+.detailSummary:focus-visible,
+.advancedSummary:focus-visible {
   outline: 2px solid var(--agent-blue-500);
   outline-offset: 2px;
   border-radius: 4px;
@@ -217,5 +283,5 @@
 
 .disclosure .detailSection {
   gap: 8px;
-  padding-bottom: 10px;
+  padding: 4px 0 10px 12px;
 }

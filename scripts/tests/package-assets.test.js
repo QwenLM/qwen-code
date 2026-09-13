@@ -661,6 +661,40 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
+  it('copies Computer Use platform references to both CLI and core distributions', () => {
+    const rootDir = createFixtureRoot();
+    const coreDir = path.join(rootDir, 'packages', 'core');
+    const resources = [
+      'SKILL.md',
+      'references/macos.md',
+      'references/windows-linux.md',
+    ];
+    for (const resource of resources) {
+      writeFile(
+        rootDir,
+        `packages/core/src/skills/bundled/computer-use/${resource}`,
+        resource,
+      );
+    }
+    stubConsole();
+    copyBundleAssets({ root: rootDir });
+    copyFiles({ root: coreDir });
+    for (const resource of resources) {
+      expect(
+        readFileSync(
+          path.join(rootDir, 'dist/bundled/computer-use', resource),
+          'utf8',
+        ),
+      ).toBe(resource);
+      expect(
+        readFileSync(
+          path.join(coreDir, 'dist/src/skills/bundled/computer-use', resource),
+          'utf8',
+        ),
+      ).toBe(resource);
+    }
+  });
+
   it('copies bundled skill scripts and references into the runtime dist', () => {
     const rootDir = createFixtureRoot();
     writeFile(
@@ -930,6 +964,45 @@ describe('package asset scripts', () => {
       readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
     );
     expect(distPackageJson.optionalDependencies.sharp).toBe('0.35.3');
+  });
+
+  it('derives every published node-pty pin from the core manifest', () => {
+    const rootDir = createFixtureRoot();
+    const corePath = path.join(rootDir, 'packages/core/package.json');
+    const core = JSON.parse(readFileSync(corePath, 'utf8'));
+    const pins = Object.fromEntries(
+      Object.entries(
+        JSON.parse(
+          readFileSync(
+            new URL('../../packages/core/package.json', import.meta.url),
+            'utf8',
+          ),
+        ).optionalDependencies,
+      )
+        .filter(([name]) => name.startsWith('@lydell/node-pty'))
+        .map(([name]) => [name, '1.2.0-test-pin']),
+    );
+    // The pin *count* is owned by conpty-host.test.ts as a deliberate human
+    // re-check tripwire; here a non-empty guard keeps `toEqual(pins)` honest
+    // without duplicating a number that fails before the code under test runs.
+    expect(Object.keys(pins).length).toBeGreaterThan(0);
+    core.optionalDependencies = pins;
+    writeFileSync(corePath, JSON.stringify(core));
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+
+    const published = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist/package.json'), 'utf8'),
+    );
+    expect(
+      Object.fromEntries(
+        Object.entries(published.optionalDependencies).filter(([name]) =>
+          name.startsWith('@lydell/node-pty'),
+        ),
+      ),
+    ).toEqual(pins);
   });
 
   it('rejects a locked sharp version outside the core declaration', () => {

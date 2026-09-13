@@ -2324,7 +2324,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       onSettledWithoutDrain?: () => void;
       content?: readonly BridgePromptContentBlock[];
     },
-  ): { accepted: boolean; messageId?: string };
+  ): { accepted: boolean; messageId?: string; reason?: 'session_idle' };
 
   storeSessionAttachment(
     sessionId: string,
