@@ -25784,7 +25784,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   );
 
   it.each(['load', 'resume'] as const)(
-    'cold %s restores the recorded session model before auth',
+    'cold %s authenticates the restored model before initializing chat counters',
     async (action) => {
       const innerConfig = bindRestoreMocks({
         sessionExists: true,
@@ -25803,6 +25803,16 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           ],
         },
       });
+      const client = innerConfig.getLlmClient();
+      client.isInitialized.mockReturnValue(false);
+      client.initialize.mockImplementation(async () => {
+        client.isInitialized.mockReturnValue(true);
+      });
+      innerConfig.initialize.mockImplementation(
+        async (options?: Parameters<Config['initialize']>[0]) => {
+          if (!options?.skipLlmInitialization) await client.initialize();
+        },
+      );
       const { agent, agentPromise } = await spawnAgent();
       const request = {
         cwd: '/tmp',
@@ -25823,6 +25833,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       );
       expect(innerConfig.switchModel.mock.invocationCallOrder[0]).toBeLessThan(
         innerConfig.refreshAuth.mock.invocationCallOrder[0],
+      );
+      expect(client.initialize).toHaveBeenCalledOnce();
+      expect(innerConfig.refreshAuth.mock.invocationCallOrder[0]).toBeLessThan(
+        client.initialize.mock.invocationCallOrder[0],
       );
       expect(
         innerConfig.getChatRecordingService().recordSessionModel,

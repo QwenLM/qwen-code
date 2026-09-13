@@ -179,8 +179,16 @@ for (const theme of [
     // the todo graph. A broken tool-call ↔ task linkage (e.g. a `toolUseId`
     // drift) still renders the canvas but silently drops the runtime metric
     // and the inspector's agent row. `1m 14s` is `formatRuntime(runtimeMs)`
-    // for the fixture's running task — locale-independent.
-    await expect(page.getByText('1m 14s')).toBeVisible();
+    // for the fixture's running task — locale-independent. It prints on
+    // both the node face and the inspector's agent row, so a page-wide
+    // locator would match both and throw a strict-mode violation; gate each
+    // surface separately, keeping both halves load-bearing.
+    await expect(
+      page.locator('[data-plan-node-id="inspect-package"]').getByText('1m 14s'),
+    ).toBeVisible();
+    await expect(
+      page.locator('[data-testid="workflow-step-detail"]').getByText('1m 14s'),
+    ).toBeVisible();
     await captureScreenshot(page, `session-workflow-cockpit-${theme}`);
   });
 }
