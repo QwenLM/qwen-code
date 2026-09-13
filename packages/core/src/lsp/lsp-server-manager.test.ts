@@ -11,12 +11,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
-import { LspServerManager } from './LspServerManager.js';
+import { LspServerManager } from './lsp-server-manager.js';
 import { LspConnectionFactory } from './LspConnectionFactory.js';
 import type {
+  LspServerHandle,
   LspConnectionInterface,
   LspConnectionResult,
   LspServerConfig,
+  LspTextDocumentSync,
 } from './types.js';
 
 const debugLoggerMock = vi.hoisted(() => ({
@@ -106,6 +108,159 @@ describe('LspServerManager', () => {
   afterEach(() => {
     vi.useRealTimers();
   });
+
+  it('contains TypeScript warmup callback failures without marking the handle warm', async () => {
+    const manager = createTrustedManager();
+    const warmupFile = path.resolve('main.ts');
+    // SAFETY: Stub discovery only; the real warmup callback and catch execute.
+    vi.spyOn(
+      manager as unknown as { findFirstTypescriptFile(): string | undefined },
+      'findFirstTypescriptFile',
+    ).mockReturnValue(warmupFile);
+    const handle: LspServerHandle = {
+      config: { ...serverConfig, name: 'typescript' },
+      status: 'READY',
+      connection: {
+        request: vi.fn(),
+        send: vi.fn(),
+      } as unknown as LspConnectionInterface,
+    };
+    const synchronize = vi.fn(() => {
+      throw new Error('sync failed');
+    });
+    await expect(
+      manager.warmupTypescriptServer(handle, synchronize),
+    ).resolves.toBeUndefined();
+    expect(synchronize).toHaveBeenCalledExactlyOnceWith(
+      pathToFileURL(warmupFile).toString(),
+      'typescript',
+    );
+    expect(handle.warmedUp).toBeFalsy();
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      'TypeScript server warm-up failed:',
+      expect.objectContaining({ message: 'sync failed' }),
+    );
+  });
+
+  it('does not latch a replacement connection after an obsolete warmup delay', async () => {
+    vi.useFakeTimers();
+    const manager = createTrustedManager();
+    vi.spyOn(
+      manager as unknown as { findFirstTypescriptFile(): string | undefined },
+      'findFirstTypescriptFile',
+    ).mockReturnValue(path.resolve('main.ts'));
+    const handle: LspServerHandle = {
+      config: { ...serverConfig, name: 'typescript' },
+      status: 'READY',
+      textDocumentSync: 1,
+      connection: createMockConnection(),
+    };
+    const pending = manager.warmupTypescriptServer(handle, () => true);
+    handle.connection = createMockConnection();
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(handle.warmedUp).not.toBe(true);
+  });
+
+  it('keeps an established latch when a forced warmup finds no TypeScript file', async () => {
+    const manager = createTrustedManager();
+    const discovery = vi
+      .spyOn(
+        manager as unknown as {
+          findFirstTypescriptFile(): string | undefined;
+        },
+        'findFirstTypescriptFile',
+      )
+      .mockReturnValue(undefined);
+    const handle: LspServerHandle = {
+      config: { ...serverConfig, name: 'typescript' },
+      status: 'READY',
+      warmedUp: true,
+      connection: createMockConnection(),
+    };
+    const synchronize = vi.fn(() => true);
+    // A forced attempt that never reaches delivery (no TypeScript file found)
+    // must not destroy the established latch: the unlock sits below the guard.
+    await manager.warmupTypescriptServer(handle, synchronize, true);
+    expect(handle.warmedUp).toBe(true);
+    expect(synchronize).not.toHaveBeenCalled();
+    // A later ordinary query stays short-circuited by the intact latch, so the
+    // unbounded per-query discovery glob is not re-run.
+    discovery.mockClear();
+    await manager.warmupTypescriptServer(handle, synchronize);
+    expect(discovery).not.toHaveBeenCalled();
+    expect(handle.warmedUp).toBe(true);
+  });
+
+  it('latches a warmup that delivered no notification when textDocumentSync is absent', async () => {
+    vi.useFakeTimers();
+    const manager = createTrustedManager();
+    vi.spyOn(
+      manager as unknown as { findFirstTypescriptFile(): string | undefined },
+      'findFirstTypescriptFile',
+    ).mockReturnValue(path.resolve('main.ts'));
+    const handle: LspServerHandle = {
+      config: { ...serverConfig, name: 'typescript' },
+      status: 'READY',
+      connection: createMockConnection(),
+    };
+    // textDocumentSync omitted: resolveTextDocumentSync must yield openClose:false
+    // so a no-notification delivery latches warm instead of awaiting the delay.
+    const pending = manager.warmupTypescriptServer(handle, () => false);
+    // The no-notification branch must return before awaiting the warmup delay:
+    // flushing timers first would mask a hoisted setTimeout.
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(handle.warmedUp).toBe(true);
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      expect.stringContaining('delivered no notification'),
+    );
+  });
+
+  it.each<LspTextDocumentSync | undefined>([
+    0,
+    1,
+    2,
+    undefined,
+    { openClose: true, change: 2 },
+    { openClose: false, change: 0 },
+  ])(
+    'retains initialize textDocumentSync %j on the ready handle',
+    async (textDocumentSync) => {
+      const manager = createTrustedManager();
+      const connection = createMockConnection({
+        initialize: vi.fn(async () => ({ capabilities: { textDocumentSync } })),
+      });
+      const createSocket = vi
+        .spyOn(LspConnectionFactory, 'createSocketConnection')
+        .mockResolvedValue({ connection } as Awaited<
+          ReturnType<typeof LspConnectionFactory.createSocketConnection>
+        >);
+      try {
+        manager.setServerConfigs([
+          {
+            ...serverConfig,
+            command: undefined,
+            transport: 'socket',
+            socket: { port: 1234 },
+          },
+        ]);
+        await manager.startAll();
+        expect(manager.getHandles().get('clangd')).toMatchObject({
+          status: 'READY',
+          textDocumentSync,
+        });
+        expect(connection.initialize).toHaveBeenCalledOnce();
+        expect(connection.send).toHaveBeenCalledWith(
+          expect.objectContaining({ method: 'initialized' }),
+        );
+      } finally {
+        await manager.stopAll();
+        createSocket.mockRestore();
+      }
+    },
+  );
 
   describe('reconcileServerConfigs', () => {
     it('starts added servers', async () => {
