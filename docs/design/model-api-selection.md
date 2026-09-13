@@ -8,15 +8,15 @@ OpenAI Chat Completions and Responses share credential configuration, but today
 Qwen Code exposes them as separate authentication choices and provider buckets.
 Users must change `openai` to `openai-responses` to select the request format.
 
-Add `api: "chat-completions" | "responses"` to each OpenAI-compatible model,
+Add `wireApi: "chat-completions" | "responses"` to each OpenAI-compatible model,
 beside `id`, `baseUrl`, and `envKey`. Present one OpenAI-compatible provider
-choice followed by API selection. Preserve existing settings, internal protocol
-identities, and recorded sessions. This is a Qwen Code feature, not a port from
+choice followed by API selection. Keep internal protocol identities and recorded
+session routes distinct. This is a Qwen Code feature, not a port from
 another codebase. Native computer-use behavior, reasoning defaults, transport
 implementations, automatic protocol detection, and automatic credential
 migration are out of scope.
 
-## Configuration and compatibility
+## Configuration contract
 
 ```json
 {
@@ -24,7 +24,7 @@ migration are out of scope.
     "openai": [
       {
         "id": "gpt-6-astra",
-        "api": "responses",
+        "wireApi": "responses",
         "envKey": "IDEALAB_API_KEY",
         "baseUrl": "https://gateway.example.com/v1",
         "generationConfig": {
@@ -37,22 +37,31 @@ migration are out of scope.
 }
 ```
 
-| Provider protocol                                | Model `api`                   | Effective internal protocol |
-| ------------------------------------------------ | ----------------------------- | --------------------------- |
-| `openai`                                         | omitted or `chat-completions` | `openai`                    |
-| `openai`                                         | `responses`                   | `openai-responses`          |
-| `openai-responses`                               | omitted or `responses`        | `openai-responses`          |
-| `openai-responses`                               | `chat-completions`            | `openai`                    |
-| Custom provider mapped to either OpenAI protocol | same rules                    | same rules                  |
-| Other known protocol                             | specified                     | configuration error         |
+| Provider protocol                  | Model `wireApi`               | Effective internal protocol |
+| ---------------------------------- | ----------------------------- | --------------------------- |
+| `openai`                           | omitted or `chat-completions` | `openai`                    |
+| `openai`                           | `responses`                   | `openai-responses`          |
+| Custom provider mapped to `openai` | same rules                    | same rules                  |
+| Other known protocol               | specified                     | configuration error         |
 
-Unknown API values are configuration errors. An `api` field cannot make an
-unknown provider id valid; existing unknown-provider warnings remain. Existing
-credentials and explicit `envKey` values retain their meaning. New setup uses
-one OpenAI credential namespace and stores Responses models under `openai` with
-`api: "responses"`. Existing legacy buckets are readable without rewriting
-user files. Explicit reinstall replaces matching legacy routes in the canonical
-`openai` group, retaining unrelated legacy entries. `api` is routing metadata and is never forwarded in request bodies.
+Unknown `wireApi` values are configuration errors. This field cannot make an
+unknown provider id valid; existing unknown-provider warnings remain. Setup
+uses one OpenAI credential namespace and writes both APIs under `openai`.
+Explicit `envKey` values retain their meaning within the supported format.
+`wireApi` is routing metadata and is never forwarded in request bodies.
+
+This refactor immediately follows the initial Responses implementation. The
+supported configuration is `openai` plus per-model `wireApi`; compatibility
+with the previous `modelProviders.openai-responses` format and automatic
+migration are deliberately out of scope. The draft field name `api` is not an
+alias. Do not add legacy-bucket discovery, pruning, credential fallback, or
+migration code. Internal `AuthType.USE_OPENAI_RESPONSES` still identifies the
+Responses transport and recorded session route; it is not a separate provider
+configuration choice.
+
+The name `wireApi` identifies the request protocol explicitly, following the
+meaning of Codex's `wire_api` while retaining this project's camelCase settings.
+The field remains per-model so one provider can offer both APIs.
 
 ## Runtime and setup design
 
@@ -63,7 +72,7 @@ Two entries with the same model and URL but different APIs remain distinct.
 Duplicate entries for the same effective route keep the existing first-wins
 policy. Provider installation must also compare effective API when merging.
 
-Raw startup selection of `openai` can select an explicitly configured Responses
+When a model was explicitly selected, raw startup selection of `openai` can select an explicitly configured Responses
 model when that model has no matching Chat route. An exact matching effective
 route takes precedence, including the configured URL discriminator. Once
 resolved, generator creation, model options, and session recording use the
@@ -81,12 +90,10 @@ effective auth type already distinguishes both APIs.
 
 Ink and OpenTUI share the provider setup hook; both must present API selection
 and show the exact persisted configuration in their preview. VS Code and Web
-Shell must expose the same choice. Web Shell keeps its existing credential
-placeholder preview; the API, provider group, and effective auth must match the
-installed routing metadata. ACP and daemon installation inputs accept
-`api` and validate it before writing settings. ACP authentication labels use
-shared OpenAI key terminology while legacy method ids continue to route
-correctly. Model removal matches each entry's effective protocol and must not
+Shell must expose the same choice. Web Shell uses a labelled review summary with masked credentials; it must
+show the selected API without inventing generated settings or defaults. ACP and daemon installation inputs accept
+`wireApi` and validate it before writing settings. ACP authentication labels use
+one shared OpenAI key method for both runtime APIs. Model removal matches each entry's effective protocol and must not
 clear the active selection when deleting its other-API sibling.
 
 Implementation areas: core model types/registry/config and provider install;
@@ -96,15 +103,15 @@ documentation. No daemon route ownership or workspace-resolution rules change.
 
 ## Validation and acceptance
 
-- Unit tests cover the compatibility table, invalid inputs, mixed API entries,
+- Unit tests cover the configuration table, invalid inputs, mixed API entries,
   exact endpoint credentials, install merge, and transactional registry reload.
 - Configuration tests cover initial `openai` selection resolving Responses,
   explicit route precedence, model switching, and recorded session restoration.
 - Setup tests cover API selection, preview/write parity, shared credentials,
-  legacy inspection, request validation, and deletion of only the intended API.
+  canonical inspection, request validation, and deletion of only the intended API.
 - An isolated localhost server records actual CLI endpoint paths and payloads:
-  legacy Chat, explicit Chat, canonical Responses, custom-provider Responses,
-  legacy Responses, invalid API rejection, and Responses tool continuation.
+  implicit Chat, explicit Chat, canonical Responses, custom-provider Responses,
+  invalid API rejection, and tool continuation for both APIs.
 - Dry-run the plan against global `qwen`, then verify the built local CLI. Use
   temporary `QWEN_HOME` directories and mock keys; do not modify real settings
   or send test prompts to a remote model.
@@ -113,4 +120,5 @@ documentation. No daemon route ownership or workspace-resolution rules change.
 
 Acceptance requires correct request formats and preserved route identity, not
 merely successful JSON parsing or a zero exit code. Detailed execution results
-live in `.qwen/e2e-tests/model-api-selection/`.
+live in the git-ignored `.qwen/e2e-tests/pr11538-canonical-wire-api/` directory;
+publish the verification report on the PR so reviewers have accessible evidence.

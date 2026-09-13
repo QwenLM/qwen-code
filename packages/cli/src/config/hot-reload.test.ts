@@ -712,7 +712,9 @@ describe('registerModelProvidersHotReload', () => {
 
   it('keeps the registry usable after an invalid API edit and applies its correction', async () => {
     const original: ModelProvidersConfig = {
-      openai: [{ id: 'gpt-model', api: 'responses', envKey: 'RESPONSES_KEY' }],
+      openai: [
+        { id: 'gpt-model', wireApi: 'responses', envKey: 'RESPONSES_KEY' },
+      ],
     };
     const registry = new ModelRegistry(original);
     merged.modelProviders = original;
@@ -726,7 +728,7 @@ describe('registerModelProvidersHotReload', () => {
     registerModelProvidersHotReload(watcher, settings, config);
 
     merged.modelProviders = {
-      openai: [{ id: 'gpt-model', api: 'invalid' }],
+      openai: [{ id: 'gpt-model', wireApi: 'invalid' }],
     } as unknown as ModelProvidersConfig;
     await listener([]);
 
@@ -737,7 +739,9 @@ describe('registerModelProvidersHotReload', () => {
     expect(refreshAuth).not.toHaveBeenCalled();
 
     merged.modelProviders = {
-      openai: [{ id: 'gpt-model', api: 'responses', envKey: 'UPDATED_KEY' }],
+      openai: [
+        { id: 'gpt-model', wireApi: 'responses', envKey: 'UPDATED_KEY' },
+      ],
     };
     await listener([]);
 
@@ -752,7 +756,7 @@ describe('registerModelProvidersHotReload', () => {
 
   it('refreshes the current API without selecting a changed API route', async () => {
     const original: ModelProvidersConfig = {
-      openai: [{ id: 'gpt-model', api: 'responses' }],
+      openai: [{ id: 'gpt-model', wireApi: 'responses' }],
     };
     const registry = new ModelRegistry(original);
     merged.modelProviders = original;
@@ -766,7 +770,7 @@ describe('registerModelProvidersHotReload', () => {
     registerModelProvidersHotReload(watcher, settings, config);
 
     merged.modelProviders = {
-      openai: [{ id: 'gpt-model', api: 'chat-completions' }],
+      openai: [{ id: 'gpt-model', wireApi: 'chat-completions' }],
     };
     await listener([]);
 

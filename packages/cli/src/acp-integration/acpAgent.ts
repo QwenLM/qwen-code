@@ -9,7 +9,7 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
-  type ModelApi,
+  type ModelWireApi,
   resolveModelProtocol,
   tryResolveModelProtocol,
   resolveModelSelectionAuthType,
@@ -1703,8 +1703,8 @@ function readExistingProviderConfig(
     ...(protocol === AuthType.USE_OPENAI ||
     protocol === AuthType.USE_OPENAI_RESPONSES
       ? {
-          api:
-            firstModel?.api ??
+          wireApi:
+            firstModel?.wireApi ??
             (protocol === AuthType.USE_OPENAI_RESPONSES
               ? 'responses'
               : 'chat-completions'),
@@ -1740,31 +1740,18 @@ function resolveExistingProviderApiKey(
   modelIds: string[],
 ): string | undefined {
   const ownsModel = resolveOwnsModel(config);
-  const matched: ProviderModelConfig[] = [];
-  for (const [providerId, models] of Object.entries(
-    settings.merged.modelProviders ?? {},
-  )) {
-    if (!Array.isArray(models)) continue;
-    for (const model of models) {
-      if (model.baseUrl !== baseUrl || !model.envKey || !ownsModel?.(model))
-        continue;
-      if (!modelIds.includes(model.id)) continue;
-      // tryResolveModelProtocol: a hand-edited invalid `api` on one entry
-      // must not reject the whole providers/connect flow — skip that entry.
-      if (
-        tryResolveModelProtocol(
-          providerId,
-          model,
-          settings.merged.providerProtocol,
-        ) !== protocol
-      ) {
-        continue;
-      }
-      matched.push(model);
-    }
-  }
   const canonicalProtocol =
     protocol === AuthType.USE_OPENAI_RESPONSES ? AuthType.USE_OPENAI : protocol;
+  const matched = (
+    settings.merged.modelProviders?.[canonicalProtocol] ?? []
+  ).filter(
+    (model) =>
+      model.baseUrl === baseUrl &&
+      model.envKey &&
+      ownsModel?.(model) &&
+      modelIds.includes(model.id) &&
+      tryResolveModelProtocol(canonicalProtocol, model) === protocol,
+  );
   // Service-role models (imageOnly/voiceOnly) carry their own suffixed env key,
   // so a reconnect reads the key of the conversation model being connected and
   // only falls back to service entries when no conversation model matched.
@@ -1838,11 +1825,7 @@ function readProviderSetupInputs(
   if (
     protocol &&
     protocol !== config.protocol &&
-    !config.protocolOptions?.includes(protocol) &&
-    !(
-      protocol === AuthType.USE_OPENAI_RESPONSES &&
-      config.protocolOptions?.includes(AuthType.USE_OPENAI)
-    )
+    !config.protocolOptions?.includes(protocol)
   ) {
     throw RequestError.invalidParams(
       undefined,
@@ -1850,11 +1833,11 @@ function readProviderSetupInputs(
     );
   }
 
-  const api = params['api'] as ModelApi | undefined;
+  const wireApi = params['wireApi'] as ModelWireApi | undefined;
   let effectiveProtocol: AuthType;
   try {
     effectiveProtocol = resolveModelProtocol(protocol ?? config.protocol, {
-      api,
+      wireApi,
     })!;
   } catch (error) {
     throw RequestError.invalidParams(
@@ -1907,7 +1890,7 @@ function readProviderSetupInputs(
 
   return {
     ...(protocol ? { protocol } : {}),
-    ...(api ? { api } : {}),
+    ...(wireApi ? { wireApi } : {}),
     baseUrl,
     apiKey,
     modelIds: resolvedModelIds,
@@ -5226,7 +5209,7 @@ class QwenAgent implements Agent {
     const method = z.nativeEnum(AuthType).parse(methodId);
     const currentAuthType =
       this.config.getCurrentAuthType?.() ?? this.config.getAuthType?.();
-    // The wire resolver throws on a hand-edited invalid `api` anywhere in
+    // The wire resolver throws on a hand-edited invalid `wireApi` anywhere in
     // modelProviders; re-authentication is the repair path, so tolerate the
     // failure instead of rejecting it outright. The fallback must preserve
     // the wire the session is actually on — falling back to the requested
@@ -5273,7 +5256,7 @@ class QwenAgent implements Agent {
       this.settings.setValue(
         SettingScope.User,
         'security.auth.selectedType',
-        authType,
+        method,
       );
     } finally {
       if (method === AuthType.QWEN_OAUTH) {

@@ -112,7 +112,7 @@ describe('validateAuthMethod', () => {
         model: { name: 'gpt-model' },
         modelProviders: {
           openai: [
-            { id: 'gpt-model', api: 'responses', envKey: 'CUSTOM_API_KEY' },
+            { id: 'gpt-model', wireApi: 'responses', envKey: 'CUSTOM_API_KEY' },
           ],
         },
       },
@@ -132,13 +132,13 @@ describe('validateAuthMethod', () => {
             {
               id: 'gpt-model',
               baseUrl: 'https://example.test/v1',
-              api: 'chat-completions',
+              wireApi: 'chat-completions',
               envKey: 'CHAT_KEY',
             },
             {
               id: 'gpt-model',
               baseUrl: 'https://example.test/v1',
-              api: 'responses',
+              wireApi: 'responses',
               envKey: 'RESPONSES_KEY',
             },
           ],

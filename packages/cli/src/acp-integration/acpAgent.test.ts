@@ -20378,9 +20378,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const modelProviders = {
         [providerId]: [
           ...(withChat
-            ? [{ id: 'same', baseUrl, api: 'chat-completions' as const }]
+            ? [{ id: 'same', baseUrl, wireApi: 'chat-completions' as const }]
             : []),
-          { id: 'same', baseUrl, api: 'responses' as const },
+          { id: 'same', baseUrl, wireApi: 'responses' as const },
         ],
       };
       const providerProtocol = { gateway: 'openai' as const };
@@ -20390,7 +20390,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         modelProvidersConfig: modelProviders,
         providerProtocolConfig: providerProtocol,
       });
-      const initialEffectiveAuthType = models.getCurrentAuthType();
       const refreshAuth = vi.fn(async (authType: AuthType) => {
         models.syncAfterAuthRefresh(authType, models.getModel());
       });
@@ -20414,9 +20413,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         ).toMatchObject({
           authMethods: [
             {
-              id: initialEffectiveAuthType,
+              id: AuthType.USE_OPENAI,
               name: 'Use OpenAI API key',
-              _meta: { args: [`--auth-type=${initialEffectiveAuthType}`] },
+              _meta: { args: ['--auth-type=openai'] },
             },
           ],
         });
@@ -20426,7 +20425,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect(settings.setValue).toHaveBeenCalledWith(
           SettingScope.User,
           'security.auth.selectedType',
-          expected,
+          methodId,
         );
       } finally {
         mockConnectionState.resolve();
@@ -20441,10 +20440,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     >('@qwen-code/qwen-code-core');
     const baseUrl = 'https://api.example/v1';
     // The session's own models are valid; an unrelated bucket carries a
-    // hand-edited invalid `api`, so the wire resolver throws over the merged
+    // hand-edited invalid `wireApi`, so the wire resolver throws over the merged
     // settings even though the session itself is healthy.
     const cleanProviders = {
-      openai: [{ id: 'same', baseUrl, api: 'responses' as const }],
+      openai: [{ id: 'same', baseUrl, wireApi: 'responses' as const }],
     };
     const modelProviders = {
       ...cleanProviders,
@@ -20452,7 +20451,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         {
           id: 'other',
           baseUrl: 'https://other.example/v1',
-          api: 'invalid' as never,
+          wireApi: 'invalid' as never,
         },
       ],
     };
@@ -20492,7 +20491,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(settings.setValue).toHaveBeenCalledWith(
         SettingScope.User,
         'security.auth.selectedType',
-        AuthType.USE_OPENAI_RESPONSES,
+        AuthType.USE_OPENAI,
       );
     } finally {
       mockConnectionState.resolve();
@@ -20500,30 +20499,31 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
-  it.each([
-    { protocol: 'openai', api: 'responses' },
-    { protocol: 'openai-responses' },
-  ])(
+  it.each([{ protocol: 'openai', wireApi: 'responses' }])(
     'qwen/providers/connect forwards OpenAI API selection: %j',
     async (selection) => {
       const { agent, agentPromise } = await bootCoreSettingsAgent(
         makeSessionSettings(),
       );
-      await expect(
-        agent.extMethod('qwen/providers/connect', {
-          providerId: 'custom-openai-compatible',
-          apiKey: 'sk-test',
-          baseUrl: 'https://api.example/v1',
-          modelIds: ['same'],
-          ...selection,
-        }),
-      ).resolves.toMatchObject({ success: true });
-      expect(buildInstallPlan).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining(selection),
-      );
-      mockConnectionState.resolve();
-      await agentPromise;
+      try {
+        await expect(
+          agent.extMethod('qwen/providers/connect', {
+            providerId: 'custom-openai-compatible',
+            apiKey: 'sk-test',
+            baseUrl: 'https://api.example/v1',
+            modelIds: ['same'],
+            ...selection,
+          }),
+        ).resolves.toMatchObject({ success: true });
+        expect(buildInstallPlan).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining(selection),
+          undefined,
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
     },
   );
 
@@ -20537,7 +20537,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         apiKey: 'sk-test',
         modelIds: ['same'],
         protocol: 'openai',
-        api: 'responses',
+        wireApi: 'responses',
       }),
     ).resolves.toMatchObject({ success: true });
     // The Responses wire dials the /v1-less default endpoint; the blank-input
@@ -20551,9 +20551,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it.each([
-    { protocol: 'openai', api: 'invalid' },
-    { protocol: 'openai', api: null },
-    { protocol: 'anthropic', api: 'responses' },
+    { protocol: 'openai', wireApi: 'invalid' },
+    { protocol: 'openai', wireApi: null },
+    { protocol: 'anthropic', wireApi: 'responses' },
   ])(
     'qwen/providers/connect rejects invalid API before writing: %j',
     async (selection) => {
@@ -20616,7 +20616,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it.each(['openai', 'openai-responses'])(
+  it.each(['openai'])(
     'qwen/providers/list exposes API prefill for %s',
     async (providerId) => {
       const actual = await vi.importActual<
@@ -20634,7 +20634,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               name: '[DeepSeek] same',
               baseUrl: 'https://api.deepseek.com',
               envKey: 'DEEPSEEK_API_KEY',
-              ...(providerId === 'openai' ? { api: 'responses' } : {}),
+              ...(providerId === 'openai' ? { wireApi: 'responses' } : {}),
             },
           ],
         },
@@ -20646,7 +20646,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           expect.objectContaining({
             existingConfig: expect.objectContaining({
               protocol: 'openai',
-              api: 'responses',
+              wireApi: 'responses',
               hasApiKey: true,
             }),
           }),
@@ -20697,7 +20697,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           id: 'deepseek',
           existingConfig: {
             protocol: 'openai',
-            api: 'chat-completions',
+            wireApi: 'chat-completions',
             baseUrl: 'https://api.deepseek.com/v1',
             hasApiKey: true,
             modelIds: ['deepseek-chat'],
@@ -21137,44 +21137,56 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/providers/connect keeps a legacy Responses key for the same endpoint only', async () => {
+  it('qwen/providers/connect keeps a canonical Responses key for the same endpoint only', async () => {
     const baseUrl = 'https://api.example/v1';
     const settings = makeSessionSettings({
       env: {
-        QWEN_CUSTOM_API_KEY_LEGACY: 'sk-legacy',
+        QWEN_CUSTOM_API_KEY_RESPONSES: 'sk-responses',
         QWEN_CUSTOM_API_KEY_openai_https___api_example_v1: 'sk-chat',
       },
       modelProviders: {
-        'openai-responses': [
-          { id: 'same', baseUrl, envKey: 'QWEN_CUSTOM_API_KEY_LEGACY' },
+        openai: [
+          {
+            id: 'same',
+            baseUrl,
+            wireApi: 'responses',
+            envKey: 'QWEN_CUSTOM_API_KEY_RESPONSES',
+          },
         ],
       },
     });
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
-    await expect(
-      agent.extMethod('qwen/providers/connect', {
-        providerId: 'custom-openai-compatible',
-        protocol: 'openai',
-        api: 'responses',
-        baseUrl,
-        modelIds: ['same'],
-      }),
-    ).resolves.toMatchObject({ success: true });
-    expect(buildInstallPlan).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ apiKey: 'sk-legacy', api: 'responses' }),
-    );
-    await expect(
-      agent.extMethod('qwen/providers/connect', {
-        providerId: 'custom-openai-compatible',
-        protocol: 'openai',
-        api: 'responses',
-        baseUrl: 'https://other.example/v1',
-        modelIds: ['same'],
-      }),
-    ).rejects.toThrow('Invalid or missing apiKey');
-    mockConnectionState.resolve();
-    await agentPromise;
+    try {
+      await expect(
+        agent.extMethod('qwen/providers/connect', {
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          wireApi: 'responses',
+          baseUrl,
+          modelIds: ['same'],
+        }),
+      ).resolves.toMatchObject({ success: true });
+      expect(buildInstallPlan).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          apiKey: 'sk-responses',
+          wireApi: 'responses',
+        }),
+        settings.merged.modelProviders!['openai'],
+      );
+      await expect(
+        agent.extMethod('qwen/providers/connect', {
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          wireApi: 'responses',
+          baseUrl: 'https://other.example/v1',
+          modelIds: ['same'],
+        }),
+      ).rejects.toThrow('Invalid or missing apiKey');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('qwen/providers/connect reuses the stored apiKey when the client omits it', async () => {

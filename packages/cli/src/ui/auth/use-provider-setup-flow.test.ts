@@ -18,7 +18,7 @@ import { maskApiKey } from './useAuth.js';
 
 describe('useProviderSetupFlow API selection', () => {
   // A preset has no `protocolOptions`, so the API step never renders for it —
-  // but the daemon/ACP contracts accept `api` for any provider id, so a preset
+  // but the daemon/ACP contracts accept `wireApi` for any provider id, so a preset
   // can already hold a Responses install.
   const preset: ProviderConfig = {
     id: 'deepseek',
@@ -36,8 +36,8 @@ describe('useProviderSetupFlow API selection', () => {
     const { result } = renderHook(() => useProviderSetupFlow(submit));
     act(() => result.current.start(customProvider));
     act(() => result.current.selectProtocol(AuthType.USE_OPENAI));
-    expect(result.current.state.step).toBe('api');
-    act(() => result.current.selectApi('responses'));
+    expect(result.current.state.step).toBe('wireApi');
+    act(() => result.current.selectWireApi('responses'));
     act(() => result.current.changeBaseUrl('https://gateway.example/v1'));
     act(() => result.current.submitBaseUrl());
     act(() => result.current.submitApiKey('sk-secret-test'));
@@ -54,7 +54,7 @@ describe('useProviderSetupFlow API selection', () => {
       openai: plan.modelProviders![0]!.models,
     });
     expect(preview.modelProviders.openai[0]).toMatchObject({
-      api: 'responses',
+      wireApi: 'responses',
       generationConfig: {
         reasoning: { effort: 'medium' },
         contextWindowSize: 272000,
@@ -66,21 +66,21 @@ describe('useProviderSetupFlow API selection', () => {
     expect(result.current.state.previewJson).not.toContain(inputs.apiKey);
   });
 
-  it('prefills legacy Responses and clears API when switching to Anthropic', () => {
+  it('prefills saved Responses and clears API when switching to Anthropic', () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     const { result } = renderHook(() => useProviderSetupFlow(submit));
     act(() =>
       result.current.start(customProvider, AuthType.USE_OPENAI_RESPONSES),
     );
     expect(result.current.state.protocol).toBe(AuthType.USE_OPENAI);
-    expect(result.current.state.api).toBe('responses');
+    expect(result.current.state.wireApi).toBe('responses');
     act(() => result.current.selectProtocol(AuthType.USE_OPENAI));
-    expect(result.current.state.api).toBe('responses');
+    expect(result.current.state.wireApi).toBe('responses');
     act(() => result.current.goBack());
     act(() => result.current.selectProtocol(AuthType.USE_ANTHROPIC));
     expect(result.current.state.step).toBe('baseUrl');
     act(() => result.current.submit());
-    expect(submit.mock.calls[0]![1]).not.toHaveProperty('api');
+    expect(submit.mock.calls[0]![1]).not.toHaveProperty('wireApi');
   });
 
   it('keeps the prefilled Responses API for a preset provider with no API step', () => {
@@ -89,15 +89,15 @@ describe('useProviderSetupFlow API selection', () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     const { result } = renderHook(() => useProviderSetupFlow(submit));
     act(() => result.current.start(preset, AuthType.USE_OPENAI_RESPONSES));
-    expect(result.current.state.api).toBe('responses');
+    expect(result.current.state.wireApi).toBe('responses');
     act(() => result.current.submitApiKey('sk-secret-test'));
     expect(submit).toHaveBeenCalledOnce();
-    expect(submit.mock.calls[0]![1]).toMatchObject({ api: 'responses' });
+    expect(submit.mock.calls[0]![1]).toMatchObject({ wireApi: 'responses' });
   });
 
   it('omits api when re-authenticating a preset with no Responses install', () => {
     // A preset re-authentication that carries no Responses install must submit
-    // without `api`: stamping the default route would make the recorded
+    // without `wireApi`: stamping the default route would make the recorded
     // model-list version irreproducible by buildProviderTemplate and prompt a
     // spurious update on every launch.
     const submit = vi.fn().mockResolvedValue(undefined);
@@ -105,7 +105,7 @@ describe('useProviderSetupFlow API selection', () => {
     act(() => result.current.start(preset));
     act(() => result.current.submitApiKey('sk-secret-test'));
     expect(submit).toHaveBeenCalledOnce();
-    expect(submit.mock.calls[0]![1]).not.toHaveProperty('api');
+    expect(submit.mock.calls[0]![1]).not.toHaveProperty('wireApi');
   });
 
   it('derives the baseUrl placeholder from the effective API route', () => {
@@ -115,17 +115,17 @@ describe('useProviderSetupFlow API selection', () => {
       result.current.start(customProvider, AuthType.USE_OPENAI_RESPONSES),
     );
     act(() => result.current.selectProtocol(AuthType.USE_OPENAI));
-    // The Responses API prefilled from the legacy install keeps the protocol
+    // The Responses API prefilled from the saved model keeps the protocol
     // reselection on the Responses wire's default endpoint.
     expect(result.current.state.baseUrlPlaceholder).toBe(
       'https://api.openai.com',
     );
-    act(() => result.current.selectApi('chat-completions'));
+    act(() => result.current.selectWireApi('chat-completions'));
     expect(result.current.state.baseUrlPlaceholder).toBe(
       'https://api.openai.com/v1',
     );
     act(() => result.current.goBack());
-    act(() => result.current.selectApi('responses'));
+    act(() => result.current.selectWireApi('responses'));
     expect(result.current.state.baseUrlPlaceholder).toBe(
       'https://api.openai.com',
     );
@@ -137,12 +137,29 @@ describe('useProviderSetupFlow API selection', () => {
     // appends no /v1 and every request 404s.
     act(() => result.current.goBack());
     act(() => result.current.goBack());
-    act(() => result.current.selectApi('chat-completions'));
-    expect(result.current.state.baseUrl).toBe('');
+    act(() => result.current.selectWireApi('chat-completions'));
+    expect(result.current.state.baseUrl).toBe('https://api.openai.com/v1');
     expect(result.current.state.baseUrlPlaceholder).toBe(
       'https://api.openai.com/v1',
     );
     act(() => result.current.submitBaseUrl());
     expect(result.current.state.baseUrl).toBe('https://api.openai.com/v1');
   });
+  it.each(['responses', 'chat-completions'] as const)(
+    'keeps a typed endpoint when selecting %s',
+    (wireApi) => {
+      const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+      act(() => result.current.start(customProvider));
+      act(() => result.current.selectProtocol(AuthType.USE_OPENAI));
+      act(() => result.current.selectWireApi('chat-completions'));
+      act(() =>
+        result.current.changeBaseUrl('https://private-gateway.example/v1'),
+      );
+      act(() => result.current.goBack());
+      act(() => result.current.selectWireApi(wireApi));
+      expect(result.current.state.baseUrl).toBe(
+        'https://private-gateway.example/v1',
+      );
+    },
+  );
 });

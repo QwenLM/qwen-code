@@ -17,9 +17,9 @@ describe('removeModelFromProviders', () => {
       const chat = {
         id: 'same',
         baseUrl: 'https://api.example/v1',
-        api: 'chat-completions' as const,
+        wireApi: 'chat-completions' as const,
       };
-      const responses = { ...chat, api: 'responses' as const };
+      const responses = { ...chat, wireApi: 'responses' as const };
       const result = removeModelFromProviders(
         { [providerId]: [chat, responses] },
         { gateway: 'openai' },

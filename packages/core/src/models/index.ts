@@ -5,7 +5,7 @@
  */
 
 export {
-  type ModelApi,
+  type ModelWireApi,
   type ModelCapabilities,
   type ModelGenerationConfig,
   type ModelConfig,

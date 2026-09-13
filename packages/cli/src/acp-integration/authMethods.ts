@@ -24,15 +24,6 @@ export function buildAuthMethods(): AuthMethod[] {
 export function pickAuthMethodsForAuthRequired(
   selectedType?: AuthType | string,
 ): AuthMethod[] {
-  if (selectedType === AuthType.USE_OPENAI_RESPONSES) {
-    return [
-      {
-        ...buildAuthMethods()[0],
-        id: AuthType.USE_OPENAI_RESPONSES,
-        _meta: { type: 'terminal', args: ['--auth-type=openai-responses'] },
-      },
-    ];
-  }
   const authMethods = buildAuthMethods();
   if (selectedType) {
     const matched = authMethods.filter((method) => method.id === selectedType);

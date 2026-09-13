@@ -16,7 +16,7 @@ import type {
 
 const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
   'protocol',
-  'api',
+  'wireApi',
   'baseUrl',
   'apiKey',
   'models',
@@ -297,12 +297,16 @@ export function parseAuthProviderInstallRequest(
     };
   }
   const protocol = body['protocol'];
-  const api = body['api'];
-  if (api !== undefined && api !== 'chat-completions' && api !== 'responses') {
+  const wireApi = body['wireApi'];
+  if (
+    wireApi !== undefined &&
+    wireApi !== 'chat-completions' &&
+    wireApi !== 'responses'
+  ) {
     return {
       ok: false,
       code: 'invalid_api',
-      error: '`api` must be chat-completions or responses',
+      error: '`wireApi` must be chat-completions or responses',
     };
   }
   const baseUrl = parseAuthProviderBaseUrl(
@@ -413,7 +417,7 @@ export function parseAuthProviderInstallRequest(
     ok: true,
     value: {
       providerId: providerId.trim(),
-      ...(api ? { api } : {}),
+      ...(wireApi ? { wireApi } : {}),
       ...(typeof protocol === 'string' && protocol.trim()
         ? {
             protocol:

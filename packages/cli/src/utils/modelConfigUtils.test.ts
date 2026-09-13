@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   AuthType,
+  ModelsConfig,
   resolveModelConfig,
   type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
@@ -39,12 +40,12 @@ describe('modelConfigUtils', () => {
     const chat: ProviderModelConfig = {
       id: 'shared-model',
       baseUrl: 'https://shared.example/v1',
-      api: 'chat-completions',
+      wireApi: 'chat-completions',
       envKey: 'CHAT_KEY',
     };
     const responses: ProviderModelConfig = {
       ...chat,
-      api: 'responses',
+      wireApi: 'responses',
       envKey: 'RESPONSES_KEY',
       generationConfig: { reasoning: { effort: 'xhigh' } },
     };
@@ -89,7 +90,7 @@ describe('modelConfigUtils', () => {
           model: responses.id,
           reasoning: { effort: 'xhigh' },
         });
-        expect(result.generationConfig).not.toHaveProperty('api');
+        expect(result.generationConfig).not.toHaveProperty('wireApi');
         expect(result.apiKey).toBe('responses-key');
         expect(result.registryBaseUrl).toBe(responses.baseUrl);
         expect(result.sources['apiKey']).toMatchObject({
@@ -102,9 +103,43 @@ describe('modelConfigUtils', () => {
       },
     );
 
+    it('does not reinterpret the CLI default model as an explicit wire selection', () => {
+      const initial = resolveCliGenerationConfig({
+        argv: {},
+        settings: {},
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { OPENAI_API_KEY: 'default-key' },
+      });
+      const modelProviders: Settings['modelProviders'] = {
+        openai: [
+          {
+            id: initial.model,
+            wireApi: 'responses',
+            baseUrl: 'https://proxy.example/v1',
+            envKey: 'PROXY_KEY',
+          },
+        ],
+      };
+      const resolved = resolveCliGenerationConfig({
+        argv: {},
+        settings: { modelProviders },
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { OPENAI_API_KEY: 'default-key' },
+      });
+      expect(resolved.sources['model']?.kind).toBe('default');
+      const models = new ModelsConfig({
+        initialAuthType: resolved.authType,
+        generationConfig: resolved.generationConfig,
+        generationConfigSources: resolved.sources,
+        modelProvidersConfig: modelProviders,
+      });
+      expect(models.getCurrentAuthType()).toBe(AuthType.USE_OPENAI);
+      expect(models.getCurrentRegistryBaseUrl()).toBeUndefined();
+    });
+
     it('keeps the selected wire when no model selection exists to derive one from', () => {
       // No model.name, no --model, no model env var: the wire resolver's
-      // no-model branch would let an unrelated api:'responses' entry flip an
+      // no-model branch would let an unrelated wireApi:'responses' entry flip an
       // `openai` selection to openai-responses, which has no DEFAULT_MODELS
       // entry — the session would then run a wire and fallback model id that
       // no config file contains.
@@ -115,7 +150,7 @@ describe('modelConfigUtils', () => {
             openai: [
               {
                 id: 'gpt-5',
-                api: 'responses',
+                wireApi: 'responses',
                 baseUrl: 'https://api.example/v1',
                 envKey: 'RESPONSES_KEY',
               },
@@ -228,7 +263,7 @@ describe('modelConfigUtils', () => {
           settings: {
             model: { name: responses.id },
             modelProviders: {
-              openai: [{ ...responses, api: 'response' }],
+              openai: [{ ...responses, wireApi: 'response' }],
             } as unknown as Settings['modelProviders'],
           },
           selectedAuthType: AuthType.USE_OPENAI,

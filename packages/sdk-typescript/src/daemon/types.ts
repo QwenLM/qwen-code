@@ -4644,7 +4644,7 @@ export interface DaemonAuthProviderDescriptor {
     baseUrlStepTitle?: string;
   };
   steps: Array<
-    'protocol' | 'api' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'
+    'protocol' | 'wireApi' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'
   >;
 }
 
@@ -4663,7 +4663,7 @@ export interface DaemonAuthProviderCatalog {
 export interface DaemonAuthProviderInstallRequest {
   providerId: string;
   protocol?: string;
-  api?: 'chat-completions' | 'responses';
+  wireApi?: 'chat-completions' | 'responses';
   baseUrl?: string;
   apiKey: string;
   modelIds?: string[];

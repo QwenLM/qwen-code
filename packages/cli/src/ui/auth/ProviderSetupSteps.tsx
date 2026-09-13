@@ -16,7 +16,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 import { AuthType, discoverProviderModels } from '@qwen-code/qwen-code-core';
 import type {
-  ModelApi,
+  ModelWireApi,
   ProviderConfig,
   BaseUrlOption,
   ModelSpec,
@@ -899,7 +899,7 @@ export function ProviderSetupSteps({
       );
     }
 
-    case 'api':
+    case 'wireApi':
       return (
         <>
           <Box marginTop={1}>
@@ -909,7 +909,7 @@ export function ProviderSetupSteps({
                   key: 'chat-completions',
                   title: t('Chat Completions'),
                   description: t('Standard OpenAI API format (most common)'),
-                  value: 'chat-completions' as ModelApi,
+                  value: 'chat-completions' as ModelWireApi,
                 },
                 {
                   key: 'responses',
@@ -917,11 +917,11 @@ export function ProviderSetupSteps({
                   description: t(
                     'OpenAI Responses API — streaming reasoning + tool use',
                   ),
-                  value: 'responses' as ModelApi,
+                  value: 'responses' as ModelWireApi,
                 },
               ]}
-              initialIndex={flow.state.api === 'responses' ? 1 : 0}
-              onSelect={flow.selectApi}
+              initialIndex={flow.state.wireApi === 'responses' ? 1 : 0}
+              onSelect={flow.selectWireApi}
               itemGap={1}
             />
           </Box>

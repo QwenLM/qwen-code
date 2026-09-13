@@ -22,6 +22,7 @@ import {
   getHomeEnvFallbackVars,
   type LoadedSettings,
 } from './settings.js';
+import { tryResolveModelProtocol } from '@qwen-code/qwen-code-core';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import { getPersistScopeForModelSelection } from './modelProvidersScope.js';
 import { getNestedProperty } from './settingsUtils.js';
@@ -127,7 +128,18 @@ export function createLoadedSettingsAdapter(
           : (models.map((model) => {
               if (!model) return model;
               const matches = previous.flatMap((entry, index) =>
-                entry?.id === model.id && entry.baseUrl === model.baseUrl
+                entry?.id === model.id &&
+                entry.baseUrl === model.baseUrl &&
+                tryResolveModelProtocol(
+                  provider,
+                  entry,
+                  settings.merged.providerProtocol,
+                ) ===
+                  tryResolveModelProtocol(
+                    provider,
+                    model,
+                    settings.merged.providerProtocol,
+                  )
                   ? [index]
                   : [],
               );

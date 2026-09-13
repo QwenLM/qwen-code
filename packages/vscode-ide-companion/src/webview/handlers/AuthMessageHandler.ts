@@ -18,7 +18,7 @@ import {
   resolveModelProtocol,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
-  type ModelApi,
+  type ModelWireApi,
   type ProviderConfig,
   type ProviderSetupInputs,
   type BaseUrlOption,
@@ -267,8 +267,8 @@ export class AuthMessageHandler extends BaseMessageHandler {
       protocol = selected as AuthType;
     }
 
-    let api: ModelApi | undefined;
-    if (shouldShowStep(provider, 'api', protocol ?? provider.protocol)) {
+    let wireApi: ModelWireApi | undefined;
+    if (shouldShowStep(provider, 'wireApi', protocol ?? provider.protocol)) {
       const selected = await this.pick(
         [
           { label: 'Chat Completions', value: 'chat-completions' },
@@ -278,7 +278,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
         'Select OpenAI API',
       );
       if (!selected) return;
-      api = selected as ModelApi;
+      wireApi = selected as ModelWireApi;
     }
 
     // Step 1: Base URL (if needed)
@@ -309,7 +309,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
         // fallback from the raw bucket protocol would persist the Chat
         // Completions endpoint on the Responses wire.
         const effectiveProtocol =
-          resolveModelProtocol(protocol ?? provider.protocol, { api }) ??
+          resolveModelProtocol(protocol ?? provider.protocol, { wireApi }) ??
           protocol ??
           provider.protocol;
         // No local fallback: getDefaultBaseUrlForProtocol owns the defaults.
@@ -445,7 +445,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     }
     await this.authInteractiveHandler(provider, {
       protocol,
-      ...(api ? { api } : {}),
+      ...(wireApi ? { wireApi } : {}),
       baseUrl,
       apiKey,
       modelIds,

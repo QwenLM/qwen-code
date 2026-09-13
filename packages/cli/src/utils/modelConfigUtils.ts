@@ -61,7 +61,7 @@ export function collectProviderModelsForProtocol(
     }
     out.push(
       ...models.filter(
-        // tryResolveModelProtocol: one entry with an invalid `api` (a
+        // tryResolveModelProtocol: one entry with an invalid `wireApi` (a
         // hand-edited settings file surviving a hot reload) must not take
         // down every read that walks the providers map — skip that entry.
         // Startup validation still classifies it as a FatalConfigError.
@@ -301,7 +301,7 @@ export function resolveCliGenerationConfig(
   }
 
   // Only derive the wire when a model selection exists to derive it from:
-  // the resolver's no-model branch would let an unrelated `api: 'responses'`
+  // the resolver's no-model branch would let an unrelated `wireApi: 'responses'`
   // entry anywhere in the map flip an `openai` selection to openai-responses,
   // which has no DEFAULT_MODELS entry — the session would then start on a
   // wire and a fallback model id no config file contains.

@@ -94,7 +94,11 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       model: { name: 'same' },
       modelProviders: {
         openai: [
-          { id: 'same', api: 'responses', baseUrl: 'https://api.example/v1' },
+          {
+            id: 'same',
+            wireApi: 'responses',
+            baseUrl: 'https://api.example/v1',
+          },
         ],
       },
     });

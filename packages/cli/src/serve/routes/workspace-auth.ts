@@ -7,7 +7,6 @@
 import type { Application, RequestHandler } from 'express';
 import {
   ALL_PROVIDERS,
-  AuthType,
   ProviderInstallError,
   resolveModelProtocol,
 } from '@qwen-code/qwen-code-core';
@@ -338,12 +337,7 @@ export function registerWorkspaceAuthRoutes(
           knownProvider.protocolOptions && knownProvider.protocolOptions.length
             ? knownProvider.protocolOptions
             : [knownProvider.protocol];
-        const requestedProtocol =
-          installRequest.protocol === AuthType.USE_OPENAI_RESPONSES &&
-          knownProvider.protocolOptions?.includes(AuthType.USE_OPENAI)
-            ? AuthType.USE_OPENAI
-            : installRequest.protocol;
-        if (!allowedProtocols.includes(requestedProtocol)) {
+        if (!allowedProtocols.includes(installRequest.protocol)) {
           res.status(400).json({
             error: `protocol must be one of: ${allowedProtocols.join(', ')}`,
             code: 'unsupported_protocol',
@@ -355,7 +349,7 @@ export function registerWorkspaceAuthRoutes(
         resolveModelProtocol(
           installRequest.protocol ?? knownProvider.protocol,
           {
-            api: installRequest.api,
+            wireApi: installRequest.wireApi,
           },
         );
       } catch (error) {

@@ -2558,6 +2558,7 @@ export class Config {
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
   private contentGenerator!: ContentGenerator;
   private readonly initialAuthType?: AuthType;
+  private readonly initialResolvedAuthType?: AuthType;
   private readonly embeddingModel: string;
 
   private modelsConfig!: ModelsConfig;
@@ -3324,6 +3325,7 @@ export class Config {
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
+    this.initialResolvedAuthType = this.modelsConfig.getCurrentAuthType();
 
     // Publish the active model id for shell subprocesses. Every Config
     // publishes its own session's model — publishModelEnv registers it per
@@ -4827,7 +4829,7 @@ export class Config {
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
-      authMethod = this.modelsConfig.getCurrentAuthType() ?? authMethod;
+      authMethod = this.initialResolvedAuthType ?? authMethod;
     }
     // The global reasoning effort (settings.model.reasoningEffort, seeded into
     // the generation config by the CLI) is NOT a provider field, but
@@ -4843,13 +4845,9 @@ export class Config {
       ? priorReasoning.effort
       : undefined;
 
-    // Sync modelsConfig state for this auth refresh. The sync may have
-    // followed the selected model onto the sibling OpenAI wire (a reload that
-    // stamped `api` onto the same id+baseUrl), so build the generator for the
-    // wire it actually landed on.
+    // Sync modelsConfig state for this auth refresh.
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
-    authMethod = this.modelsConfig.getCurrentAuthType() ?? authMethod;
 
     // Check and consume cached credentials flag
     const requireCached =

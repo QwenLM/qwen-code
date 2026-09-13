@@ -24,7 +24,7 @@ export {
 } from './config/models.js';
 export {
   type AvailableModel,
-  type ModelApi,
+  type ModelWireApi,
   type ModelCapabilities,
   type ModelConfig as ProviderModelConfig,
   type ModelConfigCliInput,

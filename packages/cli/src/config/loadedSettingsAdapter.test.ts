@@ -95,6 +95,56 @@ function makeSettings(initial: SettingsShape = {}) {
 }
 
 describe('createLoadedSettingsAdapter', () => {
+  it('preserves each API route placeholder when a bucket is reordered', () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'provider-wire-placeholders-'),
+    );
+    temporaryRoots.push(root);
+    vi.stubEnv('QWEN_HOME', root);
+    vi.stubEnv('TEST_WIRE_URL', 'https://gateway.example/v1');
+    vi.stubEnv('TEST_CHAT_HEADER', 'chat-header');
+    vi.stubEnv('TEST_RESPONSES_HEADER', 'responses-header');
+    const chat = {
+      id: 'same',
+      baseUrl: '${TEST_WIRE_URL}',
+      generationConfig: { customHeaders: { 'X-Test': '${TEST_CHAT_HEADER}' } },
+    };
+    const responses = {
+      ...chat,
+      wireApi: 'responses',
+      generationConfig: {
+        customHeaders: { 'X-Test': '${TEST_RESPONSES_HEADER}' },
+      },
+    };
+    fs.writeFileSync(
+      path.join(root, 'settings.json'),
+      JSON.stringify({
+        $version: 4,
+        modelProviders: { openai: [chat, responses] },
+      }),
+    );
+    try {
+      const loaded = loadSettings(root, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: true,
+      });
+      const models = loaded.merged.modelProviders!['openai']!;
+      createLoadedSettingsAdapter(loaded, SettingScope.User).setValue(
+        'modelProviders.openai',
+        [models[1], { ...models[0], wireApi: 'chat-completions' }],
+      );
+      const saved = JSON.parse(
+        fs.readFileSync(path.join(root, 'settings.json'), 'utf8'),
+      );
+      expect(saved.modelProviders.openai).toEqual([
+        responses,
+        { ...chat, wireApi: 'chat-completions' },
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it.each([true, false])(
     'restores actual file contents or absence after a shadowed install (existing: %s)',
     async (existingFile) => {

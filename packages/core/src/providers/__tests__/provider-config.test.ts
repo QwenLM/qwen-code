@@ -212,10 +212,10 @@ describe('buildInstallPlan', () => {
       baseUrl: 'https://api.test.com/v1',
       apiKey: 'sk-test',
       modelIds: ['model-a'],
-      api: 'responses',
+      wireApi: 'responses',
     });
-    // A version hashed from an `api`-stamped model list can never match the
-    // drift check's template rebuild (no `api`, and the default route's
+    // A version hashed from an `wireApi`-stamped model list can never match the
+    // drift check's template rebuild (no `wireApi`, and the default route's
     // generationConfig shape), so the provider would prompt an "update" on
     // every launch — and accepting it would duplicate every model. The install
     // records no version and retires one an earlier default-route install left
@@ -224,14 +224,14 @@ describe('buildInstallPlan', () => {
       'providerMetadata.test': { version: undefined },
     });
 
-    // The same holds for an explicit `api: 'chat-completions'` on a preset
+    // The same holds for an explicit `wireApi: 'chat-completions'` on a preset
     // whose own protocol already is USE_OPENAI — the stamp alone makes the
     // recorded hash irreproducible by buildProviderTemplate.
     const chatStampedPlan = buildInstallPlan(config, {
       baseUrl: 'https://api.test.com/v1',
       apiKey: 'sk-test',
       modelIds: ['model-a'],
-      api: 'chat-completions',
+      wireApi: 'chat-completions',
     });
     expect(chatStampedPlan.providerState).toEqual({
       'providerMetadata.test': { version: undefined },
@@ -361,13 +361,41 @@ describe('buildInstallPlan', () => {
     expect(models?.[0]?.generationConfig?.extra_body).toBeUndefined();
   });
 
+  it('keeps omitted wireApi on Chat when the same model has a Responses entry', () => {
+    const config = makeConfig({ models: undefined });
+    const plan = buildInstallPlan(
+      config,
+      {
+        baseUrl: 'https://api.test.com/v1',
+        apiKey: 'key',
+        modelIds: ['same'],
+        advancedConfig: { enableThinking: true },
+      },
+      [
+        {
+          id: 'same',
+          name: '[Test] same',
+          baseUrl: 'https://api.test.com/v1',
+          envKey: 'TEST_API_KEY',
+          wireApi: 'responses',
+          generationConfig: { reasoning: { effort: 'high' } },
+        },
+      ],
+    );
+    expect(plan.authType).toBe(AuthType.USE_OPENAI);
+    expect(plan.modelProviders![0]!.models[0]!.wireApi).toBeUndefined();
+    expect(plan.modelProviders![0]!.models[0]!.generationConfig).toEqual({
+      extra_body: { enable_thinking: true },
+    });
+  });
+
   it('uses the explicit model API for thinking and rejects incompatible setup inputs', () => {
     const config = makeConfig({ models: undefined });
     const inputs = {
       baseUrl: 'https://custom.com/v1',
       apiKey: 'sk-custom',
       modelIds: ['m1'],
-      api: 'responses' as const,
+      wireApi: 'responses' as const,
       advancedConfig: { enableThinking: true },
     };
     const plan = buildInstallPlan(config, inputs);
@@ -377,7 +405,7 @@ describe('buildInstallPlan', () => {
       models: [
         {
           id: 'm1',
-          api: 'responses',
+          wireApi: 'responses',
           generationConfig: { reasoning: { effort: 'medium' } },
         },
       ],
@@ -386,7 +414,10 @@ describe('buildInstallPlan', () => {
       buildInstallPlan(config, { ...inputs, protocol: AuthType.USE_ANTHROPIC }),
     ).toThrow(/api/i);
     expect(() =>
-      buildInstallPlan(config, { ...inputs, api: 'invalid' as 'responses' }),
+      buildInstallPlan(config, {
+        ...inputs,
+        wireApi: 'invalid' as 'responses',
+      }),
     ).toThrow(/api/i);
   });
 
@@ -646,12 +677,12 @@ describe('findExistingProviderModels', () => {
     });
   });
 
-  it.each(['openai', 'openai-responses'])(
+  it.each(['openai'])(
     'finds saved Responses models in the %s bucket',
     (bucket) => {
       const model = {
         id: 'responses-model',
-        api: 'responses',
+        wireApi: 'responses',
         envKey: 'TEST_API_KEY',
       };
       expect(findExistingProviderModels(config, { [bucket]: [model] })).toEqual(
@@ -662,16 +693,6 @@ describe('findExistingProviderModels', () => {
       );
     },
   );
-
-  it('inspects legacy Responses entries without rewriting their credential reference', () => {
-    const model = { id: 'legacy', envKey: 'TEST_API_KEY' };
-    expect(
-      findExistingProviderModels(config, { 'openai-responses': [model] }),
-    ).toEqual({
-      protocol: AuthType.USE_OPENAI_RESPONSES,
-      models: [model],
-    });
-  });
 
   it('returns undefined when no saved models are owned by the provider', () => {
     expect(
@@ -705,7 +726,7 @@ describe('findExistingProviderModels', () => {
     const responses = {
       id: 'same',
       baseUrl: 'https://proxy.example/v1',
-      api: 'responses' as const,
+      wireApi: 'responses' as const,
       envKey: 'TEST_API_KEY',
     };
     const chat = {
@@ -723,39 +744,13 @@ describe('findExistingProviderModels', () => {
     });
   });
 
-  it('dedups a legacy entry that differs from the canonical one by a trailing slash', () => {
-    const canonical = {
-      id: 'm',
-      baseUrl: 'https://gw.example/v1',
-      api: 'responses' as const,
-      envKey: 'TEST_API_KEY',
-    };
-    const legacy = {
-      id: 'm',
-      baseUrl: 'https://gw.example/v1/',
-      envKey: 'TEST_API_KEY',
-    };
-    // The canonical bucket wins over Object.entries order: consumers derive
-    // baseUrl/envKey/prefill from the first model, so it must be the canonical
-    // `api`-stamped entry, not whichever bucket the settings file lists first.
-    expect(
-      findExistingProviderModels(config, {
-        'openai-responses': [legacy],
-        [AuthType.USE_OPENAI]: [canonical],
-      }),
-    ).toEqual({
-      protocol: AuthType.USE_OPENAI_RESPONSES,
-      models: [canonical],
-    });
-  });
-
   it('skips entries whose api cannot be resolved instead of throwing', () => {
     expect(
       findExistingProviderModels(config, {
         [AuthType.USE_OPENAI]: [
           {
             id: 'broken',
-            api: 'Responses' as 'responses',
+            wireApi: 'Responses' as 'responses',
             envKey: 'TEST_API_KEY',
           },
           { id: 'good', envKey: 'TEST_API_KEY' },
@@ -763,7 +758,7 @@ describe('findExistingProviderModels', () => {
         [AuthType.USE_GEMINI]: [
           {
             id: 'wrong-family',
-            api: 'responses' as const,
+            wireApi: 'responses' as const,
             envKey: 'TEST_API_KEY',
           },
         ],

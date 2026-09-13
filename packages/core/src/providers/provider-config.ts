@@ -10,7 +10,6 @@ import {
   resolveModelProtocol,
   tryResolveModelProtocol,
 } from '../models/modelRegistry.js';
-import type { ModelApi } from '../models/types.js';
 import { ProviderInstallError } from './install.js';
 import type {
   ModelSpec,
@@ -30,11 +29,9 @@ function resolveEnvKey(
   inputs: ProviderSetupInputs,
 ): string {
   const protocol = inputs.protocol ?? config.protocol;
-  const credentialProtocol =
-    protocol === AuthType.USE_OPENAI_RESPONSES ? AuthType.USE_OPENAI : protocol;
   const key =
     typeof config.envKey === 'function'
-      ? config.envKey(credentialProtocol, inputs.baseUrl)
+      ? config.envKey(protocol, inputs.baseUrl)
       : config.envKey;
   return config.id === 'custom-openai-compatible' &&
     inputs.advancedConfig?.purpose
@@ -297,7 +294,7 @@ function resolveProviderState(
 
 /**
  * Retire a provider's recorded model-list version: an install whose models
- * carry an explicit `api` stamp can never be reproduced by the drift check's
+ * carry an explicit `wireApi` stamp can never be reproduced by the drift check's
  * template rebuild, so a version left behind by an earlier default-route
  * install would outlive the route switch and prompt a spurious "update" whose
  * accept path rebuilds the models unstamped. The `undefined` value deletes
@@ -327,22 +324,14 @@ export function buildInstallPlan(
     protocol === AuthType.USE_OPENAI ||
     protocol === AuthType.USE_OPENAI_RESPONSES;
   const savedProtocol = isOpenAI ? AuthType.USE_OPENAI : protocol;
-  const api: ModelApi | undefined =
-    isOpenAI &&
-    (inputs.api ||
-      config.protocolOptions ||
-      inputProtocol === AuthType.USE_OPENAI_RESPONSES)
-      ? protocol === AuthType.USE_OPENAI_RESPONSES
-        ? 'responses'
-        : 'chat-completions'
-      : undefined;
+  const wireApi = inputs.wireApi;
   let envKey = resolveEnvKey(config, inputs);
   const providerOwns = resolveOwnsModel(config);
   const builtModels =
     inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
-  let models = api
+  let models = wireApi
     ? builtModels.map((model) =>
-        model.api === undefined ? { ...model, api } : model,
+        model.wireApi === undefined ? { ...model, wireApi } : model,
       )
     : builtModels;
   const providerState = resolveProviderState(config, inputs.baseUrl, models);
@@ -370,7 +359,9 @@ export function buildInstallPlan(
         (entry) =>
           providerOwns?.(entry) &&
           entry.id === model.id &&
-          entry.baseUrl === model.baseUrl,
+          entry.baseUrl === model.baseUrl &&
+          tryResolveModelProtocol(savedProtocol, entry) ===
+            resolveModelProtocol(savedProtocol, model),
       );
       if (!existing) return model;
       const preservedGeneration = { ...existing.generationConfig };
@@ -509,12 +500,12 @@ export function buildInstallPlan(
       },
     ],
     // The drift check (findAllPendingUpdates) rebuilds the reference version
-    // from the provider's own protocol template, which never stamps `api`, so
+    // from the provider's own protocol template, which never stamps `wireApi`, so
     // any stamped install — on either wire — records nothing. Skipping alone
     // would let a version from an earlier default-route install survive, so
     // the retire shape deletes it instead.
     providerState:
-      api === undefined && protocol === config.protocol
+      wireApi === undefined && protocol === config.protocol
         ? providerState
         : retireProviderState(config),
   };
@@ -619,67 +610,23 @@ export function findExistingProviderModels(
   const protocols = config.protocolOptions?.length
     ? config.protocolOptions
     : [config.protocol];
-  for (const protocol of protocols) {
-    if (
-      protocol === AuthType.USE_OPENAI ||
-      protocol === AuthType.USE_OPENAI_RESPONSES
-    ) {
-      // An OpenAI-family provider's models can live in the canonical `openai`
-      // bucket and the legacy `openai-responses` one at once — that is exactly
-      // the state a wire switch leaves behind. Scan the canonical bucket first
-      // (installs prepend, so its first owned entry carries the current wire),
-      // then the legacy bucket, and dedup by (id, baseUrl) identity so a stale
-      // legacy duplicate cannot drive what consumers prefill. `undefined`
-      // protocols (unknown ids, invalid `api`) skip the entry rather than
-      // throwing: this powers the repair UI, so it must stay readable.
-      const collected: Array<{
-        model: ProviderModelConfig;
-        protocol: AuthType;
-      }> = [];
-      for (const bucket of [
-        AuthType.USE_OPENAI,
-        AuthType.USE_OPENAI_RESPONSES,
-      ]) {
-        const raw = modelProviders[bucket];
-        if (!Array.isArray(raw)) continue;
-        for (const model of raw) {
-          if (!isProviderModelConfig(model) || !ownsModel(model)) continue;
-          const resolved = tryResolveModelProtocol(bucket, model);
-          if (
-            resolved !== AuthType.USE_OPENAI &&
-            resolved !== AuthType.USE_OPENAI_RESPONSES
-          ) {
-            continue;
-          }
-          const duplicate = collected.some(
-            (seen) =>
-              seen.model.id === model.id &&
-              normalizeBaseUrlForMatching(seen.model.baseUrl) ===
-                normalizeBaseUrlForMatching(model.baseUrl),
-          );
-          if (!duplicate) collected.push({ model, protocol: resolved });
-        }
-      }
-      if (collected.length > 0) {
-        return {
-          protocol: collected[0]!.protocol,
-          models: collected.map((entry) => entry.model),
-        };
-      }
-      continue;
-    }
-    const models = Object.entries(modelProviders).flatMap(
-      ([providerId, raw]) => {
-        if (!Array.isArray(raw)) return [];
-        return raw.filter(
-          (model): model is ProviderModelConfig =>
-            isProviderModelConfig(model) &&
-            ownsModel(model) &&
-            tryResolveModelProtocol(providerId, model) === protocol,
-        );
-      },
+  for (const providerProtocol of protocols) {
+    const raw = modelProviders[providerProtocol];
+    if (!Array.isArray(raw)) continue;
+    const models = raw.filter(
+      (model): model is ProviderModelConfig =>
+        isProviderModelConfig(model) &&
+        ownsModel(model) &&
+        tryResolveModelProtocol(providerProtocol, model) !== undefined,
     );
-    if (models.length > 0) return { protocol, models };
+    if (!models.length) continue;
+    const protocol = resolveModelProtocol(providerProtocol, models[0]!)!;
+    return {
+      protocol,
+      models: models.filter(
+        (model) => resolveModelProtocol(providerProtocol, model) === protocol,
+      ),
+    };
   }
   return undefined;
 }
@@ -690,7 +637,13 @@ export function findExistingProviderModels(
 
 export function shouldShowStep(
   config: ProviderConfig,
-  step: 'protocol' | 'api' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig',
+  step:
+    | 'protocol'
+    | 'wireApi'
+    | 'baseUrl'
+    | 'apiKey'
+    | 'models'
+    | 'advancedConfig',
   protocol: AuthType = config.protocol,
 ): boolean {
   switch (step) {
@@ -699,7 +652,7 @@ export function shouldShowStep(
         Array.isArray(config.protocolOptions) &&
         config.protocolOptions.length > 1
       );
-    case 'api':
+    case 'wireApi':
       return (
         Boolean(config.protocolOptions?.length) &&
         (protocol === AuthType.USE_OPENAI ||
@@ -743,10 +696,7 @@ export function providerMatchesCredentials(
     const protocols = config.protocolOptions?.length
       ? config.protocolOptions
       : [config.protocol];
-    const credentialProtocols = protocols.includes(AuthType.USE_OPENAI)
-      ? [...protocols, AuthType.USE_OPENAI_RESPONSES]
-      : protocols;
-    for (const proto of credentialProtocols) {
+    for (const proto of protocols) {
       try {
         const derived = config.envKey(proto, baseUrl);
         if (

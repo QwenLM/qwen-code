@@ -1965,7 +1965,7 @@ export async function loadCliConfig(
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
     getAuthTypeFromEnv();
 
-  // Validate per-model `api` fields up front: the registry resolver throws a
+  // Validate per-model `wireApi` fields up front: the registry resolver throws a
   // bare Error on an invalid value, and every startup shape (with or without a
   // selected model/auth type) passes through here — classify it as a
   // FatalConfigError so the user gets the message and the "please fix the
@@ -1987,8 +1987,8 @@ export async function loadCliConfig(
   }
 
   // Unified resolution of generation config with source attribution. Note the
-  // up-front `api` validation loop above is what classifies invalid per-model
-  // `api` values; this call's own settings reads must not re-wrap a resolver
+  // up-front `wireApi` validation loop above is what classifies invalid per-model
+  // `wireApi` values; this call's own settings reads must not re-wrap a resolver
   // defect as a user config error, so it stays unwrapped.
   const resolvedCliConfig = resolveCliGenerationConfig({
     argv: {

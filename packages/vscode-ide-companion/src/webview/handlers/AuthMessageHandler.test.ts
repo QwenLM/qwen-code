@@ -299,7 +299,7 @@ describe('AuthMessageHandler', () => {
       expect.anything(),
       expect.objectContaining({
         protocol: 'openai',
-        api: 'responses',
+        wireApi: 'responses',
         baseUrl: 'https://api.openai.com',
       }),
     );
@@ -328,7 +328,7 @@ describe('AuthMessageHandler', () => {
       expect.anything(),
       expect.objectContaining({
         protocol: 'openai',
-        api: 'responses',
+        wireApi: 'responses',
         modelIds: ['model'],
       }),
     );

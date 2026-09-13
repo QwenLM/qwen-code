@@ -94,7 +94,7 @@ function providerToItem(config: ProviderConfig) {
 
 function getStepLabel(step: string | null, p: ProviderConfig): string {
   if (step === 'protocol') return t('Protocol');
-  if (step === 'api') return t('API');
+  if (step === 'wireApi') return t('API');
   if (step === 'baseUrl') {
     if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
     return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
@@ -251,10 +251,7 @@ export function AuthDialog(): React.JSX.Element {
       case 'CUSTOM_PROVIDER':
         setupFlow.start(
           customProvider,
-          findExistingProviderModels(
-            customProvider,
-            settings.merged.modelProviders,
-          )?.protocol,
+          undefined,
           existingEnv,
           getExistingModelIds(customProvider),
         );

@@ -343,9 +343,9 @@ describe('ProviderSetupSteps', () => {
     expect(lastFrame()).toContain('OpenAI-compatible');
     expect(lastFrame()).not.toContain('OpenAI Responses');
     unmount();
-    flow.state.step = 'api';
-    flow.state.api = 'responses';
-    flow.selectApi = vi.fn();
+    flow.state.step = 'wireApi';
+    flow.state.wireApi = 'responses';
+    flow.selectWireApi = vi.fn();
     const apiView = renderWithProviders(<ProviderSetupSteps flow={flow} />);
     expect(apiView.lastFrame()).toContain('Chat Completions');
     expect(apiView.lastFrame()).toContain('Responses');

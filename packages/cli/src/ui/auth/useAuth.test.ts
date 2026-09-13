@@ -375,7 +375,7 @@ describe('useAuthCommand', () => {
     await act(async () => {
       await result.current.handleProviderSubmit(customProvider, {
         protocol: AuthType.USE_OPENAI,
-        api: 'responses',
+        wireApi: 'responses',
         baseUrl: 'https://responses.test/v1',
         apiKey: 'test',
         modelIds: ['model'],

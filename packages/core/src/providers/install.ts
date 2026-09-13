@@ -8,11 +8,11 @@ import { AuthType } from '../core/contentGenerator.js';
 import { isImageGenerationCapable } from '../models/image-generation-capability.js';
 import {
   resolveModelProtocol,
+  tryResolveModelProtocol,
   resolveModelSelectionAuthType,
 } from '../models/modelRegistry.js';
 import { ModelsConfig } from '../models/modelsConfig.js';
 import type {
-  ModelConfig,
   ModelProvidersConfig,
   ProviderProtocolConfig,
 } from '../models/types.js';
@@ -53,21 +53,10 @@ function isSameModelIdentity(
   return a.id === b.id && (a.baseUrl ?? '') === (b.baseUrl ?? '');
 }
 
-interface ModelProvidersPatchOutcome {
-  updated: ModelProvidersConfig;
-  /**
-   * Legacy `openai-responses` entries the ownership gate preserved even though
-   * they are registry-indistinguishable from a just-installed model (same id,
-   * baseUrl, and effective protocol). The registry resolves such a collision
-   * first-registration-wins, so the caller must make it loud.
-   */
-  collidingLegacy: ModelConfig[];
-}
-
 function applyModelProvidersPatch(
   existingModelProviders: ModelProvidersConfig,
   patch: ProviderModelProvidersPatch,
-): ModelProvidersPatchOutcome {
+): ModelProvidersConfig {
   const existingModels = existingModelProviders[patch.authType] ?? [];
 
   let updatedModels = patch.models;
@@ -82,7 +71,7 @@ function applyModelProvidersPatch(
           !patch.models.some(
             (newModel) =>
               resolveModelProtocol(patch.authType, newModel) ===
-              resolveModelProtocol(patch.authType, model),
+              tryResolveModelProtocol(patch.authType, model),
           )
         );
       }
@@ -90,7 +79,7 @@ function applyModelProvidersPatch(
         (newModel) =>
           isSameModelIdentity(newModel, model) &&
           resolveModelProtocol(patch.authType, newModel) ===
-            resolveModelProtocol(patch.authType, model),
+            tryResolveModelProtocol(patch.authType, model),
       );
     });
 
@@ -100,73 +89,10 @@ function applyModelProvidersPatch(
         : [...patch.models, ...preservedModels];
   }
 
-  const updated: ModelProvidersConfig = {
+  return {
     ...existingModelProviders,
     [patch.authType]: updatedModels,
   };
-  let collidingLegacy: ModelConfig[] = [];
-  if (
-    patch.authType === AuthType.USE_OPENAI &&
-    patch.mergeStrategy !== 'append'
-  ) {
-    const ownsModel = patch.ownsModel;
-    // A hand-edited (or reverted-V5-shaped) bucket can be a present but
-    // non-array value; the registry skips such buckets with a warning, and
-    // the install path must not abort on them either.
-    const legacyRaw = existingModelProviders[AuthType.USE_OPENAI_RESPONSES];
-    const legacyModels = Array.isArray(legacyRaw) ? legacyRaw : undefined;
-    const preservedLegacy = legacyModels?.filter((model) => {
-      // The same ownership gate as the canonical bucket above: when the patch
-      // declares ownership, a legacy entry owned by another provider's
-      // credentials must survive even when it matches the install by identity
-      // and effective protocol.
-      if (ownsModel) {
-        return (
-          !ownsModel(model) ||
-          !patch.models.some(
-            (newModel) =>
-              resolveModelProtocol(patch.authType, newModel) ===
-              resolveModelProtocol(AuthType.USE_OPENAI_RESPONSES, model),
-          )
-        );
-      }
-      return !patch.models.some(
-        (newModel) =>
-          isSameModelIdentity(newModel, model) &&
-          resolveModelProtocol(patch.authType, newModel) ===
-            resolveModelProtocol(AuthType.USE_OPENAI_RESPONSES, model),
-      );
-    });
-    if (preservedLegacy && preservedLegacy.length !== legacyModels?.length) {
-      updated[AuthType.USE_OPENAI_RESPONSES] = preservedLegacy;
-    }
-    const survivingRaw = updated[AuthType.USE_OPENAI_RESPONSES];
-    const survivingLegacy = Array.isArray(survivingRaw) ? survivingRaw : [];
-    collidingLegacy = survivingLegacy.filter((legacy) =>
-      patch.models.some(
-        (newModel) =>
-          isSameModelIdentity(newModel, legacy) &&
-          resolveModelProtocol(patch.authType, newModel) ===
-            resolveModelProtocol(AuthType.USE_OPENAI_RESPONSES, legacy),
-      ),
-    );
-    if (collidingLegacy.length > 0) {
-      // A preserved foreign-owned entry must survive (re-pruning it is the
-      // data loss the ownership gate exists to stop), but the registry's
-      // first-registration-wins rule would otherwise hand the composite
-      // (id + baseUrl) slot to whichever bucket key sorts first in the
-      // settings JSON. Give the install the user just performed the
-      // deterministic win; the caller warns so the conflict is visible.
-      const reordered: ModelProvidersConfig = {
-        [patch.authType]: updated[patch.authType]!,
-      };
-      for (const [key, value] of Object.entries(updated)) {
-        if (key !== patch.authType) reordered[key] = value;
-      }
-      return { updated: reordered, collidingLegacy };
-    }
-  }
-  return { updated, collidingLegacy };
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +241,7 @@ export async function applyProviderInstallPlan(
   if (changedVoiceIds.length) {
     let prospective = previousRuntimeProviders;
     for (const patch of plan.modelProviders ?? []) {
-      prospective = applyModelProvidersPatch(prospective, patch).updated;
+      prospective = applyModelProvidersPatch(prospective, patch);
     }
     const configured = new ModelsConfig({
       modelProvidersConfig: prospective,
@@ -391,11 +317,8 @@ export async function applyProviderInstallPlan(
       ...previousRuntimeProviders,
     };
 
-    const collidingLegacyModels: ModelConfig[] = [];
     for (const patch of plan.modelProviders ?? []) {
-      const previousLegacy =
-        updatedModelProviders[AuthType.USE_OPENAI_RESPONSES];
-      const outcome = applyModelProvidersPatch(
+      updatedModelProviders = applyModelProvidersPatch(
         updatedModelProviders,
         preserveSelection
           ? {
@@ -409,16 +332,6 @@ export async function applyProviderInstallPlan(
             }
           : patch,
       );
-      updatedModelProviders = outcome.updated;
-      collidingLegacyModels.push(...outcome.collidingLegacy);
-      if (
-        previousLegacy !== updatedModelProviders[AuthType.USE_OPENAI_RESPONSES]
-      ) {
-        settings.setValue(
-          'modelProviders.openai-responses',
-          updatedModelProviders[AuthType.USE_OPENAI_RESPONSES],
-        );
-      }
       settings.setValue(
         `modelProviders.${patch.authType}`,
         updatedModelProviders[patch.authType] ?? [],
@@ -441,22 +354,6 @@ export async function applyProviderInstallPlan(
           plan.authType,
         );
       }
-    }
-
-    if (collidingLegacyModels.length > 0) {
-      // eslint-disable-next-line no-console -- user-facing install warning
-      console.error(
-        `[auth] Warning: ${collidingLegacyModels
-          .map(
-            (model) =>
-              `"${model.id}" (envKey ${model.envKey ?? 'none'}, baseUrl ${model.baseUrl ?? 'default'})`,
-          )
-          .join(
-            ', ',
-          )} remained on the legacy "openai-responses" route under another provider's credentials, ` +
-          `indistinguishable from the model(s) just installed. The new install takes precedence in this session; ` +
-          `remove the stale entry from settings.json to avoid ambiguity.`,
-      );
     }
 
     // Set auth type
@@ -515,7 +412,7 @@ export async function applyProviderInstallPlan(
         // Resolved lazily and only for OpenAI-family plans (the only ones a
         // wire switch applies to). The selection resolver walks EVERY bucket
         // of the pre-install providers map with the throwing per-model
-        // resolver, so a hand-edited invalid `api` sitting in an unrelated
+        // resolver, so a hand-edited invalid `wireApi` sitting in an unrelated
         // bucket must not abort this install: skip the route-resync probe
         // instead. The plan's own write path still validates the buckets it
         // writes with the throwing resolver.

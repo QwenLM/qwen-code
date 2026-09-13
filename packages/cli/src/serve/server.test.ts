@@ -38767,10 +38767,10 @@ describe('auth device-flow routes', () => {
   });
 
   it.each([
-    { protocol: 'openai', api: 'unknown' },
-    { protocol: 'openai', api: null },
-    { protocol: 'anthropic', api: 'responses' },
-    { protocol: 'gemini', api: 'chat-completions' },
+    { protocol: 'openai', wireApi: 'unknown' },
+    { protocol: 'openai', wireApi: null },
+    { protocol: 'anthropic', wireApi: 'responses' },
+    { protocol: 'gemini', wireApi: 'chat-completions' },
   ])(
     'POST /workspace/auth/provider rejects incompatible api before installation: %j',
     async (selection) => {
@@ -38794,10 +38794,7 @@ describe('auth device-flow routes', () => {
     },
   );
 
-  it.each([
-    { protocol: 'openai', api: 'responses' },
-    { protocol: 'openai-responses' },
-  ])(
+  it.each([{ protocol: 'openai', wireApi: 'responses' }])(
     'POST /workspace/auth/provider accepts OpenAI API selection: %j',
     async (selection) => {
       const installAuthProvider = vi

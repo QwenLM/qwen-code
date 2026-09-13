@@ -281,7 +281,7 @@ describe('useProviderUpdates', () => {
     const responsesModel = {
       ...customModel,
       id: 'responses-only',
-      api: 'responses' as const,
+      wireApi: 'responses' as const,
     };
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
@@ -859,6 +859,42 @@ describe('useProviderUpdates', () => {
       expect.anything(),
     );
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+  });
+
+  it('refreshes a built-in Responses override without adding a Chat route', async () => {
+    const first = chinaTemplate[0]!;
+    const responseModel = { ...first, wireApi: 'responses' as const };
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      openai: [responseModel, ...chinaTemplate.slice(1)],
+    };
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+    await waitFor(() =>
+      expect(result.current.providerUpdateRequest).toBeDefined(),
+    );
+    await result.current.providerUpdateRequest!.onConfirm('update');
+    await waitFor(() =>
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled(),
+    );
+    const updated =
+      mockConfig.reloadModelProvidersConfig.mock.calls[0][0]['openai'];
+    expect(
+      updated.filter((model: { id: string }) => model.id === first.id),
+    ).toEqual([
+      expect.objectContaining({ id: first.id, wireApi: 'responses' }),
+    ]);
+    expect(updated).toHaveLength(chinaTemplate.length);
   });
 
   it('persists a cooldown (not a full update) when user chooses "later"', async () => {

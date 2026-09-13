@@ -15,8 +15,7 @@ import type { Application, Request, Response } from 'express';
 import {
   AuthType,
   resolveModelId,
-  resolveModelProtocol,
-  resolveProviderProtocol,
+  tryResolveModelProtocol,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
@@ -334,25 +333,20 @@ export function registerWorkspaceModelsRoutes(
         const seenRoutes = new Set<string>();
         const remaining = Object.entries(remainingProviders).flatMap(
           ([provider, models]) => {
-            const authType = resolveProviderProtocol(
-              provider,
-              loaded.merged.providerProtocol,
-            );
-            if (
-              !authType ||
-              authType === 'qwen-oauth' ||
-              !Array.isArray(models)
-            )
-              return [];
-            return models
-              .filter((model) => model?.id === removedModelId)
-              .filter((model) => {
-                const route = JSON.stringify([authType, model.baseUrl ?? '']);
-                if (seenRoutes.has(route)) return false;
-                seenRoutes.add(route);
-                return true;
-              })
-              .map((model) => ({ model, authType }));
+            if (!Array.isArray(models)) return [];
+            return models.flatMap((model) => {
+              if (model?.id !== removedModelId) return [];
+              const authType = tryResolveModelProtocol(
+                provider,
+                model,
+                loaded.merged.providerProtocol,
+              );
+              if (!authType || authType === 'qwen-oauth') return [];
+              const route = JSON.stringify([authType, model.baseUrl ?? '']);
+              if (seenRoutes.has(route)) return [];
+              seenRoutes.add(route);
+              return [{ model, authType }];
+            });
           },
         );
 
@@ -372,8 +366,8 @@ export function registerWorkspaceModelsRoutes(
           ...(removedBaseUrl ? { baseUrl: removedBaseUrl } : {}),
         };
         // Whether the persisted selection survives the removal is decided by
-        // re-resolving it against the POST-removal config, not by comparing
-        // shapes: with per-model `api` the wire is a property of the model
+        // matching its pre-removal effective route against the remaining
+        // config: with per-model `wireApi` the wire is a property of the model
         // entry, so a survivor must carry the selection's effective protocol
         // at the selection's own endpoint — an api-less sibling can never
         // carry an `openai-responses` selection, and an unpinned selection
@@ -386,39 +380,56 @@ export function registerWorkspaceModelsRoutes(
             authType === parsed.authType &&
             (model.baseUrl ?? '') === (removedBaseUrl ?? ''),
         )?.model;
+        const validProviders = Object.fromEntries(
+          Object.entries(loaded.merged.modelProviders ?? {}).map(
+            ([providerId, models]) => [
+              providerId,
+              Array.isArray(models)
+                ? models.filter(
+                    (model) =>
+                      tryResolveModelProtocol(
+                        providerId,
+                        model,
+                        loaded.merged.providerProtocol,
+                      ) !== undefined,
+                  )
+                : models,
+            ],
+          ),
+        );
         for (const activeScope of getWritableScopes(loaded)) {
           const scopeModel = loaded.forScope(activeScope).settings.model;
           const selectedAuthType =
-            loaded.forScope(activeScope).settings.security?.auth
-              ?.selectedType ??
             loaded.merged.security?.auth?.selectedType ??
             getAuthTypeFromEnv(deps.env ?? {});
-          const activeAuthType = selectedAuthType
+          const activeSelection = selectedAuthType
             ? resolveCliGenerationConfig({
                 argv: {},
                 settings: {
                   ...loaded.merged,
-                  modelProviders: next,
+                  modelProviders: validProviders,
                   model: scopeModel,
                 },
                 selectedAuthType,
                 env: deps.env ?? {},
-              }).authType
+              })
             : undefined;
+          const activeAuthType = activeSelection?.authType;
           const selectionSurvivesRemoval =
             isOpenAiFamily(activeAuthType) &&
-            Object.entries(next).some(
+            Object.entries(remainingProviders).some(
               ([providerId, models]) =>
                 Array.isArray(models) &&
                 models.some(
                   (model) =>
                     model.id === scopeModel?.name &&
-                    resolveModelProtocol(
+                    tryResolveModelProtocol(
                       providerId,
                       model,
                       loaded.merged.providerProtocol,
                     ) === activeAuthType &&
-                    (model.baseUrl ?? '') === (scopeModel?.baseUrl ?? ''),
+                    (model.baseUrl ?? null) ===
+                      activeSelection?.registryBaseUrl,
                 ),
             );
           if (

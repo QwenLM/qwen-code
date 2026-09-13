@@ -773,6 +773,35 @@ describe('DELETE /workspace/models', () => {
     });
   });
 
+  it.each(['keep', 'target'])(
+    'deletes a valid model despite an unrelated invalid wireApi (selected=%s)',
+    async (selected) => {
+      writeUserSettings({
+        modelProviders: {
+          openai: [
+            { id: 'keep' },
+            { id: 'target' },
+            { id: 'broken', wireApi: 'bogus' },
+          ],
+        },
+        model: { name: selected },
+        security: { auth: { selectedType: 'openai' } },
+      });
+      const { app } = makeApp();
+      const res = await request(app)
+        .delete('/workspace/models')
+        .send({ authType: 'openai', modelId: 'target' });
+      expect(res.status).toBe(200);
+      expect(res.body.clearedActiveModel).toBe(selected === 'target');
+      expect(readUserSettings()).toMatchObject({
+        model: { name: selected === 'target' ? '' : 'keep' },
+        modelProviders: {
+          openai: [{ id: 'keep' }, { id: 'broken', wireApi: 'bogus' }],
+        },
+      });
+    },
+  );
+
   it('reports degraded runtime sync after the model removal is persisted', async () => {
     writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
     let modelProvidersAtSync: unknown;
@@ -839,7 +868,7 @@ describe('DELETE /workspace/models', () => {
     'keeps the active API selection from %s when deleting its sibling',
     async (source) => {
       const baseUrl = 'https://api.example/v1';
-      const responses = { id: 'same', baseUrl, api: 'responses' };
+      const responses = { id: 'same', baseUrl, wireApi: 'responses' };
       writeUserSettings({
         modelProviders: { openai: [{ id: 'same', baseUrl }, responses] },
         model: { name: 'same', baseUrl },
@@ -874,9 +903,9 @@ describe('DELETE /workspace/models', () => {
     },
   );
 
-  it('keeps the active selection when its deleted route has a surviving API sibling', async () => {
+  it('clears the selected Chat route when only its Responses sibling survives', async () => {
     const baseUrl = 'https://api.example/v1';
-    const responses = { id: 'same', baseUrl, api: 'responses' };
+    const responses = { id: 'same', baseUrl, wireApi: 'responses' };
     writeUserSettings({
       modelProviders: { openai: [{ id: 'same', baseUrl }, responses] },
       model: { name: 'same', baseUrl },
@@ -889,15 +918,39 @@ describe('DELETE /workspace/models', () => {
       baseUrl,
     });
     expect(res.status).toBe(200);
-    // The deleted Chat route was the active selection, but the surviving
-    // Responses sibling still resolves the same persisted selection — clearing
-    // it would destroy a selection that is not dangling.
-    expect(res.body.clearedActiveModel).toBe(false);
+    expect(res.body.clearedActiveModel).toBe(true);
     expect(readUserSettings()).toMatchObject({
-      model: { name: 'same', baseUrl },
+      model: { name: '', baseUrl: '' },
       modelProviders: { openai: [responses] },
     });
   });
+
+  it.each([undefined, ''])(
+    'preserves an unpinned Chat selection when deleting Responses (baseUrl=%s)',
+    async (selectedBaseUrl) => {
+      const baseUrl = 'https://gateway.example/v1';
+      writeUserSettings({
+        modelProviders: {
+          openai: [
+            { id: 'same', baseUrl },
+            { id: 'same', baseUrl, wireApi: 'responses' },
+          ],
+        },
+        model: { name: 'same', baseUrl: selectedBaseUrl },
+        security: { auth: { selectedType: 'openai-responses' } },
+      });
+      writeWorkspaceSettings({
+        security: { auth: { selectedType: 'openai' } },
+      });
+      const { app } = makeApp();
+      const res = await request(app)
+        .delete('/workspace/models')
+        .send({ authType: 'openai-responses', modelId: 'same', baseUrl });
+      expect(res.status).toBe(200);
+      expect(res.body.clearedActiveModel).toBe(false);
+      expect(readUserSettings()['model']).toMatchObject({ name: 'same' });
+    },
+  );
 
   it('clears the selection when the surviving sibling cannot carry its Responses route', async () => {
     const baseUrl = 'https://api.example/v1';
@@ -905,7 +958,7 @@ describe('DELETE /workspace/models', () => {
       modelProviders: {
         openai: [
           { id: 'same', baseUrl },
-          { id: 'same', baseUrl, api: 'responses' },
+          { id: 'same', baseUrl, wireApi: 'responses' },
         ],
       },
       model: { name: 'same', baseUrl },
@@ -918,7 +971,7 @@ describe('DELETE /workspace/models', () => {
       baseUrl,
     });
     expect(res.status).toBe(200);
-    // The surviving Chat sibling has no `api`, so it can never carry an
+    // The surviving Chat sibling has no `wireApi`, so it can never carry an
     // openai-responses selection — the persisted selection is dangling and
     // must be tombstoned.
     expect(res.body.clearedActiveModel).toBe(true);
@@ -940,9 +993,13 @@ describe('DELETE /workspace/models', () => {
       security: { auth: { selectedType: 'openai' } },
     });
     const { app } = makeApp();
+    const listed = await request(app).get('/workspace/models');
+    const target = listed.body.models.find(
+      (model: { baseUrl?: string }) => !model.baseUrl,
+    );
     const res = await request(app)
       .delete('/workspace/models')
-      .send({ authType: 'openai', modelId: 'gpt-4o' });
+      .send({ ...target, authType: 'openai', modelId: 'gpt-4o' });
     expect(res.status).toBe(200);
     // The selection was not pinned to an endpoint; the surviving same-id entry
     // dials a different endpoint under different credentials, so the selection
@@ -1034,7 +1091,7 @@ describe('DELETE /workspace/models', () => {
       modelProviders: {
         'my-proxy': [
           { id: 'same', baseUrl },
-          { id: 'same', baseUrl, api: 'responses' },
+          { id: 'same', baseUrl, wireApi: 'responses' },
         ],
       },
       providerProtocol: { 'my-proxy': 'openai' },
@@ -1044,7 +1101,7 @@ describe('DELETE /workspace/models', () => {
     const { app } = makeApp();
     const res = await request(app)
       .delete('/workspace/models')
-      .send({ authType: 'openai', modelId: 'same', baseUrl });
+      .send({ authType: 'openai-responses', modelId: 'same', baseUrl });
     expect(res.status).toBe(200);
     // Only the providerProtocol mapping lets the custom id resolve into the
     // OpenAI family — without it no survivor is recognized and the live
@@ -1053,7 +1110,7 @@ describe('DELETE /workspace/models', () => {
     expect(readUserSettings()).toMatchObject({
       model: { name: 'same', baseUrl },
       modelProviders: {
-        'my-proxy': [{ id: 'same', baseUrl, api: 'responses' }],
+        'my-proxy': [{ id: 'same', baseUrl }],
       },
     });
   });
@@ -1061,7 +1118,9 @@ describe('DELETE /workspace/models', () => {
   it('clears canonical Responses selected through the shared OpenAI auth type', async () => {
     const baseUrl = 'https://api.example/v1';
     writeUserSettings({
-      modelProviders: { openai: [{ id: 'same', baseUrl, api: 'responses' }] },
+      modelProviders: {
+        openai: [{ id: 'same', baseUrl, wireApi: 'responses' }],
+      },
       model: { name: 'same', baseUrl },
       security: { auth: { selectedType: 'openai' } },
     });

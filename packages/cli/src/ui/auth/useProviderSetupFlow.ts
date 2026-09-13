@@ -15,7 +15,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type {
   InputModalities,
-  ModelApi,
+  ModelWireApi,
   ProviderConfig,
   ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
@@ -28,7 +28,7 @@ import { normalizeModelIds, maskApiKey } from './useAuth.js';
 
 export type SetupStep =
   | 'protocol'
-  | 'api'
+  | 'wireApi'
   | 'baseUrl'
   | 'apiKey'
   | 'models'
@@ -37,7 +37,7 @@ export type SetupStep =
 
 const STEP_ORDER: SetupStep[] = [
   'protocol',
-  'api',
+  'wireApi',
   'baseUrl',
   'apiKey',
   'models',
@@ -57,8 +57,8 @@ function getVisibleSteps(
 
 // The effective wire route of an OpenAI-family selection: a `responses` API
 // rides the Responses wire even though the provider bucket stays `openai`.
-const routeProtocol = (proto: AuthType, api: ModelApi): AuthType =>
-  api === 'responses' ? AuthType.USE_OPENAI_RESPONSES : proto;
+const routeProtocol = (proto: AuthType, wireApi: ModelWireApi): AuthType =>
+  wireApi === 'responses' ? AuthType.USE_OPENAI_RESPONSES : proto;
 
 // ---------------------------------------------------------------------------
 // State type
@@ -72,7 +72,7 @@ export interface ProviderSetupState {
 
   // Protocol (for custom provider)
   protocol: AuthType;
-  api: ModelApi;
+  wireApi: ModelWireApi;
 
   // BaseUrl
   baseUrl: string;
@@ -117,7 +117,7 @@ export function useProviderSetupFlow(
   const [stepIndex, setStepIndex] = useState(0);
 
   const [protocol, setProtocol] = useState<AuthType>(AuthType.USE_OPENAI);
-  const [api, setApi] = useState<ModelApi>('chat-completions');
+  const [wireApi, setWireApi] = useState<ModelWireApi>('chat-completions');
   const [baseUrl, setBaseUrl] = useState('');
   const [baseUrlPlaceholder, setBaseUrlPlaceholder] = useState('');
   const [baseUrlOptionIndex, setBaseUrlOptionIndex] = useState(0);
@@ -157,7 +157,7 @@ export function useProviderSetupFlow(
       setStepIndex(0);
 
       setProtocol(proto);
-      setApi(
+      setWireApi(
         initial === AuthType.USE_OPENAI_RESPONSES
           ? 'responses'
           : 'chat-completions',
@@ -168,7 +168,7 @@ export function useProviderSetupFlow(
       const resolved = resolveBaseUrl(config);
       setBaseUrl(resolved);
       setBaseUrlPlaceholder(
-        resolved ? '' : getDefaultBaseUrlForProtocol(proto),
+        resolved ? '' : getDefaultBaseUrlForProtocol(initial),
       );
       setBaseUrlOptionIndex(0);
       setBaseUrlError(null);
@@ -230,41 +230,39 @@ export function useProviderSetupFlow(
         selectedProtocol === AuthType.USE_OPENAI_RESPONSES
           ? AuthType.USE_OPENAI
           : selectedProtocol;
-      const nextApi: ModelApi =
+      const nextWireApi: ModelWireApi =
         selectedProtocol === AuthType.USE_OPENAI_RESPONSES
           ? 'responses'
           : proto === protocol
-            ? api
+            ? wireApi
             : 'chat-completions';
       setProtocol(proto);
-      setApi(nextApi);
+      setWireApi(nextWireApi);
       if (provider) setVisibleSteps(getVisibleSteps(provider, proto));
       // Clear baseUrl so the user types fresh; show the default endpoint of
       // the effective route as a placeholder (used if they submit blank).
       setBaseUrl('');
       setBaseUrlPlaceholder(
-        getDefaultBaseUrlForProtocol(routeProtocol(proto, nextApi)),
+        getDefaultBaseUrlForProtocol(routeProtocol(proto, nextWireApi)),
       );
       setApiKey('');
       setApiKeyError(null);
       goNext();
     },
-    [goNext, provider, protocol, api],
+    [goNext, provider, protocol, wireApi],
   );
 
-  const selectApi = useCallback(
-    (selectedApi: ModelApi) => {
-      setApi(selectedApi);
-      // The wire route changed: clear any baseUrl auto-filled from the
-      // previous route's placeholder so a blank submit falls back to the new
-      // route's default endpoint instead of persisting the old one.
-      setBaseUrl('');
-      setBaseUrlPlaceholder(
-        getDefaultBaseUrlForProtocol(routeProtocol(protocol, selectedApi)),
+  const selectWireApi = useCallback(
+    (selectedApi: ModelWireApi) => {
+      setWireApi(selectedApi);
+      const nextPlaceholder = getDefaultBaseUrlForProtocol(
+        routeProtocol(protocol, selectedApi),
       );
+      if (baseUrl === baseUrlPlaceholder) setBaseUrl(nextPlaceholder);
+      setBaseUrlPlaceholder(nextPlaceholder);
       goNext();
     },
-    [goNext, protocol],
+    [goNext, protocol, baseUrl, baseUrlPlaceholder],
   );
 
   const selectBaseUrl = useCallback(
@@ -327,9 +325,9 @@ export function useProviderSetupFlow(
         // shows one) — dropping it would silently move a working Responses
         // route back to Chat Completions on re-authentication.
         ...(provider &&
-        (shouldShowStep(provider, 'api', protocol) ||
-          (api === 'responses' && protocol === AuthType.USE_OPENAI))
-          ? { api }
+        (shouldShowStep(provider, 'wireApi', protocol) ||
+          (wireApi === 'responses' && protocol === AuthType.USE_OPENAI))
+          ? { wireApi }
           : {}),
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim(),
@@ -347,7 +345,7 @@ export function useProviderSetupFlow(
     [
       provider,
       protocol,
-      api,
+      wireApi,
       baseUrl,
       apiKey,
       modelIds,
@@ -512,7 +510,7 @@ export function useProviderSetupFlow(
     stepIndex: stepIndex + 1, // 1-based for display
     totalSteps: visibleSteps.length,
     protocol,
-    api,
+    wireApi,
     baseUrl,
     baseUrlPlaceholder,
     baseUrlOptionIndex,
@@ -538,7 +536,7 @@ export function useProviderSetupFlow(
     reset,
     goBack,
     selectProtocol,
-    selectApi,
+    selectWireApi,
     selectBaseUrl,
     highlightBaseUrl,
     submitBaseUrl,

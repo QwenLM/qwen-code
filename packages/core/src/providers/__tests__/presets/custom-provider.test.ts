@@ -109,7 +109,8 @@ describe('customProvider', () => {
 
   it('builds an OpenAI Responses install plan', () => {
     const plan = buildInstallPlan(customProvider, {
-      protocol: AuthType.USE_OPENAI_RESPONSES,
+      protocol: AuthType.USE_OPENAI,
+      wireApi: 'responses',
       baseUrl: 'https://api.example.com',
       apiKey: 'sk-responses',
       modelIds: ['gpt-5'],
@@ -117,7 +118,7 @@ describe('customProvider', () => {
 
     expect(plan.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
     expect(plan.modelProviders?.[0]?.authType).toBe(AuthType.USE_OPENAI);
-    expect(plan.modelProviders?.[0]?.models[0]?.api).toBe('responses');
+    expect(plan.modelProviders?.[0]?.models[0]?.wireApi).toBe('responses');
   });
 
   it('shares new credentials between both OpenAI APIs', () => {
@@ -129,18 +130,18 @@ describe('customProvider', () => {
     };
     const chat = buildInstallPlan(customProvider, {
       ...inputs,
-      api: 'chat-completions',
+      wireApi: 'chat-completions',
     });
     const responses = buildInstallPlan(customProvider, {
       ...inputs,
-      api: 'responses',
+      wireApi: 'responses',
     });
     expect(chat.env).toEqual(responses.env);
     expect(responses.modelProviders?.[0]?.models[0]).toMatchObject({
-      api: 'responses',
+      wireApi: 'responses',
     });
     expect(chat.modelProviders?.[0]?.models[0]).toMatchObject({
-      api: 'chat-completions',
+      wireApi: 'chat-completions',
     });
     expect(responses.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
   });

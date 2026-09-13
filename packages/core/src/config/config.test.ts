@@ -7612,7 +7612,7 @@ describe('Server Config (config.ts)', () => {
         authType: AuthType.USE_OPENAI,
         model: 'responses-model',
         modelProvidersConfig: {
-          openai: [{ id: 'responses-model', api: 'responses' }],
+          openai: [{ id: 'responses-model', wireApi: 'responses' }],
         },
       });
       vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
@@ -7639,13 +7639,39 @@ describe('Server Config (config.ts)', () => {
       expect(config.getAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
     });
 
-    it('follows the model to the sibling wire when hot reload moves its API route', async () => {
+    it('does not redirect an OpenAI retry after the first Gemini refresh fails', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: { ...generationConfig, model: 'test-model', authType },
+          sources: {},
+        }),
+      );
+      vi.mocked(createContentGenerator).mockRejectedValueOnce(
+        new Error('test generator failure'),
+      );
+      await expect(config.refreshAuth(AuthType.USE_GEMINI)).rejects.toThrow(
+        'test generator failure',
+      );
+      await config.refreshAuth(AuthType.USE_OPENAI, true);
+      expect(createContentGenerator).toHaveBeenLastCalledWith(
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+        config,
+        true,
+      );
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI);
+    });
+
+    it('requires explicit selection after hot reload removes the selected API route', async () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_OPENAI_RESPONSES,
         model: 'shared',
         modelProvidersConfig: {
-          openai: [{ id: 'shared', api: 'responses' }],
+          openai: [{ id: 'shared', wireApi: 'responses' }],
         },
       });
       vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
@@ -7658,13 +7684,14 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockClear();
       config.reloadModelProvidersConfig({ openai: [{ id: 'shared' }] });
 
-      // The model is still configured — on the sibling Chat wire — so the
-      // refresh follows it there and rebuilds the generator instead of
-      // failing closed and wedging every later hot-reload reconcile.
-      await config.refreshAuth(AuthType.USE_OPENAI_RESPONSES, true);
-
-      expect(createContentGenerator).toHaveBeenCalled();
-      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI);
+      await expect(
+        config.refreshAuth(AuthType.USE_OPENAI_RESPONSES, true),
+      ).rejects.toThrow('is no longer configured');
+      await expect(
+        config.refreshAuth(AuthType.USE_OPENAI_RESPONSES, true),
+      ).rejects.toThrow('is no longer configured');
+      expect(createContentGenerator).not.toHaveBeenCalled();
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
       expect(config.getModel()).toBe('shared');
     });
 

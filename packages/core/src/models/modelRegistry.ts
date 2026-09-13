@@ -68,14 +68,14 @@ export function resolveProviderProtocol(
 
 export function resolveModelProtocol(
   providerId: string,
-  model: Pick<ModelConfig, 'api'>,
+  model: Pick<ModelConfig, 'wireApi'>,
   providerProtocol?: ProviderProtocolConfig,
 ): AuthType | undefined {
   const protocol = resolveProviderProtocol(providerId, providerProtocol);
-  if (!protocol || model.api === undefined) return protocol;
-  if (model.api !== 'chat-completions' && model.api !== 'responses') {
+  if (!protocol || model.wireApi === undefined) return protocol;
+  if (model.wireApi !== 'chat-completions' && model.wireApi !== 'responses') {
     throw new Error(
-      `Invalid api "${model.api}" for provider "${providerId}". Expected "chat-completions" or "responses".`,
+      `Invalid wireApi "${model.wireApi}" for provider "${providerId}". Expected "chat-completions" or "responses".`,
     );
   }
   if (
@@ -83,24 +83,24 @@ export function resolveModelProtocol(
     protocol !== AuthType.USE_OPENAI_RESPONSES
   ) {
     throw new Error(
-      `Provider "${providerId}" uses protocol "${protocol}"; api is only supported for OpenAI-compatible models.`,
+      `Provider "${providerId}" uses protocol "${protocol}"; wireApi is only supported for OpenAI-compatible models.`,
     );
   }
-  return model.api === 'responses'
+  return model.wireApi === 'responses'
     ? AuthType.USE_OPENAI_RESPONSES
     : AuthType.USE_OPENAI;
 }
 
 /**
  * {@link resolveModelProtocol} for read paths: returns `undefined` instead of
- * throwing when an entry's `api` is invalid, so one hand-edited entry cannot
+ * throwing when an entry's `wireApi` is invalid, so one hand-edited entry cannot
  * take down a whole listing or an unrelated install. Write and startup paths
  * keep using the throwing resolver — an invalid value stays a config error
  * there.
  */
 export function tryResolveModelProtocol(
   providerId: string,
-  model: Pick<ModelConfig, 'api'>,
+  model: Pick<ModelConfig, 'wireApi'>,
   providerProtocol?: ProviderProtocolConfig,
 ): AuthType | undefined {
   try {
@@ -119,8 +119,9 @@ export function resolveModelSelectionAuthType(
   baseUrl?: string | null,
 ): AuthType {
   if (
-    authType !== AuthType.USE_OPENAI &&
-    authType !== AuthType.USE_OPENAI_RESPONSES
+    !modelId ||
+    (authType !== AuthType.USE_OPENAI &&
+      authType !== AuthType.USE_OPENAI_RESPONSES)
   ) {
     return authType;
   }
@@ -134,9 +135,9 @@ export function resolveModelSelectionAuthType(
         providerProtocol,
       );
       if (
-        (modelId ? model.id === modelId : !model.imageOnly) &&
+        model.id === modelId &&
         (protocol === authType ||
-          (model.api !== undefined &&
+          (model.wireApi !== undefined &&
             (protocol === AuthType.USE_OPENAI ||
               protocol === AuthType.USE_OPENAI_RESPONSES)))
       ) {
@@ -151,7 +152,7 @@ export function resolveModelSelectionAuthType(
       ? undefined
       : preferred(
           candidates.filter(
-            (entry) => (entry.model.baseUrl ?? null) === baseUrl,
+            (entry) => (entry.model.baseUrl || null) === (baseUrl || null),
           ),
         );
   return (exact ?? preferred(candidates))?.authType ?? authType;

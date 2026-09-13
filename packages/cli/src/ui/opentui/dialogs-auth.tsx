@@ -29,7 +29,7 @@ import type {
   Config,
   ProviderConfig,
   ProviderSetupInputs,
-  ModelApi,
+  ModelWireApi,
 } from '@qwen-code/qwen-code-core';
 import {
   ALIBABA_PROVIDERS,
@@ -146,7 +146,7 @@ function providerToItem(config: ProviderConfig): RadioItem {
 
 function getStepLabel(step: string | null, p: ProviderConfig): string {
   if (step === 'protocol') return t('Protocol');
-  if (step === 'api') return t('API');
+  if (step === 'wireApi') return t('API');
   if (step === 'baseUrl') {
     if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
     return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
@@ -310,13 +310,15 @@ function ApiStep({ flow }: { flow: ProviderSetupFlow }) {
     },
     { key: 'responses', label: t('Responses'), value: 'responses' },
   ];
-  const [cursor, setCursor] = useState(flow.state.api === 'responses' ? 1 : 0);
+  const [cursor, setCursor] = useState(
+    flow.state.wireApi === 'responses' ? 1 : 0,
+  );
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (o.name === 'up') setCursor(0);
     else if (o.name === 'down') setCursor(1);
     else if (o.name === 'return')
-      flow.selectApi(items[cursor]!.value as ModelApi);
+      flow.selectWireApi(items[cursor]!.value as ModelWireApi);
   });
   return (
     <>
@@ -765,7 +767,7 @@ function SetupSteps({ flow }: { flow: ProviderSetupFlow }) {
   switch (step) {
     case 'protocol':
       return <ProtocolStep flow={flow} />;
-    case 'api':
+    case 'wireApi':
       return <ApiStep flow={flow} />;
     case 'baseUrl':
       return Array.isArray(provider.baseUrl) ? (
@@ -997,10 +999,7 @@ function AuthDialogFlow({
         case 'CUSTOM_PROVIDER':
           setupFlow.start(
             customProvider,
-            findExistingProviderModels(
-              customProvider,
-              settings.merged.modelProviders,
-            )?.protocol,
+            undefined,
             existingEnv,
             getExistingModelIds(customProvider),
           );

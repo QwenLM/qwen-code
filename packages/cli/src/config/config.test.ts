@@ -1224,7 +1224,7 @@ describe('loadCliConfig', () => {
           openai: [
             {
               id: 'gpt-model',
-              api: 'responses',
+              wireApi: 'responses',
               envKey: 'RESPONSES_KEY',
               baseUrl: 'https://example.test/v1',
             },
@@ -1260,7 +1260,7 @@ describe('loadCliConfig', () => {
             id: 'gpt-model',
             // A hand-editable typo. This resolves before the TUI starts, so an
             // unwrapped throw leaves the user a stack trace and no way back.
-            api: 'resposnes' as 'responses',
+            wireApi: 'resposnes' as 'responses',
             envKey: 'RESPONSES_KEY',
           },
         ],
@@ -1271,7 +1271,7 @@ describe('loadCliConfig', () => {
 
     expect(err).toBeInstanceOf(FatalConfigError);
     expect((err as Error).message).toMatch(
-      /Invalid api "resposnes" for provider "openai"/,
+      /Invalid wireApi "resposnes" for provider "openai"/,
     );
   });
 
@@ -1299,14 +1299,14 @@ describe('loadCliConfig', () => {
     const argv = await parseArguments();
     const settings: Settings = {
       // No security.auth.selectedType and no model.name: generation-config
-      // resolution never touches the model, so the invalid `api` is caught by
+      // resolution never touches the model, so the invalid `wireApi` is caught by
       // the up-front validation loop in loadCliConfig — still a config error,
       // not an unexpected crash with a stack trace.
       modelProviders: {
         openai: [
           {
             id: 'gpt-model',
-            api: 'resposnes' as 'responses',
+            wireApi: 'resposnes' as 'responses',
             envKey: 'RESPONSES_KEY',
           },
         ],
@@ -1318,7 +1318,7 @@ describe('loadCliConfig', () => {
 
     expect(err).toBeInstanceOf(FatalConfigError);
     expect((err as Error).message).toMatch(
-      /Invalid api "resposnes" for provider "openai"/,
+      /Invalid wireApi "resposnes" for provider "openai"/,
     );
   });
 
