@@ -81,6 +81,7 @@ function buildWsUrl(
   );
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('terminalId', terminalId);
+  url.searchParams.set('replay', '1');
   if (cwd) url.searchParams.set('cwd', cwd);
   if (release) url.searchParams.set('release', '1');
   return url.toString();
@@ -141,15 +142,25 @@ export function TerminalPanel({
     }
     if (!containerRef.current) return;
 
-    const term = new Terminal({
-      cursorBlink: true,
-      fontSize: 13,
-      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-      theme: xtermTheme(theme),
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(containerRef.current);
+    function createTerminal(handlesPrimaryDa = false) {
+      const term = new Terminal({
+        allowProposedApi: true,
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+        theme: termRef.current?.options.theme ?? xtermTheme(theme),
+      });
+      const fit = new FitAddon();
+      const host = document.createElement('div');
+      host.style.height = '100%';
+      term.loadAddon(fit);
+      term.parser.registerCsiHandler({ final: 'c' }, () => handlesPrimaryDa);
+      term.open(host);
+      return { term, fit, host };
+    }
+
+    let { term, fit, host } = createTerminal();
+    containerRef.current.replaceChildren(host);
     termRef.current = term;
     fitRef.current = fit;
 
@@ -190,6 +201,48 @@ export function TerminalPanel({
     let releaseAttempts = 0;
     let releaseRetryTimer: ReturnType<typeof setTimeout> | undefined;
     let ended = false;
+    let awaitingSnapshot = true;
+    let snapshot: { replay: boolean; handlesPrimaryDa: boolean } | undefined;
+    let restoring: ReturnType<typeof createTerminal> | undefined;
+
+    function sendInput(data: string) {
+      if (!activeRef.current) return;
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(new TextEncoder().encode(data));
+      }
+    }
+    let disposable = term.onData(sendInput);
+
+    function restoreSnapshot(text: string, ws: WebSocket) {
+      const next = createTerminal(snapshot!.handlesPrimaryDa);
+      const replay = snapshot!.replay;
+      snapshot = undefined;
+      awaitingSnapshot = false;
+      restoring = next;
+      next.term.resize(term.cols, term.rows);
+      // A new PTY's buffered output has never been answered. Reconnect history has.
+      const liveInput = replay ? undefined : next.term.onData(sendInput);
+      next.term.write(text, () => {
+        if (disposed || wsRef.current !== ws || restoring !== next) {
+          liveInput?.dispose();
+          return;
+        }
+        const previous = term;
+        next.term.options.theme = term.options.theme;
+        disposable.dispose();
+        ({ term, fit, host } = next);
+        termRef.current = term;
+        fitRef.current = fit;
+        disposable = liveInput ?? term.onData(sendInput);
+        restoring = undefined;
+        containerRef.current!.replaceChildren(host);
+        previous.dispose();
+        fit.fit();
+        sendCurrentResize();
+        if (activeRef.current) term.focus();
+      });
+    }
 
     function handleControl(raw: string): boolean {
       try {
@@ -197,12 +250,26 @@ export function TerminalPanel({
           type?: unknown;
           exitCode?: unknown;
           message?: unknown;
+          replay?: unknown;
+          handlesPrimaryDa?: unknown;
         };
-        if (ctrl.type === 'exit') {
+        if (
+          ctrl.type === 'snapshot' &&
+          awaitingSnapshot &&
+          !snapshot &&
+          typeof ctrl.replay === 'boolean' &&
+          typeof ctrl.handlesPrimaryDa === 'boolean'
+        ) {
+          snapshot = {
+            replay: ctrl.replay,
+            handlesPrimaryDa: ctrl.handlesPrimaryDa,
+          };
+          return true;
+        } else if (ctrl.type === 'exit') {
           ended = true;
           const exitCode =
             typeof ctrl.exitCode === 'number' ? String(ctrl.exitCode) : '?';
-          term.writeln(
+          (restoring?.term ?? term).writeln(
             `\r\n\x1b[33m[${t('terminal.notice.exited', { exitCode })}]\x1b[0m`,
           );
           return true;
@@ -211,7 +278,7 @@ export function TerminalPanel({
             typeof ctrl.message === 'string'
               ? ctrl.message
               : t('terminal.notice.unknownError');
-          term.writeln(
+          (restoring?.term ?? term).writeln(
             `\r\n\x1b[31m[${t('terminal.notice.error', { message })}]\x1b[0m`,
           );
           return true;
@@ -228,12 +295,23 @@ export function TerminalPanel({
       }
     }
 
-    function handleMessage(event: MessageEvent) {
-      if (disposed) return;
+    function handleMessage(event: MessageEvent, ws: WebSocket) {
+      if (disposed || wsRef.current !== ws) return;
       if (typeof event.data === 'string') {
         writeMessage(event.data);
       } else {
-        term.write(new TextDecoder().decode(event.data as ArrayBuffer));
+        const text = new TextDecoder().decode(event.data as ArrayBuffer);
+        if (snapshot) {
+          restoreSnapshot(text, ws);
+        } else if (awaitingSnapshot) {
+          ended = true;
+          term.writeln(
+            '\r\nTerminal protocol changed; restart the daemon and reload this page.',
+          );
+          ws.close(4002, 'Terminal protocol mismatch');
+        } else {
+          (restoring?.term ?? term).write(text);
+        }
       }
     }
 
@@ -257,9 +335,8 @@ export function TerminalPanel({
           ws.close();
           return;
         }
-        // Keep the reconnect notice visible until a connection succeeds; the
-        // backend immediately replays the complete scrollback after this.
-        term.reset();
+        awaitingSnapshot = true;
+        snapshot = undefined;
         reconnectDelay = RECONNECT_INITIAL_MS;
         lostNoticeWritten = false;
         if (ws.readyState === WebSocket.OPEN) {
@@ -274,7 +351,7 @@ export function TerminalPanel({
         }
       };
 
-      ws.onmessage = releaseOnly ? null : handleMessage;
+      ws.onmessage = releaseOnly ? null : (event) => handleMessage(event, ws);
 
       ws.onerror = () => {
         // Errors surface through close; reconnect is handled there.
@@ -292,6 +369,8 @@ export function TerminalPanel({
         }
         if (disposed || releaseRequested) return;
         if (ended || NON_RETRYABLE_CLOSE_CODES.has(event.code)) return;
+        restoring?.term.dispose();
+        restoring = undefined;
         if (!lostNoticeWritten) {
           term.writeln(
             `\r\n\x1b[33m[${t('terminal.notice.reconnecting')}]\x1b[0m`,
@@ -318,15 +397,6 @@ export function TerminalPanel({
       }
     };
     releaseCallbacks.set(terminalId, release);
-
-    // xterm → WebSocket (raw keystrokes = stdin, control = resize)
-    const disposable = term.onData((data: string) => {
-      if (!activeRef.current) return;
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(new TextEncoder().encode(data));
-      }
-    });
 
     // Resize observer → send new size
     const resizeObserver = new ResizeObserver(() => {
@@ -356,6 +426,7 @@ export function TerminalPanel({
       clearTimeout(resizeTimeout);
       resizeObserver.disconnect();
       disposable.dispose();
+      restoring?.term.dispose();
       if (
         !releaseRequested ||
         wsRef.current?.readyState !== WebSocket.CONNECTING
