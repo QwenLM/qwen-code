@@ -89,7 +89,9 @@ import type {
 
 interface DingTalkRichTextPart {
   type?: string;
+  msgType?: string;
   text?: string;
+  content?: string;
   downloadCode?: string;
   atName?: string;
 }
@@ -112,6 +114,12 @@ interface DingTalkRepliedMsg {
   msgType?: string;
   senderId?: string;
   content?: DingTalkMessageContent;
+}
+
+interface DingTalkQuotedMedia {
+  downloadCode: string;
+  mediaType: 'image' | 'file' | 'audio' | 'video';
+  fileName?: string;
 }
 
 interface DingTalkAtUser {
@@ -150,6 +158,10 @@ function nonEmptyString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function richTextPartType(part: DingTalkRichTextPart): string {
+  return part.type || part.msgType || 'text';
 }
 
 function parseJsonArray(value: unknown): unknown[] | undefined {
@@ -2865,11 +2877,7 @@ export class DingtalkChannel extends ChannelBase {
   private extractQuotedContext(data: DingTalkMessageData): {
     referencedText?: string;
     isReplyToBot: boolean;
-    media?: {
-      downloadCode: string;
-      mediaType: 'image' | 'file' | 'audio' | 'video';
-      fileName?: string;
-    };
+    media: DingTalkQuotedMedia[];
   } {
     // Newer format: text.repliedMsg
     if (data.text?.isReplyMsg && data.text.repliedMsg) {
@@ -2880,20 +2888,30 @@ export class DingtalkChannel extends ChannelBase {
       // Note: DingTalk doesn't include content for interactiveCard replies
       // (bot responses sent via webhook). Only user message quotes have text.
       const text = this.summarizeRepliedContent(replied);
-      const downloadCode = replied.content?.downloadCode;
-      const mediaType = this.mediaTypeFromMsgType(replied.msgType);
+      const media: DingTalkQuotedMedia[] = [];
+      const richText = replied.content?.richText;
+      if (Array.isArray(richText)) {
+        for (const part of richText) {
+          const mediaType = this.mediaTypeFromMsgType(richTextPartType(part));
+          if (part.downloadCode && mediaType) {
+            media.push({ downloadCode: part.downloadCode, mediaType });
+          }
+        }
+      } else {
+        const downloadCode = replied.content?.downloadCode;
+        const mediaType = this.mediaTypeFromMsgType(replied.msgType);
+        if (downloadCode && mediaType) {
+          media.push({
+            downloadCode,
+            mediaType,
+            fileName: replied.content?.fileName,
+          });
+        }
+      }
       return {
         referencedText: text || undefined,
         isReplyToBot,
-        ...(downloadCode && mediaType
-          ? {
-              media: {
-                downloadCode,
-                mediaType,
-                fileName: replied.content?.fileName,
-              },
-            }
-          : {}),
+        media,
       };
     }
 
@@ -2903,10 +2921,10 @@ export class DingtalkChannel extends ChannelBase {
       const isReplyToBot =
         !!data.chatbotUserId && quote.senderId === data.chatbotUserId;
       const text = quote.text?.content?.trim();
-      return { referencedText: text || undefined, isReplyToBot };
+      return { referencedText: text || undefined, isReplyToBot, media: [] };
     }
 
-    return { isReplyToBot: false };
+    return { isReplyToBot: false, media: [] };
   }
 
   /**
@@ -2958,9 +2976,11 @@ export class DingtalkChannel extends ChannelBase {
     if (content?.richText && Array.isArray(content.richText)) {
       const parts: string[] = [];
       for (const part of content.richText) {
-        const partType = part.type || 'text';
-        if (partType === 'text' && part.text) {
-          parts.push(part.text);
+        const partType = richTextPartType(part);
+        const partText =
+          typeof part.text === 'string' ? part.text : part.content;
+        if (partType === 'text' && partText) {
+          parts.push(partText);
         } else if (partType === 'picture') {
           parts.push('[image]');
         } else if (partType === 'at' && part.atName) {
@@ -3370,7 +3390,7 @@ export class DingtalkChannel extends ChannelBase {
       }
 
       const processMessage =
-        content.downloadCodes.length > 0 || quoted.media
+        content.downloadCodes.length > 0 || quoted.media.length > 0
           ? this.prepareThenHandleInbound(envelope, async () => {
               // Download media in callback order.
               if (content.downloadCodes.length > 0 && content.mediaType) {
@@ -3384,12 +3404,12 @@ export class DingtalkChannel extends ChannelBase {
                   );
                 }
               }
-              if (quoted.media) {
+              for (const media of quoted.media) {
                 await this.attachMedia(
                   envelope,
-                  quoted.media.downloadCode,
-                  quoted.media.mediaType,
-                  quoted.media.fileName,
+                  media.downloadCode,
+                  media.mediaType,
+                  media.fileName,
                 );
               }
             })
