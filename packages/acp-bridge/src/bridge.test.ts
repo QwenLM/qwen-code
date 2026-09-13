@@ -26809,6 +26809,57 @@ describe('createAcpSessionBridge', () => {
       shellSpy.mockRestore();
     });
 
+    it.each([
+      ['deadline', 'TimeoutError'],
+      ['user cancellation', 'AbortError'],
+    ])('preserves the abort reason for %s', async (kind, reasonName) => {
+      const { bridge, session } = await setupShellSession();
+      const controller = new AbortController();
+      const shellSpy = vi
+        .spyOn(ShellExecutionService, 'execute')
+        .mockImplementation(async (_command, _cwd, _onOutput, signal) => ({
+          pid: 123,
+          result: new Promise((resolve) => {
+            signal.addEventListener('abort', () => {
+              resolve({
+                rawOutput: Buffer.from('stopped'),
+                output: 'stopped',
+                pid: 123,
+                exitCode: 0,
+                signal: null,
+                error: null,
+                aborted: true,
+                executionMethod: 'child_process',
+              });
+            });
+          }),
+        }));
+      vi.useFakeTimers();
+      try {
+        const pending = bridge.executeShellCommand(
+          session.sessionId,
+          'command',
+          controller.signal,
+          { clientId: session.clientId },
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        const signal = shellSpy.mock.calls[0][3];
+        expect(signal.aborted).toBe(false);
+        if (kind === 'deadline') {
+          await vi.advanceTimersByTimeAsync(120_000);
+        } else {
+          controller.abort();
+        }
+        await pending;
+        expect(signal.reason).toBeInstanceOf(DOMException);
+        expect(signal.reason.name).toBe(reasonName);
+      } finally {
+        vi.useRealTimers();
+        shellSpy.mockRestore();
+        await bridge.shutdown();
+      }
+    });
+
     it('does not hang a completed shell on transport-failed history injection', async () => {
       const failure = deferred<unknown>();
       const shellSpy = mockShellExecute('done\n');

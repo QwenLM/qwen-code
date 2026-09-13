@@ -74,6 +74,7 @@ function cancelledArtifactResult(): ToolResult {
   return {
     llmContent: message,
     returnDisplay: message,
+    aborted: true,
   };
 }
 

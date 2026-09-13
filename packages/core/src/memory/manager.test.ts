@@ -8,7 +8,12 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { globalMemoryManager, MemoryManager } from './manager.js';
+import {
+  AUTO_SKILL_EXPERIENCE_FLOOR,
+  AUTO_SKILL_THRESHOLD,
+  globalMemoryManager,
+  MemoryManager,
+} from './manager.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
   getAutoMemoryMetadataPath,
@@ -44,6 +49,19 @@ vi.mock('./skillReviewAgentPlanner.js', async (importOriginal) => ({
 import { runAutoMemoryExtract } from './extract.js';
 import { runManagedAutoMemoryDream } from './dream.js';
 import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
+import {
+  isSubstantiveToolCall,
+  type ExperienceSignals,
+} from './experience-signals.js';
+import { ToolNames } from '../tools/tool-names.js';
+
+/** Window with substantive work but no trial-and-error signal: only the count
+ * backstop can trigger. */
+const SUBSTANTIVE_WINDOW: ExperienceSignals = {
+  retryArc: false,
+  userSteer: false,
+  hasSubstantiveWork: true,
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -285,23 +303,126 @@ describe('MemoryManager', () => {
       });
     });
 
-    it('skips below threshold', () => {
-      const mgr = new MemoryManager();
-      const result = mgr.scheduleSkillReview({
-        projectRoot: '/project',
+    it.each([
+      [
+        'rejects a retry arc below the experience floor',
+        AUTO_SKILL_EXPERIENCE_FLOOR - 1,
+        { retryArc: true, userSteer: false, hasSubstantiveWork: false },
+        ['skipped', 'below_threshold'],
+      ],
+      [
+        'accepts a retry arc at the experience floor',
+        AUTO_SKILL_EXPERIENCE_FLOOR,
+        { retryArc: true, userSteer: false, hasSubstantiveWork: false },
+        ['scheduled', undefined],
+      ],
+      [
+        'accepts a user steer at the experience floor',
+        AUTO_SKILL_EXPERIENCE_FLOOR,
+        { retryArc: false, userSteer: true, hasSubstantiveWork: false },
+        ['scheduled', undefined],
+      ],
+      [
+        'rejects a user steer below the experience floor',
+        AUTO_SKILL_EXPERIENCE_FLOOR - 1,
+        { retryArc: false, userSteer: true, hasSubstantiveWork: false },
+        ['skipped', 'below_threshold'],
+      ],
+      [
+        'rejects a read-only window below the backstop threshold',
+        10,
+        { retryArc: false, userSteer: false, hasSubstantiveWork: false },
+        ['skipped', 'below_threshold'],
+      ],
+      [
+        'rejects a read-only window at the backstop threshold',
+        AUTO_SKILL_THRESHOLD,
+        { retryArc: false, userSteer: false, hasSubstantiveWork: false },
+        ['skipped', 'below_threshold'],
+      ],
+      [
+        'accepts substantive work at the backstop threshold',
+        AUTO_SKILL_THRESHOLD,
+        SUBSTANTIVE_WINDOW,
+        ['scheduled', undefined],
+      ],
+    ] as const)(
+      '%s',
+      async (_name, toolCallCount, experienceSignals, expected) => {
+        const mgr = new MemoryManager();
+        const result = mgr.scheduleSkillReview({
+          projectRoot: '/project',
+          sessionId: 'sess',
+          history: [],
+          toolCallCount,
+          skillsModified: false,
+          experienceSignals,
+          config: makeMockConfig(),
+        });
+
+        expect([result.status, result.skippedReason]).toEqual(expected);
+        if (result.status === 'skipped') {
+          expect(runSkillReviewByAgent).not.toHaveBeenCalled();
+        }
+        await result.promise;
+      },
+    );
+
+    it.each([
+      [ToolNames.EXEC, AUTO_SKILL_THRESHOLD - 1, 'skipped'],
+      [ToolNames.EXEC, AUTO_SKILL_THRESHOLD, 'scheduled'],
+      [ToolNames.READ_FILE, AUTO_SKILL_THRESHOLD, 'skipped'],
+    ] as const)(
+      'evaluates a %s-only window of %i calls as %s',
+      async (toolName, count, expectedStatus) => {
+        const calls = Array.from({ length: count }, () => toolName);
+        const result = new MemoryManager().scheduleSkillReview({
+          projectRoot: '/project',
+          sessionId: 'sess',
+          history: [],
+          toolCallCount: calls.length,
+          skillsModified: false,
+          experienceSignals: {
+            retryArc: false,
+            userSteer: false,
+            hasSubstantiveWork: calls.some(isSubstantiveToolCall),
+          },
+          config: makeMockConfig(),
+        });
+
+        expect(result.status).toBe(expectedStatus);
+        if (expectedStatus === 'skipped') {
+          expect(result.skippedReason).toBe('below_threshold');
+          expect(runSkillReviewByAgent).not.toHaveBeenCalled();
+        }
+        await result.promise;
+      },
+    );
+
+    it('preserves the legacy count-only threshold when signals are omitted', async () => {
+      const below = new MemoryManager().scheduleSkillReview({
+        projectRoot: '/below',
         sessionId: 'sess',
         history: [],
-        toolCallCount: 1,
-        threshold: 2,
+        toolCallCount: AUTO_SKILL_THRESHOLD - 1,
         skillsModified: false,
         config: makeMockConfig(),
       });
+      expect([below.status, below.skippedReason]).toEqual([
+        'skipped',
+        'below_threshold',
+      ]);
 
-      expect(result).toEqual({
-        status: 'skipped',
-        skippedReason: 'below_threshold',
+      const atThreshold = new MemoryManager().scheduleSkillReview({
+        projectRoot: '/at-threshold',
+        sessionId: 'sess',
+        history: [],
+        toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
+        config: makeMockConfig(),
       });
-      expect(runSkillReviewByAgent).not.toHaveBeenCalled();
+      expect(atThreshold.status).toBe('scheduled');
+      await atThreshold.promise;
     });
 
     it('skips when skills were modified in session', () => {
@@ -311,8 +432,8 @@ describe('MemoryManager', () => {
         sessionId: 'sess',
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 20,
-        threshold: 2,
         skillsModified: true,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
       });
 
@@ -337,8 +458,8 @@ describe('MemoryManager', () => {
         sessionId: 'sess',
         history: [{ role: 'user' as const, parts: [{ text: 'hi' }] }],
         toolCallCount: 25,
-        threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
       };
 
@@ -367,15 +488,58 @@ describe('MemoryManager', () => {
       expect(third.taskId).not.toBe(first.taskId);
     });
 
+    it('reports below_threshold (not already_running) for a gate-failing window during an in-flight review', async () => {
+      // Pins the gate-before-in-flight ordering: `already_running` means the
+      // window would have triggered. A below-floor window must instead be
+      // classified as `below_threshold` so the skip reason stays accurate.
+      let resolveReview!: (v: { touchedSkillFiles: string[] }) => void;
+      vi.mocked(runSkillReviewByAgent).mockReturnValueOnce(
+        new Promise<{ touchedSkillFiles: string[] }>((resolve) => {
+          resolveReview = resolve;
+        }),
+      );
+
+      const mgr = new MemoryManager();
+      const baseParams = {
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user' as const, parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
+        config: makeMockConfig(),
+      };
+
+      const first = mgr.scheduleSkillReview(baseParams);
+      expect(first.status).toBe('scheduled');
+
+      // A window below the fast-path floor cannot trigger even with a
+      // retry arc, so the gate must reject it before the in-flight check.
+      const second = mgr.scheduleSkillReview({
+        ...baseParams,
+        toolCallCount: AUTO_SKILL_EXPERIENCE_FLOOR - 1,
+        experienceSignals: {
+          retryArc: true,
+          userSteer: false,
+          hasSubstantiveWork: false,
+        },
+      });
+      expect(second.status).toBe('skipped');
+      expect(second.skippedReason).toBe('below_threshold');
+
+      resolveReview({ touchedSkillFiles: [] });
+      await first.promise;
+    });
+
     it('schedules skill review at threshold', async () => {
       const mgr = new MemoryManager();
       const result = mgr.scheduleSkillReview({
         projectRoot: '/project',
         sessionId: 'sess',
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 2,
-        threshold: 2,
+        toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         maxTurns: 3,
         timeoutMs: 30_000,
@@ -439,8 +603,8 @@ describe('MemoryManager', () => {
         sessionId: 'sess',
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 25,
-        threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: true,
       });
@@ -475,8 +639,8 @@ describe('MemoryManager', () => {
         sessionId: 'sess',
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 25,
-        threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: true,
       }).promise!;
@@ -499,8 +663,8 @@ describe('MemoryManager', () => {
         sessionId: 'sess',
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 25,
-        threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: false,
       });
@@ -538,8 +702,8 @@ describe('MemoryManager', () => {
         sessionId: 'sess',
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 25,
-        threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: true,
       }).promise!;
@@ -700,8 +864,8 @@ describe('MemoryManager', () => {
         sessionId: 'sess',
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 25,
-        threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: true,
       });
@@ -800,8 +964,8 @@ describe('MemoryManager', () => {
         sessionId: 'sess',
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 25,
-        threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: true,
       }).promise!;
@@ -1041,9 +1205,9 @@ describe('MemoryManager', () => {
         sessionId: 'sess-extract',
         history: [{ role: 'user', parts: [{ text: 'do some work' }] }],
         toolCallCount: 25,
-        threshold: 20,
         enabled: true,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config,
       });
 
@@ -1065,9 +1229,9 @@ describe('MemoryManager', () => {
         sessionId: 'sess-1',
         history: [{ role: 'user', parts: [{ text: 'work' }] }],
         toolCallCount: 25,
-        threshold: 20,
         enabled: true,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config,
       });
 
@@ -1627,8 +1791,8 @@ describe('MemoryManager', () => {
         sessionId: 'sess',
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 25,
-        threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config,
       });
 
@@ -1659,8 +1823,8 @@ describe('MemoryManager', () => {
         sessionId: 'sess',
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 25,
-        threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config,
       });
       expect(first.status).toBe('scheduled');
@@ -1675,8 +1839,8 @@ describe('MemoryManager', () => {
         sessionId: 'sess',
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 25,
-        threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config,
       });
 

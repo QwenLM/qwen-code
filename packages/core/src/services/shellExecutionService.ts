@@ -163,6 +163,14 @@ export function isSignalTermination(
   return signal !== null && signal !== 0;
 }
 
+function isTimeoutAbortReason(reason: unknown): boolean {
+  try {
+    return (reason as { name?: unknown } | null)?.name === 'TimeoutError';
+  } catch {
+    return false;
+  }
+}
+
 /** A structured result from a shell command execution. */
 export interface ShellExecutionResult {
   /**
@@ -186,7 +194,7 @@ export interface ShellExecutionResult {
   signal: number | null;
   /** An error object if the process failed to spawn. */
   error: Error | null;
-  /** A boolean indicating if the command was aborted by the user. */
+  /** Whether cancellation/timeout prevented spawn or drove live termination. */
   aborted: boolean;
   /**
    * True iff execute() returned because of a background-promote abort
@@ -828,6 +836,7 @@ export class ShellExecutionService {
         const sniffChunks: Buffer[] = [];
         let error: Error | null = null;
         let exited = false;
+        let cancelKillDispatched = false;
 
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
@@ -959,6 +968,11 @@ export class ShellExecutionService {
           signal: NodeJS.Signals | null,
         ) => {
           const { finalBuffer } = cleanup();
+          const normalizedSignal = signal ? os.constants.signals[signal] : null;
+          // A timeout abort keeps merge-base semantics: shell.ts keys its
+          // timeout copy off `aborted`, so a command that trap-exits 0 on
+          // the timeout kill must not read as plain success.
+          const timeoutAbort = isTimeoutAbortReason(abortSignal.reason);
           // Ensure we don't add an extra newline if stdout already ends with one.
           const separator = stdout.endsWith('\n') ? '' : '\n';
           const combinedOutput =
@@ -986,9 +1000,28 @@ export class ShellExecutionService {
             rawOutput: finalBuffer,
             output: boundedOutput,
             exitCode: code,
-            signal: signal ? os.constants.signals[signal] : null,
+            signal: normalizedSignal,
             error,
-            aborted: abortSignal.aborted,
+            // A cancel that lands in the zombie window (kernel reaped the
+            // child, Node has not delivered 'exit' yet) cannot be seen by
+            // performCancelKill's guard, so cancelKillDispatched alone
+            // retro-flags a completed command. Classify at settlement from
+            // what the exit itself says: a kill-caused death carries a
+            // signal (POSIX SIGTERM/SIGKILL) or a non-zero taskkill exit
+            // code (win32); a natural exit 0 that was already pending
+            // resolves aborted: false and keeps its output. Ceilings: a
+            // natural NON-zero exit racing a cancel still reads as
+            // cancelled (harm ≈ merge-base baseline), and a kill-caused
+            // graceful exit 0 on a user cancel reads as completed (the
+            // trade R25-1 prescribed); timeout aborts are exempt via
+            // timeoutAbort so the timeout copy never loses `aborted`.
+            // Closing either needs kernel-side pending-exit insight, not a
+            // liveness probe (a zombie answers kill(pid, 0) successfully).
+            aborted:
+              cancelKillDispatched &&
+              (isSignalTermination(normalizedSignal) ||
+                code !== 0 ||
+                timeoutAbort),
             pid: undefined,
             executionMethod: 'child_process',
           });
@@ -1340,7 +1373,15 @@ export class ShellExecutionService {
         };
 
         const performCancelKill = async (): Promise<void> => {
-          if (!child.pid || exited) return;
+          if (
+            !child.pid ||
+            exited ||
+            child.exitCode !== null ||
+            child.signalCode !== null
+          ) {
+            return;
+          }
+          cancelKillDispatched = true;
           if (isWindows) {
             const killer = cpSpawn(
               WINDOWS_TASKKILL,
@@ -1581,11 +1622,12 @@ export class ShellExecutionService {
         const sniffChunks: Buffer[] = [];
         const error: Error | null = null;
         let exited = false;
-        // Set the moment performCancelKill actually proceeds (a cancel reached
-        // us before the shell exited). The finalizer reads THIS, not a late
+        // Set only when performCancelKill actually dispatches a kill.
+        // The finalizer reads THIS, not a late
         // abortSignal.aborted check, to decide tree-kill vs shell-pid-only — an
         // abort that arrives after a normal exit must not retro-flag the reap.
         let cancelKillDispatched = false;
+        let cancelAfterLeaderExit = false;
 
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
@@ -1920,6 +1962,13 @@ export class ShellExecutionService {
 
         const exitDisposable = ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
+            const normalizedSignal = signal === 0 ? null : (signal ?? null);
+            const timeoutAbort = isTimeoutAbortReason(abortSignal.reason);
+            // Normal exits may intentionally leave background children alive.
+            const pendingCancel =
+              cancelAfterLeaderExit && isSignalTermination(signal ?? null)
+                ? performCancelKill(true)
+                : undefined;
             exited = true;
             abortSignal.removeEventListener('abort', abortHandler);
 
@@ -1928,6 +1977,7 @@ export class ShellExecutionService {
               let fullOutput = '';
 
               try {
+                await pendingCancel;
                 try {
                   render(true);
                 } catch (e) {
@@ -1974,9 +2024,13 @@ export class ShellExecutionService {
                   rawOutput: finalBuffer,
                   output: fullOutput,
                   exitCode,
-                  signal: signal === 0 ? null : (signal ?? null),
+                  signal: normalizedSignal,
                   error,
-                  aborted: abortSignal.aborted,
+                  aborted:
+                    cancelKillDispatched &&
+                    (isSignalTermination(normalizedSignal) ||
+                      exitCode !== 0 ||
+                      timeoutAbort),
                   pid: ptyProcess.pid,
                   executionMethod:
                     (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ??
@@ -2405,11 +2459,22 @@ export class ShellExecutionService {
           }
         };
 
-        const performCancelKill = async (): Promise<void> => {
+        const performCancelKill = async (
+          afterLeaderExit = false,
+        ): Promise<void> => {
           if (!ptyProcess.pid || exited) return;
+          if (
+            !ShellExecutionService.isPtyActive(
+              afterLeaderExit ? -ptyProcess.pid : ptyProcess.pid,
+            )
+          ) {
+            cancelAfterLeaderExit =
+              os.platform() !== 'win32' && !afterLeaderExit;
+            return;
+          }
           // Record that a cancel — not a natural exit — drove this teardown, so
-          // the finalizer reap tree-kills. Guarded by `exited` above, so a late
-          // abort after a normal exit returns early and never sets this.
+          // the finalizer reap tree-kills. The liveness check also covers an
+          // exit whose onExit callback has not been delivered yet.
           cancelKillDispatched = true;
           if (os.platform() === 'win32') {
             // Tree-kill SYNCHRONOUSLY (spawnSync, like windowsStrategy.killPty):
@@ -2479,7 +2544,10 @@ export class ShellExecutionService {
               // Send SIGTERM first to allow graceful shutdown
               process.kill(-ptyProcess.pid, 'SIGTERM');
               await new Promise((res) => setTimeout(res, SIGKILL_TIMEOUT_MS));
-              if (!exited) {
+              if (
+                !exited ||
+                ShellExecutionService.isPtyActive(-ptyProcess.pid)
+              ) {
                 // Escalate to SIGKILL if still running
                 process.kill(-ptyProcess.pid, 'SIGKILL');
               }
