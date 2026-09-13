@@ -852,8 +852,7 @@ function DaemonStatusDialogInner({
                   // would be CSP-blocked from here anyway). On the current
                   // target the typed token would overwrite the stored
                   // credential before the page reloads, so probe it first —
-                  // 'self' permits the probe, and a 401 is answered without
-                  // destroying the working token.
+                  // a non-success response must not destroy the working token.
                   if (daemonOrigin !== workspace.baseUrl) {
                     setConnectionError('');
                     onChangeTarget(daemonOrigin, token);
@@ -870,8 +869,12 @@ function DaemonStatusDialogInner({
                     signal: controller.signal,
                   })
                     .then((response) => {
-                      if (response.status === 401) {
-                        setConnectionError(t('daemon.connection.authFailed'));
+                      if (!response.ok) {
+                        setConnectionError(
+                          response.status === 401
+                            ? t('daemon.connection.authFailed')
+                            : t('daemon.connection.notReady'),
+                        );
                         return;
                       }
                       setConnectionError('');

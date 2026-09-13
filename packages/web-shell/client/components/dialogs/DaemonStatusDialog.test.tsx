@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonMetricsSeriesBucket } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
+import { getDaemonToken, persistDaemonToken } from '../../config/daemon';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -395,29 +396,38 @@ describe('DaemonStatusDialog', () => {
 
   // The address field is pre-filled with the current target, so submitting a
   // typed token there must probe it before the stored credential is replaced:
-  // a 401 keeps the old token and reports the rejection instead of navigating.
-  it('probes a typed token on the current target and keeps the stored credential on a 401', async () => {
-    const onChangeTarget = vi.fn();
-    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 401 });
-    vi.stubGlobal('fetch', fetchMock);
-    try {
-      mount('en', onChangeTarget);
-      const token = typeToken('bad-token');
-      await submitConnect(token);
-      expect(fetchMock).toHaveBeenCalledWith(
-        'http://localhost:4170/capabilities',
-        expect.objectContaining({
-          headers: { Authorization: 'Bearer bad-token' },
-        }),
-      );
-      expect(onChangeTarget).not.toHaveBeenCalled();
-      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
-        'rejected',
-      );
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
+  // a failed probe keeps the old token instead of navigating.
+  it.each([
+    [401, 'rejected'],
+    [503, 'did not accept'],
+  ])(
+    'keeps the stored credential when a same-target probe returns %i',
+    async (status, message) => {
+      const onChangeTarget = vi.fn();
+      const fetchMock = vi.fn().mockResolvedValue({ ok: false, status });
+      vi.stubGlobal('fetch', fetchMock);
+      try {
+        persistDaemonToken('working-token', 'http://localhost:4170');
+        mount('en', onChangeTarget);
+        const token = typeToken('bad-token');
+        await submitConnect(token);
+        expect(fetchMock).toHaveBeenCalledWith(
+          'http://localhost:4170/capabilities',
+          expect.objectContaining({
+            headers: { Authorization: 'Bearer bad-token' },
+          }),
+        );
+        expect(onChangeTarget).not.toHaveBeenCalled();
+        expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
+        expect(
+          container!.querySelector('[role="alert"]')!.textContent,
+        ).toContain(message);
+      } finally {
+        persistDaemonToken('', 'http://localhost:4170');
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it('switches the current target once the typed token probes green', async () => {
     const onChangeTarget = vi.fn();
