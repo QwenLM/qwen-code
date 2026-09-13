@@ -128,6 +128,9 @@ async function measureTimeToFastResultMs(
       config: {
         getSessionId: () => 'session-scan-bench',
         getModel: () => 'qwen3-coder-plus',
+        // No trust answer now reads as untrusted (empty project universe in
+        // local-memory mode); production callers always pass a real Config.
+        isTrustedFolder: () => true,
       } as Config,
       documentCache,
       onFastResult: () => {

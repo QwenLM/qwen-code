@@ -167,6 +167,49 @@ describe('memory metadata migration', () => {
     expect(status.legacyFiles).toBe(0);
   });
 
+  it('reports not-ready when a memory subdirectory is unreadable', async () => {
+    // chmod 000 does not block root, where this scenario cannot run.
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
+    // The corpus holds only a fully-structured document, so it is 'ready'
+    // today; the unreadable subdirectory can hide legacy files, and ready
+    // must flip false or the one-way legacy -> structured switch commits
+    // with part of the corpus permanently unscanned.
+    await write(
+      'project/structured.md',
+      [
+        '---',
+        'name: Structured',
+        'description: Complete metadata',
+        'type: project',
+        'category: project_introduction',
+        'keywords:',
+        '  - memory migration',
+        '  - structured memory',
+        'usage_scenarios:',
+        '  - Testing migration',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+    const locked = path.join(memoryRoot, 'reference');
+    await fs.mkdir(locked, { recursive: true });
+    await fs.writeFile(path.join(locked, 'hidden.md'), legacyContent());
+    await fs.chmod(locked, 0o000);
+    try {
+      const status = await scanMemoryMetadataCorpusStatus({
+        projectRoot,
+        teamMemoryEnabled: false,
+        trustedProject: true,
+      });
+
+      expect(status.ready).toBe(false);
+    } finally {
+      await fs.chmod(locked, 0o700);
+    }
+  });
+
   it('excludes protected pinned files from migration and readiness', async () => {
     const userRoot = getUserAutoMemoryRoot();
     const pinnedFile = path.join(

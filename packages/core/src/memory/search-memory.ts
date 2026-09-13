@@ -202,6 +202,15 @@ function normalizedOffsetToSourceOffset(
       high = middle;
     }
   }
+  // The lower bound overshoots the target character by one source index
+  // whenever normalization skips the target value — e.g. at a word boundary,
+  // where trimming makes |norm(prefix)| jump from `target - 1` straight to
+  // `target + 1`. A single source character can only add normalized
+  // characters at its own position, so one step back always lands on the
+  // character that produced the target normalized offset.
+  if (normalizeSearchText(source.slice(0, low)).length > normalizedOffset) {
+    low = Math.max(0, low - 1);
+  }
   return low;
 }
 
@@ -735,13 +744,7 @@ function selectBodyWindowOffset(
     bestStart + SEARCH_BODY_WINDOW_CHARS,
     normalizedBody.length,
   );
-  let end = normalizedOffsetToSourceOffset(searchableBody, normalizedEnd);
-  if (
-    normalizeSearchText(searchableBody.slice(0, end)).length > normalizedEnd &&
-    /\s/u.test(searchableBody[end - 2] ?? '')
-  ) {
-    end -= 1;
-  }
+  const end = normalizedOffsetToSourceOffset(searchableBody, normalizedEnd);
   return { offset, maxChars: end - offset };
 }
 

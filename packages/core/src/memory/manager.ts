@@ -259,7 +259,7 @@ export interface ScheduleMetadataMigrationParams {
 export interface MetadataMigrationScheduleResult {
   status: 'scheduled' | 'skipped';
   taskId?: string;
-  skippedReason?: 'complete' | 'running' | 'memory_pressure';
+  skippedReason?: 'complete' | 'running' | 'memory_pressure' | 'cancelled';
   promise?: Promise<MemoryTaskRecord>;
 }
 
@@ -764,29 +764,49 @@ export class MemoryManager {
     ) {
       return { status: 'skipped', skippedReason: 'complete' };
     }
+    // Register the abort controller (under a reserved id) together with the
+    // domain reservation, BEFORE the candidate scan: the scan reads every
+    // memory file in the corpus and must be covered by cancelMigrations() /
+    // requestShutdown(), or a forked migration agent can still be spawned
+    // after shutdown was requested. The scan is also tracked so drain()
+    // covers it; the controller is re-keyed to the record id once the
+    // record exists.
+    const scanTaskId = `migration-scan:${domain}`;
+    const abortController = new AbortController();
+    this.migrationAbortControllers.set(scanTaskId, abortController);
     activeMigrationDomains.add(domain);
+    let candidatesFound: boolean;
     try {
-      if (
-        (
-          await Promise.all(
-            roots.map((candidateRoot) =>
-              scanMemoryMetadataMigrationCandidates(
-                candidateRoot,
-                params.scope,
-              ),
+      candidatesFound = await this.track(
+        scanTaskId,
+        Promise.all(
+          roots.map((candidateRoot) =>
+            scanMemoryMetadataMigrationCandidates(
+              candidateRoot,
+              params.scope,
+              abortController.signal,
             ),
-          )
-        ).every((candidates) => candidates.length === 0)
-      ) {
-        activeMigrationDomains.delete(domain);
-        return { status: 'skipped', skippedReason: 'complete' };
-      }
+          ),
+        ).then((scans) => scans.some((candidates) => candidates.length > 0)),
+      );
     } catch (error) {
       activeMigrationDomains.delete(domain);
+      this.migrationAbortControllers.delete(scanTaskId);
+      if (abortController.signal.aborted) {
+        return { status: 'skipped', skippedReason: 'cancelled' };
+      }
       throw error;
     }
+    this.migrationAbortControllers.delete(scanTaskId);
+    if (abortController.signal.aborted) {
+      activeMigrationDomains.delete(domain);
+      return { status: 'skipped', skippedReason: 'cancelled' };
+    }
+    if (!candidatesFound) {
+      activeMigrationDomains.delete(domain);
+      return { status: 'skipped', skippedReason: 'complete' };
+    }
     const record = makeTaskRecord('migration', params.projectRoot);
-    const abortController = new AbortController();
     this.migrationAbortControllers.set(record.id, abortController);
     this.migrationInFlightByDomain.set(domain, record.id);
     this.storeWith(record, {
@@ -1659,8 +1679,12 @@ export class MemoryManager {
   }
 
   cancelMigrations(): void {
-    for (const taskId of [...this.migrationAbortControllers.keys()]) {
-      this.cancelTask(taskId);
+    for (const [taskId, controller] of [...this.migrationAbortControllers]) {
+      // A scan-phase reservation (registered before its task record exists)
+      // makes cancelTask return false; abort its controller directly.
+      if (!this.cancelTask(taskId)) {
+        controller.abort();
+      }
     }
   }
 
@@ -2231,21 +2255,29 @@ export class MemoryManager {
     now = new Date(),
   ): Promise<AutoMemoryDreamResult> {
     await ensureAutoMemoryScaffold(projectRoot, now);
+    const alreadyRunning: AutoMemoryDreamResult = {
+      touchedTopics: [],
+      createdEntries: 0,
+      updatedEntries: 0,
+      deletedEntries: 0,
+      dedupedEntries: 0,
+      splitEntries: 0,
+      keywordBackfilled: 0,
+      systemMessage:
+        'Managed auto-memory dream skipped: another dream is already running.',
+    };
+    // Mirror scheduleDream's sweep: acquireDreamLock creates with 'wx', so
+    // it fails on ANY existing lock — including one orphaned by a crashed
+    // CLI. Sweep by holder liveness first or that lock blocks /dream for
+    // the whole session; the EEXIST branch below stays as the race backstop.
+    if (await dreamLockExists(projectRoot)) {
+      return alreadyRunning;
+    }
     try {
       await acquireDreamLock(projectRoot);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-        return {
-          touchedTopics: [],
-          createdEntries: 0,
-          updatedEntries: 0,
-          deletedEntries: 0,
-          dedupedEntries: 0,
-          splitEntries: 0,
-          keywordBackfilled: 0,
-          systemMessage:
-            'Managed auto-memory dream skipped: another dream is already running.',
-        };
+        return alreadyRunning;
       }
       throw error;
     }
@@ -2258,7 +2290,20 @@ export class MemoryManager {
         { trigger: 'manual', recordMetadata: true, sessionId },
       );
     } finally {
-      await releaseDreamLock(projectRoot);
+      // Mirror runDream's guarded release: letting a release failure
+      // propagate would overwrite a successful result, and the flag lets the
+      // next scheduleDream force-clean the leaked lock instead of reporting
+      // 'locked' until the staleness window expires.
+      try {
+        await releaseDreamLock(projectRoot);
+      } catch (error) {
+        this.dreamLockReleaseFailed = true;
+        const message = error instanceof Error ? error.message : String(error);
+        debugLogger.warn(
+          `Failed to release dream lock after a manual dream: ${message}. ` +
+            `Next scheduleDream() will force-clean the leaked lock.`,
+        );
+      }
     }
   }
 

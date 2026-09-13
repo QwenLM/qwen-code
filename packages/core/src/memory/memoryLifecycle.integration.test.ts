@@ -344,6 +344,9 @@ describe('managed auto-memory lifecycle integration', () => {
     const recall = await resolveRelevantAutoMemoryPromptForQuery(
       projectRoot,
       'What is the overflow zephyr codeword?',
+      // No trust answer now reads as untrusted (empty project universe in
+      // local-memory mode); declare the trusted folder as production does.
+      { config: { isTrustedFolder: () => true } as Config },
     );
 
     expect(recall.strategy).toBe('heuristic');
@@ -418,6 +421,9 @@ describe('managed auto-memory lifecycle integration', () => {
       const recall = await resolveRelevantAutoMemoryPromptForQuery(
         projectRoot,
         'What is the overflow zephyr codeword?',
+        // No trust answer now reads as untrusted (empty project universe in
+        // local-memory mode); declare the trusted folder as production does.
+        { config: { isTrustedFolder: () => true } as Config },
       );
       expect(recall.selectedDocs.map((doc) => doc.filePath)).toContain(
         targetPath,

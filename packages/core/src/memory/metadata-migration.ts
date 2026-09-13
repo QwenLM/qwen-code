@@ -150,12 +150,16 @@ function splitFrontmatter(filePath: string, content: string): FrontmatterParts {
   };
 }
 
-async function listMemoryFiles(root: string) {
+async function listMemoryFiles(
+  root: string,
+  onUnreadableDir?: (relativeDir: string) => void,
+) {
   return (
     await listTrustedMemoryMarkdownFiles(
       root,
       getMemoryRootTrustedAnchor(root),
       AUTO_MEMORY_INDEX_FILENAME,
+      { onUnreadableDir },
     )
   ).filter(
     ({ relativePath }) =>
@@ -167,12 +171,16 @@ async function listMemoryFiles(root: string) {
 export async function scanMemoryMetadataMigrationCandidates(
   root: string,
   scope: AutoMemoryScope,
+  abortSignal?: AbortSignal,
 ): Promise<MemoryMetadataMigrationCandidate[]> {
   const candidates: MemoryMetadataMigrationCandidate[] = [];
   for (const {
     relativePath,
     resolvedPath: trustedFile,
   } of await listMemoryFiles(root)) {
+    // The scan reads every file in the corpus; let a shutdown cancel it
+    // instead of holding the exit window hostage.
+    abortSignal?.throwIfAborted();
     const filePath = path.join(root, relativePath);
     let content: string;
     try {
@@ -227,11 +235,19 @@ export async function scanMemoryMetadataCorpusStatus(params: {
       scope: 'team',
     });
   }
+  // An unreadable (EACCES) subdirectory is skipped by the walk, so its
+  // legacy files are invisible here — the corpus must not report ready
+  // (which would trigger the one-way legacy -> structured switch) while
+  // part of it could not be scanned.
+  let unreadableDirs = 0;
   const scannedRoots = await Promise.all(
     roots.map(async ({ root, scope }) => {
       const files = [];
       for (const { relativePath, resolvedPath } of await listMemoryFiles(
         root,
+        () => {
+          unreadableDirs += 1;
+        },
       )) {
         let content: string;
         try {
@@ -275,7 +291,7 @@ export async function scanMemoryMetadataCorpusStatus(params: {
       .join('\0'),
   );
   return {
-    ready: allCandidates.length === 0,
+    ready: allCandidates.length === 0 && unreadableDirs === 0,
     revision,
     files: allFiles.length,
     legacyFiles: allCandidates.length,

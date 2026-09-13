@@ -39,6 +39,14 @@ export interface AutoMemoryDreamResult {
   dedupedEntries: number;
   splitEntries: number;
   keywordBackfilled: number;
+  /**
+   * True when the on-disk corpus changed in ways the reported counters do
+   * not cover: the dream agent holds a shell, so an unreported write or
+   * delete never reaches the (agent-reported) counters, and MEMORY.md is
+   * excluded from the snapshots entirely. Drives the fail-closed index
+   * rebuild; the counters stay agent-attributed.
+   */
+  hasFilesystemChanges?: boolean;
   systemMessage?: string;
 }
 
@@ -152,10 +160,19 @@ export function validateDreamSnapshotChanges(
   before: Map<string, DreamSnapshotEntry>,
   after: Map<string, DreamSnapshotEntry>,
   includedPaths?: ReadonlySet<string>,
+  options: { skipPreviouslyInvalid?: boolean } = {},
 ): void {
   for (const [relativePath, entry] of after) {
     if (includedPaths && !includedPaths.has(relativePath)) continue;
     const previous = before.get(relativePath);
+    // A document already invalid before the run is not this run's failure —
+    // skipping it keeps pre-existing junk (or a concurrent writer's
+    // half-saved file) from failing every dream. Only the unfiltered pass
+    // skips: a path the agent reported writing is held to the strict guard,
+    // because repairing invalid documents is the dream's job.
+    if (options.skipPreviouslyInvalid && previous && !previous.valid) {
+      continue;
+    }
     if (previous?.content !== entry.content && !entry.valid) {
       throw new Error(
         `Dream produced an invalid memory document: ${relativePath}`,
@@ -220,17 +237,38 @@ async function runDreamByAgent(
       result.filesWritten ?? result.filesTouched,
     );
     validateDreamSnapshotChanges(before, written, writtenPaths);
+    // Fail closed on the filesystem, not the agent's self-report: the dream
+    // agent holds a shell, so a write it does not report (a heredoc with
+    // broken frontmatter, an `rm`) still lands on disk. Validate every
+    // document whose content changed, not only the reported paths — this
+    // must fire BEFORE applyDreamOperations unlinks the merge sources.
+    validateDreamSnapshotChanges(before, written, undefined, {
+      skipPreviouslyInvalid: true,
+    });
     abortSignal?.throwIfAborted();
     operations = await applyDreamOperations(memoryRoot, before, abortSignal);
     after = await snapshotDreamFiles(memoryRoot);
     for (const deletedPath of operations.deletedPaths) {
       writtenPaths.add(deletedPath);
     }
+    // The reported counters keep the agent-reported filter (unattributed
+    // concurrent writes must not count as the dream's work), but the
+    // rebuild gate needs the unfiltered diff.
     const changes = diffDreamSnapshots(before, after, writtenPaths);
+    const observed = diffDreamSnapshots(before, after);
     return {
       ...changes,
       dedupedEntries: operations.dedupedEntries,
       splitEntries: operations.splitEntries,
+      hasFilesystemChanges:
+        observed.createdEntries +
+          observed.updatedEntries +
+          observed.deletedEntries >
+          0 ||
+        // MEMORY.md is the snapshots' excluded filename, so the diff can
+        // never see a hand-written index; its rebuild trigger comes from
+        // the reported write set.
+        writtenPaths.has(AUTO_MEMORY_INDEX_FILENAME),
       systemMessage: `Managed auto-memory dream (agent): ${
         result.finalText
           ? result.finalText.trim().slice(0, 300)
@@ -321,7 +359,9 @@ export async function runManagedAutoMemoryDream(
     agentResult.createdEntries +
       agentResult.updatedEntries +
       agentResult.deletedEntries >
-      0 || agentResult.touchedTopics.length > 0;
+      0 ||
+    agentResult.touchedTopics.length > 0 ||
+    agentResult.hasFilesystemChanges === true;
   if (hasChanges) {
     await rebuildManagedAutoMemoryIndex(projectRoot);
   }

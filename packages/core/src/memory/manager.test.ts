@@ -333,6 +333,51 @@ describe('MemoryManager', () => {
       await scheduled.promise;
     });
 
+    it('cancels a migration during the candidate scan and never spawns the agent', async () => {
+      // The scan phase reads the whole corpus and used to run untracked:
+      // cancelMigrations() had no controller to abort and drain() no promise
+      // to await, so a forked migration agent could still be spawned after
+      // shutdown was requested.
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      const runMigration = vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      );
+      let releaseScan: (() => void) | undefined;
+      vi.spyOn(
+        metadataMigration,
+        'scanMemoryMetadataMigrationCandidates',
+      ).mockImplementationOnce(
+        () =>
+          new Promise<metadataMigration.MemoryMetadataMigrationCandidate[]>(
+            (resolve) => {
+              releaseScan = () => resolve([]);
+            },
+          ),
+      );
+      const manager = new MemoryManager();
+      const config = makeMockConfig();
+
+      const scheduled = manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'project',
+        config,
+      });
+      await vi.waitFor(() => expect(releaseScan).toBeDefined());
+
+      // drain() must see the scan phase, not just the forked-agent phase.
+      await expect(manager.drain({ timeoutMs: 50 })).resolves.toBe(false);
+
+      manager.cancelMigrations();
+      releaseScan?.();
+
+      await expect(scheduled).resolves.toEqual({
+        status: 'skipped',
+        skippedReason: 'cancelled',
+      });
+      expect(runMigration).not.toHaveBeenCalled();
+    });
+
     it('cancels a running migration without overwriting the terminal state', async () => {
       await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
       let capturedSignal: AbortSignal | undefined;
@@ -1611,6 +1656,92 @@ describe('MemoryManager', () => {
 
       expect(result.systemMessage).toContain('already running');
       expect(runManagedAutoMemoryDream).not.toHaveBeenCalled();
+    });
+
+    it('sweeps a stale lock orphaned by a crashed process before a manual dream', async () => {
+      // acquireDreamLock creates with 'wx', so it fails on ANY existing
+      // lock — including one a crashed CLI left behind. The scheduled path
+      // sweeps by holder liveness; the manual path must do the same or the
+      // orphan blocks /dream for the whole session.
+      const mgr = new MemoryManager();
+      const config = makeMockConfig();
+      const lockPath = getAutoMemoryConsolidationLockPath(projectRoot);
+      await fs.writeFile(lockPath, String(process.pid));
+      const stale = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      await fs.utimes(lockPath, stale, stale);
+
+      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+
+      expect(runManagedAutoMemoryDream).toHaveBeenCalled();
+      expect(result.systemMessage ?? '').not.toContain('already running');
+      // The swept-then-released lock is gone after the run.
+      await expect(fs.stat(lockPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+
+    it('returns the dream result when the lock release fails, and lets the next scheduleDream recover', async () => {
+      // A failed release (Windows EPERM/EBUSY, ENOENT race) used to replace
+      // the successful result with the release error AND leave the lock on
+      // disk owned by our own live PID — dreamLockExists() then reports
+      // 'locked' until the staleness window expires. The release is guarded
+      // and flagged instead, so the next scheduleDream force-cleans it.
+      const lockPath = getAutoMemoryConsolidationLockPath(projectRoot);
+      const mgr = new MemoryManager(async () => ['sess-9']);
+      const config = makeMockConfig();
+      vi.mocked(runManagedAutoMemoryDream).mockImplementation(async () => {
+        // Replace the acquired lock file with a directory: fs.rm without
+        // recursive then fails with ERR_FS_EISDIR on every platform.
+        await fs.rm(lockPath, { force: true });
+        await fs.mkdir(lockPath);
+        return {
+          touchedTopics: ['project'],
+          createdEntries: 1,
+          updatedEntries: 0,
+          deletedEntries: 0,
+          dedupedEntries: 0,
+          splitEntries: 0,
+          keywordBackfilled: 0,
+          systemMessage: 'Managed auto-memory dream (agent): consolidated',
+        };
+      });
+
+      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+      expect(result.systemMessage).toContain('consolidated');
+      // The release failed: the lock path is still occupied.
+      await expect(fs.stat(lockPath)).resolves.toBeDefined();
+
+      // Restore the leaked-lock shape (fresh mtime, our own live PID): the
+      // staleness sweep cannot clear it, only the release-failed flag can.
+      await fs.rmdir(lockPath);
+      await fs.writeFile(lockPath, String(process.pid));
+
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
+        touchedTopics: [],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+        systemMessage: undefined,
+      });
+      const scheduled = await mgr.scheduleDream({
+        projectRoot,
+        sessionId: 'sess-2',
+        config,
+        now: new Date('2026-04-02T10:00:00.000Z'),
+        minHoursBetweenDreams: 0,
+        minSessionsBetweenDreams: 1,
+      });
+
+      expect(scheduled).not.toMatchObject({
+        status: 'skipped',
+        skippedReason: 'locked',
+      });
+      if (scheduled.status === 'scheduled') {
+        await scheduled.promise;
+      }
     });
 
     it('skips when dream is disabled in config', async () => {

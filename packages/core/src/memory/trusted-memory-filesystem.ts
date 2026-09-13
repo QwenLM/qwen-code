@@ -31,6 +31,13 @@ export interface TrustedMemoryAccessOptions {
    * symlink-screened either way.
    */
   followRootSymlink?: boolean;
+  /**
+   * Called once per subdirectory whose readdir fails with EACCES. Without
+   * this hook the walk skips an unreadable directory silently, so callers
+   * would report a partial scan as complete. ENOENT (entry unlinked
+   * mid-walk) stays silent.
+   */
+  onUnreadableDir?: (relativeDir: string) => void;
 }
 
 export async function resolveTrustedMemoryRoot(
@@ -132,6 +139,13 @@ export async function listTrustedMemoryMarkdownFiles(
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== 'ENOENT' && code !== 'EACCES') throw error;
+        // A subdirectory this process cannot read leaves the walk silently
+        // partial; surface it so scan callers can mark the scope incomplete.
+        // File-entry EACCES (a realpath race) stays quiet — the per-file
+        // read failure counter covers those.
+        if (code === 'EACCES' && entry.isDirectory()) {
+          options.onUnreadableDir?.(relativePath);
+        }
       }
     }
   };

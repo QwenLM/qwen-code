@@ -45,6 +45,7 @@ const MAX_STRUCTURED_MEMORY_KEYWORDS = 6;
 export type AutoMemoryScanIncompleteReason =
   | 'root_read_failed'
   | 'file_read_failed'
+  | 'dir_read_failed'
   | 'file_limit'
   | 'ref_collision';
 
@@ -437,7 +438,11 @@ export function parseAutoMemoryTopicDocument(
   };
 }
 
-async function listMarkdownFiles(root: string, scope: AutoMemoryScope) {
+async function listMarkdownFiles(
+  root: string,
+  scope: AutoMemoryScope,
+  onUnreadableDir?: (relativeDir: string) => void,
+) {
   return listTrustedMemoryMarkdownFiles(
     root,
     getMemoryRootTrustedAnchor(root),
@@ -448,7 +453,7 @@ async function listMarkdownFiles(root: string, scope: AutoMemoryScope) {
     // committed symlink would redirect the scan — and every injected
     // project/team document — anywhere the user can read. The write side
     // already rejects that shape (TeamMemoryRootSecurityError).
-    { followRootSymlink: scope === 'user' },
+    { followRootSymlink: scope === 'user', onUnreadableDir },
   );
 }
 
@@ -486,8 +491,13 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
   rootError?: unknown;
 }> {
   let files: Awaited<ReturnType<typeof listMarkdownFiles>>;
+  // The walk skips an unreadable (EACCES) subdirectory without failing, so
+  // count them here: a partially scanned root must not report complete.
+  let unreadableDirs = 0;
   try {
-    files = await listMarkdownFiles(root, opts.scope);
+    files = await listMarkdownFiles(root, opts.scope, () => {
+      unreadableDirs += 1;
+    });
   } catch (error) {
     debugLogger.debug(`failed to list memory root ${root}`, error);
     return {
@@ -559,6 +569,13 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
       scope: opts.scope,
       reason: 'file_read_failed',
       discovered: files.length,
+      returned: returnedDocs.length,
+    });
+  }
+  if (unreadableDirs > 0) {
+    incompleteScopes.push({
+      scope: opts.scope,
+      reason: 'dir_read_failed',
       returned: returnedDocs.length,
     });
   }
@@ -772,11 +789,14 @@ export async function scanAllAutoMemoryTopicDocuments(
   // Dedupe on the same scope:relativePath key the snapshot uses so two
   // files sharing one relative path collapse to a single candidate id.
   const roots = getProjectAutoMemoryRoots(projectRoot, trustedProject);
+  // An untrusted project in local-memory mode has no trusted root at all —
+  // getProjectAutoMemoryRoots already excluded the repo-local root, and
+  // falling back to it here would re-admit exactly what the gate removed,
+  // leaving repo-authored memory injectable by the legacy recall path and
+  // impossible to forget. Match scanAutoMemorySnapshot: scan nothing.
+  if (roots.length === 0) return [];
   const perRoot = await Promise.all(
-    // An untrusted project in local-memory mode has no trusted root at all;
-    // fall back to the configured root so the legacy callers that never
-    // gated on trust keep scanning it.
-    (roots.length > 0 ? roots : [getAutoMemoryRoot(projectRoot)]).map((root) =>
+    roots.map((root) =>
       scanAutoMemoryDocumentsFromRoot(root, {
         scope: 'project',
         uncapped: true,

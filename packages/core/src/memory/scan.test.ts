@@ -1211,4 +1211,77 @@ describe('auto-memory topic scanning', () => {
       clearAutoMemoryRootCache();
     }
   });
+
+  it('returns an empty project universe for an untrusted project in local-memory mode', async () => {
+    // With QWEN_CODE_MEMORY_LOCAL=1 the configured root IS the repo-local
+    // root, so an untrusted project has no trusted root at all. The legacy
+    // recall/forget path must match the snapshot path and scan nothing —
+    // falling back to the configured root would re-admit the repo-shipped
+    // memory the trust gate just excluded.
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    await fs.mkdir(memoryRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(memoryRoot, 'payload.md'),
+      [
+        '---',
+        'type: project',
+        'name: Untrusted payload',
+        'description: Repo supplied memory',
+        'keywords:',
+        '  - payload',
+        '---',
+        'body',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    await expect(
+      scanAllAutoMemoryTopicDocuments(projectRoot, undefined, false),
+    ).resolves.toEqual([]);
+  });
+
+  it('reports an unreadable subdirectory as an incomplete scope instead of complete', async () => {
+    // chmod 000 does not block root, where this scenario cannot run.
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
+    // A mode-000 subdirectory is skipped by the walk; without an incomplete
+    // marker the tree prompt would claim the map is complete while
+    // reference/hidden.md is silently missing.
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const visible = path.join(memoryRoot, 'project', 'visible.md');
+    const locked = path.join(memoryRoot, 'reference');
+    await fs.mkdir(path.dirname(visible), { recursive: true });
+    await fs.writeFile(
+      visible,
+      '---\ntype: project\nname: Visible\ndescription: visible\n---\nbody',
+      'utf-8',
+    );
+    await fs.mkdir(locked, { recursive: true });
+    await fs.writeFile(
+      path.join(locked, 'hidden.md'),
+      '---\ntype: reference\nname: Hidden\ndescription: hidden\n---\nbody',
+      'utf-8',
+    );
+    await fs.chmod(locked, 0o000);
+    try {
+      const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+        scopes: ['project'],
+        trustedProject: true,
+      });
+
+      expect(snapshot.sourceStatus.complete).toBe(false);
+      expect(snapshot.sourceStatus.incompleteScopes).toContainEqual(
+        expect.objectContaining({
+          scope: 'project',
+          reason: 'dir_read_failed',
+        }),
+      );
+      expect(
+        snapshot.docs.some((doc) => doc.relativePath === 'reference/hidden.md'),
+      ).toBe(false);
+    } finally {
+      await fs.chmod(locked, 0o700);
+    }
+  });
 });

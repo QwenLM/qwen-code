@@ -117,32 +117,27 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
       const before = preCallBodyCoverage.get(ref);
       if (before !== undefined && sameBodyCoverage(before, coverage)) return;
       const live = bodyCoverage.get(ref);
-      if (!live || live.version < coverage.version) {
-        // The call's entry was cloned from the pre-call snapshot, so it
-        // carries ranges this call never read. When the live entry vanished
-        // mid-call (memory-pressure eviction), committing those inherited
-        // ranges would claim evicted bodies are still in history — strip
-        // everything but the windows this call added.
-        const inherited =
-          before !== undefined &&
-          before.version === coverage.version &&
-          before.total === coverage.total
-            ? before
-            : undefined;
-        bodyCoverage.set(
-          ref,
-          inherited
-            ? {
-                ...coverage,
-                ranges: coverage.ranges.filter(
-                  (range) =>
-                    !inherited.ranges.some(
-                      (b) => b.start === range.start && b.end === range.end,
-                    ),
+      // The call's entry was cloned from the pre-call snapshot, so it
+      // carries ranges this call never read. Only the windows the call
+      // itself added may be committed, in every branch: when the live entry
+      // vanished mid-call (memory-pressure eviction) those inherited ranges
+      // were cleared on purpose, and when a sibling re-committed the entry
+      // at the same version, unioning the inherited ranges back would
+      // resurrect the evicted windows — later reads would claim an evicted
+      // body is still in history.
+      const addedRanges =
+        before !== undefined &&
+        before.version === coverage.version &&
+        before.total === coverage.total
+          ? coverage.ranges.filter(
+              (range) =>
+                !before.ranges.some(
+                  (b) => b.start === range.start && b.end === range.end,
                 ),
-              }
-            : coverage,
-        );
+            )
+          : coverage.ranges;
+      if (!live || live.version < coverage.version) {
+        bodyCoverage.set(ref, { ...coverage, ranges: addedRanges });
         return;
       }
       if (live.version > coverage.version) {
@@ -150,10 +145,10 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
         // this call's stale snapshot entry must not downgrade it.
         return;
       }
-      // Same file version: union this call's windows into the live entry so
-      // a concurrent sibling's already-committed windows survive this
+      // Same file version: union this call's own windows into the live entry
+      // so a concurrent sibling's already-committed windows survive this
       // call's write-back of its stale snapshot.
-      for (const range of coverage.ranges) {
+      for (const range of addedRanges) {
         if (
           !live.ranges.some(
             (liveRange) =>
@@ -246,6 +241,17 @@ function summarizeSearchMemoryResult(result: SearchMemoryToolResult): string {
     return `Found ${result.results.length} matching ${
       result.results.length === 1 ? 'memory' : 'memories'
     }`;
+  }
+  // A bare explore call ({mode:'explore'} with no branches) returns the
+  // router — one entry per category — and an empty branches array; count
+  // that shape instead of reporting zero categories.
+  if (result.branches.length === 0) {
+    const router = result.router ?? [];
+    const entries = router.reduce(
+      (total, category) => total + category.total,
+      0,
+    );
+    return `Listed ${router.length} memory categories (${entries} entries)`;
   }
   return `Listed ${result.branches.length} memory categories (${result.branches.reduce(
     (total, branch) => total + branch.leaves.length,

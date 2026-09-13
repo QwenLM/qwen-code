@@ -305,9 +305,28 @@ describe('managed auto-memory dream', () => {
     const memoryRoot = getAutoMemoryRoot(projectRoot);
     const concurrentFile = path.join(memoryRoot, 'project', 'concurrent.md');
     await fs.mkdir(path.dirname(concurrentFile), { recursive: true });
+    // The fixture is fully structured-valid: validation now fails closed on
+    // any newly-invalid document in the root (reported or not), so an
+    // invalid concurrent write would (correctly) reject the run instead of
+    // exercising counters attribution.
+    const concurrentContent = [
+      '---',
+      'type: project',
+      'name: Concurrent',
+      'description: written by another task',
+      'category: project_introduction',
+      'keywords:',
+      '  - concurrent write',
+      '  - attribution',
+      'usage_scenarios:',
+      '  - Testing counters',
+      '---',
+      'body',
+      '',
+    ].join('\n');
     vi.mocked(planManagedAutoMemoryDreamByAgent).mockImplementation(
       async () => {
-        await fs.writeFile(concurrentFile, 'written by another task');
+        await fs.writeFile(concurrentFile, concurrentContent);
         return {
           status: 'completed',
           filesTouched: [],
@@ -324,7 +343,7 @@ describe('managed auto-memory dream', () => {
 
     expect(result.createdEntries).toBe(0);
     await expect(fs.readFile(concurrentFile, 'utf-8')).resolves.toBe(
-      'written by another task',
+      concurrentContent,
     );
   });
 
@@ -358,6 +377,134 @@ describe('managed auto-memory dream', () => {
     const snapshot = await snapshotDreamFiles(memoryRoot);
     expect(snapshot.has('project/notes.md')).toBe(false);
     expect(snapshot.has('project/link.md')).toBe(false);
+  });
+
+  it('rejects an unreported shell-written invalid document before applying operations', async () => {
+    // The sharpest unreported-write variant: the agent writes the operations
+    // manifest but writes the replacement document via the shell with broken
+    // frontmatter and never reports it. Validation must fire on the
+    // filesystem state — before applyDreamOperations unlinks the source —
+    // or the only surviving copy is an unparseable document.
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const topicDir = path.join(memoryRoot, 'project');
+    await fs.mkdir(topicDir, { recursive: true });
+    const source = path.join(topicDir, 'source.md');
+    await fs.writeFile(
+      source,
+      '---\ntype: project\nname: Source\ndescription: Source\n---\n\nFact.\n',
+    );
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockImplementation(
+      async () => {
+        await fs.writeFile(
+          path.join(topicDir, 'replacement.md'),
+          'not a memory document',
+        );
+        await fs.writeFile(
+          path.join(memoryRoot, DREAM_OPERATIONS_FILENAME),
+          JSON.stringify({
+            version: 1,
+            delete: ['project/source.md'],
+            operations: [],
+          }),
+        );
+        return {
+          status: 'completed',
+          filesWritten: [],
+          filesTouched: [],
+        };
+      },
+    );
+
+    await expect(
+      runManagedAutoMemoryDream(
+        projectRoot,
+        new Date('2026-04-02T00:00:00.000Z'),
+        mockConfig,
+      ),
+    ).rejects.toThrow('invalid memory document');
+    await expect(fs.readFile(source, 'utf-8')).resolves.toContain('Fact');
+  });
+
+  it('rebuilds the index after an unreported shell-style delete', async () => {
+    // The dream agent holds a shell, so a delete it does not report never
+    // reaches the agent-attributed counters — but the rebuild gate must
+    // still fire or MEMORY.md keeps pointing at a file that no longer
+    // exists.
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const topicDir = path.join(memoryRoot, 'project');
+    await fs.mkdir(topicDir, { recursive: true });
+    await fs.writeFile(
+      path.join(topicDir, 'a.md'),
+      '---\ntype: project\nname: A\ndescription: shell-delete fixture\n---\nbody\n',
+    );
+    await fs.writeFile(
+      getAutoMemoryIndexPath(projectRoot),
+      '- [A](project/a.md) — hook\n',
+    );
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockImplementation(
+      async () => {
+        await fs.unlink(path.join(topicDir, 'a.md'));
+        return {
+          status: 'completed',
+          filesWritten: [],
+          filesTouched: [],
+        };
+      },
+    );
+
+    const result = await runManagedAutoMemoryDream(
+      projectRoot,
+      new Date('2026-04-02T00:00:00.000Z'),
+      mockConfig,
+    );
+
+    // The reported counters stay agent-attributed…
+    expect(result.deletedEntries).toBe(0);
+    // …but the filesystem signal drives the rebuild.
+    expect(result.hasFilesystemChanges).toBe(true);
+    const index = await fs.readFile(
+      getAutoMemoryIndexPath(projectRoot),
+      'utf-8',
+    );
+    expect(index).not.toContain('a.md');
+  });
+
+  it('rebuilds the index when the agent hand-writes MEMORY.md', async () => {
+    // MEMORY.md is the snapshots' excluded filename, so a direct write to it
+    // is invisible to the snapshot diff — the rebuild trigger comes from the
+    // reported write set, and the rebuild atomically regenerates the index
+    // from the entry files.
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const topicDir = path.join(memoryRoot, 'project');
+    await fs.mkdir(topicDir, { recursive: true });
+    await fs.writeFile(
+      path.join(topicDir, 'keep.md'),
+      '---\ntype: project\nname: Keep\ndescription: index fixture\n---\nbody\n',
+    );
+    const indexPath = getAutoMemoryIndexPath(projectRoot);
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockImplementation(
+      async () => {
+        await fs.writeFile(
+          indexPath,
+          '- [bogus](project/bogus.md) — hallucinated\n',
+        );
+        return {
+          status: 'completed',
+          filesWritten: [indexPath],
+          filesTouched: [indexPath],
+        };
+      },
+    );
+
+    const result = await runManagedAutoMemoryDream(
+      projectRoot,
+      new Date('2026-04-02T00:00:00.000Z'),
+      mockConfig,
+    );
+
+    expect(result.hasFilesystemChanges).toBe(true);
+    const index = await fs.readFile(indexPath, 'utf-8');
+    expect(index).not.toContain('bogus.md');
   });
 
   it('rebuilds the index after deleting memories with unparseable frontmatter', async () => {

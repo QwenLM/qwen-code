@@ -416,6 +416,116 @@ describe('SearchMemoryTool', () => {
     expect(liveVersions.has('project:long.md')).toBe(false);
   });
 
+  it('does not resurrect evicted ranges through the same-version union branch', async () => {
+    // Call A snapshots live coverage, parks; memory-pressure eviction clears
+    // the live maps; sibling B commits a different window at the SAME file
+    // version; A then commits its clone. A's inherited (already-evicted)
+    // window must not be unioned back into live state — only the window A
+    // itself added may merge.
+    const mockConfig = config();
+    const tool = new SearchMemoryTool(mockConfig);
+    const memoryManager = mockConfig.getMemoryManager();
+    const liveCoverage = memoryManager.getBodyCoverageInHistory();
+    liveCoverage.set('project:long.md', {
+      version: 7,
+      total: 20000,
+      ranges: [{ start: 0, end: 8000 }],
+    });
+    const sourceStatus = {
+      requestedScopes: ['project' as const],
+      searchedScopes: ['project' as const],
+      unavailableScopes: [],
+      complete: true,
+      incompleteScopes: [],
+    };
+    let releaseA!: () => void;
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    vi.mocked(executeSearchMemory)
+      .mockImplementationOnce(async (_params, options) => {
+        await gateA;
+        options?.bodyCoverage?.set('project:long.md', {
+          version: 7,
+          total: 20000,
+          ranges: [
+            { start: 0, end: 8000 },
+            { start: 8000, end: 16000 },
+          ],
+        });
+        options?.bodyPresentVersions?.set('project:long.md', 7);
+        return { mode: 'fetch', sourceStatus, results: [] };
+      })
+      .mockImplementationOnce(async (_params, options) => {
+        memoryManager.getBodyPresentVersionsInHistory().clear();
+        liveCoverage.clear();
+        options?.bodyCoverage?.set('project:long.md', {
+          version: 7,
+          total: 20000,
+          ranges: [{ start: 16000, end: 20000 }],
+        });
+        return { mode: 'fetch', sourceStatus, results: [] };
+      });
+
+    const callA = tool
+      .build({ mode: 'fetch', refs: ['project:long.md'] })
+      .execute(new AbortController().signal);
+    const callB = tool
+      .build({ mode: 'fetch', refs: ['project:long.md'] })
+      .execute(new AbortController().signal);
+    await callB;
+    releaseA();
+    await callA;
+
+    // Live coverage is exactly the post-eviction windows: B's committed
+    // window plus the one A itself added — never the evicted [0,8000].
+    expect(liveCoverage.get('project:long.md')).toEqual({
+      version: 7,
+      total: 20000,
+      ranges: [
+        { start: 8000, end: 16000 },
+        { start: 16000, end: 20000 },
+      ],
+    });
+    // The merged coverage does not span 0..20000, so A's full-presence
+    // claim must not commit either.
+    expect(
+      memoryManager.getBodyPresentVersionsInHistory().has('project:long.md'),
+    ).toBe(false);
+  });
+
+  it('counts the router categories for a bare explore call', async () => {
+    // `{mode:'explore'}` with no branches returns the category router and an
+    // empty branches array; the transcript line must count the router, not
+    // report zero categories for a call that returned the whole tree.
+    const tool = new SearchMemoryTool(config());
+    vi.mocked(executeSearchMemory).mockResolvedValue({
+      mode: 'explore',
+      sourceStatus: {
+        requestedScopes: ['project'],
+        searchedScopes: ['project'],
+        unavailableScopes: [],
+        complete: true,
+        incompleteScopes: [],
+      },
+      router: [
+        {
+          category: 'tech_stack',
+          total: 3,
+          keywords: [],
+          hiddenKeywordCount: 0,
+        },
+      ],
+      branches: [],
+    });
+
+    const result = await tool
+      .build({ mode: 'explore' })
+      .execute(new AbortController().signal);
+
+    expect(result.returnDisplay).toBe('Listed 1 memory categories (3 entries)');
+  });
+
   it('summarizes the result for display instead of dumping the full JSON', async () => {
     const tool = new SearchMemoryTool(config());
     vi.mocked(executeSearchMemory).mockResolvedValue({

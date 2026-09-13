@@ -997,6 +997,29 @@ describe('executeSearchMemory', () => {
     ]);
   });
 
+  it('starts the body window on the exact word-boundary character', async () => {
+    // Regression: normalization trims a trailing space, so |norm(prefix)|
+    // never takes the value of a word-initial offset — the lower-bound
+    // mapping overshot it by one source index ('harlie' instead of
+    // 'charlie'). Single-space lowercase ASCII makes normalization an
+    // identity mapping, so the intended window start is exact.
+    const filler = 'alpha bravo charlie delta ';
+    const body = `${filler.repeat(13)}zebrafixmarker${' tail note.'.repeat(10)}`;
+    const keywordIndex = body.indexOf('zebrafixmarker');
+    const expectedStart = keywordIndex - 300;
+    expect(keywordIndex).toBe(338);
+    expect(body[expectedStart]).toBe('c');
+
+    const result = await executeSearchMemory(
+      { mode: 'search', keywords: ['zebrafixmarker'] },
+      options([doc('project/window-edge.md', { body })]),
+    );
+
+    const searchResult = expectContentResult(result, 'search');
+    expect(searchResult.results[0]?.range?.start).toBe(expectedStart);
+    expect(searchResult.results[0]?.content?.startsWith('charlie')).toBe(true);
+  });
+
   it('maps normalized match offsets back to the original body', async () => {
     const body = `${'\n'.repeat(3000)}${'A'.repeat(3000)}target phrase${'B'.repeat(2000)}`;
     const result = await executeSearchMemory(
