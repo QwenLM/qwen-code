@@ -48,6 +48,6 @@ retain the daemon's [origin requirements](../../docs/users/qwen-serve.md#securit
 
 ## Limitations
 
-This is not a released mobile client. File selection, microphone permission bridging and downloads still need native integrations. No foreground service runs. Phase 2 also requires profile keys and switching, capability checks per connection, credential migration, maintainer-provided per-device revocation, Keystore storage, background SSE and notification permissions.
+This is not a released mobile client. File selection, microphone permission bridging, downloads, new-window handling and renderer-process recovery still need native integrations. System font-scale integration and full pinch-zoom/accessibility acceptance remain follow-ups. No foreground service runs. Phase 2 also requires profile keys and switching, capability checks per connection, credential migration, maintainer-provided per-device revocation, Keystore storage, background SSE and notification permissions.
 
 JVM tests and APK compilation are separate from emulator/physical-device acceptance. Consult the PR verification report for actual completed checks; source presence does not establish device validation.
