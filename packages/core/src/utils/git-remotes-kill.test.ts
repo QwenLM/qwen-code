@@ -320,6 +320,38 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     ]);
   });
 
+  it('refuses when the worktree-section completion spawn itself is killed', async () => {
+    // removeWorktreeScopeSection's catch swallows the completion
+    // failure into `false`: the removal must then surface git's own
+    // refusal (409), never certify a half-completed removal.
+    const calls = runGit.mock.calls.length;
+    runGit
+      .mockResolvedValueOnce(
+        'worktree\u0000file:.git/config.worktree\u0000remote.dup.url\nhttps://example.com/w.git\u0000',
+      ) // pre-flight origin read: worktree record, editable
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockResolvedValueOnce('worktree\u0000core.x\ny\u0000') // snapshot
+      .mockRejectedValueOnce(
+        Object.assign(new Error('exit 128'), {
+          stdout: '',
+          stderr: "error: Could not remove config section 'remote.dup'\n",
+          code: 128,
+        }),
+      ) // git remote remove
+      .mockResolvedValueOnce(
+        'worktree\u0000remote.dup.url\nhttps://example.com/w.git\u0000',
+      ) // completion scope read: worktree only
+      .mockRejectedValueOnce(killedDumpError()); // the --worktree --remove-section completion
+    const err = await gitRemoteRemove('/repo', 'dup').catch((e: unknown) => e);
+    expect(String((err as { stderr?: unknown }).stderr)).toContain(
+      'Could not remove config section',
+    );
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect(runGit.mock.calls.length).toBe(calls + 8);
+  });
+
   it('refuses over an inherited record that races in after the pre-flight', async () => {
     // The certify-path union gate's section half is the backstop for a
     // survivor the pre-flight could not see (a concurrent global edit,

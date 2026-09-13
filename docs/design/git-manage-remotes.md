@@ -211,6 +211,12 @@ refspec` at any line start vetoes the completion outright — that refusal has i
   multi-valued key's non-effective entry is residue whose later
   surfacing would dangle. Linked worktrees carry their own
   config.worktree files the invoking worktree's reads never see, so the
+  Before any read or write at a listed sibling path the sweep verifies
+  the sibling shares this repository's common dir (`rev-parse
+  --git-common-dir` at both ends, compared through path spellings): a
+  planted `.git/worktrees/<x>/gitdir` can name an unrelated repository,
+  and the sweep WRITES with cwd set to it; a genuine
+  `git worktree add ../feat` sibling passes (same common dir). The
   sweep walks every linked worktree — `git worktree list --porcelain -z`,
   NUL-framed fields — and cleans those — skipping
   `prunable` records (the directory is gone; nothing is readable) and
@@ -293,7 +299,9 @@ refspec` at any line start vetoes the completion outright — that refusal has i
   refuse. Sectionless values git resolves without a section short-circuit
   before the probe ONLY for the shapes a probe would put on the
   network or that need no probe at all (the local-repository `.`,
-  URLs, scp-like `host:path`); every colon-less value — bare word OR
+  URLs, scp-like `host:path`, and — on win32 only — UNC
+  `\\server\share`, a network transport a probe would block on); every
+  other colon-less value — bare word OR
   path-shaped — falls through to the resolver + path probes, so an
   EXISTING path still certifies while a DANGLING slashed value
   (`ghost/fork`, a relative path that does not exist) refuses, the
@@ -333,7 +341,11 @@ refspec` at any line start vetoes the completion outright — that refusal has i
   A flat layout's SLASHED branch refs are no longer a residual: the
   sweep also skips every ref inside a SURVIVING remote's fetch-dest
   namespace (read from `remote.<r>.fetch`), which owns them whatever
-  name prefix they sit under.
+  name prefix they sit under. Dests whose wildcard sits MID-pattern
+  (`refs/remotes/*/main`, `or*/main`) cannot bound their namespaces and
+  fail closed: the whole refs/remotes/ tree reads as foreign, so the
+  sweep deletes nothing there (residue stays as cache — the safe
+  polarity).
   The skip's accepted residual:
   git also accepts a colon-bearing (or `.`/`/`-shaped) SECTION name, so a
   hand-made sectionless-named remote whose first-attempt cleanup died
@@ -592,6 +604,9 @@ workspaceCwd; remotes }` (mutations answer the fresh list without
     that isolates one twin cannot strip the survivor's marker; the row
     search folds the marking skeleton as an extra name-side target, so a
     table-only twin (dotless-ı, long s) is findable by the text it inks
+    — in every case form of the needle (the table is case-sensitive:
+    `I`→`l` exists while `i`→`l` does not, so `Istanbul` must reach its
+    `lstanbul` twin typed upper, lower or mixed)
     as —
     appends a `(hidden characters)` marker — or, for a row marked ONLY
     by a collision inside printable ASCII (the table folds 1→l, m→rn;

@@ -76,7 +76,7 @@ beforeAll(() => {
   } catch {
     // No readable global config: the discrimination premise holds.
   }
-  if (/^remote\./m.test(ambientGlobal)) {
+  if (/^remote\.[^.]+\./m.test(ambientGlobal)) {
     throw new Error(
       'host ~/.gitconfig defines a [remote] section — the env-passthrough witness is not discriminating on this host',
     );

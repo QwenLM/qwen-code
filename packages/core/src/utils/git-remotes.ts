@@ -1290,10 +1290,20 @@ async function remoteTrackingRefs(
     const target = colon >= 0 ? value.slice(colon + 1) : value;
     if (!target.startsWith('refs/remotes/')) continue;
     const rest = target.slice('refs/remotes/'.length);
-    if (rest === '*' || rest.endsWith('/*')) {
-      foreignRoots.add(rest === '*' ? '' : rest.slice(0, -2));
-    } else if (!rest.includes('*')) {
+    if (!rest.includes('*')) {
       foreignRoots.add(rest);
+    } else if (rest === '*') {
+      foreignRoots.add('');
+    } else if (rest.endsWith('/*') && !rest.slice(0, -2).includes('*')) {
+      foreignRoots.add(rest.slice(0, -2));
+    } else {
+      // A wildcard in any other position (a mid-wildcard dest like
+      // `refs/remotes/*/main` or `or*/main`, which git accepts) cannot
+      // bound the namespaces it covers — fail closed: treat the whole
+      // refs/remotes/ tree as foreign so the sweep deletes nothing
+      // there. Surviving-remote keys are read AFTER the removal, so
+      // the removed name's own residue is never suppressed by this.
+      foreignRoots.add('');
     }
   }
   const owners = [...namesRaw.split('\n').filter(Boolean), name];
@@ -1422,6 +1432,7 @@ async function sweepSiblingWorktreeKeys(
     throw err;
   }
   let topSpellings: Set<string> | undefined;
+  let ownCommonSpellings: Set<string> | undefined;
   // `-z` terminates every FIELD (record separator = an empty field), so
   // a path carrying a literal newline stays intact.
   const records: string[][] = [];
@@ -1447,6 +1458,44 @@ async function sweepSiblingWorktreeKeys(
       record.some((line) => line === 'prunable' || line.startsWith('prunable '))
     )
       continue;
+    // A `worktree list` record is built from THIS repository's own
+    // .git/worktrees/*/gitdir files with no back-pointer: a planted
+    // gitdir can name an UNRELATED repository, and this sweep WRITES
+    // (`config --worktree --fixed-value --unset-all`) with cwd set to
+    // it. Verify the sibling shares this repository's common dir
+    // before any read or write; a genuine `git worktree add ../feat`
+    // sibling passes (same common dir), a planted victim does not.
+    let siblingCommon: string;
+    try {
+      siblingCommon = (
+        await runGit(wt, ['rev-parse', '--git-common-dir'], env)
+      ).trim();
+    } catch (err) {
+      stripConfigDump(err);
+      throw err;
+    }
+    if (ownCommonSpellings === undefined) {
+      let ownCommon: string;
+      try {
+        ownCommon = (
+          await runGit(cwd, ['rev-parse', '--git-common-dir'], env)
+        ).trim();
+      } catch (err) {
+        stripConfigDump(err);
+        throw err;
+      }
+      ownCommonSpellings = await pathSpellings(
+        cwd,
+        path.resolve(cwd, ownCommon),
+      );
+    }
+    const siblingSpellings = await pathSpellings(
+      wt,
+      path.resolve(wt, siblingCommon),
+    );
+    if (![...siblingSpellings].some((sp) => ownCommonSpellings!.has(sp))) {
+      continue;
+    }
     // The invoking worktree is already swept by the main path. The
     // toplevel read is lazy: no siblings, no extra spawn.
     if (topSpellings === undefined) {

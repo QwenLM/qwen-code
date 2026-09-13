@@ -32,3 +32,76 @@ describe('remoteNameSkeleton closure', () => {
     }
   });
 });
+
+// One remote name, two spellings: NFC and NFD are the same name to a
+// user and render the same in the picker, so they must land in the same
+// collision group — otherwise neither row gets marked and the confusable
+// the fold exists to surface walks through. The decomposed spelling
+// never offers the composed code point to the table's direct branch, so
+// its parts decide the class and the generator has to resolve every
+// prototype in that same space.
+describe('remoteNameSkeleton canonical equivalence', () => {
+  it('folds a precomposed char and its decomposed spelling alike in a name', () => {
+    // `ņ` is a table key; `n` + U+0326 is not, and U+0326 is not in the
+    // table either — the composed spelling used to answer `ɲ` while the
+    // decomposed one answered `n̦`, so `infra` spelled either way sat in
+    // two groups and neither was marked.
+    expect(remoteNameSkeleton('i\u0146fra')).toBe(
+      remoteNameSkeleton('in\u0326fra'),
+    );
+  });
+
+  it('gives a canonical part its table chance before flattening it', () => {
+    // U+1E9B decomposes canonically to `ſ` + U+0307 but compatibly to
+    // `s` + U+0307: one NFKD step would flatten the `ſ` to `s` before
+    // the table could answer `f` for it, and the two spellings would
+    // land in ṡ and ḟ respectively.
+    expect(remoteNameSkeleton('\u1E9B')).toBe(
+      remoteNameSkeleton('\u017F\u0307'),
+    );
+  });
+
+  it('is invariant under NFD for every canonically decomposable code point', () => {
+    // Swept, not sampled: whether an entry splits depends on whether its
+    // own parts are table keys, so a sample cannot know what it is
+    // missing. The sweep size is asserted alongside the split list — a
+    // sweep that silently visits nothing proves nothing.
+    const splits: string[] = [];
+    let swept = 0;
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const ch = String.fromCodePoint(cp);
+      const nfd = ch.normalize('NFD');
+      if (nfd === ch) continue;
+      swept++;
+      if (
+        remoteNameSkeleton(nfd) !== remoteNameSkeleton(ch) &&
+        splits.length < 20
+      ) {
+        splits.push(`U+${cp.toString(16).toUpperCase()}`);
+      }
+    }
+    expect(swept).toBeGreaterThan(13_000);
+    expect(splits).toEqual([]);
+  });
+});
+
+// The table's own defense of the lunate sigma, pinned: the direct branch
+// has to answer before any normalization, or Ϲ routes through Σ into a
+// different class and the entry Unicode carries for exactly that pair is
+// dead weight.
+describe('remoteNameSkeleton lunate sigma', () => {
+  it('keeps Ϲ in the C class and out of the Σ class', () => {
+    expect(remoteNameSkeleton('\u03F9')).toBe(remoteNameSkeleton('C'));
+    expect(remoteNameSkeleton('\u03F9')).not.toBe(remoteNameSkeleton('\u03A3'));
+  });
+});
+
+// The NFKC compatibility fallback for table-ABSENT chars, pinned: U+00B9
+// SUPERSCRIPT ONE carries no table entry, so only the fallback can route
+// it to the class of its compatibility decomposition ('1' → 'l').
+describe('remoteNameSkeleton NFKC fallback', () => {
+  it('folds a table-absent compatibility char through its decomposition', () => {
+    expect(remoteNameSkeleton('¹')).toBe(remoteNameSkeleton('1'));
+  });
+});

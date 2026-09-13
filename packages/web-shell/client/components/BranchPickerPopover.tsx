@@ -48,9 +48,11 @@ import styles from './BranchPickerPopover.module.css';
 const GIT_PULL_FETCH_TIMEOUT_MS = 600_000;
 
 // A remote mutation chains git's add/rm plus the verification and
-// upstream-cleanup spawns (each with its own 30s budget — the add chain
-// is 5 of them), so size the client fetch timeout above the chain,
-// mirroring the pull flow.
+// upstream-cleanup spawns (each with its own 30s budget). The chain
+// length grows with pointed branches and linked worktrees, so this is a
+// UX CEILING mirroring the pull flow, not a strict bound on the chain:
+// realistic chains (a handful of spawns) sit far below it, and a
+// pathological one surfaces as a client timeout rather than a hang.
 export const GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS = 600_000;
 
 function daemonErrorBody(err: unknown): Record<string, unknown> | undefined {
@@ -1165,6 +1167,9 @@ export function BranchPickerPopover({
   );
 
   const q = search.toLowerCase().trim();
+  // The raw case forms feed the case-sensitive table fold in the
+  // remotes filter (see inkedNeedles there).
+  const qTyped = search.trim();
 
   const filterBranches = useCallback(
     (branches: DaemonGitBranchInfo[]) => {
@@ -1223,20 +1228,29 @@ export function BranchPickerPopover({
     // The marking fold as an extra name-side target: NFKC alone finds
     // compatibility twins (ligatures) but not table-only folds
     // (dotless-ı, long s), so a twin the marker flags as ink-identical
-    // must be reachable by the text it inks as.
+    // must be reachable by the text it inks as. The table is
+    // case-SENSITIVE (`['I','l']` exists, `['i','l']` does not), so a
+    // needle folded only in one case misses twins whose ink-identity
+    // lives in the other case's keys (`Istanbul` vs `lstanbul`): fold
+    // the needle as typed AND in both whole-string case forms, and
+    // match if any variant lands in the row's ink.
     const inked = (v: string) =>
       remoteNameSkeleton(sanitizeRemoteDisplay(v)).toLowerCase();
+    const inkedNeedles = [
+      qTyped,
+      qTyped.toLowerCase(),
+      qTyped.toUpperCase(),
+    ].map((v) => inked(v));
     const needle = collapse(sanitizeRemoteDisplay(q));
-    const inkedNeedle = inked(q);
     return remotes.filter(
       (r) =>
         collapse(sanitizeRemoteDisplay(r.name)).includes(needle) ||
-        inked(r.name).includes(inkedNeedle) ||
+        inkedNeedles.some((n) => inked(r.name).includes(n)) ||
         collapse(sanitizeRemoteDisplay(r.fetchUrl)).includes(needle) ||
         collapse(sanitizeRemoteDisplay(r.pushUrl)).includes(needle) ||
         collapse(sanitizeRemoteDisplay(remoteExtras(r, t))).includes(needle),
     );
-  }, [remotes, q, t]);
+  }, [remotes, q, qTyped, t]);
 
   // TR39 fold, counted over the UNFILTERED list: a search that isolates
   // one twin must not strip the collision marker from the surviving row
@@ -1958,8 +1972,10 @@ function RemotesView({
               // "origin ") flags the same way. Three more structural
               // arms, because the class list alone has no last corner:
               // canonical-equivalence twins (an NFD name inks like its
-              // NFC twin), a Latin name mixing in another script's
-              // letters (the Cyrillic-`о` homoglyph shape), and the TR39
+              // NFC twin), a name mixing scripts (any Latin + non-Latin
+              // mix — the Cyrillic-`о` homoglyph is the motivating
+              // shape, but the arm is script-mixing generally, in the
+              // conservative direction), and the TR39
               // skeleton collision below (an ink-identical twin INSIDE
               // Latin/Common, like a ligature — the table closes what
               // per-property arms cannot enumerate). The first two mark

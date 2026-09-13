@@ -1858,6 +1858,24 @@ describe('BranchPickerPopover remotes view', () => {
     ).toBe('');
   });
 
+  it('refuses a dash-prefixed URL client-side without calling the daemon', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [],
+    });
+    await openRemotesView();
+    // The url arm of the local dash guard: `-oProxyCommand=…` is an exec
+    // vector shape; the client refuses before spawning anything.
+    setInput('remote-add-name', 'dashurl');
+    setInput('remote-add-url', '-oProxyCommand=id');
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(workspaceGitRemoteAdd).not.toHaveBeenCalled();
+    expect(footerText()).toContain('no leading -');
+  });
+
   it('surfaces a daemon add failure in the footer and keeps the list', async () => {
     workspaceGitRemoteAdd.mockRejectedValue(
       new DaemonHttpError(
@@ -3005,7 +3023,9 @@ describe('BranchPickerPopover remotes view', () => {
     // The twins carry no hidden characters anywhere: never the
     // hidden-characters copy. (remotel marks `(lookalike name)` — the
     // table's prototype for `m` is `rn`, so its raw name is not its
-    // skeleton; pushl is its own skeleton and stays plain.)
+    // skeleton; pushl is its own skeleton, but the all-ASCII group
+    // marks BOTH rows because `raw ≠ skeleton` carries no impostor
+    // evidence there, so it carries `(lookalike name)` too.)
     expect(rowOf('remotel')?.textContent).toContain('(lookalike name)');
     expect(rowOf('remotel')?.textContent).not.toContain('(hidden characters)');
     // The all-ASCII group marks BOTH rows: `raw ≠ skeleton` carries no
@@ -3171,6 +3191,37 @@ describe('BranchPickerPopover remotes view', () => {
     expect(
       document.body.querySelectorAll('[data-testid="remote-row"]').length,
     ).toBe(2);
+  });
+
+  it('finds case-asymmetric table twins by every case form of the needle', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('Istanbul'), remote('lstanbul')],
+    });
+    await openRemotesView();
+    // The table maps 'I' → 'l' but carries no lowercase-'i' entry, so a
+    // needle folded in a single case misses the twin whose ink-identity
+    // lives in the other case's key; both rows carry the lookalike
+    // marker, so both must stay reachable by every case form.
+    for (const needle of ['Istanbul', 'istanbul', 'ISTANBUL', 'lstanbul']) {
+      setInput('remotes-search', needle);
+      await flush();
+      expect(
+        document.body.querySelectorAll('[data-testid="remote-row"]').length,
+      ).toBe(2);
+    }
   });
 
   it('spells the fold-covered code points for a printable-ASCII collision', async () => {

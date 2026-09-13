@@ -103,61 +103,82 @@ const resolve = (targets, depth = 0) => {
 
 const closed = new Map();
 for (const [src, targets] of raw) {
-  // The consumer NFC-normalizes AFTER substitution, so an emitted value
-  // whose NFC form is itself a table key would split one TR39 class
-  // across two skeletons (U+AB74 -> o+U+031B, whose NFC is U+01A1).
-  // Close each prototype under NFC + table until it is a fixed point.
-  let resolved = resolve(targets);
-  for (let pass = 0; ; pass++) {
-    const nfc = [...String.fromCodePoint(...resolved).normalize('NFC')].map(
-      (c) => c.codePointAt(0),
-    );
-    if (
-      nfc.length === resolved.length &&
-      nfc.every((c, i) => c === resolved[i])
-    ) {
-      break;
-    }
-    if (pass >= 3) {
-      throw new Error('prototype closure did not converge under NFC');
-    }
-    resolved = resolve(nfc);
-  }
+  const resolved = resolve(targets);
   if (resolved.length === 1 && resolved[0] === src) continue;
   closed.set(String.fromCodePoint(src), String.fromCodePoint(...resolved));
 }
 
-// The consumer also folds TABLE-ABSENT halves through NFKC (with a
-// per-half table chance) before the final NFC, so a value carrying a
-// compatibility shape the table does not list is not a fixed point of
-// the runtime fold: a name holding the source char and a name holding
-// the value verbatim — ink-identical — would land in two skeletons
-// (`%` -> `º/₀`: its halves NFKC to `o/0`, and the per-half table
-// chance lifts the `0` to `O`). Close every value under
-// the consumer fold, map-wide (one value's fold reads another's entry),
-// until stable.
-const consumerFold = (value, table) => {
-  let out = '';
-  for (const ch of value) {
-    const direct = table.get(ch);
-    if (direct !== undefined) {
-      out += direct;
-      continue;
+// The consumer fold IS the runtime fold (`remoteNameSkeleton`): the
+// table answers first on the composed code point, a table-absent code
+// point falls back to its canonical parts (each with its own table
+// chance) and then to NFKD for the compatibility shapes, and the pass
+// repeats to a fixed point under a closing NFC. Every emitted entry has
+// to satisfy one equation in it:
+//
+//   value === runtimeFold(key.normalize('NFD'))
+//
+// Three failures collapse into that equation. A value that is not a fold
+// fixed point puts one ink-identical class in two skeletons: a name
+// holding the source char and a name holding the value verbatim land
+// apart (`%` -> `º/₀`, whose parts decompose to `o/0` and lift the `0`
+// to `O`). A value that is not what the key's OWN decomposed spelling
+// folds to makes the skeleton depend on which canonical spelling a
+// remote name happens to use (`i\u0146fra` vs `in\u0326fra`): the
+// decomposed spelling never offers the composed code point to the direct
+// branch, so its parts decide the class and the composed spelling has to
+// arrive at the same one. And a fold that cycles never reaches a fixed
+// point at all, so what the runtime returns depends on its pass cap's
+// parity (`Ț` -> `Ţ`, whose own parts decompose back to `Ț`). Solving
+// the equation for the NFD spelling solves the first two — and where
+// NFD(key) recomposes to the key, as it does for most entries, it
+// degenerates to the plain fixed-point closure, so no class moves that
+// need not.
+
+// Solving it in NFD space can leave a value that renders exactly like
+// its key (`אָ` -> `אָ`): the Hebrew presentation forms are composition
+// exclusions, so the closing NFC never recomposes them. That is not a
+// self-map — the arm below compares code points, not ink.
+
+// Mirrors `remoteNameSkeleton`'s own cap: a value that only settles past
+// it is one the runtime never reaches. Returns undefined when the fold
+// did not settle inside it.
+const FOLD_PASSES = 8;
+const runtimeFold = (value, table) => {
+  let out = value;
+  for (let pass = 0; pass < FOLD_PASSES; pass++) {
+    let next = '';
+    for (const ch of out) {
+      const direct = table.get(ch);
+      if (direct !== undefined) {
+        next += direct;
+        continue;
+      }
+      for (const part of ch.normalize('NFD')) {
+        const partDirect = table.get(part);
+        if (partDirect !== undefined) {
+          next += partDirect;
+          continue;
+        }
+        for (const folded of part.normalize('NFKD')) {
+          next += table.get(folded) ?? folded;
+        }
+      }
     }
-    for (const folded of ch.normalize('NFKC')) {
-      out += table.get(folded) ?? folded;
-    }
+    next = next.normalize('NFC');
+    if (next === out) return out;
+    out = next;
   }
-  return out.normalize('NFC');
+  return undefined;
 };
 for (let pass = 0; ; pass++) {
   let changed = false;
   for (const [src, value] of closed) {
-    const folded = consumerFold(value, closed);
-    if (folded === src) {
-      // The fold collapsed a value onto its own source char: a self-map
-      // is a semantic no-op, but it must leave the map HERE — a direct
-      // hit and an NFKC miss differ, so every other value's fixed point
+    const folded = runtimeFold(src.normalize('NFD'), closed);
+    if (folded === undefined || folded === src) {
+      // The entry cannot stand — the fold either cycled or collapsed
+      // the value onto its own source char (a self-map is a semantic
+      // no-op) — so it must leave the map HERE: a direct hit and a
+      // decomposition miss differ, so every other value's fixed point
       // has to be recomputed against the map without it. Key membership
       // also feeds the tooltip escape (escapeSkeletonNameChars'
       // has(ch)), so an arm that ever fires shrinks both surfaces at
@@ -172,21 +193,25 @@ for (let pass = 0; ; pass++) {
     }
   }
   if (!changed) break;
-  if (pass >= 3) {
+  if (pass >= 12) {
     throw new Error(
-      'prototype closure did not converge under the consumer fold',
+      'prototype closure did not converge under the runtime fold',
     );
   }
 }
 
-// The loop's !changed exit already implies the fixed point; checking it
-// directly keeps the invariant a verified fact, not a loop argument.
+// The loop's !changed exit already implies both halves of the equation;
+// checking them directly keeps the invariant a verified fact, not a loop
+// argument.
 for (const [src, value] of closed) {
-  if (consumerFold(value, closed) !== value) {
+  if (
+    runtimeFold(value, closed) !== value ||
+    runtimeFold(src.normalize('NFD'), closed) !== value
+  ) {
     // Code point, not the raw char: a U+2028/U+2029-class source would
     // otherwise print mangled text into the diagnostic.
     throw new Error(
-      `emitted value not a consumer-fold fixed point: U+${src
+      `emitted value not closed under the runtime fold: U+${src
         .codePointAt(0)
         .toString(16)
         .toUpperCase()}`,

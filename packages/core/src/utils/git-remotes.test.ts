@@ -1025,6 +1025,32 @@ describe('repository-scope listing and removal', () => {
     );
   });
 
+  it('ignores a planted worktrees gitdir pointing at an unrelated repository', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // A hand-written .git/worktrees/<x>/gitdir is indistinguishable in
+    // `worktree list` from a real sibling, and the sweep WRITES with cwd
+    // set to it — the shared-common-dir ownership probe must skip it.
+    const victim = makeRepo();
+    git(victim, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    git(victim, 'config', '--worktree', 'branch.main.remote', 'origin');
+    git(victim, 'config', '--worktree', 'branch.main.merge', 'refs/heads/main');
+    const admin = path.join(dir, '.git', 'worktrees', 'evil');
+    fs.mkdirSync(admin, { recursive: true });
+    fs.writeFileSync(
+      path.join(admin, 'gitdir'),
+      `${path.join(victim, '.git')}\n`,
+    );
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(
+      git(victim, 'config', '--worktree', '--get', 'branch.main.remote'),
+    ).toBe('origin\n');
+    expect(
+      git(victim, 'config', '--worktree', '--get', 'branch.main.merge'),
+    ).toBe('refs/heads/main\n');
+  });
+
   it('keeps a sibling merge key whose remote lives in the shared config', async () => {
     const dir = makeRepo();
     git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
@@ -2521,6 +2547,33 @@ describe('repository-scope listing and removal', () => {
     expect(git(dir, 'rev-parse', '--verify', 'refs/remotes/main')).toBeTruthy();
   });
 
+  it('certifies an unmasked UNC upstream on win32 without probing it', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // A UNC path is a NETWORK transport on win32: probing it would block
+    // up to the git timeout on an offline share, so the shape
+    // short-circuits the probes there and certifies.
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    try {
+      git(
+        dir,
+        'config',
+        '--global',
+        'branch.main.remote',
+        '\\\\fileserver\\share\\repo.git',
+      );
+      git(dir, 'config', '--local', 'branch.main.remote', 'origin');
+      const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+      expect(remotes).toEqual([]);
+    } finally {
+      Object.defineProperty(process, 'platform', platform!);
+    }
+  });
+
   it('refuses a never-configured name whose namespace a surviving refspec dests into', async () => {
     const dir = makeRepo();
     git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
@@ -2558,6 +2611,57 @@ describe('repository-scope listing and removal', () => {
     expect(
       git(dir, 'rev-parse', '--verify', 'refs/remotes/release/1.0'),
     ).toBeTruthy();
+  });
+
+  it('keeps a surviving remote mid-wildcard dest refs out of an unrelated sweep', async () => {
+    const dir = makeRepo();
+    // A mid-wildcard dest (`refs/remotes/*/main`, git-legal) covers
+    // namespaces no literal prefix bounds; failing closed (whole tree
+    // foreign) is the only safe reading. Removing `origin` (own dest
+    // disjoint) must not delete fork's live refs/remotes/origin/main.
+    git(dir, 'remote', 'add', 'fork', 'https://example.com/f/r.git');
+    git(
+      dir,
+      'config',
+      'remote.fork.fetch',
+      '+refs/heads/*:refs/remotes/*/main',
+    );
+    git(
+      dir,
+      'config',
+      'remote.origin.fetch',
+      '+refs/heads/*:refs/remotes/origin/ns/*',
+    );
+    git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git(dir, 'update-ref', 'refs/remotes/master/main', 'HEAD');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['fork']);
+    const refs = git(dir, 'for-each-ref', 'refs/remotes');
+    expect(refs).toContain('refs/remotes/origin/main');
+    expect(refs).toContain('refs/remotes/master/main');
+  });
+
+  it('still sweeps a refspec-less remote orphans when another remote keeps a default dest', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // A surviving remote with a DEFAULT dest (refs/remotes/origin/*)
+    // must not disable the sweep repo-wide: the refspec-less `nf`'s
+    // orphan namespace is still nf's own, while origin's namespace
+    // stays foreign.
+    git(
+      dir,
+      'config',
+      '--local',
+      'remote.nf.url',
+      'https://example.com/n/r.git',
+    );
+    git(dir, 'update-ref', 'refs/remotes/nf/main', 'HEAD');
+    git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    const remotes = await gitRemoteRemove(dir, 'nf', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['origin']);
+    const refs = git(dir, 'for-each-ref', 'refs/remotes');
+    expect(refs).not.toContain('refs/remotes/nf/main');
+    expect(refs).toContain('refs/remotes/origin/main');
   });
 
   it('keeps a configured slashed sibling bare ref out of the converge sweep', async () => {
