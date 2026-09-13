@@ -398,6 +398,20 @@ describe('getDaemonToken', () => {
     expect(mod.getDaemonToken()).toBeUndefined();
   });
 
+  it.each(['?daemon=10.0.0.9:4170', '?daemon=https://a.example'])(
+    'does not attribute a URL token to a replacement target (%s)',
+    async (search) => {
+      setupToken(search, '#token=original-secret');
+      const mod = await import('./daemon');
+      expect(mod.getDaemonToken('https://b.example')).toBeUndefined();
+      expect(
+        window.sessionStorage.getItem('qwen-daemon-token:https://b.example'),
+      ).toBeNull();
+      expect(window.location.hash).toBe('#token=original-secret');
+      expect(mod.getDaemonToken()).toBe('original-secret');
+    },
+  );
+
   it('persists and reloads a token under the selected daemon origin', async () => {
     setupToken(
       '?daemon=https%3A%2F%2Fdaemon.example.com%3A4170',

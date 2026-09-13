@@ -161,7 +161,8 @@ export function getDaemonToken(baseUrl?: string): string | undefined {
   const key = daemonTokenStorageKey(baseUrl);
   const cached = cachedDaemonTokens.get(key);
   if (cached) return cached;
-  const fromUrl = readTokenFromLocation();
+  const fromUrl =
+    key === daemonTokenStorageKey() ? readTokenFromLocation() : undefined;
   if (fromUrl) {
     // Persist per-tab so the token survives navigations that do not carry it.
     // sessionStorage (not localStorage) keeps the token scoped to this tab and
