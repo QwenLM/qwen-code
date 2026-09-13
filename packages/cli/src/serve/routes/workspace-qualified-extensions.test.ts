@@ -2804,6 +2804,80 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('re-enters waiting_for_input with a fresh interaction id per prompt', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const submittedSettings: string[] = [];
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockImplementation(async function (this: ExtensionManager) {
+      submittedSettings.push(await requestApiKey(this));
+      submittedSettings.push(await requestApiKey(this));
+      return {} as never;
+    });
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'demo' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    try {
+      const started = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/demo',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+      expect(started.status).toBe(202);
+
+      const answerNextPrompt = async (): Promise<string> => {
+        let interactionId = '';
+        await vi.waitFor(async () => {
+          const operation = await auth(
+            request(h.app).get(
+              `/extensions/operations/${started.body.operationId}`,
+            ),
+          );
+          expect(operation.body).toMatchObject({
+            status: 'waiting_for_input',
+            interaction: { kind: 'setting', setting: { name: 'API key' } },
+          });
+          interactionId = operation.body.interaction.id as string;
+        });
+        const answer = await auth(
+          request(h.app)
+            .post(
+              `/workspace/extensions/operations/${started.body.operationId}/interactions/${interactionId}`,
+            )
+            .send({ value: 'configured' }),
+        );
+        expect(answer.status).toBe(200);
+        return interactionId;
+      };
+
+      const firstInteractionId = await answerNextPrompt();
+      const secondInteractionId = await answerNextPrompt();
+      expect(secondInteractionId).not.toBe(firstInteractionId);
+
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(submittedSettings).toEqual(['configured', 'configured']);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('answers an interaction from a client id known only to a secondary runtime bridge', async () => {
     const h = await makeHarness();
     mockExtensionManager();

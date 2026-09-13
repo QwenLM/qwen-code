@@ -221,7 +221,7 @@ describe('extensions manager logic', () => {
               ...activation.extensions[0]!,
               workspaceActivation: 'disabled',
               effectiveActivation: 'disabled',
-              activationSource: 'workspace',
+              activationSource: 'workspace_override',
             },
           ],
         },
