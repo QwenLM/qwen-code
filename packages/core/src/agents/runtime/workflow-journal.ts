@@ -29,10 +29,10 @@
  * call #3 changes its key, which changes #4's prefix, which changes #4's
  * key, and so on — so the cache naturally invalidates from the edit point.
  *
- * The `canonicalOpts` projection keeps only the dispatch-affecting opts
- * (`schema`, `model`, `isolation`, `agentType`, `workingDir`) with object keys
- * sorted, so cosmetic opt differences (a re-ordered schema, a `label` change)
- * don't bust the cache.
+ * The `canonicalOpts` projection keeps only the dispatch and replay-affecting
+ * opts (`schema`, `model`, `isolation`, `agentType`, `workingDir`, `stepId`,
+ * `extensions`) with object keys sorted, so cosmetic opt differences (a
+ * re-ordered schema, a `label` change) don't bust the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`
@@ -47,6 +47,7 @@ import { read, writeLine } from '../../utils/jsonl-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isSymlinkedRoot } from './workflow-saved.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
+import type { WorkflowSourceRef } from '../workflow-source-ref.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_JOURNAL');
 
@@ -82,13 +83,22 @@ export interface JournalFailedEntry {
   agentId: string;
 }
 
+/** 在注册前持久化来源，使中断的 run 也能在新进程中恢复。 */
+export interface JournalSourceRefEntry {
+  type: 'source-ref';
+  sourceRef: WorkflowSourceRef;
+}
+
 export type JournalEntry =
   | JournalStartedEntry
   | JournalResultEntry
-  | JournalFailedEntry;
+  | JournalFailedEntry
+  | JournalSourceRefEntry;
 
 /** Parsed journal: completed results + started-but-maybe-incomplete markers. */
 export interface JournalReplay {
+  /** 最新的来源记录；不参与 dispatch replay key。 */
+  sourceRef?: WorkflowSourceRef;
   /** key → the completed result entry (last write wins). */
   results: Map<string, JournalResultEntry>;
   /** key → all `started` entries seen (length > 1 ⇒ prior respawns). */
@@ -205,8 +215,11 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
   const results = new Map<string, JournalResultEntry>();
   const started = new Map<string, JournalStartedEntry[]>();
   const failed = new Set<string>();
+  let sourceRef: WorkflowSourceRef | undefined;
   for (const e of entries) {
-    if (e.type === 'result') {
+    if (e.type === 'source-ref') {
+      sourceRef = e.sourceRef;
+    } else if (e.type === 'result') {
       results.set(e.key, e);
     } else if (e.type === 'started') {
       // A later attempt supersedes the prior terminal failure. If it is
@@ -220,7 +233,12 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
       failed.add(e.key);
     }
   }
-  return { results, started, failed };
+  return {
+    results,
+    started,
+    failed,
+    ...(sourceRef ? { sourceRef } : {}),
+  };
 }
 
 /**

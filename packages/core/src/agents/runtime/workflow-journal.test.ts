@@ -185,6 +185,27 @@ describe('buildReplay', () => {
     expect(replay.failed.size).toBe(0);
   });
 
+  it('retains the latest source reference without changing dispatch replay', () => {
+    const entries: JournalEntry[] = [
+      {
+        type: 'source-ref',
+        sourceRef: { id: 'flow-1', revision: '6' },
+      },
+      { type: 'started', key: 'k1', agentId: '1' },
+      {
+        type: 'source-ref',
+        sourceRef: { id: 'flow-1', revision: '7' },
+      },
+      { type: 'result', key: 'k1', agentId: '1', result: 'ok' },
+    ];
+
+    const replay = buildReplay(entries);
+
+    expect(replay.sourceRef).toEqual({ id: 'flow-1', revision: '7' });
+    expect(replay.results.get('k1')?.result).toBe('ok');
+    expect(replay.started.get('k1')).toHaveLength(1);
+  });
+
   // The record that separates "this agent failed" from "the run stopped with
   // this agent in flight". Both leave a `started` with no `result`; only the
   // first leaves a `failed`.
@@ -233,6 +254,10 @@ describe('WorkflowJournal', () => {
 
   it('append then load round-trips entries', async () => {
     const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
+    await j.append({
+      type: 'source-ref',
+      sourceRef: { id: 'flow-1', revision: '7' },
+    });
     await j.append({ type: 'started', key: 'k1', agentId: '1' });
     await j.append({
       type: 'result',
@@ -241,6 +266,7 @@ describe('WorkflowJournal', () => {
       result: { v: 9 },
     });
     const replay = await j.load();
+    expect(replay.sourceRef).toEqual({ id: 'flow-1', revision: '7' });
     expect(replay.results.get('k1')?.result).toEqual({ v: 9 });
     expect(replay.started.get('k1')).toHaveLength(1);
   });

@@ -15177,6 +15177,7 @@ export class Session implements SessionContext {
       resolvedExtensionNames.add(extension.name);
       const context = await buildExtensionMentionContext(extension, {
         remainingBudget,
+        config: this.config,
         signal: abortSignal,
         onDebugMessage: (message) => this.debug(message),
       });

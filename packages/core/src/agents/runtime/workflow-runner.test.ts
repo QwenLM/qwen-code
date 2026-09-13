@@ -332,6 +332,35 @@ describe('WorkflowRunner', () => {
     );
   });
 
+  it('persists source references before registering a run', async () => {
+    const { config, registry } = configWithRegistry();
+    stubStorage(config, await makeStorageRoot());
+    const sourceRef = { id: 'flow-1', revision: '7' };
+    let sourcePersisted = false;
+    writeLineMock.mockImplementation(async (_path, entry) => {
+      if (
+        (entry as { type?: string }).type === 'source-ref' &&
+        JSON.stringify((entry as { sourceRef?: unknown }).sourceRef) ===
+          JSON.stringify(sourceRef)
+      ) {
+        sourcePersisted = true;
+      }
+    });
+    registry.setRegisterCallback(() => {
+      expect(sourcePersisted).toBe(true);
+    });
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      args: undefined,
+      script: 'return 1;',
+      sourceRef,
+    });
+    expect(sourcePersisted).toBe(true);
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+  });
+
   it('keeps snapshot recovery inside the cancellable start window', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';
@@ -365,18 +394,30 @@ describe('WorkflowRunner', () => {
     }
   });
 
-  it('still resumes when no valid prior snapshot is available', async () => {
+  it('recovers source references from the journal when no snapshot is available', async () => {
     const { config } = configWithRegistry();
+    stubStorage(config, await makeStorageRoot());
     listWorkflowSnapshotsMock.mockResolvedValue([]);
-    const resumed = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
-      args: undefined,
-      script: 'return 1;',
-      resumeFromRunId: 'wf_1234abcd',
+    const sourceRef = { id: 'flow-1', revision: '7' };
+    const load = vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValue({
+      results: new Map(),
+      started: new Map(),
+      failed: new Set(),
+      sourceRef,
     });
-    await expect(resumed.completion).resolves.toMatchObject({ ok: true });
-    expect(resumed.sourceRef).toBeUndefined();
+    try {
+      const resumed = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        args: undefined,
+        script: 'return 1;',
+        resumeFromRunId: 'wf_1234abcd',
+      });
+      await expect(resumed.completion).resolves.toMatchObject({ ok: true });
+      expect(resumed.sourceRef).toEqual(sourceRef);
+    } finally {
+      load.mockRestore();
+    }
   });
 
   it('rejects malformed provenance before registering a run', async () => {

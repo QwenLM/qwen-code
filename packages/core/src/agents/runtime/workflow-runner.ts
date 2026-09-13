@@ -242,9 +242,16 @@ export class WorkflowRunner {
               (snapshot) => snapshot.runId === runId,
             )
           : undefined;
+      assertStartNotCancelled();
+      resumeReplay = options.resumeFromRunId
+        ? await journal?.load()
+        : undefined;
+      assertStartNotCancelled();
       const source =
         options.sourceRef === undefined
-          ? (previousEntry?.sourceRef ?? previousSnapshot?.sourceRef)
+          ? (previousEntry?.sourceRef ??
+            resumeReplay?.sourceRef ??
+            previousSnapshot?.sourceRef)
           : options.sourceRef;
       sourceRef =
         source === undefined ? undefined : normalizeWorkflowSourceRef(source);
@@ -281,9 +288,6 @@ export class WorkflowRunner {
         );
       }
 
-      resumeReplay = options.resumeFromRunId
-        ? await journal?.load()
-        : undefined;
       // A registry-side cancel (`cancelStarting`, `abortAll`) aborts the
       // reserved controller while the caller's signal stays live. It is a
       // cancel in either mode: registering anyway would let the settlement
@@ -312,6 +316,12 @@ export class WorkflowRunner {
         journalPath = undefined;
       }
       assertStartNotCancelled();
+      // sourceRef 不参与 dispatch key，但必须在注册前同步落盘。这样进程在
+      // 首个 agent 完成前退出时，下一次 resume 仍能从同一 journal 恢复来源。
+      if (journalPath && journal && sourceRef) {
+        await journal.append({ type: 'source-ref', sourceRef });
+        assertStartNotCancelled();
+      }
       const dispatch =
         options.dispatch ??
         createProductionDispatch(

@@ -1852,7 +1852,9 @@ describe('WorkflowOrchestrator', () => {
 
       expect(dispatch).toHaveBeenCalledOnce();
       expect(entries.map((entry) => entry.type)).toEqual(['started', 'result']);
-      expect(entries.some((entry) => entry.key === keyB)).toBe(false);
+      expect(
+        entries.some((entry) => 'key' in entry && entry.key === keyB),
+      ).toBe(false);
       expect(respawns).toEqual([]);
     } finally {
       if (previous === undefined) {
@@ -3986,6 +3988,37 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       extensions: ['data-expert'],
     });
     expect(calls[0].prompt).toContain('- Skills: data-expert:schema-audit');
+    expect(calls[0].prompt).not.toContain(
+      'Invoke listed Skills through the Skill tool',
+    );
+  });
+
+  it('does not advertise extension skills disabled for model invocation', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'restricted',
+        description: 'restricted',
+        systemPrompt: 'restricted',
+        level: 'project',
+        tools: ['*'],
+      }),
+      onCreate: async () => ({
+        finalText: 'done',
+        terminateMode: 'GOAL',
+      }),
+    });
+    Object.assign(config, {
+      getActiveExtensions: () => [extensionWithSkill],
+      getContextFilePaths: () => [],
+      isSkillEnabled: () => false,
+    });
+
+    await createProductionDispatch(config)('check', {
+      agentType: 'restricted',
+      extensions: ['data-expert'],
+    });
+
+    expect(calls[0].prompt).not.toContain('- Skills:');
     expect(calls[0].prompt).not.toContain(
       'Invoke listed Skills through the Skill tool',
     );

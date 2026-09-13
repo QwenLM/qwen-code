@@ -592,7 +592,6 @@ export function createProductionDispatch(
             `agent({extensions}): active extension '${name}' was not found.`,
           );
         if (loaded.has(extension.name)) continue;
-        selectedExtensionHasSkills ||= (extension.skills?.length ?? 0) > 0;
         const unloadedContextFiles = extension.contextFiles.filter(
           (contextFile) =>
             !loadedContextFiles.has(
@@ -603,10 +602,12 @@ export function createProductionDispatch(
           { ...extension, contextFiles: unloadedContextFiles },
           {
             remainingBudget,
+            config,
             signal,
             strict: true,
           },
         );
+        selectedExtensionHasSkills ||= context.hasModelInvocableSkills;
         remainingBudget = context.remainingBudget;
         contexts.push(context.text);
         loaded.add(extension.name);

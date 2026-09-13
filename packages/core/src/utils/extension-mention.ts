@@ -5,7 +5,9 @@
  */
 
 import * as fs from 'node:fs/promises';
+import type { Config } from '../config/config.js';
 import type { Extension } from '../extension/extensionManager.js';
+import type { SkillConfig } from '../skills/types.js';
 import { getErrorMessage } from './errors.js';
 import { isSubpath } from './paths.js';
 import { stripTerminalControlSequences } from './terminalSafe.js';
@@ -78,7 +80,31 @@ export function getSanitizedExtensionDisplayName(extension: Extension): string {
   );
 }
 
-export function buildExtensionContextText(extension: Extension): string {
+function modelInvocableExtensionSkills(
+  extension: Extension,
+  config?: Config,
+): SkillConfig[] {
+  if (config?.getDisabledSkillLevels?.()?.has('extension')) return [];
+  const skillManager = config?.getSkillManager?.();
+  return (extension.skills ?? []).filter((skill) => {
+    if (skill.disableModelInvocation) return false;
+    const registeredSkill: SkillConfig = {
+      ...skill,
+      name: `${extension.name}:${skill.name}`,
+      authoredName: skill.name,
+      level: 'extension',
+      extensionName: extension.name,
+      extensionDisplayName: extension.displayName,
+    };
+    if (config?.isSkillEnabled?.(registeredSkill) === false) return false;
+    return !skillManager || skillManager.isSkillActive(registeredSkill);
+  });
+}
+
+function buildExtensionContextTextWithSkills(
+  extension: Extension,
+  skills: SkillConfig[],
+): string {
   const displayName = getSanitizedExtensionDisplayName(extension);
   const lines: string[] = [`Extension: ${displayName}`];
   if (extension.config.description) {
@@ -91,9 +117,9 @@ export function buildExtensionContextText(extension: Extension): string {
 
   const capabilities: string[] = [];
 
-  if (extension.skills && extension.skills.length > 0) {
+  if (skills.length > 0) {
     const extensionName = sanitizeDisplayText(extension.name);
-    const skillNames = extension.skills
+    const skillNames = skills
       .map((s) => {
         const skillName = sanitizeDisplayText(s.name);
         return extensionName && skillName
@@ -131,6 +157,16 @@ export function buildExtensionContextText(extension: Extension): string {
   ].join('\n');
 }
 
+export function buildExtensionContextText(
+  extension: Extension,
+  config?: Config,
+): string {
+  return buildExtensionContextTextWithSkills(
+    extension,
+    modelInvocableExtensionSkills(extension, config),
+  );
+}
+
 function sliceWithoutTrailingHighSurrogate(
   value: string,
   requestedEnd: number,
@@ -145,14 +181,27 @@ export async function buildExtensionMentionContext(
   extension: Extension,
   options: {
     remainingBudget: number;
+    config?: Config;
     /** Fail instead of truncating context files retained by the loader. */
     strict?: boolean;
     signal?: AbortSignal;
     onDebugMessage?: (message: string) => void;
   },
-): Promise<{ text: string; remainingBudget: number }> {
+): Promise<{
+  text: string;
+  remainingBudget: number;
+  hasModelInvocableSkills: boolean;
+}> {
   if (options.strict) options.signal?.throwIfAborted();
-  let contextText = buildExtensionContextText(extension);
+  const invocableSkills = modelInvocableExtensionSkills(
+    extension,
+    options.config,
+  );
+  let contextText = buildExtensionContextTextWithSkills(
+    extension,
+    invocableSkills,
+  );
+  const hasModelInvocableSkills = invocableSkills.length > 0;
   let remainingBudget = options.remainingBudget;
   if (options.strict) {
     remainingBudget -= contextText.length;
@@ -163,7 +212,7 @@ export async function buildExtensionMentionContext(
   }
 
   if (extension.contextFiles.length === 0) {
-    return { text: contextText, remainingBudget };
+    return { text: contextText, remainingBudget, hasModelInvocableSkills };
   }
 
   const closingFence = EXTENSION_CLOSING_FENCE;
@@ -265,5 +314,5 @@ export async function buildExtensionMentionContext(
     remainingBudget -= cappedContent.length;
   }
 
-  return { text: contextText, remainingBudget };
+  return { text: contextText, remainingBudget, hasModelInvocableSkills };
 }

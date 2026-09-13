@@ -643,6 +643,7 @@ export async function resolveAtCommandQuery({
 
     const context = await buildExtensionMentionContext(extension, {
       remainingBudget: extensionContextBudgetRemaining,
+      config,
       signal,
       onDebugMessage,
     });

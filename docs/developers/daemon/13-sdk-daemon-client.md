@@ -269,8 +269,8 @@ arguments such as:
 
 `sourceRef` is optional provenance. Its `id` and `revision` are required when
 present; `digest` and `title` are optional. It is retained in the run, tool result,
-snapshot, and resume/retry path. It is neither a permission grant nor a runtime
-verification of the script digest.
+journal, snapshot, and resume/retry path. It is neither a permission grant nor a
+runtime verification of the script digest.
 
 The script may associate an agent call with a definition node and load an expert:
 

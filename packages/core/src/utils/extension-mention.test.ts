@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { Config } from '../config/config.js';
 import type { Extension } from '../extension/extensionManager.js';
 import {
   buildExtensionContextText,
@@ -169,6 +170,31 @@ describe('extension mention context', () => {
     );
     expect(buildExtensionContextText(extension)).toContain('Skills: unnamed');
     expect(buildExtensionContextText(extension)).not.toContain('\u001b');
+  });
+
+  it('lists only extension skills that the model may invoke', () => {
+    extension.skills = [
+      { name: 'visible' },
+      { name: 'disabled', paths: [] },
+      { name: 'manual-only', disableModelInvocation: true },
+      { name: 'path-gated', paths: ['src/**'] },
+    ] as never;
+    const config = {
+      getDisabledSkillLevels: () => new Set(),
+      isSkillEnabled: (skill: { authoredName?: string }) =>
+        skill.authoredName !== 'disabled',
+      getSkillManager: () => ({
+        isSkillActive: (skill: { authoredName?: string }) =>
+          skill.authoredName !== 'path-gated',
+      }),
+    } as unknown as Config;
+
+    const text = buildExtensionContextText(extension, config);
+
+    expect(text).toContain('Skills: expert:visible');
+    expect(text).not.toContain('expert:disabled');
+    expect(text).not.toContain('expert:manual-only');
+    expect(text).not.toContain('expert:path-gated');
   });
 
   it('preserves visible Unicode format sequences in display and context text', async () => {
