@@ -34,6 +34,7 @@ import { StreamingState } from '../../types.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useAgentStreamingState } from '../../hooks/useAgentStreamingState.js';
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
+import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
 import { useTextBuffer } from '../shared/text-buffer.js';
 import { calculatePromptWidths } from '../../utils/layoutUtils.js';
 import { BaseTextInput } from '../BaseTextInput.js';
@@ -52,6 +53,31 @@ interface AgentComposerProps {
   agentId: string;
 }
 
+// ─── Layout key ─────────────────────────────────────────────
+
+/**
+ * Build the layout key AppContainer's controls-height measure effect depends
+ * on to re-measure the agent footer. The footer's height shifts with the
+ * agent's streaming state (LoadingIndicator row), terminal status row
+ * (Completed/Failed/Cancelled), queued-message display, and input text
+ * wrapping — none of which AppContainer can observe through its own state.
+ * Syncing this key to AgentViewContext is what triggers the re-measure;
+ * mirrors getLiveAgentPanelLayoutKey for the LiveAgentPanel.
+ */
+export function getAgentComposerLayoutKey(parts: {
+  streamingState: StreamingState;
+  statusLabel: string;
+  queuedMessageCount: number;
+  inputText: string;
+}): string {
+  return [
+    parts.streamingState,
+    parts.statusLabel,
+    parts.queuedMessageCount,
+    parts.inputText,
+  ].join('|');
+}
+
 // ─── Component ──────────────────────────────────────────────
 
 // Shared empty queue identity so unregistered agents don't allocate on
@@ -68,6 +94,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   } = useAgentViewState();
   const {
     setAgentInputBufferText,
+    setAgentComposerLayoutKey,
     setAgentTabBarFocused,
     setAgentApprovalMode,
     appendToAgentMessageQueue,
@@ -89,6 +116,13 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     lastPromptTokenCount,
   } = useAgentStreamingState(interactiveAgent);
 
+  // An open right-click context menu owns the keyboard while it is up
+  // (mounted on this tab by AgentChatContent's ContentMouseController).
+  // KeypressContext broadcasts to every subscriber and discards return
+  // values, so the menu cannot consume a key for us — each consumer has to go
+  // quiet itself, exactly as InputPrompt does for the main view.
+  const { menu: contextMenu, closeMenu } = useContextMenu();
+
   // ── Escape to cancel the active agent round ──
 
   useKeypress(
@@ -102,7 +136,9 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     },
     {
       isActive:
-        streamingState === StreamingState.Responding && !agentShellFocused,
+        streamingState === StreamingState.Responding &&
+        !agentShellFocused &&
+        contextMenu === null,
     },
   );
 
@@ -164,6 +200,23 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
 
   const handleKeypress = useCallback(
     (key: Key): boolean => {
+      // While the right-click context menu is open it owns the navigation
+      // keys (the overlay handles them); any other key closes the menu and is
+      // then processed normally, mirroring click-away dismissal. The
+      // dismissing key must fall through rather than be swallowed, since
+      // BaseTextInput still owns every non-navigation key.
+      if (contextMenu !== null) {
+        if (
+          key.name === 'up' ||
+          key.name === 'down' ||
+          key.name === 'return' ||
+          key.name === 'escape'
+        ) {
+          return true;
+        }
+        closeMenu();
+      }
+
       // When tab bar has focus, block all non-printable keys so they don't
       // act on the hidden buffer. Printable characters fall through to
       // BaseTextInput naturally; the tab bar handler releases focus on the
@@ -193,7 +246,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       }
       return false;
     },
-    [buffer, agentTabBarFocused, setAgentTabBarFocused],
+    [buffer, agentTabBarFocused, setAgentTabBarFocused, contextMenu, closeMenu],
   );
 
   // ── Message queue display ──
@@ -241,6 +294,22 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         return null;
     }
   }, [status, interactiveAgent]);
+
+  // Sync a layout key that changes whenever this footer's height can change
+  // (loading row toggling, status row appearing, queued messages growing,
+  // input wrapping). AppContainer's controls-height measure effect depends on
+  // it via AgentViewContext; without the sync, controlsHeight stays
+  // stale-high after the footer grows and the transcript viewport pushes the
+  // composer and tab bar past the terminal bottom (#9507).
+  const composerLayoutKey = getAgentComposerLayoutKey({
+    streamingState,
+    statusLabel: statusLabel?.text ?? '',
+    queuedMessageCount: messageQueue.length,
+    inputText: buffer.text,
+  });
+  useEffect(() => {
+    setAgentComposerLayoutKey(composerLayoutKey);
+  }, [composerLayoutKey, setAgentComposerLayoutKey]);
 
   // ── Approval-mode styling (mirrors main InputPrompt) ──
 
