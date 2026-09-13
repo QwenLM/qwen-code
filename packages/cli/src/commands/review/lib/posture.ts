@@ -22,8 +22,11 @@
 // - an explicit/configured `critical` floor resolves `critical` at compose
 //   unconditionally;
 // - the round arm (`thisRound >= CRITICAL_FLOOR_ROUND`) reads the side
-//   file's round, which is exactly what compose's `prevRound` reads, and
-//   rounds only grow;
+//   file's round, which is what compose's `prevRound` reads, and rounds
+//   only grow — except that this reader also refuses a round the file
+//   records as unattributed (see `resolveCriticalPosture`), where compose's
+//   floor still engages on it: the prediction may under-claim, never
+//   outrun;
 // - the flat-trend arm reads the recorded streak: at or past
 //   `FLAT_STREAK_TO_ENGAGE` compose's latch holds engagement on the recorded
 //   value alone ("the pin is the latch"), so a streak at the bar today is a
@@ -94,23 +97,37 @@ export function resolveCriticalPosture(input: {
     flatRounds?: unknown;
     foreign?: unknown;
     anonymousAdoption?: unknown;
+    roundAdoptedAnonymously?: unknown;
   };
   // The counter is a SHARED id space (`pr-context`: "the round counter is a
   // shared id space, and the anchor was already stripped at the seam for a
   // foreign winner"), so a round number can be another account's — or one
   // an anonymous walk adopted because it could not ask whose it was. The
-  // file records both, and until this diff nothing read them here: before
-  // it, a counter from either source moved the posting FLOOR; with it, the
-  // same counter buys less review WORK — the territory fan-out forced on,
-  // the round-cap tier flipped, and a non-delta chunk leaving the wave
-  // after one dry receipt with no cold check and no return path.
+  // file records both. Before the fix-audit shape (#10104) such a counter
+  // moved only the posting FLOOR; with the shape, the same counter buys
+  // less review WORK — the territory fan-out forced on, the round-cap tier
+  // flipped, and a non-delta chunk leaving the wave after one dry launch
+  // with no cold check and no return path.
   //
   // So the two arms that read the counter refuse it where its provenance
   // is not this account's. The `explicit` arm above is unconditioned: it
   // reads the operator's own CLI-written invocation record, not this file.
   // Same direction as the flat arm's clamp below — a number nobody can
   // attribute engages nothing.
-  if (rec.foreign === true || rec.anonymousAdoption === true) return null;
+  //
+  // Three flags, because the file records two different adoptions. An
+  // anonymous WHOLE write adopts the list and its counter together
+  // (`anonymousAdoption`); an anonymous counter-ADVANCE keeps this account's
+  // own list and adopts only the counter (`roundAdoptedAnonymously`,
+  // #10136 R24-1). Reading the list flag alone let the second shape engage
+  // the posture on a round number nobody vouched.
+  if (
+    rec.foreign === true ||
+    rec.anonymousAdoption === true ||
+    rec.roundAdoptedAnonymously === true
+  ) {
+    return null;
+  }
   const round =
     typeof rec.round === 'number' &&
     Number.isInteger(rec.round) &&

@@ -93,6 +93,8 @@ describe('resolveCriticalPosture', () => {
       { foreign: true },
       { anonymousAdoption: true },
       { foreign: true, anonymousAdoption: true },
+      // The counter-advance adopts only the counter (#10136 R24-1).
+      { roundAdoptedAnonymously: true },
     ]) {
       expect(
         resolveCriticalPosture({ sideLedger: { round: 9, ...provenance } }),
@@ -103,6 +105,23 @@ describe('resolveCriticalPosture', () => {
         }),
       ).toBeNull();
     }
+    // The counter-advance's whole shape: this account's own list, written
+    // `foreign: false` with no list-adoption flag — only the counter's
+    // provenance marks it (#10136 R24-1).
+    const advanced = {
+      v: 1,
+      round: 8,
+      findings: [{ id: 'R3-1', sev: 'S', file: 'own.ts', title: 'own' }],
+      reviewId: 200,
+      foreign: false,
+      merged: false,
+    };
+    expect(
+      resolveCriticalPosture({
+        sideLedger: { ...advanced, roundAdoptedAnonymously: true },
+      }),
+    ).toBeNull();
+    expect(resolveCriticalPosture({ sideLedger: advanced })).toBe('round');
     // The controls: the same numbers from this account's own rounds engage,
     // and the operator's OWN recorded floor is unconditioned — it reads the
     // CLI-written invocation record, never this file.
