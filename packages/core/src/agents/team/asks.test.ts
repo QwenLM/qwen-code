@@ -8,13 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  answerAsk,
-  createAsk,
-  declineAsk,
-  getAsk,
-  listAsks,
-} from './asks.js';
+import { answerAsk, createAsk, declineAsk, getAsk, listAsks } from './asks.js';
 import { getCollectionDir } from './board-lock.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
