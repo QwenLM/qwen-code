@@ -98,7 +98,16 @@ export interface MessageListProps {
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   onInsightReportOpen?: (path: string) => void;
-  onEditUserMessage?: (targetTurnIndex: number, content: string) => void;
+  /** Open the in-place editor; return true when a host owns the lifecycle. */
+  onEditUserMessage?: (
+    targetTurnIndex: number,
+    content: string,
+  ) => boolean | void;
+  /** Send the text confirmed in the in-place editor. `false` keeps it open. */
+  onSubmitUserMessageEdit?: (
+    targetTurnIndex: number,
+    content: string,
+  ) => boolean | void | Promise<boolean | void>;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
   hasOlderHistory?: boolean;
@@ -2860,6 +2869,7 @@ export const MessageList = memo(
       onAttachmentPreview,
       onInsightReportOpen,
       onEditUserMessage,
+      onSubmitUserMessageEdit,
       loadingTranscript,
       catchingUp,
       hasOlderHistory = false,
@@ -5471,6 +5481,22 @@ export const MessageList = memo(
             displayItem.message.role === 'user'
               ? displayItem.message.content
               : undefined;
+          // Only the newest user turn can be edited, and only while the
+          // transcript still holds the turn the rewind would target.
+          const userMessageEditTarget =
+            editableUserContent !== undefined &&
+            displayItem.message.id === editableUserTurn.lastId &&
+            !isResponding &&
+            !hasOlderHistory &&
+            !historyCapacityReached
+              ? {
+                  turnIndex:
+                    editableUserTurn.turnIndexById.get(
+                      displayItem.message.id,
+                    ) ?? 0,
+                  content: editableUserContent,
+                }
+              : undefined;
 
           return (
             <MessageItem
@@ -5481,19 +5507,20 @@ export const MessageList = memo(
               onAttachmentPreview={onAttachmentPreview}
               onInsightReportOpen={onInsightReportOpen}
               onEditUserMessage={
-                onEditUserMessage &&
-                !isResponding &&
-                !hasOlderHistory &&
-                !historyCapacityReached &&
-                displayItem.message.role === 'user' &&
-                editableUserContent !== undefined &&
-                displayItem.message.id === editableUserTurn.lastId
+                onEditUserMessage && userMessageEditTarget
                   ? () =>
                       onEditUserMessage(
-                        editableUserTurn.turnIndexById.get(
-                          displayItem.message.id,
-                        ) ?? 0,
-                        editableUserContent,
+                        userMessageEditTarget.turnIndex,
+                        userMessageEditTarget.content,
+                      )
+                  : undefined
+              }
+              onSubmitUserMessageEdit={
+                onSubmitUserMessageEdit && userMessageEditTarget
+                  ? (content) =>
+                      onSubmitUserMessageEdit(
+                        userMessageEditTarget.turnIndex,
+                        content,
                       )
                   : undefined
               }
@@ -5559,6 +5586,7 @@ export const MessageList = memo(
         onAttachmentPreview,
         onInsightReportOpen,
         onEditUserMessage,
+        onSubmitUserMessageEdit,
         editableUserTurn,
         hasOlderHistory,
         historyCapacityReached,

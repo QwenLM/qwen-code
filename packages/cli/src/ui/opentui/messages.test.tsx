@@ -176,10 +176,12 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     // shrinks the card or ctrl-s expansion pushes the dialog off screen
     // (mem0 e2e regression).
     expect(maxHistoryItemRows(80)).toBe(320);
+    // No payload: the collapsed-dialog bound (80 - 46) is the tight one.
     expect(pendingCardMaxRows(80, 0, 110)).toBe(34);
-    expect(pendingCardMaxRows(100, 0, 110)).toBe(54);
-    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns.
-    expect(pendingCardMaxRows(80, 3900, 110)).toBe(20);
+    expect(pendingCardMaxRows(100, 0, 110)).toBe(51);
+    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns; the
+    // expanded-dialog bound leaves (80 - 26 - 37) * 0.7 = 11 card rows.
+    expect(pendingCardMaxRows(80, 3900, 110)).toBe(11);
   });
 
   it('falls back to the settled cap on short terminals', () => {

@@ -60,6 +60,16 @@
   color: color-mix(in srgb, var(--muted-foreground) 78%, transparent);
 }
 
+/* Gives way on a narrow pane rather than pushing into the action buttons. */
+.checkpoint {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--warning-color);
+}
+
 .actions {
   display: inline-flex;
   align-items: center;

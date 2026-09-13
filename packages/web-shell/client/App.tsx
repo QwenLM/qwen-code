@@ -102,6 +102,7 @@ import type {
 import { TranscriptViewport } from './components/TranscriptViewport';
 import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
+import { useModelConfigurations } from './hooks/useModelConfigurations';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
@@ -110,9 +111,9 @@ import {
   getTaskActivityKey,
   hasActiveTaskActivity,
 } from './utils/taskActivity';
-import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
+import type { VoiceModelOption } from './voice/voiceModels';
 import {
-  loadVoiceProviders,
+  loadVoiceStatus,
   resolveVoiceWorkspaceTarget,
   setVoiceModelSetting,
   supportsVoiceModelSettings,
@@ -134,14 +135,16 @@ import {
   ChatEditor,
   type ComposerToolbarAction,
 } from './components/ChatEditor';
-import type {
-  ComposerSubmitCommit,
-  EditorHandle,
+import {
+  mapRestoredInputAnnotationsAfterTextChange,
+  type ComposerSubmitCommit,
+  type EditorHandle,
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import type { AttachmentPreviewRequest } from './adapters/messageTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { GoalStatusStrip } from './components/GoalStatusStrip';
+import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import composerStatusStyles from './components/ComposerStatusStack.module.css';
 import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
@@ -601,6 +604,8 @@ const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
   main: 'model.select',
   fast: 'model.setFast',
   voice: 'model.setVoice',
+  advisor: 'model.setAdvisor',
+  image: 'model.setImage',
   vision: 'model.setVision',
 };
 
@@ -775,6 +780,49 @@ function getLatestUserBlock(
     }
   }
   return undefined;
+}
+
+/**
+ * Conversational user turns, i.e. the blocks a rewind indexes against.
+ * Background notifications are injected as user blocks but are not turns.
+ */
+function countUserTurns(blocks: readonly DaemonTranscriptBlock[]): number {
+  let count = 0;
+  for (const block of blocks) {
+    if (
+      block?.kind === 'user' &&
+      block.meta?.['source'] !== 'background_notification'
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/** Longest a resend waits for the rewind to land in the transcript. */
+const REWIND_APPLIED_TIMEOUT_MS = 2000;
+
+/** Wait for the rewind event before adding any new optimistic message. */
+function waitForRewindApplied(
+  getBlocks: () => readonly DaemonTranscriptBlock[],
+  targetTurnIndex: number,
+  isCurrent: () => boolean,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + REWIND_APPLIED_TIMEOUT_MS;
+    const poll = () => {
+      if (!isCurrent()) {
+        resolve(false);
+      } else if (countUserTurns(getBlocks()) <= targetTurnIndex) {
+        resolve(true);
+      } else if (Date.now() >= deadline) {
+        resolve(false);
+      } else {
+        setTimeout(poll, 16);
+      }
+    };
+    poll();
+  });
 }
 
 function matchesUserMessageIdentity(
@@ -1157,7 +1205,13 @@ export interface WebShellProps {
   additionalSlashCommands?: readonly CommandInfo[];
   /** Keep Context Usage available while restored-session usage is loading. */
   contextUsageAlwaysVisible?: boolean;
-  /** Let the host expose the last user turn's edit-and-resend action. */
+  /**
+   * Offer the last user turn's edit-and-resend action. On by default. Editing
+   * happens in place in the message bubble, and the rewind is deferred to send
+   * time, so abandoning the edit keeps the turns after it. Hosts that own the
+   * lifecycle pass `false`, or answer `onUserMessageEditRequest` with `true` to
+   * keep their own editor.
+   */
   userMessageEditing?: boolean;
   /**
    * Called before WebShell starts its built-in user-message edit flow. Return
@@ -1327,6 +1381,8 @@ export interface WebShellProps {
    * direct or queued logical submit, after local command routing and before
    * session creation, composer commit, optimistic rendering, or admission.
    * Retries reuse the previously prepared payload and skip this callback.
+   * If this callback rejects, the submission is cancelled and the rejection's
+   * `Error.message` is surfaced to the user, so hosts must localize it.
    */
   prepareSubmit?: (
     submission: WebShellSubmitSnapshot,
@@ -1336,6 +1392,8 @@ export interface WebShellProps {
    * until the Promise resolves. If the Promise rejects, the prompt is cancelled.
    * `sessionId` is `undefined` when the session has not yet been created (deferred).
    * Also called for queued prompts (submitted while a turn is streaming).
+   * A rejection's `Error.message` is surfaced to the user, so hosts must
+   * localize it.
    */
   onSubmitBefore?: (params: {
     sessionId: string | undefined;
@@ -2982,7 +3040,7 @@ export function App({
   autoSubmitSlashCommands = false,
   additionalSlashCommands = EMPTY_ADDITIONAL_SLASH_COMMANDS,
   contextUsageAlwaysVisible = false,
-  userMessageEditing = false,
+  userMessageEditing = true,
   onUserMessageEditRequest,
   cycleModeOnTab = false,
   sessionSourceType = WEB_SHELL_SESSION_SOURCE_TYPE,
@@ -3283,7 +3341,30 @@ export function App({
     connection.sessionId,
     connection.workspaceCwd,
   );
-  const sessionWriteBlocked = Boolean(connection.loadingTranscript);
+  const [pendingEditRewind, setPendingEditRewind] = useState<{
+    sessionKey: string | undefined;
+    turnIndex: number;
+    owner: DaemonSessionOwnerSnapshot;
+    recover: () => void;
+  } | null>(null);
+  const editRewindSyncBlocked = Boolean(
+    pendingEditRewind &&
+      pendingEditRewind.sessionKey === logicalSessionKey &&
+      pendingEditRewind.owner.isCurrent() &&
+      countUserTurns(blocks) > pendingEditRewind.turnIndex,
+  );
+  useLayoutEffect(() => {
+    if (!pendingEditRewind || editRewindSyncBlocked) return;
+    setPendingEditRewind(null);
+    if (
+      pendingEditRewind.sessionKey === logicalSessionKey &&
+      pendingEditRewind.owner.isCurrent()
+    ) {
+      pendingEditRewind.recover();
+    }
+  }, [pendingEditRewind, editRewindSyncBlocked, logicalSessionKey]);
+  const sessionWriteBlocked =
+    Boolean(connection.loadingTranscript) || editRewindSyncBlocked;
   const sessionWriteBlockedRef = useRef(sessionWriteBlocked);
   const sessionWriteBlockGenerationRef = useRef(0);
   if (sessionWriteBlocked && !sessionWriteBlockedRef.current) {
@@ -9637,6 +9718,25 @@ export function App({
   // to be recreated on every render, cascading into downstream effect chains.
   const dispatchSessionChangeRef = useRef(dispatchSessionChange);
   dispatchSessionChangeRef.current = dispatchSessionChange;
+  // Single error-to-toast helper: suppresses aborts, daemon-turn errors and
+  // already-dispatched notices before surfacing anything. Declared above
+  // sendPrompt / enqueuePrompt so their dep arrays can reference it (a
+  // reference below those callbacks would be a TDZ error).
+  const reportError = useCallback(
+    (error: unknown, fallback: string) => {
+      if (isAbortError(error)) return;
+      if (isDaemonTurnError(error)) {
+        return;
+      }
+      if (isAlreadyDispatched(error)) {
+        return;
+      }
+      const message = formatError(error, fallback);
+      console.error('[web-shell]', message, error);
+      pushToast('error', message);
+    },
+    [pushToast],
+  );
   const sendPrompt = useCallback(
     async (
       text: string,
@@ -9658,6 +9758,7 @@ export function App({
         onCancelledBeforeAdmission?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
         onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
+        beforeAdmission?: () => Promise<void>;
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
     ) => {
@@ -9688,7 +9789,9 @@ export function App({
           ? undefined
           : prepareSubmitRef.current;
       const submitBefore = onSubmitBeforeRef.current;
-      const hasAsyncPreflight = Boolean(prepare || submitBefore);
+      const hasAsyncPreflight = Boolean(
+        prepare || submitBefore || opts?.beforeAdmission,
+      );
       const admissionSource = {
         owner: sessionOwnerGuard.capture(),
         sessionId: connectionRef.current.sessionId,
@@ -9752,10 +9855,17 @@ export function App({
           }
         } catch (err) {
           if (!appMountedRef.current) return;
-          console.warn(
-            '[web-shell] prompt preflight rejected, prompt cancelled',
-            err,
-          );
+          // Say so. Hosts put user-facing text in these errors — the VS Code
+          // companion's message-edit rewind throws localized failures here —
+          // and cancelling silently leaves the user in front of a composer
+          // that appeared to do nothing (#9911). Only when the user is still
+          // on the session this submission belonged to; a toast for a session
+          // they have left would be noise. reportError suppresses aborts and
+          // logs the error itself, so this catch no longer warns (that would
+          // double-log a real failure).
+          if (admissionOwnerIsCurrent()) {
+            reportError(err, 'Message could not be submitted');
+          }
           // Restore retry-critical refs so Ctrl+Y doesn't resend the
           // cancelled prompt.
           restoreCancelledSubmitState();
@@ -9786,8 +9896,16 @@ export function App({
       let allocatedSessionId: string | undefined;
       try {
         allocatedSessionId = await ensureSessionForPrompt();
+        if (!admissionSourceIsCurrent(allocatedSessionId)) {
+          restoreCancelledSubmitState();
+          return;
+        }
+        if (opts?.beforeAdmission) await opts.beforeAdmission();
       } finally {
-        if (appMountedRef.current && shouldShowPreparing) {
+        if (
+          appMountedRef.current &&
+          (shouldShowPreparing || opts?.beforeAdmission)
+        ) {
           finishPreparing();
         }
       }
@@ -9950,6 +10068,7 @@ export function App({
       ensureSessionForPrompt,
       finishPromptPreparation,
       getComposerWorkspaceCwd,
+      reportError,
       sessionCatalogController,
       sessionActions,
       sessionOwnerGuard,
@@ -10209,21 +10328,6 @@ export function App({
     ]),
   );
 
-  const reportError = useCallback(
-    (error: unknown, fallback: string) => {
-      if (isAbortError(error)) return;
-      if (isDaemonTurnError(error)) {
-        return;
-      }
-      if (isAlreadyDispatched(error)) {
-        return;
-      }
-      const message = formatError(error, fallback);
-      console.error('[web-shell]', message, error);
-      pushToast('error', message);
-    },
-    [pushToast],
-  );
   const handleFailedPromptRetry = useCallback(() => {
     if (
       sessionWriteBlockedRef.current ||
@@ -10480,13 +10584,22 @@ export function App({
         const sourceWorkspaceCwd = getComposerWorkspaceCwd();
         const sourceVersion = composerSourceVersionRef.current;
         const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
-        const submissionOwnerIsCurrent = () =>
+        // Narrower than submissionOwnerIsCurrent below: it answers "is the user
+        // still looking at the session this submission belonged to", which is
+        // what decides whether a failure is worth telling them about. The full
+        // guard also tracks composer identity, and submitting is itself what
+        // moves that — so reusing it here would suppress the very message the
+        // user needs (#9911). The full guard is composed on this base rather
+        // than restating the same four conjuncts, so the two cannot drift.
+        const submissionSessionIsCurrent = () =>
           appMountedRef.current &&
           sourceOwner.isCurrent() &&
+          connectionRef.current.sessionId === sourceSessionId &&
+          getComposerWorkspaceCwd() === sourceWorkspaceCwd;
+        const submissionOwnerIsCurrent = () =>
+          submissionSessionIsCurrent() &&
           !sessionWriteBlockedRef.current &&
           sessionWriteBlockGenerationRef.current === writeBlockGeneration &&
-          connectionRef.current.sessionId === sourceSessionId &&
-          getComposerWorkspaceCwd() === sourceWorkspaceCwd &&
           composerSourceVersionRef.current === sourceVersion;
         void (async () => {
           let preparedPrompt = text;
@@ -10523,10 +10636,18 @@ export function App({
               sourceWorkspaceCwd,
             );
           } catch (err) {
-            console.warn(
-              '[web-shell] queued prompt preflight rejected, cancelled',
-              err,
-            );
+            // A rejected preflight cancels the submission, so it has to say so.
+            // Hosts put user-facing text in these errors — the VS Code
+            // companion's rewind failures are localized strings — and a silent
+            // cancel leaves the user in front of a composer that did nothing
+            // (#9911). Stay quiet only when this submission is no longer the
+            // current one, where the toast would belong to a session the user
+            // has already left. reportError suppresses aborts and logs the
+            // error itself, so this catch no longer warns (that would
+            // double-log a real failure).
+            if (submissionSessionIsCurrent()) {
+              reportError(err, 'Message could not be submitted');
+            }
           }
         })();
         return false;
@@ -10542,6 +10663,7 @@ export function App({
     },
     [
       getComposerWorkspaceCwd,
+      reportError,
       rawEnqueuePrompt,
       sessionCatalogController,
       sessionOwnerGuard,
@@ -10842,6 +10964,8 @@ export function App({
     autoLoad: projectFeaturesAvailable,
     enabled: projectFeaturesAvailable,
   });
+  const modelConfigurations = useModelConfigurations(projectFeaturesAvailable);
+  const reloadModelConfigurations = modelConfigurations.reload;
   // useProviders returns a fresh object each render, but its `reload` identity is
   // stable — pull it out so callbacks can depend on the function alone without
   // re-creating on every render (and without an exhaustive-deps warning).
@@ -11033,6 +11157,72 @@ export function App({
     );
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
+  const currentAdvisorModel = readScopedModelSetting(
+    workspaceSettings,
+    modelSettingScope,
+    'advisorModel',
+  );
+  const currentImageModel = readScopedModelSetting(
+    workspaceSettings,
+    modelSettingScope,
+    'imageModel',
+  );
+  const roleModelsReady =
+    !modelConfigurations.loading &&
+    !modelConfigurations.error &&
+    modelConfigurations.data !== undefined;
+  const advisorModels: ModelDialogModel[] =
+    roleModelsReady && !providersState.loading && !providersState.error
+      ? [
+          { id: '', label: t('model.useMain') },
+          ...providersState.providers.flatMap((provider) =>
+            provider.models.flatMap((model) => {
+              if (
+                model.isRuntime ||
+                !isVisibleComposerModel({ id: model.modelId })
+              )
+                return [];
+              const configuration = modelConfigurations.models.find(
+                (entry) => entry.key === model.configurationKey,
+              );
+              const id =
+                configuration?.advisorModel ??
+                (provider.authType === 'qwen-oauth'
+                  ? `${provider.authType}:${model.baseModelId}`
+                  : undefined);
+              return id
+                ? [
+                    {
+                      id,
+                      baseModelId: model.baseModelId,
+                      label: model.name,
+                      authType: provider.authType,
+                      baseUrl: model.baseUrl,
+                      envKey: model.envKey,
+                      contextWindow: model.contextLimit,
+                      modalities: model.modalities,
+                    },
+                  ]
+                : [];
+            }),
+          ),
+        ]
+      : [];
+  const imageModels = modelConfigurations.models.flatMap((model) =>
+    model.imageModel
+      ? [
+          {
+            id: model.imageModel,
+            baseModelId: model.modelId,
+            label: model.name ?? model.modelId,
+            authType: model.authType,
+            baseUrl: model.baseUrl,
+            envKey: model.envKey,
+            contextWindow: model.contextWindowSize,
+          },
+        ]
+      : [],
+  );
   const currentModelFallbacks = useMemo(() => {
     const value = readScopedModelSetting(
       workspaceSettings,
@@ -11175,7 +11365,7 @@ export function App({
         !showFallbacksDialogRef.current &&
         !showAuthDialogRef.current;
       try {
-        const status = await loadVoiceProviders(workspace.client, target);
+        const status = await loadVoiceStatus(workspace.client, target);
         if (!intentIsCurrent()) {
           if (request === voicePickerRequestRef.current) {
             pendingVoicePickerSourceRef.current = undefined;
@@ -11184,7 +11374,16 @@ export function App({
         }
         pendingVoicePickerSourceRef.current = undefined;
         voicePickerTargetRef.current = target;
-        setVoiceModels(extractVoiceModels(status));
+        setVoiceModels(
+          status.availableVoiceModels.map((model) => ({
+            id: model.id,
+            label: model.name,
+            baseUrl: model.baseUrl,
+            contextWindow: model.contextWindow,
+            authType: 'openai',
+            modalities: { audio: true },
+          })),
+        );
         setModelSettingScope(scope);
         setModelDialogMode('voice');
       } catch (error) {
@@ -13951,33 +14150,251 @@ export function App({
     [sessionActions],
   );
 
-  const editUserMessage = useCallback(
-    async (turnIndex: number, content: string) => {
-      if (onUserMessageEditRequest?.(turnIndex, content) === true) return;
+  // The inline editor is owned by the message row. This only reports whether a
+  // host takes the lifecycle over, so the row can skip its own editor.
+  const beginUserMessageEdit = useCallback(
+    (turnIndex: number, content: string) =>
+      onUserMessageEditRequest?.(turnIndex, content) === true,
+    [onUserMessageEditRequest],
+  );
 
-      const restoreComposer = () => {
-        editorRef.current?.setText(content);
-        editorRef.current?.focus();
+  const submitUserMessageEdit = useCallback(
+    async (turnIndex: number, content: string): Promise<boolean> => {
+      const trimmed = content.trim();
+      if (
+        sessionWriteBlockedRef.current ||
+        promptPreparationOwnerRef.current ||
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current
+      ) {
+        pushToast('error', t('userMessage.editBusy'));
+        return false;
+      }
+      const sessionId = connectionRef.current.sessionId;
+      if (
+        unknownPromptAdmissionRef.current?.payloadAvailable &&
+        unknownPromptAdmissionRef.current.sessionId === sessionId
+      )
+        return false;
+      const original = getLatestUserBlock(store.getSnapshot().blocks);
+      if (!sessionId || original?.kind !== 'user') return false;
+      const images: PromptImage[] | undefined = original.images?.map(
+        (image) => ({
+          data: image.data,
+          media_type: image.mimeType,
+        }),
+      );
+      const files: PromptFile[] | undefined = original.files?.map((file) => ({
+        name: file.name,
+        media_type: file.mimeType,
+        data: file.data,
+        text: file.text,
+        attachmentId: file.attachmentId,
+      }));
+      if (!trimmed && !images?.length && !files?.length) return false;
+      const inputAnnotations = mapRestoredInputAnnotationsAfterTextChange(
+        original.meta?.inputAnnotations ?? [],
+        original.text,
+        trimmed,
+      );
+      const owner = sessionOwnerGuard.capture();
+      const editRetryOwner: CancelledRetryOwner = {
+        sessionId,
+        workspaceCwd: getComposerWorkspaceCwd(),
+        sessionKey: logicalSessionKey,
+        sourceVersion: composerSourceVersionRef.current,
+        snapshot: owner,
       };
-
-      restoreComposer();
-      window.setTimeout(restoreComposer, 0);
+      const generation = sessionWriteBlockGenerationRef.current;
+      const isCurrent = () =>
+        appMountedRef.current &&
+        owner.isCurrent() &&
+        connectionRef.current.sessionId === sessionId &&
+        !sessionWriteBlockedRef.current &&
+        sessionWriteBlockGenerationRef.current === generation;
+      const assertCurrent = () => {
+        if (!isCurrent())
+          throw new DOMException('Edit session changed', 'AbortError');
+      };
+      const assertTarget = () => {
+        assertCurrent();
+        if (
+          countUserTurns(store.getSnapshot().blocks) !== turnIndex + 1 ||
+          !matchesUserMessageIdentity(
+            getLatestUserBlock(store.getSnapshot().blocks),
+            { block: original },
+            true,
+          )
+        ) {
+          throw new Error(t('userMessage.editStale'));
+        }
+      };
+      let preparedEdit: WebShellPreparedSubmit = {
+        prompt: trimmed,
+        inputAnnotations,
+      };
+      let rewindStarted = false;
+      let rewindApplied = false;
+      let admissionStarted = false;
+      let admitted = false;
+      let admissionUnknown = false;
       try {
-        const { snapshots } = await sessionActions.getRewindSnapshots();
-        const snapshot = snapshots.find(
-          (entry) => entry.turnIndex === turnIndex,
-        );
-        if (!snapshot) throw new Error(t('rewind.empty'));
-        await sessionActions.rewindSession(snapshot.promptId, {
-          rewindFiles: false,
+        await sendPrompt(trimmed, images, files, {
+          submittedPrompt: trimmed,
+          inputAnnotations,
+          clearComposerOnPromptStart: false,
+          onPreparedSubmit: (prepared) => {
+            preparedEdit = prepared;
+          },
+          beforeAdmission: async () => {
+            assertTarget();
+            for (let index = 0; index < (images?.length ?? 0); index += 1) {
+              const attachmentId = original.images![index].attachmentId;
+              if (!attachmentId) continue;
+              const attachment =
+                await sessionActions.readAttachment(attachmentId);
+              assertTarget();
+              images![index] = {
+                data: attachment.data,
+                media_type: attachment.mimeType,
+              };
+            }
+            for (const file of files ?? []) {
+              if (file.data !== undefined || file.text !== undefined) continue;
+              if (!file.attachmentId)
+                throw new Error(t('userMessage.editAttachmentUnavailable'));
+              const attachment = await sessionActions.readAttachment(
+                file.attachmentId,
+              );
+              assertTarget();
+              file.data = base64ToBlob(attachment.data, attachment.mimeType);
+              file.media_type = attachment.mimeType;
+            }
+            const { snapshots } = await sessionActions.getRewindSnapshots();
+            assertTarget();
+            const snapshot = snapshots.find(
+              (entry) => entry.turnIndex === turnIndex,
+            );
+            if (!snapshot) throw new Error(t('rewind.empty'));
+            rewindStarted = true;
+            await sessionActions.rewindSession(snapshot.promptId, {
+              rewindFiles: false,
+            });
+            assertCurrent();
+            rewindApplied = await waitForRewindApplied(
+              () => store.getSnapshot().blocks,
+              turnIndex,
+              isCurrent,
+            );
+            assertCurrent();
+            if (!rewindApplied) {
+              throw new Error(t('userMessage.editSyncFailed'));
+            }
+          },
+          onAdmissionStarted: () => {
+            admissionStarted = true;
+          },
+          onAdmitted: () => {
+            admitted = true;
+          },
         });
       } catch (error) {
-        reportError(error, t('rewind.failed', { reason: String(error) }));
+        if (!isCurrent()) return false;
+        if (
+          admissionStarted &&
+          !admitted &&
+          !isDefinitelyRejectedPromptAdmission(error)
+        ) {
+          admissionUnknown = true;
+          updateUnknownPromptAdmission({
+            sessionId,
+            text: preparedEdit.prompt,
+            images,
+            files,
+            inputAnnotations: preparedEdit.inputAnnotations
+              ? [...preparedEdit.inputAnnotations]
+              : undefined,
+            payloadAvailable: true,
+          });
+          pushToast('warning', t('queue.admissionUnknown'));
+        } else if (!isAbortError(error) && !isAlreadyDispatched(error)) {
+          reportError(
+            error,
+            t('userMessage.editFailed', { reason: formatError(error, '') }),
+          );
+        }
       } finally {
-        restoreComposer();
+        if (rewindStarted && !admitted && !admissionUnknown && isCurrent()) {
+          const recover = () => {
+            // Only create a replacement after the old turn has been removed.
+            if (countUserTurns(store.getSnapshot().blocks) === turnIndex) {
+              store.appendLocalUserMessage(
+                preparedEdit.prompt,
+                images?.map((image) => ({
+                  data: image.data,
+                  mimeType: image.media_type,
+                })),
+                preparedEdit.inputAnnotations?.length
+                  ? { inputAnnotations: [...preparedEdit.inputAnnotations] }
+                  : undefined,
+                files?.map((file) => ({
+                  ...file,
+                  mimeType: file.media_type,
+                })),
+              );
+            }
+            const recoveryBlocks = store.getSnapshot().blocks;
+            const failedMessage = getLatestUserBlock(recoveryBlocks);
+            if (!failedMessage || failedMessage === original) return;
+            const previousMessage = getLatestUserBlock(
+              recoveryBlocks.slice(0, recoveryBlocks.indexOf(failedMessage)),
+            );
+            updateFailedPrompt({
+              sessionId,
+              messageId: failedMessage.id,
+              identity: { block: failedMessage },
+              previousIdentity: previousMessage
+                ? { block: previousMessage }
+                : undefined,
+              owner: editRetryOwner,
+              text: preparedEdit.prompt,
+              images,
+              files,
+              inputAnnotations: preparedEdit.inputAnnotations
+                ? [...preparedEdit.inputAnnotations]
+                : undefined,
+            });
+          };
+          if (
+            !rewindApplied &&
+            countUserTurns(store.getSnapshot().blocks) > turnIndex
+          ) {
+            setPendingEditRewind({
+              sessionKey: logicalSessionKey,
+              turnIndex,
+              owner,
+              recover,
+            });
+          } else {
+            recover();
+          }
+        }
       }
+      return admitted;
     },
-    [onUserMessageEditRequest, reportError, sessionActions, t],
+    [
+      pushToast,
+      reportError,
+      sendPrompt,
+      sessionActions,
+      sessionOwnerGuard,
+      store,
+      t,
+      updateUnknownPromptAdmission,
+      updateFailedPrompt,
+      getComposerWorkspaceCwd,
+      logicalSessionKey,
+    ],
   );
 
   const handleRewindError = useCallback(
@@ -16062,6 +16479,12 @@ export function App({
           // A transient reload failure shouldn't surface as "delete failed" —
           // the model was already removed. Just log it. Reload settings too so a
           // cleared active model / scrubbed fallback isn't shown stale.
+          void reloadModelConfigurations().catch((error: unknown) =>
+            console.warn(
+              '[web-shell] failed to reload model configurations',
+              error,
+            ),
+          );
           reloadProviders().catch((err: unknown) => {
             console.warn(
               '[web-shell] failed to reload providers after delete',
@@ -16090,6 +16513,7 @@ export function App({
     [
       workspaceActions,
       reloadProviders,
+      reloadModelConfigurations,
       reloadWorkspaceSettings,
       reportError,
       sessionOwnerGuard,
@@ -16101,6 +16525,9 @@ export function App({
   const handleCloseAuthDialog = useCallback(() => {
     setShowAuthDialog(false);
     if (!projectFeaturesAvailable) return;
+    void reloadModelConfigurations().catch((error: unknown) =>
+      console.warn('[web-shell] failed to reload model configurations', error),
+    );
     // The provider install flow doesn't broadcast a settings change, so refresh
     // the model list on close to surface any newly added models. Log a failed
     // reload (leaves stale model data) rather than swallowing it.
@@ -16110,7 +16537,7 @@ export function App({
         err,
       );
     });
-  }, [reloadProviders, projectFeaturesAvailable]);
+  }, [reloadProviders, reloadModelConfigurations, projectFeaturesAvailable]);
 
   const handleFallbacksConfirm = useCallback(
     (baseIds: string[]) => {
@@ -16241,7 +16668,7 @@ export function App({
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
       // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
-      // not ACP format. extractVoiceModels() sets id to the baseModelId.
+      // not ACP format. The voice status API supplies the raw model id.
       const bareModelId = extractBareModelId(modelId);
       const target = voicePickerTargetRef.current;
       if (!target || target.ownerKey !== mainVoiceTargetRef.current?.ownerKey) {
@@ -16289,11 +16716,82 @@ export function App({
     ],
   );
 
+  const handleRoleModelSelect = (
+    key: 'advisorModel' | 'imageModel',
+    value: string,
+  ) => {
+    if (
+      !projectFeaturesAvailable ||
+      !roleModelsReady ||
+      !(
+        key === 'advisorModel' ? advisorModels : [{ id: '' }, ...imageModels]
+      ).some((model) => model.id === value)
+    )
+      return;
+    const owner = sessionOwnerGuard.capture();
+    void setWorkspaceSetting(modelSettingScope, key, value)
+      .then((result) => {
+        if (owner.isCurrent() && result?.requiresRestart) {
+          store.dispatch([
+            { type: 'status', text: t('settings.requiresRestart') },
+          ]);
+        }
+      })
+      .catch((error: unknown) => {
+        if (owner.isCurrent())
+          reportError(
+            error,
+            t(key === 'imageModel' ? 'model.setImage' : 'model.setAdvisor'),
+          );
+      });
+  };
+
+  const handleModelContextWindowUpdate = async (
+    key: string,
+    size: number | null,
+  ) => {
+    const token = ++modelActionTokenRef.current;
+    setModelActionBusy(true);
+    try {
+      const result = await workspace.client.updateModelContextWindow(key, size);
+      await Promise.allSettled([
+        reloadModelConfigurations(),
+        reloadProviders(),
+      ]);
+      return result;
+    } finally {
+      if (modelActionTokenRef.current === token) setModelActionBusy(false);
+    }
+  };
+  const modelDialogModels: Partial<
+    Record<ModelDialogMode, ModelDialogModel[]>
+  > = {
+    voice: voiceModels,
+    advisor: advisorModels,
+    image: roleModelsReady
+      ? [{ id: '', label: t('model.disabled') }, ...imageModels]
+      : [],
+  };
+  const modelDialogCurrent: Partial<Record<ModelDialogMode, string>> = {
+    voice: currentVoiceModel,
+    vision: currentVisionModel,
+    fast: currentFastModel,
+    advisor:
+      typeof currentAdvisorModel === 'string'
+        ? (advisorModels.find(
+            (model) => model.id === `${currentAdvisorModel}\0`,
+          )?.id ?? currentAdvisorModel)
+        : '',
+    image: typeof currentImageModel === 'string' ? currentImageModel : '',
+  };
+
   const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
     main: handleModelSelect,
     fast: handleFastModelSelect,
     voice: handleVoiceModelSelect,
     vision: handleVisionModelSelect,
+    advisor: (id) => handleRoleModelSelect('advisorModel', id),
+    image: (id) => handleRoleModelSelect('imageModel', id),
   };
 
   // Once every settings-launched model surface is closed (the model picker via
@@ -16851,19 +17349,23 @@ export function App({
             >
               <ModelDialog
                 mode={modelDialogMode}
-                models={modelDialogMode === 'voice' ? voiceModels : undefined}
+                models={modelDialogModels[modelDialogMode]}
+                loading={
+                  (modelDialogMode === 'advisor' && providersState.loading) ||
+                  ((modelDialogMode === 'advisor' || modelDialogMode === 'image') &&
+                    modelConfigurations.loading)
+                }
+                error={
+                  modelDialogMode === 'advisor'
+                    ? providersState.error ?? modelConfigurations.error
+                    : modelDialogMode === 'image'
+                      ? modelConfigurations.error
+                      : undefined
+                }
                 filterModel={
                   modelDialogMode === 'main' ? mainModelFilter : undefined
                 }
-                currentModelId={
-                  modelDialogMode === 'voice'
-                    ? currentVoiceModel
-                    : modelDialogMode === 'vision'
-                      ? currentVisionModel
-                      : modelDialogMode === 'fast'
-                        ? currentFastModel
-                        : undefined
-                }
+                currentModelId={modelDialogCurrent[modelDialogMode]}
                 onSelect={(modelId) => {
                   if (modelDialogMode) {
                     modelHandlers[modelDialogMode](modelId);
@@ -17736,10 +18238,15 @@ export function App({
                         onChatWidthModeChange={handleChatWidthModeChange}
                         modelManagement={{
                           providers: providersState.providers,
+                          configurations: modelConfigurations.models,
+                          onUpdateContextWindow: handleModelContextWindowUpdate,
                           currentModelId:
                             connection.currentModel ?? undefined,
-                          loading: providersState.loading,
-                          error: providersState.error,
+                          loading:
+                            providersState.loading ||
+                            modelConfigurations.loading,
+                          error:
+                            providersState.error ?? modelConfigurations.error,
                           busy: modelActionBusy,
                           onSelectModel: handleModelSelect,
                           onDeleteModel: handleDeleteModel,
@@ -17750,7 +18257,14 @@ export function App({
                           // the reset effect is gated on the dialog/fallback/auth
                           // flags, so it never runs for the approvalMode dialog
                           // and would leave a stale scope behind.
-                          if (key === 'fastModel') {
+                          if (key === 'advisorModel' || key === 'imageModel') {
+                            void reloadModelConfigurations();
+                            if (key === 'advisorModel') void reloadProviders();
+                            setModelSettingScope(scope);
+                            setModelDialogMode(
+                              key === 'advisorModel' ? 'advisor' : 'image',
+                            );
+                          } else if (key === 'fastModel') {
                             setModelSettingScope(scope);
                             setModelDialogMode('fast');
                           } else if (key === 'visionModel') {
@@ -18377,11 +18891,12 @@ export function App({
                                 onRetryFailedPrompt={handleFailedPromptRetry}
                                 onEditUserMessage={
                                   userMessageEditing
-                                    ? (turnIndex, content) =>
-                                        void editUserMessage(
-                                          turnIndex,
-                                          content,
-                                        )
+                                    ? beginUserMessageEdit
+                                    : undefined
+                                }
+                                onSubmitUserMessageEdit={
+                                  userMessageEditing
+                                    ? submitUserMessageEdit
                                     : undefined
                                 }
                                 onBranchSession={handleBranchCurrentSession}
@@ -18898,6 +19413,15 @@ export function App({
                             />
                           </div>
                         )}
+                        <SessionRecoveryBanner
+                          blocked={
+                            isDisabled ||
+                            isStartingNewSessionSuggestion ||
+                            interactionBlocked ||
+                            sessionHasActivePrompt ||
+                            unknownPromptAdmission?.payloadAvailable === true
+                          }
+                        />
                         <ChatEditor
                           ref={setEditorHandle}
                           compactOverlays={compactComposerOverlays}

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MessageTimestamp, formatTimestamp } from './MessageTimestamp';
@@ -97,5 +97,46 @@ describe('MessageTimestamp', () => {
     expect(toolRow.firstElementChild?.classList).toContain(
       styles.toolGroupSpacing,
     );
+  });
+
+  it('renders the edit action after the copy action in the hover row', () => {
+    const onEdit = vi.fn();
+    const ts = new Date(2026, 5, 13, 9, 8, 7).getTime();
+    const container = render(
+      <MessageTimestamp
+        timestamp={ts}
+        chatMode
+        copyText="hello"
+        copyTitle="Copy"
+        onEdit={onEdit}
+        editTitle="Edit message"
+      >
+        <div>body</div>
+      </MessageTimestamp>,
+    );
+
+    const actions = container.querySelectorAll(`.${styles.chatActions} button`);
+    expect(
+      [...actions].map((button) => button.getAttribute('aria-label')),
+    ).toEqual(['Copy', 'Edit message']);
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
+        ?.click();
+    });
+    expect(onEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits the edit action when no handler is given', () => {
+    const ts = new Date(2026, 5, 13, 9, 8, 7).getTime();
+    const container = render(
+      <MessageTimestamp timestamp={ts} chatMode copyText="hello">
+        <div>body</div>
+      </MessageTimestamp>,
+    );
+
+    expect(
+      container.querySelector('button[aria-label="Edit message"]'),
+    ).toBeNull();
   });
 });
