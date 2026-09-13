@@ -29,6 +29,7 @@ import {
   type DaemonSkillToggleMutation,
   type DaemonWorkspaceMcpServerStatus,
   type DaemonWorkspaceGitStatus,
+  type DaemonWorkspaceVoiceStatus,
   type GoalSnapshotV2,
   type SessionSource,
   type SessionSourcesResult,
@@ -228,6 +229,22 @@ function voiceSetting(effective: string): DaemonSettingDescriptor {
   };
 }
 
+function voiceWorkspaceStatus(
+  workspaceCwd: string,
+): DaemonWorkspaceVoiceStatus {
+  return {
+    v: 1,
+    workspaceCwd,
+    enabled: true,
+    mode: 'hold',
+    language: 'auto',
+    voiceModel: null,
+    availableVoiceModels: [
+      { id: 'qwen3-asr-flash', transport: 'qwen-asr-chat' },
+    ],
+  };
+}
+
 function sessionWorkflowSetting(): DaemonSettingDescriptor {
   return {
     key: 'experimental.sessionWorkflow',
@@ -264,8 +281,8 @@ const {
   settingsReload,
   settingsSetValue,
   qualifiedWorkspaceSettings,
-  rootWorkspaceProviders,
-  qualifiedWorkspaceProviders,
+  rootWorkspaceVoice,
+  qualifiedWorkspaceVoice,
   qualifiedSetWorkspaceSetting,
   sessionCatalogController,
   mockReleaseDetachedWebTerminal,
@@ -290,8 +307,8 @@ const {
   };
   const loadSkillsStatus = vi.fn().mockResolvedValue({ skills: [] });
   const qualifiedWorkspaceSettings = vi.fn();
-  const rootWorkspaceProviders = vi.fn();
-  const qualifiedWorkspaceProviders = vi.fn();
+  const rootWorkspaceVoice = vi.fn();
+  const qualifiedWorkspaceVoice = vi.fn();
   const qualifiedSetWorkspaceSetting = vi.fn();
   const workspaceClient = {
     liveSetupStatus: vi
@@ -308,10 +325,10 @@ const {
         pullRequests: [],
       }),
     })),
-    workspaceProviders: rootWorkspaceProviders,
+    workspaceVoice: rootWorkspaceVoice,
     workspaceById: vi.fn(() => ({
       workspaceSettings: qualifiedWorkspaceSettings,
-      workspaceProviders: qualifiedWorkspaceProviders,
+      workspaceVoice: qualifiedWorkspaceVoice,
       setWorkspaceSetting: qualifiedSetWorkspaceSetting,
     })),
     sessionStatus: vi.fn(() =>
@@ -755,8 +772,8 @@ const {
     settingsReload: vi.fn().mockResolvedValue(undefined),
     settingsSetValue,
     qualifiedWorkspaceSettings,
-    rootWorkspaceProviders,
-    qualifiedWorkspaceProviders,
+    rootWorkspaceVoice,
+    qualifiedWorkspaceVoice,
     qualifiedSetWorkspaceSetting,
     sessionCatalogController: {
       invalidateWorkspace: vi.fn(),
@@ -1306,13 +1323,21 @@ vi.mock('./components/LocalControlQrButton', async () => {
 vi.mock('./components/dialogs/ModelDialog', async () => {
   const React = await import('react');
   return {
-    ModelDialog: (props: { onSelect?: (id: string) => void }) =>
+    ModelDialog: (props: {
+      mode?: string;
+      models?: Array<{ id: string }>;
+      onSelect?: (id: string) => void;
+    }) =>
       React.createElement(
         'button',
         {
           'data-testid': 'model-select',
           type: 'button',
-          onClick: () => props.onSelect?.('fast-model-x'),
+          onClick: () => {
+            const id =
+              props.mode === 'voice' ? props.models?.[0]?.id : 'fast-model-x';
+            if (id !== undefined) props.onSelect?.(id);
+          },
         },
         'select model',
       ),
@@ -10534,25 +10559,17 @@ beforeEach(() => {
     v: 1,
     settings: [],
   });
-  rootWorkspaceProviders.mockReset();
-  rootWorkspaceProviders.mockResolvedValue({
-    v: 1,
-    workspaceCwd: '/work/primary',
-    initialized: true,
-    providers: [],
-  });
-  qualifiedWorkspaceProviders.mockReset();
-  qualifiedWorkspaceProviders.mockResolvedValue({
-    v: 1,
-    workspaceCwd: '/work/secondary',
-    initialized: true,
-    providers: [],
-  });
+  rootWorkspaceVoice.mockReset();
+  rootWorkspaceVoice.mockResolvedValue(voiceWorkspaceStatus('/work/primary'));
+  qualifiedWorkspaceVoice.mockReset();
+  qualifiedWorkspaceVoice.mockResolvedValue(
+    voiceWorkspaceStatus('/work/secondary'),
+  );
   qualifiedSetWorkspaceSetting.mockReset();
   qualifiedSetWorkspaceSetting.mockResolvedValue({
     key: 'voiceModel',
     scope: 'workspace',
-    value: 'fast-model-x',
+    value: 'qwen3-asr-flash',
     requiresRestart: false,
   });
   mockFollowup.clear.mockClear();
@@ -13967,8 +13984,8 @@ describe('App session callbacks', () => {
     });
     await flush();
 
-    expect(rootWorkspaceProviders).toHaveBeenCalledOnce();
-    expect(qualifiedWorkspaceProviders).not.toHaveBeenCalled();
+    expect(rootWorkspaceVoice).toHaveBeenCalledOnce();
+    expect(qualifiedWorkspaceVoice).not.toHaveBeenCalled();
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="model-select"]')
@@ -13979,7 +13996,7 @@ describe('App session callbacks', () => {
     expect(settingsSetValue).toHaveBeenCalledWith(
       'workspace',
       'voiceModel',
-      'fast-model-x',
+      'qwen3-asr-flash',
     );
     expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
   });
@@ -14007,7 +14024,7 @@ describe('App session callbacks', () => {
     expect(workspaceGit).not.toHaveBeenCalled();
   });
 
-  it('uses qualified providers and workspace settings for secondary Voice models', async () => {
+  it('uses qualified voice status and workspace settings for secondary Voice models', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
       workspaceCwd: '/work/primary',
@@ -14039,7 +14056,11 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(qualifiedWorkspaceProviders).toHaveBeenCalledOnce();
+    expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
+    expect(mockWorkspace.client.workspaceById).toHaveBeenCalledWith(
+      'secondary',
+    );
+    expect(rootWorkspaceVoice).not.toHaveBeenCalled();
     expect(mockWorkspaceActions.loadProviders).not.toHaveBeenCalled();
     const select = container.querySelector<HTMLButtonElement>(
       '[data-testid="model-select"]',
@@ -14053,7 +14074,7 @@ describe('App session callbacks', () => {
     expect(qualifiedSetWorkspaceSetting).toHaveBeenCalledWith(
       'workspace',
       'voiceModel',
-      'fast-model-x',
+      'qwen3-asr-flash',
     );
     expect(settingsSetValue).not.toHaveBeenCalled();
   });
@@ -14120,7 +14141,7 @@ describe('App session callbacks', () => {
     ).toBe('secondary-voice');
   });
 
-  it('drops a provider failure after the Voice workspace changes', async () => {
+  it('drops a Voice status failure after the Voice workspace changes', async () => {
     mockConnection.workspaceCwd = '/work/secondary-a';
     mockWorkspace.capabilities = {
       workspaceCwd: '/work/primary',
@@ -14150,8 +14171,8 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const providersResult = deferred();
-    qualifiedWorkspaceProviders.mockReturnValue(providersResult.promise);
+    const voiceResult = deferred();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
     const onToast = vi.fn();
     const { container, rerender } = renderApp({ onToast });
     await flush();
@@ -14160,13 +14181,13 @@ describe('App session callbacks', () => {
       testState.latestChatEditorProps?.onSubmit('/model --voice');
       await Promise.resolve();
     });
-    expect(qualifiedWorkspaceProviders).toHaveBeenCalledOnce();
+    expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
 
     mockConnection.workspaceCwd = '/work/secondary-b';
     rerender();
     await flush();
     await act(async () => {
-      providersResult.reject(new Error('old workspace failed'));
+      voiceResult.reject(new Error('old workspace failed'));
       await Promise.resolve();
     });
 
@@ -14174,7 +14195,7 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
   });
 
-  it('drops a stale provider success after an A to B to A workspace change', async () => {
+  it('drops a stale Voice status success after an A to B to A workspace change', async () => {
     mockConnection.workspaceCwd = '/work/secondary-a';
     mockWorkspace.capabilities = {
       workspaceCwd: '/work/primary',
@@ -14204,13 +14225,8 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const providersResult = deferred<{
-      v: 1;
-      workspaceCwd: string;
-      initialized: boolean;
-      providers: never[];
-    }>();
-    qualifiedWorkspaceProviders.mockReturnValue(providersResult.promise);
+    const voiceResult = deferred<DaemonWorkspaceVoiceStatus>();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
     const { container, rerender } = renderApp();
     await flush();
 
@@ -14225,12 +14241,7 @@ describe('App session callbacks', () => {
     await flush();
 
     await act(async () => {
-      providersResult.resolve({
-        v: 1,
-        workspaceCwd: '/work/secondary-a',
-        initialized: true,
-        providers: [],
-      });
+      voiceResult.resolve(voiceWorkspaceStatus('/work/secondary-a'));
       await Promise.resolve();
     });
     await flush();
@@ -14238,7 +14249,7 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
   });
 
-  it('drops a provider failure after the Web Shell unmounts', async () => {
+  it('drops a Voice status failure after the Web Shell unmounts', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
       workspaceCwd: '/work/primary',
@@ -14262,8 +14273,8 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const providersResult = deferred();
-    qualifiedWorkspaceProviders.mockReturnValue(providersResult.promise);
+    const voiceResult = deferred();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
     const onToast = vi.fn();
     const { unmount } = renderApp({ onToast });
     await flush();
@@ -14273,7 +14284,7 @@ describe('App session callbacks', () => {
     });
     unmount();
     await act(async () => {
-      providersResult.reject(new Error('late provider failure'));
+      voiceResult.reject(new Error('late Voice status failure'));
       await Promise.resolve();
     });
 
@@ -14349,14 +14360,9 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const providerStatus = {
-      v: 1 as const,
-      workspaceCwd: '/work/secondary',
-      initialized: true,
-      providers: [],
-    };
-    const providersResult = deferred<typeof providerStatus>();
-    qualifiedWorkspaceProviders.mockReturnValue(providersResult.promise);
+    const voiceStatus = voiceWorkspaceStatus('/work/secondary');
+    const voiceResult = deferred<typeof voiceStatus>();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
     const { container } = renderApp();
     await flush();
 
@@ -14370,7 +14376,7 @@ describe('App session callbacks', () => {
         ?.click();
     });
     await act(async () => {
-      providersResult.resolve(providerStatus);
+      voiceResult.resolve(voiceStatus);
       await Promise.resolve();
     });
     await flush();
@@ -14402,14 +14408,9 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const providerStatus = {
-      v: 1 as const,
-      workspaceCwd: '/work/secondary',
-      initialized: true,
-      providers: [],
-    };
-    const providersResult = deferred<typeof providerStatus>();
-    qualifiedWorkspaceProviders.mockReturnValue(providersResult.promise);
+    const voiceStatus = voiceWorkspaceStatus('/work/secondary');
+    const voiceResult = deferred<typeof voiceStatus>();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
     const { container } = renderApp();
     await flush();
 
@@ -14417,13 +14418,13 @@ describe('App session callbacks', () => {
       testState.latestChatEditorProps?.onSubmit('/model --voice');
       testState.latestChatEditorProps?.onSubmit('/settings');
     });
-    expect(qualifiedWorkspaceProviders).toHaveBeenCalledOnce();
+    expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
     expect(
       container.querySelector('[data-testid="inline-panel"]'),
     ).not.toBeNull();
 
     await act(async () => {
-      providersResult.resolve(providerStatus);
+      voiceResult.resolve(voiceStatus);
       await Promise.resolve();
     });
     await flush();
@@ -33837,7 +33838,7 @@ describe('App session callbacks', () => {
     expect(settingsSetValue).toHaveBeenCalledWith(
       'user',
       'voiceModel',
-      'fast-model-x',
+      'qwen3-asr-flash',
     );
     expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
   });
