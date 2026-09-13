@@ -35,7 +35,7 @@ concurrency:
 jobs:
   sync:
     name: 'Mirror Qwen Code Desktop to Aliyun OSS'
-    if: "${{ github.repository == 'QwenLM/qwen-code' && github.ref == 'refs/heads/main' }}"
+    if: "${{ github.repository == 'QwenLM/qwen-code' && (github.ref == 'refs/heads/main' || github.event_name == 'release') }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 90
     environment:

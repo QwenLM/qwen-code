@@ -1,0 +1,55 @@
+name: 'Desktop Release Sync'
+
+run-name: 'Desktop release following ${{ github.event.release.tag_name }}'
+
+# Publishes the desktop app whenever a stable Qwen Code release is published,
+# the way the VS Code companion already follows the CLI.
+#
+# The desktop app is a shell around the CLI, so its useful version is whichever
+# CLI it carries. Following the release event gives it that number for free and
+# removes the question of when to cut a desktop release: the answer becomes the
+# same as for the CLI.
+#
+# Three gates, mirroring release-vscode-companion.yml:
+#
+#   - the repository variable below, so this can be stopped without a code change
+#   - the `v` prefix, so `desktop-v*`, `sdk-typescript-v*` and the other release
+#     series in this repository do not trigger it
+#   - stable only, so nightlies and previews do not reach users
+#
+# The variable is opt-IN rather than opt-out, unlike the VS Code one. A desktop
+# release is a push: publishing moves the updater feed, and every installation
+# follows within a day. That is worth turning on deliberately, after watching a
+# few releases build without publishing.
+on:
+  release:
+    types: ['published']
+
+permissions:
+  actions: 'read'
+  contents: 'write'
+
+concurrency:
+  group: 'desktop-release-sync'
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: 'Publish desktop for ${{ github.event.release.tag_name }}'
+    if: |-
+      ${{
+        github.repository == 'QwenLM/qwen-code' &&
+        vars.RELEASE_DESKTOP_SYNC_PUBLISH == 'true' &&
+        startsWith(github.event.release.tag_name, 'v') &&
+        github.event.release.prerelease == false
+      }}
+    uses: './.github/workflows/desktop-release.yml'
+    with:
+      version: '${{ github.event.release.tag_name }}'
+      qwen_code_ref: '${{ github.event.release.tag_name }}'
+      electron_bridge: false
+      dry_run: false
+      draft: false
+      prerelease: false
+      clobber: false
+    secrets: 'inherit'
