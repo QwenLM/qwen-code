@@ -2102,6 +2102,71 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
     return provider;
   }
 
+  it('keeps a first-time service save without claiming authentication or rolling it back', async () => {
+    const { minimaxProvider, resolveBaseUrl } = await import(
+      '@qwen-code/qwen-code-core'
+    );
+    const provider = makeProvider();
+    const initialize = vi.fn();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = initialize;
+    await provider['handleAuthInteractive'](minimaxProvider, {
+      baseUrl: resolveBaseUrl(minimaxProvider),
+      apiKey: 'test-image',
+      modelIds: ['image-01'],
+    });
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+    expect(
+      (
+        provider as unknown as {
+          sendMessageToWebView: ReturnType<typeof vi.fn>;
+        }
+      ).sendMessageToWebView,
+    ).toHaveBeenCalledExactlyOnceWith({
+      type: 'authState',
+      data: { authenticated: false },
+    });
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Service models saved. Configure a conversation model to start chatting.',
+    );
+  });
+
+  it('retains saved model fields when reconnecting through the extension', async () => {
+    const model = {
+      id: inputs.modelIds[0],
+      baseUrl: inputs.baseUrl,
+      envKey: 'DEEPSEEK_API_KEY',
+      name: '[DeepSeek] My tuned model',
+      generationConfig: {
+        contextWindowSize: 65536,
+        customHeaders: { 'X-Route': '${ROUTE}' },
+      },
+    };
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      modelProviders: { openai: [model] },
+    });
+    const provider = makeProvider();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = true;
+    });
+    await provider['handleAuthInteractive'](providerConfig, inputs);
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    expect(
+      mockApplyProviderInstallPlanToFile.mock.calls[0][0].modelProviders[0]
+        .models,
+    ).toEqual([model]);
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+  });
+
   it('restores the snapshot when the reconnect leaves authState !== true', async () => {
     const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
     mockSnapshotSettingsForRollback.mockReturnValue(snapshot);
