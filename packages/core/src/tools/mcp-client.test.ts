@@ -3299,6 +3299,33 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(transportEnv['GH_TOKEN']).toBe('gh-abc');
     });
 
+    it('strips bundled Python paths from desktop stdio child env', async () => {
+      process.env = {
+        ...ORIGINAL_ENV,
+        QWEN_CODE_DESKTOP: '1',
+        PYTHONHOME: '/tmp/.mount_Qwen/usr',
+        PYTHONPATH: '/tmp/.mount_Qwen/usr/share/pyshared',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport(
+        'python-server',
+        {
+          command: 'python',
+          env: { PYTHONPATH: '/home/user/venv/lib/python3.12/site-packages' },
+        },
+        false,
+      );
+
+      const transportEnv = mockedTransport.mock.calls[0]?.[0]?.env ?? {};
+      expect(transportEnv['PYTHONHOME']).toBeUndefined();
+      expect(transportEnv['PYTHONPATH']).toBe(
+        '/home/user/venv/lib/python3.12/site-packages',
+      );
+    });
+
     it('should normalize PATH-like env keys on Windows for stdio transport', async () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       process.env = {

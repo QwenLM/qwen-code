@@ -2560,8 +2560,13 @@ export async function createTransport(
     // Windows), then apply server-specific overrides on top so that a server
     // config providing its own PATH fully replaces the parent value instead of
     // being merged with a stale case-variant.
+    const inherited = normalizePathEnvForWindows(sanitizeChildEnv(process.env));
+    if (process.env['QWEN_CODE_DESKTOP'] === '1') {
+      delete inherited['PYTHONHOME'];
+      delete inherited['PYTHONPATH'];
+    }
     const env = {
-      ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+      ...inherited,
       ...(mcpServerConfig.env || {}),
     };
 
