@@ -165,6 +165,42 @@ describe('registerSkillHooks', () => {
     expect(hooks[0].matcher).toBe('^(Write|Edit)$');
   });
 
+  it('matches every tool when a hook entry omits matcher', () => {
+    const skill: SkillConfig = {
+      name: 'test-skill',
+      description: 'Test skill',
+      level: 'user',
+      filePath: '/path/to/skill/SKILL.md',
+      skillRoot,
+      body: 'Test body',
+      hooks: {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo "every tool"',
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const count = registerSkillHooks(sessionHooksManager, sessionId, skill);
+    expect(count).toBe(1);
+
+    for (const tool of ['write_file', 'run_shell_command']) {
+      expect(
+        sessionHooksManager.getMatchingHooks(
+          sessionId,
+          HookEventName.PreToolUse,
+          tool,
+        ),
+      ).toHaveLength(1);
+    }
+  });
+
   it('should register multiple hooks for same event and matcher', () => {
     const skill: SkillConfig = {
       name: 'test-skill',
