@@ -157,6 +157,9 @@ export interface ProviderSetupInputs {
   /** Pre-built model configs (e.g. OpenRouter fetches models from API). Overrides modelIds. */
   prebuiltModels?: ProviderModelConfig[];
   advancedConfig?: {
+    /** Replace all advanced form controls; omitted fields otherwise stay unchanged. */
+    replaceExisting?: boolean;
+    purpose?: 'image' | 'voice';
     enableThinking?: boolean;
     multimodal?: InputModalities;
     contextWindowSize?: number;
