@@ -9,6 +9,8 @@ import type { Config } from '../config/config.js';
 import {
   REASONING_EFFORT_TIERS,
   applyReasoningEffort,
+  setGeneratorReasoningEffort,
+  reasoningEffortsForCapability,
   clampReasoningEffort,
   getGptReasoningCapabilities,
   isReasoningEffortPlaceholder,
@@ -16,6 +18,7 @@ import {
   parseModelReasoningCapabilities,
   type ReasoningEffort,
 } from './reasoning-effort.js';
+import type { ContentGeneratorConfig } from './contentGenerator.js';
 
 describe('getGptReasoningCapabilities', () => {
   it.each([
@@ -295,6 +298,72 @@ describe('applyReasoningEffort', () => {
 
     const disabled = makeConfig(true);
     expect(applyReasoningEffort(disabled, undefined)).toBe(true);
+  });
+});
+
+// The one rule `/effort` and a workflow `agent({ effort })` share for putting a
+// tier on a config. A per-agent config is spread from the session's, so the
+// block must be replaced rather than mutated or the session would change too.
+describe('setGeneratorReasoningEffort', () => {
+  type ReasoningHolder = { reasoning?: ContentGeneratorConfig['reasoning'] };
+
+  it('writes the tier onto a config with no reasoning block', () => {
+    const cfg: ReasoningHolder = {};
+    expect(setGeneratorReasoningEffort(cfg, 'low')).toBe(true);
+    expect(cfg.reasoning).toEqual({ effort: 'low' });
+  });
+
+  it('keeps sibling fields and replaces the block instead of mutating it', () => {
+    const shared = { effort: 'high' as const, budget_tokens: 2048 };
+    const cfg: ReasoningHolder = { reasoning: shared };
+    expect(setGeneratorReasoningEffort(cfg, 'max')).toBe(true);
+    expect(cfg.reasoning).toEqual({ effort: 'max', budget_tokens: 2048 });
+    expect(shared).toEqual({ effort: 'high', budget_tokens: 2048 });
+  });
+
+  it('leaves a config with thinking turned off alone', () => {
+    const cfg: ReasoningHolder = { reasoning: false };
+    expect(setGeneratorReasoningEffort(cfg, 'high')).toBe(false);
+    expect(cfg.reasoning).toBe(false);
+  });
+
+  it('collapses reasoning to undefined when clearing the last key', () => {
+    const cfg: ReasoningHolder = { reasoning: { effort: 'medium' } };
+    expect(setGeneratorReasoningEffort(cfg, undefined)).toBe(true);
+    expect(cfg.reasoning).toBeUndefined();
+  });
+
+  it('reports false for a missing config', () => {
+    expect(setGeneratorReasoningEffort(undefined, 'low')).toBe(false);
+  });
+});
+
+// The tier set `/effort` offers a model, shared with the per-agent path.
+describe('reasoningEffortsForCapability', () => {
+  it('offers every tier when the model declares nothing', () => {
+    expect(reasoningEffortsForCapability(undefined)).toEqual(
+      REASONING_EFFORT_TIERS,
+    );
+  });
+
+  it('offers nothing for a toggle-only model', () => {
+    const toggleOnly = parseModelReasoningCapabilities({
+      thinking: true,
+      disableField: 'enable_thinking',
+      toggleOnly: true,
+    });
+    expect(toggleOnly).toBeDefined();
+    expect(reasoningEffortsForCapability(toggleOnly)).toEqual([]);
+  });
+
+  it('offers exactly the declared tiers', () => {
+    const declared = parseModelReasoningCapabilities({
+      thinking: true,
+      disableField: 'reasoning_effort',
+      efforts: ['low', 'high'],
+    });
+    expect(declared).toBeDefined();
+    expect(reasoningEffortsForCapability(declared)).toEqual(['low', 'high']);
   });
 });
 

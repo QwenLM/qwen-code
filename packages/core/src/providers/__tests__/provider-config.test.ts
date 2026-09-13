@@ -16,6 +16,8 @@ import {
   resolveBaseUrl,
   shouldShowStep,
   providerMatchesCredentials,
+  customProvider,
+  generateCustomEnvKey,
   type ProviderConfig,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -39,6 +41,122 @@ function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
 }
 
 describe('buildInstallPlan', () => {
+  it.each([AuthType.USE_OPENAI, AuthType.USE_OPENAI_RESPONSES])(
+    'clears explicitly submitted advanced controls without losing unrelated settings (%s)',
+    (protocol) => {
+      const inputs = {
+        protocol,
+        baseUrl: 'https://custom.example/v1',
+        apiKey: 'new-key',
+        modelIds: ['custom-model'],
+      };
+      const initial = buildInstallPlanSrc(customProvider, {
+        ...inputs,
+        advancedConfig: {
+          enableThinking: true,
+          multimodal: { image: true, audio: true },
+          contextWindowSize: 131072,
+          maxTokens: 8192,
+        },
+      });
+      const existing = initial.modelProviders![0]!.models;
+      existing[0]!.generationConfig = {
+        ...existing[0]!.generationConfig,
+        extra_body: {
+          ...existing[0]!.generationConfig?.extra_body,
+          custom_flag: 'retained',
+        },
+        samplingParams: { max_tokens: 8192, temperature: 0.2 },
+        customHeaders: { 'X-Route': 'paid' },
+        timeout: 12345,
+      };
+      const before = structuredClone(existing);
+      expect(
+        buildInstallPlanSrc(customProvider, inputs, existing)
+          .modelProviders![0]!.models,
+      ).toEqual(existing);
+      for (const advancedConfig of [{}, { contextWindowSize: 65536 }]) {
+        const partial = buildInstallPlanSrc(
+          customProvider,
+          { ...inputs, advancedConfig },
+          existing,
+        ).modelProviders![0]!.models[0]!;
+        expect(partial.generationConfig).toEqual({
+          ...existing[0]!.generationConfig,
+          ...(advancedConfig.contextWindowSize
+            ? { contextWindowSize: 65536 }
+            : {}),
+        });
+      }
+      const disabled = buildInstallPlanSrc(
+        customProvider,
+        { ...inputs, advancedConfig: { enableThinking: false } },
+        existing,
+      ).modelProviders![0]!.models[0]!;
+      const expectedDisabled = structuredClone(existing[0]!.generationConfig!);
+      delete expectedDisabled.extra_body!['enable_thinking'];
+      if (protocol === AuthType.USE_OPENAI_RESPONSES)
+        delete expectedDisabled.reasoning;
+      expect(disabled.generationConfig).toEqual(expectedDisabled);
+      const withoutModalities = buildInstallPlanSrc(
+        customProvider,
+        { ...inputs, advancedConfig: { multimodal: {} } },
+        existing,
+      ).modelProviders![0]!.models[0]!;
+      const expectedModalities = structuredClone(
+        existing[0]!.generationConfig!,
+      );
+      delete expectedModalities.modalities;
+      expect(withoutModalities.generationConfig).toEqual(expectedModalities);
+      const cleared = buildInstallPlanSrc(
+        customProvider,
+        {
+          ...inputs,
+          advancedConfig: { replaceExisting: true },
+        },
+        existing,
+      ).modelProviders![0]!.models[0]!;
+      expect(cleared.generationConfig).toEqual({
+        extra_body: { custom_flag: 'retained' },
+        samplingParams: { temperature: 0.2 },
+        customHeaders: { 'X-Route': 'paid' },
+        timeout: 12345,
+      });
+      expect(cleared.envKey).toBe(existing[0]!.envKey);
+      const enabled = buildInstallPlanSrc(
+        customProvider,
+        {
+          ...inputs,
+          advancedConfig: { enableThinking: true },
+        },
+        existing,
+      ).modelProviders![0]!.models[0]!;
+      expect(enabled.generationConfig?.extra_body).toEqual({
+        custom_flag: 'retained',
+        ...(protocol === AuthType.USE_OPENAI ? { enable_thinking: true } : {}),
+      });
+      expect(enabled.generationConfig).toEqual(existing[0]!.generationConfig);
+      const replaced = buildInstallPlanSrc(
+        customProvider,
+        {
+          ...inputs,
+          advancedConfig: {
+            replaceExisting: true,
+            contextWindowSize: 32768,
+            maxTokens: 4096,
+          },
+        },
+        existing,
+      ).modelProviders![0]!.models[0]!;
+      expect(replaced.generationConfig).toEqual({
+        ...cleared.generationConfig,
+        contextWindowSize: 32768,
+        samplingParams: { temperature: 0.2, max_tokens: 4096 },
+      });
+      expect(existing).toEqual(before);
+    },
+  );
+
   it('builds a plan with fixed models (not editable)', () => {
     const config = makeConfig();
     const plan = buildInstallPlan(config, {
@@ -86,6 +204,24 @@ describe('buildInstallPlan', () => {
     expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
       computeModelListVersion(models ?? []),
     );
+  });
+
+  it('keeps an edited window when reconnecting a model with a preset default', () => {
+    const config = makeConfig();
+    const inputs = {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'test',
+      modelIds: ['model-a'],
+    };
+    const initial = buildInstallPlan(config, inputs);
+    const original = initial.modelProviders![0]!.models;
+    original[0]!.generationConfig = { contextWindowSize: 65536 };
+    const reconnected = buildInstallPlan(config, inputs, original);
+    expect(reconnected.providerState).toEqual(initial.providerState);
+    expect(
+      reconnected.modelProviders![0]!.models[0]!.generationConfig
+        ?.contextWindowSize,
+    ).toBe(65536);
   });
 
   it('applies advancedConfig to editable unknown model IDs only', () => {
@@ -537,6 +673,24 @@ describe('shouldShowStep', () => {
 });
 
 describe('providerMatchesCredentials', () => {
+  it.each(['IMAGE', 'VOICE'])(
+    'recognizes custom %s credentials only at their own endpoint',
+    (purpose) => {
+      const baseUrl = 'https://media.example/v1';
+      const envKey = `${generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl)}_${purpose}`;
+      expect(providerMatchesCredentials(customProvider, baseUrl, envKey)).toBe(
+        true,
+      );
+      expect(
+        providerMatchesCredentials(
+          customProvider,
+          'https://other.example/v1',
+          envKey,
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('matches by string envKey and string baseUrl', () => {
     const config = makeConfig();
     expect(

@@ -244,6 +244,7 @@ function setupGoalClient() {
     startAutomaticActiveTodoWorkChain: vi.fn(),
     endAutomaticActiveTodoWorkChain: vi.fn(),
     takeActiveTodoReminder: vi.fn(() => undefined),
+    getActiveTodoReminder: vi.fn(() => undefined),
     getContentGeneratorConfig: vi.fn(() => undefined),
     hasHooksForEvent: vi.fn(() => false),
     getStopHookBlockingCap: vi.fn(() => 8),
@@ -1921,6 +1922,93 @@ describe('LlmClient Goal admission', () => {
     expect(pauseStateIndex).toBeGreaterThanOrEqual(0);
     expect(inactiveProjectionIndex).toBeGreaterThan(pauseStateIndex);
     expect(loopIndex).toBeGreaterThan(inactiveProjectionIndex);
+  });
+
+  it('reports stop_hook_active on a goal-bound Stop hook continuation', async () => {
+    const { client, config } = setupGoalClient();
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          output: { decision: 'block', reason: 'Run the policy check' },
+          stopHookCount: 1,
+        })
+        .mockResolvedValue({ output: undefined, stopHookCount: 1 }),
+    };
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+
+    await collect(
+      client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'goal-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+        },
+      ),
+    );
+
+    const stopFlags = messageBus.request.mock.calls
+      .filter(([request]) => request.eventName === 'Stop')
+      .map(([request]) => request.input.stop_hook_active);
+    expect(stopFlags).toEqual([false, true]);
+  });
+
+  it('reports stop_hook_active false when a goal turn reuses a hook-forced prompt id', async () => {
+    const { client, config } = setupGoalClient();
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          output: { decision: 'block', reason: 'Run the policy check' },
+          stopHookCount: 1,
+        })
+        .mockResolvedValue({ output: undefined, stopHookCount: 1 }),
+    };
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+    vi.mocked(config.getStopHookBlockingCap).mockReturnValue(2);
+    // Goal turn 1: the hook-forced continuation ends with a tool call that is
+    // never returned. Goal turn 2 then runs under the same prompt id, which
+    // is how consecutive goal continuations are submitted.
+    turnMocks.pendingToolCalls.push([], [{ name: 'read_file' }], []);
+    const goalSend = () =>
+      collect(
+        client.sendMessageStream(
+          [{ text: 'continue' }],
+          new AbortController().signal,
+          'goal-prompt-shared',
+          {
+            type: SendMessageType.Goal,
+            goalPermit: permit,
+            goalTurnKey: `goal-runtime:${permit.turnId}`,
+          },
+        ),
+      );
+
+    await goalSend();
+    const secondTurnEvents = await goalSend();
+
+    const stopFlags = messageBus.request.mock.calls
+      .filter(([request]) => request.eventName === 'Stop')
+      .map(([request]) => request.input.stop_hook_active);
+    expect(stopFlags).toEqual([false, false]);
+    expect(secondTurnEvents).not.toContainEqual(
+      expect.objectContaining({ type: LlmEventType.HookSystemMessage }),
+    );
   });
 
   it('drains a concurrent pause before a non-blocking Stop true-stops', async () => {

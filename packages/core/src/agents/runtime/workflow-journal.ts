@@ -30,9 +30,9 @@
  * key, and so on — so the cache naturally invalidates from the edit point.
  *
  * The `canonicalOpts` projection keeps only the dispatch-affecting opts
- * (`schema`, `model`, `isolation`, `agentType`, `workingDir`) with object keys
- * sorted, so cosmetic opt differences (a re-ordered schema, a `label` change)
- * don't bust the cache.
+ * (`schema`, `model`, `effort`, `isolation`, `agentType`, `workingDir`,
+ * `disallowedTools`) with object keys sorted, so cosmetic opt differences (a
+ * re-ordered schema, a `label` change) don't bust the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`
@@ -98,11 +98,36 @@ export interface JournalReplay {
 }
 
 /**
+ * The `agent()` options that change what a dispatch does, as one list: the
+ * resume key projects exactly these, and the orchestrator's fast path, which
+ * hands the session config to the agent untouched, is taken only when every
+ * one of them is absent. `label` / `phase` / `stallMs` are deliberately not
+ * here: they are cosmetic or operational.
+ */
+export const DISPATCH_AFFECTING_AGENT_OPTS = [
+  'schema',
+  'model',
+  'effort',
+  'isolation',
+  'agentType',
+  'workingDir',
+  'disallowedTools',
+] as const;
+
+/**
  * Project the dispatch-affecting opts into a stable canonical string. Only
- * `schema` / `model` / `isolation` / `agentType` / `workingDir` change what
- * the dispatch does; `label` / `phase` / `stallMs` are cosmetic or
- * operational and must NOT bust the cache. Object keys are sorted recursively
- * so a re-serialized schema with reordered keys hashes the same.
+ * `schema` / `model` / `effort` / `isolation` / `agentType` / `workingDir` /
+ * `disallowedTools` change what the dispatch does; `label` / `phase` /
+ * `stallMs` are cosmetic or operational and must NOT bust the cache. Object
+ * keys are sorted recursively so a re-serialized schema with reordered keys
+ * hashes the same.
+ *
+ * `effort` and `disallowedTools` change how hard the agent thinks and what it
+ * may do, so a resume that changed either has to run live. The sandbox
+ * normalizes both before they get here — an effort alias to its tier, a deny
+ * list to a sorted, de-duplicated array of tool names — so `'med'` and
+ * `'medium'`, `Edit` and `edit`, or the same tools in another order, are one
+ * key.
  *
  * `workingDir` is dispatch-affecting for the same reason it exists: the same
  * prompt run against two different worktrees is two different questions. Were
@@ -111,13 +136,7 @@ export interface JournalReplay {
  */
 export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   const projected: Record<string, unknown> = {};
-  for (const k of [
-    'schema',
-    'model',
-    'isolation',
-    'agentType',
-    'workingDir',
-  ] as const) {
+  for (const k of DISPATCH_AFFECTING_AGENT_OPTS) {
     const v = opts[k];
     if (v === undefined || typeof v === 'function') continue;
     projected[k] = v;
