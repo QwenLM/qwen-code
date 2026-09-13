@@ -6,7 +6,16 @@
 
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -120,6 +129,155 @@ describe.skipIf(process.platform === 'win32')(
 
     const prepare = (id: string) =>
       environment.prepare({ id, toolName: 'read_file', params: {} }, signal);
+
+    const prepareInstall = () =>
+      environment.prepare(
+        {
+          id: 'install',
+          toolName: 'run_shell_command',
+          params: { command: 'npm install' },
+        },
+        signal,
+      );
+
+    const gitMask = (args: string[]): string => {
+      const suffix = `:${join(root, 'workspace', '.git')}:ro`;
+      const volume = args.find((arg) => arg.endsWith(suffix));
+      expect(volume).toBeDefined();
+      return volume!.slice(0, -suffix.length);
+    };
+
+    it('keeps an initially absent root .git masked on the primary and later install workers', async () => {
+      const primaryArgs = runtime.execFile.mock.calls.find(
+        (call) => call[1][0] === 'create',
+      )![1];
+      const mask = gitMask(primaryArgs);
+      expect((await lstat(mask)).isDirectory()).toBe(true);
+      const entry = join(root, 'workspace', '.git');
+      await expect(lstat(entry)).rejects.toMatchObject({ code: 'ENOENT' });
+      await mkdir(entry);
+      await writeFile(join(entry, 'config'), 'workspace metadata');
+      await prepareInstall();
+      const creates = runtime.execFile.mock.calls.filter(
+        (call) => call[1][0] === 'create',
+      );
+      expect(creates).toHaveLength(2);
+      expect(gitMask(creates[1][1])).toBe(mask);
+      expect(creates[1][1]).not.toContain('--network');
+      expect(await readFile(join(entry, 'config'), 'utf8')).toBe(
+        'workspace metadata',
+      );
+    });
+
+    it.each(['file', 'directory'])(
+      'uses an empty read-only mask matching an existing .git %s',
+      async (kind) => {
+        await environment.dispose();
+        const entry = join(root, 'workspace', '.git');
+        if (kind === 'directory') await mkdir(entry);
+        else await writeFile(entry, 'gitdir: ../metadata');
+        runtime.execFile.mockClear();
+        environment = await createEnvironment();
+        const args = runtime.execFile.mock.calls.find(
+          (call) => call[1][0] === 'create',
+        )![1];
+        const mask = gitMask(args);
+        expect((await lstat(mask)).isDirectory()).toBe(kind === 'directory');
+        if (kind === 'file') expect(await readFile(mask, 'utf8')).toBe('');
+      },
+    );
+
+    it.each(['file', 'symlink'])(
+      'refuses an install worker when an absent .git becomes a %s',
+      async (kind) => {
+        const entry = join(root, 'workspace', '.git');
+        if (kind === 'file') await writeFile(entry, 'gitdir: ../metadata');
+        else await symlink(join(root, 'bundle'), entry, 'dir');
+        runtime.execFile.mockClear();
+        runtime.spawn.mockClear();
+        await expect(prepareInstall()).rejects.toThrow(
+          kind === 'file' ? 'changed type' : 'symlinked .git',
+        );
+        expect(
+          runtime.execFile.mock.calls.some((call) => call[1][0] === 'create'),
+        ).toBe(false);
+        expect(runtime.spawn).not.toHaveBeenCalled();
+      },
+    );
+
+    it('refuses an install worker when a .git file becomes a directory', async () => {
+      await environment.dispose();
+      const entry = join(root, 'workspace', '.git');
+      await writeFile(entry, 'gitdir: ../metadata');
+      environment = await createEnvironment();
+      await rm(entry);
+      await mkdir(entry);
+      runtime.execFile.mockClear();
+      runtime.spawn.mockClear();
+      await expect(prepareInstall()).rejects.toThrow('changed type');
+      expect(
+        runtime.execFile.mock.calls.some((call) => call[1][0] === 'create'),
+      ).toBe(false);
+      expect(runtime.spawn).not.toHaveBeenCalled();
+    });
+
+    it('does not create an install container after disposal during its filesystem check', async () => {
+      runtime.execFile.mockClear();
+      runtime.spawn.mockClear();
+      const installation = prepareInstall().catch((error: unknown) => error);
+      const disposal = environment.dispose();
+      expect(await installation).toMatchObject({
+        message: expect.stringContaining('disposed during startup'),
+      });
+      await disposal;
+      expect(
+        runtime.execFile.mock.calls.some((call) => call[1][0] === 'create'),
+      ).toBe(false);
+      expect(runtime.spawn).not.toHaveBeenCalled();
+    });
+
+    it.each(['type change', 'disposal'])(
+      'does not attach an install worker after %s during container creation',
+      async (change) => {
+        let finishCreate: (() => void) | undefined;
+        runtime.execFile.mockClear();
+        runtime.spawn.mockClear();
+        runtime.execFile.mockImplementation(
+          (_runtime, args, _options, callback) => {
+            if (args[0] === 'create') {
+              finishCreate = () => callback(null, '', '');
+            } else callback(null, '{}', '');
+          },
+        );
+        const installation = prepareInstall().catch((error: unknown) => error);
+        await vi.waitFor(() => expect(finishCreate).toBeDefined());
+        let disposal: Promise<void> | undefined;
+        if (change === 'type change') {
+          await writeFile(
+            join(root, 'workspace', '.git'),
+            'gitdir: ../metadata',
+          );
+        } else {
+          disposal = environment.dispose();
+        }
+        finishCreate!();
+        expect(await installation).toMatchObject({
+          message: expect.stringContaining(
+            change === 'type change'
+              ? 'changed type'
+              : 'disposed during startup',
+          ),
+        });
+        await disposal;
+        expect(runtime.spawn).not.toHaveBeenCalled();
+        const created = runtime.execFile.mock.calls.find(
+          (call) => call[1][0] === 'create',
+        )![1];
+        expect(
+          runtime.execFile.mock.calls.map((call) => call[1]),
+        ).toContainEqual(['rm', '-f', created[created.indexOf('--name') + 1]]);
+      },
+    );
 
     it('rejects server errors from a successful info command before creating a container', async () => {
       await environment.dispose();

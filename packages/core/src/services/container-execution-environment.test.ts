@@ -421,12 +421,12 @@ describe('container execution boundary', () => {
       worker,
       'install-name',
       true,
-      undefined,
+      '/tmp/mask',
       true,
     );
     expect(args).not.toContain('--network');
     expect(args).not.toContain('--user');
-    expect(args).not.toContain('/tmp/mask:/workspace/project/.git:ro');
+    expect(args).toContain('/tmp/mask:/workspace/project/.git:ro');
     expect(args).toContain('HOME=/executor-home');
   });
 });

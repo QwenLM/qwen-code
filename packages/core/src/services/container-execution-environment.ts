@@ -114,7 +114,7 @@ export function workerContainerArguments(
   worker: ExecutionWorkerOptions,
   name: string,
   rootless: boolean,
-  gitMask?: string,
+  gitMask: string,
   network = false,
 ): string[] {
   const args = [
@@ -141,8 +141,7 @@ export function workerContainerArguments(
       '--volume',
       `${worker.outputDirectory}:${worker.outputDirectory}`,
     );
-  if (gitMask)
-    args.push('--volume', `${gitMask}:${join(worker.workspace, '.git')}:ro`);
+  args.push('--volume', `${gitMask}:${join(worker.workspace, '.git')}:ro`);
   if (!network) args.push('--network', 'none');
   const uid = process.getuid?.();
   const gid = process.getgid?.();
@@ -157,6 +156,31 @@ export function workerContainerArguments(
     JSON.stringify(worker),
   );
   return args;
+}
+
+async function gitEntryIsDirectory(workspace: string): Promise<boolean> {
+  const entry = await lstat(join(workspace, '.git')).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+      return undefined;
+    },
+  );
+  if (entry?.isSymbolicLink())
+    throw new Error('A symlinked .git entry cannot be safely mounted.');
+  if (entry && !entry.isDirectory() && !entry.isFile())
+    throw new Error('The .git entry must be a regular file or directory.');
+  return !entry || entry.isDirectory();
+}
+
+async function validateGitMask(workspace: string, gitMask: string) {
+  if (
+    (await gitEntryIsDirectory(workspace)) !==
+    (await lstat(gitMask)).isDirectory()
+  ) {
+    throw new Error(
+      'The workspace .git entry changed type; restart the container agent.',
+    );
+  }
 }
 
 interface PendingRequest {
@@ -179,7 +203,7 @@ class ContainerWorker {
   start(
     worker: ExecutionWorkerOptions,
     rootless: boolean,
-    gitMask: string | undefined,
+    gitMask: string,
     network: boolean,
     signal: AbortSignal,
   ): Promise<void> {
@@ -196,11 +220,15 @@ class ContainerWorker {
   private async startInternal(
     worker: ExecutionWorkerOptions,
     rootless: boolean,
-    gitMask: string | undefined,
+    gitMask: string,
     network: boolean,
     signal: AbortSignal,
   ): Promise<void> {
     signal.throwIfAborted();
+    await validateGitMask(worker.workspace, gitMask);
+    signal.throwIfAborted();
+    if (this.disposal)
+      throw new Error('Container executor was disposed during startup.');
     debugLogger.debug(
       `Creating ${this.options.runtime} container ${this.name} with image ${this.options.image} (may pull the image; cancellation is available).`,
     );
@@ -216,6 +244,7 @@ class ContainerWorker {
       ),
       signal,
     );
+    await validateGitMask(worker.workspace, gitMask);
     signal.throwIfAborted();
     if (this.disposal)
       throw new Error('Container executor was disposed during startup.');
@@ -349,7 +378,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
     private readonly workerOptions: ExecutionWorkerOptions,
     private readonly rootless: boolean,
     private readonly temporaryDirectory: string,
-    private readonly gitMask: string | undefined,
+    private readonly gitMask: string,
     private readonly primary: ContainerWorker,
   ) {
     this.workers.add(primary);
@@ -448,18 +477,11 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
       maxBufferedOutputBytes:
         config.getShellExecutionConfig().maxBufferedOutputBytes,
     };
-    const gitEntry = await lstat(join(workspace, '.git')).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code !== 'ENOENT') throw error;
-        return undefined;
-      },
-    );
-    if (gitEntry?.isSymbolicLink())
-      throw new Error('A symlinked .git entry cannot be safely mounted.');
+    const gitDirectory = await gitEntryIsDirectory(workspace);
     const temporaryDirectory = await mkdtemp(
       join(temporaryRoot, 'qwen-agent-executor-'),
     );
-    const gitMask = gitEntry ? join(temporaryDirectory, 'git-mask') : undefined;
+    const gitMask = join(temporaryDirectory, 'git-mask');
     const primary = new ContainerWorker(resolvedOptions);
     const environment = new ContainerExecutionEnvironment(
       resolvedOptions,
@@ -472,10 +494,8 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
     try {
       await mkdir(environment.outputDirectory);
       workerOptions.outputDirectory = environment.outputDirectory;
-      if (gitMask) {
-        if (gitEntry?.isDirectory()) await mkdir(gitMask);
-        else await writeFile(gitMask, '');
-      }
+      if (gitDirectory) await mkdir(gitMask);
+      else await writeFile(gitMask, '');
       await primary.start(workerOptions, rootless, gitMask, false, signal);
       return environment;
     } catch (error) {

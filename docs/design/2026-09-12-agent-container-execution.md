@@ -199,7 +199,15 @@ fallback writes, without reopening entries or changing permissions by path.
 Existing entries are never overwritten by the host; failed writes use the
 existing recovery path. Workers can still modify their shared output contents.
 
-Mask the working tree's `.git` entry with an empty read-only mount. Linked
+Always mask the working tree's `.git` entry with an empty read-only mount on
+both the primary and installation workers, even when the entry is initially
+absent. Use a directory mask for an absent entry or directory and a file mask
+for a regular file. Reject symbolic links and other entry types. Recheck before
+container creation and attachment; a file/directory kind change requires a new
+agent environment. These checks are not atomic with concurrent host filesystem
+changes. The runtime may leave an empty `.git` mount-point directory in a
+previously non-Git workspace; executor cleanup does not remove workspace entries.
+In-container `git init` at the workspace root is consequently unsupported. Linked
 worktrees refer to a shared common directory which contains parent and sibling
 state and may contain credentials. Only the selected workspace root's `.git` is
 masked. Nested repositories and
@@ -294,6 +302,20 @@ A housekeeping timeout can be followed by another cache synchronization attempt.
 Malformed protocol responses and broken transports still fail the whole worker;
 silently skipping corruption would hide a possibly lost result, so transport
 recovery is deferred.
+
+The worker and its tool subprocesses currently share a UID and PID namespace.
+The stdin/stdout protocol has no authentication or separate identity protecting
+it from those subprocesses. Where the runtime permits access to the worker's
+file descriptors, in-container code can inject a valid reply, not just a malformed
+line. The host accepts the first matching reply, including preparation parameters,
+permission decisions, confirmation details and tool results. A forged edit
+confirmation can also affect the child's host-side approval mode if the user
+chooses to allow future edits. Request IDs and malformed-response rejection do not establish
+reply authenticity. Treat this channel as part of the untrusted container;
+Track A does not provide trustworthy tool reporting or permission mediation
+against hostile in-container code. Separating the endpoint and payload identities
+requires a follow-up design that preserves workspace ownership and rootless
+runtime compatibility. No such separation is implemented in this slice.
 
 A hard host exit such as `SIGKILL` cannot run this cleanup. Exited containers and
 temporary output directories may remain; there is no startup sweeper in this
