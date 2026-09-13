@@ -1,0 +1,566 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { randomUUID } from 'node:crypto';
+
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type CDPSession,
+  type Page,
+} from 'playwright-core';
+
+import type { ChromeBridge } from '../bridge/index.js';
+import { BrowserRuntimeError, staleSessionError } from '../core/errors.js';
+import type { BrowserUserTabInfo, TabInfo } from '../core/primitives.js';
+import {
+  playwrightTransportAdapter,
+  QwenPlaywrightTransport,
+} from './qwen-playwright-transport.js';
+import {
+  consoleLevel,
+  orderOpenTabs,
+  providerTab,
+  providerTabs,
+  pushBounded,
+  record,
+  staleTabError,
+} from './runtime-helpers.js';
+import type { DiscoveredTab, ProviderTab, TabState } from './runtime-state.js';
+
+export interface PlaywrightSessionOptions {
+  bridge: ChromeBridge;
+}
+
+export class PlaywrightSession {
+  private readonly bridge: ChromeBridge;
+  private transport: QwenPlaywrightTransport | undefined;
+  private browser: Browser | undefined;
+  private context: BrowserContext | undefined;
+  private readonly discoveredTabs = new Map<string, DiscoveredTab>();
+  private readonly tabs = new Map<string, TabState>();
+  private tabIdPrefix = newTabIdPrefix();
+  private selectedTabId: string | undefined;
+  private started = false;
+  private stopped = false;
+  private starting: Promise<void> | undefined;
+  private registration = Promise.resolve();
+  private stopping: Promise<void> | undefined;
+  private readonly removeEventListener: () => void;
+  private readonly removeConnectionListener: () => void;
+
+  constructor(options: PlaywrightSessionOptions) {
+    this.bridge = options.bridge;
+    this.removeEventListener = this.bridge.onEvent((event) => {
+      if (this.stopped) return;
+      if (event.method === 'Page.javascriptDialogOpening') {
+        for (const tab of this.tabs.values())
+          if (tab.providerTabId === event.tabId) traceDialogOpening(tab);
+      }
+      if (event.method === 'Page.javascriptDialogClosed') {
+        for (const tab of this.tabs.values()) {
+          if (tab.providerTabId !== event.tabId) continue;
+          traceDialogClosed(tab);
+          // Playwright hands a dialog over on a later turn than the bridge
+          // reports its CDP events: the microtask keeps this clear behind an
+          // opening delivered from the same drain, and the trace above
+          // covers an opening Playwright has not delivered yet.
+          queueMicrotask(() => {
+            tab.dialog = undefined;
+          });
+        }
+      }
+      if (event.method === 'qwenBrowser.derivedTabTracked') {
+        const parent = record(event.params).openerTabId;
+        if (
+          typeof parent === 'number' &&
+          [...this.tabs.values()].some(
+            (tab) => tab.providerTabId === parent && !tab.stale,
+          )
+        ) {
+          const tabIdPrefix = this.tabIdPrefix;
+          void this.bridge
+            .request('tabs.get', { tabId: event.tabId })
+            .then(async (value) => {
+              if (this.stopped || tabIdPrefix !== this.tabIdPrefix) return;
+              const provider = providerTab(value);
+              await this.registerTab(provider);
+            })
+            .catch(() => undefined);
+        }
+      }
+    });
+    this.removeConnectionListener = this.bridge.onConnectionChange(
+      (connected) => {
+        if (!connected && !this.stopped) this.invalidateSession();
+      },
+    );
+  }
+
+  async start(): Promise<void> {
+    if (this.stopped)
+      throw new BrowserRuntimeError(
+        'NOT_RUNNING',
+        'A stopped Browser Use runtime cannot be restarted',
+      );
+    if (this.started && this.browser?.isConnected()) return;
+    const attempt = (this.starting ??= this.startInternal());
+    try {
+      await attempt;
+    } finally {
+      if (this.starting === attempt) this.starting = undefined;
+    }
+  }
+
+  private async startInternal(): Promise<void> {
+    await this.transport?.close();
+    this.assertRunning();
+    const tabIdPrefix = this.tabIdPrefix;
+    await this.bridge.start();
+    const transport = new QwenPlaywrightTransport(this.bridge);
+    try {
+      const browser = await chromium.connectOverCDP(
+        playwrightTransportAdapter(transport),
+        {
+          noDefaults: true,
+          timeout: 10_000,
+        },
+      );
+      const context = browser.contexts()[0];
+      if (context === undefined)
+        throw new BrowserRuntimeError(
+          'OPERATION_FAILED',
+          'Playwright did not expose the Chrome default context',
+        );
+      if (this.stopped)
+        throw new BrowserRuntimeError(
+          'NOT_RUNNING',
+          'Browser Use stopped while Playwright was connecting',
+        );
+      if (tabIdPrefix !== this.tabIdPrefix)
+        throw new BrowserRuntimeError(
+          'BROWSER_DISCONNECTED',
+          'Chrome extension disconnected while Playwright was connecting',
+        );
+      this.transport = transport;
+      this.browser = browser;
+      this.context = context;
+      this.started = true;
+      browser.on('disconnected', () => {
+        if (this.browser === browser) this.invalidateSession();
+      });
+    } catch (error) {
+      await transport.close();
+      throw error;
+    }
+  }
+
+  stop(): Promise<void> {
+    return (this.stopping ??= this.stopInternal());
+  }
+
+  private async stopInternal(): Promise<void> {
+    this.stopped = true;
+    this.removeEventListener();
+    this.removeConnectionListener();
+    await this.starting?.catch(() => undefined);
+    await this.registration;
+    await this.transport?.close();
+    this.invalidateSession();
+    await this.bridge.stop();
+  }
+
+  private invalidateSession(): void {
+    for (const tab of this.tabs.values()) tab.stale = 'session';
+    this.tabIdPrefix = newTabIdPrefix();
+    this.tabs.clear();
+    this.discoveredTabs.clear();
+    this.selectedTabId = undefined;
+    this.browser = undefined;
+    this.context = undefined;
+    this.started = false;
+  }
+
+  private assertRunning(): void {
+    if (this.stopped)
+      throw new BrowserRuntimeError(
+        'NOT_RUNNING',
+        'Browser Use runtime stopped',
+      );
+  }
+
+  isSessionStale(id: string): boolean {
+    return id.startsWith('tab-') && !id.startsWith(this.tabIdPrefix);
+  }
+
+  async newTab(): Promise<TabInfo> {
+    const provider = providerTab(await this.bridge.request('tabs.create'));
+    const info = await this.registerTab(provider);
+    this.selectedTabId = info.id;
+    return info;
+  }
+
+  async listTabs(): Promise<TabInfo[]> {
+    await this.syncDerivedTabs();
+    return await Promise.all(
+      [...this.tabs.values()]
+        .filter((tab) => !tab.stale)
+        .map(async (tab) => await this.tabInfo(tab)),
+    );
+  }
+
+  async getTabInfo(id: string): Promise<TabInfo> {
+    return await this.tabInfo(this.claimed(id));
+  }
+
+  async selectedTabInfo(): Promise<TabInfo | null> {
+    const selected =
+      this.selectedTabId === undefined
+        ? undefined
+        : this.tabs.get(this.selectedTabId);
+    return selected === undefined || selected.stale
+      ? null
+      : await this.tabInfo(selected);
+  }
+
+  async openTabs(): Promise<BrowserUserTabInfo[]> {
+    // The model is told it sees http(s) tabs newest first, so establish that
+    // here rather than trusting the relay's order; the discovery records and
+    // the returned list are built from the same ordered list.
+    const providers = orderOpenTabs(
+      providerTabs(await this.bridge.request('tabs.queryOpen')),
+    );
+    this.discoveredTabs.clear();
+    return providers.map((provider) => {
+      const tab: DiscoveredTab = {
+        id: `open-${randomUUID()}`,
+        providerTabId: provider.providerTabId,
+        title: provider.title,
+        url: provider.url,
+        ...(provider.lastOpened === undefined
+          ? {}
+          : { lastOpened: provider.lastOpened }),
+        ...(provider.tabGroup === undefined
+          ? {}
+          : { tabGroup: provider.tabGroup }),
+      };
+      this.discoveredTabs.set(tab.id, tab);
+      return {
+        id: tab.id,
+        title: tab.title,
+        url: tab.url,
+        ...(tab.lastOpened === undefined ? {} : { lastOpened: tab.lastOpened }),
+        ...(tab.tabGroup === undefined ? {} : { tabGroup: tab.tabGroup }),
+      };
+    });
+  }
+
+  async claimTab(value: unknown): Promise<TabInfo> {
+    const supplied = typeof value === 'string' ? { id: value } : record(value);
+    const id = typeof supplied.id === 'string' ? supplied.id : '';
+    const discovered = this.discoveredTabs.get(id);
+    if (discovered === undefined)
+      throw new BrowserRuntimeError(
+        'TAB_NOT_GRANTED',
+        'The tab must come from a fresh browser.user.openTabs() result',
+      );
+    if (
+      ('title' in supplied && supplied.title !== discovered.title) ||
+      ('url' in supplied && supplied.url !== discovered.url)
+    )
+      throw new BrowserRuntimeError(
+        'STALE_TAB',
+        'The supplied tab no longer matches the discovery result',
+      );
+    const current = providerTab(
+      await this.bridge.request('tabs.get', {
+        tabId: discovered.providerTabId,
+      }),
+    );
+    if (current.title !== discovered.title || current.url !== discovered.url)
+      throw new BrowserRuntimeError(
+        'STALE_TAB',
+        'The Chrome tab changed after discovery; list open tabs again',
+      );
+    const info = await this.registerTab(current);
+    this.selectedTabId = info.id;
+    return info;
+  }
+
+  // Background callers (popup adoption) register tabs too, so registration
+  // must not move the selection; newTab and claimTab select what they return.
+  private async registerTab(provider: ProviderTab): Promise<TabInfo> {
+    this.assertRunning();
+    const tabIdPrefix = this.tabIdPrefix;
+    const existing = [...this.tabs.values()].find(
+      (tab) => tab.providerTabId === provider.providerTabId && !tab.stale,
+    );
+    if (existing !== undefined) {
+      const info = await this.tabInfo(existing);
+      this.assertRunning();
+      if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
+      return info;
+    }
+    return await this.serializeRegistration(async () => {
+      this.assertRunning();
+      if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
+      const registered = [...this.tabs.values()].find(
+        (tab) => tab.providerTabId === provider.providerTabId && !tab.stale,
+      );
+      if (registered !== undefined) {
+        const info = await this.tabInfo(registered);
+        this.assertRunning();
+        if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
+        return info;
+      }
+      const context = this.requireContext();
+      const transport = this.requireTransport();
+      const targetIdPromise = transport.registerTab(provider.providerTabId);
+      const pagePromise = context.waitForEvent('page', {
+        timeout: 10_000,
+        predicate: async (candidate) =>
+          (await pageTargetId(candidate)) === (await targetIdPromise),
+      });
+      let page: Page;
+      try {
+        [, page] = await Promise.all([targetIdPromise, pagePromise]);
+        this.assertRunning();
+        if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
+        // noDefaults skips Playwright's focus emulation for background pages.
+        await this.bridge.request('cdp.send', {
+          tabId: provider.providerTabId,
+          method: 'Emulation.setFocusEmulationEnabled',
+          params: { enabled: true },
+        });
+        this.assertRunning();
+        if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
+        if (page.isClosed()) throw staleTabError();
+      } catch (error) {
+        await transport.unregisterTab(provider.providerTabId);
+        throw error;
+      }
+      const tab: TabState = {
+        id: `${tabIdPrefix}${randomUUID()}`,
+        providerTabId: provider.providerTabId,
+        page,
+        stale: false,
+        logs: [],
+        dialogTrace: [],
+        fileChoosers: new Map(),
+        navigationWaiters: new Map(),
+      };
+      this.installPageObservers(tab, transport);
+      this.tabs.set(tab.id, tab);
+      const info = await this.tabInfo(tab);
+      this.assertRunning();
+      if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
+      return info;
+    });
+  }
+
+  private async serializeRegistration<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.registration;
+    let release: (() => void) | undefined;
+    this.registration = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release?.();
+    }
+  }
+
+  private installPageObservers(
+    tab: TabState,
+    transport: QwenPlaywrightTransport,
+  ): void {
+    const { page } = tab;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (tab.stale === false) tab.stale = 'tab';
+      tab.dialog = undefined;
+      tab.dialogTrace.length = 0;
+      tab.fileChoosers.clear();
+      tab.navigationWaiters.clear();
+      this.tabs.delete(tab.id);
+      if (this.selectedTabId === tab.id) this.selectedTabId = undefined;
+      void transport.unregisterTab(tab.providerTabId).catch(() => undefined);
+    };
+    page.on('close', release);
+    page.on('crash', release);
+    page.on('dialog', (dialog) => {
+      // The bridge saw this dialog's CDP events before Playwright delivered
+      // it; once it has already reported the dialog closed, caching the
+      // handle would leave a phantom that blocks the tab until the next
+      // close.
+      if (takeDeliveredDialog(tab)) return;
+      tab.dialog = dialog;
+    });
+    page.on('framenavigated', (frame) => {
+      // Chrome resolves any open dialog when the main frame navigates away;
+      // Playwright also emits framenavigated for subframes.
+      if (frame === page.mainFrame()) tab.dialog = undefined;
+    });
+    page.on('console', (message) => {
+      const location = message.location();
+      pushBounded(tab.logs, {
+        level: consoleLevel(message.type()),
+        message: message.text().slice(0, 20_000),
+        timestamp: new Date().toISOString(),
+        ...(location.url === '' ? {} : { url: location.url }),
+      });
+    });
+    page.on('pageerror', (error) => {
+      pushBounded(tab.logs, {
+        level: 'error',
+        message: error.message.slice(0, 20_000),
+        timestamp: new Date().toISOString(),
+      });
+    });
+  }
+
+  private async syncDerivedTabs(): Promise<void> {
+    const controlledProviders = new Set(
+      [...this.tabs.values()].map((tab) => tab.providerTabId),
+    );
+    const derived = providerTabs(
+      await this.bridge.request('tabs.queryDerived'),
+    );
+    for (const provider of derived) {
+      if (
+        !controlledProviders.has(provider.providerTabId) &&
+        provider.derivedFromProviderTabId !== undefined &&
+        controlledProviders.has(provider.derivedFromProviderTabId)
+      ) {
+        // One unattachable derived tab must not fail the whole listing,
+        // but a lost session still propagates.
+        try {
+          await this.registerTab(provider);
+        } catch (error) {
+          if (
+            error instanceof BrowserRuntimeError &&
+            (error.code === 'STALE_BROWSER_SESSION' ||
+              error.code === 'BROWSER_DISCONNECTED')
+          )
+            throw error;
+        }
+        controlledProviders.add(provider.providerTabId);
+      }
+    }
+  }
+
+  private async tabInfo(tab: TabState): Promise<TabInfo> {
+    if (tab.stale === 'session') throw staleSessionError();
+    if (tab.stale === 'tab' || tab.page.isClosed()) throw staleTabError();
+    return {
+      id: tab.id,
+      title:
+        tab.dialog === undefined
+          ? await tab.page.title().catch(() => null)
+          : null,
+      url: tab.page.url() || null,
+    };
+  }
+
+  async closeTab(tab: TabState): Promise<void> {
+    const transport = this.requireTransport();
+    await this.bridge.request('tabs.close', { tabId: tab.providerTabId });
+    tab.stale = 'tab';
+    this.tabs.delete(tab.id);
+    await transport.unregisterTab(tab.providerTabId);
+    if (this.selectedTabId === tab.id) this.selectedTabId = undefined;
+  }
+
+  claimed(id: string): TabState {
+    const tab = this.tabs.get(id);
+    if (tab?.stale === 'session') throw staleSessionError();
+    if (tab === undefined || tab.stale === 'tab' || tab.page.isClosed())
+      throw staleTabError();
+    this.selectedTabId = id;
+    return tab;
+  }
+
+  private requireContext(): BrowserContext {
+    if (this.context !== undefined) return this.context;
+    throw new BrowserRuntimeError(
+      'NOT_RUNNING',
+      'The Playwright browser context is unavailable',
+    );
+  }
+
+  private requireTransport(): QwenPlaywrightTransport {
+    if (this.transport !== undefined) return this.transport;
+    throw new BrowserRuntimeError(
+      'NOT_RUNNING',
+      'The Playwright transport is unavailable',
+    );
+  }
+}
+
+function newTabIdPrefix(): string {
+  return `tab-${randomUUID()}-`;
+}
+
+async function pageTargetId(page: Page): Promise<string | undefined> {
+  let session: CDPSession | undefined;
+  try {
+    session = await page.context().newCDPSession(page);
+    const result = record(await session.send('Target.getTargetInfo'));
+    const info = record(result.targetInfo);
+    return typeof info.targetId === 'string' ? info.targetId : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    await session?.detach().catch(() => undefined);
+  }
+}
+
+// A page shows one dialog at a time, so the bridge's opening and closed
+// events and Playwright's deliveries all describe one sequence, and the
+// trace pairs them by position. An entry stays until both sides have seen
+// it; the bound keeps an opening Playwright never delivers from growing the
+// trace forever.
+const MAX_DIALOG_TRACE = 16;
+
+function traceDialogOpening(tab: TabState): void {
+  pushBounded(
+    tab.dialogTrace,
+    { closed: false, delivered: false },
+    MAX_DIALOG_TRACE,
+  );
+}
+
+// A close with no traced opening belongs to a dialog that was already open
+// when the tab was attached; it must not be charged to a later dialog.
+function traceDialogClosed(tab: TabState): void {
+  const entry = tab.dialogTrace.find((item) => !item.closed);
+  if (entry !== undefined) entry.closed = true;
+  pruneDialogTrace(tab);
+}
+
+// True when the bridge already reported the delivered dialog closed. An
+// untraced delivery (its opening arrived before the tab was registered)
+// trusts Playwright.
+function takeDeliveredDialog(tab: TabState): boolean {
+  const entry = tab.dialogTrace.find((item) => !item.delivered);
+  if (entry === undefined) return false;
+  entry.delivered = true;
+  const { closed } = entry;
+  pruneDialogTrace(tab);
+  return closed;
+}
+
+function pruneDialogTrace(tab: TabState): void {
+  while (tab.dialogTrace[0]?.closed && tab.dialogTrace[0]?.delivered)
+    tab.dialogTrace.shift();
+}

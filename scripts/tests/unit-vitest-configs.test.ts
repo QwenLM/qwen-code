@@ -13,6 +13,7 @@ import externalContextConfig from '../../integrations/external-context/vitest.co
 import externalContextMem0Config from '../../integrations/external-context-mem0/vitest.config.js';
 import acpBridgeConfig from '../../packages/acp-bridge/vitest.config.js';
 import audioCaptureConfig from '../../packages/audio-capture/vitest.config.js';
+import browserUseConfig from '../../packages/browser-use/vitest.config.js';
 import channelsBaseConfig from '../../packages/channels/base/vitest.config.js';
 import dingtalkConfig from '../../packages/channels/dingtalk/vitest.config.js';
 import dwsConfig from '../../packages/channels/dws/vitest.config.js';
@@ -54,6 +55,7 @@ const configs: Record<string, ExemptionConfig> = {
   'integrations/external-context-mem0': externalContextMem0Config,
   'packages/acp-bridge': acpBridgeConfig,
   'packages/audio-capture': audioCaptureConfig,
+  'packages/browser-use': browserUseConfig,
   'packages/channels/base': channelsBaseConfig,
   'packages/channels/dingtalk': dingtalkConfig,
   'packages/channels/dws': dwsConfig,
@@ -109,6 +111,8 @@ const configModules: Record<
     import('../../packages/acp-bridge/vitest.config.js'),
   'packages/audio-capture': () =>
     import('../../packages/audio-capture/vitest.config.js'),
+  'packages/browser-use': () =>
+    import('../../packages/browser-use/vitest.config.js'),
   'packages/channels/base': () =>
     import('../../packages/channels/base/vitest.config.js'),
   'packages/channels/dingtalk': () =>
@@ -196,6 +200,7 @@ describe('shared-pool test timeout', () => {
     'integrations/external-context-mem0',
     'packages/acp-bridge',
     'packages/audio-capture',
+    'packages/browser-use',
     'packages/channels/base',
     'packages/channels/dingtalk',
     'packages/channels/dws',

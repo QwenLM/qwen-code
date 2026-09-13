@@ -1,0 +1,542 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import vm from 'node:vm';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const backend = vi.hoisted(() => ({
+  calls: [] as Array<{
+    method: string;
+    args: unknown;
+  }>,
+  dispatch: vi.fn(async (method: string, args: unknown): Promise<unknown> => {
+    backend.calls.push({ method, args });
+    if (method === 'browsers.get') {
+      return {
+        id: 'chrome',
+        name: 'Chrome',
+        type: 'extension',
+        family: 'chrome',
+      };
+    }
+    if (method === 'browser.documentation') return 'browser docs';
+    if (method === 'browser.user.history') return [];
+    if (method === 'tabs.new') return { id: 'tab-1' };
+    if (method === 'tabs.selected') return null;
+    if (method === 'browser.user.claimTab') return { id: 'tab-9' };
+    if (method === 'playwright.waitForEvent')
+      return { chooserId: 'chooser-1', multiple: true };
+    if (method === 'fileChooser.setFiles') return null;
+    if (method === 'tab.goto') return null;
+    if (method === 'tab.dialog.accept' || method === 'tab.dialog.dismiss')
+      return null;
+    if (method === 'locator.click' || method === 'locator.downloadMedia')
+      return null;
+    if (method === 'playwright.domSnapshot') return '- button [ref=e2]';
+    if (method.startsWith('dom_cua.') || method.startsWith('cua.')) return null;
+    if (method === 'tab.screenshot') {
+      return {
+        base64: '/9j/2Q==',
+        mimeType: 'image/jpeg',
+        width: 1280,
+        height: 720,
+        viewport: { width: 1280, height: 720 },
+        devicePixelRatio: 2,
+        coordinateSpace: 'css-pixels',
+        origin: { x: 0, y: 0 },
+      };
+    }
+    throw new Error(`unexpected call: ${method}`);
+  }),
+  stop: vi.fn(async () => undefined),
+}));
+
+vi.mock('./runtime.js', () => ({
+  createBrowserBackend: vi.fn(async () => backend),
+}));
+
+import { createBrowserBackend } from './runtime.js';
+import { closeBrowserRuntime, setupBrowserRuntime } from './index.js';
+
+afterEach(async () => {
+  await closeBrowserRuntime();
+  backend.calls.length = 0;
+  vi.clearAllMocks();
+});
+
+describe('Browser SDK in the existing Node REPL', () => {
+  it('reuses one agent and backend across Node REPL cells', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    expect(await browser.documentation()).toBe('browser docs');
+    expect(await setupBrowserRuntime()).toBe(agent);
+
+    expect(backend.calls.map(({ method }) => method)).toEqual([
+      'browsers.get',
+      'browser.documentation',
+    ]);
+  });
+
+  it('does not rebind SDK objects after the runtime is replaced', async () => {
+    const oldAgent = await setupBrowserRuntime();
+    const oldBrowser = await oldAgent.browsers.get('chrome');
+    const oldTab = await oldBrowser.tabs.new();
+    const oldLocator = oldTab.playwright.locator('button');
+
+    await closeBrowserRuntime();
+    const newAgent = await setupBrowserRuntime();
+    const dispatchCount = backend.dispatch.mock.calls.length;
+
+    expect(newAgent).not.toBe(oldAgent);
+    for (const operation of [
+      () => oldAgent.browsers.list(),
+      () => oldBrowser.tabs.new(),
+      () => oldTab.url(),
+      () => oldLocator.count(),
+    ]) {
+      await expect(operation()).rejects.toMatchObject({
+        code: 'STALE_BROWSER_SESSION',
+      });
+    }
+    expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+    await expect(newAgent.browsers.get('chrome')).resolves.toBeDefined();
+  });
+
+  it('invalidates an operation that finishes after its runtime closes', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    let resolveOperation: (value: unknown) => void = () => undefined;
+    const pendingOperation = new Promise<unknown>((resolve) => {
+      resolveOperation = resolve;
+    });
+    backend.dispatch.mockReturnValueOnce(pendingOperation);
+
+    const operation = browser.documentation();
+    await closeBrowserRuntime();
+    resolveOperation('browser docs');
+
+    await expect(operation).rejects.toMatchObject({
+      code: 'STALE_BROWSER_SESSION',
+    });
+  });
+
+  it.each(['and', 'or', 'has', 'hasNot'] as const)(
+    'rejects %s composition across tabs before dispatch',
+    async (method) => {
+      const agent = await setupBrowserRuntime();
+      const browser = await agent.browsers.get('chrome');
+      const tab = await browser.tabs.new();
+      backend.dispatch.mockResolvedValueOnce({ id: 'tab-2' });
+      const otherTab = await browser.tabs.new();
+      const locator = tab.playwright.locator('button');
+      const other = otherTab.playwright.getByText('Submit');
+      const dispatchCount = backend.dispatch.mock.calls.length;
+
+      expect(() =>
+        method === 'and' || method === 'or'
+          ? locator[method](other)
+          : locator.filter({ [method]: other }),
+      ).toThrow('expects a Locator from the same tab and browser session');
+      expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+    },
+  );
+
+  it.each(['and', 'or', 'has', 'hasNot'] as const)(
+    'rejects %s composition with an old session even when tab IDs match',
+    async (method) => {
+      const oldAgent = await setupBrowserRuntime();
+      const oldBrowser = await oldAgent.browsers.get('chrome');
+      const oldTab = await oldBrowser.tabs.new();
+      const oldLocator = oldTab.playwright.getByText('Submit');
+      await closeBrowserRuntime();
+
+      const agent = await setupBrowserRuntime();
+      const browser = await agent.browsers.get('chrome');
+      const tab = await browser.tabs.new();
+      expect(tab.id).toBe(oldTab.id);
+      const locator = tab.playwright.locator('button');
+      const dispatchCount = backend.dispatch.mock.calls.length;
+
+      expect(() =>
+        method === 'and' || method === 'or'
+          ? locator[method](oldLocator)
+          : locator.filter({ [method]: oldLocator }),
+      ).toThrow('expects a Locator from the same tab and browser session');
+      expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+    },
+  );
+
+  it('preserves compound locator steps within the same tab and session', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+    const locator = tab.playwright.locator('button');
+    const other = tab.playwright.getByText('Submit');
+    const otherSteps = [{ kind: 'getByText', text: 'Submit' }];
+
+    for (const method of ['and', 'or', 'has', 'hasNot'] as const) {
+      const combined =
+        method === 'and' || method === 'or'
+          ? locator[method](other)
+          : locator.filter({ [method]: other });
+      await combined.click();
+      expect(backend.calls.at(-1)).toEqual({
+        method: 'locator.click',
+        args: {
+          tabId: tab.id,
+          steps: [
+            { kind: 'locator', selector: 'button' },
+            method === 'and' || method === 'or'
+              ? { kind: method, steps: otherSteps }
+              : { kind: 'filter', [method]: otherSteps },
+          ],
+        },
+      });
+    }
+  });
+
+  it('serializes History and locator requests without a Host Call bridge', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('extension');
+    await browser.user.history({
+      queries: ['qwen'],
+      from: new Date('2026-08-01T00:00:00.000Z'),
+      limit: 5,
+    });
+    const tab = await browser.tabs.new();
+    const crossRealmRegex = vm.runInNewContext('/log in/i') as RegExp;
+    await tab.playwright
+      .getByRole('button', { name: crossRealmRegex })
+      .first()
+      .click({ modifiers: ['Shift'] });
+    await tab.playwright.locator('img').downloadMedia({ timeoutMs: 1_000 });
+    await tab.playwright.domSnapshot();
+    await tab.dom_cua.click({ node_id: 'f1e3' });
+    await tab.dom_cua.type({ text: 'hello' });
+    await tab.dom_cua.keypress({ keys: ['Control', 'a'] });
+    await tab.dom_cua.scroll({ x: 0, y: 200 });
+    await tab.cua.click({ x: 10, y: 20, button: 4 });
+
+    expect(backend.calls).toContainEqual(
+      expect.objectContaining({
+        method: 'browser.user.history',
+        args: {
+          browserId: 'chrome',
+          options: {
+            queries: ['qwen'],
+            from: '2026-08-01T00:00:00.000Z',
+            limit: 5,
+          },
+        },
+      }),
+    );
+    expect(backend.calls).toContainEqual({
+      method: 'playwright.domSnapshot',
+      args: { tabId: 'tab-1' },
+    });
+    expect(backend.calls).toContainEqual({
+      method: 'dom_cua.click',
+      args: { tabId: 'tab-1', node_id: 'f1e3' },
+    });
+    expect(backend.calls).toContainEqual({
+      method: 'dom_cua.type',
+      args: { tabId: 'tab-1', text: 'hello' },
+    });
+    expect(backend.calls).toContainEqual({
+      method: 'dom_cua.keypress',
+      args: { tabId: 'tab-1', keys: ['Control', 'a'] },
+    });
+    expect(backend.calls).toContainEqual({
+      method: 'dom_cua.scroll',
+      args: { tabId: 'tab-1', x: 0, y: 200 },
+    });
+    expect(backend.calls).toContainEqual({
+      method: 'cua.click',
+      args: { tabId: 'tab-1', x: 10, y: 20, button: 4 },
+    });
+    expect(backend.calls).toContainEqual(
+      expect.objectContaining({
+        method: 'locator.click',
+        args: {
+          tabId: 'tab-1',
+          steps: [
+            {
+              kind: 'getByRole',
+              role: 'button',
+              name: { regex: 'log in', flags: 'i' },
+            },
+            { kind: 'first' },
+          ],
+          modifiers: ['Shift'],
+        },
+      }),
+    );
+    expect(backend.calls).toContainEqual({
+      method: 'locator.downloadMedia',
+      args: {
+        tabId: 'tab-1',
+        steps: [{ kind: 'locator', selector: 'img' }],
+        timeoutMs: 1_000,
+      },
+    });
+  });
+
+  it('returns a screenshot with bytes and original image metadata', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+    const screenshot = await tab.screenshot();
+
+    expect(screenshot.bytes).toBeInstanceOf(Uint8Array);
+    expect(Buffer.from(screenshot.bytes).toString('base64')).toBe('/9j/2Q==');
+    expect(screenshot).toEqual({
+      bytes: screenshot.bytes,
+      mimeType: 'image/jpeg',
+      metadata: {
+        width: 1280,
+        height: 720,
+        viewport: { width: 1280, height: 720 },
+        devicePixelRatio: 2,
+        coordinateSpace: 'css-pixels',
+        origin: { x: 0, y: 0 },
+      },
+    });
+  });
+
+  it('rejects invalid locator composition and never coerces model values', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+    const locator = tab.playwright.locator('button');
+
+    expect(() =>
+      locator.filter({ has: {} as unknown as typeof locator }),
+    ).toThrow('filter has expects a Locator');
+
+    await tab.goto(undefined as unknown as string);
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'tab.goto',
+      args: { tabId: 'tab-1' },
+    });
+
+    await tab.playwright.locator('img').downloadMedia();
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'locator.downloadMedia',
+      args: {
+        tabId: 'tab-1',
+        steps: [{ kind: 'locator', selector: 'img' }],
+      },
+    });
+  });
+
+  it('rejects an nth index outside the contract range before dispatch', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+    const locator = tab.playwright.locator('li');
+    const dispatchCount = backend.dispatch.mock.calls.length;
+
+    for (const index of [10_001, -10_001, 1.5, NaN]) {
+      expect(() => locator.nth(index)).toThrow(
+        new TypeError('nth index must be an integer between -10000 and 10000'),
+      );
+    }
+    expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+    await locator.nth(10_000).click();
+    await locator.nth(-10_000).click();
+    expect(backend.calls.slice(-2).map(({ args }) => args)).toEqual([
+      {
+        tabId: 'tab-1',
+        steps: [
+          { kind: 'locator', selector: 'li' },
+          { kind: 'nth', index: 10_000 },
+        ],
+      },
+      {
+        tabId: 'tab-1',
+        steps: [
+          { kind: 'locator', selector: 'li' },
+          { kind: 'nth', index: -10_000 },
+        ],
+      },
+    ]);
+  });
+
+  it('fails all() closed instead of returning locators that cannot be used', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+    const locator = tab.playwright.locator('li');
+
+    backend.dispatch.mockResolvedValueOnce(10_002);
+    await expect(locator.all()).rejects.toThrow(
+      new RangeError(
+        'all() matched 10002 elements, more than nth() can address; narrow the locator',
+      ),
+    );
+    backend.dispatch.mockResolvedValueOnce(10_001);
+    await expect(locator.all()).resolves.toHaveLength(10_001);
+
+    let deep = tab.playwright.locator('ul');
+    for (let depth = 1; depth < 32; depth++) deep = deep.locator('li');
+    const dispatchCount = backend.dispatch.mock.calls.length;
+    await expect(deep.all()).rejects.toThrow(
+      new RangeError(
+        'all() cannot extend a locator that already has 32 steps; narrow the locator',
+      ),
+    );
+    expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+  });
+
+  it('normalizes file chooser uploads', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+
+    const chooser = await tab.playwright.waitForEvent('filechooser');
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'playwright.waitForEvent',
+      args: { tabId: 'tab-1', event: 'filechooser' },
+    });
+    expect(chooser.isMultiple()).toBe(true);
+
+    await chooser.setFiles('/abs/a');
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'fileChooser.setFiles',
+      args: { tabId: 'tab-1', chooserId: 'chooser-1', files: ['/abs/a'] },
+    });
+    await chooser.setFiles(['/abs/a', '/abs/b'], { timeoutMs: 5 });
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'fileChooser.setFiles',
+      args: {
+        tabId: 'tab-1',
+        chooserId: 'chooser-1',
+        files: ['/abs/a', '/abs/b'],
+        timeoutMs: 5,
+      },
+    });
+
+    const dispatchCount = backend.dispatch.mock.calls.length;
+    expect(() => tab.playwright.waitForEvent('popup' as never)).toThrow(
+      'waitForEvent supports only "download" and "filechooser"',
+    );
+    expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+  });
+
+  it('guards claimTab arguments and forwards a discovered tab unchanged', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const dispatchCount = backend.dispatch.mock.calls.length;
+
+    for (const value of [undefined, null, 42]) {
+      await expect(browser.user.claimTab(value as never)).rejects.toThrow(
+        new TypeError(
+          'claimTab expects a tab returned by browser.user.openTabs()',
+        ),
+      );
+    }
+    expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+
+    const discovered = {
+      id: 'open-1',
+      title: 'Gmail',
+      url: 'https://mail.example/',
+      lastOpened: '2026-09-07T00:00:00.000Z',
+    };
+    const claimed = await browser.user.claimTab(discovered);
+    expect(claimed.id).toBe('tab-9');
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'browser.user.claimTab',
+      args: { browserId: 'chrome', tab: discovered },
+    });
+    await browser.user.claimTab('open-1');
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'browser.user.claimTab',
+      args: { browserId: 'chrome', tab: 'open-1' },
+    });
+  });
+
+  it('resolves tabs.selected() to undefined when no tab is selected', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+
+    await expect(browser.tabs.selected()).resolves.toBeUndefined();
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'tabs.selected',
+      args: { browserId: 'chrome' },
+    });
+  });
+
+  it('exposes only the actions supported by each dialog type', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+
+    backend.dispatch.mockResolvedValueOnce({
+      dialogId: 'alert-1',
+      type: 'alert',
+      message: 'Heads up',
+      defaultPrompt: '',
+    });
+    const alert = await tab.getJsDialog();
+    if (alert?.type !== 'alert') throw new Error('expected an alert dialog');
+    expect(alert.message).toBe('Heads up');
+    expect('accept' in alert).toBe(false);
+    await alert.dismiss();
+    expect(backend.calls).toContainEqual({
+      method: 'tab.dialog.dismiss',
+      args: { tabId: 'tab-1', dialogId: 'alert-1' },
+    });
+
+    backend.dispatch.mockResolvedValueOnce({
+      dialogId: 'prompt-1',
+      type: 'prompt',
+      message: 'Name',
+      defaultPrompt: 'Qwen',
+    });
+    const prompt = await tab.getJsDialog();
+    if (prompt?.type !== 'prompt') throw new Error('expected a prompt dialog');
+    expect(prompt.defaultValue).toBe('Qwen');
+    expect(() => prompt.accept(undefined as unknown as string)).toThrow(
+      'Prompt dialog accept expects text',
+    );
+    await prompt.accept('Codex');
+
+    expect(backend.calls).toContainEqual({
+      method: 'tab.dialog.accept',
+      args: { tabId: 'tab-1', dialogId: 'prompt-1', promptText: 'Codex' },
+    });
+  });
+
+  it('keeps model values behind a JSON boundary', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const cyclic: Record<string, unknown> = {};
+    cyclic['self'] = cyclic;
+    const dispatchCount = backend.dispatch.mock.calls.length;
+
+    await expect(browser.user.history(cyclic)).rejects.toThrow(
+      'Browser operation arguments must be JSON-serializable',
+    );
+    expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+
+    const cyclicResult: Record<string, unknown> = {};
+    cyclicResult['self'] = cyclicResult;
+    backend.dispatch.mockResolvedValueOnce(cyclicResult);
+    await expect(browser.documentation()).rejects.toThrow(
+      'Browser operation result must be JSON-serializable',
+    );
+  });
+
+  it('can retry after backend setup fails', async () => {
+    const createBackend = vi.mocked(createBrowserBackend);
+    createBackend.mockRejectedValueOnce(new Error('install failed'));
+
+    await expect(setupBrowserRuntime()).rejects.toThrow('install failed');
+    await expect(setupBrowserRuntime()).resolves.toBeDefined();
+    expect(createBackend).toHaveBeenCalledTimes(2);
+  });
+});

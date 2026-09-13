@@ -1,0 +1,438 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { Buffer } from 'node:buffer';
+import { clearTimeout, setTimeout } from 'node:timers';
+
+import type { Page } from 'playwright-core';
+
+import { BrowserRuntimeError } from '../core/errors.js';
+import type {
+  DispatchResult,
+  LocatorMatcher,
+  LogEntry,
+} from '../core/primitives.js';
+import type { Args, ProviderTab } from './runtime-state.js';
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+// The claimTab schema caps title and url at this length; clamping once here
+// gives the discovery record and the object handed to the model the same
+// string, so the documented openTabs() -> claimTab() round trip survives a
+// tab whose URL is longer.
+const MAX_TAB_TEXT_LENGTH = 20_000;
+
+type KeyboardModifier = 'Alt' | 'Control' | 'ControlOrMeta' | 'Meta' | 'Shift';
+type MouseButton = 'left' | 'middle' | 'right';
+
+export function providerTabs(value: unknown): ProviderTab[] {
+  if (!Array.isArray(value))
+    throw new BrowserRuntimeError(
+      'OPERATION_FAILED',
+      'Chrome extension returned an invalid tab list',
+    );
+  return value.map(providerTab);
+}
+
+export function providerTab(value: unknown): ProviderTab {
+  const tab = record(value);
+  if (typeof tab.providerTabId !== 'number')
+    throw new BrowserRuntimeError(
+      'OPERATION_FAILED',
+      'Chrome extension returned an invalid tab',
+    );
+  return {
+    providerTabId: tab.providerTabId,
+    title:
+      typeof tab.title === 'string'
+        ? tab.title.slice(0, MAX_TAB_TEXT_LENGTH)
+        : null,
+    url:
+      typeof tab.url === 'string'
+        ? tab.url.slice(0, MAX_TAB_TEXT_LENGTH)
+        : null,
+    ...(typeof tab.active === 'boolean' ? { active: tab.active } : {}),
+    ...(typeof tab.lastOpened === 'string'
+      ? { lastOpened: tab.lastOpened }
+      : {}),
+    ...(typeof tab.tabGroup === 'string' ? { tabGroup: tab.tabGroup } : {}),
+    ...(typeof tab.derivedFromProviderTabId === 'number'
+      ? { derivedFromProviderTabId: tab.derivedFromProviderTabId }
+      : {}),
+  };
+}
+
+// The model-facing contract promises an http(s)-only listing ordered by
+// lastOpened descending; establish that here rather than in prose. An entry
+// without a parseable lastOpened sorts last, and ties keep the relay's order.
+export function orderOpenTabs(tabs: readonly ProviderTab[]): ProviderTab[] {
+  const opened = (tab: ProviderTab): number => {
+    const time =
+      tab.lastOpened === undefined ? NaN : Date.parse(tab.lastOpened);
+    return Number.isNaN(time) ? -Infinity : time;
+  };
+  return tabs
+    .filter((tab) => tab.url === null || /^https?:/.test(tab.url))
+    .sort((left, right) => {
+      const a = opened(left);
+      const b = opened(right);
+      return a === b ? 0 : a > b ? -1 : 1;
+    });
+}
+
+export function matcher(value: LocatorMatcher): string | RegExp {
+  if (typeof value === 'string') return value;
+  try {
+    return new RegExp(value.regex, value.flags ?? '');
+  } catch (error) {
+    throw new BrowserRuntimeError(
+      'INVALID_ARGUMENT',
+      `Invalid locator regex: ${(error as Error).message}`,
+    );
+  }
+}
+
+export function navigationOptions(args: Args): {
+  timeout: number;
+  waitUntil: 'commit' | 'domcontentloaded' | 'load' | 'networkidle';
+} {
+  return {
+    timeout: timeoutArg(args),
+    waitUntil:
+      args.waitUntil === 'commit' ||
+      args.waitUntil === 'domcontentloaded' ||
+      args.waitUntil === 'networkidle'
+        ? args.waitUntil
+        : 'load',
+  };
+}
+
+export function loadState(
+  value: unknown,
+): 'domcontentloaded' | 'load' | 'networkidle' {
+  return value === 'domcontentloaded' || value === 'networkidle'
+    ? value
+    : 'load';
+}
+
+export function timeoutArg(args: Args, fallback = DEFAULT_TIMEOUT_MS): number {
+  return typeof args.timeoutMs === 'number' ? args.timeoutMs : fallback;
+}
+
+export function timeoutOption(args: Args): { timeout: number } {
+  return { timeout: timeoutArg(args) };
+}
+
+export function clickOptions(
+  args: Args,
+  fallback = DEFAULT_TIMEOUT_MS,
+): {
+  timeout: number;
+  button: MouseButton;
+  modifiers: KeyboardModifier[];
+  force?: boolean;
+} {
+  return {
+    timeout: timeoutArg(args, fallback),
+    button: mouseButton(args.button),
+    modifiers: modifiers(args.modifiers),
+    ...(args.force === true ? { force: true } : {}),
+  };
+}
+
+export function mouseButton(value: unknown): MouseButton {
+  switch (value) {
+    case undefined:
+    case 1:
+    case 'left':
+      return 'left';
+    case 2:
+    case 'middle':
+      return 'middle';
+    case 3:
+    case 'right':
+      return 'right';
+    default:
+      throw new BrowserRuntimeError(
+        'INVALID_ARGUMENT',
+        'Playwright supports left, middle and right mouse buttons',
+      );
+  }
+}
+
+export function modifiers(value: unknown): KeyboardModifier[] {
+  if (value === undefined) return [];
+  const values = stringArray(value);
+  return values.map((item) => {
+    const normalized = item.replace(/[\s_-]/g, '').toLowerCase();
+    if (normalized === 'alt' || normalized === 'option') return 'Alt';
+    if (normalized === 'control' || normalized === 'ctrl') return 'Control';
+    if (
+      normalized === 'meta' ||
+      normalized === 'command' ||
+      normalized === 'cmd'
+    )
+      return 'Meta';
+    if (normalized === 'shift') return 'Shift';
+    if (normalized === 'controlormeta' || normalized === 'ctrlormeta')
+      return 'ControlOrMeta';
+    throw new BrowserRuntimeError(
+      'INVALID_ARGUMENT',
+      `Unsupported modifier key: ${item}`,
+    );
+  });
+}
+
+export async function withModifiers(
+  page: Page,
+  value: unknown,
+  action: () => Promise<void>,
+): Promise<void> {
+  const keys = modifiers(value);
+  const pressed: string[] = [];
+  try {
+    for (const key of keys) {
+      pressed.push(key);
+      await page.keyboard.down(key);
+    }
+    await action();
+  } finally {
+    // A failed release must not rewrite a completed action into a failure;
+    // the action's own rejection propagates through this finally on its own.
+    await Promise.allSettled(
+      pressed.reverse().map((key) => page.keyboard.up(key)),
+    );
+  }
+}
+
+export async function pressKeyChord(page: Page, value: unknown): Promise<void> {
+  const keys = stringArray(value);
+  const chord = keys.join('+');
+  try {
+    await page.keyboard.press(chord);
+  } catch (error) {
+    await releaseChordKeys(page, chordTokens(chord));
+    throw error;
+  }
+}
+
+// Playwright's Keyboard.press splits the chord itself: '+' separates only
+// after a non-empty token, so a standalone '+' is a literal key. The derived
+// tokens are the keys it actually holds, so the recovery must release these
+// rather than the caller's array elements.
+export function chordTokens(chord: string): string[] {
+  const tokens: string[] = [];
+  let building = '';
+  for (const char of chord) {
+    if (char === '+' && building !== '') {
+      tokens.push(building);
+      building = '';
+    } else {
+      building += char;
+    }
+  }
+  tokens.push(building);
+  return tokens;
+}
+
+// Playwright presses chord tokens left to right and never releases them when
+// a later token is rejected; release the chord's own tokens so the tab is
+// not left with a key physically held.
+export async function releaseChordKeys(
+  page: Page,
+  chord: readonly string[],
+): Promise<void> {
+  await Promise.allSettled(
+    [...chord].reverse().map((key) => page.keyboard.up(key)),
+  );
+}
+
+export function selectOptions(
+  value: unknown,
+):
+  | string
+  | string[]
+  | { value?: string; label?: string; index?: number }
+  | Array<{ value?: string; label?: string; index?: number }> {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    const mapped = value.map((item) =>
+      typeof item === 'string' ? item : selectOptionRecord(item),
+    );
+    // Playwright accepts an all-string or all-descriptor array, never mixed.
+    if (mapped.some((item) => typeof item !== 'string'))
+      return mapped.map((item) =>
+        typeof item === 'string' ? { value: item } : item,
+      );
+    return mapped as string[];
+  }
+  return selectOptionRecord(value);
+}
+
+export function selectOptionRecord(value: unknown): {
+  value?: string;
+  label?: string;
+  index?: number;
+} {
+  const item = record(value);
+  return {
+    ...(typeof item.value === 'string' ? { value: item.value } : {}),
+    ...(typeof item.label === 'string' ? { label: item.label } : {}),
+    ...(typeof item.index === 'number' ? { index: item.index } : {}),
+  };
+}
+
+export function consoleLevel(value: string): LogEntry['level'] {
+  // Playwright reports console.warn as 'warning'; the contract stores 'warn'.
+  if (value === 'warning') return 'warn';
+  if (
+    value === 'debug' ||
+    value === 'info' ||
+    value === 'warn' ||
+    value === 'error'
+  )
+    return value;
+  return 'log';
+}
+
+export function isClip(value: unknown): value is {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  const clip = record(value);
+  return (
+    typeof clip.x === 'number' &&
+    typeof clip.y === 'number' &&
+    typeof clip.width === 'number' &&
+    typeof clip.height === 'number'
+  );
+}
+
+export function jpegDimensions(buffer: Buffer): {
+  width: number;
+  height: number;
+} {
+  if (buffer.length >= 4 && buffer.readUInt16BE(0) === 0xffd8) {
+    let offset = 2;
+    while (offset + 4 <= buffer.length && buffer[offset] === 0xff) {
+      const marker = buffer[offset + 1];
+      if (marker === 0xff) {
+        offset++;
+        continue;
+      }
+      if (marker === 0xda || marker === 0xd9) break;
+      const length = buffer.readUInt16BE(offset + 2);
+      if (length < 2 || offset + 2 + length > buffer.length) break;
+      if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+        if (length < 8) break;
+        return {
+          width: buffer.readUInt16BE(offset + 7),
+          height: buffer.readUInt16BE(offset + 5),
+        };
+      }
+      offset += 2 + length;
+    }
+  }
+  throw new BrowserRuntimeError(
+    'OPERATION_FAILED',
+    'Chrome returned an invalid JPEG screenshot',
+  );
+}
+
+export function staleTabError(): BrowserRuntimeError {
+  return new BrowserRuntimeError(
+    'STALE_TAB',
+    'The Chrome tab is closed or stale; claim a tab again to continue',
+  );
+}
+
+export function isoTimestamp(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'string') return new Date(value).toISOString();
+  throw new BrowserRuntimeError(
+    'INVALID_ARGUMENT',
+    'Expected an ISO date string',
+  );
+}
+
+export function stringArg(args: Args, name: string): string {
+  const value = args[name];
+  if (typeof value !== 'string')
+    throw new BrowserRuntimeError(
+      'INVALID_ARGUMENT',
+      `Missing string argument: ${name}`,
+    );
+  return value;
+}
+
+export function numberArg(args: Args, name: string): number {
+  const value = args[name];
+  if (typeof value !== 'number')
+    throw new BrowserRuntimeError(
+      'INVALID_ARGUMENT',
+      `Missing number argument: ${name}`,
+    );
+  return value;
+}
+
+export function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string'))
+    throw new BrowserRuntimeError(
+      'INVALID_ARGUMENT',
+      'Expected a string array',
+    );
+  return value;
+}
+
+export function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object'
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+export function pushBounded<T>(array: T[], value: T, limit = 1_000): void {
+  array.push(value);
+  if (array.length > limit) array.splice(0, array.length - limit);
+}
+
+export function jsonResult(value: unknown): DispatchResult {
+  if (value === undefined) return null;
+  try {
+    return JSON.parse(JSON.stringify(value)) as DispatchResult;
+  } catch {
+    throw new BrowserRuntimeError(
+      'OPERATION_FAILED',
+      'Browser evaluation returned a non-serializable value',
+    );
+  }
+}
+
+export async function withTimeout<T>(
+  promise: Promise<T>,
+  timeout: number,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new BrowserRuntimeError(
+                'OPERATION_TIMEOUT',
+                `Operation timed out after ${timeout}ms`,
+              ),
+            ),
+          timeout,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
