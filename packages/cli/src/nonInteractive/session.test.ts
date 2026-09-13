@@ -78,6 +78,8 @@ let mockBackgroundShellRegistry: {
 };
 let mockBackgroundTaskRegistry: {
   abortAll: ReturnType<typeof vi.fn>;
+  setNotificationCallback: ReturnType<typeof vi.fn>;
+  setRegisterCallback: ReturnType<typeof vi.fn>;
 };
 
 function createConfig(overrides: ConfigOverrides = {}): Config {
@@ -236,6 +238,8 @@ describe('runNonInteractiveStreamJson', () => {
     };
     mockBackgroundTaskRegistry = {
       abortAll: vi.fn(),
+      setNotificationCallback: vi.fn(),
+      setRegisterCallback: vi.fn(),
     };
     config = createConfig();
     runNonInteractiveMock.mockReset();
@@ -1053,6 +1057,133 @@ describe('runNonInteractiveStreamJson', () => {
         captureMonitorRegistrations: false,
       }),
     );
+  });
+
+  it('keeps background task callbacks live after the originating turn', async () => {
+    let registerCallback:
+      | ((entry: {
+          agentId: string;
+          toolUseId?: string;
+          description: string;
+          subagentType?: string;
+        }) => void)
+      | undefined;
+    let notificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            agentId: string;
+            toolUseId?: string;
+            status: string;
+            stats?: {
+              totalTokens: number;
+              toolUses: number;
+              durationMs: number;
+            };
+          },
+        ) => void)
+      | undefined;
+    mockBackgroundTaskRegistry.setRegisterCallback.mockImplementation((cb) => {
+      registerCallback = cb;
+    });
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (cb) => {
+        notificationCallback = cb;
+      },
+    );
+
+    const notificationXml =
+      '<task-notification>background complete</task-notification>';
+    runNonInteractiveMock
+      .mockImplementationOnce(async () => {
+        registerCallback?.({
+          agentId: 'agent_1',
+          toolUseId: 'tool_agent_1',
+          description: 'background work',
+          subagentType: 'general-purpose',
+        });
+      })
+      .mockResolvedValueOnce(undefined);
+
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+      yield createUserMessage('Start background work');
+      await vi.waitFor(() => {
+        expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+      });
+      await runNonInteractiveMock.mock.results[0]?.value;
+      notificationCallback?.('Background agent completed.', notificationXml, {
+        agentId: 'agent_1',
+        toolUseId: 'tool_agent_1',
+        status: 'completed',
+        stats: { totalTokens: 12, toolUses: 3, durationMs: 45 },
+      });
+      await vi.waitFor(() => {
+        expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+      });
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(mockOutputAdapter.emitSystemMessage).toHaveBeenCalledWith(
+      'task_started',
+      {
+        task_id: 'agent_1',
+        tool_use_id: 'tool_agent_1',
+        description: 'background work',
+        subagent_type: 'general-purpose',
+      },
+    );
+    expect(mockOutputAdapter.emitUserMessage).toHaveBeenCalledWith([
+      { text: 'Background agent completed.' },
+    ]);
+    expect(mockOutputAdapter.emitSystemMessage).toHaveBeenCalledWith(
+      'task_notification',
+      {
+        task_id: 'agent_1',
+        tool_use_id: 'tool_agent_1',
+        status: 'completed',
+        usage: { total_tokens: 12, tool_uses: 3, duration_ms: 45 },
+      },
+    );
+    expect(runNonInteractiveMock).toHaveBeenNthCalledWith(
+      1,
+      config,
+      expect.objectContaining({ merged: expect.any(Object) }),
+      'Start background work',
+      expect.stringContaining('test-session'),
+      expect.objectContaining({
+        adapter: mockOutputAdapter,
+        captureBackgroundTaskNotifications: false,
+        captureBackgroundTaskRegistrations: false,
+      }),
+    );
+    expect(runNonInteractiveMock).toHaveBeenNthCalledWith(
+      2,
+      config,
+      expect.objectContaining({ merged: expect.any(Object) }),
+      notificationXml,
+      expect.stringContaining('test-session'),
+      expect.objectContaining({
+        adapter: mockOutputAdapter,
+        sendMessageType: SendMessageType.Notification,
+        captureBackgroundTaskNotifications: false,
+        captureBackgroundTaskRegistrations: false,
+      }),
+    );
+    expect(
+      mockBackgroundTaskRegistry.setNotificationCallback,
+    ).toHaveBeenLastCalledWith(undefined);
+    expect(
+      mockBackgroundTaskRegistry.setNotificationCallback,
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      mockBackgroundTaskRegistry.setRegisterCallback,
+    ).toHaveBeenLastCalledWith(undefined);
+    expect(
+      mockBackgroundTaskRegistry.setRegisterCallback,
+    ).toHaveBeenCalledTimes(2);
   });
 
   it('drops a queued running monitor event after cancellation', async () => {

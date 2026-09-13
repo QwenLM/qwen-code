@@ -457,6 +457,8 @@ export interface RunNonInteractiveOptions {
   controlService?: ControlService;
   sendMessageType?: SendMessageType;
   notificationDisplayText?: string;
+  captureBackgroundTaskNotifications?: boolean;
+  captureBackgroundTaskRegistrations?: boolean;
   captureMonitorNotifications?: boolean;
   captureMonitorRegistrations?: boolean;
   onResultEmitted?: () => void;
@@ -855,6 +857,9 @@ export async function runNonInteractive(
       );
       await settleBeforeTerminalOutput();
       if (exceeded) {
+        if (!ownsAdapter) {
+          throw new Error(exceeded.message);
+        }
         await handleBudgetExceededError(config, exceeded);
         // Explicit unreachable — `handleBudgetExceededError` is `never`
         // in production (it calls `process.exit`). If a test stubs
@@ -1560,35 +1565,39 @@ export async function runNonInteractive(
       // Register the callback early so background agents launched during the main
       // tool-call chain can push completions onto the queue.
       const registry = config.getBackgroundTaskRegistry();
-      registry.setNotificationCallback((displayText, modelText, meta) => {
-        localQueue.push({
-          displayText,
-          modelText,
-          sendMessageType: SendMessageType.Notification,
-          todoWorkChainId: meta.todoWorkChainId,
-          sdkNotification: {
-            task_id: meta.agentId,
-            tool_use_id: meta.toolUseId,
-            status: meta.status,
-            usage: meta.stats
-              ? {
-                  total_tokens: meta.stats.totalTokens,
-                  tool_uses: meta.stats.toolUses,
-                  duration_ms: meta.stats.durationMs,
-                }
-              : undefined,
-          },
+      if (options.captureBackgroundTaskNotifications !== false) {
+        registry.setNotificationCallback((displayText, modelText, meta) => {
+          localQueue.push({
+            displayText,
+            modelText,
+            sendMessageType: SendMessageType.Notification,
+            todoWorkChainId: meta.todoWorkChainId,
+            sdkNotification: {
+              task_id: meta.agentId,
+              tool_use_id: meta.toolUseId,
+              status: meta.status,
+              usage: meta.stats
+                ? {
+                    total_tokens: meta.stats.totalTokens,
+                    tool_uses: meta.stats.toolUses,
+                    duration_ms: meta.stats.durationMs,
+                  }
+                : undefined,
+            },
+          });
         });
-      });
+      }
 
-      registry.setRegisterCallback((entry) => {
-        adapter.emitSystemMessage('task_started', {
-          task_id: entry.agentId,
-          tool_use_id: entry.toolUseId,
-          description: entry.description,
-          subagent_type: entry.subagentType,
+      if (options.captureBackgroundTaskRegistrations !== false) {
+        registry.setRegisterCallback((entry) => {
+          adapter.emitSystemMessage('task_started', {
+            task_id: entry.agentId,
+            tool_use_id: entry.toolUseId,
+            description: entry.description,
+            subagent_type: entry.subagentType,
+          });
         });
-      });
+      }
 
       const monitorRegistry = config.getMonitorRegistry();
       if (options.captureMonitorNotifications !== false) {
@@ -1740,7 +1749,7 @@ export async function runNonInteractive(
         await failClosedActiveGoalTurn(
           'Headless Goal stopped after loop detection',
         );
-        registry.abortAll();
+        await abortBackgroundTasksAndHoldBackNotifications();
         flushQueuedNotificationsToSdk(localQueue);
         finalizeOneShotMonitors();
 
@@ -3131,7 +3140,7 @@ export async function runNonInteractive(
           // silently convert a cancellation into a completion.
           while (true) {
             if (abortController.signal.aborted) {
-              registry.abortAll();
+              await abortBackgroundTasksAndHoldBackNotifications();
               // Flush queued terminal notifications before routeAbort
               // exits so stream-json consumers always see a task_notification
               // paired with every task_started.
@@ -3355,6 +3364,9 @@ export async function runNonInteractive(
       if (budgetExceeded) {
         // Always exit AFTER emitResult so STREAM_JSON / JSON consumers
         // see a terminal result envelope before the process dies.
+        if (!ownsAdapter) {
+          throw new AlreadyReportedError(budgetExceeded.message);
+        }
         await handleBudgetExceededError(config, budgetExceeded);
       }
       if (recoverableCancellation) {
@@ -3400,8 +3412,12 @@ export async function runNonInteractive(
       abortController.signal.removeEventListener('abort', stampBudgetAbort);
 
       const reg = config.getBackgroundTaskRegistry();
-      reg.setNotificationCallback(undefined);
-      reg.setRegisterCallback(undefined);
+      if (options.captureBackgroundTaskNotifications !== false) {
+        reg.setNotificationCallback(undefined);
+      }
+      if (options.captureBackgroundTaskRegistrations !== false) {
+        reg.setRegisterCallback(undefined);
+      }
       const monReg = config.getMonitorRegistry();
       // In one-shot (non-Session) runs, abort all running monitors so their
       // piped stdio refs don't keep the Node event loop alive after the result

@@ -1963,6 +1963,74 @@ describe('runNonInteractive', () => {
     void run;
   });
 
+  it('reports a per-turn budget without exiting a caller-owned session', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(0);
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+    const exitCleanup = vi.fn();
+    const unregisterCleanup = registerCleanup(exitCleanup);
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'session-budget-tool',
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'session-budget',
+          },
+        },
+      ]),
+    );
+
+    try {
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Use a tool',
+          'session-budget',
+          {
+            adapter,
+            captureBackgroundTaskNotifications: false,
+            captureBackgroundTaskRegistrations: false,
+            captureMonitorNotifications: false,
+            captureMonitorRegistrations: false,
+          },
+        ),
+      ).rejects.toMatchObject({
+        name: 'AlreadyReportedError',
+        message:
+          'Run aborted: tool-call budget of 0 exceeded (--max-tool-calls); observed 1.',
+      });
+
+      const envelopes = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('')
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line));
+      expect(envelopes.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: true,
+        error: {
+          message:
+            'Run aborted: tool-call budget of 0 exceeded (--max-tool-calls); observed 1.',
+        },
+      });
+      expect(process.exit).not.toHaveBeenCalled();
+      expect(exitCleanup).not.toHaveBeenCalled();
+      expect(mockBackgroundTaskRegistry.abortAll).not.toHaveBeenCalled();
+      expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+    } finally {
+      unregisterCleanup();
+    }
+  });
+
   it('records a budget error when an in-flight model stream rejects after abort', async () => {
     setupMetricsMock();
     vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(0.01);
@@ -3047,11 +3115,52 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(1);
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledOnce();
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
     expect(processStdoutSpy).not.toHaveBeenCalled();
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Loop detection halted the run'),
     );
+  });
+
+  it('does not abort Session-owned background tasks after loop detection', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.LoopDetected,
+          value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+        },
+      ]),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Loop in a reusable session',
+      'prompt-session-loop-detected',
+      {
+        adapter,
+        captureBackgroundTaskNotifications: false,
+        captureBackgroundTaskRegistrations: false,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(mockBackgroundTaskRegistry.abortAll).not.toHaveBeenCalled();
+    expect(
+      mockBackgroundTaskRegistry.setNotificationCallback,
+    ).not.toHaveBeenCalled();
+    expect(
+      mockBackgroundTaskRegistry.setRegisterCallback,
+    ).not.toHaveBeenCalled();
+    expect(process.exit).not.toHaveBeenCalled();
   });
 
   it('shows the always-on hint (not the skipLoopDetection escape) for a consecutive-identical halt', async () => {
@@ -6006,6 +6115,7 @@ describe('runNonInteractive', () => {
     ).rejects.toThrow('process.exit(130) called');
 
     expect(process.exit).toHaveBeenCalledWith(130);
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledOnce();
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
     const envelopesAtExit = stdoutAtExit
       .trim()
@@ -6117,6 +6227,7 @@ describe('runNonInteractive', () => {
     ).rejects.toThrow('process.exit(130) called');
 
     expect(process.exit).toHaveBeenCalledWith(130);
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledOnce();
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
     const envelopesAtExit = stdoutAtExit
       .trim()
@@ -6246,6 +6357,7 @@ describe('runNonInteractive', () => {
     const stderrDestroySpy = vi
       .spyOn(process.stderr, 'destroy')
       .mockImplementation(() => process.stderr);
+    const stdoutErrorListenersBefore = process.stdout.listenerCount('error');
     const stderrErrorListenersBefore = process.stderr.listenerCount('error');
     let stderrErrorListenersAtWrite = -1;
     let stderrErrorEmitted = false;
@@ -6284,6 +6396,12 @@ describe('runNonInteractive', () => {
     ).toContain('[API Error: provider failed mid-stream]');
     expect(stderrErrorListenersAtWrite).toBe(stderrErrorListenersBefore + 1);
     expect(stderrDestroySpy).toHaveBeenCalled();
+    expect(process.stdout.listenerCount('error')).toBe(
+      stdoutErrorListenersBefore,
+    );
+    expect(process.stderr.listenerCount('error')).toBe(
+      stderrErrorListenersBefore,
+    );
   });
 
   it('falls back to stderr for an owned stream-json adapter after a terminal API error', async () => {
@@ -6899,6 +7017,54 @@ describe('runNonInteractive', () => {
     expect(endInteractionSpanSpy).toHaveBeenCalledWith('cancelled', {
       promptId: 'prompt-recoverable-interrupt',
     });
+  });
+
+  it('preserves Session-owned background tasks when interrupted during final holdback', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    mockBackgroundTaskRegistry.hasUnfinalizedTasks.mockReturnValue(true);
+    const turnAbortController = new AbortController();
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      (async function* () {
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        } as ServerLlmStreamEvent;
+        setTimeout(
+          () => turnAbortController.abort(new TurnInterruptedError()),
+          0,
+        );
+      })(),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'wait for background work',
+      'prompt-session-final-holdback-interrupt',
+      {
+        adapter,
+        abortController: turnAbortController,
+        recoverableCancellation: true,
+        captureBackgroundTaskNotifications: false,
+        captureBackgroundTaskRegistrations: false,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+      },
+    );
+
+    expect(exitCode).toBe(130);
+    expect(mockBackgroundTaskRegistry.abortAll).not.toHaveBeenCalled();
+    expect(
+      mockBackgroundTaskRegistry.setNotificationCallback,
+    ).not.toHaveBeenCalled();
+    expect(
+      mockBackgroundTaskRegistry.setRegisterCallback,
+    ).not.toHaveBeenCalled();
+    expect(process.exit).not.toHaveBeenCalled();
   });
 
   it('emits the effective fork context mode in headless task events', async () => {
