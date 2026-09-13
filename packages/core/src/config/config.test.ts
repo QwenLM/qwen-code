@@ -8,8 +8,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
-import type { ConfigParameters, SandboxConfig } from './config.js';
+import type {
+  ConfigParameters,
+  SandboxConfig,
+  SkillSettingsLists,
+} from './config.js';
 import {
+  bareDisablementBlocksQualifiedGrantWarnings,
+  bareEnabledGrantWarnings,
   Config,
   ApprovalMode,
   APPROVAL_MODES,
@@ -473,6 +479,298 @@ vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
 }));
 
+describe('bareEnabledGrantWarnings', () => {
+  const rustPdf = { name: 'rust:pdf', authoredName: 'pdf' };
+  const lists = (
+    enabled: string[],
+    defaultDisabled: string[] = [],
+  ): SkillSettingsLists => ({
+    enabled: new Set(enabled),
+    defaultDisabled: new Set(defaultDisabled),
+    hardDisabled: new Set(),
+  });
+  const warning =
+    "Warning: skills.enabled lists 'pdf' by bare name, which no longer " +
+    "enables the extension skill 'rust:pdf'. Replace it with 'rust:pdf'.";
+
+  it('names the qualified replacement for a stale bare grant', () => {
+    expect(bareEnabledGrantWarnings(lists(['pdf']), [rustPdf])).toEqual([
+      warning,
+    ]);
+  });
+
+  it('stays silent for qualified entries, registry-identity entries, non-extension skills, and an empty enabled set', () => {
+    expect(bareEnabledGrantWarnings(lists(['rust:pdf']), [rustPdf])).toEqual(
+      [],
+    );
+    // A bare entry that owns some registry identity enables that skill.
+    expect(
+      bareEnabledGrantWarnings(lists(['pdf']), [rustPdf, { name: 'pdf' }]),
+    ).toEqual([]);
+    expect(
+      bareEnabledGrantWarnings(lists(['commit']), [{ name: 'commit' }]),
+    ).toEqual([]);
+    expect(bareEnabledGrantWarnings(lists([]), [rustPdf])).toEqual([]);
+  });
+
+  it('stays silent for a load-bearing bare entry that cancels a defaultDisabled entry', () => {
+    expect(
+      bareEnabledGrantWarnings(lists(['pdf'], ['pdf']), [rustPdf]),
+    ).toEqual([]);
+  });
+
+  it('names every same-authored skill for one shared bare entry', () => {
+    expect(
+      bareEnabledGrantWarnings(lists(['pdf']), [
+        rustPdf,
+        { name: 'other:pdf', authoredName: 'pdf' },
+      ]),
+    ).toEqual([
+      "Warning: skills.enabled lists 'pdf' by bare name, which no longer " +
+        "enables the extension skills 'rust:pdf', 'other:pdf'. Replace it " +
+        "with 'rust:pdf', 'other:pdf'.",
+    ]);
+  });
+
+  it('names the hard block that defeats the replacement', () => {
+    const withHard: SkillSettingsLists = {
+      enabled: new Set(['pdf']),
+      defaultDisabled: new Set(),
+      hardDisabled: new Set(['pdf']),
+    };
+
+    expect(bareEnabledGrantWarnings(withHard, [rustPdf]).join('\n')).toContain(
+      'remove that entry too',
+    );
+  });
+
+  it('warns when a load-bearing pair targets a default-off extension skill', () => {
+    expect(
+      bareEnabledGrantWarnings(
+        lists(['pdf'], ['pdf']),
+        [rustPdf],
+        new Set(['rust:pdf']),
+      ),
+    ).toEqual([
+      "Warning: skills.enabled and skills.defaultDisabled both list 'pdf' " +
+        'by bare name. The pair cancels the disablement but no longer ' +
+        "enables the extension skill 'rust:pdf', which defaults off. " +
+        "Replace the bare 'pdf' with 'rust:pdf' in both skills.enabled " +
+        'and skills.defaultDisabled to enable it.',
+    ]);
+  });
+
+  it('names only the same-authored members that really default off', () => {
+    const skills = [rustPdf, { name: 'other:pdf', authoredName: 'pdf' }];
+    expect(
+      bareEnabledGrantWarnings(lists(['pdf'], ['pdf']), skills, new Set()),
+    ).toEqual([]);
+    expect(
+      bareEnabledGrantWarnings(
+        lists(['pdf'], ['pdf']),
+        skills,
+        new Set(['rust:pdf']),
+      ),
+    ).toEqual([
+      "Warning: skills.enabled and skills.defaultDisabled both list 'pdf' " +
+        'by bare name. The pair cancels the disablement but no longer ' +
+        "enables the extension skill 'rust:pdf', which defaults off. " +
+        "Replace the bare 'pdf' with 'rust:pdf' in both skills.enabled " +
+        'and skills.defaultDisabled to enable it.',
+    ]);
+  });
+
+  it('keeps the replacement advice while a qualified grant coexists with the bare pair', () => {
+    expect(
+      bareEnabledGrantWarnings(
+        lists(['pdf', 'rust:pdf'], ['pdf']),
+        [rustPdf],
+        new Set(['rust:pdf']),
+      ).join('\n'),
+    ).toContain("Replace the bare 'pdf' with 'rust:pdf' in both");
+  });
+
+  it('drops the off-state claim when a qualified grant already enables the skill', () => {
+    const joined = bareEnabledGrantWarnings(
+      lists(['pdf', 'rust:pdf'], ['pdf']),
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('already enables it');
+    expect(joined).not.toContain('which defaults off');
+  });
+
+  it('names granted and ungranted default-off members in separate warnings', () => {
+    const joined = bareEnabledGrantWarnings(
+      lists(['pdf', 'rust:pdf'], ['pdf']),
+      [rustPdf, { name: 'other:pdf', authoredName: 'pdf' }],
+      new Set(['rust:pdf', 'other:pdf']),
+    ).join('\n');
+    expect(joined).toContain(
+      "enables the extension skill 'other:pdf', which defaults off",
+    );
+    expect(joined).toContain(
+      "the qualified grant 'rust:pdf' in skills.enabled already enables",
+    );
+  });
+
+  it('keeps the off-state claim when a hard entry defeats the qualified grant', () => {
+    const joined = bareEnabledGrantWarnings(
+      {
+        enabled: new Set(['pdf', 'rust:pdf']),
+        defaultDisabled: new Set(['pdf']),
+        hardDisabled: new Set(['pdf']),
+      },
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('which defaults off');
+    expect(joined).not.toContain('already enables');
+  });
+
+  it('keeps the off-state claim when a qualified hard entry defeats the qualified grant', () => {
+    const joined = bareEnabledGrantWarnings(
+      {
+        enabled: new Set(['pdf', 'rust:pdf']),
+        defaultDisabled: new Set(['pdf']),
+        hardDisabled: new Set(['rust:pdf']),
+      },
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('which defaults off');
+    expect(joined).not.toContain('already enables');
+  });
+
+  it('names the bare hard entry the pair replacement cannot out-enable', () => {
+    const joined = bareEnabledGrantWarnings(
+      {
+        enabled: new Set(['pdf']),
+        defaultDisabled: new Set(['pdf']),
+        hardDisabled: new Set(['pdf']),
+      },
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('which defaults off');
+    expect(joined).toContain("A bare 'pdf' in skills.disabled also blocks");
+    expect(joined).toContain('remove that entry too');
+  });
+
+  it('names a qualified hard entry the pair replacement cannot out-enable', () => {
+    const joined = bareEnabledGrantWarnings(
+      {
+        enabled: new Set(['pdf']),
+        defaultDisabled: new Set(['pdf']),
+        hardDisabled: new Set(['rust:pdf']),
+      },
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('which defaults off');
+    expect(joined).toContain("'rust:pdf' in skills.disabled also blocks");
+    expect(joined).not.toContain('already enables');
+  });
+
+  it('pluralizes the grant noun when several qualified grants carry the pair', () => {
+    const joined = bareEnabledGrantWarnings(
+      lists(['pdf', 'rust:pdf', 'other:pdf'], ['pdf']),
+      [rustPdf, { name: 'other:pdf', authoredName: 'pdf' }],
+      new Set(['rust:pdf', 'other:pdf']),
+    ).join('\n');
+    expect(joined).toContain(
+      "the qualified grants 'rust:pdf', 'other:pdf' in skills.enabled " +
+        'already enable them',
+    );
+  });
+});
+
+describe('bareDisablementBlocksQualifiedGrantWarnings', () => {
+  const rustPdf = { name: 'rust:pdf', authoredName: 'pdf' };
+  const lists = (
+    enabled: string[],
+    hardDisabled: string[] = [],
+  ): SkillSettingsLists => ({
+    enabled: new Set(enabled),
+    defaultDisabled: new Set(),
+    hardDisabled: new Set(hardDisabled),
+  });
+  const warn = (
+    enabled: string[],
+    disabledNames: string[],
+    hardDisabled: string[] = [],
+    skills: Array<{ name: string; authoredName?: string }> = [rustPdf],
+  ) =>
+    bareDisablementBlocksQualifiedGrantWarnings(
+      lists(enabled, hardDisabled),
+      new Set(disabledNames),
+      skills,
+    );
+  const defaultAdvice =
+    "Warning: skills.enabled opts in 'rust:pdf' but a bare 'pdf' entry " +
+    'still blocks it — disable entries match under either spelling; a ' +
+    'skills.defaultDisabled entry is cancelled only by the identical ' +
+    "spelling. Write 'rust:pdf' in both lists, or remove 'pdf'.";
+  const hardAdvice =
+    "Warning: skills.enabled opts in 'rust:pdf' but 'pdf' in " +
+    'skills.disabled still blocks it — hard entries are never cancelled ' +
+    "by skills.enabled. Remove 'pdf' from skills.disabled to enable the " +
+    'skill.';
+
+  it('advises both lists for a bare defaultDisabled block', () => {
+    expect(warn(['rust:pdf'], ['pdf'])).toEqual([defaultAdvice]);
+  });
+
+  it('names the siblings a hard-entry removal re-enables', () => {
+    expect(
+      warn(
+        ['rust:pdf'],
+        ['pdf'],
+        ['pdf'],
+        [rustPdf, { name: 'other:pdf', authoredName: 'pdf' }],
+      ).join('\n'),
+    ).toContain("The removal also re-enables 'other:pdf'");
+  });
+
+  it('never advises re-adding a skill whose registry identity is the bare entry', () => {
+    // Following an add-back advice for the local skill would re-block the
+    // opt-in under either-spelling matching and reprint this same warning,
+    // so the advice must name the limitation instead of the entry.
+    const advice = warn(
+      ['rust:pdf'],
+      ['pdf'],
+      ['pdf'],
+      [rustPdf, { name: 'pdf' }],
+    ).join('\n');
+
+    expect(advice).toContain(
+      "'pdf' cannot be blocked on its own while 'rust:pdf' stays enabled",
+    );
+    expect(advice).not.toContain("Add 'pdf' to skills.disabled");
+  });
+
+  it('advises removal for a hard block, since rewriting it would silence the warning without unblocking', () => {
+    expect(warn(['rust:pdf'], ['pdf'], ['pdf'])).toEqual([hardAdvice]);
+  });
+
+  it('still warns when a same-named skill owns the bare spelling', () => {
+    expect(warn(['rust:pdf'], ['pdf'], [], [rustPdf, { name: 'pdf' }])).toEqual(
+      [defaultAdvice],
+    );
+  });
+
+  it('still warns when the bare name is also enabled, if the block is hard', () => {
+    expect(warn(['pdf', 'rust:pdf'], ['pdf'], ['pdf'])).toEqual([hardAdvice]);
+  });
+
+  it('stays silent for qualified disables, bare enables, and missing pairs', () => {
+    expect(warn(['rust:pdf'], ['rust:pdf'])).toEqual([]);
+    expect(warn(['pdf'], ['pdf'])).toEqual([]);
+    expect(warn([], ['pdf'])).toEqual([]);
+    expect(warn(['rust:pdf'], [])).toEqual([]);
+  });
+});
+
 describe('matchesServerPattern', () => {
   it('exact match when no glob characters', () => {
     expect(matchesServerPattern('puppeteer', 'puppeteer')).toBe(true);
@@ -629,6 +927,121 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('skill settings migration warnings at initialize', () => {
+    // The pure generators are unit-tested above; these pin the wiring —
+    // initialize() must consume the provider and surface its warnings, or a
+    // refactor that drops the block stays green.
+    const initializeWithLists = async (
+      lists: SkillSettingsLists,
+      disabledSkillNamesProvider: () => ReadonlySet<string> = () =>
+        lists.hardDisabled,
+    ) => {
+      vi.mocked(SkillManager.prototype.listSkills).mockResolvedValueOnce([
+        { name: 'rust:pdf', authoredName: 'pdf' } as SkillConfig,
+      ]);
+      const config = new Config({
+        ...baseParams,
+        skillSettingsListsProvider: () => lists,
+        disabledSkillNamesProvider,
+      });
+      await config.initialize();
+      return config;
+    };
+
+    it('surfaces the stale bare grant warning from the provider lists', async () => {
+      const config = await initializeWithLists({
+        enabled: new Set(['pdf']),
+        defaultDisabled: new Set(),
+        hardDisabled: new Set(),
+      });
+
+      expect(config.getWarnings().join('\n')).toContain(
+        "no longer enables the extension skill 'rust:pdf'",
+      );
+    });
+
+    it('surfaces the bare disablement blocking a qualified grant', async () => {
+      const config = await initializeWithLists({
+        enabled: new Set(['rust:pdf']),
+        defaultDisabled: new Set(),
+        hardDisabled: new Set(['pdf']),
+      });
+
+      expect(config.getWarnings().join('\n')).toContain('still blocks it');
+    });
+
+    it('warns with the default-entry advice when the resolved disable set exceeds the hard list', async () => {
+      const config = await initializeWithLists(
+        {
+          enabled: new Set(['rust:pdf']),
+          defaultDisabled: new Set(['pdf']),
+          hardDisabled: new Set(),
+        },
+        () => new Set(['pdf']),
+      );
+
+      expect(config.getWarnings().join('\n')).toContain(
+        'cancelled only by the identical spelling',
+      );
+    });
+
+    it('surfaces the default-off pair warning named by registry identity', async () => {
+      // The pure function is pinned above; this pins the caller half: the
+      // default-off set initialize() collects must carry registry names,
+      // or the pair warning goes silent while the skill stays off.
+      vi.mocked(SkillManager.prototype.listSkills).mockResolvedValueOnce([
+        {
+          name: 'rust:pdf',
+          authoredName: 'pdf',
+          level: 'extension',
+          extensionName: 'rust',
+        } as SkillConfig,
+      ]);
+      const config = new Config({
+        ...baseParams,
+        // baseParams pins overrideExtensions to []; lift it so the mocked
+        // loaded extension reaches getExtensions() and feeds the caller.
+        overrideExtensions: undefined,
+        skillSettingsListsProvider: () => ({
+          enabled: new Set(['pdf']),
+          defaultDisabled: new Set(['pdf']),
+          hardDisabled: new Set(),
+        }),
+      });
+      const manager = config.getExtensionManager();
+      vi.spyOn(manager, 'getLoadedExtensions').mockReturnValue([
+        {
+          id: 'a'.repeat(64),
+          name: 'rust',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/rust',
+          config: { name: 'rust', version: '1.0.0' },
+          contextFiles: [],
+          skills: [],
+        } as Extension,
+      ]);
+      vi.spyOn(manager, 'getExtensionSkillState').mockReturnValue({
+        defaultEnabled: false,
+        workspaceEnabled: null,
+      });
+      await config.initialize();
+
+      expect(config.getWarnings().join('\n')).toContain(
+        "enables the extension skill 'rust:pdf', which defaults off",
+      );
+    });
+
+    it('stays silent without a provider', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      expect(config.getWarnings().join('\n')).not.toContain(
+        'skills.enabled lists',
+      );
+    });
+  });
+
   it('resolves live skill settings without reviving an inactive or removed owner', () => {
     const disabled = new Set<string>();
     const enabled = new Set<string>();
@@ -696,6 +1109,50 @@ describe('Server Config (config.ts)', () => {
     ).toBe(false);
     expect(config.isSkillEnabled({ ...skill, level: 'project' })).toBe(true);
     expect(config.getDisabledSkillNames()).toEqual(new Set());
+
+    // A renamed extension skill: the registry spells it with its owner, the
+    // manifest and the workspace extension-skill store still spell it as
+    // authored. Both views must resolve to the same skill.
+    const qualified = {
+      ...skill,
+      name: 'suite:Review',
+      authoredName: 'Review',
+    };
+    disabled.clear();
+    enabled.clear();
+    state.defaultEnabled = true;
+    state.workspaceEnabled = null;
+    expect(config.isSkillEnabled(qualified)).toBe(true);
+
+    // Restriction: either spelling blocks it.
+    disabled.add('review');
+    expect(config.isSkillEnabled(qualified)).toBe(false);
+    disabled.clear();
+    disabled.add('suite:review');
+    expect(config.isSkillEnabled(qualified)).toBe(false);
+
+    // Grant: only the registry identity opens it. A legacy bare entry does
+    // not, because an unrelated rename must not hand out capability.
+    disabled.clear();
+    state.defaultEnabled = false;
+    enabled.add('review');
+    expect(config.isSkillEnabled(qualified)).toBe(false);
+    enabled.add('suite:review');
+    expect(config.isSkillEnabled(qualified)).toBe(true);
+
+    // The store is keyed by the authored name, so a default declared by the
+    // extension author still applies to the renamed skill.
+    enabled.clear();
+    state.defaultEnabled = false;
+    state.workspaceEnabled = null;
+    expect(config.isSkillEnabled(qualified)).toBe(false);
+    state.workspaceEnabled = true;
+    expect(config.isSkillEnabled(qualified)).toBe(true);
+
+    const stateSpy = vi.mocked(manager.getExtensionSkillState);
+    stateSpy.mockClear();
+    config.isSkillEnabled(qualified);
+    expect(stateSpy).toHaveBeenCalledWith(extension.id, 'Review');
   });
 
   describe('project-dir registry lifecycle', () => {
@@ -6162,6 +6619,48 @@ describe('Server Config (config.ts)', () => {
       ).toBeUndefined();
     });
 
+    it('retains an image selection while the tool registry is still initializing', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      let release!: (registry: ToolRegistry) => void;
+      const createRegistry = vi
+        .spyOn(config, 'createToolRegistry')
+        .mockReturnValue(
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+        );
+      const initializing = config.initialize();
+      await vi.waitFor(() => expect(createRegistry).toHaveBeenCalled());
+      const selection = `openai:qwen-image-2.0\0${baseUrl}`;
+      try {
+        await expect(config.setImageModel(selection)).resolves.toBeUndefined();
+      } finally {
+        release(new ToolRegistry(config));
+        await initializing;
+      }
+      expect(config.getImageGenerationConfig()).toMatchObject({
+        model: 'qwen-image-2.0',
+        baseUrl,
+      });
+      await config.setImageModel(selection);
+      expect(ToolRegistry.prototype.ensureTool).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+      );
+    });
+
     it('registers image_gen immediately when the image model changes at runtime', async () => {
       const baseUrl = 'https://images.example.com/api/v1';
       const config = new Config({
@@ -6180,6 +6679,9 @@ describe('Server Config (config.ts)', () => {
       await config.initialize();
       vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
 
+      const refreshTools = vi
+        .spyOn(config.getLlmClient(), 'setTools')
+        .mockResolvedValue(undefined);
       await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
 
       expect(ToolRegistry.prototype.registerFactory).toHaveBeenCalledWith(
@@ -6189,6 +6691,10 @@ describe('Server Config (config.ts)', () => {
       expect(ToolRegistry.prototype.ensureTool).toHaveBeenCalledWith(
         ToolNames.IMAGE_GEN,
       );
+      expect(refreshTools).toHaveBeenCalledOnce();
+      await config.setImageModel('');
+      expect(config.isImageGenerationEnabled()).toBe(false);
+      expect(refreshTools).toHaveBeenCalledTimes(2);
     });
 
     it('does not register image_gen when the permission manager disables it', async () => {
@@ -13097,6 +13603,24 @@ describe('BaseLlmClient Lifecycle', () => {
     );
   });
 
+  it('reads current provider protocols through the reloaded model registry', () => {
+    const providers = { alternate: [{ id: 'test-model' }] };
+    const config = new Config({
+      ...baseParams,
+      modelProvidersConfig: providers,
+      providerProtocolConfig: { alternate: 'openai' },
+    });
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'openai' });
+    config.reloadModelProvidersConfig(providers, { alternate: 'gemini' });
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'gemini' });
+    config.reloadModelProvidersConfig({});
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'gemini' });
+    expect(config.getModelProvidersConfig()).toEqual({});
+    config.reloadModelProvidersConfig(providers, {});
+    expect(config.getProviderProtocolConfig()).toEqual({});
+    expect(config.getModelProvidersConfig()).toEqual(providers);
+  });
+
   it('clears per-model generators when provider config is reloaded', async () => {
     const config = new Config(baseParams);
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -14310,5 +14834,122 @@ describe('Model Switching and Config Updates', () => {
 
     expect(config.getActiveTodoReminder('old-prompt')).toBeUndefined();
     expect(config.getActiveTodoWorkChainOwner('old-retry')).toBe('old-retry');
+  });
+
+  it('keeps live related automatic-turn mappings when continuing a chain', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'R');
+    config.startAutomaticActiveTodoWorkChain('prompt-auto', 'prompt-user');
+
+    // The branch an ordinary turn now routes through when a reminder is
+    // registered (#10953). It must re-point the chain without orphaning the
+    // live automatic turn's mapping.
+    config.startActiveTodoWorkChain('prompt-user-2', 'prompt-user');
+
+    // The automatic turn completes the whole plan: its todo_write must reach
+    // the shared owner and delete the finished plan's reminder.
+    config.setActiveTodoReminder('prompt-auto', undefined);
+
+    expect(config.getActiveTodoReminder('prompt-user-2')).toBeUndefined();
+  });
+
+  it('keeps a live related automatic-turn mapping for a non-completing plan update', () => {
+    // A related automatic turn whose todo_write is a NON-completing update
+    // (still unfinished items) must resolve to the shared owner, so the
+    // updated plan lands under the foreground chain instead of stranding a
+    // stale copy under the orphaned automatic prompt id. The completing
+    // write in the sibling test clears session-wide regardless of ownership,
+    // so it cannot discriminate the retention loop; a non-completing write
+    // only lands on the shared owner when the loop keeps `prompt-auto ->
+    // prompt-user` alive — `owners.clear()` would orphan it to itself and
+    // leave the superseded plan re-injected.
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'R1');
+    config.startAutomaticActiveTodoWorkChain('prompt-auto', 'prompt-user');
+
+    config.startActiveTodoWorkChain('prompt-user-2', 'prompt-user');
+
+    config.setActiveTodoReminder('prompt-auto', 'R2');
+
+    expect(config.getActiveTodoReminder('prompt-user-2')).toBe('R2');
+  });
+
+  it('clears the foreground reminder when an unrelated automatic turn completes the shared plan', () => {
+    // An isolated cron/notification turn has no `continuedFrom`, so its
+    // completion todo_write resolves to its own prompt id and, before the
+    // session-wide clear, would leave the foreground reminder behind. The
+    // plan file is session-scoped, so completion must clear every reminder.
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('p1');
+    config.setActiveTodoReminder('p1', 'R');
+    config.startAutomaticActiveTodoWorkChain('p-cron');
+
+    config.setActiveTodoReminder('p-cron', undefined);
+
+    expect(config.getActiveTodoReminder('p1')).toBeUndefined();
+  });
+
+  it('does not carry the foreground reminder when the plan was last written by a foreign owner', () => {
+    // The continuation guard carries a registered reminder only when the
+    // foreground head still owns the session plan file. A real write from the
+    // foreground records that ownership; an isolated cron/notification turn
+    // that rewrites the plan under its own owner must flip the predicate off.
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('p1');
+    config.setActiveTodoReminder('p1', 'R1');
+    config.recordActiveTodoPlanWriter('p1');
+
+    expect(
+      config.getActiveTodoReminder('p1') !== undefined &&
+        config.getActiveTodoWorkChainOwner('p1') ===
+          config.getActiveTodoPlanWriterOwner(),
+    ).toBe(true);
+
+    config.startAutomaticActiveTodoWorkChain('p-cron');
+    config.recordActiveTodoPlanWriter('p-cron');
+    config.setActiveTodoReminder('p-cron', 'R2');
+
+    expect(
+      config.getActiveTodoReminder('p1') !== undefined &&
+        config.getActiveTodoWorkChainOwner('p1') ===
+          config.getActiveTodoPlanWriterOwner(),
+    ).toBe(false);
+  });
+
+  it('prunes the superseded foreground head when continuing a chain', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user-1');
+    config.setActiveTodoReminder('prompt-user-1', 'R');
+
+    config.startActiveTodoWorkChain('prompt-user-2', 'prompt-user-1');
+
+    // The old head must no longer resolve to the shared owner; it falls back
+    // to itself so the owners map does not grow one entry per continuation.
+    expect(config.getActiveTodoWorkChainOwner('prompt-user-2', 'stale')).toBe(
+      'prompt-user-1',
+    );
+    expect(config.getActiveTodoWorkChainOwner('prompt-user-1', 'stale')).toBe(
+      'stale',
+    );
+  });
+
+  it('clearActiveTodoReminders clears reminders, owners, and cadence counters', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'R');
+    config.startAutomaticActiveTodoWorkChain('prompt-auto', 'prompt-user');
+
+    config.clearActiveTodoReminders();
+
+    expect(config.getActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.getActiveTodoWorkChainOwner('prompt-user')).toBe(
+      'prompt-user',
+    );
+    expect(config.getActiveTodoWorkChainOwner('prompt-auto')).toBe(
+      'prompt-auto',
+    );
+    expect(config.takeActiveTodoReminder('prompt-user', true)).toBeUndefined();
   });
 });

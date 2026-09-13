@@ -1489,6 +1489,7 @@ const EN: Messages = {
   'localFiles.status.needsGesture': 'Reconnect to continue',
   'localFiles.status.failed': 'Failed',
   'localFiles.status.unavailable': 'Unavailable here',
+  'localFiles.status.resolving': 'Resolving…',
   'localFiles.needsSessionHint':
     'Start a session first. The bridge binds to exactly one session, so no other session can reach your files.',
   'localFiles.blocker.insecureContext':
@@ -1499,6 +1500,10 @@ const EN: Messages = {
     'This browser has no File System Access API. Use Chrome or Edge to connect a local directory.',
   'localFiles.blocker.workspaceIneligible':
     "This conversation's workspace cannot host a local directory (untrusted or live workspace).",
+  'localFiles.blocker.workspaceResolving':
+    'Which workspace this conversation belongs to is not known yet.',
+  'localFiles.blocker.unsupportedDaemon':
+    'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -2007,7 +2012,7 @@ const EN: Messages = {
   'auth.documentation': 'Documentation',
   'auth.modelsRequired': 'Model IDs cannot be empty.',
   'auth.review': 'Review',
-  'auth.reviewText': 'The following JSON will be saved to settings.json:',
+  'auth.reviewText': 'Review the connection and model settings before saving.',
   'auth.save': 'Save',
   'auth.saving': 'Saving...',
   'auth.termsTitle': 'Terms of Services and Privacy Notice',
@@ -2017,7 +2022,7 @@ const EN: Messages = {
   'auth.advanced.prompt': 'Optional: configure advanced generation settings.',
   'auth.advanced.thinking': 'Enable thinking',
   'auth.advanced.thinkingDesc':
-    'Allows the model to perform extended reasoning before responding.',
+    'Enable extended reasoning. Leave off to use the model default.',
   'auth.advanced.modality': 'Enable modality',
   'auth.advanced.modalityDesc':
     'Enables multimodal input capabilities (image, video, etc.).',
@@ -2027,8 +2032,17 @@ const EN: Messages = {
   'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': 'Context window',
   'auth.advanced.contextDesc':
-    'Max input tokens (leave empty to auto-detect from model name).',
+    'Context window capacity in tokens. Leave empty to infer the limit from the model ID.',
   'auth.advanced.contextPlaceholder': 'Context window (optional)',
+  'auth.advanced.maxTokens': 'Maximum output tokens',
+  'auth.advanced.maxTokensDesc':
+    'Maximum tokens per response. Leave empty to infer the limit from the model ID.',
+  'auth.advanced.tokenLimitInvalid': (v) =>
+    `${v?.field ?? 'Token limit'} must be a whole number between 1 and 10,000,000.`,
+  'auth.advanced.modalitiesRequired':
+    'Select at least one input type or turn off modality.',
+  'auth.advanced.defaults': 'Use model defaults',
+  'auth.apiKeySet': 'Set (hidden)',
   'local.btw':
     'Ask a quick side question without affecting the main conversation. Usage: /btw <your question>',
   'btw.empty': 'Please provide a question. Usage: /btw <your question>',
@@ -2402,6 +2416,7 @@ const EN: Messages = {
   'mcp.userMcp': 'Global MCP',
   'mcp.workingDirectory': 'Working Directory',
   'goal.aborted': 'Goal aborted',
+  'goal.blocked': 'Goal blocked',
   'goal.usageLimited': 'Goal usage limited',
   'goal.paused': 'Goal paused',
   'goal.achieved': 'Goal achieved',
@@ -2618,6 +2633,36 @@ const EN: Messages = {
   'reasoning.updateFailed': 'Failed to update reasoning options',
   'model.setFast': 'Set Fast Model',
   'model.setVoice': 'Set Voice Model',
+  'auth.purpose.label': 'Model purpose',
+  'auth.purpose.chat': 'Conversation',
+  'auth.purpose.chatHint':
+    'Use this provider for conversation. The current model is retained when it is included in the configuration.',
+  'auth.purpose.image': 'Image generation',
+  'auth.purpose.voice': 'Voice transcription',
+  'auth.purpose.imageHint':
+    'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
+  'auth.purpose.voiceHint':
+    'Use OpenAI protocol with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
+  'settings.models.editWindow': 'Edit context window',
+  'settings.models.windowHint':
+    'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
+  'settings.models.windowSaved': 'Saved. Restart existing sessions to apply.',
+  'settings.models.saved': 'Saved',
+  'model.setAdvisor': 'Set Advisor Model',
+  'settings.label.advisorModel': 'Advisor Model',
+  'settings.label.imageModel': 'Image Model',
+  'settings.label.voiceModel': 'Voice Model',
+  'settings.description.advisorModel':
+    'Model used to review recent conversation progress. Leave empty to use the main model.',
+  'settings.description.imageModel':
+    'Model used for image generation. Add a custom model with Image generation purpose, then select it here.',
+  'settings.description.voiceModel':
+    'Model used for voice transcription. Add a custom model with Voice transcription purpose, then select it here.',
+
+  'model.setImage': 'Set Image Model',
+  'model.useMain': 'Use main model',
+  'model.disabled': 'Disabled',
+
   'model.setVision': 'Set Vision Model',
   'model.switch': 'Switch Model',
   'model.unknown': 'unknown',
@@ -3632,10 +3677,15 @@ const EN: Messages = {
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
   'settings.models.title': 'Models',
+  'settings.models.context': (v) => `Context: ${v?.tokens ?? ''} tokens`,
+  'settings.models.credentialEnv': 'Key environment variable',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
   'settings.models.current': 'Current',
   'settings.models.runtime': 'Runtime',
+  'settings.models.savedConfiguration': 'Saved configuration',
+  'settings.models.ambiguousWindow':
+    'Multiple configurations share this route. Its context window cannot be edited here.',
   'settings.models.delete': 'Delete',
   'settings.models.confirmDelete': 'Confirm',
   'settings.models.cancel': 'Cancel',
@@ -5142,6 +5192,7 @@ const ZH: Messages = {
   'localFiles.status.needsGesture': '需要重新连接',
   'localFiles.status.failed': '连接失败',
   'localFiles.status.unavailable': '当前环境不可用',
+  'localFiles.status.resolving': '解析中…',
   'localFiles.needsSessionHint':
     '请先创建一个会话。桥只绑定一个会话，因此其他会话无法访问你的文件。',
   'localFiles.blocker.insecureContext':
@@ -5152,6 +5203,9 @@ const ZH: Messages = {
     '当前浏览器没有 File System Access API。请使用 Chrome 或 Edge 连接本地目录。',
   'localFiles.blocker.workspaceIneligible':
     '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。',
+  'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
+  'localFiles.blocker.unsupportedDaemon':
+    '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -5613,7 +5667,7 @@ const ZH: Messages = {
   'auth.documentation': '文档',
   'auth.modelsRequired': '模型 ID 不能为空。',
   'auth.review': '确认',
-  'auth.reviewText': '以下 JSON 将保存到 settings.json：',
+  'auth.reviewText': '保存前请确认连接信息和模型参数。',
   'auth.save': '保存',
   'auth.saving': '正在保存...',
   'auth.termsTitle': '服务条款和隐私声明',
@@ -5622,7 +5676,7 @@ const ZH: Messages = {
     `输入以逗号分隔的模型 ID。例如：${v?.modelIds ?? ''}`,
   'auth.advanced.prompt': '可选：配置高级生成设置。',
   'auth.advanced.thinking': '启用 thinking',
-  'auth.advanced.thinkingDesc': '允许模型在回复前进行扩展推理。',
+  'auth.advanced.thinkingDesc': '启用扩展推理；不勾选时保留模型默认行为。',
   'auth.advanced.modality': '启用多模态',
   'auth.advanced.modalityDesc': '启用图片、视频等多模态输入能力。',
   'auth.advanced.modalityImage': '图片',
@@ -5631,8 +5685,17 @@ const ZH: Messages = {
   'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': '上下文窗口',
   'auth.advanced.contextDesc':
-    '最大输入 token 数（留空则根据模型名称自动检测）。',
+    '模型的上下文窗口 Token 容量，留空根据模型 ID 自动推断。',
   'auth.advanced.contextPlaceholder': '上下文窗口（可选）',
+  'auth.advanced.maxTokens': '最大输出 Token',
+  'auth.advanced.maxTokensDesc':
+    '每次回复的最大 Token 数，留空根据模型 ID 自动推断。',
+  'auth.advanced.tokenLimitInvalid': (v) =>
+    `${v?.field ?? 'Token 上限'}必须是 1 到 10,000,000 之间的整数。`,
+  'auth.advanced.modalitiesRequired':
+    '请至少选择一种输入类型，或关闭多模态选项。',
+  'auth.advanced.defaults': '使用模型默认值',
+  'auth.apiKeySet': '已设置（隐藏）',
   'local.btw': '快速问一个不影响主对话的侧边问题。用法：/btw <your question>',
   'btw.empty': '请提供一个问题。用法：/btw <你的问题>',
   'btw.side.empty': '请提供一个问题。用法：/btw side <你的问题>',
@@ -5974,6 +6037,7 @@ const ZH: Messages = {
   'mcp.userMcp': '全局 MCP',
   'mcp.workingDirectory': '工作目录',
   'goal.aborted': '目标已中止',
+  'goal.blocked': '目标已阻塞',
   'goal.usageLimited': '目标用量受限',
   'goal.paused': '目标已暂停',
   'goal.achieved': '目标已达成',
@@ -6177,6 +6241,35 @@ const ZH: Messages = {
   'reasoning.updateFailed': '更新思考选项失败',
   'model.setFast': '设置 Fast Model',
   'model.setVoice': '设置语音模型',
+  'auth.purpose.label': '模型用途',
+  'auth.purpose.chat': '对话',
+  'auth.purpose.chatHint':
+    '将此提供商用于对话。配置包含当前模型时会保留当前选择。',
+  'auth.purpose.image': '生图',
+  'auth.purpose.voice': '语音转写',
+  'auth.purpose.imageHint':
+    '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
+  'auth.purpose.voiceHint':
+    '请选择 OpenAI 协议，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
+  'settings.models.editWindow': '配置窗口大小',
+  'settings.models.windowHint':
+    '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
+  'settings.models.windowSaved': '已保存，重启已有会话后生效。',
+  'settings.models.saved': '已保存',
+  'model.setAdvisor': '设置顾问模型',
+  'settings.label.advisorModel': '顾问模型',
+  'settings.label.imageModel': '生图模型',
+  'settings.label.voiceModel': '语音转写模型',
+  'settings.description.advisorModel': '用于复查近期对话进展，默认使用主模型。',
+  'settings.description.imageModel':
+    '用于生成图片。添加自定义模型时选择“生图”用途，再在这里选择。',
+  'settings.description.voiceModel':
+    '用于将语音转成文字。添加自定义模型时选择“语音转写”用途，再在这里选择。',
+
+  'model.setImage': '设置生图模型',
+  'model.useMain': '使用主模型',
+  'model.disabled': '不启用',
+
   'model.setVision': '设置视觉模型',
   'model.switch': '切换模型',
   'model.unknown': '未知',
@@ -7126,10 +7219,15 @@ const ZH: Messages = {
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
   'settings.models.title': '模型',
+  'settings.models.context': (v) => `上下文：${v?.tokens ?? ''} Token`,
+  'settings.models.credentialEnv': '密钥环境变量',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',
   'settings.models.current': '当前',
   'settings.models.runtime': '运行时',
+  'settings.models.savedConfiguration': '已保存配置',
+  'settings.models.ambiguousWindow':
+    '多个配置共用此模型端点，无法在此修改窗口大小。',
   'settings.models.delete': '删除',
   'settings.models.confirmDelete': '确认删除',
   'settings.models.cancel': '取消',

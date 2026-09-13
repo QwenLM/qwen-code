@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { execFile } from 'node:child_process';
+import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core';
 import { Colors } from '../colors.js';
 import {
   RadioButtonSelect,
@@ -43,7 +44,7 @@ function execGit(args: string[], cwd: string): Promise<GitResult> {
   return new Promise((resolve) => {
     execFile(
       'git',
-      args,
+      [...NO_EXEC_CONFIG, ...args],
       { cwd, timeout: 5000 },
       (error, stdout: string | Buffer) => {
         const out = typeof stdout === 'string' ? stdout : stdout.toString();
@@ -119,7 +120,7 @@ export function WorktreeExitDialog({
     let cancelled = false;
     async function loadDirtyState() {
       const [statusRes, commitsRes] = await Promise.all<GitResult>([
-        execGit(['status', '--porcelain'], worktreePath),
+        execGit(['--no-optional-locks', 'status', '--porcelain'], worktreePath),
         originalHeadCommit
           ? execGit(
               ['rev-list', '--count', `${originalHeadCommit}..HEAD`],
