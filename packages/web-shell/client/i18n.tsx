@@ -856,7 +856,7 @@ const EN: Messages = {
   'contextUsage.builtinTools': 'Built-in tools',
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
-  'contextUsage.estimatedOverhead': 'Estimated pre-conversation overhead',
+  'contextUsage.estimatedOverhead': 'Estimated base overhead',
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
@@ -866,15 +866,14 @@ const EN: Messages = {
   'contextUsage.model': 'Model',
   'contextUsage.noSession':
     'No active session yet. Send your first message before viewing context usage.',
-  'contextUsage.noApiResponse':
-    'No API response yet. Send a message to see actual usage.',
+  'contextUsage.usageUnavailable':
+    'Current context usage is unavailable. The estimates below cover base overhead only, excluding conversation messages.',
   'contextUsage.overLimit':
     'Context exceeds limit! Use /compress or /clear to reduce.',
   'contextUsage.skills': 'Skills',
   'contextUsage.systemPrompt': 'System prompt',
   'contextUsage.title': 'Context Usage',
   'contextUsage.tokens': 'tokens',
-  'contextUsage.usageByCategory': 'Usage by category',
   'contextUsage.used': 'Used',
   'contextUsage.accessibleUsage': (v) =>
     `${v?.used} of ${v?.total} tokens used`,
@@ -2823,8 +2822,26 @@ const EN: Messages = {
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
   'contextUsage.refresh': 'Refresh',
+  'contextUsage.remaining': 'Remaining',
+  'contextUsage.advanced': 'Advanced · usage by category',
+  'contextUsage.snapshot': 'Snapshot',
+  'contextUsage.viewCurrent': 'View current context',
+  'contextUsage.compress': 'Compress context',
+  'contextUsage.compressing': 'Compressing…',
+  'contextUsage.compressed': 'Compression completed. Context usage refreshed.',
+  'contextUsage.compressCancelled':
+    'Cancellation requested. Refresh to check current usage.',
+  'contextUsage.compressInterrupted':
+    'Connection changed during compression. Refresh to check current usage.',
+  'contextUsage.compressFailed': 'Compression failed. You can try again.',
+  'contextUsage.compressRefreshFailed':
+    'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
+  'contextUsage.compressUnavailable':
+    'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
   'contextUsage.retry': 'Retry',
   'contextUsage.loadError': 'Failed to load context usage.',
+  'contextUsage.previousReading':
+    'Could not refresh. Showing a previous reading.',
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
@@ -4598,7 +4615,7 @@ const ZH: Messages = {
   'contextUsage.builtinTools': '内置工具',
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
-  'contextUsage.estimatedOverhead': '预估的对话前开销',
+  'contextUsage.estimatedOverhead': '基础开销估算',
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
@@ -4608,15 +4625,14 @@ const ZH: Messages = {
   'contextUsage.model': '模型',
   'contextUsage.noSession':
     '当前还没有会话。请先发送第一条消息，再查看上下文使用情况。',
-  'contextUsage.noApiResponse':
-    '尚无 API 响应。发送一条消息后可查看实际使用量。',
+  'contextUsage.usageUnavailable':
+    '当前上下文用量暂不可用。下方仅为基础开销估算，不含对话消息。',
   'contextUsage.overLimit':
     '上下文已超过限制！请使用 /compress 或 /clear 减少占用。',
   'contextUsage.skills': 'Skills',
   'contextUsage.systemPrompt': '系统提示词',
   'contextUsage.title': '上下文使用情况',
   'contextUsage.tokens': 'tokens',
-  'contextUsage.usageByCategory': '按类别统计',
   'contextUsage.used': '已用',
   'contextUsage.accessibleUsage': (v) => `已用 ${v?.used} / ${v?.total} tokens`,
   'contextUsage.viewDetails': '查看明细',
@@ -6416,8 +6432,24 @@ const ZH: Messages = {
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
   'contextUsage.refresh': '刷新',
+  'contextUsage.remaining': '剩余',
+  'contextUsage.advanced': '高级 · 用量分类',
+  'contextUsage.snapshot': '历史快照',
+  'contextUsage.viewCurrent': '查看当前上下文',
+  'contextUsage.compress': '手动压缩',
+  'contextUsage.compressing': '正在压缩…',
+  'contextUsage.compressed': '压缩完成，已刷新上下文用量。',
+  'contextUsage.compressCancelled': '已请求取消压缩，请刷新确认当前用量。',
+  'contextUsage.compressInterrupted':
+    '压缩期间连接发生变化，请刷新查看当前使用量。',
+  'contextUsage.compressFailed': '压缩失败，可以重试。',
+  'contextUsage.compressRefreshFailed':
+    '压缩已完成，但用量刷新失败。请点击刷新重试。',
+  'contextUsage.compressUnavailable':
+    '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
   'contextUsage.retry': '重试',
   'contextUsage.loadError': '上下文使用情况加载失败。',
+  'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
