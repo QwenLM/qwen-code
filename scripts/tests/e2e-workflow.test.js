@@ -466,24 +466,85 @@ describe('e2e workflow', () => {
       }
     });
 
-    it('retries every npm ci run body, whatever the step is named', () => {
-      // The name-keyed collection above misses an install hiding under any
-      // other step name — repo-hygiene.yml and qwen-autofix.yml call theirs
-      // 'Install dependencies and build' — so scan the command itself.
-      // Command position, not a substring anywhere in the body: a `#`
-      // comment mentioning npm ci inside a run block must not red this, and
-      // the loop marker matches the retry's shape, not its attempt list.
-      const bareInstalls = Object.entries(yml.jobs).flatMap(([jobName, job]) =>
+    // Fail closed on the mention, not on a recognised spelling: the ways
+    // shell can write one command cannot be enumerated against a regex. The
+    // previous pair exempted a whole body for carrying any retry loop — a
+    // trailing bare install rode the exemption — and saw only installs
+    // opening their line, so `cd … && npm ci` and `time npm ci` were
+    // invisible. Require every executable line mentioning `npm ci` to belong
+    // to one of the install steps pinned above, so an unrecognised shape
+    // reddens the suite for a human to judge instead of passing silently.
+    // Full-line `#` comments never execute, so a body quoting the recipe in
+    // prose is excluded rather than flagged.
+    const retriedInstalls = new Set(
+      installSteps.map(([jobName, step]) => `${jobName}/${step.name}`),
+    );
+    const findUnretriedInstalls = (jobs) =>
+      Object.entries(jobs).flatMap(([jobName, job]) =>
         (job.steps ?? [])
           .filter(
             (step) =>
               typeof step.run === 'string' &&
-              /^\s*npm ci\b/m.test(step.run) &&
-              !/for attempt in [0-9 ]+; do/.test(step.run),
+              step.run
+                .split('\n')
+                .filter((line) => !line.trimStart().startsWith('#'))
+                .join('\n')
+                .includes('npm ci') &&
+              !retriedInstalls.has(`${jobName}/${step.name ?? '(unnamed)'}`),
           )
           .map((step) => `${jobName}/${step.name ?? '(unnamed)'}`),
       );
-      expect(bareInstalls).toEqual([]);
+
+    it('retries every npm ci run body, whatever the step is named', () => {
+      // The name-keyed collection above misses an install hiding under any
+      // other step name — repo-hygiene.yml and qwen-autofix.yml call theirs
+      // 'Install dependencies and build' — so scan the command itself.
+      expect(findUnretriedInstalls(yml.jobs)).toEqual([]);
+    });
+
+    it('flags an unretried install however shell spells it', () => {
+      // Each synthetic body slipped the old regex pair — the loop exempting
+      // a trailing bare install was the filed escape; the rest never open
+      // their install line. The six real bodies ride along under their own
+      // keys to pin that the exemption recognises exactly them, and a
+      // comment-only mention stays unflagged because it never executes.
+      const jobs = {
+        ...Object.fromEntries(
+          installSteps.map(([jobName, step]) => [jobName, { steps: [step] }]),
+        ),
+        synthetic: {
+          steps: [
+            {
+              name: 'Install dependencies and build',
+              run: [
+                'for attempt in 1 2 3; do',
+                '  npx playwright install --with-deps chromium && break',
+                'done',
+                'npm ci --prefer-offline --no-audit --progress=false',
+              ].join('\n'),
+            },
+            {
+              name: 'Install integration dependencies',
+              run: 'cd integration-tests && npm ci',
+            },
+            { name: 'Time the install', run: 'time npm ci' },
+            {
+              name: 'Retry the install once',
+              run: 'for attempt in 1; do npm ci --prefer-offline; done',
+            },
+            {
+              name: 'Mention the recipe',
+              run: '# npm ci is retried elsewhere\necho done',
+            },
+          ],
+        },
+      };
+      expect(findUnretriedInstalls(jobs)).toEqual([
+        'synthetic/Install dependencies and build',
+        'synthetic/Install integration dependencies',
+        'synthetic/Time the install',
+        'synthetic/Retry the install once',
+      ]);
     });
   });
 
