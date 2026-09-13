@@ -12,10 +12,13 @@ Repository maintainers set these under **Settings → Secrets and variables →
 Actions → Variables**. An unset (or empty) variable always falls back to the
 default listed below.
 
-The workflow files are the source of truth for these levers:
-`scripts/tests/release-workflow.test.js` pins the `release.yml` expressions
-byte-for-byte, and this page mirrors them. If the two ever disagree, trust the
-workflow and update this page in the same change.
+The workflow files are the source of truth for these levers, and the test
+suites pin the workflow expressions byte-for-byte:
+`scripts/tests/package-scripts.test.js` pins the shared worker-cap
+expression (`QWEN_CI_VITEST_MAX_WORKERS` with the `ecs-qwen-` guard), and
+`scripts/tests/release-workflow.test.js` pins the `release.yml` retry and
+timeout expressions. This page mirrors them; if the docs and the workflows
+ever disagree, trust the workflows and update this page in the same change.
 
 ## Variables
 
