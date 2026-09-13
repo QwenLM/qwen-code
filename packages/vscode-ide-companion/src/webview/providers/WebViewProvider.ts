@@ -42,6 +42,7 @@ import {
 import {
   buildInstallPlan,
   parseInsightMessage,
+  type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { isLogLevel, logger } from '../../utils/logger.js';
 import {
@@ -1486,8 +1487,26 @@ export class WebViewProvider {
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
-      const plan = buildInstallPlan(providerConfig, inputs);
+      const existingProviders = rollbackSnapshot?.['modelProviders'] as
+        | ModelProvidersConfig
+        | undefined;
+      const plan = buildInstallPlan(
+        providerConfig,
+        inputs,
+        existingProviders?.[inputs.protocol ?? providerConfig.protocol],
+      );
       await applyProviderInstallPlanToFile(plan);
+
+      if (!plan.modelSelection && !this.authState) {
+        this.sendMessageToWebView({
+          type: 'authState',
+          data: { authenticated: false },
+        });
+        void vscode.window.showInformationMessage(
+          'Service models saved. Configure a conversation model to start chatting.',
+        );
+        return;
+      }
 
       // Disconnect + reconnect
       if (this.agentInitialized) {
@@ -1953,7 +1972,10 @@ export class WebViewProvider {
     if (message.type === 'webShellSessionChanged') {
       this.webShellPermissionOwners.delete(webview);
       const data = message.data as
-        | { sessionId?: unknown; workspaceCwd?: unknown }
+        | {
+            sessionId?: unknown;
+            workspaceCwd?: unknown;
+          }
         | undefined;
       const sessionId = getRestorableDaemonSessionId(data?.sessionId) ?? null;
       this.messageHandler.setCurrentConversationId(sessionId);
@@ -1997,29 +2019,6 @@ export class WebViewProvider {
           ),
           canonicalWorkspaceCwd,
         );
-        // Pre-cutover companions recorded their conversations in globalState;
-        // their daemon transcripts carry no source attribution, so the
-        // vscode-scoped history query cannot surface them. Ship the legacy ids
-        // as an allowlist so the panel can claim its own sessions back from
-        // the daemon's unattributed catalog. Read-only: the store stays
-        // untouched for downgrade/recovery, and only ids cross the bridge —
-        // never the message snapshots.
-        let legacyConversationIds: string[] | undefined;
-        try {
-          const legacyIds = (await this.conversationStore.getAllConversations())
-            .map((conversation) =>
-              getRestorableDaemonSessionId(conversation.id),
-            )
-            .filter((id): id is string => id !== undefined);
-          if (legacyIds.length > 0) {
-            legacyConversationIds = legacyIds;
-          }
-        } catch (error) {
-          logger.warn(
-            '[WebViewProvider] Failed to read legacy conversations:',
-            error,
-          );
-        }
         const serializedSessionId = getRestorableDaemonSessionId(
           this.messageHandler.getCurrentConversationId(),
         );
@@ -2109,7 +2108,6 @@ export class WebViewProvider {
               : {}),
             hostKind: this.isViewHost ? 'view' : 'panel',
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
-            ...(legacyConversationIds ? { legacyConversationIds } : {}),
           },
         });
         // A daemon that dies after a successful start — or that gets

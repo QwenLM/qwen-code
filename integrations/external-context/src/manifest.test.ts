@@ -110,7 +110,7 @@ describe('extension manifest', () => {
         type: 'command',
         command,
         ...(shell === undefined ? {} : { shell }),
-        timeout: 8000,
+        timeout: 8,
         name: 'external-context-auto-recall',
         statusMessage: 'Retrieving external context',
       });
@@ -197,7 +197,7 @@ describe('extension manifest', () => {
         type: 'command',
         command,
         ...(shell === undefined ? {} : { shell }),
-        timeout: 8000,
+        timeout: 8,
         name: 'external-context-memory-write-confirmation',
         statusMessage: 'Confirming external memory write',
       });
