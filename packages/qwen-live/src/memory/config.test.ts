@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -15,7 +15,7 @@ import {
   validateMemoryBaseUrl,
 } from './config.js';
 
-const dataDir = '/tmp/qwen-memory-config-tests';
+const dataDir = join(tmpdir(), 'qwen-memory-config-tests');
 const resolve = (raw?: unknown) =>
   resolveMemoryConfig(raw, dataDir, join(dataDir, 'config.json'));
 

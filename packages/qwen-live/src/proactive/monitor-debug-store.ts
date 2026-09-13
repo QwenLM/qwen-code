@@ -42,7 +42,9 @@ async function privateDirectory(path: string): Promise<void> {
   if (
     !stat.isDirectory() ||
     stat.isSymbolicLink() ||
-    (stat.mode & 0o077) !== 0 ||
+    // Windows stat modes are synthetic (directories report 0o777), so the
+    // POSIX privacy check applies only where the bits are real.
+    (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
     (process.getuid && stat.uid !== process.getuid())
   )
     throw new Error('unsafe_directory');

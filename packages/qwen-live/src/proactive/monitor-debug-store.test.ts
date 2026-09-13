@@ -225,25 +225,28 @@ describe('MonitorDebugStore', () => {
       text: 'Reply [redacted]',
       result: 'reply',
     });
-    for (const path of [
-      root,
-      archive.directory,
-      join(archive.directory, 'requests'),
-      directory,
-    ]) {
-      expect((await lstat(path)).mode & 0o777).toBe(0o700);
-    }
-    for (const path of [
-      join(archive.directory, 'monitor.json'),
-      ...[
-        'request.json',
-        'response.json',
-        'image-0001.jpg',
-        'image-0002.jpg',
-        'input.wav',
-      ].map((file) => join(directory, file)),
-    ]) {
-      expect((await lstat(path)).mode & 0o777).toBe(0o600);
+    // Windows reports synthetic mode bits; assert POSIX modes where real.
+    if (process.platform !== 'win32') {
+      for (const path of [
+        root,
+        archive.directory,
+        join(archive.directory, 'requests'),
+        directory,
+      ]) {
+        expect((await lstat(path)).mode & 0o777).toBe(0o700);
+      }
+      for (const path of [
+        join(archive.directory, 'monitor.json'),
+        ...[
+          'request.json',
+          'response.json',
+          'image-0001.jpg',
+          'image-0002.jpg',
+          'input.wav',
+        ].map((file) => join(directory, file)),
+      ]) {
+        expect((await lstat(path)).mode & 0o777).toBe(0o600);
+      }
     }
     expect(log).toHaveBeenCalledWith(
       'proactive.monitor_request_saved',
@@ -406,10 +409,13 @@ describe('MonitorDebugStore', () => {
 
   it('rejects shared or symlink archive roots without touching their contents', async () => {
     await mkdir(root, { mode: 0o700 });
-    await chmod(root, 0o755);
     await writeFile(join(root, 'keep.txt'), 'keep');
-    expect(await store.initialize()).toBe(false);
-    expect(store.create(INFO)).toBeUndefined();
+    // Windows cannot make a directory shared through mode bits.
+    if (process.platform !== 'win32') {
+      await chmod(root, 0o755);
+      expect(await store.initialize()).toBe(false);
+      expect(store.create(INFO)).toBeUndefined();
+    }
     const linked = new MonitorDebugStore(
       log,
       join(temporary, 'linked-archives'),
@@ -418,6 +424,18 @@ describe('MonitorDebugStore', () => {
     await symlink(root, linked.root);
     expect(await linked.initialize()).toBe(false);
     expect(await readFile(join(root, 'keep.txt'), 'utf8')).toBe('keep');
+  });
+
+  it('accepts a private archive root where the filesystem has no POSIX mode bits', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      await mkdir(root, { mode: 0o700 });
+      await chmod(root, 0o777);
+      expect(await store.initialize()).toBe(true);
+    } finally {
+      if (platform) Object.defineProperty(process, 'platform', platform);
+    }
   });
 
   it('does not recreate an active directory pruned by another store', async () => {
