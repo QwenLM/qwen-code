@@ -108,10 +108,11 @@ export const disposeConoutWorker = (ptyProcess: unknown): void => {
  * Releases what node-pty leaves behind when a Windows PTY finishes.
  *
  * **What this function itself reliably frees is the conout worker thread.**
- * Shell PTYs now use node-pty's bundled ConPTY backend, which releases its host
- * reference immediately after spawn so the host exits with its last client.
- * Web-terminal PTYs still use the Windows inbox backend, whose natural-exit
- * host leak is not fixed here.
+ * Shell, web-terminal, and agent-view PTYs now use node-pty's bundled ConPTY
+ * backend, which releases its host reference immediately after spawn so the
+ * host exits with its last client. The web terminal keeps the Windows inbox
+ * backend only as a spawn-failure retry (#11352); that fallback's
+ * natural-exit host leak is not fixed here.
  *
  * With the inbox backend, a finished PTY strands both the ConPTY host and the
  * `worker_threads` Worker node-pty runs to read the conout pipe. With bundled
@@ -146,10 +147,11 @@ export const disposeConoutWorker = (ptyProcess: unknown): void => {
  *   `kill()` stays the single closer. The inbox conhost half of #11303 is
  *   therefore not fixed by this function on the natural-exit path.
  *
- * The web-terminal PTY (`web-terminal-registry.ts`) and agent-view PTY host do
- * not use the bundled backend, so they can still strand an inbox host per
- * exited terminal. Do not add a test that treats a stubbed `_ptyNative.kill`
- * call as evidence that the inbox host was released.
+ * The web-terminal PTY (`web-terminal-registry.ts`) and the agent-view PTY
+ * host spawn with the bundled backend too (#11352); only the web terminal's
+ * inbox spawn-failure retry can still strand an inbox host per exited
+ * terminal. Do not add a test that treats a stubbed `_ptyNative.kill` call as
+ * evidence that the inbox host was released.
  *
  * **Why not just call `ptyProcess.kill()`.** On the inbox backend it forks a
  * helper that can fall back after a natural exit to terminating a recycled

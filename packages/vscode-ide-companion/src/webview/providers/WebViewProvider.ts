@@ -42,6 +42,7 @@ import {
 import {
   buildInstallPlan,
   parseInsightMessage,
+  type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { isLogLevel, logger } from '../../utils/logger.js';
 import {
@@ -1486,8 +1487,26 @@ export class WebViewProvider {
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
-      const plan = buildInstallPlan(providerConfig, inputs);
+      const existingProviders = rollbackSnapshot?.['modelProviders'] as
+        | ModelProvidersConfig
+        | undefined;
+      const plan = buildInstallPlan(
+        providerConfig,
+        inputs,
+        existingProviders?.[inputs.protocol ?? providerConfig.protocol],
+      );
       await applyProviderInstallPlanToFile(plan);
+
+      if (!plan.modelSelection && !this.authState) {
+        this.sendMessageToWebView({
+          type: 'authState',
+          data: { authenticated: false },
+        });
+        void vscode.window.showInformationMessage(
+          'Service models saved. Configure a conversation model to start chatting.',
+        );
+        return;
+      }
 
       // Disconnect + reconnect
       if (this.agentInitialized) {

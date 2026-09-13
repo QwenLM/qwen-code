@@ -937,6 +937,7 @@ describe('Session', () => {
       isProvisionalWorkspace: vi.fn().mockReturnValue(false),
       setLiveAppendSystemPrompt: vi.fn(),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       // The restore-ask_user_question prompt path is gated on this flag;
       // the restore describe block overrides to true.
       getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
@@ -945,6 +946,7 @@ describe('Session', () => {
       startAutomaticActiveTodoWorkChain: vi.fn(),
       endAutomaticActiveTodoWorkChain: vi.fn(),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      getActiveTodoPlanWriterOwner: vi.fn().mockReturnValue(undefined),
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
       getProjectRoot: vi.fn().mockReturnValue('/repo'),
@@ -980,6 +982,7 @@ describe('Session', () => {
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       reloadModelProvidersConfig: vi.fn(),
+      setImageModel: vi.fn(),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
@@ -1140,16 +1143,20 @@ describe('Session', () => {
     expect(provider?.()).toBe(true);
   });
 
-  it('reloads model providers from the session-owned settings', () => {
+  it('reloads model providers from the session-owned settings', async () => {
     const modelProviders = {
       idealab: [{ id: 'qwen3', baseUrl: 'https://idealab.example/v1' }],
     };
     Object.assign(mockSettings.merged, {
       modelProviders,
       providerProtocol: { idealab: 'openai' },
+      imageModel: 'openai:image-01\0https://images.example/v1',
     });
 
-    session.reloadModelProvidersFromDisk();
+    await session.reloadModelProvidersFromDisk();
+    expect(mockConfig.setImageModel).toHaveBeenCalledWith(
+      'openai:image-01\0https://images.example/v1',
+    );
 
     expect(mockSettings.reloadScopesFromDiskAtomically).toHaveBeenCalledWith([
       SettingScope.User,
@@ -1161,12 +1168,12 @@ describe('Session', () => {
     );
   });
 
-  it('does not apply stale model providers when a settings scope cannot reload', () => {
+  it('does not apply stale model providers when a settings scope cannot reload', async () => {
     vi.mocked(mockSettings.reloadScopesFromDiskAtomically).mockReturnValueOnce(
       false,
     );
 
-    expect(() => session.reloadModelProvidersFromDisk()).toThrow(
+    await expect(session.reloadModelProvidersFromDisk()).rejects.toThrow(
       'Unable to reload model-provider settings from disk.',
     );
     expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
@@ -2981,10 +2988,174 @@ describe('Session', () => {
     );
   });
 
+  it('continues the todo work chain on an ordinary prompt while a reminder is registered', async () => {
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+    // A registered reminder means the plan still has unfinished items
+    // (todo_write deletes it on completion).
+    const reminder =
+      '<system-reminder>unfinished todo: delegated node</system-reminder>';
+    vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+    // The reminder comes back only when the caller forces it, so the absence
+    // assertion below is what discriminates the turn-start gate.
+    vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+      (_promptId, force = false) => (force ? reminder : undefined),
+    );
+    // The foreground head still owns the session plan file, so the
+    // continuation guard's owner-equality conjunct holds.
+    vi.mocked(mockConfig.getActiveTodoPlanWriterOwner).mockReturnValue(
+      'test-session-id########1',
+    );
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+    });
+
+    // The first prompt has no previous chain to continue.
+    expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+      'test-session-id########1',
+      undefined,
+    );
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'how is progress going?' }],
+    });
+
+    // The follow-up turn must continue the previous chain instead of
+    // discarding the plan context it asks about (#10953).
+    expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+      'test-session-id########2',
+      'test-session-id########1',
+    );
+
+    // Carrying the chain must not splice the plan ahead of the user's own
+    // text: turn-start injection stays reserved for machine continuations
+    // (core parity), and the follow-up turn is an ordinary prompt.
+    const followUpCall = vi
+      .mocked(mockChat.sendMessageStream)
+      .mock.calls.at(-1)?.[1] as { message: Part[] };
+    expect(textParts(followUpCall.message)).not.toContain(reminder);
+
+    // Once the plan completes (todo_write deleted the reminder), the next
+    // ordinary prompt must start a fresh chain — the cleared-reminder branch
+    // of the continuation guard must not keep carrying the previous chain.
+    vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(undefined);
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start different work' }],
+    });
+    expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+      'test-session-id########3',
+      undefined,
+    );
+  });
+
+  it('does not continue the todo work chain when the plan was last written by a foreign owner', async () => {
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+    // A reminder is registered, but an isolated cron/notification turn last
+    // wrote the session plan under its own owner — the foreground head no
+    // longer owns the authoritative plan, so the continuation guard must
+    // not carry (and must not re-deliver the stale foreground snapshot).
+    vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(
+      '<system-reminder>unfinished todo: delegated node</system-reminder>',
+    );
+    vi.mocked(mockConfig.getActiveTodoPlanWriterOwner).mockReturnValue(
+      'prompt-cron',
+    );
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+    });
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'how is progress going?' }],
+    });
+
+    expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+      'test-session-id########2',
+      undefined,
+    );
+  });
+
+  it.each(['agent', 'task'])(
+    'forces the active todo reminder due when a %s tool result returns',
+    async (agentToolName) => {
+      const reminder =
+        '<system-reminder>unfinished todo: follow up on the delegated node</system-reminder>';
+      // Mimic the real budget: nothing is due under the ordinary cadence
+      // (the delegation consumed the only tool turn), only forcing delivers.
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+        (_promptId: string, force = false) => (force ? reminder : undefined),
+      );
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'agent done',
+        returnDisplay: 'agent done',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: agentToolName,
+        kind: core.Kind.Execute,
+        displayName: 'Agent',
+        description: 'Delegates work to a subagent',
+        build: vi.fn().mockReturnValue({
+          params: {},
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Agent'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  { id: 'call-agent-1', name: agentToolName, args: {} },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'delegate the work' }],
+      });
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+        'test-session-id########1',
+        true,
+      );
+      const toolResultCall = vi
+        .mocked(mockChat.sendMessageStream)
+        .mock.calls.at(-1)?.[1] as { message: Part[] };
+      expect(textParts(toolResultCall.message)).toContain(reminder);
+    },
+  );
+
   it('includes active Todo context on the first retry request', async () => {
     const reminder =
       '<system-reminder>unfinished todo: run tests</system-reminder>';
-    vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
+    // Return the reminder only when the caller forces it, so this case proves
+    // the retry turn's turn-start force rather than the mock's blanket value.
+    vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+      (_promptId, force = false) => (force ? reminder : undefined),
+    );
     mockChat.sendMessageStream = vi
       .fn()
       .mockImplementation(async () => createEmptyStream());
@@ -6695,6 +6866,44 @@ describe('Session', () => {
   });
 
   describe('rewindToTurn', () => {
+    it('clears the active-todo chain so a rewound turn starts fresh', async () => {
+      // A registered reminder would otherwise make the post-rewind turn
+      // continue the rewound-away chain (#10953 regression).
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(
+        '<system-reminder>unfinished todo: delegated node</system-reminder>',
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementation(async () => createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start work' }],
+      });
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+        'test-session-id########1',
+        undefined,
+      );
+
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'start work' }] },
+        { role: 'model', parts: [{ text: 'reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      session.rewindToTurn(0);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start different work' }],
+      });
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+        'test-session-id########2',
+        undefined,
+      );
+    });
+
     it('truncates model history before the requested user turn and records rewind', async () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
