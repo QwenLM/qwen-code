@@ -69,6 +69,8 @@ export interface LspCallHierarchyItem {
   range: LspRange;
   /** The range that should be selected when navigating to this item. */
   selectionRange: LspRange;
+  /** Client-issued freshness token; echo unchanged, never send to the LSP server. */
+  documentRevision?: string;
   /** Opaque data used by the server for subsequent calls. */
   data?: unknown;
   /** The LSP server that provided this item. */
@@ -587,6 +589,27 @@ export interface LspProcessDiagnostics {
   exitSignal?: string | null;
 }
 
+export type LspTextDocumentSync =
+  | 0
+  | 1
+  | 2
+  | { openClose?: boolean; change?: 0 | 1 | 2 };
+
+/**
+ * Normalize the textDocumentSync capability into the two facts the document
+ * synchronizer needs. Single source of truth shared by the service (deciding
+ * whether to send) and the manager (deciding whether a warmup latched), so the
+ * two coupled decisions cannot drift apart.
+ */
+export function resolveTextDocumentSync(
+  sync: LspTextDocumentSync | undefined,
+): { change: 0 | 1 | 2; openClose: boolean } {
+  const change = typeof sync === 'number' ? sync : (sync?.change ?? 0);
+  const openClose =
+    typeof sync === 'number' ? sync !== 0 : (sync?.openClose ?? false);
+  return { change, openClose };
+}
+
 /**
  * Handle for managing an LSP server instance.
  */
@@ -597,6 +620,8 @@ export interface LspServerHandle {
   status: LspServerStatus;
   /** Active connection to the server */
   connection?: LspConnectionInterface;
+  /** Synchronization capability from this connection's initialize response. */
+  textDocumentSync?: LspTextDocumentSync;
   /** Server process (for stdio transport) */
   process?: ChildProcess;
   /** Error that caused failure */

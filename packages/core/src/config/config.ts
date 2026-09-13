@@ -4862,6 +4862,10 @@ export class Config {
     return this.modelsConfig.getModelProvidersConfig();
   }
 
+  getProviderProtocolConfig(): ProviderProtocolConfig {
+    return this.modelsConfig.getProviderProtocolConfig();
+  }
+
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
@@ -5793,11 +5797,14 @@ export class Config {
    */
   async setImageModel(model: string | undefined): Promise<void> {
     this.imageModel = model || undefined;
-    if (!this.initialized || !this.isImageGenerationEnabled()) {
+    if (!this.initialized || !this.toolRegistry) {
       return;
     }
-    await this.registerImageGenerationTool(this.toolRegistry);
-    await this.toolRegistry.ensureTool(ToolNames.IMAGE_GEN);
+    if (this.isImageGenerationEnabled()) {
+      await this.registerImageGenerationTool(this.toolRegistry);
+      await this.toolRegistry.ensureTool(ToolNames.IMAGE_GEN);
+    }
+    await this.llmClient.setTools();
   }
 
   /**
@@ -6115,6 +6122,10 @@ export class Config {
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
+      // Read by the DashScope metadata gate off this same object, so a
+      // per-model override has to travel with the switch like the cache flags.
+      this.contentGeneratorConfig.enableRequestMetadata =
+        config.enableRequestMetadata;
       this.contentGeneratorConfig.forceGlobalCacheScope =
         config.forceGlobalCacheScope;
       this.contentGeneratorConfig.cacheRetention = config.cacheRetention;
@@ -6142,6 +6153,10 @@ export class Config {
       if ('enableCacheControl' in sources) {
         this.contentGeneratorConfigSources['enableCacheControl'] =
           sources['enableCacheControl'];
+      }
+      if ('enableRequestMetadata' in sources) {
+        this.contentGeneratorConfigSources['enableRequestMetadata'] =
+          sources['enableRequestMetadata'];
       }
       if ('forceGlobalCacheScope' in sources) {
         this.contentGeneratorConfigSources['forceGlobalCacheScope'] =
