@@ -254,13 +254,24 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // sweep re-verify
       .mockResolvedValueOnce('worktree /other\0\0') // one sibling
       .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel (lazy)
+      .mockResolvedValueOnce('/repo/.git\n') // sibling common-dir probe (at /other)
+      .mockResolvedValueOnce('.git\n') // own common-dir probe (lazy, at cwd)
       .mockRejectedValueOnce(killedDumpError()); // sibling config read
     const err = await gitRemoteRemove('/repo', 'origin').catch(
       (e: unknown) => e,
     );
     expect(err).toMatchObject({ killed: true });
     expect((err as { stdout?: unknown }).stdout).toBe('');
-    expect(runGit.mock.calls.length).toBe(calls + 21);
+    expect(runGit.mock.calls.length).toBe(calls + 23);
+    // Pin WHERE the kill landed: the sibling's config.worktree read, not
+    // one of the ownership probes — otherwise the test passes while
+    // testing a different spawn.
+    expect(runGit.mock.calls.at(-1)?.[1]).toEqual([
+      'config',
+      '--worktree',
+      '--list',
+      '-z',
+    ]);
   });
 
   it('fails the converge arm closed on a killed repo-path probe', async () => {

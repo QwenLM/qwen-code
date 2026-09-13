@@ -210,7 +210,7 @@ refspec` at any line start vetoes the completion outright — that refusal has i
   pushRemote entry value-matched to the removed remote goes: a
   multi-valued key's non-effective entry is residue whose later
   surfacing would dangle. Linked worktrees carry their own
-  config.worktree files the invoking worktree's reads never see, so the
+  config.worktree files the invoking worktree's reads never see.
   Before any read or write at a listed sibling path the sweep verifies
   the sibling shares this repository's common dir (`rev-parse
   --git-common-dir` at both ends, compared through path spellings): a
@@ -604,11 +604,10 @@ workspaceCwd; remotes }` (mutations answer the fresh list without
     that isolates one twin cannot strip the survivor's marker; the row
     search folds the marking skeleton as an extra name-side target, so a
     table-only twin (dotless-ı, long s) is findable by the text it inks
-    — in every case form of the needle (the table is case-sensitive:
+    as, in every case form of the needle (the table is case-sensitive:
     `I`→`l` exists while `i`→`l` does not, so `Istanbul` must reach its
-    `lstanbul` twin typed upper, lower or mixed)
-    as —
-    appends a `(hidden characters)` marker — or, for a row marked ONLY
+    `lstanbul` twin typed upper, lower or mixed). A marked row appends
+    a `(hidden characters)` marker — or, for a row marked ONLY
     by a collision inside printable ASCII (the table folds 1→l, m→rn;
     nothing is hidden), a `(lookalike name)` marker —
     and its tooltip and aria-labels carry the raw name with the

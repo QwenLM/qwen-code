@@ -1237,19 +1237,23 @@ export function BranchPickerPopover({
     const inked = (v: string) =>
       remoteNameSkeleton(sanitizeRemoteDisplay(v)).toLowerCase();
     const inkedNeedles = [
-      qTyped,
-      qTyped.toLowerCase(),
-      qTyped.toUpperCase(),
-    ].map((v) => inked(v));
+      ...new Set(
+        [qTyped, qTyped.toLowerCase(), qTyped.toUpperCase()].map((v) =>
+          inked(v),
+        ),
+      ),
+    ];
     const needle = collapse(sanitizeRemoteDisplay(q));
-    return remotes.filter(
-      (r) =>
+    return remotes.filter((r) => {
+      const rowInk = inked(r.name);
+      return (
         collapse(sanitizeRemoteDisplay(r.name)).includes(needle) ||
-        inkedNeedles.some((n) => inked(r.name).includes(n)) ||
+        inkedNeedles.some((n) => rowInk.includes(n)) ||
         collapse(sanitizeRemoteDisplay(r.fetchUrl)).includes(needle) ||
         collapse(sanitizeRemoteDisplay(r.pushUrl)).includes(needle) ||
-        collapse(sanitizeRemoteDisplay(remoteExtras(r, t))).includes(needle),
-    );
+        collapse(sanitizeRemoteDisplay(remoteExtras(r, t))).includes(needle)
+      );
+    });
   }, [remotes, q, qTyped, t]);
 
   // TR39 fold, counted over the UNFILTERED list: a search that isolates

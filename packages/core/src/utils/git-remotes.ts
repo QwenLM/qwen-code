@@ -1458,6 +1458,17 @@ async function sweepSiblingWorktreeKeys(
       record.some((line) => line === 'prunable' || line.startsWith('prunable '))
     )
       continue;
+    // The invoking worktree is already swept by the main path: skip it
+    // BEFORE the ownership probes so a repo whose only record is its
+    // own pays no probe spawn — just the one lazy toplevel read its
+    // record triggers, reused by every later sibling.
+    if (topSpellings === undefined) {
+      topSpellings = await pathSpellings(cwd, await repoTopLevel(cwd, env));
+    }
+    const wtSpellings = await pathSpellings(cwd, wt);
+    if ([...wtSpellings].some((spelling) => topSpellings!.has(spelling))) {
+      continue;
+    }
     // A `worktree list` record is built from THIS repository's own
     // .git/worktrees/*/gitdir files with no back-pointer: a planted
     // gitdir can name an UNRELATED repository, and this sweep WRITES
@@ -1494,15 +1505,6 @@ async function sweepSiblingWorktreeKeys(
       path.resolve(wt, siblingCommon),
     );
     if (![...siblingSpellings].some((sp) => ownCommonSpellings!.has(sp))) {
-      continue;
-    }
-    // The invoking worktree is already swept by the main path. The
-    // toplevel read is lazy: no siblings, no extra spawn.
-    if (topSpellings === undefined) {
-      topSpellings = await pathSpellings(cwd, await repoTopLevel(cwd, env));
-    }
-    const wtSpellings = await pathSpellings(cwd, wt);
-    if ([...wtSpellings].some((spelling) => topSpellings!.has(spelling))) {
       continue;
     }
     let byKey: Map<string, string[]>;
