@@ -53,6 +53,7 @@ import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { toOriginalKey } from './key-map.js';
 import {
+  DIALOG_FRAME_CHROME_COLUMNS,
   DialogFrame,
   DialogSelect,
   FooterHint,
@@ -317,18 +318,25 @@ function TextBody({ text }: { text: string }) {
     () => sanitizeTerminalText(text).replace(/\t/g, '  ').split('\n'),
     [text],
   );
+  // The window helpers measure 2 columns inside the width they are handed,
+  // but this dialog is a full-width DialogFrame whose chrome spends
+  // DIALOG_FRAME_CHROME_COLUMNS — hand over the terminal width minus the
+  // share they do not model, so the window counts wraps at the width the
+  // body actually paints (R6-2; the same basis the pending card's
+  // dialog-body price measures on in messages.tsx).
+  const windowWidth = width - (DIALOG_FRAME_CHROME_COLUMNS - 2);
   const window = useMemo(
-    () => headWindowPhysical(rows, width, CONFIRM_BODY_COLLAPSED_ROWS),
-    [rows, width],
+    () => headWindowPhysical(rows, windowWidth, CONFIRM_BODY_COLLAPSED_ROWS),
+    [rows, windowWidth],
   );
   const expandedWindow = useMemo(
     () =>
       tailWindowPhysical(
         rows,
-        width,
+        windowWidth,
         Math.max(height - EXPANDED_BODY_RESERVE_ROWS, 1),
       ),
-    [rows, width, height],
+    [rows, windowWidth, height],
   );
   // The ctrl-s promise is "show more lines": offer and honor it only when
   // expansion actually reveals rows the collapsed window hides. On short

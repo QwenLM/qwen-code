@@ -201,15 +201,23 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(pendingCardMaxRows(100, 1080, 110)).toBe(37);
     // An mcp dialog shows two fixed lines and cannot expand: the card is the
     // only surface carrying the arguments (R5-9), so it keeps the
-    // collapsed-footprint budget — (80 - 26 - 5) * 0.7 = 34 — no matter how
-    // wide the args payload is.
-    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' })).toBe(34);
+    // collapsed-footprint budget no matter how wide the args payload is.
+    // The region converts at the card's own wrap ratio: an mcp card renders
+    // its raw mcp__server__tool name (42 columns here), so a budget row
+    // buys 66 of the 108 wrap columns and the bound is
+    // (80 - 26 - 5) * 66/108 = 29.
+    const mcpNameCols = 'mcp__github_enterprise__create_repository'.length + 1;
+    expect(
+      pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, mcpNameCols),
+    ).toBe(29);
     // ...but N pending siblings share the transcript region: two parked mcp
     // calls halve the collapsed bound after charging the second card's
-    // hidden-tail and awaiting rows ((80 - 26 - 5 - 2) * 0.7 / 2 = 16), so
-    // two 45-row cards cannot push the first call's dialog off an 80-row
+    // hidden-tail and awaiting rows ((80 - 26 - 5 - 2) * 66/108 / 2 = 14),
+    // so two 45-row cards cannot push the first call's dialog off an 80-row
     // alt screen.
-    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 2)).toBe(16);
+    expect(
+      pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 2, mcpNameCols),
+    ).toBe(14);
     // A hook-bounced info confirmation whose reason exactly fills the
     // collapsed window prices the collapsed dialog's real 20-row body
     // ((80 - 26 - 20) * 0.7 = 23); an unconverted physical-row term would
@@ -317,6 +325,30 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     ).toBe(7);
   });
 
+  it("converts the shared region with the card's own name width (R6-1)", () => {
+    // mcp cards never appear in TOOL_DISPLAY_BY_NAME, so they render the raw
+    // mcp__<server>__<tool> name — the longest names of any arm. A budget
+    // row buys only (cols - name) of the card's wrap columns: at a
+    // 42-column name the fixed 0.7 ratio hands back 34 budget rows that
+    // paint ~54 physical rows against the 49-row region, and the mounted
+    // dialog's outcome list leaves the alt screen (the mem0 regression
+    // shape). The name-aware conversion caps the budget at 29.
+    const nameCols = 'mcp__github_enterprise__create_repository'.length + 1;
+    const budget = pendingCardMaxRows(
+      80,
+      3900,
+      110,
+      { type: 'mcp' },
+      1,
+      nameCols,
+    );
+    expect(budget).toBeLessThanOrEqual(30);
+    expect(budget).toBe(29);
+    // A short display name keeps the measured 0.7 ceiling — the tightening
+    // only bites names too wide for that ceiling to hold.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6)).toBe(34);
+  });
+
   it('charges the rows a dialog renders outside its body window (R4-1)', () => {
     // An info dialog's urls block (a margin row, a header row and one row
     // per URL) and an exec dialog's warnings render OUTSIDE the windowed
@@ -349,17 +381,27 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     // The settled 5-row floor must not lift the divided bound back up, and
     // each sibling past the first spends its hidden-tail and awaiting rows
     // (2 per card — the reserve charges one card's) from the region before
-    // it is divided: at N=8 (mcp dialogs) floor((80-26-5-14)*0.7/8) = 3,
-    // and eight cards paint 8*3/0.7 + 14 ≈ 48.3 physical rows against the
+    // it is divided: at N=8, mcp dialogs priced at the raw 42-column name
+    // (wrap ratio 66/108) floor((80-26-5-14)*(66/108)/8) = 2, and eight
+    // cards paint 8*2*(108/66) + 14 ≈ 40.2 physical rows against the
     // 80-26-5 = 49-row region. A floor-lifted 5-row budget would paint
-    // 8*5/0.7 + 14 ≈ 71, and even a chrome-free 4-row price would paint
-    // 8*4/0.7 + 14 ≈ 59.7 — both push the mounted dialog off the alt
-    // screen. The tall-body dialogs (collapsed body 20) cross one batch
-    // size earlier: floor((80-26-20-8)*0.7/5) = 3 and
+    // 8*5*(108/66) + 14 ≈ 79.5 — the mounted dialog leaves the alt screen.
+    // The tall-body dialogs (collapsed body 20, short name, ratio 0.7)
+    // cross one batch size earlier: floor((80-26-20-8)*0.7/5) = 3 and
     // 5*3/0.7 + 8 ≈ 29.4 <= 34, where 5*5/0.7 + 8 ≈ 43.7 would not.
-    const mcp = pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 8);
-    expect(mcp).toBe(3);
-    expect((8 * mcp) / 0.7 + 2 * (8 - 1)).toBeLessThanOrEqual(80 - 26 - 5);
+    const mcpNameCols = 'mcp__github_enterprise__create_repository'.length + 1;
+    const mcp = pendingCardMaxRows(
+      80,
+      3900,
+      110,
+      { type: 'mcp' },
+      8,
+      mcpNameCols,
+    );
+    expect(mcp).toBe(2);
+    expect(
+      (8 * mcp * 108) / (108 - mcpNameCols) + 2 * (8 - 1),
+    ).toBeLessThanOrEqual(80 - 26 - 5);
     const tall = pendingCardMaxRows(80, 0, 110, undefined, 5);
     expect((5 * tall) / 0.7 + 2 * (5 - 1)).toBeLessThanOrEqual(80 - 26 - 20);
   });

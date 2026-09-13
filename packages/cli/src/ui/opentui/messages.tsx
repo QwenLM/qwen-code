@@ -301,7 +301,9 @@ const MCP_CONFIRM_BODY_ROWS = 5;
  * description ~79 of the 108 columns capToolCardDescription budgets with
  * (the name column takes the rest), so a budget of B rows renders about
  * B / 0.73 rows. Budgeting at 0.7 keeps the estimate on the safe side of
- * that inflation across plausible name lengths.
+ * that inflation across plausible SHORT name lengths; pendingCardMaxRows
+ * tightens it per card by the name width the card actually paints (a raw
+ * mcp__server__tool name is wider than the ~32 columns 0.7 absorbs).
  */
 const CARD_DESC_WRAP_RATIO = 0.7;
 
@@ -404,8 +406,10 @@ function dialogBodyMeasure(
  * body is much taller than its folded card row) — shrunk so the expanded
  * body plus chrome still fits. Both dialog bounds are priced in budget
  * rows: a budget row renders ~1/0.7 physical rows, so the physical rows the
- * region above the card and the dialog occupy are converted by
- * CARD_DESC_WRAP_RATIO — spending them unconverted over-budgets the card
+ * region above the card and the dialog occupy are converted by the card's
+ * wrap ratio (CARD_DESC_WRAP_RATIO tightened by `nameWidth`, the display
+ * columns the card's name plus its trailing space occupy — default 0, the
+ * short-name ceiling) — spending them unconverted over-budgets the card
  * ~1.37x and the dialog's question row and outcome list leave the screen —
  * and both bounds are shared between the `pendingCount` cards awaiting
  * approval, since N parked calls each painting the full region push the
@@ -428,19 +432,33 @@ export function pendingCardMaxRows(
   width: number,
   dialog?: PendingDialogBody,
   pendingCount = 1,
+  nameWidth = 0,
 ): number {
   const h = Math.floor(terminalHeight);
-  const payloadRows = Math.ceil(
-    descriptionWidth / Math.max(width - STATUS_INDICATOR_WIDTH, 10),
+  const cols = Math.max(width - STATUS_INDICATOR_WIDTH, 10);
+  const payloadRows = Math.ceil(descriptionWidth / cols);
+  // A budget row buys only (cols - nameWidth) description columns — the
+  // card's flex row paints the status glyph and the name first — so the
+  // physical region converts at the card's OWN wrap ratio, not the fixed
+  // 0.7 ceiling measured on a short display name: an mcp card renders its
+  // raw mcp__<server>__<tool> name (never in TOOL_DISPLAY_BY_NAME), and at
+  // a 42-column name the fixed ratio hands back 34 rows that paint ~54
+  // physical rows against the 49-row region, pushing the mounted dialog's
+  // outcome list off the alt screen (R6-1). The floor keeps a name wider
+  // than the row yielding some budget.
+  const wrapRatio = Math.min(
+    CARD_DESC_WRAP_RATIO,
+    Math.max((cols - nameWidth) / cols, 0.05),
   );
   // The card's payload folds on the transcript's width, but the dialog's
-  // body measures on the dialog's own content columns: the frame's border
-  // and padding spend 4 columns (dialogs-shared's "one column of border and
-  // one of padding on each side"), and start-opentui-ui passes
+  // body measures on the dialog's own content columns: the frame spends
+  // dialogs-shared's DIALOG_FRAME_CHROME_COLUMNS (one column of border and
+  // one of padding on each side), and start-opentui-ui passes
   // availableWidth as terminalWidth - 4 — so the dialog's column basis here
   // IS width (dialogWidth = width + 2, minus the headWindowPhysical-style
-  // measure's own 2 columns). The measure stops once the count can no
-  // longer change the clamped outcome: every total past
+  // measure's own 2 columns), the same basis dialogs-confirm's TextBody
+  // windows on. The measure stops once the count can no longer change the
+  // clamped outcome: every total past
   // h - DIALOG_EXPANDED_RESERVE_ROWS bottoms the expanded bound out at the
   // floor.
   const body = dialogBodyMeasure(
@@ -463,7 +481,7 @@ export function pendingCardMaxRows(
             DIALOG_EXPANDED_RESERVE_ROWS -
             body.expanded -
             siblingChromeRows) *
-            CARD_DESC_WRAP_RATIO) /
+            wrapRatio) /
             Math.max(pendingCount, 1),
         );
   const collapsedDialogBound =
@@ -474,7 +492,7 @@ export function pendingCardMaxRows(
             COLLAPSED_DIALOG_CHROME_ROWS -
             body.collapsed -
             siblingChromeRows) *
-            CARD_DESC_WRAP_RATIO) /
+            wrapRatio) /
             Math.max(pendingCount, 1),
         );
   return Math.max(

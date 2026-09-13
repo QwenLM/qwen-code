@@ -405,6 +405,12 @@ function ToolCard({
                 extra: pendingDialogExtra,
               },
               pendingCount,
+              // The budget's physical-to-budget conversion spends the name
+              // column the flex row paints first (the same nameCols
+              // capToolCardDescription computes): a raw mcp__server__tool
+              // name leaves the description far fewer columns than the
+              // fixed 0.7 ceiling assumes.
+              getCachedStringWidth(name) + 1,
             )
           : TOOL_CARD_DESCRIPTION_ROWS,
       ),
