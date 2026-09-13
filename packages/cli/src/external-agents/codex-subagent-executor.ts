@@ -313,6 +313,7 @@ export async function runCodexAppServer(
     clearTimeout(initTimer);
     const startedTurn = await request('turn/start', {
       threadId,
+      ...(params.onThought ? { summary: 'auto' } : {}),
       input: [{ type: 'text', text: prompt, text_elements: [] }],
     });
     associateTurn(object(startedTurn['turn'])['id']);

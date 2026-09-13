@@ -56,6 +56,18 @@ node ../../node_modules/@playwright/test/cli.js test client/e2e/web-shell.mesh-s
 
 本地 Qwen 必须调用 `thread_review` 才算交回验收，因此测试允许该协作工具，仅禁止文件修改、命令和联网；不要把提示词改成笼统的“禁止所有工具”。Codex Host 的最终结果由 Host 回传，两条路径不能混淆。
 
+### Codex 已登录但任务仍排队
+
+Codex App/CLI 登录状态不等于 Agent Host 接单进程在线。检查执行主机的心跳和接单进程；不要为清队列重新发消息或重建 Agent。已有注册凭证时，在原执行目录恢复 Host（协调端地址必须与当前 daemon 一致）：
+
+```bash
+QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 npm run dev -- serve --no-web --hostname 127.0.0.1 --port 0 --no-open --agent-host-server http://127.0.0.1:4171 --agent-host-provider codex --agent-host-workspace-id '<原工作区 ID>'
+```
+
+注册凭证按协调端 URL、工作区 ID 和执行目录保存。换端口不会自动沿用旧注册；确认是同一协调端数据后才能迁移原凭证，不能把凭证发给未经确认的新服务。此进程必须保持运行，当前并非系统自启动服务。
+
+Codex 流式接收思考摘要时会显式请求 `summary: auto`；是否实际返回摘要仍由模型决定。没有摘要时只展示真实阶段和回复，不能虚构思考内容。`thread_post` / `thread_review` 的正式消息仍在工具提交时出现，不等于工具参数已逐字流式展示。
+
 为保留失败现场，测试对话不会删除；报告附有其 ID。测试 finally 仅请求取消本次新建对话里仍活跃的 run，不触碰其他任务。进程被强杀时 finally 无法保证执行，请根据报告中的对话 ID 手动检查。
 
 ## 结果与边界
@@ -73,3 +85,7 @@ node ../../node_modules/@playwright/test/cli.js show-report client/e2e/playwrigh
 本次记录（2026-09-14）：默认页面回归 `1 passed (13.5s)`，真实 Host 模式未执行。首次运行因状态文字旁包含取消按钮导致精确文本定位失败，修正为定位 Agent activity 面板后重跑通过；没有放宽正文增长或去重断言。
 
 后续补充（同日）：加入排队/离线与思考增量断言后，默认回归 `1 passed (13.0s)`；真实本地 Qwen 模式 `1 passed (1.0m)`。同步观察到 31 次思考增长、17 次正文增长，正式结果为一条。真实运行的思考采样和截图操作也补入本脚本；未据此宣称远程 Host 或 Codex 思考摘要已验收。
+
+Codex Host 补验（同日）：恢复原 Host 接单进程和当前协调端连接后，原积压任务完成，未重发消息。唯一一条长回复通过真实侧栏进入并在聊天框发送：约 0.35 秒开始执行，15.517 秒首次正文 94 字符，结束前观察到 25 次正文增长，27.886 秒达到 2478 字符，28.159 秒完成；主聊天在结束前可见，最终正式结果一条。13.539 秒出现思考阶段，但即使请求 `summary: auto`，本次思考摘要字符数仍为 0，不算思考正文流式通过。
+
+本次命名 Playwright 用例因开发服务器 `main.tsx` 资源加载失败中断，不算通过；以上为复用同一已创建对话、独立 Node + Playwright 页面操作与只读采样的替代验收，仅发送一次模型请求，没有新增第二条对话。未执行构建或本地 CI。
