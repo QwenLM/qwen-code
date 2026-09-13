@@ -13,6 +13,7 @@ import {
   enrollAgentHost,
   heartbeatAgentHost,
   pickupRunForHost,
+  renewRunLease,
   type HostRunResult,
 } from '@qwen-code/qwen-code-core';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -185,6 +186,41 @@ export function registerAgentHostTransportRoutes(
         );
         if (!host) {
           res.status(401).json({ error: 'Invalid Agent Host credential.' });
+          return;
+        }
+        if (input['run'] !== undefined) {
+          const run = input['run'];
+          if (!run || typeof run !== 'object' || Array.isArray(run)) {
+            res.status(400).json({ error: 'Invalid Agent Host lease.' });
+            return;
+          }
+          const { threadId, runId, leaseId, attempt } = run as Record<
+            string,
+            unknown
+          >;
+          if (
+            typeof threadId !== 'string' ||
+            typeof runId !== 'string' ||
+            typeof leaseId !== 'string' ||
+            typeof attempt !== 'number' ||
+            !Number.isSafeInteger(attempt) ||
+            attempt < 1
+          ) {
+            res.status(400).json({ error: 'Invalid Agent Host lease.' });
+            return;
+          }
+          const renewed = await renewRunLease(runtime.workspaceCwd, {
+            threadId,
+            runId,
+            leaseId,
+            attempt,
+            hostId,
+          });
+          if (!renewed.ok) {
+            res.status(409).json({ error: renewed.reason });
+            return;
+          }
+          res.json({ host, lease: renewed.value });
           return;
         }
         res.json({ host });

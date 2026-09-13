@@ -170,23 +170,26 @@ export async function renewRunLease(
     threadId: string;
     runId: string;
     leaseId: string;
+    hostId?: string;
+    attempt?: number;
     ttlMs?: number;
   },
   now = Date.now(),
 ): Promise<LeaseResult<RunLease>> {
   const ttl = input.ttlMs ?? DEFAULT_RUN_LEASE_MS;
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const checked = await checkRunLeaseInTransaction(transaction, input, now);
+    if (!checked.ok) return checked;
+    if (input.hostId !== undefined && checked.value.hostId !== input.hostId) {
+      return { ok: false, reason: 'stale_lease' as const };
+    }
     const thread = await transaction.readThread(input.threadId);
     const run = thread?.runs.find((candidate) => candidate.id === input.runId);
     if (!thread || !run) return { ok: false, reason: 'no_such_run' as const };
-    const held = liveLease(run, now);
-    if (!held || held.leaseId !== input.leaseId) {
-      return { ok: false, reason: 'stale_lease' as const };
+    if (isThreadTerminal(thread.status) || run.status !== 'running') {
+      return { ok: false, reason: 'not_leasable' as const };
     }
-    if (held.attempt !== run.attempts) {
-      return { ok: false, reason: 'attempt_moved_on' as const };
-    }
-    const lease: RunLease = { ...held, expiresAt: now + ttl };
+    const lease: RunLease = { ...checked.value, expiresAt: now + ttl };
     await transaction.writeThread(
       withRun(thread, input.runId, (target) => ({ ...target, lease })),
     );

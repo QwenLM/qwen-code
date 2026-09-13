@@ -172,6 +172,7 @@ function modelPrompt(assignment: HostRunAssignment): string {
 async function executeCodexPrompt(
   workspaceCwd: string,
   prompt: string,
+  signal: AbortSignal,
 ): Promise<string> {
   // ponytail: one-shot CLI is enough for the demo; persist Codex thread ids
   // only when same-task continuation is required.
@@ -188,7 +189,7 @@ async function executeCodexPrompt(
         workspaceCwd,
         prompt,
       ],
-      { cwd: workspaceCwd, stdio: ['ignore', 'pipe', 'pipe'] },
+      { cwd: workspaceCwd, stdio: ['ignore', 'pipe', 'pipe'], signal },
     );
     let stdout = '';
     let stderr = '';
@@ -243,10 +244,43 @@ async function executeAssignment(
   assignment: HostRunAssignment,
 ): Promise<HostRunResult> {
   const promptId = `agent-host:${assignment.runId}:${assignment.attempt}`;
-  const renew = setInterval(
-    () => void pickup(credential.serverUrl, credential, 0).catch(() => {}),
-    LEASE_RENEW_MS,
-  );
+  const execution = new AbortController();
+  let finished = false;
+  const renewLease = async () => {
+    try {
+      const response = await requestJson<{ lease?: { leaseId: string } }>(
+        `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/heartbeat`,
+        {
+          method: 'POST',
+          signal: AbortSignal.timeout(10_000),
+          headers: {
+            authorization: `AgentHost ${credential.secret}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            workspaceCwd: options.workspaceCwd,
+            providers: [PROVIDER_LABELS[options.provider]],
+            run: {
+              threadId: assignment.threadId,
+              runId: assignment.runId,
+              leaseId: assignment.lease.leaseId,
+              attempt: assignment.attempt,
+            },
+          }),
+        },
+      );
+      if (response.lease?.leaseId !== assignment.lease.leaseId) {
+        throw new Error(
+          'Coordinator did not confirm the run lease. Upgrade the coordinator.',
+        );
+      }
+    } catch (error) {
+      if (!finished) execution.abort(error);
+    }
+  };
+  await renewLease();
+  execution.signal.throwIfAborted();
+  const renew = setInterval(() => void renewLease(), LEASE_RENEW_MS);
   renew.unref?.();
   let summary: string | undefined;
   try {
@@ -254,6 +288,7 @@ async function executeAssignment(
       summary = await executeCodexPrompt(
         options.workspaceCwd,
         modelPrompt(assignment),
+        execution.signal,
       );
     } else {
       const sessionId = agentThreadSessionId(
@@ -288,10 +323,11 @@ async function executeAssignment(
           sessionId,
           prompt: [{ type: 'text', text: assignment.prompt }],
         },
-        undefined,
+        execution.signal,
         { promptId, modelPrompt: modelPrompt(assignment) },
       );
       for (;;) {
+        execution.signal.throwIfAborted();
         const turn = await options.bridge.getSessionTurnStatus(
           sessionId,
           undefined,
@@ -306,10 +342,14 @@ async function executeAssignment(
             break;
           }
         }
-        await delay(250);
+        await delay(250, undefined, { signal: execution.signal });
       }
     }
+    execution.signal.throwIfAborted();
+  } catch (error) {
+    throw execution.signal.aborted ? execution.signal.reason : error;
   } finally {
+    finished = true;
     clearInterval(renew);
   }
   if (!summary) {
@@ -465,7 +505,10 @@ export async function startAgentHostConnection(
             hostId: activeCredential.hostId,
             leaseId: assignment.lease.leaseId,
             attempt: assignment.attempt,
-            status: 'failed',
+            status:
+              error instanceof Error && error.message === 'not_leasable'
+                ? 'cancelled'
+                : 'failed',
             error: error instanceof Error ? error.message : String(error),
           };
         }
