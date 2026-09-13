@@ -917,6 +917,13 @@ describe('runCleanup', () => {
       '/repo/.qwen/tmp/review-pr-123-base.lock',
       { recursive: true, force: true },
     );
+    // ...and NOT the host-side lock. A builder killed with its client can still
+    // be writing into the base tree from its container; removing its lock let
+    // the next review build over it. That lock only ages out.
+    const hostSide = mocks.rmSync.mock.calls
+      .map(([path]) => String(path))
+      .filter((path) => path.startsWith('/repo/.qwen/review-leases/base-tree'));
+    expect(hostSide).toEqual([]);
   });
 
   it('never sweeps lease files, even for a target whose name collides with the lease prefix (#9205)', () => {

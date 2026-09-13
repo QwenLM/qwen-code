@@ -956,8 +956,11 @@ export function runCleanup(target: string): void {
     }
     // The base-tree build lock's LEGACY location, beside the tree. The lock now
     // lives host-side beside the base-tree trust file — here, inside the mounted
-    // directory, the reviewed code could backdate or delete it — and releasing
-    // the lease reclaims that directory whole. A builder from before the move,
+    // directory, the reviewed code could backdate or delete it — and this
+    // command leaves that one alone: a builder killed with its client can still
+    // be writing into the tree from its container, and removing its lock lets
+    // the next review build over it at once, where a lock that ages out at
+    // least holds it off for that long. A builder from before the move,
     // killed mid-build, can still have left one at this path (a plain directory,
     // which `releaseWorktree` above does not touch), so it is swept here too.
     // Best effort only: nothing reads this path any more, so a lock that will

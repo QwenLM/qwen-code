@@ -1844,6 +1844,28 @@ describe('lease acquisition is atomic (#9205)', () => {
     }
   });
 
+  it('reclaims the trust state but never a build lock a live builder holds (R6-4)', () => {
+    // The reclaim is keyed by target, and a release is entitled only to its
+    // own session's state: removing the whole directory deleted a live
+    // builder's lock, which lives beside the trust files.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    const dir = join(root, '.qwen', 'review-leases', 'base-tree', 'pr-1');
+    const lock = join(dir, 'review-pr-1-base.lock');
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, 'holder'), 'a-live-builder');
+    writeFileSync(join(dir, 'deadbeefdeadbeef.json'), '{"identity":1}');
+    writeFileSync(join(dir, 'cafebabecafebabe.json'), '{"identity":2}');
+
+    clearReviewWorktreeLease(root, 'pr-1');
+
+    // Every trust file goes, not only the current run's...
+    expect(existsSync(join(dir, 'deadbeefdeadbeef.json'))).toBe(false);
+    expect(existsSync(join(dir, 'cafebabecafebabe.json'))).toBe(false);
+    // ...and the lock stands, untouched.
+    expect(readFileSync(join(lock, 'holder'), 'utf8')).toBe('a-live-builder');
+  });
+
   it('reclaims the base-tree trust state for the target it clears, and only that one', () => {
     // The trust file is keyed by the PLAN's path — a digest no other module
     // can reconstruct — so nothing outside this ever deleted it, and a real

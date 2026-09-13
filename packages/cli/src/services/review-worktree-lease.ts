@@ -10,6 +10,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -396,21 +397,50 @@ function atomicWriteLease(path: string, data: string): void {
  *
  * Nothing else can: they are keyed by the plan's PATH, a digest no other
  * module reconstructs, and a real built tree's per-file inventory measures
- * ~9 MB — one file per plan path per review, kept forever. Host-side and this
- * session's own state, so a plain recursive remove is right, and best-effort
- * like every other removal on the release paths.
+ * ~9 MB — one file per plan path per review, kept forever. So every trust file
+ * under the target goes, not only the current run's.
+ *
+ * Every entry except a build lock. The lock lives in this directory too, and
+ * this reclaim is keyed by target while a release is entitled only to its own
+ * session's state: a prompt's lease finalizer runs while a `base-tree` that
+ * prompt started can still be building — the finalizer removes the review
+ * worktree, not the base tree — and deleting that builder's lock let the next
+ * ask in over the tree it was mid-install in. Not even a lock whose holder
+ * process is gone: the build's commands run in containers a dead client cannot
+ * stop, which go on writing into the tree — the reason `cleanup` leaves it
+ * too. A lock ages out. The directory
+ * itself goes only once nothing is left in it. Best-effort, like every removal
+ * on the release paths.
  */
 function reclaimBaseTreeTrust(root: string, target: string): void {
+  const dir = join(leaseDirectory(root), 'base-tree', target);
+  let entries: string[];
   try {
-    rmSync(join(leaseDirectory(root), 'base-tree', target), {
-      recursive: true,
-      force: true,
-    });
+    entries = readdirSync(dir);
   } catch (error) {
-    debugLogger.debug(
-      `Failed to reclaim base-tree trust state for ${target}:`,
-      error,
-    );
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debugLogger.debug(
+        `Failed to reclaim base-tree trust state for ${target}:`,
+        error,
+      );
+    }
+    return;
+  }
+  for (const name of entries) {
+    if (name.endsWith('.lock')) continue;
+    try {
+      rmSync(join(dir, name), { recursive: true, force: true });
+    } catch (error) {
+      debugLogger.debug(
+        `Failed to reclaim base-tree trust state ${name} for ${target}:`,
+        error,
+      );
+    }
+  }
+  try {
+    rmdirSync(dir);
+  } catch {
+    // A lock still stands, or a writer raced in: the directory stays.
   }
 }
 

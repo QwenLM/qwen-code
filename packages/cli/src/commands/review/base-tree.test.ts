@@ -19,6 +19,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  renameSync,
+  realpathSync,
   lstatSync,
   symlinkSync,
   utimesSync,
@@ -46,6 +48,7 @@ import {
 } from './lib/base-tree-trust.js';
 import { adminEntryOf, plantAdminEntry } from './lib/test-utils.js';
 import {
+  clearReviewWorktreeLease,
   createReviewWorktreeLease,
   recordReviewWorktreeLeaseMergeBase,
 } from '../../services/review-worktree-lease.js';
@@ -56,12 +59,29 @@ import type { BuildTestReport } from './build-test.js';
 // stage that here, because this suite runs as root in the CI image.
 const fsFaults = vi.hoisted(() => ({
   rmFails: null as ((path: string) => boolean) | null,
+  lstatFails: null as ((path: string) => boolean) | null,
+  readdirSeen: null as string[] | null,
+  lstatHook: null as ((path: string) => void) | null,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    readdirSync: ((...args: unknown[]) => {
+      fsFaults.readdirSeen?.push(String(args[0]));
+      return (actual.readdirSync as (...a: unknown[]) => unknown)(...args);
+    }) as typeof actual.readdirSync,
+    lstatSync: ((...args: Parameters<typeof actual.lstatSync>) => {
+      fsFaults.lstatHook?.(String(args[0]));
+      if (fsFaults.lstatFails?.(String(args[0]))) {
+        throw Object.assign(
+          new Error(`EACCES: permission denied, lstat '${String(args[0])}'`),
+          { code: 'EACCES' },
+        );
+      }
+      return actual.lstatSync(...args);
+    }) as typeof actual.lstatSync,
     rmSync: ((...args: Parameters<typeof actual.rmSync>) => {
       if (fsFaults.rmFails?.(String(args[0]))) {
         throw Object.assign(
@@ -124,6 +144,8 @@ describe('runBaseTree', () => {
       onReuseWindow?: () => void;
       onCertifyWindow?: () => void;
       onSettleWindow?: () => void;
+      onInventoryWindow?: () => void;
+      install?: boolean;
     } = {},
     build: (w: string) => BuildTestReport = () => okBuild,
   ): BaseTreeReport => {
@@ -133,7 +155,7 @@ describe('runBaseTree', () => {
       plan: planPath,
       worktree,
       timeout: 60,
-      install: false,
+      install: true,
       build,
       ...rest,
     });
@@ -239,6 +261,70 @@ describe('runBaseTree', () => {
     baseSha = git(repo, 'rev-parse', 'HEAD');
     planPath = '';
     recordReviewWorktreeLeaseMergeBase(repo, 'pr-1', baseSha);
+  };
+
+  /**
+   * Commit a new merge base registering a real submodule at `deps/lib`, point
+   * the lease and the plan at it, and return the submodule's source repository.
+   */
+  const commitSubmoduleBase = (): string => {
+    const sub = mkdtempSync(join(tmpdir(), 'qwen-base-sub-'));
+    git(sub, 'init', '-q', '-b', 'main');
+    git(sub, 'config', 'user.email', 't@t.t');
+    git(sub, 'config', 'user.name', 't');
+    writeFileSync(join(sub, 'lib.js'), 'sub\n');
+    git(sub, 'add', '-A');
+    git(sub, 'commit', '-qm', 'sub');
+    git(
+      repo,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'deps/lib',
+    );
+    git(repo, 'commit', '-qm', 'add submodule');
+    baseSha = git(repo, 'rev-parse', 'HEAD');
+    planPath = '';
+    recordReviewWorktreeLeaseMergeBase(repo, 'pr-1', baseSha);
+    return sub;
+  };
+  /** A build step that materialises the tree's submodules, as an install would. */
+  const initSubmodules = (w: string): BuildTestReport => {
+    git(
+      w,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'update',
+      '--init',
+      '-q',
+    );
+    return okBuild;
+  };
+  /** A `git` on PATH that runs `script` (sh, `$REAL` is the real git). */
+  const gitShim = (name: string, script: string): string => {
+    const dir = join(repo, name);
+    mkdirSync(dir, { recursive: true });
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(join(dir, 'git'), `#!/bin/sh\nREAL=${realGit}\n${script}\n`, {
+      mode: 0o755,
+    });
+    return dir;
+  };
+  /** Run `fn` with `dir` first on PATH. */
+  const withPath = <T>(dir: string, fn: () => T): T => {
+    const saved = process.env['PATH'];
+    process.env['PATH'] = `${dir}:${saved}`;
+    try {
+      return fn();
+    } finally {
+      process.env['PATH'] = saved;
+    }
   };
 
   /** Push the repository config past the filter screen's include fan-out. */
@@ -2514,6 +2600,10 @@ describe('runBaseTree', () => {
       );
       expect(r.available).toBe(false);
       expect(r.note).toContain('rewritten while it was being certified');
+      // The re-ask before the index REFRESH, not the one before the inventory:
+      // both refuse a rewritten pointer, and only this one keeps the refresh
+      // from running through it.
+      expect(r.note).toContain('tracked files cannot be checked safely');
       expect(builds).toEqual([tree()]);
       expect(builtTreeRecord(trustPathFor(), tree())).toBeNull();
     },
@@ -2675,6 +2765,524 @@ describe('runBaseTree', () => {
       expect(r.available).toBe(false);
     },
     15_000,
+  );
+
+  itWhereContainmentExists(
+    'refuses a submodule the index names OUTSIDE the tree, rather than walking it (R6-1)',
+    () => {
+      // `gitlinkPaths` took names out of the resolved repository's index and
+      // walked them unchecked, so one forged `../` gitlink recorded host
+      // directories as the tree's residue. git's own write path refuses such a
+      // name, so no honest index carries one; the shim forges it, for the
+      // certification's own spawns only.
+      const outside = join(repo, 'HOSTSECRET');
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, 'id_rsa'), 'secret');
+      const shim = gitShim(
+        'git-shim-gitlink',
+        `for a in "$@"; do\n` +
+          `  if [ "$a" = --stage ]; then\n` +
+          `    $REAL "$@" || exit $?\n` +
+          `    printf '160000 ${'e'.repeat(40)} 0\\t../../../HOSTSECRET\\0'\n` +
+          `    exit 0\n` +
+          `  fi\n` +
+          `done\n` +
+          `exec $REAL "$@"`,
+      );
+      const saved = process.env['PATH'];
+      let r: BaseTreeReport;
+      const seen: string[] = [];
+      try {
+        r = run({}, () => {
+          process.env['PATH'] = `${shim}:${saved}`;
+          fsFaults.readdirSeen = seen;
+          return okBuild;
+        });
+      } finally {
+        process.env['PATH'] = saved;
+        fsFaults.readdirSeen = null;
+      }
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('residue could not be enumerated');
+      expect(builtTreeRecord(trustPathFor(), tree())).toBeNull();
+      // ...and the walk never READ the host directory: the listing's own
+      // per-entry check would refuse its children afterwards anyway, so the
+      // walk's entrance is held to account by what it touched.
+      const hostReads = seen.filter((p) => {
+        try {
+          return realpathSync(p).startsWith(realpathSync(outside));
+        } catch {
+          return false;
+        }
+      });
+      expect(hostReads).toEqual([]);
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses an untracked listing that names a path OUTSIDE the tree (R6-1)',
+    () => {
+      // The same discipline for a plain entry: a listing is not allowed to
+      // name its way out of the tree, whichever arm of the walk it enters.
+      const outside = join(repo, 'HOSTSECRET');
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, 'id_rsa'), 'secret');
+      const shim = gitShim(
+        'git-shim-others',
+        `for a in "$@"; do\n` +
+          `  if [ "$a" = --others ]; then\n` +
+          `    $REAL "$@" || exit $?\n` +
+          `    printf '../../../HOSTSECRET/id_rsa\\0'\n` +
+          `    exit 0\n` +
+          `  fi\n` +
+          `done\n` +
+          `exec $REAL "$@"`,
+      );
+      const saved = process.env['PATH'];
+      let r: BaseTreeReport;
+      try {
+        r = run({}, () => {
+          process.env['PATH'] = `${shim}:${saved}`;
+          return okBuild;
+        });
+      } finally {
+        process.env['PATH'] = saved;
+      }
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('residue could not be enumerated');
+      expect(builtTreeRecord(trustPathFor(), tree())).toBeNull();
+    },
+  );
+
+  itWhereContainmentExists(
+    'describes a registered submodule swapped for a link, instead of dropping it (R6-1)',
+    () => {
+      // A gitlink is invisible to `--others`, and a submodule that is no
+      // longer a directory was dropped before anything could describe it —
+      // so a link out of the tree at its path was certified.
+      const outsideDir = join(repo, 'outside-pkg');
+      mkdirSync(outsideDir, { recursive: true });
+      writeFileSync(join(outsideDir, 'run.js'), 'the real thing');
+      const sub = commitSubmoduleBase();
+      try {
+        const r = run(
+          {
+            onInventoryWindow: () => {
+              rmSync(join(tree(), 'deps', 'lib'), {
+                recursive: true,
+                force: true,
+              });
+              symlinkSync(outsideDir, join(tree(), 'deps', 'lib'));
+            },
+          },
+          initSubmodules,
+        );
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('target is a DIRECTORY outside the tree');
+        expect(builtTreeRecord(trustPathFor(), tree())).toBeNull();
+      } finally {
+        rmSync(sub, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses a listed path reached through a parent swapped for a link out of the tree (R6-1)',
+    () => {
+      // The name is clean — `pkg/data/file.txt` — but between git's listing and
+      // the stat, `pkg` became a link out of the tree, and `lstat` follows every
+      // component but the last: the HOST file was recorded as the tree's.
+      const outside = join(repo, 'outside-pkg');
+      mkdirSync(join(outside, 'data'), { recursive: true });
+      writeFileSync(join(outside, 'data', 'file.txt'), 'host bytes');
+      const pkg = join(tree(), 'pkg');
+      const swapped = join(repo, 'pkg-swapped');
+      const shim = gitShim(
+        'git-shim-parent',
+        `for a in "$@"; do\n` +
+          `  if [ "$a" = --others ] && [ ! -e '${swapped}' ]; then\n` +
+          `    $REAL "$@"; st=$?\n` +
+          `    touch '${swapped}'; rm -rf '${pkg}'; ln -s '${outside}' '${pkg}'\n` +
+          `    exit $st\n` +
+          `  fi\n` +
+          `done\n` +
+          `exec $REAL "$@"`,
+      );
+      const saved = process.env['PATH'];
+      let r: BaseTreeReport;
+      try {
+        r = run({}, (w) => {
+          mkdirSync(join(w, 'pkg', 'data'), { recursive: true });
+          writeFileSync(join(w, 'pkg', 'data', 'file.txt'), 'built bytes');
+          process.env['PATH'] = `${shim}:${saved}`;
+          return okBuild;
+        });
+      } finally {
+        process.env['PATH'] = saved;
+      }
+      expect(existsSync(swapped)).toBe(true); // the premise: the swap landed
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('residue could not be enumerated');
+      expect(builtTreeRecord(trustPathFor(), tree())).toBeNull();
+    },
+  );
+
+  itWhereContainmentExists(
+    'never walks a submodule reached through a parent swapped for a link out of the tree (R6-1)',
+    () => {
+      // The walk's own entrance, asked on the resolved path: without it the
+      // host directory behind the swapped parent was READ before anything
+      // refused, so what the walk touched is asserted, not only the verdict.
+      const outside = join(repo, 'outside-deps');
+      mkdirSync(join(outside, 'lib'), { recursive: true });
+      writeFileSync(join(outside, 'lib', 'HOST-SECRET'), 'host bytes');
+      const sub = commitSubmoduleBase();
+      const seen: string[] = [];
+      try {
+        const r = run(
+          {
+            onInventoryWindow: () => {
+              rmSync(join(tree(), 'deps'), { recursive: true, force: true });
+              symlinkSync(outside, join(tree(), 'deps'));
+              fsFaults.readdirSeen = seen;
+            },
+          },
+          initSubmodules,
+        );
+        fsFaults.readdirSeen = null;
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('residue could not be enumerated');
+        expect(builtTreeRecord(trustPathFor(), tree())).toBeNull();
+        const hostReads = seen.filter((p) => {
+          try {
+            return realpathSync(p).startsWith(realpathSync(outside));
+          } catch {
+            return false;
+          }
+        });
+        expect(hostReads).toEqual([]);
+      } finally {
+        fsFaults.readdirSeen = null;
+        rmSync(sub, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses when a parent it already vouched for is swapped for a link mid-walk (R6-1)',
+    () => {
+      // The parent check is cached per directory, so a parent swapped for a
+      // link AFTER its first answer lent "inside" to every later entry under
+      // it — and `lstat` followed the link to a host file. Every cached answer
+      // is asked again once the walk is done. The swap is staged on the first
+      // entry's own lstat, which is exactly between the two answers.
+      const outside = join(repo, 'outside-pkg');
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, 'b.txt'), 'host bytes');
+      const pkg = join(tree(), 'pkg');
+      let swapped = false;
+      let r: BaseTreeReport;
+      try {
+        r = run(
+          {
+            onInventoryWindow: () => {
+              fsFaults.lstatHook = (p) => {
+                if (!swapped && p === join(pkg, 'a.txt')) {
+                  swapped = true;
+                  rmSync(pkg, { recursive: true, force: true });
+                  symlinkSync(outside, pkg);
+                }
+              };
+            },
+          },
+          (w) => {
+            mkdirSync(join(w, 'pkg'), { recursive: true });
+            writeFileSync(join(w, 'pkg', 'a.txt'), 'built a');
+            writeFileSync(join(w, 'pkg', 'b.txt'), 'built b');
+            return okBuild;
+          },
+        );
+      } finally {
+        fsFaults.lstatHook = null;
+      }
+      expect(swapped).toBe(true); // the premise: the swap landed mid-walk
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('residue could not be enumerated');
+      expect(builtTreeRecord(trustPathFor(), tree())).toBeNull();
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses when the tree itself is swapped for a link mid-walk (R6-1)',
+    () => {
+      // A top-level entry is judged against the tree and never cached, so a
+      // tree swapped for a link to a host directory mid-walk let every later
+      // top-level `lstat` describe a host file. The tree is re-asked with the
+      // cached parents once the walk is done.
+      const outside = join(repo, 'outside-root');
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, 'x2.txt'), 'host bytes');
+      let swapped = false;
+      let r: BaseTreeReport;
+      try {
+        r = run(
+          {
+            onInventoryWindow: () => {
+              fsFaults.lstatHook = (p) => {
+                if (!swapped && p === join(tree(), 'x1.txt')) {
+                  swapped = true;
+                  renameSync(tree(), `${tree()}.moved`);
+                  symlinkSync(outside, tree());
+                }
+              };
+            },
+          },
+          (w) => {
+            writeFileSync(join(w, 'x1.txt'), 'built 1');
+            writeFileSync(join(w, 'x2.txt'), 'built 2');
+            return okBuild;
+          },
+        );
+      } finally {
+        fsFaults.lstatHook = null;
+      }
+      expect(swapped).toBe(true); // the premise: the swap landed mid-walk
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('residue could not be enumerated');
+      expect(builtTreeRecord(trustPathFor(), tree())).toBeNull();
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses a registered submodule it cannot stat, instead of dropping it (R6-1)',
+    () => {
+      // "Could not describe" is not "not there": only ENOENT — registered,
+      // never materialised — is nothing to walk.
+      const sub = commitSubmoduleBase();
+      try {
+        const r = run(
+          {
+            onInventoryWindow: () => {
+              fsFaults.lstatFails = (p) => p === join(tree(), 'deps', 'lib');
+            },
+          },
+          initSubmodules,
+        );
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('residue could not be enumerated');
+        expect(builtTreeRecord(trustPathFor(), tree())).toBeNull();
+      } finally {
+        fsFaults.lstatFails = null;
+        rmSync(sub, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itWhereContainmentExists(
+    'declines — never rebuilds — when the reuse check cannot READ the tracked state (R6-2)',
+    () => {
+      // A read that fails is not evidence. It reached the arm-wide catch, whose
+      // fall-through is the rebuild, and deleted the tree a sibling shard was
+      // using — its file included.
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it'); // the control
+      writeFileSync(join(tree(), 'evidence.txt'), 'a sibling is using this');
+      const shim = gitShim(
+        'git-shim-status',
+        `for a in "$@"; do\n` +
+          `  if [ "$a" = --untracked-files=no ]; then\n` +
+          `    echo "fatal: stubbed status failure" >&2; exit 128\n` +
+          `  fi\n` +
+          `done\n` +
+          `exec $REAL "$@"`,
+      );
+      const second = withPath(shim, () => run({}, build));
+      expect(second.available).toBe(false);
+      expect(second.note).toContain('its tracked state could not be read');
+      expect(second.note).toContain('declining to reuse or discard');
+      expect(builds).toEqual([tree()]);
+      expect(existsSync(join(tree(), 'evidence.txt'))).toBe(true);
+    },
+  );
+
+  itWhereContainmentExists(
+    "declines when the reuse check cannot READ HEAD — on a recorded tree and on this run's unrecorded one (R6-2)",
+    () => {
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      const shim = gitShim(
+        'git-shim-head',
+        `rp=0; hd=0\n` +
+          `for a in "$@"; do\n` +
+          `  [ "$a" = rev-parse ] && rp=1\n` +
+          `  [ "$a" = HEAD ] && hd=1\n` +
+          `done\n` +
+          `if [ $rp = 1 ] && [ $hd = 1 ]; then echo "fatal: stubbed HEAD failure" >&2; exit 128; fi\n` +
+          `exec $REAL "$@"`,
+      );
+      const recorded = withPath(shim, () => run({}, build));
+      expect(recorded.available).toBe(false);
+      expect(recorded.note).toContain('its HEAD could not be read');
+      expect(builds).toEqual([tree()]);
+
+      // This run's tree with its record gone: the same answer, not a sweep.
+      dropBuiltTree(trustPathFor(), runIdentity(worktree).identity, tree());
+      const unrecorded = withPath(shim, () => run({}, build));
+      expect(unrecorded.available).toBe(false);
+      expect(unrecorded.note).toContain('its HEAD could not be read');
+      expect(builds).toEqual([tree()]);
+      expect(existsSync(tree())).toBe(true);
+    },
+  );
+
+  it('never reads a lock as a corpse on a bound nobody can vouch for (R6-3)', () => {
+    // yargs coerces `--timeout 30m` to NaN, and under NaN every lock read as
+    // stale — a live builder's was swept. Under Infinity no corpse ever was.
+    const lock = lockPath();
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, 'stale-after-ms'), String(2 * 3600 * 1000));
+    const old = Date.now() / 1000 - 45 * 60;
+    utimesSync(lock, old, old);
+    expect(sweepStaleLock(lock, NaN)).toBe('fresh');
+    expect(existsSync(lock)).toBe(true);
+
+    const builds: string[] = [];
+    for (const timeout of [NaN, Infinity]) {
+      const r = runBaseTree({
+        plan: planPath || (planPath = writePlan()),
+        worktree,
+        timeout,
+        install: true,
+        build: (w) => {
+          builds.push(w);
+          return okBuild;
+        },
+      });
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('--timeout');
+    }
+    expect(builds).toEqual([]);
+    expect(existsSync(lock)).toBe(true);
+  });
+
+  it('keeps a build lock another process holds when the lease is released (R6-4)', () => {
+    // The lock lives beside the trust files, and the prompt-end lease
+    // finalizer — which removes the review worktree, not the base tree —
+    // removed the whole directory while a builder that prompt started was
+    // still running, letting a second builder in over its tree.
+    const lock = lockPath();
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, 'holder'), 'a-live-builder');
+    const trustFile = join(dirname(lock), 'deadbeefdeadbeef.json');
+    writeFileSync(trustFile, '{"identity":1}');
+
+    clearReviewWorktreeLease(repo, 'pr-1');
+    expect(existsSync(lock)).toBe(true);
+    expect(existsSync(trustFile)).toBe(false); // the reclaim's own job, still done
+
+    writeLease();
+    const builds: string[] = [];
+    const r = run({}, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('another probe is building');
+    expect(builds).toEqual([]);
+  });
+
+  it('releases only its OWN build lock (R6-4)', () => {
+    // Swept or reclaimed from under this builder and re-taken by a sibling:
+    // the unconditional remove by path deleted THAT holder's live lock.
+    let replaced = false;
+    const r = run({}, () => {
+      rmSync(lockPath(), { recursive: true, force: true });
+      mkdirSync(lockPath());
+      writeFileSync(join(lockPath(), 'holder'), 'a-sibling');
+      replaced = true;
+      return okBuild;
+    });
+    expect(replaced).toBe(true);
+    expect(r.available).toBe(true);
+    expect(readFileSync(join(lockPath(), 'holder'), 'utf8')).toBe('a-sibling');
+  });
+
+  itWhereContainmentExists(
+    'does not settle a failure the ASK explains — a plant on its path, or a skipped install (R4-2)',
+    () => {
+      // A step that ran and failed settles the lane for the run. Two failures
+      // are facts about the ask instead: an ancestor `node_modules` inside the
+      // mount on the build's resolution path (which the success path refuses
+      // to certify under), and `--no-install` on a fresh checkout.
+      const failing = {
+        ...okBuild,
+        ok: false,
+        build: [{ command: 'npm run build', exitCode: 1 }],
+      } as unknown as BuildTestReport;
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return failing;
+      };
+      const planted = join(repo, '.qwen', 'tmp', 'node_modules', '.bin');
+      mkdirSync(planted, { recursive: true });
+      writeFileSync(join(planted, 'node'), '#!/bin/sh\nexit 1\n');
+
+      const first = run({}, build);
+      expect(first.available).toBe(false);
+      expect(first.note).toContain('module resolution state');
+      expect(builtTreeRecord(trustPathFor(), tree())?.state).toBe('truncated');
+      expect(run({}, build).note).not.toContain('already failed');
+      expect(builds).toHaveLength(2); // repaid, not settled
+
+      rmSync(join(repo, '.qwen', 'tmp', 'node_modules'), {
+        recursive: true,
+        force: true,
+      });
+      nextRun();
+      const noInstall = run({ install: false }, build);
+      expect(noInstall.note).toContain('--no-install');
+      expect(builtTreeRecord(trustPathFor(), tree())?.state).toBe('truncated');
+      expect(run({ install: false }, build).note).not.toContain(
+        'already failed',
+      );
+      expect(builds).toHaveLength(4);
+    },
+  );
+
+  itWhereContainmentExists(
+    "re-asks the pointer before the inventory's own spawns (R6-5)",
+    () => {
+      // The index refresh runs for up to `GIT_TIMEOUT_MS`, and the inventory's
+      // `ls-files` resolve the repository through the pointer after it — so a
+      // rewrite in that window was certified `ok`.
+      const r = run(
+        {
+          onInventoryWindow: () => {
+            plantAdminEntry(
+              join(repo, '.qwen', 'tmp', '.evil-git'),
+              adminEntryOf(tree()),
+              tree(),
+              join(repo, '.git'),
+            );
+          },
+        },
+        () => okBuild,
+      );
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('rewritten while it was being certified');
+      expect(r.note).toContain('residue cannot be measured');
+      expect(builtTreeRecord(trustPathFor(), tree())).toBeNull();
+    },
   );
 
   it("honours the lock HOLDER's staleness bound, not only the asker's (R4-6)", () => {

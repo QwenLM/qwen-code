@@ -206,6 +206,24 @@ export function baseTreeTrustPath(worktree: string, planPath: string): string {
     .update(resolve(planPath))
     .digest('hex')
     .slice(0, 16);
+  return join(baseTreeStateDir(worktree), `${key}.json`);
+}
+
+/**
+ * Where a worktree's base-tree build lock lives: host-side, in the same
+ * per-target directory as the trust files, named for the base tree it guards.
+ * One definition beside the trust path it sits next to, so no caller spells
+ * it twice.
+ */
+export function baseTreeLockPath(worktree: string): string {
+  return join(
+    baseTreeStateDir(worktree),
+    `${basename(resolve(worktree))}-base.lock`,
+  );
+}
+
+/** The host-side directory holding one review target's base-tree state. */
+function baseTreeStateDir(worktree: string): string {
   return join(
     trustRootFor(worktree),
     basename(REVIEW_LEASE_DIR),
@@ -216,7 +234,6 @@ export function baseTreeTrustPath(worktree: string, planPath: string): string {
     // and a real built tree's per-file inventory measures ~9 MB, one file
     // per plan path per review, forever.
     reviewTargetOf(worktree),
-    `${key}.json`,
   );
 }
 
