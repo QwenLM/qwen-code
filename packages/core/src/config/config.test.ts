@@ -6619,6 +6619,48 @@ describe('Server Config (config.ts)', () => {
       ).toBeUndefined();
     });
 
+    it('retains an image selection while the tool registry is still initializing', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      let release!: (registry: ToolRegistry) => void;
+      const createRegistry = vi
+        .spyOn(config, 'createToolRegistry')
+        .mockReturnValue(
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+        );
+      const initializing = config.initialize();
+      await vi.waitFor(() => expect(createRegistry).toHaveBeenCalled());
+      const selection = `openai:qwen-image-2.0\0${baseUrl}`;
+      try {
+        await expect(config.setImageModel(selection)).resolves.toBeUndefined();
+      } finally {
+        release(new ToolRegistry(config));
+        await initializing;
+      }
+      expect(config.getImageGenerationConfig()).toMatchObject({
+        model: 'qwen-image-2.0',
+        baseUrl,
+      });
+      await config.setImageModel(selection);
+      expect(ToolRegistry.prototype.ensureTool).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+      );
+    });
+
     it('registers image_gen immediately when the image model changes at runtime', async () => {
       const baseUrl = 'https://images.example.com/api/v1';
       const config = new Config({
@@ -6637,6 +6679,9 @@ describe('Server Config (config.ts)', () => {
       await config.initialize();
       vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
 
+      const refreshTools = vi
+        .spyOn(config.getLlmClient(), 'setTools')
+        .mockResolvedValue(undefined);
       await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
 
       expect(ToolRegistry.prototype.registerFactory).toHaveBeenCalledWith(
@@ -6646,6 +6691,10 @@ describe('Server Config (config.ts)', () => {
       expect(ToolRegistry.prototype.ensureTool).toHaveBeenCalledWith(
         ToolNames.IMAGE_GEN,
       );
+      expect(refreshTools).toHaveBeenCalledOnce();
+      await config.setImageModel('');
+      expect(config.isImageGenerationEnabled()).toBe(false);
+      expect(refreshTools).toHaveBeenCalledTimes(2);
     });
 
     it('does not register image_gen when the permission manager disables it', async () => {
@@ -13554,6 +13603,24 @@ describe('BaseLlmClient Lifecycle', () => {
     );
   });
 
+  it('reads current provider protocols through the reloaded model registry', () => {
+    const providers = { alternate: [{ id: 'test-model' }] };
+    const config = new Config({
+      ...baseParams,
+      modelProvidersConfig: providers,
+      providerProtocolConfig: { alternate: 'openai' },
+    });
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'openai' });
+    config.reloadModelProvidersConfig(providers, { alternate: 'gemini' });
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'gemini' });
+    config.reloadModelProvidersConfig({});
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'gemini' });
+    expect(config.getModelProvidersConfig()).toEqual({});
+    config.reloadModelProvidersConfig(providers, {});
+    expect(config.getProviderProtocolConfig()).toEqual({});
+    expect(config.getModelProvidersConfig()).toEqual(providers);
+  });
+
   it('clears per-model generators when provider config is reloaded', async () => {
     const config = new Config(baseParams);
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -13675,6 +13742,61 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['forceGlobalCacheScope']?.kind).toBe('settings');
     expect(sources['toolResultContentFormat']?.kind).toBe('settings');
     expect(sources['modalities']?.kind).toBe('computed');
+  });
+
+  it('carries enableRequestMetadata across a qwen-oauth hot model switch', async () => {
+    // The DashScope provider reads enableRequestMetadata off its own
+    // contentGeneratorConfig, which on the main route is this same object. A
+    // hot switch rebuilds it field by field, so a per-model override that is
+    // not copied would leave the gate reading the previous model's value.
+    const config = new Config(baseParams);
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        ['model']: 'qwen3-coder-plus',
+        ['authType']: AuthType.QWEN_OAUTH,
+        ['apiKey']: 'test-key',
+        ['enableRequestMetadata']: false,
+      },
+      sources: {
+        model: { kind: 'settings' },
+        enableRequestMetadata: { kind: 'settings' },
+      },
+    });
+
+    await config.refreshAuth(AuthType.QWEN_OAUTH);
+    expect(config.getContentGeneratorConfig()['enableRequestMetadata']).toBe(
+      false,
+    );
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        ['model']: 'qwen-max',
+        ['authType']: AuthType.QWEN_OAUTH,
+        ['apiKey']: 'test-key',
+        ['enableRequestMetadata']: true,
+      },
+      sources: {
+        model: { kind: 'programmatic', detail: 'user' },
+        enableRequestMetadata: { kind: 'settings', detail: 'model' },
+      },
+    });
+
+    await (
+      config as unknown as {
+        handleModelChange: (
+          authType: AuthType,
+          requiresRefresh: boolean,
+        ) => Promise<void>;
+      }
+    ).handleModelChange(AuthType.QWEN_OAUTH, false);
+
+    expect(config.getContentGeneratorConfig()['enableRequestMetadata']).toBe(
+      true,
+    );
+    const sources = config.getContentGeneratorConfigSources();
+    expect(sources['enableRequestMetadata']?.kind).toBe('settings');
+    expect(sources['enableRequestMetadata']?.detail).toBe('model');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {
