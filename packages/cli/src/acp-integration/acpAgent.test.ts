@@ -17538,6 +17538,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     );
 
+    // MCP and hook writes are workspace-global by contract: their status and
+    // reload routes resolve only the bootstrap workspace, so these handlers
+    // deliberately do not resolve `sessionId` — a session-scoped write would
+    // be answered "saved" while no route ever lists or applies it.
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/boot-workspace');
+
     await agent.extMethod('qwen/settings/setMcpServer', {
       sessionId: 'worktree-session',
       scope: 'workspace',
@@ -17549,7 +17555,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     });
     expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
-      worktreeRoot,
+      '/boot-workspace',
       expect.objectContaining({
         consumeCorruptionEnvVars: true,
         skipLoadEnvironment: true,
@@ -17563,7 +17569,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       hook: { hooks: [{ type: 'command', command: 'echo hi' }] },
     });
     expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
-      worktreeRoot,
+      '/boot-workspace',
       expect.objectContaining({
         consumeCorruptionEnvVars: true,
         skipLoadEnvironment: true,

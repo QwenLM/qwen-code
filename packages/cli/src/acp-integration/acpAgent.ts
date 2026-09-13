@@ -6503,8 +6503,17 @@ class QwenAgent implements Agent {
   }
 
   /**
-   * Resolve the workspace root for the `qwen/settings/*` + `qwen/permissions/*`
-   * handlers. `sessionId` names the requesting session, whose own Config is
+   * Resolve the workspace root for the session-aware `qwen/settings/*` +
+   * `qwen/permissions/*` handlers — the ones whose write and read-back share
+   * the resolved coordinate. The handlers whose status/apply routes are
+   * workspace-global (`setMcpServer`, `removeMcpServer`, `setHook`,
+   * `removeHook`, `setExtensionSetting`) deliberately do NOT resolve
+   * `sessionId`: their write would land in the session's worktree while the
+   * status and reload routes keep reading the bootstrap workspace, so the
+   * handler would answer "saved" for a server no route ever lists or applies.
+   * Those five resolve `requestedCwd ?? this.config.getTargetDir()` instead.
+   *
+   * `sessionId` names the requesting session, whose own Config is
    * relocated to its worktree; without one the daemon's bootstrap
    * `this.config` is used — nothing relocates the agent-level Config, so that
    * is the boot workspace and swapping `process.cwd()` for
@@ -13531,7 +13540,12 @@ class QwenAgent implements Agent {
             'MCP server name is required',
           );
         }
-        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        // Workspace-global write: the MCP status/apply routes
+        // (`buildManagedWorkspaceMcpStatus`, `reloadWorkspaceMcpDiscovery`)
+        // resolve only the bootstrap workspace, so a session-scoped write
+        // here would be listed nowhere and applied never. Session-aware
+        // resolution returns only once those routes share the coordinate.
+        const settingsCwd = requestedCwd ?? this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
@@ -13561,7 +13575,8 @@ class QwenAgent implements Agent {
             'MCP server name is required',
           );
         }
-        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        // Workspace-global write, same contract as setMcpServer above.
+        const settingsCwd = requestedCwd ?? this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
@@ -13580,7 +13595,10 @@ class QwenAgent implements Agent {
         if (!isHookEvent(event)) {
           throw RequestError.invalidParams(undefined, 'Invalid hook event');
         }
-        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        // Workspace-global write: the workspaceHooks status route reports the
+        // bootstrap Config's live hook registry, so a session-scoped write
+        // would diverge from what is reported and applied.
+        const settingsCwd = requestedCwd ?? this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
@@ -13636,7 +13654,8 @@ class QwenAgent implements Agent {
         ) {
           throw RequestError.invalidParams(undefined, 'Invalid hook index');
         }
-        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        // Workspace-global write, same contract as setHook above.
+        const settingsCwd = requestedCwd ?? this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
@@ -13676,7 +13695,9 @@ class QwenAgent implements Agent {
         if (typeof value !== 'string') {
           throw RequestError.invalidParams(undefined, 'value must be a string');
         }
-        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        // Workspace-global write: the workspaceExtensions status route
+        // reports the bootstrap workspace, same contract as setMcpServer.
+        const settingsCwd = requestedCwd ?? this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const extensionManager = new ExtensionManager({
           workspaceDir: settingsCwd,
