@@ -750,6 +750,153 @@ it('marks only the live-conversation bridge with the Conversations provenance en
   }
 });
 
+it.each([
+  ['chat', false],
+  ['image', false],
+  ['voice', false],
+  ['image', true],
+] as const)(
+  'preserves saved %s configuration through the provider HTTP installer (environment auth: %s)',
+  async (purpose, environmentAuth) => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qws-provider-reconnect-'),
+    );
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    fs.mkdirSync(home);
+    fs.mkdirSync(workspace);
+    for (const key of [
+      'QWEN_OAUTH',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'QWEN_MODEL',
+      'OPENAI_BASE_URL',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'GOOGLE_CLOUD_PROJECT',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_BASE_URL',
+    ]) {
+      vi.stubEnv(key, '');
+    }
+    if (environmentAuth) {
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        'OPENAI_API_KEY=environment-chat-key\nOPENAI_MODEL=environment-chat\nOPENAI_BASE_URL=https://chat.example/v1\n',
+      );
+    }
+    vi.stubEnv('QWEN_HOME', home);
+    const baseUrl = 'https://media.example/v1';
+    const id = purpose === 'voice' ? 'qwen3-asr-flash' : `${purpose}-model`;
+    const envKey =
+      qwenCore.generateCustomEnvKey(qwenCore.AuthType.USE_OPENAI, baseUrl) +
+      (purpose === 'chat' ? '' : `_${purpose.toUpperCase()}`);
+    vi.stubEnv(envKey, 'before');
+    const model = {
+      id,
+      baseUrl,
+      envKey,
+      name: 'My tuned model',
+      generationConfig: {
+        contextWindowSize: 65536,
+        samplingParams: { max_tokens: 4000 },
+        customHeaders: { 'X-Route': 'paid' },
+      },
+      ...(purpose === 'image'
+        ? { imageOnly: true, supportsImageGeneration: true }
+        : {}),
+      ...(purpose === 'voice' ? { voiceOnly: true } : {}),
+    };
+    const file = path.join(home, 'settings.json');
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        $version: 4,
+        env: { [envKey]: 'before' },
+        modelProviders: { openai: [model] },
+      }),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          preheatBridge: false,
+          trustedWorkspace: true,
+          daemonLogBaseDir: path.join(root, 'debug'),
+        },
+      );
+      const response = await fetch(`${handle.url}/workspace/auth/provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          baseUrl,
+          apiKey: 'after',
+          modelIds: [id],
+        }),
+      });
+      expect(response.status).toBe(200);
+      const result = (await response.json()) as { message: string };
+      if (purpose !== 'chat') {
+        expect(result.message).toBe(
+          environmentAuth
+            ? 'Service models saved.'
+            : 'Service models saved. Configure a conversation model to start chatting.',
+        );
+      }
+      const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+      expect(saved.modelProviders.openai).toEqual([model]);
+      expect(saved.env[envKey]).toBe('after');
+      if (purpose !== 'chat') {
+        expect(saved.security?.auth?.selectedType).toBeUndefined();
+        expect(saved.model?.name).toBeUndefined();
+      }
+      const cleared = await fetch(`${handle.url}/workspace/auth/provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          baseUrl,
+          apiKey: 'after',
+          modelIds: [id],
+          advancedConfig: { replaceExisting: true },
+        }),
+      });
+      expect(cleared.status).toBe(200);
+      expect(
+        JSON.parse(fs.readFileSync(file, 'utf8')).modelProviders.openai,
+      ).toEqual([
+        {
+          ...model,
+          generationConfig: { customHeaders: { 'X-Route': 'paid' } },
+        },
+      ]);
+    } finally {
+      await handle?.close();
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
 function writeWebShellFixture(workspaceDir: string): string {
   const shellDir = path.join(workspaceDir, 'web-shell');
   fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
