@@ -12,6 +12,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
 } from '../core/environmentContext.js';
+import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 import {
   normalizeForEchoCompare,
   sanitizeTitle,
@@ -619,6 +620,41 @@ describe('tryGenerateSessionTitle', () => {
 
     expect(captured).not.toContain('IDE_SKILL_CONTEXT');
     expect(captured).toContain('what does this function do?');
+  });
+
+  it('excludes UserPromptSubmit context while keeping the submitted prompt', async () => {
+    const submittedPrompt = 'diagnose the parser CI failure';
+    const hookContext = 'UNRELATED_MEMORY_TOPIC '.repeat(80);
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: submittedPrompt },
+          { text: wrapUserPromptSubmitContext(hookContext) },
+          { text: reminder('TRAILING_SYSTEM_REMINDER') },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'I will inspect the parser test failures.' }],
+      },
+    ];
+
+    let captured = '';
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history,
+      generateJsonResult: async (opts: unknown) => {
+        captured = JSON.stringify((opts as { contents: Content[] }).contents);
+        return { title: 'Diagnose parser CI failure' };
+      },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal);
+
+    expect(captured).toContain(submittedPrompt);
+    expect(captured).not.toContain('UNRELATED_MEMORY_TOPIC');
+    expect(captured).not.toContain('TRAILING_SYSTEM_REMINDER');
   });
 
   it('tail-slices conversations longer than 1000 characters', async () => {

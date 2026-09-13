@@ -11,12 +11,60 @@ import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
 } from '../core/environmentContext.js';
+import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 import { generateSessionRecap } from './sessionRecap.js';
 
 const reminder = (body: string) =>
   `${SYSTEM_REMINDER_OPEN}\n${body}\n${SYSTEM_REMINDER_CLOSE}`;
 
 describe('generateSessionRecap', () => {
+  it('excludes UserPromptSubmit context while keeping the submitted prompt', async () => {
+    const submittedPrompt = 'diagnose the parser CI failure';
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: submittedPrompt },
+          {
+            text: wrapUserPromptSubmitContext(
+              'UNRELATED_MEMORY_TOPIC '.repeat(80),
+            ),
+          },
+          { text: reminder('TRAILING_SYSTEM_REMINDER') },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'I will inspect the parser test failures.' }],
+      },
+    ];
+
+    let captured: Content[] | null = null;
+    const generateText = vi.fn(async (opts: { contents: Content[] }) => {
+      captured = opts.contents;
+      return {
+        text: '<recap>Diagnosing parser CI failures. Next: inspect the failing tests.</recap>',
+        usage: undefined,
+      };
+    });
+    const config = {
+      getFastModel: vi.fn(() => 'qwen-turbo'),
+      getModel: vi.fn(() => 'qwen-plus'),
+      getLlmClient: vi.fn(() => ({
+        getHistoryShallow: () => history,
+      })),
+      getBaseLlmClient: vi.fn(() => ({ generateText })),
+      getOutputLanguageFilePath: vi.fn(() => undefined),
+    } as unknown as Config;
+
+    await generateSessionRecap(config, new AbortController().signal);
+
+    const serialized = JSON.stringify(captured);
+    expect(serialized).toContain(submittedPrompt);
+    expect(serialized).not.toContain('UNRELATED_MEMORY_TOPIC');
+    expect(serialized).not.toContain('TRAILING_SYSTEM_REMINDER');
+  });
+
   it('strips startup and mid-session system reminders from recap input', async () => {
     const history: Content[] = [
       {
