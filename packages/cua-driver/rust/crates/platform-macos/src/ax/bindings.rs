@@ -712,34 +712,52 @@ pub fn app_window_id_of_pid(pid: i32) -> Option<u32> {
         }
         let _ = AXUIElementSetMessagingTimeout(app, 2.0);
         super::enablement::ensure_chromium_ax_enabled(pid, app);
-        let mut selection = copy_element_attr_with_status(app, "AXFocusedWindow");
-        if selection.complete && selection.value.is_none() {
-            selection = copy_element_attr_with_status(app, "AXMainWindow");
-        }
-        if selection.complete && selection.value.is_none() {
-            let mut windows = copy_ax_windows_with_status(app);
-            selection.complete = windows.complete;
-            if windows.complete {
-                selection.value = windows.elements.pop();
-            }
-            for window in windows.elements {
+        for attribute in ["AXFocusedWindow", "AXMainWindow"] {
+            let selection = copy_element_attr_with_status(app, attribute);
+            if let Some(window) = selection.value {
+                let id = app_target_window_id(window);
                 CFRelease(window as CFTypeRef);
+                if id.is_some() {
+                    CFRelease(app as CFTypeRef);
+                    return id;
+                }
             }
+        }
+        let windows = copy_ax_windows_with_status(app);
+        let mut resolved = Vec::new();
+        if windows.complete {
+            for window in &windows.elements {
+                if let Some(id) = app_target_window_id(*window) {
+                    if !resolved.contains(&id) {
+                        resolved.push(id);
+                    }
+                }
+            }
+        }
+        for window in windows.elements {
+            CFRelease(window as CFTypeRef);
         }
         CFRelease(app as CFTypeRef);
-        let window = selection.value?;
-        let _ = AXUIElementSetMessagingTimeout(window, 2.0);
-        let (sheets, complete) = super::sheets::copy_attached_sheets(&[window]);
-        let id = if complete && sheets.len() == 1 {
-            sheets[0].window_id.or_else(|| ax_get_window_id(window))
-        } else if complete && sheets.is_empty() {
-            ax_get_window_id(window)
+        if resolved.len() == 1 {
+            resolved.pop()
         } else {
             None
-        };
-        CFRelease(window as CFTypeRef);
-        id
+        }
     }
+}
+
+unsafe fn app_target_window_id(window: AXUIElementRef) -> Option<u32> {
+    let _ = AXUIElementSetMessagingTimeout(window, 2.0);
+    let (sheets, complete) = super::sheets::copy_attached_sheets(&[window]);
+    if !complete || sheets.len() > 1 {
+        return None;
+    }
+    if let Some(id) = sheets.first().and_then(|sheet| sheet.window_id) {
+        if crate::windows::window_info_by_id(id).is_some() {
+            return Some(id);
+        }
+    }
+    ax_get_window_id(window).filter(|id| crate::windows::window_info_by_id(*id).is_some())
 }
 
 /// The returned menu-bar item owns its retain. Only an explicitly selected

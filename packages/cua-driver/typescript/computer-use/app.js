@@ -64,6 +64,7 @@ function currentWindow(windows, { allowNone = false } = {}) {
 
 export class ComputerUseApp {
   #computer;
+  #listApps;
   #launch;
   #identity;
   #pid;
@@ -73,9 +74,10 @@ export class ComputerUseApp {
   #generation;
   #queue = Promise.resolve();
 
-  constructor(computer, app, launch) {
+  constructor(computer, app, launch, listApps) {
     this.#launch = launch;
     this.#computer = computer;
+    this.#listApps = listApps;
     this.#identity = appIdentity(app);
     this.#pid = app.pid;
     this.#generation = computer.connectionGeneration;
@@ -97,12 +99,12 @@ export class ComputerUseApp {
   async #target(signal, { launch = false, allowNoWindow = false } = {}) {
     let app;
     try {
-      app = resolveApp(await this.#computer.listApps({ signal, runningOnly: true }), this.#identity);
+      app = resolveApp(await this.#listApps({ signal, runningOnly: true }), this.#identity);
     } catch (error) {
       if (!launch || error.code !== "app_not_running") throw error;
       this.#invalidate();
       await this.#launch(signal);
-      app = resolveApp(await this.#computer.listApps({ signal, runningOnly: true }), this.#identity);
+      app = resolveApp(await this.#listApps({ signal, runningOnly: true }), this.#identity);
     }
     if (app.pid !== this.#pid) this.#invalidate();
     this.#pid = app.pid;
@@ -217,13 +219,6 @@ export class ComputerUseApp {
     );
   }
 
-  #canRetryInForeground(method, error) {
-    return ["click", "doubleClick", "rightClick", "scroll", "typeText", "pressKey", "hotkey"].includes(method) &&
-      error instanceof ComputerUseError && error.details?.effect === "refused" &&
-      error.details?.escalation?.recommended === "foreground" &&
-      error.details?.operation?.dispatched === true && error.details?.operation?.committed === false;
-  }
-
   #act(method, point, options = {}, elementRequired = false) {
     optionsForApp(options);
     return this.#serial(async () => {
@@ -254,17 +249,9 @@ export class ComputerUseApp {
           this.#address({ x: options.toX, y: options.toY }, target);
         }
         const semantic = ["setValue", "performSecondaryAction", "paste", "selectText"].includes(method);
-        address = { ...options, ...address, ...(semantic ? {} : { deliveryMode: "background" }) };
+        address = { ...options, ...address, ...(semantic ? {} : { deliveryMode: "foreground" }) };
         if (["click", "doubleClick", "rightClick", "drag", "typeText", "paste"].includes(method)) address.appContext = true;
-        let result;
-        try {
-          result = await this.#computer[method](address);
-        } catch (error) {
-          if (!this.#canRetryInForeground(method, error)) throw error;
-          const foreground = { ...address, deliveryMode: "foreground" };
-          if (["click", "doubleClick", "rightClick"].includes(method)) delete foreground.appContext;
-          result = await this.#computer[method](foreground);
-        }
+        const result = await this.#computer[method](address);
         const nativeEffects = ["confirmed", "partial", "unverifiable", "suspected_noop", "refused"];
         const nativeEffect = result.action?.effect;
         return { effect: result.effect ??

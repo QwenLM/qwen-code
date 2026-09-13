@@ -10,7 +10,7 @@ type Point = number | { x: number; y: number };
 type ComputerUse = {
   getApp: (nameOrIdentifierOrPath: string) => Promise<App>;
   listApps: () => Promise<
-    Array<{ name?: string; bundle_id?: string; launch_path?: string }>
+    Array<{ id: string; displayName: string; isRunning: boolean }>
   >;
   close: () => Promise<void>;
 };
@@ -86,7 +86,7 @@ nodeRepl.write((await app.getState()).text);
 The app handle tracks its current window and dialog. Read the returned window
 title to confirm the intended document. If the app is unknown or its name is
 ambiguous, discover applications with `computer.listApps()` and use a matching
-application identifier or path.
+application `id`.
 
 AX text uses short numeric IDs, such as `[37] TextField "Name"`. Use IDs from
 the current observation for element actions. IDs can change when the app's
@@ -121,6 +121,7 @@ Use the actual ID from your observation; `37` is only an example.
 - An action error can occur after the UI already changed. Read state before deciding whether to retry. Partial, unconfirmed or cancelled actions must not be blindly repeated.
 - Coordinate actions use pixels in this app's current screenshot, with `(0, 0)` at its top-left. Every App observation refreshes that frame internally. Request `includeScreenshot: true` when you need to inspect the image, especially after a window change. Do not infer coordinates from another window or desktop screenshot.
 - `pressKey` sends one key, optionally with modifiers. `hotkey` sends a combination such as `['super', 's']`. Use the platform's appropriate shortcut.
+- App input activates the exact target internally for one dispatch and restores the previous foreground app. There is no delivery-mode choice and no automatic replay after an uncertain result.
 - Literal `\n` or `\r` in `typeText` sends Return. In a composer or form this may submit rather than insert a newline.
 - If AX is incomplete or does not explain the interface, request a screenshot and inspect it. Incomplete observations do not authorize element actions.
 

@@ -288,14 +288,21 @@ impl Tool for GetWindowStateTool {
                         tracing::debug!(pid, %error, "app focus monitor unavailable");
                     }
                 }
-                crate::ax::tree::walk_tree_with_context(
-                    pid,
-                    Some(window_id),
-                    q.as_deref(),
-                    max_elements,
-                    max_depth,
-                    app_context,
-                )
+                let walk = || {
+                    crate::ax::tree::walk_tree_with_context(
+                        pid,
+                        Some(window_id),
+                        q.as_deref(),
+                        max_elements,
+                        max_depth,
+                        app_context,
+                    )
+                };
+                if app_context {
+                    crate::apps::with_app_observation(pid, walk)
+                } else {
+                    walk()
+                }
             });
             match tokio::time::timeout(std::time::Duration::from_secs(20), walk_future).await {
                 Ok(Ok(r)) => Some(r),

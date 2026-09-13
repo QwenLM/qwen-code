@@ -87,6 +87,13 @@ function actionResult(result) {
   };
 }
 
+function compactApp(app) {
+  const displayName = typeof app?.name === "string" ? app.name : "";
+  const id = typeof app?.bundle_id === "string" && app.bundle_id !== ""
+    ? app.bundle_id : displayName || "unknown";
+  return { id, displayName, isRunning: app?.running === true };
+}
+
 function verificationResult(result) {
   const value = result.structured ?? { status: "unknown", stable: false };
   return result.verification === undefined
@@ -778,7 +785,7 @@ export class ComputerUse {
     return this.#supportsObservationRevision({});
   }
 
-  async listApps(options = {}) {
+  async #listAppsDetailed(options = {}) {
     const { structured } = await this.#invoke(
       "listApps",
       options.runningOnly ? { runningOnly: true } : {},
@@ -790,11 +797,27 @@ export class ComputerUse {
     return structured?.apps ?? structured ?? [];
   }
 
+  async listApps(options = {}) {
+    let platform;
+    try {
+      platform = await this.getPlatform({ signal: options.signal });
+    } catch (error) {
+      if (error?.code !== "driver_platform_unavailable") throw error;
+    }
+    const apps = await this.#listAppsDetailed(options);
+    return platform === "macos" ? apps.map(compactApp) : apps;
+  }
+
   async getApp(selector, options = {}) {
-    const app = resolveApp(await this.listApps(options), selector, { allowStopped: true });
+    const app = resolveApp(await this.#listAppsDetailed(options), selector, { allowStopped: true });
     const identity = appIdentity(app);
     if (!this.#apps.has(identity)) {
-      this.#apps.set(identity, new ComputerUseApp(this, app, (signal) => this.#invoke("launchApp", { name: identity }, { signal })));
+      this.#apps.set(identity, new ComputerUseApp(
+        this,
+        app,
+        (signal) => this.#invoke("launchApp", { name: identity }, { signal }),
+        (listOptions) => this.#listAppsDetailed(listOptions),
+      ));
     }
     return this.#apps.get(identity);
   }

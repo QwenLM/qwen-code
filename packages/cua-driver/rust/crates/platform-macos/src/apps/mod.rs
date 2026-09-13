@@ -162,6 +162,8 @@ pub fn launch_with_urls_by_bundle(
     // openURLs:withApplicationAtURL: to bail with "application not
     // found" for Cryptex-installed apps (Safari). Verified empirically.
     let cfg = nsworkspace::OpenConfig {
+        activates: false,
+        reopens_running_application: false,
         arguments: additional_args.to_vec(),
         environment: env.clone(),
         creates_new_instance,
@@ -206,6 +208,8 @@ pub fn launch_with_urls_by_name(
     // See `launch_with_urls_by_bundle` — skip `oapp` AppleEvent on
     // the URL-handoff path.
     let cfg = nsworkspace::OpenConfig {
+        activates: false,
+        reopens_running_application: false,
         arguments: additional_args.to_vec(),
         environment: env.clone(),
         creates_new_instance,
@@ -610,6 +614,41 @@ pub fn activate_pid(pid: i32) -> bool {
             None => false,
         }
     }
+}
+
+pub fn with_app_observation<R>(pid: i32, body: impl FnOnce() -> R) -> R {
+    let prior = frontmost_pid();
+    let needs_reopen = crate::ax::bindings::app_window_id_of_pid(pid).is_none();
+    if needs_reopen {
+        if let Some(app) = list_running_apps().into_iter().find(|app| app.pid == pid) {
+            let app_ref = app
+                .bundle_id
+                .clone()
+                .or(app.launch_path)
+                .unwrap_or(app.name);
+            let config = nsworkspace::OpenConfig {
+                activates: true,
+                reopens_running_application: true,
+                apple_event_bundle_id: app.bundle_id,
+                ..Default::default()
+            };
+            if nsworkspace::open_application(&app_ref, &config).is_ok() {
+                let deadline = std::time::Instant::now() + Duration::from_millis(400);
+                while crate::ax::bindings::app_window_id_of_pid(pid).is_none()
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+    let result = body();
+    if needs_reopen {
+        if let Some(prior) = prior.filter(|prior| *prior != pid) {
+            let _ = activate_pid(prior);
+        }
+    }
+    result
 }
 
 /// Return the bundle identifier of the running process for `pid`, via

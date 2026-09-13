@@ -40,9 +40,12 @@ await computer.close();
 `getApp()` binds identity without launching. `getState()` can open a discovered
 stopped app through the native background launcher; actions never restart an app.
 Ambiguous names or identifiers require a unique installation path from
-`listApps()`. Different installations sharing a bundle ID have different handles.
-Native selection uses the focused AX window, main window, then last AX window,
-including attached sheets and the actual owning process.
+the caller. Public macOS `listApps()` returns only `id`, `displayName` and
+`isRunning`; internal process and window addressing stays on the app handle.
+Native selection uses the focused AX window, main window, then one unambiguous
+AX window, including attached sheets and the actual owning process. If a running
+app hides its remaining surface from AX, observation briefly reopens that app
+surface, captures it, and restores the previous foreground app.
 
 App methods accept short observed IDs or screenshot coordinates, and do not
 accept process IDs, window IDs, opaque tokens or delivery options.
@@ -61,11 +64,9 @@ that image; use `getState({ includeScreenshot: true })` when the caller needs to
 inspect it.
 
 Native code selects semantic or synthesized input after checking the target.
-App clicks and keyboard input start on the native background path. When native
-preflight proves that no actuator ran and recommends foreground delivery, the
-App handle makes one guarded foreground attempt and restores the prior app.
-Native drag and App paste select their guarded foreground route before dispatch.
-Failed, partial, unverifiable and cancelled possible-dispatch actions are never replayed.
+App input makes one guarded activation of the exact target, dispatches once and
+restores the prior app. Failed, partial, unverifiable and cancelled
+possible-dispatch actions are never replayed.
 Errors request fresh observation before another action; they do not ask the
 model to choose a delivery mode. Argument errors detected before native dispatch
 retain their specific correction; uncertain post-dispatch failures retain the
@@ -174,7 +175,10 @@ overrides it. Invalid environment values fail facade creation, and the public
 JavaScript option remains camelCase: `delivery_mode` is rejected instead of
 being silently ignored.
 
-## Usage
+## Windows/Linux exact-window usage
+
+On macOS, use the App workflow above. The lower-level discovery records below
+remain available on Windows and Linux.
 
 ```js
 import { ComputerUse } from "@qwen-code/cua-sdk/computer-use";

@@ -9,6 +9,18 @@ pub struct ListWindowsTool;
 
 static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 
+fn resolve_app_window(pid: i32) -> Option<crate::windows::WindowInfo> {
+    if let Some(window) =
+        crate::ax::bindings::app_window_id_of_pid(pid).and_then(crate::windows::window_info_by_id)
+    {
+        return Some(window);
+    }
+
+    crate::apps::with_app_observation(pid, || {
+        crate::ax::bindings::app_window_id_of_pid(pid).and_then(crate::windows::window_info_by_id)
+    })
+}
+
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
         name: "list_windows".into(),
@@ -92,12 +104,7 @@ impl Tool for ListWindowsTool {
 
         let app_target = if app_context {
             let pid = pid_filter.expect("validated above");
-            match tokio::task::spawn_blocking(move || {
-                crate::ax::bindings::app_window_id_of_pid(pid)
-                    .and_then(crate::windows::window_info_by_id)
-            })
-            .await
-            {
+            match tokio::task::spawn_blocking(move || resolve_app_window(pid)).await {
                 Ok(target) => target,
                 Err(error) => {
                     return ToolResult::error(format!("Could not resolve app window: {error}"))

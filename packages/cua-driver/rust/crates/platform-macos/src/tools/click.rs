@@ -16,6 +16,10 @@
 use async_trait::async_trait;
 use cua_driver_contract::{ClickButton, ClickInput};
 use cua_driver_core::{
+    action_record::{
+        ActionEffect, ActionEvidence, ActionExecutionRecord, ActionTransport, ActualDelivery,
+        EvidenceKind, RequestedDelivery,
+    },
     protocol::ToolResult,
     tool::{Tool, ToolDef},
     tool_args::parse_typed_projection,
@@ -65,6 +69,25 @@ struct SelectionPixelTarget {
     screen_y: f64,
     window_x: f64,
     window_y: f64,
+}
+
+fn app_click_record(accessibility: bool) -> ActionExecutionRecord {
+    ActionExecutionRecord::builder(
+        ActionEffect::Unverifiable,
+        if accessibility {
+            ActionTransport::MacosAxAction
+        } else {
+            ActionTransport::MacosCgEventPid
+        },
+        RequestedDelivery::Foreground,
+    )
+    .actual_delivery(ActualDelivery::Foreground)
+    .evidence(ActionEvidence {
+        kind: EvidenceKind::NativeApiResult,
+        detail: "the app-bound click actuator completed".into(),
+    })
+    .build()
+    .expect("app click record is valid")
 }
 
 fn selection_readback_confirms(
@@ -1265,6 +1288,8 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
         return ToolResult::error("click.count must be at least 1");
     }
     let modifiers = args.str_array("modifier");
+    let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
+    let foreground = delivery_mode.is_foreground();
     let element = if let Some(index) = index {
         match state
             .element_cache
@@ -1302,10 +1327,13 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
     } else {
         BackgroundAction::WindowPointer
     };
-    let lease = match super::gate_background_window_action(pid, window_id, element_ptr, route).await
-    {
-        Ok(lease) => lease,
-        Err(error) => return error,
+    let lease = if foreground {
+        None
+    } else {
+        match super::gate_background_window_action(pid, window_id, element_ptr, route).await {
+            Ok(lease) => Some(lease),
+            Err(error) => return error,
+        }
     };
     let cursor_key = super::cursor_tools::resolve_cursor_key(&args);
     let point = if let Some(pointer) = element_ptr {
@@ -1358,41 +1386,59 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
             cursor_overlay::OverlayCommand::ClickPulse { x, y },
         );
     }
-    if let Err(error) = lease.gate_again(window_id, element_ptr, route).await {
-        return error;
+    if let Some(lease) = &lease {
+        if let Err(error) = lease.gate_again(window_id, element_ptr, route).await {
+            return error;
+        }
     }
-    let snapshot = WindowChangeDetector::snapshot_without_suppression(apps::frontmost_pid());
-    let result = focus_guard::with_focus_suppressed_now(Some(pid), "app.click", || async move {
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            // Pick one actuator before sending. AX errors propagate without a
-            // second pointer attempt, and text controls never receive AXFocused.
-            if let Some(action) = action {
-                let status = unsafe {
-                    crate::ax::bindings::perform_action(
-                        element_ptr.unwrap() as AXUIElementRef,
-                        action,
-                    )
+    let prior_front = apps::frontmost_pid();
+    let snapshot = if foreground {
+        WindowChangeDetector::snapshot_without_suppression(prior_front)
+    } else {
+        WindowChangeDetector::snapshot(prior_front)
+    };
+    let result = focus_guard::with_focus_suppressed(
+        if foreground { None } else { Some(pid) },
+        prior_front,
+        "app.click",
+        || async move {
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let dispatch = || -> anyhow::Result<()> {
+                    if let Some(action) = action {
+                        let status = unsafe {
+                            crate::ax::bindings::perform_action(
+                                element_ptr.unwrap() as AXUIElementRef,
+                                action,
+                            )
+                        };
+                        if status != kAXErrorSuccess {
+                            anyhow::bail!("{action} failed with AX error {status}");
+                        }
+                        Ok(())
+                    } else {
+                        let (point, local) = pointer_target.unwrap();
+                        let modifiers: Vec<&str> = modifiers.iter().map(String::as_str).collect();
+                        crate::input::app_pointer::click_button(
+                            pid,
+                            window_id,
+                            point,
+                            local,
+                            count,
+                            &modifiers,
+                            native_button,
+                        )
+                    }
                 };
-                if status != kAXErrorSuccess {
-                    anyhow::bail!("{action} failed with AX error {status}");
+                if foreground {
+                    crate::input::skylight::with_foreground_assist(pid, window_id, dispatch)?;
+                    Ok(())
+                } else {
+                    dispatch()
                 }
-                Ok(())
-            } else {
-                let (point, local) = pointer_target.unwrap();
-                let modifiers: Vec<&str> = modifiers.iter().map(String::as_str).collect();
-                crate::input::app_pointer::click_button(
-                    pid,
-                    window_id,
-                    point,
-                    local,
-                    count,
-                    &modifiers,
-                    native_button,
-                )
-            }
-        })
-        .await
-    })
+            })
+            .await
+        },
+    )
     .await;
     // Preserve the existing post-action observation interval so menu-close
     // notifications arrive before the next app observation.
@@ -1401,14 +1447,16 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
         Ok(Ok(())) => ToolResult::text(format!("Click dispatched.{}", changes.result_suffix()))
             .with_structured(serde_json::json!({
                 "path": if action.is_some() { "ax" } else { "cgevent" }, "verified": false, "effect": "unverifiable"
-            })),
+            }))
+            .with_action_record(app_click_record(action.is_some())),
         Ok(Err(_)) if changes.new_windows.iter().any(|window| window.pid == pid) => ToolResult::text(format!(
             "Click changed the app.{}",
             changes.result_suffix()
         ))
         .with_structured(serde_json::json!({
-            "path": if action.is_some() { "ax" } else { "cgevent" }, "verified": false, "effect": "partial"
-        })),
+            "path": if action.is_some() { "ax" } else { "cgevent" }, "verified": false, "effect": "unverifiable"
+        }))
+        .with_action_record(app_click_record(action.is_some())),
         Ok(Err(error)) => ToolResult::error(format!("click failed: {error}")),
         Err(error) => ToolResult::error(format!("click task failed: {error}")),
     }

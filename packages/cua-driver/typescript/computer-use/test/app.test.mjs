@@ -16,7 +16,7 @@ function fixture({ apps = [{ ...appRecord }], windows = [{ ...document }], obser
   let revision = 0;
   const driver = {
     async listToolsJson() {
-      return JSON.stringify({ tools: [{ name: "get_window_state", capabilities: ["accessibility.observation_revision.v1"] }] });
+      return JSON.stringify({ platform: "macos", tools: [{ name: "get_window_state", capabilities: ["accessibility.observation_revision.v1"] }] });
     },
     async listApps(input) { calls.push({ method: "listApps", input }); return result({ apps }); },
     async listWindows(input) { calls.push({ method: "listWindows", input }); return result({ windows }); },
@@ -64,12 +64,15 @@ test("app aliases bind the same handle and hide OS addressing from state", async
   assert.equal(calls.at(-1).input.windowId, 7n);
   assert.equal(calls.at(-1).input.elementIndex, undefined);
   assert.equal(calls.at(-1).input.appContext, true);
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
   await app.typeText("owned text");
   assert.equal(calls.at(-1).input.appContext, true);
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
   assert.equal(calls.at(-1).input.text, "owned text");
   for (const method of ["doubleClick", "rightClick"]) {
     await app[method](37);
     assert.equal(calls.at(-1).input.appContext, true);
+    assert.equal(calls.at(-1).input.deliveryMode, "foreground");
     assert.equal(calls.at(-1).input.elementToken, "rv1:window_7:25");
   }
 });
@@ -78,6 +81,24 @@ test("app resolution rejects ambiguous names instead of selecting the first proc
   const { computer } = fixture({ apps: [appRecord, { ...appRecord, pid: 84, bundle_id: "org.other.fixture", launch_path: "/Applications/OtherFixture.app" }] });
   await assert.rejects(computer.getApp("Fixture"), { code: "app_ambiguous" });
   assert.equal((await computer.getApp("org.other.fixture")).name, "Fixture");
+});
+
+test("macOS app discovery exposes only stable application identity", async () => {
+  const { computer } = fixture({
+    apps: [{
+      ...appRecord,
+      active: true,
+      kind: "desktop",
+      last_used: "2026-09-13T00:00:00Z",
+      windows: [{ window_id: 7, title: "Document" }],
+    }],
+  });
+  assert.deepEqual(await computer.listApps(), [{
+    id: "org.example.fixture",
+    displayName: "Fixture",
+    isRunning: true,
+  }]);
+  assert.equal((await computer.getApp("Fixture")).name, "Fixture");
 });
 
 test("native app target changes invalidate prior element IDs", async () => {
@@ -110,18 +131,18 @@ test("native target selection ignores z order and on-screen ordering", async () 
   assert.equal((await (await computer.getApp("Fixture")).getState()).window, "Document");
 });
 
-test("app input dispatches once and delegates the drag route to native app context", async () => {
+test("app input activates the exact target once without exposing a mode choice", async () => {
   const { computer, calls, windows } = fixture();
   const app = await computer.getApp("Fixture");
   await app.getState();
   await app.pressKey("Return");
-  assert.equal(calls.at(-1).input.deliveryMode, "background");
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
   windows.push(dialog);
   await app.getState({ includeScreenshot: true });
   await app.pressKey("Return");
-  assert.equal(calls.at(-1).input.deliveryMode, "background");
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
   await app.drag({ fromX: 1, fromY: 2, toX: 20, toY: 25 });
-  assert.equal(calls.at(-1).input.deliveryMode, "background");
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
   assert.equal(calls.at(-1).input.appContext, true);
   assert.equal(calls.filter((call) => call.method === "windowPressKey").length, 2);
   assert.equal(calls.filter((call) => call.method === "windowDrag").length, 1);
@@ -170,7 +191,7 @@ test("missing capability metadata does not make the facade choose another input 
   const app = await computer.getApp("Fixture");
   await app.getState();
   await app.pressKey("Return");
-  assert.equal(calls.at(-1).input.deliveryMode, "background");
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
   assert.equal(calls.filter((call) => call.method === "windowPressKey").length, 1);
 });
 
@@ -308,41 +329,13 @@ test("app API preserves actionable validation errors before dispatch", async () 
   assert.equal(calls.filter((call) => mutations.includes(call.method)).length, 0);
 });
 
-test("a structured pre-actuator refusal retries once in foreground", async () => {
-  let attempts = 0;
-  const { computer, calls } = fixture({ action: () => {
-    attempts += 1;
-    return attempts === 1 ? result({ code: "same_pid_keyboard_ambiguity", effect: "refused", escalation: { recommended: "foreground" } }, { isError: true }) : result({ effect: "confirmed" });
-  } });
+test("an app input refusal is not replayed after its automatic foreground attempt", async () => {
+  const { computer, calls } = fixture({ action: () =>
+    result({ code: "input_unavailable", effect: "refused" }, { isError: true }) });
   const app = await computer.getApp("Fixture");
   await app.getState();
-  assert.deepEqual(await app.pressKey("Return"), { effect: "confirmed" });
-  assert.equal(attempts, 2);
-  assert.deepEqual(calls.filter((call) => call.method === "windowPressKey").map((call) => call.input.deliveryMode), ["background", "foreground"]);
-});
-
-test("foreground click retry leaves app-bound background routing", async () => {
-  let attempts = 0;
-  const { computer, calls } = fixture({ action: () => {
-    attempts += 1;
-    return attempts === 1 ? result({ code: "background_unavailable", effect: "refused", escalation: { recommended: "foreground" } }, { isError: true }) : result({ effect: "confirmed" });
-  } });
-  const app = await computer.getApp("Fixture");
-  await app.getState();
-  assert.deepEqual(await app.click(37), { effect: "confirmed" });
-  const clicks = calls.filter((call) => call.method === "windowClick").map((call) => call.input);
-  assert.equal(clicks[0].appContext, true);
-  assert.equal(clicks[0].deliveryMode, "background");
-  assert.equal(clicks[1].appContext, undefined);
-  assert.equal(clicks[1].deliveryMode, "foreground");
-});
-
-test("a foreground retry failure is never retried again", async () => {
-  const { computer, calls } = fixture({ action: () => result({ code: "background_unavailable", effect: "refused", escalation: { recommended: "foreground" } }, { isError: true }) });
-  const app = await computer.getApp("Fixture");
-  await app.getState();
-  await assert.rejects(app.pressKey("Return"), { code: "background_unavailable" });
-  assert.deepEqual(calls.filter((call) => call.method === "windowPressKey").map((call) => call.input.deliveryMode), ["background", "foreground"]);
+  await assert.rejects(app.pressKey("Return"), { code: "input_unavailable" });
+  assert.deepEqual(calls.filter((call) => call.method === "windowPressKey").map((call) => call.input.deliveryMode), ["foreground"]);
 });
 
 test("getState returns a compact state when a running app has no windows", async () => {
