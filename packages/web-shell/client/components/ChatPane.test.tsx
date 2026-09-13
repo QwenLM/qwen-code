@@ -554,6 +554,9 @@ describe('ChatPane', () => {
       },
     );
     render({ registerContextUsageControls });
+    expect(latestChatEditorProps.contextUsageControls).toBe(
+      registerContextUsageControls.mock.calls.at(-1)![0],
+    );
     expect(registerContextUsageControls).toHaveBeenLastCalledWith(
       expect.objectContaining({
         sessionId: connectionState.sessionId,
@@ -3040,6 +3043,22 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.tokenCount).toBe(0);
     expect(latestChatEditorProps.contextWindow).toBe(0);
     expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
+  });
+
+  it('opens composer details with the pane session and actions without adding a snapshot', () => {
+    const onOpenContextUsage = vi.fn();
+    render({ onOpenContextUsage });
+    act(() => latestChatEditorProps.onOpenContextUsage());
+    expect(onOpenContextUsage).toHaveBeenCalledExactlyOnceWith(
+      connectionState.sessionId,
+      daemonActions,
+    );
+    expect(appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(getContextUsage).not.toHaveBeenCalled();
+    connectionState.status = 'error';
+    rerender({ onOpenContextUsage });
+    expect(latestChatEditorProps.onOpenContextUsage).toBeUndefined();
+    expect(latestChatEditorProps.contextUsageControls.canCompress).toBe(false);
   });
 
   it('shows context usage for this pane session', async () => {

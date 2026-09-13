@@ -964,6 +964,42 @@ describe('ChatEditor context usage ring', () => {
     expect(ring(noWindow)).toBeNull();
   });
 
+  it('keeps live hover actions available for an always-visible ring with unknown counts', async () => {
+    const compress = vi.fn().mockResolvedValue(undefined);
+    const onOpenContextUsage = vi.fn();
+    const onShowContextUsage = vi.fn();
+    const getContextUsage = vi.fn();
+    const container = renderChatEditor({
+      contextUsageAlwaysVisible: true,
+      onOpenContextUsage,
+      onShowContextUsage,
+      contextUsageControls: {
+        sessionId: 'session-1',
+        captureOwner: () => ({ isCurrent: () => true }),
+        canCompress: true,
+        compressing: false,
+        compress,
+        getContextUsage,
+      },
+    });
+    await act(async () => ring(container)!.focus());
+    const card = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(card.querySelector('dl')).toBeNull();
+    const buttons = Array.from(card.querySelectorAll('button'));
+    const compression = buttons.find(
+      (button) => button.textContent === 'Compress context',
+    )!;
+    expect(compression.disabled).toBe(false);
+    await act(async () => compression.click());
+    expect(compress).toHaveBeenCalledOnce();
+    await act(async () =>
+      buttons.find((button) => button.textContent === 'View details')!.click(),
+    );
+    expect(onOpenContextUsage).toHaveBeenCalledOnce();
+    expect(onShowContextUsage).not.toHaveBeenCalled();
+    expect(getContextUsage).not.toHaveBeenCalled();
+  });
+
   it('opens the context breakdown when clicked', () => {
     const onShowContextUsage = vi.fn();
     const container = renderChatEditor({
@@ -981,7 +1017,7 @@ describe('ChatEditor context usage ring', () => {
     expect(onShowContextUsage).toHaveBeenCalledTimes(1);
   });
 
-  it('shows the used/total detail in a tooltip on focus', async () => {
+  it('shows the used/total detail in the hover card on focus', async () => {
     const container = renderChatEditor({
       tokenCount: 53_600,
       contextWindow: 1_000_000,
@@ -992,7 +1028,7 @@ describe('ChatEditor context usage ring', () => {
       ring(container)!.focus();
     });
 
-    const tooltip = document.querySelector('[data-slot="tooltip-content"]')!;
+    const tooltip = document.querySelector('[data-web-shell-context-popover]')!;
     expect(tooltip.textContent).toContain('Context Usage');
     expect(tooltip.textContent).toContain('5.4%');
     expect(tooltip.textContent).toContain('53,600 tokens');
@@ -1005,20 +1041,10 @@ describe('ChatEditor context usage ring', () => {
       tooltip.querySelector<HTMLElement>('[data-level]')?.style.width,
     ).toBe('5.36%');
     expect(
-      document.getElementById(
-        ring(container)!.getAttribute('aria-describedby')!,
-      )?.textContent,
-    ).toBe('53,600 of 1,000,000 tokens used');
-    const arrow = document.querySelector<SVGElement>(
-      '[data-slot="tooltip-arrow"]',
-    );
-    expect(arrow?.querySelectorAll('path')).toHaveLength(2);
-    expect(arrow?.style.transform).toBe(
-      'translateY(var(--floating-arrow-offset))',
-    );
-    expect(
-      arrow?.closest('[data-slot="tooltip-content"]')?.getAttribute('class'),
-    ).toContain('[--floating-arrow-offset:-1px]');
+      document
+        .getElementById(ring(container)!.getAttribute('aria-controls')!)
+        ?.getAttribute('aria-label'),
+    ).toBe('Context Usage');
   });
 
   it('shows zero remaining capacity when usage exceeds the context window', async () => {
@@ -1031,7 +1057,7 @@ describe('ChatEditor context usage ring', () => {
       ring(container)!.focus();
     });
     expect(
-      document.querySelector('[data-slot="tooltip-content"]')?.textContent,
+      document.querySelector('[data-web-shell-context-popover]')?.textContent,
     ).toContain('Remaining0 tokens');
   });
 
@@ -1058,7 +1084,7 @@ describe('ChatEditor context usage ring', () => {
       ).toBe(level);
       expect(
         document
-          .querySelector('[data-slot="tooltip-content"] [data-level]')
+          .querySelector('[data-web-shell-context-popover] [data-level]')
           ?.getAttribute('data-level'),
       ).toBe(level);
     },

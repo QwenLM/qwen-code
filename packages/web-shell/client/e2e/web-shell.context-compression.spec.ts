@@ -110,9 +110,54 @@ for (const theme of ['light', 'dark']) {
       .getByRole('group', { name: 'Context Usage', exact: true })
       .first();
     await expect(historical).toContainText('Snapshot');
-    await page
-      .getByRole('button', { name: 'Context Usage', exact: true })
+    const editor = page.locator(
+      '[data-web-shell-composer-surface] .cm-content[contenteditable="true"]',
+    );
+    await editor.click();
+    await editor.fill('Keep this draft while compressing');
+    const readsBeforeHover = reads;
+    await ring.hover();
+    const hover = page.locator('[data-web-shell-context-popover]');
+    await expect(hover).toBeVisible();
+    await expect(hover).toContainText('36,000 tokens');
+    await expect(editor).toBeFocused();
+    expect(reads).toBe(readsBeforeHover);
+    expect(submitted).toHaveLength(0);
+    await ring.focus();
+    await ring.press('Escape');
+    await ring.press('ArrowDown');
+    const firstAction = hover.getByRole('button', {
+      name: 'Compress context',
+      exact: true,
+    });
+    const secondAction = hover.getByRole('button', {
+      name: 'View details',
+      exact: true,
+    });
+    await expect(firstAction).toBeFocused();
+    await firstAction.press('Tab');
+    await expect(secondAction).toBeFocused();
+    await secondAction.press('Shift+Tab');
+    await expect(firstAction).toBeFocused();
+    expect(
+      daemon.requests.filter((request) =>
+        request.path.endsWith('/approval-mode'),
+      ),
+    ).toHaveLength(0);
+    await firstAction.press('Escape');
+    await editor.click();
+    await expect(hover).not.toBeVisible();
+    await expect(editor).toBeFocused();
+    await ring.hover();
+    await hover
+      .getByRole('button', { name: 'View details', exact: true })
       .click();
+    await expect(hover).not.toBeVisible();
+    await expect(
+      page
+        .getByRole('group', { name: 'Context Usage', exact: true })
+        .filter({ hasText: 'Snapshot' }),
+    ).toHaveCount(1);
     const panel = page.locator('[class*="panel"][aria-busy]');
     const feedbackColor =
       theme === 'dark' ? 'rgb(160, 160, 160)' : 'rgb(95, 98, 89)';
@@ -123,11 +168,19 @@ for (const theme of ['light', 'dark']) {
       exact: true,
     });
     await expect(compress).toBeEnabled();
-    const editor = page.locator(
-      '[data-web-shell-composer-surface] .cm-content[contenteditable="true"]',
-    );
-    await editor.fill('Keep this draft while compressing');
-    await compress.evaluate((button: HTMLButtonElement) => {
+    await ring.focus();
+    await ring.press('ArrowDown');
+    const hoverCompress = hover.getByRole('button', {
+      name: 'Compress context',
+      exact: true,
+    });
+    await expect(hoverCompress).toBeFocused();
+    await hoverCompress.press('Escape');
+    await expect(hover).not.toBeVisible();
+    await expect(ring).toBeFocused();
+    await ring.press('ArrowDown');
+    await expect(hoverCompress).toBeFocused();
+    await hoverCompress.evaluate((button: HTMLButtonElement) => {
       button.click();
       button.click();
     });
@@ -137,6 +190,9 @@ for (const theme of ['light', 'dark']) {
     });
     await expect(
       panel.getByRole('button', { name: 'Compressing…', exact: true }),
+    ).toBeDisabled();
+    await expect(
+      hover.getByRole('button', { name: 'Compressing…', exact: true }),
     ).toBeDisabled();
     await expect(
       panel.getByRole('button', { name: 'Refresh', exact: true }),
@@ -172,8 +228,15 @@ for (const theme of ['light', 'dark']) {
       path: testInfo.outputPath(`context-compressed-${theme}.png`),
     });
 
+    await hover
+      .getByRole('button', { name: 'View details', exact: true })
+      .click();
     await compress.click();
     await expect.poll(() => submitted.length).toBe(2);
+    await ring.hover();
+    await expect(
+      hover.getByRole('button', { name: 'Compressing…', exact: true }),
+    ).toBeDisabled();
     await daemon.sendEvent({
       id: 40,
       v: 1,
@@ -189,6 +252,12 @@ for (const theme of ['light', 'dark']) {
       'Compression failed. You can try again.',
     );
     await expect(panel.getByRole('alert')).toHaveCSS('color', errorColor);
+    await expect(hover.getByRole('alert')).toHaveText(
+      'Compression failed. You can try again.',
+    );
+    await hover
+      .getByRole('button', { name: 'View details', exact: true })
+      .click();
     await expect(compress).toBeEnabled();
     await expect(ring).toHaveAttribute('aria-label', '20.0% context used');
 

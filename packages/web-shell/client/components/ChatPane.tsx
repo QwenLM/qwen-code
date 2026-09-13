@@ -229,6 +229,10 @@ export interface ChatPaneProps {
   ) => void;
   registerContextUsageControls?: RegisterContextUsageControls;
   onBeforeContextCompress?: (sessionId: string) => void;
+  onOpenContextUsage?: (
+    sessionId: string,
+    sessionActions: DaemonSessionActions,
+  ) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
@@ -274,6 +278,7 @@ export function ChatPane({
   onPaneArtifactsChange,
   registerContextUsageControls,
   onBeforeContextCompress,
+  onOpenContextUsage,
   messageTurnOutputs,
   embedded = false,
   onFirstPromptAdmitted,
@@ -1795,6 +1800,15 @@ export function ChatPane({
             }
             onShowContextUsage={
               contextUsageAvailable ? handleShowContextUsage : undefined
+            }
+            contextUsageControls={contextUsageControls}
+            onOpenContextUsage={
+              contextUsageAvailable && onOpenContextUsage
+                ? () => {
+                    if (connection.sessionId)
+                      onOpenContextUsage(connection.sessionId, actions);
+                  }
+                : undefined
             }
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}

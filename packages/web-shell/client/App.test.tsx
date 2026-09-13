@@ -9,7 +9,10 @@ import {
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
-import type { RegisterContextUsageControls } from './hooks/useContextUsageControls';
+import type {
+  ContextUsageControls,
+  RegisterContextUsageControls,
+} from './hooks/useContextUsageControls';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import * as browserNotifications from './browser-turn-notifications';
 import {
@@ -206,6 +209,8 @@ type ChatEditorTestProps = {
   tokenCount?: number;
   contextWindow?: number;
   onShowContextUsage?: () => void;
+  onOpenContextUsage?: () => void;
+  contextUsageControls?: ContextUsageControls;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
 };
 
@@ -727,6 +732,10 @@ const {
       latestSplitViewProps: null as {
         registerContextUsageControls?: RegisterContextUsageControls;
         onBeforeContextCompress?: (sessionId: string) => void;
+        onOpenContextUsage?: (
+          sessionId: string,
+          actions: typeof mockPaneSessionActions,
+        ) => void;
         onPendingPanesChange?: (ids: string[]) => void;
         showSessionDetails?: boolean;
         includeOtherWorkspaces?: boolean;
@@ -14925,6 +14934,59 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
       detail: false,
     });
+  });
+
+  it('opens details and compresses through the composer with the header entry hidden', async () => {
+    mockConnection.commands = [
+      { name: 'compress', description: '', source: 'builtin-command' },
+    ];
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'session-1',
+    });
+    renderApp({ header: { items: [] } });
+    await flush();
+    expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
+    await act(async () =>
+      testState.latestChatEditorProps!.onOpenContextUsage!(),
+    );
+    await flush();
+    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
+      detail: true,
+      silent: true,
+    });
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+    let finish!: (result: { stopReason: string }) => void;
+    mockSessionActions.sendPrompt.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    let compression!: Promise<void>;
+    act(() => {
+      compression =
+        testState.latestChatEditorProps!.contextUsageControls!.compress();
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledExactlyOnceWith(
+      '/compress',
+    );
+    expect(testState.latestChatEditorProps!.contextUsageControls).toMatchObject(
+      { canCompress: false, compressing: true },
+    );
+    const panelButton = Array.from(
+      document.body.querySelectorAll('button'),
+    ).find((button) => button.textContent === 'Compressing…')!;
+    expect(panelButton.disabled).toBe(true);
+    await act(async () => {
+      finish({ stopReason: 'end_turn' });
+      await compression;
+    });
+    expect(
+      testState.latestChatEditorProps!.contextUsageControls?.result?.kind,
+    ).toBe('completed');
+    expect(document.body.textContent).toContain(
+      'Compression completed. Context usage refreshed.',
+    );
   });
 
   it('suppresses stale composer context usage on error and restores it on reconnect', async () => {
@@ -29934,101 +29996,115 @@ describe('App session callbacks', () => {
     expect(document.body.textContent).not.toContain('qwen-plus::hybrid');
   });
 
-  it('opens context usage from a split pane and closes it when the pane is removed', async () => {
-    mockPaneSessionActions.getContextUsage.mockClear();
-    const { container } = renderApp({
-      sidebar: false,
-      splitSessionIds: ['s1'],
-      header: { items: ['contextUsage'] },
-    });
-    await flush();
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="split-header-actions"] [aria-label="Context Usage"]',
-        )!
-        .click();
-    });
-    await flush();
-    // The pane opener must bind the pane's own session actions, not the
-    // main session's: only the pane mock resolves a renderable payload.
-    expect(mockPaneSessionActions.getContextUsage).toHaveBeenCalledWith({
-      detail: true,
-      silent: true,
-    });
-    expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain('pane-only-model');
-    const compressionButton = () =>
-      Array.from(document.body.querySelectorAll('button')).find(
-        (button) => button.textContent === 'Compress context',
-      )!;
-    expect(compressionButton().disabled).toBe(true);
-    const compress = vi.fn().mockResolvedValue(undefined);
-    const controls = {
-      sessionId: 's1',
-      captureOwner: () => ({ isCurrent: () => true }),
-      canCompress: true,
-      compressing: false,
-      compress,
-      getContextUsage: mockPaneSessionActions.getContextUsage,
-    };
-    let unregister!: () => void;
-    act(() => {
-      unregister =
-        testState.latestSplitViewProps!.registerContextUsageControls!(controls);
-    });
-    expect(compressionButton().disabled).toBe(false);
-    await act(async () => compressionButton().click());
-    expect(compress).toHaveBeenCalledOnce();
-    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
-    const replacementCompress = vi.fn().mockResolvedValue(undefined);
-    let unregisterReplacement!: () => void;
-    act(() => {
-      unregisterReplacement = testState.latestSplitViewProps!
-        .registerContextUsageControls!({
-        ...controls,
-        compress: replacementCompress,
+  it.each(['header', 'composer'] as const)(
+    'opens context usage from a split pane %s and closes it when the pane is removed',
+    async (entry) => {
+      mockPaneSessionActions.getContextUsage.mockClear();
+      const { container } = renderApp({
+        sidebar: false,
+        splitSessionIds: ['s1'],
+        header: { items: entry === 'header' ? ['contextUsage'] : [] },
       });
-    });
-    act(() => unregister());
-    expect(compressionButton().disabled).toBe(false);
-    await act(async () => compressionButton().click());
-    expect(replacementCompress).toHaveBeenCalledOnce();
-    act(() => unregisterReplacement());
-    expect(compressionButton().disabled).toBe(true);
+      await flush();
+      await act(async () => {
+        if (entry === 'composer') {
+          testState.latestSplitViewProps!.onOpenContextUsage!(
+            's1',
+            mockPaneSessionActions,
+          );
+          return;
+        }
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="split-header-actions"] [aria-label="Context Usage"]',
+          )!
+          .click();
+      });
+      await flush();
+      // The pane opener must bind the pane's own session actions, not the
+      // main session's: only the pane mock resolves a renderable payload.
+      expect(mockPaneSessionActions.getContextUsage).toHaveBeenCalledWith({
+        detail: true,
+        silent: true,
+      });
+      expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain('pane-only-model');
+      const compressionButton = () =>
+        Array.from(document.body.querySelectorAll('button')).find(
+          (button) => button.textContent === 'Compress context',
+        )!;
+      expect(compressionButton().disabled).toBe(true);
+      const compress = vi.fn().mockResolvedValue(undefined);
+      const controls = {
+        sessionId: 's1',
+        captureOwner: () => ({ isCurrent: () => true }),
+        canCompress: true,
+        compressing: false,
+        compress,
+        getContextUsage: mockPaneSessionActions.getContextUsage,
+      };
+      let unregister!: () => void;
+      act(() => {
+        unregister =
+          testState.latestSplitViewProps!.registerContextUsageControls!(
+            controls,
+          );
+      });
+      expect(compressionButton().disabled).toBe(false);
+      await act(async () => compressionButton().click());
+      expect(compress).toHaveBeenCalledOnce();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      const replacementCompress = vi.fn().mockResolvedValue(undefined);
+      let unregisterReplacement!: () => void;
+      act(() => {
+        unregisterReplacement = testState.latestSplitViewProps!
+          .registerContextUsageControls!({
+          ...controls,
+          compress: replacementCompress,
+        });
+      });
+      act(() => unregister());
+      expect(compressionButton().disabled).toBe(false);
+      await act(async () => compressionButton().click());
+      expect(replacementCompress).toHaveBeenCalledOnce();
+      act(() => unregisterReplacement());
+      expect(compressionButton().disabled).toBe(true);
 
-    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        text: expect.stringContaining('web-shell:context-usage:v1:'),
-      }),
-    ]);
-    expect(
-      document.body.querySelector('button[aria-label="Close Context Usage"]'),
-    ).not.toBeNull();
-    // The pane-bound flag must survive serialization, or the reclaim
-    // machinery can never recognize the tab after a refresh.
-    const persisted = JSON.parse(
-      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
-        '{}',
-    );
-    expect(persisted['/tmp/project\0session-1'].tabs).toContainEqual({
-      id: 'context-usage:s1',
-      kind: 'context_usage',
-      title: 'Context Usage',
-      sessionId: 's1',
-      closeWithPane: true,
-    });
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="split-remove-panes"]')!
-        .click();
-    });
-    expect(
-      document.body.querySelector('button[aria-label="Close Context Usage"]'),
-    ).toBeNull();
-  });
+      expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          text: expect.stringContaining('web-shell:context-usage:v1:'),
+        }),
+      ]);
+      expect(
+        document.body.querySelector('button[aria-label="Close Context Usage"]'),
+      ).not.toBeNull();
+      // The pane-bound flag must survive serialization, or the reclaim
+      // machinery can never recognize the tab after a refresh.
+      const persisted = JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      );
+      expect(persisted['/tmp/project\0session-1'].tabs).toContainEqual({
+        id: 'context-usage:s1',
+        kind: 'context_usage',
+        title: 'Context Usage',
+        sessionId: 's1',
+        closeWithPane: true,
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="split-remove-panes"]',
+          )!
+          .click();
+      });
+      expect(
+        document.body.querySelector('button[aria-label="Close Context Usage"]'),
+      ).toBeNull();
+    },
+  );
 
   it('blocks context compression while the main approval overlay is open', async () => {
     mockConnection.commands = [
