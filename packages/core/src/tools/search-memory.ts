@@ -8,6 +8,7 @@ import type { Config } from '../config/config.js';
 import { logMemorySearch, MemorySearchEvent } from '../telemetry/index.js';
 import {
   executeSearchMemory,
+  isRangeCovered,
   type MemoryBodyCoverage,
   type SearchMemoryToolResult,
   type SearchMemoryToolParams,
@@ -112,15 +113,6 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
       }
       throw error;
     }
-    callBodyPresentVersions.forEach((version, ref) => {
-      // Commit only what the call itself wrote: replaying untouched pre-call
-      // entries would resurrect state a mid-call eviction cleared on purpose.
-      if (preCallBodyPresentVersions.get(ref) === version) return;
-      const live = bodyPresentVersions.get(ref);
-      if (live === undefined || live < version) {
-        bodyPresentVersions.set(ref, version);
-      }
-    });
     callBodyCoverage.forEach((coverage, ref) => {
       const before = preCallBodyCoverage.get(ref);
       if (before !== undefined && sameBodyCoverage(before, coverage)) return;
@@ -172,6 +164,27 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
         }
       }
       live.ranges.sort((a, b) => a.start - b.start);
+    });
+    callBodyPresentVersions.forEach((version, ref) => {
+      // Commit only what the call itself wrote: replaying untouched pre-call
+      // entries would resurrect state a mid-call eviction cleared on purpose.
+      if (preCallBodyPresentVersions.get(ref) === version) return;
+      // The "whole body is present" claim must rest on the coverage that
+      // survived the merge above, not on the call's clone: a mid-call
+      // eviction strips the inherited ranges, and committing the claim anyway
+      // would make every later fetch return alreadyAvailable with no content.
+      const merged = bodyCoverage.get(ref);
+      if (
+        !merged ||
+        merged.version !== version ||
+        !isRangeCovered(merged.ranges, { start: 0, end: merged.total })
+      ) {
+        return;
+      }
+      const live = bodyPresentVersions.get(ref);
+      if (live === undefined || live < version) {
+        bodyPresentVersions.set(ref, version);
+      }
     });
     callExhaustedBodyRefs.forEach((ref) => {
       if (!preCallExhaustedBodyRefs.has(ref)) {

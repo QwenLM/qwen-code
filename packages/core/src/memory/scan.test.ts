@@ -189,6 +189,69 @@ describe('auto-memory topic scanning', () => {
     });
   });
 
+  it('keeps bare number and boolean scalars in free-text frontmatter fields', () => {
+    // `name: 10183` parses as a YAML number; dropping it makes the topic
+    // render as its own type and strict validation demand a migration.
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/issue-number.md',
+      [
+        '---',
+        'name: 10183',
+        'description: 42',
+        'type: project',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+    expect(parsed?.title).toBe('10183');
+    expect(parsed?.description).toBe('42');
+
+    const structured = [
+      '---',
+      'name: 10183',
+      'description: Rescue issue-numbered memories',
+      'type: project',
+      'category: project_introduction',
+      'keywords:',
+      '  - migration',
+      '  - rescue',
+      'usage_scenarios:',
+      '  - Recovering a numbered topic',
+      '---',
+      'Body.',
+    ].join('\n');
+    expect(validateStructuredAutoMemoryDocument(structured)).toEqual({
+      valid: true,
+      missingOrInvalidFields: [],
+    });
+  });
+
+  it('keeps fixed-vocabulary frontmatter fields closed to coerced scalars', () => {
+    // Coercion must not smuggle a number into the closed vocabularies:
+    // `type: 1` coerces to "1", which is still not an AUTO_MEMORY_TYPES member.
+    const content = [
+      '---',
+      'name: Vocabulary stays closed',
+      'description: Numeric type must not validate',
+      'type: 1',
+      'category: project_introduction',
+      'keywords:',
+      '  - vocabulary',
+      '  - coercion',
+      'usage_scenarios:',
+      '  - Checking the membership guard',
+      '---',
+      'Body.',
+    ].join('\n');
+    expect(validateStructuredAutoMemoryDocument(content)).toEqual({
+      valid: false,
+      missingOrInvalidFields: ['type'],
+    });
+    expect(
+      parseAutoMemoryTopicDocument('/tmp/numeric-type.md', content),
+    ).toBeNull();
+  });
+
   it('rejects duplicate or malformed structured keyword arrays', () => {
     const content = [
       '---',

@@ -5466,8 +5466,7 @@ export class LlmClient {
         info.newTokenCount,
         info.newTokenCountIsEstimated ?? true,
       );
-      this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
-      this.config.getMemoryManager().markAllMemoryBodiesEvictedFromHistory();
+      this.resetManagedAutoMemoryAfterCompression();
       // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context
       // that lived inside the previous user prompt.

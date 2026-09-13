@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 import type { Config } from '../config/config.js';
 import { getAutoMemoryFilePath } from './paths.js';
 import { resolveRelevantAutoMemoryPromptForQuery } from './recall.js';
@@ -16,22 +17,22 @@ import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js
 import { ensureAutoMemoryScaffold } from './store.js';
 
 /**
- * Measures steady-state recall latency with a warm document cache.
+ * Measures cold and steady-state recall scan latency.
  *
  * `recall-delivery-eval.test.ts` times the deterministic *scoring*, which is
  * microseconds. That is not what decides whether the fast path delivers. The
  * fast result is published from `onFastResult`, which fires only after recall
- * has enumerated every topic file. The first run also reads and parses each
- * file; measured runs reuse the same session-like document cache.
+ * has enumerated, read, and parsed every topic file — and the cold first scan
+ * is the one the initial-turn budget has to cover, since a session's
+ * `documentCache` starts empty.
  *
  * So this file measures wall-clock time from the recall call to the fast
  * callback, against a real temporary memory tree, with the model selector
- * mocked to hang the way a network round trip does.
+ * mocked to hang the way a network round trip does — once with no document
+ * cache (first session turn) and once reusing a session-like cache.
  *
  * Timings are machine-dependent and CI is shared, so the assertions are
- * deliberately loose; the printed table is the artifact worth reading. What
- * is asserted is the narrower steady-state claim. This benchmark does not
- * certify first-session cold-cache latency.
+ * deliberately loose; the printed table is the artifact worth reading.
  */
 
 vi.mock('./relevanceSelector.js', () => ({
@@ -56,6 +57,16 @@ const SHARED_CI = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') === true;
 const FAST_RESULT_CEILING_MS = SHARED_CI
   ? INITIAL_BUDGET_MS * 10
   : INITIAL_BUDGET_MS / 2;
+// The cold scan is what the initial-turn budget actually has to cover, so the
+// smaller corpi face the budget itself. The 1000-topic row sits just over it
+// even at one YAML parse per file (~104ms measured) — the budget was sized for
+// the warm path — so its ceiling is the measured cost with ~20% slack, which
+// still reddens if the frontmatter rescue's second CST parse returns (~+48%
+// at 1000 files). On the shared pool expectWithinLatencyBudget loosens the
+// bound rather than measuring the neighbours.
+function coldScanCeilingMs(topicCount: number): number {
+  return topicCount >= 1000 ? INITIAL_BUDGET_MS * 1.25 : INITIAL_BUDGET_MS;
+}
 
 let tempDir: string;
 const projectRootByCount = new Map<number, string>();
@@ -101,13 +112,11 @@ async function buildMemoryTree(topicCount: number): Promise<string> {
 }
 
 /** Wall-clock ms from the recall call until the fast result is published. */
-async function measureTimeToFastResultMs(projectRoot: string): Promise<number> {
+async function measureTimeToFastResultMs(
+  projectRoot: string,
+  documentCache?: AutoMemoryDocumentCache,
+): Promise<number> {
   let elapsed = Number.NaN;
-  let documentCache = documentCacheByProject.get(projectRoot);
-  if (!documentCache) {
-    documentCache = new Map();
-    documentCacheByProject.set(projectRoot, documentCache);
-  }
   const startedAt = performance.now();
   const recall = resolveRelevantAutoMemoryPromptForQuery(
     projectRoot,
@@ -127,6 +136,16 @@ async function measureTimeToFastResultMs(projectRoot: string): Promise<number> {
   // Let the pending recall settle so it does not leak into the next sample.
   await recall;
   return elapsed;
+}
+
+/** The per-project session-like cache, created on first use. */
+function sessionCacheFor(projectRoot: string): AutoMemoryDocumentCache {
+  let documentCache = documentCacheByProject.get(projectRoot);
+  if (!documentCache) {
+    documentCache = new Map();
+    documentCacheByProject.set(projectRoot, documentCache);
+  }
+  return documentCache;
 }
 
 describe('auto-memory recall scan latency', () => {
@@ -153,11 +172,19 @@ describe('auto-memory recall scan latency', () => {
     for (const topicCount of TOPIC_COUNTS) {
       const projectRoot = projectRootByCount.get(topicCount)!;
       // Populate the session-like document cache before steady-state samples.
-      await measureTimeToFastResultMs(projectRoot);
+      await measureTimeToFastResultMs(
+        projectRoot,
+        sessionCacheFor(projectRoot),
+      );
 
       const samples: number[] = [];
       for (let i = 0; i < REPEATS; i += 1) {
-        samples.push(await measureTimeToFastResultMs(projectRoot));
+        samples.push(
+          await measureTimeToFastResultMs(
+            projectRoot,
+            sessionCacheFor(projectRoot),
+          ),
+        );
       }
       samples.sort((a, b) => a - b);
       const best = samples[0];
@@ -197,6 +224,56 @@ describe('auto-memory recall scan latency', () => {
         'branch replaced. That is why the wait ends on the fast result rather',
         'than always running to the ceiling: it removes the cost for every tree',
         'small enough to scan in time, and bounds it for the rest.',
+      ].join('\n'),
+    );
+  }, 120_000);
+
+  it('publishes the cold-scan fast result inside the initial budget', async () => {
+    // No documentCache: the first turn of a session scans with an empty one,
+    // so this is the sample the initial-turn budget actually has to cover.
+    const rows: Array<[number, number, number, number]> = [];
+
+    for (const topicCount of TOPIC_COUNTS) {
+      const projectRoot = projectRootByCount.get(topicCount)!;
+
+      const samples: number[] = [];
+      for (let i = 0; i < REPEATS; i += 1) {
+        samples.push(await measureTimeToFastResultMs(projectRoot));
+      }
+      samples.sort((a, b) => a - b);
+      const best = samples[0];
+      const median = samples[Math.floor(samples.length / 2)];
+      const worst = samples[samples.length - 1];
+      rows.push([topicCount, best, median, worst]);
+
+      expect(Number.isFinite(median)).toBe(true);
+      // If the cold scan alone exceeds the budget, the turn pays the whole
+      // wait and still delivers nothing — strictly worse than delivering
+      // without waiting. Every documented corpus size must fit. The
+      // assertion faces the best sample: the one least contaminated by
+      // contention when the suite shares a machine.
+      expectWithinLatencyBudget(best, coldScanCeilingMs(topicCount), {
+        poolMultiplier: 10,
+      });
+    }
+
+    console.log(
+      [
+        '',
+        'Cold-cache scan — time from recall start to fast result (single project scope)',
+        `initial budget: ${INITIAL_BUDGET_MS} ms`,
+        '',
+        `| topics | best of ${REPEATS} | median | worst of ${REPEATS} | share of budget | fast result inside budget? |`,
+        '| --- | --- | --- | --- | --- | --- |',
+        ...rows.map(
+          ([topicCount, best, median, worst]) =>
+            `| ${topicCount} | ${best.toFixed(1)} ms | ${median.toFixed(1)} ms | ${worst.toFixed(1)} ms | ${((median / INITIAL_BUDGET_MS) * 100).toFixed(1)}% | ${median < INITIAL_BUDGET_MS ? 'yes' : 'no'} |`,
+        ),
+        '',
+        'These samples pass no document cache: the first turn of a session',
+        'reads and parses every topic file. The fast result is only available',
+        'once this scan completes, so this is the real precondition for the',
+        'fast path delivering anything on the turn that needs it most.',
       ].join('\n'),
     );
   }, 120_000);

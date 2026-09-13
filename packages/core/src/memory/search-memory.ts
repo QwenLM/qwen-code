@@ -841,7 +841,7 @@ async function readContentResult(
   };
 }
 
-function isRangeCovered(
+export function isRangeCovered(
   ranges: ReadonlyArray<{ start: number; end: number }>,
   target: { start: number; end: number },
 ): boolean {

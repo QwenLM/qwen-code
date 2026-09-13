@@ -9,7 +9,8 @@ import type { Config } from '../config/config.js';
 import { executeSearchMemory } from '../memory/search-memory.js';
 import { SearchMemoryTool } from './search-memory.js';
 
-vi.mock('../memory/search-memory.js', () => ({
+vi.mock('../memory/search-memory.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../memory/search-memory.js')>()),
   executeSearchMemory: vi.fn(),
 }));
 
@@ -128,6 +129,11 @@ describe('SearchMemoryTool', () => {
         throw new Error('search failed');
       })
       .mockImplementationOnce(async (_params, options) => {
+        options?.bodyCoverage?.set('project:sibling.md', {
+          version: 2,
+          total: 100,
+          ranges: [{ start: 0, end: 100 }],
+        });
         options?.bodyPresentVersions?.set('project:sibling.md', 2);
         resolveSibling();
         return {
@@ -348,6 +354,66 @@ describe('SearchMemoryTool', () => {
       total: 20000,
       ranges: [{ start: 8000, end: 16000 }],
     });
+  });
+
+  it('does not commit a full-presence claim built on evicted coverage', async () => {
+    // The call's versions clone inherits no entry, so readContentResult
+    // commits one when its merged (cloned) coverage reaches the body total —
+    // but the live coverage it inherited was evicted mid-call, so the
+    // surviving ranges no longer span the body and the claim must not commit.
+    const mockConfig = config();
+    const tool = new SearchMemoryTool(mockConfig);
+    const memoryManager = mockConfig.getMemoryManager();
+    const liveVersions = memoryManager.getBodyPresentVersionsInHistory();
+    const liveCoverage = memoryManager.getBodyCoverageInHistory();
+    liveCoverage.set('project:long.md', {
+      version: 7,
+      total: 20000,
+      ranges: [{ start: 0, end: 8000 }],
+    });
+    vi.mocked(executeSearchMemory).mockImplementationOnce(
+      async (_params, options) => {
+        liveVersions.clear();
+        liveCoverage.clear();
+        // What readContentResult writes after fetching the continuation
+        // window: the inherited range plus the new one, and the resulting
+        // full-presence claim on the call's clones.
+        options?.bodyCoverage?.set('project:long.md', {
+          version: 7,
+          total: 20000,
+          ranges: [
+            { start: 0, end: 8000 },
+            { start: 8000, end: 20000 },
+          ],
+        });
+        options?.bodyPresentVersions?.set('project:long.md', 7);
+        return {
+          mode: 'fetch',
+          sourceStatus: {
+            requestedScopes: ['project'],
+            searchedScopes: ['project'],
+            unavailableScopes: [],
+            complete: true,
+            incompleteScopes: [],
+          },
+          results: [],
+        };
+      },
+    );
+
+    await tool
+      .build({ mode: 'fetch', refs: ['project:long.md'] })
+      .execute(new AbortController().signal);
+
+    expect(liveCoverage.get('project:long.md')).toEqual({
+      version: 7,
+      total: 20000,
+      ranges: [{ start: 8000, end: 20000 }],
+    });
+    // The merged coverage does not span 0..20000, so the full-presence claim
+    // must not commit: the next fetch re-reads the body instead of reporting
+    // alreadyAvailable with no content.
+    expect(liveVersions.has('project:long.md')).toBe(false);
   });
 
   it('summarizes the result for display instead of dumping the full JSON', async () => {

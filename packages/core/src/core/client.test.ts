@@ -5158,6 +5158,9 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
+      // A doc surfaced before /compress must not stay in the legacy recall
+      // exclusion set after history is rewritten (R27-3).
+      client['surfacedRelevantAutoMemoryPaths'].add('/memory/deploy.md');
 
       await client.tryCompressChat('p2');
 
@@ -5170,6 +5173,7 @@ describe('Gemini Client (client.ts)', () => {
         mockMemoryManager.markAllMemoryBodiesEvictedFromHistory,
       ).toHaveBeenCalledOnce();
       expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+      expect(client['surfacedRelevantAutoMemoryPaths'].size).toBe(0);
     });
 
     it('re-prepends startup context and seeds the new chat after compression', async () => {

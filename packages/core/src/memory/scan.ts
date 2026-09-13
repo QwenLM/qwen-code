@@ -118,7 +118,17 @@ export interface StructuredAutoMemoryValidation {
 }
 
 function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' ? value.trim() || undefined : undefined;
+  if (typeof value === 'string') {
+    return value.trim() || undefined;
+  }
+  // A bare scalar in a free-text field (`name: 10183`) parses as a
+  // number/boolean; keep its text instead of dropping the field. Fixed
+  // vocabularies stay closed: a coerced value still has to pass the
+  // membership check at the call site.
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return undefined;
 }
 
 // A trailing ` #...` on a PLAIN scalar is structurally a YAML comment, but
@@ -171,6 +181,12 @@ function rescueUnquotedHashFields(
   frontmatter: string,
   parsed: Record<string, unknown>,
 ): Record<string, unknown> {
+  // Every rescue below needs a YAML comment node, and a comment needs a `#`.
+  // Skip the second CST parse for the overwhelmingly common frontmatter that
+  // contains none — on the cold recall scan this runs once per file.
+  if (!frontmatter.includes('#')) {
+    return parsed;
+  }
   const document = parseDocument(frontmatter, { schema: 'core' });
   if (document.errors.length > 0 || !isMap(document.contents)) {
     return parsed;
