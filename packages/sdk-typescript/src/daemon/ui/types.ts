@@ -483,6 +483,8 @@ export interface DaemonUiStateResyncRequiredEvent extends DaemonUiEventBase {
  */
 export interface DaemonUiPromptCancelledEvent extends DaemonUiEventBase {
   type: 'prompt.cancelled';
+  /** Execution time before explicit cancellation, excluding cleanup. */
+  elapsedMs?: number;
   /**
    * Why the turn was cancelled. Absent for a user-initiated cancel;
    * `'forward_failed'` when the daemon synthesized the cancel because the
@@ -1106,6 +1108,7 @@ export interface DaemonPromptCancelledTranscriptBlock
   extends DaemonTranscriptBlockBase {
   kind: 'prompt_cancelled';
   reason?: string;
+  elapsedMs?: number;
 }
 
 export type DaemonTranscriptBlock =

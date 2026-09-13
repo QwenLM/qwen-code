@@ -303,7 +303,10 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         );
       }}
     >
-      <BrowserTurnNotifications language={language}>
+      <BrowserTurnNotifications
+        language={language}
+        options={{ defaultEnabled: true }}
+      >
         <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
           <WorkspaceSessionProvider
             sessionId={sessionId}
@@ -327,7 +330,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                 ],
               },
               rightPanel: {
-                items: ['review', 'sideTask', 'terminal'],
+                items: ['review', 'sideTask', 'terminal', 'webPreview'],
               },
               environmentPanel: {
                 items: [

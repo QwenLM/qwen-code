@@ -577,27 +577,46 @@ describe('foldLiveEvent status rows (ink StatusMessage parity)', () => {
 });
 
 describe('foldLiveEvent tool-output', () => {
-  it('appends live output to the running tool card', () => {
-    let items = foldLiveEvent([], {
+  const started = () =>
+    foldLiveEvent([], {
       type: 'tool-start',
       id: 'tool1',
       tool: 'run_shell_command',
       title: 'run_shell_command',
     });
-    items = foldLiveEvent(items, {
+
+  it('replaces the running card output with each snapshot', () => {
+    let items = foldLiveEvent(started(), {
       type: 'tool-output',
       id: 'tool1',
-      delta: 'line1\n',
+      output: 'line1\n',
     });
     items = foldLiveEvent(items, {
       type: 'tool-output',
       id: 'tool1',
-      delta: 'line2\n',
+      output: 'line1\nline2\n',
     });
     expect(items[0]).toMatchObject({
       kind: 'tool',
       done: false,
       output: 'line1\nline2\n',
+    });
+  });
+
+  it('holds one copy when the result repeats the streamed output', () => {
+    let items = foldLiveEvent(started(), {
+      type: 'tool-output',
+      id: 'tool1',
+      output: 'ACCEPT_TOOL_RAN\n',
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-result',
+      id: 'tool1',
+      display: 'ACCEPT_TOOL_RAN\n',
+    });
+    expect(items[0]).toMatchObject({
+      kind: 'tool',
+      output: 'ACCEPT_TOOL_RAN\n',
     });
   });
 });
@@ -741,6 +760,66 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
       color: 'success',
       title: 'Goal complete',
     });
+  });
+
+  it('shows checkpoint health, matching the ink card', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          checkpointStalls: 2,
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+      ),
+    ).toMatchObject({
+      checkpoint: 'Checkpoint: 2/3 stalled · Error: provider failed',
+    });
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+      ),
+    ).toMatchObject({
+      checkpoint: 'Checkpoint: last check failed · Error: provider failed',
+    });
+    // A stop for another reason clears the diagnostic and keeps the streak:
+    // the line is the count alone, with no trailing separator.
+    expect(
+      describeGoalCard(
+        snap({ objective: 'o', status: 'paused', checkpointStalls: 2 }),
+      ),
+    ).toMatchObject({ checkpoint: 'Checkpoint: 2/3 stalled' });
+    const healthy = describeGoalCard(
+      snap({ objective: 'o', status: 'active' }),
+    );
+    expect(healthy).toMatchObject({ state: 'card' });
+    expect(healthy).not.toHaveProperty('checkpoint');
+
+    // Same visibility rule as the ink card: never on a completed Goal, and a
+    // stall-free failure only while the Goal is active.
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'complete',
+          checkpointStalls: 1,
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+      ),
+    ).not.toHaveProperty('checkpoint');
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'paused',
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+      ),
+    ).not.toHaveProperty('checkpoint');
   });
 
   it('builds the subtitle from turns and active time', () => {

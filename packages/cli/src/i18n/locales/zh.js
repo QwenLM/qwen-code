@@ -169,6 +169,7 @@ export default {
   // acronyms are kept in English (Agent, Grep, Glob, LSP), as is a product name
   // inside an otherwise-translated label (e.g. `Notebook`).
   // ============================================================================
+  'toolDisplayName.Exec': '执行代码',
   'toolDisplayName.Edit': '编辑',
   'toolDisplayName.WriteFile': '写入文件',
   'toolDisplayName.ReadFile': '读取文件',
@@ -353,8 +354,8 @@ export default {
   'All available skills are locked at a higher scope (see below).':
     '所有可用技能都被更高范围锁定（详见下方）。',
   'No skills match the search.': '没有匹配搜索的技能。',
-  'Locked by higher-scope settings (cannot toggle here):':
-    '被更高范围设置锁定（此处无法切换）：',
+  'Locked by settings entries you cannot toggle here:':
+    '被无法在此切换的设置条目锁定：',
   'higher scope': '更高范围',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已锁定：{{scope}}]',
@@ -724,6 +725,7 @@ export default {
   // ============================================================================
   // Settings Labels
   // ============================================================================
+  'Code Mode Only (Experimental)': '仅代码模式（实验性）',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '终端响铃通知',
@@ -1124,8 +1126,8 @@ export default {
     '命令输入为包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
   'Input to command is JSON with notification message and type.':
     '命令输入为包含通知消息和类型的 JSON。',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    '命令输入为 JSON，其中包含 "prompt"（当前模型侧提示）以及可选的 "submitted_prompt"（受支持交互式 TUI 的提交文本投影）。',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    '命令输入为 JSON，其中包含 "prompt"（当前模型侧提示）以及可选的 "submitted_prompt"（在受支持的提交边界捕获的文本投影）。',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     '命令输入为包含 command_name、command_args 和展开后提示文本的 JSON。',
   'Input to command is JSON with session start source.':

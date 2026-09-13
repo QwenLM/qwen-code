@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type {
   DaemonContextMemoryDetail,
   DaemonContextSkillDetail,
@@ -5,6 +6,7 @@ import type {
   DaemonSessionContextUsageStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { Button } from '../ui/button';
 import { getContextUsageLevel } from '../../utils/contextUsage';
 import { formatContextTokens as formatTokens } from '../../utils/formatTokenCount';
 import styles from './ContextUsageMessage.module.css';
@@ -13,7 +15,6 @@ const SENTINEL = 'web-shell:context-usage:v1:';
 const FILLED = '\u2588';
 const BUFFER = '\u2592';
 const EMPTY = '\u2591';
-const DETAIL_NAME_MAX_LEN = 30;
 
 export function serializeContextUsageMessage(
   status: DaemonSessionContextUsageStatus,
@@ -36,11 +37,6 @@ export function parseContextUsageMessage(
   }
 }
 
-function truncateName(name: string, maxLen: number): string {
-  if (name.length <= maxLen) return name;
-  return `${name.slice(0, maxLen - 1)}\u2026`;
-}
-
 function formatPercentage(tokens: number, contextWindowSize: number): string {
   if (contextWindowSize <= 0) return '0.0';
   const percentage = (tokens / contextWindowSize) * 100;
@@ -55,11 +51,9 @@ function sortByTokens<T extends { tokens: number }>(items: readonly T[]): T[] {
 function ProgressBar({
   usedPercentage,
   bufferPercentage,
-  compact = false,
 }: {
   usedPercentage: number;
   bufferPercentage: number;
-  compact?: boolean;
 }) {
   const usedLevel = getContextUsageLevel(usedPercentage);
   const usedCount = Math.min(usedPercentage, 100);
@@ -69,57 +63,33 @@ function ProgressBar({
   );
   const freeCount = Math.max(0, 100 - usedCount - bufferCount);
 
-  if (compact) {
-    // Proportional blocks: the glyph track cannot scale to the pane width.
-    const usedColor =
-      usedLevel === 'error'
-        ? 'var(--error-color)'
-        : usedLevel === 'warning'
-          ? 'var(--warning-color)'
-          : 'var(--agent-blue-500)';
-    return (
-      <div className={styles.progress} aria-hidden="true">
-        <span style={{ width: `${usedCount}%`, background: usedColor }} />
-        <span
-          style={{
-            width: `${freeCount}%`,
-            background: 'var(--muted-foreground)',
-            opacity: 0.25,
-          }}
-        />
-        <span
-          style={{
-            width: `${bufferCount}%`,
-            background: 'var(--warning-color)',
-            opacity: 0.45,
-          }}
-        />
-      </div>
-    );
-  }
-
-  const width = 56;
-  const usedGlyphs = Math.round((usedCount / 100) * width);
-  const bufferGlyphs = Math.round((bufferCount / 100) * width);
-  const freeGlyphs = Math.max(0, width - usedGlyphs - bufferGlyphs);
-  const usedClass =
+  const usedColor =
     usedLevel === 'error'
-      ? styles.error
+      ? 'var(--error-color)'
       : usedLevel === 'warning'
-        ? styles.warning
-        : styles.accent;
-
+        ? 'var(--warning-color)'
+        : 'var(--agent-blue-500)';
   return (
-    <div className={styles.progress} aria-hidden="true">
-      <span className={usedClass}>
-        {FILLED.repeat(Math.max(0, usedGlyphs))}
-      </span>
-      <span className={styles.secondary}>
-        {EMPTY.repeat(Math.max(0, freeGlyphs))}
-      </span>
-      <span className={styles.warning}>
-        {BUFFER.repeat(Math.max(0, bufferGlyphs))}
-      </span>
+    <div
+      className={styles.progress}
+      data-web-shell-context-meter
+      aria-hidden="true"
+    >
+      <span style={{ width: `${usedCount}%`, background: usedColor }} />
+      <span
+        style={{
+          width: `${freeCount}%`,
+          background: 'var(--muted-foreground)',
+          opacity: 0.25,
+        }}
+      />
+      <span
+        style={{
+          width: `${bufferCount}%`,
+          background: 'var(--warning-color)',
+          opacity: 0.45,
+        }}
+      />
     </div>
   );
 }
@@ -145,15 +115,15 @@ function CategoryRow({
     <div className={styles.row}>
       <span className={`${styles.symbol} ${symbolClassName}`}>{symbol}</span>
       <span className={styles.label}>{label}</span>
-      <span className={isOverLimit ? styles.error : styles.value}>
+      <span
+        className={`${styles.value}${isOverLimit ? ` ${styles.error}` : ''}`}
+      >
         {formatTokens(tokens)} {tokenLabel} (
         {formatPercentage(tokens, contextWindowSize)}%)
       </span>
     </div>
   );
 }
-
-const DETAIL_COMMAND = '/context detail';
 
 function DetailHint({
   hint,
@@ -162,23 +132,19 @@ function DetailHint({
   hint: string;
   onShowDetail?: () => void;
 }) {
-  // The clickable part is located by the literal command inside the
-  // translated hint, so a translation that drops it (or a missing
-  // callback) degrades to the plain text line.
-  const idx = onShowDetail ? hint.indexOf(DETAIL_COMMAND) : -1;
-  if (idx < 0) return <div className={styles.hint}>{hint}</div>;
-  return (
-    <div className={styles.hint}>
-      {hint.slice(0, idx)}
-      <button
-        type="button"
-        className={styles.detailCommand}
-        onClick={onShowDetail}
-      >
-        {DETAIL_COMMAND}
-      </button>
-      {hint.slice(idx + DETAIL_COMMAND.length)}
-    </div>
+  const { t } = useI18n();
+  return onShowDetail ? (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className={styles.detailCommand}
+      onClick={onShowDetail}
+    >
+      {t('contextUsage.viewDetails')}
+    </Button>
+  ) : (
+    <div className={styles.hint}>{hint}</div>
   );
 }
 
@@ -186,18 +152,16 @@ function DetailRow({
   name,
   tokens,
   tokenLabel,
-  detailNameMaxLen,
 }: {
   name: string;
   tokens: number;
   tokenLabel: string;
-  detailNameMaxLen: number;
 }) {
   return (
     <div className={styles.detailRow}>
       <span className={styles.secondary}>{'\u2514'} </span>
       <span className={styles.detailName} title={name}>
-        {truncateName(name, detailNameMaxLen)}
+        {name}
       </span>
       <span className={styles.value}>
         {formatTokens(tokens)} {tokenLabel}
@@ -206,12 +170,33 @@ function DetailRow({
   );
 }
 
+function DetailGroup({
+  title,
+  count,
+  compact,
+  children,
+}: {
+  title: string;
+  count: number;
+  compact: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <details className={styles.disclosure} open={!compact}>
+      <summary className={styles.detailSummary}>
+        {title} <span className={styles.secondary}>({count})</span>
+      </summary>
+      <div className={styles.detailSection}>{children}</div>
+    </details>
+  );
+}
+
 function DetailSection({
   title,
   items,
   getName,
   tokenLabel,
-  detailNameMaxLen,
+  compact,
 }: {
   title: string;
   items: readonly (DaemonContextToolDetail | DaemonContextMemoryDetail)[];
@@ -219,30 +204,28 @@ function DetailSection({
     item: DaemonContextToolDetail | DaemonContextMemoryDetail,
   ) => string;
   tokenLabel: string;
-  detailNameMaxLen: number;
+  compact: boolean;
 }) {
   const sorted = sortByTokens(items);
   if (sorted.length === 0) return null;
   return (
-    <section className={styles.detailSection}>
-      <div className={styles.sectionTitle}>{title}</div>
+    <DetailGroup title={title} count={sorted.length} compact={compact}>
       {sorted.map((item) => (
         <DetailRow
           key={getName(item)}
           name={getName(item)}
           tokens={item.tokens}
           tokenLabel={tokenLabel}
-          detailNameMaxLen={detailNameMaxLen}
         />
       ))}
-    </section>
+    </DetailGroup>
   );
 }
 
 function SkillsSection({
   skills,
   labels,
-  detailNameMaxLen,
+  compact,
 }: {
   skills: readonly DaemonContextSkillDetail[];
   labels: {
@@ -251,7 +234,7 @@ function SkillsSection({
     skills: string;
     tokens: string;
   };
-  detailNameMaxLen: number;
+  compact: boolean;
 }) {
   const sorted = [...skills].sort((a, b) => {
     if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
@@ -260,14 +243,13 @@ function SkillsSection({
   if (sorted.length === 0) return null;
 
   return (
-    <section className={styles.detailSection}>
-      <div className={styles.sectionTitle}>{labels.skills}</div>
+    <DetailGroup title={labels.skills} count={sorted.length} compact={compact}>
       {sorted.map((skill) => (
         <div key={skill.name} className={styles.skillBlock}>
           <div className={styles.detailRow}>
             <span className={styles.secondary}>{'\u2514'} </span>
             <span className={styles.detailName} title={skill.name}>
-              {truncateName(skill.name, detailNameMaxLen)}
+              {skill.name}
               {skill.loaded && (
                 <span className={styles.success}> {labels.active}</span>
               )}
@@ -287,7 +269,7 @@ function SkillsSection({
           )}
         </div>
       ))}
-    </section>
+    </DetailGroup>
   );
 }
 
@@ -295,15 +277,11 @@ export function ContextUsageMessage({
   status,
   onShowDetail,
   compact = false,
-  detailNameMaxLen = DETAIL_NAME_MAX_LEN,
 }: {
   status: DaemonSessionContextUsageStatus;
   /** Run /context detail, exactly like typing it. */
   onShowDetail?: () => void;
   compact?: boolean;
-  /** Compact's wrapping column fits full names; the transcript's fixed
-   * name column keeps the default cap. */
-  detailNameMaxLen?: number;
 }) {
   const { t } = useI18n();
   const { usage } = status;
@@ -318,9 +296,23 @@ export function ContextUsageMessage({
       : 0;
 
   return (
-    <div className={`${styles.panel}${compact ? ` ${styles.compact}` : ''}`}>
+    <section
+      className={`${styles.panel}${compact ? ` ${styles.compact}` : ''}`}
+      role={compact ? undefined : 'group'}
+      aria-label={compact ? undefined : t('contextUsage.title')}
+    >
       {!compact && (
-        <div className={styles.title}>{t('contextUsage.title')}</div>
+        <div className={styles.header}>
+          <div className={styles.title}>{t('contextUsage.title')}</div>
+          {hasTokenCount && (
+            <span
+              className={styles.percentage}
+              data-level={getContextUsageLevel(percentage)}
+            >
+              {percentage.toFixed(1)}%
+            </span>
+          )}
+        </div>
       )}
 
       {!hasTokenCount ? (
@@ -364,7 +356,6 @@ export function ContextUsageMessage({
           <ProgressBar
             usedPercentage={Math.min(percentage, 100)}
             bufferPercentage={bufferPercentage}
-            compact={compact}
           />
           <div className={styles.spacer} />
           <CategoryRow
@@ -456,33 +447,33 @@ export function ContextUsageMessage({
           <DetailSection
             title={t('contextUsage.builtinTools')}
             items={usage.builtinTools}
+            compact={compact}
             getName={(item) => ('name' in item ? item.name : item.path)}
             tokenLabel={t('contextUsage.tokens')}
-            detailNameMaxLen={detailNameMaxLen}
           />
           <DetailSection
             title={t('contextUsage.mcpTools')}
             items={usage.mcpTools}
+            compact={compact}
             getName={(item) => ('name' in item ? item.name : item.path)}
             tokenLabel={t('contextUsage.tokens')}
-            detailNameMaxLen={detailNameMaxLen}
           />
           <DetailSection
             title={t('contextUsage.memoryFiles')}
             items={usage.memoryFiles}
+            compact={compact}
             getName={(item) => ('path' in item ? item.path : item.name)}
             tokenLabel={t('contextUsage.tokens')}
-            detailNameMaxLen={detailNameMaxLen}
           />
           <SkillsSection
             skills={usage.skills}
+            compact={compact}
             labels={{
               active: t('contextUsage.active'),
               bodyLoaded: t('contextUsage.bodyLoaded'),
               skills: t('contextUsage.skills'),
               tokens: t('contextUsage.tokens'),
             }}
-            detailNameMaxLen={detailNameMaxLen}
           />
         </>
       ) : (
@@ -491,6 +482,6 @@ export function ContextUsageMessage({
           onShowDetail={onShowDetail}
         />
       )}
-    </div>
+    </section>
   );
 }

@@ -7,10 +7,8 @@
 import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
 import type { HookExecutionPlan } from './types.js';
 import { getHookKey, HookEventName } from './types.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
 import { getAliasSetForTool } from '../tools/tool-utils.js';
-
-const debugLogger = createDebugLogger('TRUSTED_HOOKS');
+import { matchesHookPattern } from './hook-matcher.js';
 
 export function getToolMatcherTargets(toolName: string): string[] {
   return [...getAliasSetForTool(toolName)];
@@ -146,10 +144,9 @@ export class HookPlanner {
   }
 
   /**
-   * Check if a hook entry matches the given context.
-   * Uses explicit event-based dispatch to avoid ambiguity between events
-   * that share similar context fields (e.g., SessionStart and SubagentStart
-   * both have agentType, but use different matcher semantics).
+   * Check if a hook entry matches the given context. Every event with a
+   * matcher target uses the shared matchesHookPattern rule; tool events also
+   * match display-name and legacy aliases exactly.
    */
   private matchesContext(
     entry: HookRegistryEntry,
@@ -160,161 +157,18 @@ export class HookPlanner {
       return true; // No matcher means match all
     }
 
-    const matcher = entry.matcher.trim();
-
-    if (matcher === '' || matcher === '*') {
-      return true; // Empty string or wildcard matches all
-    }
-
     const matcherTarget = getHookMatcherTarget(eventName, context);
     if (!matcherTarget || !matcherTarget.target) {
       return true;
     }
 
-    switch (matcherTarget.kind) {
-      case 'toolName':
-        return this.matchesToolName(matcher, matcherTarget.target);
-
-      case 'commandName':
-        return this.matchesCommandName(matcher, matcherTarget.target);
-
-      case 'agentType':
-        return this.matchesAgentType(matcher, matcherTarget.target);
-
-      case 'trigger':
-      case 'error':
-        return this.matchesTrigger(matcher, matcherTarget.target);
-
-      case 'notificationType':
-        return this.matchesNotificationType(matcher, matcherTarget.target);
-
-      case 'filePath':
-        return this.matchesFilePath(matcher, matcherTarget.target);
-
-      case 'sessionTrigger':
-        return this.matchesSessionTrigger(matcher, matcherTarget.target);
-
-      default: {
-        const exhaustive: never = matcherTarget.kind;
-        return exhaustive;
-      }
-    }
-  }
-
-  /**
-   * Match notification type against matcher pattern
-   */
-  private matchesNotificationType(
-    matcher: string,
-    notificationType: string,
-  ): boolean {
-    return matcher === notificationType;
-  }
-
-  /**
-   * Match loaded instruction file path against matcher pattern.
-   */
-  private matchesFilePath(matcher: string, filePath: string): boolean {
-    try {
-      const regex = new RegExp(matcher);
-      return regex.test(filePath);
-    } catch (error) {
-      debugLogger.warn(
-        `Invalid regex in hook matcher "${matcher}" for file path "${filePath}", falling back to exact match: ${error}`,
-      );
-      return matcher === filePath;
-    }
-  }
-
-  /**
-   * Match session source or end reason against matcher pattern
-   */
-  private matchesSessionTrigger(matcher: string, trigger: string): boolean {
-    try {
-      // Attempt to treat the matcher as a regular expression.
-      const regex = new RegExp(matcher);
-      return regex.test(trigger);
-    } catch (error) {
-      // If it's not a valid regex, treat it as a literal string for an exact match.
-      debugLogger.warn(
-        `Invalid regex in hook matcher "${matcher}" for session trigger "${trigger}", falling back to exact match: ${error}`,
-      );
-      return matcher === trigger;
-    }
-  }
-
-  /**
-   * Match tool name against matcher pattern
-   */
-  private matchesToolName(matcher: string, toolName: string): boolean {
-    const targets = getToolMatcherTargets(toolName);
-
-    if (
-      matcher.includes('|') &&
-      !matcher.startsWith('^') &&
-      !matcher.startsWith('(')
-    ) {
-      const alternatives = matcher.split('|').map((entry) => entry.trim());
-      if (alternatives.some((entry) => targets.includes(entry))) {
-        return true;
-      }
-    }
-
-    if (targets.includes(matcher)) {
-      return true;
-    }
-
-    try {
-      // Regex matchers apply to the runtime id only. Alias expansion is exact
-      // so display names do not create new substring matches.
-      const regex = new RegExp(matcher);
-      return regex.test(toolName);
-    } catch (error) {
-      debugLogger.warn(
-        `Invalid regex in hook matcher "${matcher}" for tool "${toolName}", no alias match and invalid regex: ${error}`,
-      );
-      return false;
-    }
-  }
-
-  /**
-   * Match slash command name against matcher pattern.
-   */
-  private matchesCommandName(matcher: string, commandName: string): boolean {
-    try {
-      // Attempt to treat the matcher as a regular expression.
-      const regex = new RegExp(matcher);
-      return regex.test(commandName);
-    } catch (error) {
-      // If it's not a valid regex, treat it as a literal string for an exact match.
-      debugLogger.warn(
-        `Invalid regex in hook matcher "${matcher}" for command "${commandName}", falling back to exact match: ${error}`,
-      );
-      return matcher === commandName;
-    }
-  }
-
-  /**
-   * Match trigger/source against matcher pattern
-   */
-  private matchesTrigger(matcher: string, trigger: string): boolean {
-    return matcher === trigger;
-  }
-
-  /**
-   * Match agent type against matcher pattern.
-   * Supports regex matching, same as tool name matching.
-   */
-  private matchesAgentType(matcher: string, agentType: string): boolean {
-    try {
-      const regex = new RegExp(matcher);
-      return regex.test(agentType);
-    } catch (error) {
-      debugLogger.warn(
-        `Invalid regex in hook matcher "${matcher}" for agent type "${agentType}", falling back to exact match: ${error}`,
-      );
-      return matcher === agentType;
-    }
+    return matchesHookPattern(
+      entry.matcher,
+      matcherTarget.target,
+      matcherTarget.kind === 'toolName'
+        ? { aliases: getToolMatcherTargets(matcherTarget.target) }
+        : {},
+    );
   }
 
   /**

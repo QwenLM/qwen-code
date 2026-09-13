@@ -27,6 +27,7 @@ import {
 } from '../../utils/schemaConverter.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
+import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 // `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
@@ -264,7 +265,11 @@ export class AnthropicContentConverter {
       request.config?.systemInstruction,
     );
 
-    this.processContents(request.contents, messages);
+    this.processContents(
+      request.contents,
+      messages,
+      !!options.dropUnsignedAssistantThinking,
+    );
 
     if (options.stripAssistantThinking) {
       this.stripThinkingFromAssistantMessages(messages);
@@ -567,19 +572,21 @@ export class AnthropicContentConverter {
   private processContents(
     contents: ContentListUnion,
     messages: AnthropicMessageParam[],
+    demoteForeignThoughtToText: boolean,
   ): void {
     if (Array.isArray(contents)) {
       for (const content of contents) {
-        this.processContent(content, messages);
+        this.processContent(content, messages, demoteForeignThoughtToText);
       }
     } else if (contents) {
-      this.processContent(contents, messages);
+      this.processContent(contents, messages, demoteForeignThoughtToText);
     }
   }
 
   private processContent(
     content: ContentUnion | PartUnion,
     messages: AnthropicMessageParam[],
+    demoteForeignThoughtToText: boolean,
   ): void {
     if (typeof content === 'string') {
       messages.push({
@@ -606,14 +613,46 @@ export class AnthropicContentConverter {
             type: 'thinking',
             thinking: part.text || '',
           };
+          let dropThinkingBlock = false;
           if (
             'thoughtSignature' in part &&
             typeof part.thoughtSignature === 'string'
           ) {
-            (thinkingBlock as { signature?: string }).signature =
-              part.thoughtSignature;
+            // `thoughtSignature` carries no origin marker, so a Responses-API
+            // reasoning replay payload (`{"id":…,"encrypted_content":…}`)
+            // reaches here unchanged after a provider switch. It is not an
+            // Anthropic signature — forwarding it puts a foreign opaque blob
+            // on the wire as `thinking.signature`. Drop the payload instead,
+            // mirroring the fallback `responses-converter.ts` already applies
+            // in the other direction for an unreplayable signature.
+            // https://github.com/QwenLM/qwen-code/issues/9453
+            if (isResponsesReasoningSignature(part.thoughtSignature)) {
+              debugLogger.debug(
+                'Dropping a Responses reasoning replay payload from thoughtSignature',
+              );
+              // When the caller asked to drop unsigned thinking
+              // (`dropUnsignedAssistantThinking`), an unsigned `thinking`
+              // block is exactly the shape the pass below treats as a proxy
+              // protocol violation, so do not emit one — keep the visible
+              // summary as plain text when present. Otherwise leave the block
+              // unsigned (never attach the foreign payload as a signature) so
+              // `stripThinkingFromAssistantMessages` removes it under
+              // `stripAssistantThinking` and `fillMissingThinkingSignatures`
+              // fills `signature: ''` under DeepSeek normalization.
+              if (demoteForeignThoughtToText) {
+                dropThinkingBlock = true;
+                if (part.text) {
+                  contentBlocks.push({ type: 'text', text: part.text });
+                }
+              }
+            } else {
+              (thinkingBlock as { signature?: string }).signature =
+                part.thoughtSignature;
+            }
           }
-          contentBlocks.push(thinkingBlock as AnthropicContentBlockParam);
+          if (!dropThinkingBlock) {
+            contentBlocks.push(thinkingBlock as AnthropicContentBlockParam);
+          }
         }
       }
 

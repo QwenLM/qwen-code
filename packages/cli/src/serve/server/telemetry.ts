@@ -194,6 +194,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'GET /session/:id/artifacts',
   },
   {
+    method: 'GET',
+    path: '/session/:id/artifacts/:artifactId/content',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/artifacts/:artifactId/content',
+  },
+  {
     method: 'POST',
     path: '/session/:id/artifacts',
     attribution: 'handler_resolved',

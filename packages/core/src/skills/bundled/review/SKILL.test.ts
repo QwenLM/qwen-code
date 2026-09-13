@@ -171,7 +171,7 @@ describe('bundled review skill', () => {
   it('pins the setup-batch ordering constraints', () => {
     const body = skillBody();
     expect(body).toContain('`fetch-pr` before all of them');
-    expect(body).toContain('`agent-prompt --roster` after the rules load');
+    expect(body).toContain('`emit-workflow` after the rules load');
     // The re-run ordering, same class as the two above and newer. A side-file
     // `--since` re-run rewrites the fetch report from scratch, while
     // `repo-context` enriches that same file in place: run in the other
@@ -412,7 +412,7 @@ describe('bundled review skill', () => {
     expect(body).toContain('the work list carries across models');
   });
 
-  it('launches the 3B convergence pair in the same response', () => {
+  it('launches the 3B convergence pair in one generated workflow', () => {
     // The pair's wall-clock saving exists only while both rounds go out
     // together: a later edit serializing the skill while the prompt-builder
     // tests stay green (they call each round builder themselves) restores
@@ -426,11 +426,82 @@ describe('bundled review skill', () => {
     const section = body.slice(start, end);
     expect(section).toContain('`--all-chunks --round 1`');
     expect(section).toContain('`--all-chunks --round 2`');
-    expect(section).toContain('in the same response');
+    expect(section).toContain('in one generated workflow');
+    expect(section).toContain('emit-workflow --batch');
     // The reporting transition is the fix for the round-0 blocker; a revert
     // dropping it must fail here, not slip through.
     expect(section).toContain('wait for BOTH fan-outs');
     expect(section).toContain('every shard passed as `--round 2`');
+  });
+
+  it('routes both initial topologies through the fixed workflow emitter', () => {
+    const body = coreBody();
+    for (const [start, end] of [
+      ['## Step 3A:', '## Step 3B:'],
+      ['## Step 3B:', '### Whole-file invariant agents'],
+    ]) {
+      const section = body.slice(body.indexOf(start), body.indexOf(end));
+      const commands = [...section.matchAll(/```bash\n([\s\S]*?)```/g)].map(
+        ([, command]) => command,
+      );
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).toContain('review emit-workflow --plan');
+      expect(commands[0]).toContain('--rules');
+      expect(commands[0]).not.toContain('agent-prompt');
+      expect(section).toContain('foreground `workflow` call');
+    }
+    expect(body.split('---')[1]).toMatch(/^ {2}- workflow$/m);
+    expect(body).toContain('`run_in_background: false`, without `args`');
+    expect(body).not.toContain(
+      'invoking all `agent` tools in a **single response**',
+    );
+  });
+
+  it('keeps focused navigation on workflow dispatch without reverse auditors', () => {
+    const body = coreBody();
+    const start = body.indexOf('**Automatic navigation profile:**');
+    expect(start).toBeGreaterThan(-1);
+    const focused = body.slice(start, body.indexOf('\n\n', start));
+    expect(focused).toContain('`emit-workflow`');
+    expect(focused).toContain('`scriptPath`');
+    expect(focused).toContain('ONE foreground `workflow` call');
+    expect(focused).toContain('single `docs-nav` reviewer');
+    expect(focused).toContain('Skip Step 5 entirely');
+    expect(focused).not.toContain('agent-prompt --roster');
+
+    const batch = body.slice(
+      body.indexOf('### Batch verification'),
+      body.indexOf('**Do not write the verifier'),
+    );
+    expect(batch).toContain('except for `reviewProfile: "docs-nav"`');
+    expect(batch).toContain('in the same generated workflow');
+    expect(batch).toContain('combine all successful manifests');
+    expect(batch).toContain(
+      'At medium or for `reviewProfile: "docs-nav"`, there is no reverse audit',
+    );
+  });
+
+  it('makes every recorded follow-up command produce a manifest for the selected wave', () => {
+    const body = coreBody();
+    const commands = [...body.matchAll(/```bash\n([\s\S]*?)```/g)].flatMap(
+      ([, block]) => block.split(/(?=^"\$\{QWEN_CODE_CLI:-qwen\}")/m),
+    );
+    const builders = commands.filter((command) =>
+      command.startsWith('"${QWEN_CODE_CLI:-qwen}" review agent-prompt '),
+    );
+    expect(builders).toHaveLength(4);
+    for (const command of builders) {
+      expect(command).toContain('--batch');
+      expect(command).toMatch(/> [^\n]+\.json/);
+      expect(command).not.toContain('| head');
+    }
+    expect(body).toContain('Never glob historical manifests or prompt records');
+    expect(body).toContain('include a manifest after exit 4/5');
+    expect(body).toContain('If no build succeeded, invoke no workflow');
+    expect(body).toContain("round _k+1_ plus round _k_'s verifier shards");
+    expect(body).toContain('Keep the worktree until the workflow has settled');
+    expect(body).toContain('recover any completed verifier results');
+    expect(body).not.toContain('stop waiting on it yourself');
   });
 
   it('pins the bounded-tail protocol on the round-cap bullet', () => {

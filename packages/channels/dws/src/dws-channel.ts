@@ -10,7 +10,6 @@ import {
   isTerminalTaskLifecycleType,
   PollingChannelBase,
   sanitizeLogText,
-  stripMessagePrefix,
   truncateCodePoints,
   type ChannelAgentBridge,
   type ChannelBaseOptions,
@@ -607,7 +606,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly userInstructions?: string;
   private readonly client: DwsClientLike;
   private readonly imStates: ImSubscriptionState[];
-  private readonly dwsMessagePrefix?: string;
   private readonly startReactionName: string;
   private readonly endReactionName?: string;
   private readonly watchTodos: boolean;
@@ -652,10 +650,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     client?: DwsClientLike,
   ) {
     const profile = configuredString(config.profile, 'profile');
-    const messagePrefix = configuredString(
-      config.messagePrefix,
-      'messagePrefix',
-    );
     const startReactionName =
       configuredString(config.startReaction, 'startReaction') ??
       DEFAULT_START_REACTION;
@@ -713,7 +707,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }));
     this.startReactionName = startReactionName;
     this.endReactionName = endReactionName;
-    this.dwsMessagePrefix = messagePrefix;
     this.watchTodos = watchTodos;
   }
 
@@ -1722,8 +1715,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       threadId: summary.taskId,
       messageId: `todo-${fingerprint}`,
       text: `Process this DingTalk todo:\n${truncateCodePoints(title, MAX_COMMENT_CHARS)}`,
-      displayText: title,
-      bypassMessagePrefix: true,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1974,21 +1965,15 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
     if (this.shouldFilterImMessage(source, message)) {
       if (source.kind === 'group' || source.kind === 'group-all') {
-        const text = stripMessagePrefix(
-          message.content.trim(),
-          this.dwsMessagePrefix,
-        );
-        if (!this.dwsMessagePrefix || text) {
-          const envelope = this.createImEnvelope(source, message, text);
-          if (
-            this.groupGate.check(envelope, { createPairingRequest: false })
-              .reason === 'mention_required' &&
-            !this.queuedMessages.has(key) &&
-            !this.cursor.processedMessages.includes(key) &&
-            !this.hasPendingMessage(key)
-          ) {
-            this.recordPendingGroupHistory(envelope);
-          }
+        const envelope = this.createImEnvelope(source, message);
+        if (
+          this.groupGate.check(envelope, { createPairingRequest: false })
+            .reason === 'mention_required' &&
+          !this.queuedMessages.has(key) &&
+          !this.cursor.processedMessages.includes(key) &&
+          !this.hasPendingMessage(key)
+        ) {
+          this.recordPendingGroupHistory(envelope);
         }
       }
       this.removePersistedPendingMessageForSource(key, source);
@@ -2277,7 +2262,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     // on both the at stream and its group stream under a single dedup key, and
     // only when a mention is required is the at stream the sole deliverer, so
     // the normalized text cannot depend on which copy won the race.
-    const rawText =
+    const text =
       source.kind === 'at' && this.requiresMention(message.conversationId)
         ? message.content
             .replace(
@@ -2286,18 +2271,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
             )
             .trim()
         : message.content.trim();
-    const providerDocumentNotification =
-      source.kind === 'direct'
-        ? parseDocumentMentionNotification(rawText)
-        : undefined;
-    const text = providerDocumentNotification
-      ? rawText
-      : stripMessagePrefix(rawText, this.dwsMessagePrefix);
-    if (this.dwsMessagePrefix && !text) {
-      this.markProcessedMessage(key);
-      this.saveCursor();
-      return;
-    }
 
     const target: DwsImTarget =
       source.kind === 'direct'
@@ -2312,10 +2285,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
 
     const documentNotification =
-      providerDocumentNotification ??
-      (source.kind === 'direct'
+      source.kind === 'direct'
         ? parseDocumentMentionNotification(text)
-        : undefined);
+        : undefined;
     if (documentNotification) {
       await this.processDocumentNotification(
         message,
@@ -2370,7 +2342,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       chatName: message.conversationId,
       messageId: message.messageId,
       text,
-      bypassMessagePrefix: true,
       ...(message.referencedText
         ? { referencedText: message.referencedText }
         : {}),
@@ -2631,7 +2602,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         threadId: notification.commentKey,
         messageId: message.messageId,
         text: truncateCodePoints(notification.request, MAX_COMMENT_CHARS),
-        bypassMessagePrefix: true,
         isGroup: true,
         isMentioned: true,
         isReplyToBot: false,
@@ -2718,22 +2688,15 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
           pending.source.kind === 'group' ||
           pending.source.kind === 'group-all'
         ) {
-          const text = stripMessagePrefix(
-            pending.message.content.trim(),
-            this.dwsMessagePrefix,
+          const envelope = this.createImEnvelope(
+            pending.source,
+            pending.message,
           );
-          if (!this.dwsMessagePrefix || text) {
-            const envelope = this.createImEnvelope(
-              pending.source,
-              pending.message,
-              text,
-            );
-            if (
-              this.groupGate.check(envelope, { createPairingRequest: false })
-                .reason === 'mention_required'
-            ) {
-              this.recordPendingGroupHistory(envelope);
-            }
+          if (
+            this.groupGate.check(envelope, { createPairingRequest: false })
+              .reason === 'mention_required'
+          ) {
+            this.recordPendingGroupHistory(envelope);
           }
         }
         this.removePersistedPendingMessageForSource(key, pending.source);

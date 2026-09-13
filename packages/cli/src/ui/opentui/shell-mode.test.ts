@@ -148,7 +148,7 @@ describe('executeUserShell', () => {
       .filter((event) => event.type.startsWith('tool-'))
       .map((event) => (event as { id?: string }).id);
 
-  it('streams throttled deltas and lands a tail-deduped result', async () => {
+  it('streams throttled snapshots and lands the whole output', async () => {
     const { events, done, emitOutput, resolveResult } = setup();
     emitOutput('hello ');
     vi.advanceTimersByTime(1001);
@@ -169,7 +169,7 @@ describe('executeUserShell', () => {
       {
         type: 'tool-output',
         id: expect.any(String),
-        delta: 'hello world\n',
+        output: 'hello world\n',
       },
     ]);
     expect(new Set(cardIds(events)).size).toBe(1);
@@ -183,7 +183,7 @@ describe('executeUserShell', () => {
     expect(events[4]).toEqual({
       type: 'tool-result',
       id: expect.any(String),
-      display: '',
+      display: 'hello world',
     });
     expect(events[5]).toEqual({
       type: 'tool-end',
@@ -246,7 +246,7 @@ describe('executeUserShell', () => {
     );
   });
 
-  it('starts the status prefix on its own row when the card was streamed', async () => {
+  it('keeps one copy of the output when the card was already streamed', async () => {
     const { events, done, emitOutput, resolveResult } = setup();
     emitOutput('boom ');
     vi.advanceTimersByTime(1001);
@@ -260,14 +260,15 @@ describe('executeUserShell', () => {
     );
     await done;
     expect(events.filter((event) => event.type === 'tool-output')).toEqual([
-      { type: 'tool-output', id: expect.any(String), delta: 'boom one\n' },
+      { type: 'tool-output', id: expect.any(String), output: 'boom one\n' },
     ]);
-    // The streamed head is already on the card; the empty tail must not glue
-    // the exit-code prefix onto its last line.
+    // The result replaces the streamed snapshot, so the card reads as one
+    // status line over one copy of the output rather than the two glued
+    // together.
     expect(events[events.length - 2]).toEqual({
       type: 'tool-result',
       id: expect.any(String),
-      display: '\nCommand exited with code 1.\n',
+      display: 'Command exited with code 1.\nboom one',
     });
     expect(addHistoryMock).toHaveBeenCalledWith(
       llmClient,
@@ -430,7 +431,7 @@ describe('executeUserShell', () => {
     expect(addHistoryMock).toHaveBeenCalledWith(llmClient, 'echo hello', 'hi');
   });
 
-  it('does not stream pty output as deltas', async () => {
+  it('does not stream pty output to the running card', async () => {
     const { events, done, emitOutput, resolveResult, executeArgs } =
       setup(true);
     expect(executeArgs[4]).toBe(true);

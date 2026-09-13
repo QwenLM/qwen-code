@@ -1417,7 +1417,7 @@ describe('SettingsDialog', () => {
 
   describe('String Settings Editing', () => {
     it('should allow editing and committing a string setting', async () => {
-      let settings = createMockSettings({ 'a.string.setting': 'initial' });
+      let settings = createMockSettings({ advisorModel: 'initial' });
       const onSelect = vi.fn();
 
       const { stdin, unmount, rerender } = render(
@@ -1429,8 +1429,9 @@ describe('SettingsDialog', () => {
       // Wait for the dialog to render
       await wait();
 
-      // Navigate to the last setting
-      for (let i = 0; i < 20; i++) {
+      const stringSettingIndex = getDialogSettingKeys().indexOf('advisorModel');
+      expect(stringSettingIndex).toBeGreaterThanOrEqual(0);
+      for (let i = 0; i < stringSettingIndex; i++) {
         stdin.write('j'); // Down
         await wait(10);
       }
@@ -1447,11 +1448,7 @@ describe('SettingsDialog', () => {
       stdin.write('\r');
       await wait();
 
-      settings = createMockSettings(
-        { 'a.string.setting': 'new value' },
-        {},
-        {},
-      );
+      settings = createMockSettings({ advisorModel: 'new value' }, {}, {});
       rerender(
         <KeypressProvider kittyProtocolEnabled={false}>
           <SettingsDialog settings={settings} onSelect={onSelect} />

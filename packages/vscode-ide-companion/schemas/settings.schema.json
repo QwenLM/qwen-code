@@ -486,6 +486,11 @@
           "type": "boolean",
           "default": true
         },
+        "showToolCallDetails": {
+          "description": "Show tool arguments and results inline. Disable to render ordinary tool calls as a one-line summary; click a summary in Virtualized History or press Ctrl+O to expand its details. Approval prompts, user-initiated shell commands, and focused interactive shells remain expanded.",
+          "type": "boolean",
+          "default": true
+        },
         "showToolCallArgs": {
           "description": "Render tool calls on their own line with their raw arguments inline, instead of the type-based compact summary that folds read/search/list batches into \"Read 3 files\". Useful when debugging MCP integrations or tool schemas. Applies wherever the arguments are available: live, resumed, agent-view and speculated turns. The row is capped at 2 wrapped lines (and never more than 1000 characters) and truncated with a `+N chars` marker; press Ctrl+O for the complete payload. Groups of running parallel subagents keep their compact roster, and daemon-attached sessions carry no arguments, so both keep the compact view — press Ctrl+O there. Does not change result-output truncation.",
           "type": "boolean",
@@ -743,8 +748,30 @@
           "description": "Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.",
           "type": "integer"
         },
+        "goalMaxTurns": {
+          "description": "Goal-turn window armed on each new Goal. Every finished Goal turn counts, including user-driven turns; user turns are still admitted at the ceiling, but they can make the next autonomous continuation a wind-down. A Goal that reaches the ceiling gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window on top of the turns already finished. Unset runs Goals with no turn ceiling, and -1 says so explicitly -- but the opt-out only takes a ceiling off a Goal that has already spent it, on the resume or edit that follows; a Goal still under its ceiling keeps it. A ceiling is armed only on a Goal created after the change, so bounding a Goal already on the record means replacing it with /goal set, which starts a new Goal at revision 1 with its meters reset and its earlier evidence no longer citable, or clearing it and starting again. Zero, values above 10,000, other negative, fractional, or non-number values are rejected at startup. Changes take effect after restart.",
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 10000,
+          "not": {
+            "enum": [
+              0
+            ]
+          }
+        },
+        "goalMaxActiveMinutes": {
+          "description": "Active-time window armed on each new Goal, in minutes of wall time while the Goal remains active, including waits and idle time between turns. Paused, blocked or stopped time does not count, nor does downtime across a restart; a suspended process is still charged. A Goal that reaches the ceiling gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window. The ceiling is read between turns, not by a timer, so a Goal can run well past it before it stops. Active time is measured between recorded transitions, so time in a turn that a restart interrupted is not charged. Unset runs Goals with no time ceiling, and -1 says so explicitly -- but the opt-out only takes a ceiling off a Goal that has already spent it, on the resume or edit that follows. A ceiling is armed only on a Goal created after the change, so bounding a Goal already on the record means replacing it with /goal set, which starts a new Goal at revision 1 with its meters reset and its earlier evidence no longer citable, or clearing it and starting again. Zero, values above 10,080 (one week), other negative, fractional, or non-number values are rejected at startup. Changes take effect after restart.",
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 10080,
+          "not": {
+            "enum": [
+              0
+            ]
+          }
+        },
         "goalCheckpointTimeoutSeconds": {
-          "description": "Ceiling on one Goal evidence-checkpoint check, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call. A check whose claims overrun the aggregate byte budget, or include a claim over the per-claim character limit, makes one corrective retry, and both calls share this ceiling. A check that does not finish in time is abandoned as inconclusive; it counts toward the checkpoint stall limit only when the evidence window has overflowed, while a non-overflowing check preserves the streak and retries on a later turn. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The calls are streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the check. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.",
+          "description": "Ceiling on one Goal evidence-checkpoint model call, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; when a call makes its one corrective retry, both requests share this ceiling (docs/users/features/goals.md lists which failures earn one). A check on an overflowing window after a stalled checkpoint sends its evidence in batches, one call per batch, each under its own ceiling. A check that does not finish in time is abandoned as inconclusive; it counts toward the checkpoint stall limit only when the evidence window has overflowed, while a non-overflowing check preserves the streak and retries on a later turn. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The calls are streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the check. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.",
           "type": "integer",
           "minimum": 1,
           "maximum": 900
@@ -1069,7 +1096,7 @@
       "type": "object",
       "properties": {
         "disabled": {
-          "description": "Slash command names to hide and refuse to execute. Matched case-insensitively against the final command name (for extension commands this is the disambiguated form, e.g. \"myext.deploy\"). Merged as a union across settings scopes, so workspace settings can add to but not remove entries defined in system/user settings.",
+          "description": "Slash command names to hide and refuse to execute. Matched case-insensitively against the final command name (for extension commands this is the disambiguated form, e.g. \"myext.deploy\"), except that a skill command is gated under either spelling — its registered name (rust:pdf) or the name its SKILL.md authors (pdf) — so an entry written before that prefix existed still gates it. Merged as a union across settings scopes, so workspace settings can add to but not remove entries defined in system/user settings.",
           "type": "array",
           "items": {
             "type": "string"
@@ -1095,21 +1122,21 @@
           }
         },
         "disabled": {
-          "description": "Skill names to hide. Matched case-insensitively against the skill name. Hidden skills do not appear in <available_skills> or as /<name> slash commands. UNION-merged across systemDefaults/user/workspace/system scopes — workspace cannot remove entries defined in higher scopes.",
+          "description": "Skill names to hide. Matched case-insensitively against the skill name. Hidden skills do not appear in <available_skills> or as /<name> slash commands. An extension skill matches under either its registered name (rust:pdf) or the name its SKILL.md authors (pdf), so an entry written before that prefix existed still blocks it. UNION-merged across systemDefaults/user/workspace/system scopes — workspace cannot remove entries defined in higher scopes.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "defaultDisabled": {
-          "description": "Skill names disabled by default unless explicitly enabled through skills.enabled. Matched case-insensitively and UNION-merged across settings scopes. skills.disabled always wins.",
+          "description": "Skill names disabled by default unless explicitly enabled through skills.enabled. Matched case-insensitively and UNION-merged across settings scopes. An extension skill is disabled under either its registered name (rust:pdf) or the name its SKILL.md authors (pdf). skills.disabled always wins; skills.enabled cancels an entry here only when the two lists spell the name the same way.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "enabled": {
-          "description": "Explicit opt-ins that override matching skills.defaultDisabled entries. Matched case-insensitively and UNION-merged across settings scopes. Cannot override skills.disabled.",
+          "description": "Explicit opt-ins, matched against the skill name as registered — an extension skill is rust:pdf there. An entry spelled as the registered name overrides a matching skills.defaultDisabled entry and, for an extension skill, both the default the owning extension declares and the enablement stored for this workspace. A bare pdf entry never matches as a grant; it only cancels an identically-spelled skills.defaultDisabled entry, and once cancelled the enablement stored for this workspace decides, else the default the owning extension declares. Matched case-insensitively and UNION-merged across settings scopes. Cannot override skills.disabled or re-enable skills from a skills.disabledLevels-excluded level.",
           "type": "array",
           "items": {
             "type": "string"
@@ -1249,6 +1276,11 @@
       "description": "Settings for built-in and custom tools.",
       "type": "object",
       "properties": {
+        "codeModeOnly": {
+          "description": "Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available. Ignored in safe and bare modes.",
+          "type": "boolean",
+          "default": false
+        },
         "sandbox": {
           "anyOf": [
             {
@@ -1813,7 +1845,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -1925,7 +1957,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2037,7 +2069,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2149,7 +2181,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2261,7 +2293,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2373,7 +2405,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2485,7 +2517,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2597,7 +2629,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2709,7 +2741,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2821,7 +2853,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -2933,7 +2965,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3045,7 +3077,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3157,7 +3189,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3269,7 +3301,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3381,7 +3413,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3493,7 +3525,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {
@@ -3605,7 +3637,567 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in seconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "PostCompact": {
+          "description": "Hooks that execute after conversation compaction completes.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http",
+                        "prompt"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "PermissionDenied": {
+          "description": "Hooks that execute when AUTO-mode classification denies a tool call.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http",
+                        "prompt"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "TodoCreated": {
+          "description": "Hooks that execute when a new todo item is created. They can block creation during validation.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http",
+                        "prompt"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "TodoCompleted": {
+          "description": "Hooks that execute when a todo item is marked as completed. They can block completion during validation.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http",
+                        "prompt"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "InstructionsLoaded": {
+          "description": "Hooks that execute when an instruction file such as QWEN.md is loaded into context.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http",
+                        "prompt"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.",
                       "type": "number"
                     },
                     "env": {

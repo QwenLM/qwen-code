@@ -75,6 +75,7 @@ export enum LlmEventType {
   Citation = 'citation',
   Retry = 'retry',
   HookSystemMessage = 'hook_system_message',
+  GoalSettlementFailed = 'goal_settlement_failed',
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
   GoalState = 'goal_state',
@@ -148,6 +149,11 @@ export interface ToolCallRequestInfo {
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
   goalContext?: GoalTurnPermit;
+  /** Parent model tool call for a programmatically dispatched child call. */
+  parentCallId?: string;
+  source?: 'model' | 'code_mode';
+  /** Exact tools an exec call may dispatch for a restricted agent. */
+  codeModeAllowedToolNames?: readonly string[];
 }
 
 export type ToolExecutionStatus =
@@ -488,6 +494,11 @@ export type ServerLlmHookSystemMessageEvent = {
   value: string;
 };
 
+export type ServerLlmGoalSettlementFailedEvent = {
+  type: LlmEventType.GoalSettlementFailed;
+  value: string;
+};
+
 export type ServerLlmUserPromptSubmitBlockedEvent = {
   type: LlmEventType.UserPromptSubmitBlocked;
   value: {
@@ -525,6 +536,7 @@ export type ServerLlmStreamEvent =
   | ServerLlmContentEvent
   | ServerLlmErrorEvent
   | ServerLlmFinishedEvent
+  | ServerLlmGoalSettlementFailedEvent
   | ServerLlmHookSystemMessageEvent
   | ServerLlmUserPromptSubmitBlockedEvent
   | ServerLlmStopHookLoopEvent

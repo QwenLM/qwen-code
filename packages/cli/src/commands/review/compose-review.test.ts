@@ -579,6 +579,159 @@ function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
   };
 }
 
+describe('focused navigation publishing', () => {
+  function focusedPlan(verified = false, reviewed = true): string {
+    const p = plan({
+      step45: false,
+      effort: 'high',
+      ownerRepo: 'QwenLM/qwen-code',
+      prNumber: 11426,
+      fetchedSha: 'a'.repeat(40),
+      reviewModelId: 'fixture-model@1a2b3c4d',
+    });
+    const captured = JSON.parse(readFileSync(p, 'utf8'));
+    Object.assign(captured, {
+      reviewProfile: 'docs-nav',
+      srcDiffLines: 13,
+      fullSrcDiffLines: 13,
+      diffLines: 13,
+      files: [
+        {
+          path: 'docs/developers/_meta.ts',
+          kind: 'source',
+          removedLines: 3,
+          heavy: false,
+        },
+      ],
+      chunks: [
+        {
+          id: 1,
+          startLine: 1,
+          endLine: 13,
+          files: [{ path: 'docs/developers/_meta.ts', newStart: 1, newEnd: 9 }],
+        },
+      ],
+    });
+    writeFileSync(p, JSON.stringify(captured));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    if (reviewed) {
+      const brief = briefPath(p, 'docs-nav');
+      const launch = `read_file(file_path="${brief}")\nread_file(file_path="${DIFF}", offset=0, limit=13)`;
+      mkdirSync(promptRecordDir(p), { recursive: true });
+      writeFileSync(brief, 'Review the navigation diff.');
+      writeFileSync(join(promptRecordDir(p), 'docs-nav.txt'), launch);
+      transcript('docs-nav', launch, { toolCalls: 2, range: [0, 13] });
+    }
+    if (verified) recordStep45(p, ['verify']);
+    return p;
+  }
+
+  it.each([
+    {
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      verified: false,
+      event: 'COMMENT',
+    },
+    {
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      verified: true,
+      event: 'COMMENT',
+    },
+    {
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      verified: true,
+      event: 'REQUEST_CHANGES',
+    },
+    {
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      verified: false,
+      event: 'COMMENT',
+    },
+  ])(
+    'publishes $event for C=$criticalsInline S=$suggestionsInline verified=$verified without a full-review anchor',
+    ({ verified, event, ...counts }) => {
+      const r = composeReview({
+        ...counts,
+        planPath: focusedPlan(verified),
+        env: ENV,
+        modelId: MODEL,
+      });
+      expect(r.event).toBe(event);
+      expect(r.body).toContain(
+        'Not reviewed: the full review and reverse audit',
+      );
+      expect(r.body).toContain('cannot certify Approve');
+      expect(r.remediation.join('\n')).not.toContain('--role reverse-audit');
+      expect(r.cappedBy).not.toContain('chunk-nobody-read');
+      expect(r.remediation.join('\n')).not.toContain('--roster');
+      const ledger = parseLedger(r.body);
+      expect(ledger).not.toBeNull();
+      for (const field of ['sha', 'model', 'closed'])
+        expect(ledger).not.toHaveProperty(field);
+      if (counts.criticalsInline > 0) {
+        expect(r.cappedBy.includes('criticals-unverified')).toBe(!verified);
+      }
+    },
+  );
+
+  it('still requires the focused reviewer to read the diff', () => {
+    const r = composeReview({
+      planPath: focusedPlan(false, false),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.remediation.join('\n')).toContain('--roster');
+  });
+
+  it('caps a verified-blocker focused round at Comment while the findings file carries a tag', () => {
+    // The profile runs no Step 5, so the tag backstop is the ONLY machine
+    // check that an unruled candidate never posts as a verified blocker —
+    // SKILL Step 4 passes the cumulative findings file as findingsPath.
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: focusedPlan(true),
+      findingsPath: findingsFile(TAGGED),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+  });
+
+  it('does not read the by-design anchor withhold as a stopped chain', () => {
+    // Round 2 of a navigation-only PR recovers a marker with a round and no
+    // sha: every focused round withholds the anchor by design (its disclosed
+    // gap caps the verdict), so the mechanism-health note must stay silent —
+    // reporting it would re-post a false malfunction on every round.
+    writeFileSync(
+      join(dir, 'qwen-review-pr-11426-prev-ledger.json'),
+      JSON.stringify({ round: 1, posted: 0, fresh: 0, findings: [] }),
+    );
+    const r = composeReview({
+      planPath: focusedPlan(false),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.health).toBeUndefined();
+    expect(r.body).not.toContain('did not close cleanly');
+    const ledger = parseLedger(r.body);
+    expect(ledger).not.toBeNull();
+    for (const field of ['sha', 'model', 'closed'])
+      expect(ledger).not.toHaveProperty(field);
+  });
+});
+
 describe('composeReview — the C/S table', () => {
   it('C=0, S=0 → APPROVE with the LGTM body', () => {
     const r = composeReview(base({}));
@@ -7342,6 +7495,18 @@ describe('composeReview — fixedFindings', () => {
       // An inline link's DESTINATION is raw characters, so a backtick in it
       // is not a delimiter either.
       ['see [x](a`b) <details>` here', 'see [x](a`b) &lt;details>` here'],
+      // A reference link's LABEL is not: MEASURED against cmark-gfm, a
+      // backtick inside `[a`b][c]`, `[x][a`b]`, `[a`b]` or a link
+      // reference definition's own label is an ordinary code-span
+      // delimiter, and the tag it pairs over is code. Ordinary text is
+      // what this pass already reads them as, so nothing special is
+      // needed — the rows are here because two audits reasoned the other
+      // way and neither could build a counterexample (#9940 review,
+      // rounds 11 and 12).
+      ['see [a`b][c] and <details>` here', 'see [a`b][c] and <details>` here'],
+      ['see [x][a`b] <details>` here', 'see [x][a`b] <details>` here'],
+      ['see [a`b] <details>` here', 'see [a`b] <details>` here'],
+      ['[a`b]: /u <details>` here', '[a`b]: /u <details>` here'],
       // …and the `_` rule reaches the LAST label too, not only the one
       // before it: `http://a.b_c` does not link, so the backticks pair and
       // the tag between them is live.
@@ -7411,6 +7576,183 @@ describe('composeReview — fixedFindings', () => {
     expect(escapeTagOpeners('| ` c1 | <script>bad()</script> ` |')).toBe(
       '| ` c1 | <script>bad()</script> ` |',
     );
+  });
+
+  it('every model-written channel reaches the escape as ONE line — the invariant the per-line escape rests on (#9940 review, round 12 reverse audit)', () => {
+    // `escapeTagOpeners` models CommonMark INLINE structure only. That is
+    // correct exactly while every channel folds its text to ONE LINE before
+    // posting it — and the fold is not one primitive. `collapseEntry` and
+    // `collapseToLine` carry the entry, disclosure and duplicate-drop
+    // legs; the downgrade reasons have their own `\s+` pass; the deferral
+    // leg is held TWICE, by a `collapse` pass and by `mdField`'s
+    // line-ending strip (lib/md-field.ts), and either alone holds it —
+    // MEASURED: break only one and the row is still folded; the bare CR
+    // reaches the POSTED LINE only with both broken. Two more legs are
+    // held twice: cannot-tell by `collapseEntry` AND `collapseToLine`, and
+    // the RELOCATION exit THREE times — `collapseToLine` at
+    // `toDeferredEntries` and again inside `boundDeferredLine`, then
+    // `mdField`. Breaking any two of the three still leaves it folded.
+    //
+    // So THREE rows cannot redden on a SINGLE-site regression — a property
+    // of the code, not a gap here — and the other five do redden on theirs
+    // (all eight measured). Do not read a double-held row as a sentinel
+    // for its own folds; it is here for the channel, not for them.
+    //
+    // The two rows asserted inert as a CODE SPAN get there differently.
+    // The deferral LIST line is `- ${mdField(entry)}` and never reaches
+    // `escapeTagOpeners` at all; the relocation line does reach it, and
+    // comes back unchanged because the escape reads `mdField`'s backtick
+    // span correctly. The fold is what all eight share, and it is what
+    // this case is about.
+    //
+    // Three producers push into `bodyCriticals` AFTER `ingestEntryList`
+    // has run, and that is how a channel gets missed: `scriptLintGate`'s
+    // push, which for a while did not fold; a Critical deferral's
+    // RELOCATION exit, which a `Suggestion` row never reaches (armed
+    // below); and the non-convergence Critical, which is this module's own
+    // fixed prose and carries no line break to fold. The gate's push is
+    // the one this case does not arm — it needs a report fixture beside
+    // the plan — and it is pinned by `folds its own entry`. A producer
+    // outside these still owes a case.
+    const multiline = [
+      'the retry helper\n<div class="w"> and `x\nnever clears it',
+      'the retry helper\r\n<div class="w"> and `x\r\nnever clears it',
+      'the retry helper\r<div class="w"> and `x\rnever clears it',
+    ];
+    const carries = (body: string, where: string, escapes = true) => {
+      // Split on `\n` ONLY, so a surviving bare `\r` stays INSIDE the
+      // matched line where the next assertion can see it. Splitting on the
+      // folds' own set here would consume the very break under test, and
+      // counting lines proves nothing on its own: the filter keeps the
+      // entry's first physical line whatever happened to the rest.
+      const lines = body
+        .split('\n')
+        .filter(
+          (l) =>
+            l.includes('retry helper') && !l.includes('qwen-review-ledger'),
+        );
+      expect([where, lines.length]).toEqual([where, 1]);
+      // The head and the TAIL of the entry on the SAME line, and no break
+      // left inside it. That is the fold, stated as the reader sees it: an
+      // LF that survives puts the tail on another line, a bare CR that
+      // survives stays in this one — and the per-line escape then decides
+      // each half on its own and can post a tag the renderer holds live
+      // (compose-review.ts records that happening). `&amp;lt;` was asserted
+      // here before and could not fail: the escape only ever writes
+      // `&lt;`, so the only body that trips it is one a model wrote with
+      // those characters already in it.
+      expect([where, lines[0]!.includes('never clears it')]).toEqual([
+        where,
+        true,
+      ]);
+      expect([where, /[\r\n]/.test(lines[0]!)]).toEqual([where, false]);
+      // Inert by ESCAPE on the prose channels; the deferral line is a code
+      // span, where the renderer already holds the tag and an escape would
+      // show the reader a literal `&lt;`.
+      expect([
+        where,
+        escapes
+          ? lines[0]!.includes('&lt;div class="w">')
+          : /^[^`]*`[^`]*<div class="w">[^`]*`[^`]*$/.test(lines[0]!),
+      ]).toEqual([where, true]);
+    };
+    for (const text of multiline) {
+      carries(
+        composeReview(base({ bodyCriticals: [text, 'blocker two'] })).body,
+        'bodyCriticals',
+      );
+      carries(
+        composeReview(base({ cannotTellCriticals: [text] })).body,
+        'cannotTellCriticals',
+      );
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            suggestionsDroppedAsDuplicates: [text],
+          }),
+        ).body,
+        'suggestionsDroppedAsDuplicates',
+      );
+      carries(
+        composeReview(base({ uncoverableChunks: [text] })).body,
+        'uncoverableChunks',
+      );
+      carries(
+        composeReview(base({ unreviewedDimensions: [text] })).body,
+        'unreviewedDimensions',
+      );
+      carries(
+        composeReview(
+          base({
+            criticalsInline: 1,
+            presubmit: {
+              downgradeRequestChanges: true,
+              downgradeReasons: [text],
+            },
+          }),
+        ).body,
+        'downgradeReasons',
+      );
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            deferredSuggestions: [
+              {
+                file: 'a.ts',
+                line: 1,
+                source: 'review',
+                severity: 'Suggestion',
+                title: text,
+              },
+            ],
+          }),
+        ).body,
+        'deferredSuggestions',
+        false,
+      );
+      // The deferral channel has a SECOND exit: a Critical relocates into
+      // `bodyCriticals` — another producer that joins after
+      // `ingestEntryList` has run, and the one this case would otherwise
+      // miss, since a `Suggestion` never reaches it.
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            deferredSuggestions: [
+              {
+                file: 'a.ts',
+                line: 1,
+                source: 'review',
+                severity: 'Critical',
+                title: text,
+              },
+            ],
+          }),
+        ).body,
+        'deferredSuggestions (relocated)',
+        false,
+      );
+      // A ruling note's `by` does not fold — it REFUSES, because the note
+      // is one posted line and a folded `by` would misquote the author.
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by: text }] })),
+      ).toThrow(/must be ONE non-empty line/);
+    }
+    // A quoted FENCE is refused rather than folded on the two Critical
+    // channels: folding it would join the delimiters onto one line and
+    // silently change what the author quoted.
+    const fenced =
+      'the retry helper\n```\n<div class="w">\n```\nnever clears it';
+    for (const input of [
+      { bodyCriticals: [fenced, 'blocker two'] },
+      { cannotTellCriticals: [fenced] },
+    ]) {
+      expect(() => composeReview(base(input))).toThrow(
+        /quotes a code fence its one-line render cannot carry/,
+      );
+    }
   });
 
   it('a raw `<![CDATA[ … > … <details> … ]]>` does not fold the rest of the body away (#9940 review, round 10 reverse audit)', () => {

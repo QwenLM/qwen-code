@@ -1719,7 +1719,7 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
     await gotoSession(page, scenario, daemon);
     const surface = page.locator('[data-web-shell-composer-surface]');
     const initialHeight = await composerHeight(page);
-    expect(initialHeight).toBe(140);
+    expect(initialHeight).toBe(116);
 
     await replaceComposerText(
       page,

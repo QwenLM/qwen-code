@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  stripDisplayControlChars,
+  stripTerminalControlSequences,
+} from '../utils/terminalSafe.js';
+
 export const GOAL_STATE_VERSION = 2 as const;
 export const GOAL_PROPOSAL_REASON_MAX_CHARACTERS = 8_000;
 export const GOAL_PROPOSAL_REASON_MAX_BYTES = 16_000;
@@ -29,8 +34,141 @@ export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
  * the loop.
  */
 export const GOAL_NO_PROGRESS_TURN_LIMIT = 3;
+/**
+ * The stall stop for a Goal whose last stalled check could not fit the window
+ * inside the checkpoint's claim bounds: a full claim list that still left
+ * evidence behind, or well-formed claims over the claim count, the byte budget
+ * or the per-claim length. Compaction itself cannot keep up -- the objective produces more
+ * evidence than one window holds -- so narrowing it is the remedy.
+ */
 export const GOAL_CHECKPOINT_STALLED_REASON =
-  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list, came back with a result that could not be folded into claims, or did not come back at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check could not fit it within the checkpoint claim bounds, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
+
+/**
+ * The stall stop for a Goal whose last stalled check answered with output that
+ * is not usable claims at all. The objective may not be too wide -- the
+ * checkpoint model is returning output the runtime cannot accept -- so the
+ * capacity advice to narrow it would send the user to rewrite a Goal that was
+ * never the problem.
+ */
+export const GOAL_CHECKPOINT_UNUSABLE_REASON =
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check answered with output that could not be folded into claims. Narrowing the objective does not fix this. Check that the checkpoint model returns the structured JSON it is asked for, or switch models, then resume the Goal; resuming starts a fresh evidence window.';
+
+/**
+ * The stall stop for a Goal whose last stalled check produced no answer to
+ * judge. The runtime cannot tell why from here: the provider may be
+ * unreachable or rate-limited, the check may have run past its own ceiling on
+ * a window too large to verify in time, or the check itself may have failed.
+ * The recorded failure says which, so this names every remedy that can apply
+ * rather than blaming the provider.
+ */
+export const GOAL_CHECKPOINT_UNREACHABLE_REASON =
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check failed before the checkpoint verifier returned an answer. The recorded checkpoint failure says why: an unreachable or rate-limited provider, a check that did not finish within model.goalCheckpointTimeoutSeconds, or an error in the check itself. Fix the provider, raise that timeout, or narrow the objective so the window checkpoints in time, then resume the Goal; resuming starts a fresh evidence window.';
+
+/**
+ * What the last stalled checkpoint check ran into, which decides the advice
+ * the stop carries. `capacity`: the check could not fit the window within the
+ * claim bounds (a full claim list that left evidence behind, or claims over
+ * the count, byte or length bound). `unusable`: it answered with output that is not
+ * usable claims. `unreachable`: no answer arrived to judge.
+ */
+export type GoalCheckpointFailureShape =
+  | 'capacity'
+  | 'unusable'
+  | 'unreachable';
+
+/** The `lastReason` a checkpoint stall stop records for its last failure. */
+export function goalCheckpointStalledReason(
+  shape: GoalCheckpointFailureShape,
+): string {
+  switch (shape) {
+    case 'capacity':
+      return GOAL_CHECKPOINT_STALLED_REASON;
+    case 'unusable':
+      return GOAL_CHECKPOINT_UNUSABLE_REASON;
+    case 'unreachable':
+      return GOAL_CHECKPOINT_UNREACHABLE_REASON;
+    default: {
+      const exhaustive: never = shape;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * Longest `lastCheckpointFailure` a record keeps. A provider error can carry a
+ * whole response body, and the record is journaled on every checkpoint check.
+ */
+export const GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS = 500;
+
+/**
+ * Makes a checkpoint failure safe to keep as a one-line diagnostic: terminal
+ * control sequences and bidi overrides removed, every run of whitespace (line
+ * breaks included) collapsed to one space, and the result capped by code
+ * point. Collapsing runs before the cap, so the bound spends its code points
+ * on the message rather than on a response body's indentation. The value is
+ * journaled, handed to the model, and rendered on every Goal surface, so it is
+ * cleaned once where it is written rather than trusted to each reader.
+ */
+export function capGoalCheckpointFailure(text: string): string {
+  const oneLine = stripDisplayControlChars(stripTerminalControlSequences(text))
+    .replace(/\s+/g, ' ')
+    .trim();
+  const codePoints = [...oneLine];
+  return codePoints.length <= GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS
+    ? oneLine
+    : `${codePoints.slice(0, GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS - 1).join('')}…`;
+}
+
+/**
+ * Whether a Goal surface should show checkpoint health, decided once so every
+ * card and summary agrees. A completed Goal never does: its checkpoints no
+ * longer matter, and the terminal snapshot keeps whatever the record carried.
+ * A running stall streak always does, whatever the status, because it is
+ * still the truth about the evidence window a resume re-enters. A Goal stopped
+ * because its checkpoint request was too large to send shows the failure that
+ * stopped it, since that failure is the stop. Any other failure that spent no
+ * stall shows only while the Goal is active: once the Goal stops or pauses for
+ * another reason, that diagnostic explains nothing about the stop and would
+ * read as though it did.
+ */
+export function goalCheckpointHealthVisible(goal: {
+  status?: string;
+  checkpointStalls?: number;
+  lastCheckpointFailure?: string;
+  limitKind?: string;
+}): boolean {
+  if (goal.status === 'complete') return false;
+  if ((goal.checkpointStalls ?? 0) > 0) return true;
+  const failed = Boolean(goal.lastCheckpointFailure?.trim());
+  if (goal.limitKind === 'checkpoint_request') return failed;
+  return (goal.status ?? 'active') === 'active' && failed;
+}
+
+/**
+ * The checkpoint health a text surface prints -- the stall count, or the
+ * stall-free label, then the diagnostic -- or undefined when
+ * `goalCheckpointHealthVisible` hides it. Worded once so every terminal
+ * surface says the same thing. `clean` runs on the diagnostic before it is
+ * trimmed and joined, for a caller that writes straight to a terminal; a
+ * caller that sanitizes the rendered line itself passes nothing, so the text
+ * is not escaped twice.
+ */
+export function goalCheckpointHealthLine(
+  goal: Parameters<typeof goalCheckpointHealthVisible>[0],
+  clean: (text: string) => string = (text) => text,
+): string | undefined {
+  if (!goalCheckpointHealthVisible(goal)) return undefined;
+  const stalls = goal.checkpointStalls ?? 0;
+  return [
+    stalls > 0
+      ? `${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`
+      : 'last check failed',
+    clean(goal.lastCheckpointFailure ?? '').trim(),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
 
 /**
  * Default autonomous spend window armed on a newly created Goal, in model
@@ -68,25 +206,101 @@ export function isGoalTokenBudgetSpent(
   return goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget;
 }
 
+/** The `lastReason` a Goal stops with when `turnCount` reaches its budget. */
+export function goalTurnBudgetReason(turnBudget: number): string {
+  return `The Goal ran its Goal-turn budget (${turnBudget.toLocaleString('en-US')} ${turnBudget === 1 ? 'turn' : 'turns'}). Resume the Goal to authorize another window of turns, or clear it.`;
+}
+
+/**
+ * Whether the Goal has finished as many turns as its budget allows. Shaped
+ * like `isGoalTokenBudgetSpent` and used the same way: one predicate serves
+ * the runtime's stop condition and the reducer's re-arm condition.
+ */
+export function isGoalTurnBudgetSpent(
+  goal: Pick<GoalRecord, 'turnCount' | 'turnBudget'>,
+): goal is Pick<GoalRecord, 'turnCount' | 'turnBudget'> & {
+  turnBudget: number;
+} {
+  return goal.turnBudget !== undefined && goal.turnCount >= goal.turnBudget;
+}
+
+/**
+ * The budget as the setting spells it. Minutes are the unit the setting takes
+ * and the unit a stop is worth reporting in; a sub-minute budget only arises
+ * in tests, and reporting one as `0 minutes` would read as unbounded.
+ */
+function formatGoalActiveTimeBudget(activeTimeBudgetMs: number): string {
+  const minutes = activeTimeBudgetMs / 60_000;
+  if (minutes >= 1) {
+    const rounded = Math.round(minutes);
+    return `${rounded.toLocaleString('en-US')} ${rounded === 1 ? 'minute' : 'minutes'}`;
+  }
+  const seconds = Math.max(1, Math.round(activeTimeBudgetMs / 1_000));
+  return `${seconds.toLocaleString('en-US')} ${seconds === 1 ? 'second' : 'seconds'}`;
+}
+
+/** The `lastReason` a Goal stops with when its active time reaches its budget. */
+export function goalActiveTimeBudgetReason(activeTimeBudgetMs: number): string {
+  return `The Goal ran its active-time budget (${formatGoalActiveTimeBudget(activeTimeBudgetMs)}). Resume the Goal to authorize another window of time, or clear it.`;
+}
+
+/**
+ * Whether the Goal has been active for as long as its budget allows.
+ *
+ * Takes the elapsed figure rather than computing it: active time keeps
+ * accruing while the Goal is `active`, so the caller holds the clock (see
+ * `elapsedActiveTime`). A stopped Goal's elapsed time is its committed
+ * `activeTimeMs`, which is what makes the re-arm on resume well defined.
+ */
+export function isGoalActiveTimeBudgetSpent(
+  goal: Pick<GoalRecord, 'activeTimeBudgetMs'>,
+  elapsedActiveMs: number,
+): goal is Pick<GoalRecord, 'activeTimeBudgetMs'> & {
+  activeTimeBudgetMs: number;
+} {
+  return (
+    goal.activeTimeBudgetMs !== undefined &&
+    elapsedActiveMs >= goal.activeTimeBudgetMs
+  );
+}
+
 /**
  * Which bound a `usage_limited` Goal ran into.
  *
  * Only the enumerated bounds are typed: they are the ones a caller has to
  * branch on. The evidence kinds mark a window a plain resume cannot simply
- * re-enter; `token_budget` marks a spent authorization that a resume re-arms.
+ * re-enter; the budget kinds mark a spent authorization that a resume re-arms.
  * Every other route to `usage_limited` is an operational failure that carries
  * prose in `lastReason` and nothing to key off.
  */
 export type GoalLimitKind =
   | 'evidence_catalog'
   | 'checkpoint_request'
-  | 'token_budget';
+  | 'token_budget'
+  | 'turn_budget'
+  | 'time_budget';
 
 export function isGoalLimitKind(value: unknown): value is GoalLimitKind {
   return (
     value === 'evidence_catalog' ||
     value === 'checkpoint_request' ||
-    value === 'token_budget'
+    isGoalBudgetLimitKind(value)
+  );
+}
+
+/**
+ * Whether the bound is a spent authorization rather than a wall the Goal ran
+ * into. Resuming a Goal stopped by one of these is the user granting another
+ * window, so the resume clears the stop prose and re-arms the ceiling; the
+ * evidence kinds instead need a fresh evidence window to make progress.
+ */
+export function isGoalBudgetLimitKind(
+  value: unknown,
+): value is 'token_budget' | 'turn_budget' | 'time_budget' {
+  return (
+    value === 'token_budget' ||
+    value === 'turn_budget' ||
+    value === 'time_budget'
   );
 }
 
@@ -181,6 +395,22 @@ export interface GoalRecord {
    */
   tokenBudget?: number;
   /**
+   * The count `turnCount` may reach before autonomous continuation stops and
+   * the Goal waits for the user. Every finished Goal turn contributes to the
+   * count, including user-driven turns, although those turns are not rejected
+   * at the ceiling. Armed and re-armed exactly like `tokenBudget` (`turnCount
+   * + grant` on the resume of a spent Goal), and absent by default.
+   */
+  turnBudget?: number;
+  /**
+   * The ceiling on `activeTimeMs` -- wall time while this Goal stays `active`,
+   * including waits and idle time between turns -- before autonomous
+   * continuation stops. Armed and re-armed like the other budgets, and absent
+   * by default. Time paused, blocked, stopped, or outside a running process
+   * does not count against it.
+   */
+  activeTimeBudgetMs?: number;
+  /**
    * The turn that delivered this spend window's wind-down hand-off. A spent
    * budget grants one more continuation before it stops the Goal, so the
    * model can hand off instead of being cut mid-thought; this marks that
@@ -206,6 +436,22 @@ export interface GoalRecord {
    * an evidence-limited Goal.
    */
   checkpointStalls?: number;
+  /**
+   * What the most recent checkpoint check that gave no relief ran into, as a
+   * one-line diagnostic: `ErrorName: message` for a check that failed, or the
+   * runtime's own phrase for one that answered with a full claim list while
+   * the window overflowed -- so it does not always mean the check threw.
+   * Capped at GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS. Set by every such check,
+   * whether or not it spends a stall, and kept on the record the stall breaker
+   * stops, so the stop can be diagnosed from the record alone. Cleared by a
+   * check that finds room or writes a checkpoint without stalling, by every
+   * control action that clears `checkpointStalls`, and by a checkpoint stop
+   * whose cause is not itself a check (missing recovery dependencies, an
+   * exhausted catalog, an unreadable transcript), so it can be absent while
+   * `checkpointStalls` is still non-zero. A check that proves nothing either
+   * way (a turn that recorded no evidence) leaves it as it was.
+   */
+  lastCheckpointFailure?: string;
   /**
    * Consecutive autonomous turns that recorded neither a tool result nor a
    * terminal proposal. A model that only restates status never reaches the

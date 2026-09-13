@@ -88,6 +88,8 @@ export default defineConfig(({ command }) => ({
     dedupe: ['react', 'react-dom', '@qwen-code/sdk'],
   },
   build: {
+    // Avoid esbuild lowering xterm's logical assignments into invalid code.
+    target: 'es2021',
     outDir: '../dist',
     emptyOutDir: true,
   },
@@ -96,6 +98,24 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     cors: false,
+    // Mirrors buildWebShellCsp() in packages/cli/src/serve/web-shell-static.ts;
+    // dev intentionally permits same-origin ancestors instead of denying all.
+    headers: {
+      'Content-Security-Policy': [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+        "style-src 'self' 'unsafe-inline'",
+        "font-src 'self' data:",
+        "img-src 'self' data: blob:",
+        "media-src 'self' data:",
+        "connect-src 'self'",
+        "worker-src 'self' blob:",
+        "base-uri 'none'",
+        'frame-src http: https: blob:',
+        "frame-ancestors 'self'",
+      ].join('; '),
+      'Referrer-Policy': 'no-referrer',
+    },
     port: 5173,
     proxy: {
       '/health': daemonProxy,

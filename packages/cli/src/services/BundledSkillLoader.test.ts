@@ -49,6 +49,7 @@ describe('BundledSkillLoader', () => {
     mockAddSessionAllowRule = vi.fn();
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
+      enableReviewWorkflow: vi.fn().mockResolvedValue(undefined),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue(undefined),
       getCliVersion: vi.fn().mockReturnValue('0.21.2'),
@@ -179,6 +180,34 @@ describe('BundledSkillLoader', () => {
       type: 'submit_prompt',
       content: [{ text: makeSkillPrompt('You are an expert code reviewer.') }],
     });
+  });
+
+  it('waits for review workflow registration before submitting the slash prompt', async () => {
+    let release!: () => void;
+    const registration = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(mockConfig.enableReviewWorkflow).mockReturnValue(registration);
+    mockSkillManager.listSkills.mockResolvedValue([makeSkill()]);
+    const commands = await new BundledSkillLoader(mockConfig).loadCommands(
+      signal,
+    );
+    let submitted = false;
+    const pending = Promise.resolve(
+      commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      ),
+    ).then((result) => {
+      submitted = true;
+      return result;
+    });
+    await vi.waitFor(() =>
+      expect(mockConfig.enableReviewWorkflow).toHaveBeenCalledOnce(),
+    );
+    expect(submitted).toBe(false);
+    release();
+    expect(await pending).toMatchObject({ type: 'submit_prompt' });
   });
 
   describe('invocation arguments', () => {

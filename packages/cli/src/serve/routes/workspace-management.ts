@@ -32,6 +32,7 @@ import {
   WorkspaceDisplayNameValidationError,
   WorkspaceRegistrationStoreCommittedError,
   WorkspaceRegistrationStoreLimitError,
+  WorkspaceRegistrationStoreTooLargeError,
   type WorkspaceRegistrationStore,
 } from '../workspace-registration-store.js';
 import {
@@ -57,6 +58,7 @@ import {
 const MAX_PATH_SUGGESTIONS = 50;
 
 export interface WorkspaceManagementRouteDeps {
+  maxRegisteredWorkspaces?: number;
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
@@ -123,6 +125,7 @@ export function registerWorkspaceManagementRoutes(
   deps: WorkspaceManagementRouteDeps,
 ): WorkspaceManagementHandle {
   const {
+    maxRegisteredWorkspaces = MAX_REGISTERED_WORKSPACES,
     workspaceRegistry,
     mutate,
     safeBody,
@@ -190,6 +193,23 @@ export function registerWorkspaceManagementRoutes(
       error: 'Daemon is shutting down',
       code: 'daemon_shutting_down',
     });
+  };
+  const sendStoreCapacityError = (res: Response, error: unknown): boolean => {
+    if (error instanceof WorkspaceRegistrationStoreLimitError) {
+      res.status(409).json({
+        error: 'Workspace registration limit reached',
+        code: 'workspace_limit_reached',
+      });
+      return true;
+    }
+    if (error instanceof WorkspaceRegistrationStoreTooLargeError) {
+      res.status(409).json({
+        error: 'Workspace registration store is too large',
+        code: 'workspace_registration_store_too_large',
+      });
+      return true;
+    }
+    return false;
   };
   const attachRegistrationIds = (
     runtime: WorkspaceRuntime,
@@ -286,7 +306,7 @@ export function registerWorkspaceManagementRoutes(
     // workspaces filling the limit must not block its publication.
     if (
       provenance !== 'live-conversation' &&
-      projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES
+      projectedWorkspaceCount() >= maxRegisteredWorkspaces
     ) {
       throw new Error('Workspace registration limit reached');
     }
@@ -336,7 +356,7 @@ export function registerWorkspaceManagementRoutes(
         }
         if (
           provenance !== 'live-conversation' &&
-          projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES
+          projectedWorkspaceCount() >= maxRegisteredWorkspaces
         ) {
           throw new Error('Workspace registration limit reached');
         }
@@ -485,7 +505,7 @@ export function registerWorkspaceManagementRoutes(
       });
       return;
     }
-    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+    if (projectedWorkspaceCount() >= maxRegisteredWorkspaces) {
       res.status(409).json({
         error: 'Workspace registration limit reached',
         code: 'workspace_limit_reached',
@@ -964,7 +984,7 @@ export function registerWorkspaceManagementRoutes(
           const alreadyPersisted = persistedWorkspaces.length > 0;
           if (
             !alreadyPersisted &&
-            snapshot.workspaces.length >= MAX_REGISTERED_WORKSPACES - 1
+            snapshot.workspaces.length >= maxRegisteredWorkspaces - 1
           ) {
             res.status(409).json({
               error: 'Workspace registration limit reached',
@@ -994,13 +1014,11 @@ export function registerWorkspaceManagementRoutes(
               const persistedDisplayName = hasDisplayName
                 ? displayName
                 : existingRuntime.displayName;
-              added =
-                persistedDisplayName === undefined
-                  ? await workspaceRegistrationStore!.add(canonical)
-                  : await workspaceRegistrationStore!.add(
-                      canonical,
-                      persistedDisplayName,
-                    );
+              added = await workspaceRegistrationStore!.add(
+                canonical,
+                persistedDisplayName,
+                maxRegisteredWorkspaces,
+              );
             } catch (err) {
               if (!(err instanceof WorkspaceRegistrationStoreCommittedError)) {
                 throw err;
@@ -1039,18 +1057,12 @@ export function registerWorkspaceManagementRoutes(
             persisted: true,
           });
         } catch (err) {
-          if (err instanceof WorkspaceRegistrationStoreLimitError) {
-            res.status(409).json({
-              error: 'Workspace registration limit reached',
-              code: 'workspace_limit_reached',
-            });
-            return;
-          }
           writeStderrLine(
             `qwen serve: failed to persist existing workspace registration: ${
               err instanceof Error ? err.message : String(err)
             }`,
           );
+          if (sendStoreCapacityError(res, err)) return;
           res.status(500).json({
             error: 'Failed to persist workspace registration',
             code: 'workspace_registration_store_error',
@@ -1095,7 +1107,7 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
-      if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+      if (projectedWorkspaceCount() >= maxRegisteredWorkspaces) {
         res.status(409).json({
           error: 'Workspace registration limit reached',
           code: 'workspace_limit_reached',
@@ -1118,13 +1130,11 @@ export function registerWorkspaceManagementRoutes(
           if (persist) {
             try {
               try {
-                persistedRecordAdded =
-                  displayName === undefined
-                    ? await workspaceRegistrationStore!.add(canonical)
-                    : await workspaceRegistrationStore!.add(
-                        canonical,
-                        displayName,
-                      );
+                persistedRecordAdded = await workspaceRegistrationStore!.add(
+                  canonical,
+                  displayName,
+                  maxRegisteredWorkspaces,
+                );
               } catch (err) {
                 if (
                   !(err instanceof WorkspaceRegistrationStoreCommittedError)
@@ -1237,6 +1247,7 @@ export function registerWorkspaceManagementRoutes(
           }`,
         );
         if (persistenceFailed) {
+          if (sendStoreCapacityError(res, err)) return;
           res.status(500).json({
             error: 'Failed to persist workspace registration',
             code: 'workspace_registration_store_error',

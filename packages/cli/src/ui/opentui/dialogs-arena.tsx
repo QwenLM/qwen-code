@@ -500,7 +500,7 @@ function ArenaStop({ config, onClose, notify }: OpenTuiArenaDialogProps) {
           <box key={it.key} flexDirection="column">
             <box flexDirection="row">
               <text fg={i === sel ? C.accent : C.dim}>
-                {i === sel ? '● ' : '○ '}
+                {i === sel ? '› ' : '  '}
               </text>
               <text
                 fg={i === sel ? C.text : C.dim}
@@ -762,7 +762,7 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
           <box key={row.key} flexDirection="column">
             <box flexDirection="row">
               <text fg={row.disabled ? C.dim : i === sel ? C.accent : C.dim}>
-                {i === sel ? '● ' : '○ '}
+                {i === sel ? '› ' : '  '}
               </text>
               <text
                 fg={row.disabled ? C.dim : i === sel ? C.text : C.dim}

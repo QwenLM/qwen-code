@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   countReasoningItems,
+  isEncryptedReasoningRejection,
   downgradeRejectedReasoningItems,
   parseReasoningIdRejection,
 } from './responses-reasoning-rejection.js';
@@ -532,5 +533,54 @@ describe('downgradeRejectedReasoningItems', () => {
     ];
     expect(countReasoningItems(items)).toBe(2);
     expect(countReasoningItems([])).toBe(0);
+  });
+});
+
+describe('isEncryptedReasoningRejection', () => {
+  const error = {
+    code: 'invalid_encrypted_content',
+    type: 'invalid_request_error',
+  };
+  const direct = JSON.stringify({ error });
+  const gateway = JSON.stringify({
+    routify_response: { success: false, status: 400, error_detail: { error } },
+  });
+
+  it.each([direct, gateway, `data: ${gateway}\n\n`])(
+    'recognizes an explicit encrypted-content rejection: %s',
+    (body) => {
+      expect(isEncryptedReasoningRejection(400, body)).toBe(true);
+    },
+  );
+
+  it.each([
+    ['wrong status', direct, 500],
+    [
+      'unknown code',
+      JSON.stringify({
+        error: {
+          code: 'invalid_request_error',
+          message: 'invalid_encrypted_content',
+        },
+      }),
+      400,
+    ],
+    ['quoted request', JSON.stringify({ debug: { error } }), 400],
+    ['contradictory gateway', gateway.replace('false', 'true'), 400],
+    ['wrong gateway status', gateway.replace('400', '500'), 400],
+    [
+      'duplicate error key',
+      `{"error":{},"error":${JSON.stringify(error)}}`,
+      400,
+    ],
+    ['oversized', direct.padEnd(64001, ' '), 400],
+    ['trailing garbage', direct + 'garbage', 400],
+    ['multiple frames', `data: ${gateway}\n\ndata: ${gateway}\n\n`, 400],
+    ['malformed', '{', 400],
+    ['array', `[${direct}]`, 400],
+  ])('does not recover on %s', (_label, body, status) => {
+    expect(isEncryptedReasoningRejection(Number(status), String(body))).toBe(
+      false,
+    );
   });
 });

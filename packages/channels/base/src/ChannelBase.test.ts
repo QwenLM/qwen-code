@@ -23,7 +23,6 @@ import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import {
-  buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
   resolveChannelWebhookTarget,
 } from './ChannelWebhookTask.js';
@@ -722,31 +721,34 @@ describe('ChannelBase', () => {
   });
 
   describe('gate integration', () => {
-    it('filters and strips configured message prefixes before dispatch', async () => {
-      const ch = createChannel({ messagePrefix: '/review' });
+    it.each(['hello', '/review /new', '@Qwen /review inspect this'])(
+      'preserves %s when an old config still contains messagePrefix',
+      async (text) => {
+        const legacyConfig = { ...defaultConfig(), messagePrefix: '/review' };
+        const ch = createChannel(legacyConfig);
 
-      await ch.handleInbound(envelope({ text: 'hello' }));
-      await ch.handleInbound(envelope({ text: '@Qwen /review inspect this' }));
+        await ch.handleInbound(envelope({ text }));
 
-      expect(bridge.prompt).toHaveBeenCalledTimes(1);
-      expect(bridge.prompt).toHaveBeenCalledWith(
-        expect.any(String),
-        'inspect this',
-        expect.any(Object),
-      );
-    });
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          expect.any(String),
+          text,
+          expect.any(Object),
+        );
+        expect(bridge.discardSession).not.toHaveBeenCalled();
+      },
+    );
 
-    it('checks a prepared envelope once and rejects before preparation', async () => {
-      const ch = createChannel({ messagePrefix: '/review' });
+    it('rejects disallowed groups before preparing media', async () => {
+      const ch = createChannel();
       const prepare = vi.fn(async () => {});
-      const rejected = envelope({ text: 'hello' });
+      const rejected = envelope({ isGroup: true });
 
       await ch.handlePreparedInbound(rejected, prepare);
       await ch.handlePreparedInbound(rejected, prepare);
       expect(prepare).not.toHaveBeenCalled();
 
       await ch.handlePreparedInbound(
-        envelope({ text: '/review inspect this' }),
+        envelope({ text: 'inspect this' }),
         prepare,
       );
       expect(prepare).toHaveBeenCalledTimes(1);
@@ -757,23 +759,22 @@ describe('ChannelBase', () => {
       );
     });
 
-    it('documents the prefix on shared command replies', async () => {
-      const ch = createChannel({ messagePrefix: '/review' });
+    it('documents direct shared commands', async () => {
+      const ch = createChannel();
 
-      await ch.handleInbound(envelope({ text: '/review /help' }));
+      await ch.handleInbound(envelope({ text: '/help' }));
 
-      expect(ch.sent[0]?.text).toContain('/review /help — Show this help');
+      expect(ch.sent[0]?.text).toContain('/help — Show this help');
       expect(ch.sent[0]?.text).toContain(
-        '/review /approve [request-id] — Approve a pending permission request',
+        '/approve [request-id] — Approve a pending permission request',
       );
     });
 
-    it('keeps permission and shared-clear instructions usable with a prefix', async () => {
+    it('keeps permission and shared-clear instructions directly usable', async () => {
       const ch = createChannel({
-        messagePrefix: '/review',
         sessionScope: 'single',
       });
-      await ch.handleInbound(envelope({ text: '/review start' }));
+      await ch.handleInbound(envelope({ text: 'start' }));
       ch.sent = [];
       for (const requestId of ['req-1', 'req-2']) {
         await ch.dispatchPermissionRequest({
@@ -790,74 +791,27 @@ describe('ChannelBase', () => {
       }
       expect(ch.sent).toHaveLength(2);
 
-      expect(ch.sent[0]?.text).toContain('/review /approve');
-      expect(ch.sent[0]?.text).toContain('/review /deny');
+      expect(ch.sent[0]?.text).toContain('/approve');
+      expect(ch.sent[0]?.text).toContain('/deny');
 
       ch.sent = [];
-      await ch.handleInbound(envelope({ text: '/review /approve' }));
-      expect(ch.sent[0]?.text).toContain('/review /approve <request-id>');
+      await ch.handleInbound(envelope({ text: '/approve' }));
+      expect(ch.sent[0]?.text).toContain('/approve <request-id>');
 
       ch.sent = [];
-      await ch.handleInbound(envelope({ text: '/review /clear' }));
-      expect(ch.sent[0]?.text).toContain('/review /clear confirm');
+      await ch.handleInbound(envelope({ text: '/clear' }));
+      expect(ch.sent[0]?.text).toContain('/clear confirm');
     });
 
-    it('logs prefix mismatches for DMs but not ambient group traffic', async () => {
+    it('offers pairing on first contact with ordinary text', async () => {
       const ch = createChannel({
-        messagePrefix: '/review',
-        groupPolicy: 'open',
-      });
-      const writeSpy = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
-
-      await ch.handleInbound(
-        envelope({
-          text: 'ambient',
-          isGroup: true,
-          isMentioned: false,
-          isReplyToBot: false,
-        }),
-      );
-      expect(
-        writeSpy.mock.calls.some(([message]) =>
-          String(message).includes('message_prefix_mismatch'),
-        ),
-      ).toBe(false);
-
-      await ch.handleInbound(envelope({ text: 'direct' }));
-      expect(
-        writeSpy.mock.calls.some(([message]) =>
-          String(message).includes('message_prefix_mismatch'),
-        ),
-      ).toBe(true);
-    });
-
-    it('requires the prefix on a pairing first contact too', async () => {
-      // Deliberate ordering: the prefix gate runs ahead of the pairing
-      // gates. A pairing code is a reply, and replying to every unprefixed
-      // message is exactly the traffic the prefix suppresses.
-      const ch = createChannel({
-        messagePrefix: '/review',
         senderPolicy: 'pairing',
         allowedUsers: [],
       });
 
       await ch.handleInbound(envelope({ text: 'hello' }));
-      expect(ch.sent).toEqual([]);
-
-      await ch.handleInbound(envelope({ text: '/review hello' }));
       expect(ch.sent[0]?.text).toContain('pairing code');
-    });
-
-    it('allows explicitly marked system envelopes through', async () => {
-      const ch = createChannel({ messagePrefix: '/review' });
-
-      await ch.handleInbound(
-        envelope({ text: 'system event', bypassMessagePrefix: true }),
-      );
-
-      expect(bridge.prompt).toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it('silently drops group messages when groupPolicy=disabled', async () => {
@@ -2586,11 +2540,11 @@ describe('ChannelBase', () => {
     });
 
     it('requires card-presented questions to be submitted or denied', async () => {
-      const ch = createChannel({ messagePrefix: '/review' });
+      const ch = createChannel();
       ch.userInputPresentationResult = { kind: 'presented' };
       const active = await startActiveSession(ch, {
         senderId: 'owner-1',
-        text: '/review run tests',
+        text: 'run tests',
       });
       emitUserQuestion(active.sessionId, 'req-card-command');
       await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
@@ -2600,7 +2554,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(
         envelope({
           senderId: 'owner-1',
-          text: '/review /approve req-card-command',
+          text: '/approve req-card-command',
         }),
       );
 
@@ -2608,12 +2562,12 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toContain(
         'Submit this question through its interactive card',
       );
-      expect(ch.sent.at(-1)?.text).toContain('/review /deny [request-id]');
+      expect(ch.sent.at(-1)?.text).toContain('/deny [request-id]');
 
       await ch.handleInbound(
         envelope({
           senderId: 'owner-1',
-          text: '/review /deny req-card-command',
+          text: '/deny req-card-command',
         }),
       );
 
@@ -13061,7 +13015,7 @@ describe('ChannelBase', () => {
       expect(secondPrompt).not.toContain('Be concise.');
     });
 
-    it('keeps all model-only context out of the user-facing prompt text', async () => {
+    it('shows the exact model prompt in session history', async () => {
       const ch = createChannel({
         instructions: 'Be concise.',
         sessionScope: 'thread',
@@ -13094,16 +13048,16 @@ describe('ChannelBase', () => {
       expect(modelText).toContain('earlier message');
       expect(modelText).toContain('/tmp/hidden.txt');
       expect(modelText).toContain('Issue: hidden metadata');
-      expect(options).toMatchObject({ displayText: 'hello' });
+      expect(options).toMatchObject({ displayText: modelText });
     });
 
-    it('neutralizes display-unsafe controls in the raw-text display fallback', async () => {
+    it('neutralizes display-unsafe controls without truncating the prompt', async () => {
       const ch = createChannel();
       const rlo = String.fromCharCode(0x202e); // bidi override (trojan-source)
       const bel = String.fromCharCode(0x07); // C0 control
-      // Adapters that never set displayText fall back to the raw text; the
-      // projection must neutralize it before it reaches the session bus,
-      // transcript, and session previews.
+      // Session history receives the full model prompt, so unsafe controls
+      // are neutralized before it reaches the session bus, transcript, and
+      // session previews.
       await ch.handleInbound(
         envelope({ text: `line1${rlo}${bel}\nline2${'A'.repeat(9000)}` }),
       );
@@ -13111,11 +13065,10 @@ describe('ChannelBase', () => {
       const [, , options] = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0]!;
       const displayText = (options as { displayText: string }).displayText;
-      // Controls are replaced, the real newline survives, and the projection
-      // is capped by code point.
+      // Controls are replaced, the real newline survives, and nothing is cut.
       expect(displayText.startsWith('line1  \nline2')).toBe(true);
       expect(displayText).not.toContain(rlo);
-      expect(Array.from(displayText)).toHaveLength(8000);
+      expect(Array.from(displayText)).toHaveLength(9013);
     });
 
     it('prepends channel boundary metadata after custom instructions once per session', async () => {
@@ -13492,6 +13445,9 @@ describe('ChannelBase', () => {
         promptText.indexOf('[Current message - respond to this]'),
       );
       expect(promptText).toContain('[Production] deploy staging');
+      const options = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][2] as { displayText: string };
+      expect(options.displayText).toBe(promptText);
     });
 
     it('does not inject chat-scoped channel memory into single-scope sessions', async () => {
@@ -17953,13 +17909,13 @@ describe('ChannelBase', () => {
         .calls[1][1] as string;
       expect(secondCallText).toContain('second');
       expect(secondCallText).toContain('third');
-      // Metadata stays model-facing; the coalesced projection carries only
-      // the raw user-authored texts.
+      // The coalesced turn shows exactly what the model receives, metadata
+      // included.
       expect(secondCallText).toContain('hidden policy second');
       expect(secondCallText).toContain('hidden policy third');
       expect(
         (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1][2],
-      ).toMatchObject({ displayText: '[Alice] second\n\n[Bob] third' });
+      ).toMatchObject({ displayText: secondCallText });
 
       // Both responses should have been sent
       expect(ch.sent).toEqual(
@@ -19767,43 +19723,6 @@ describe('ChannelBase', () => {
         expect(prompt).toContain('Event:');
         expect(prompt).toContain('payload-survives');
       });
-
-      it('caps and sanitizes the webhook display text like the model prompt', () => {
-        const task: ChannelWebhookTask = {
-          channelName: 'dingtalk-main',
-          source: 'github-ci',
-          eventType: 'ci_failed',
-          targetRef: 'default',
-          title: `[forged] ${'T'.repeat(20_000)}\u202e`,
-          summary: `S\u0007${'S'.repeat(20_000)}`,
-          payload: {},
-        };
-
-        const displayText = buildChannelWebhookDisplayText(task);
-        const [title, summary] = displayText.split('\n\n');
-
-        // Same per-field caps as the model prompt path (500/1000 code points).
-        expect(Array.from(title!).length).toBeLessThanOrEqual(500);
-        expect(Array.from(summary!).length).toBeLessThanOrEqual(1000);
-        // sanitizePromptText strips the [tag] forgery prefix, bidi overrides,
-        // and C0 controls on both projections.
-        expect(displayText).not.toContain('[forged]');
-        expect(displayText).not.toContain('\u202e');
-        expect(displayText).not.toContain('\u0007');
-      });
-
-      it('omits absent webhook summary from the display text', () => {
-        const task: ChannelWebhookTask = {
-          channelName: 'dingtalk-main',
-          source: 'github-ci',
-          eventType: 'ci_failed',
-          targetRef: 'default',
-          title: 'CI failed on main',
-          payload: {},
-        };
-
-        expect(buildChannelWebhookDisplayText(task)).toBe('CI failed on main');
-      });
     });
 
     describe('runWebhookTask', () => {
@@ -19847,8 +19766,12 @@ describe('ChannelBase', () => {
           expect.stringContaining(
             '[External event "ci_failed" from github-ci]',
           ),
-          { displayText: 'CI failed' },
+          { displayText: expect.any(String) },
         );
+        const [, webhookPrompt, webhookOptions] = (
+          bridge.prompt as ReturnType<typeof vi.fn>
+        ).mock.calls[0]!;
+        expect(webhookOptions).toEqual({ displayText: webhookPrompt });
         expect(ch.proactive).toEqual([
           { chatId: 'group-1', text: 'CI failed because lint broke.' },
         ]);
@@ -20789,7 +20712,10 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
         '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
-        { displayText: 'post summary' },
+        {
+          displayText:
+            '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
+        },
       );
       expect(ch.proactive).toEqual([
         { chatId: 'group-1', text: 'loop response' },
@@ -22121,7 +22047,10 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).toHaveBeenLastCalledWith(
           's-1',
           '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost again',
-          { displayText: 'post again' },
+          {
+            displayText:
+              '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost again',
+          },
         );
         expect(ch.proactive).toEqual([
           { chatId: 'chat1', text: 'second response' },

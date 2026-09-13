@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { EventEmitter, once } from 'node:events';
+import { liveText, liveMessage } from '@qwen-code/qwen-live/i18n';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,8 +16,10 @@ import {
   LIVE_PROTOCOL_VERSION,
   MAX_CONTROL_FRAME_BYTES,
   MAX_SOCKET_BUFFERED_BYTES,
+  encodeOutputAudioFrame,
   type HostAction,
   type HostControlMessage,
+  type OutputAudioFrame,
 } from '../../shared/protocol.ts';
 
 const cleanup: Array<() => Promise<void> | void> = [];
@@ -55,11 +59,13 @@ describe('LiveDaemonConnection', () => {
     const directory = await mkdtemp(join(tmpdir(), 'qwen-live-connection-'));
     cleanup.push(() => rm(directory, { recursive: true, force: true }));
     const discoveryPath = join(directory, 'daemon.json');
+    const configPath = join(directory, 'custom data', 'config.json');
     await writeFile(
       discoveryPath,
       JSON.stringify({
         url: `http://127.0.0.1:${address.port}`,
         token: 'private-token',
+        configPath,
         protocolVersion: LIVE_PROTOCOL_VERSION,
         pid: process.pid,
         instanceNonce: 'abcdefghijklmnop',
@@ -77,15 +83,18 @@ describe('LiveDaemonConnection', () => {
       },
     );
     const snapshots: string[] = [];
-    const outputFrames: Uint8Array[] = [];
+    const outputFrames: OutputAudioFrame[] = [];
+    const outputEvents: string[] = [];
     const shortcuts: string[] = [];
-    let captureCalls = 0;
+    let visualCaptureCalls = 0;
+    let visualCaptureSource: 'screen' | 'camera' = 'screen';
     const connection = new LiveDaemonConnection(
       '0.0.6',
       {
         getReadiness: () => ({
           permissions: {
             microphone: 'granted',
+            camera: 'granted',
             accessibility: 'granted',
             screenRecording: 'granted',
           },
@@ -97,31 +106,51 @@ describe('LiveDaemonConnection', () => {
           },
         }),
         onSnapshot: (snapshot) => snapshots.push(snapshot.phase),
-        onOutputAudio: (frame) => outputFrames.push(frame),
+        onOutputAudio: (frame) => {
+          outputFrames.push(frame);
+          outputEvents.push(`audio:${frame.epoch}:${frame.outputId}`);
+        },
+        onOutputAudioFinished: (identity) => {
+          outputEvents.push(`finished:${identity.epoch}:${identity.outputId}`);
+        },
         onClearOutput: () => undefined,
         setShortcut: (shortcut) => {
           shortcuts.push(shortcut);
           return { success: true };
         },
-        captureScreenContext: async () => {
-          captureCalls += 1;
-          if (captureCalls === 3) {
+        captureVisual: async (request) => {
+          visualCaptureCalls += 1;
+          if (visualCaptureCalls === 3) {
             throw new Error('x'.repeat(100_000));
           }
+          if (visualCaptureCalls === 4)
+            throw new Error(liveMessage('host.error.visualUnavailable'));
+          assert.deepEqual(request, {
+            source: 'screen',
+            snapshotWidth: 1920,
+            snapshotHeight: 1080,
+            ...(visualCaptureCalls === 1 ? { persistAsset: false } : {}),
+          });
           return {
+            source: visualCaptureSource,
+            image: Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64'),
+            width: 1920,
+            height: 1080,
             appName: 'Safari',
             windowTitle: 'LIVE_APP_A',
-            accessibilityText:
-              captureCalls === 1
-                ? 'AXWindow LIVE_APP_A'
-                : '\u0001'.repeat(32_000),
-            screenshotPath: '/private/tmp/qwen-live-appshot/test.png',
+            accessibilityText: 'AXWindow LIVE_APP_A',
+            ...(request.persistAsset === false
+              ? {}
+              : {
+                  screenshotPath: '/private/tmp/qwen-live-appshot/visual.png',
+                }),
           };
         },
       },
       discoveryPath,
     );
     cleanup.push(() => connection.stop());
+    assert.equal(connection.getConfigFilePath(), undefined);
     connection.start();
 
     const request = await requestPromise;
@@ -132,6 +161,7 @@ describe('LiveDaemonConnection', () => {
     assert(peer);
 
     const helloFrame = await nextMessage(peer);
+    assert.equal(connection.getConfigFilePath(), undefined);
     assert.equal(helloFrame.isBinary, false);
     const hello = JSON.parse(
       helloFrame.data.toString('utf8'),
@@ -139,6 +169,9 @@ describe('LiveDaemonConnection', () => {
     assert.equal(hello.type, 'host.hello');
     assert.equal(hello.protocolVersion, LIVE_PROTOCOL_VERSION);
     assert.equal(hello.bundleId, 'com.alibaba.qwen-code.live-host');
+    assert.deepEqual(hello.capabilities, {
+      outputAudioEndMarkerV1: true,
+    });
 
     const requiredActions: HostAction[] = [
       { type: 'host.action', action: 'stop', epoch: 0 },
@@ -171,6 +204,14 @@ describe('LiveDaemonConnection', () => {
         daemonInstanceNonce: 'abcdefghijklmnop',
         heartbeatIntervalMs: 1_000,
         epoch: 0,
+        capabilities: { outputAudioEndMarkerV1: true },
+        visualInput: {
+          source: 'camera',
+          mode: 'live-feed',
+          fps: 1,
+          liveWidth: 1280,
+          liveHeight: 720,
+        },
         status: {
           v: 1,
           available: true,
@@ -181,6 +222,190 @@ describe('LiveDaemonConnection', () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(snapshots.at(-1), 'ready');
+    assert.equal(connection.getConfigFilePath(), configPath);
+    assert.equal('configPath' in connection.getSnapshot(), false);
+    assert.deepEqual(connection.getSnapshot().capabilities, {
+      outputAudioEndMarkerV1: true,
+    });
+    assert.deepEqual(connection.getSnapshot().visualInput, {
+      source: 'camera',
+      mode: 'live-feed',
+      fps: 1,
+      liveWidth: 1280,
+      liveHeight: 720,
+    });
+
+    const image = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64');
+    assert.equal(connection.sendVisualFrame('camera', image, 1), false);
+    const imageFramePromise = nextMessage(peer);
+    assert.equal(connection.sendVisualFrame('camera', image, 0), true);
+    const imageFrame = await imageFramePromise;
+    assert.equal(imageFrame.isBinary, false);
+    assert.deepEqual(JSON.parse(imageFrame.data.toString('utf8')), {
+      type: 'host.visual_frame',
+      epoch: 0,
+      source: 'camera',
+      image,
+    });
+
+    const visualSourcePromise = nextMessage(peer);
+    assert.equal(connection.sendVisualSettings({ source: 'screen' }, 0), true);
+    const visualSource = await visualSourcePromise;
+    assert.deepEqual(JSON.parse(visualSource.data.toString('utf8')), {
+      type: 'host.visual_settings',
+      epoch: 0,
+      source: 'screen',
+      mode: 'live-feed',
+      permissions: {
+        camera: 'granted',
+        accessibility: 'granted',
+        screenRecording: 'granted',
+      },
+      appshot: true,
+    });
+    const visualModePromise = nextMessage(peer);
+    assert.equal(connection.sendVisualSettings({ mode: 'on-demand' }, 0), true);
+    const visualMode = await visualModePromise;
+    assert.deepEqual(JSON.parse(visualMode.data.toString('utf8')), {
+      type: 'host.visual_settings',
+      epoch: 0,
+      source: 'screen',
+      mode: 'on-demand',
+      permissions: {
+        camera: 'granted',
+        accessibility: 'granted',
+        screenRecording: 'granted',
+      },
+      appshot: true,
+    });
+    assert.deepEqual(connection.getSnapshot().visualInput, {
+      source: 'camera',
+      mode: 'live-feed',
+      fps: 1,
+      liveWidth: 1280,
+      liveHeight: 720,
+    });
+
+    peer.send(
+      JSON.stringify({
+        type: 'host.capture_visual',
+        requestId: 'visual-1',
+        epoch: 0,
+        source: 'screen',
+        snapshotWidth: 1920,
+        snapshotHeight: 1080,
+        persistAsset: false,
+      }),
+    );
+    const visualCaptureFrame = await nextMessage(peer);
+    assert.deepEqual(JSON.parse(visualCaptureFrame.data.toString('utf8')), {
+      type: 'host.visual_capture_result',
+      requestId: 'visual-1',
+      success: true,
+      source: 'screen',
+      image,
+      width: 1920,
+      height: 1080,
+      appName: 'Safari',
+      windowTitle: 'LIVE_APP_A',
+      accessibilityText: 'AXWindow LIVE_APP_A',
+    });
+    assert.equal(visualCaptureCalls, 1);
+
+    peer.send(
+      JSON.stringify({
+        type: 'host.state',
+        epoch: 0,
+        visualInput: {
+          source: 'screen',
+          mode: 'on-demand',
+          fps: 1,
+          liveWidth: 1280,
+          liveHeight: 720,
+        },
+        status: {
+          v: 1,
+          available: true,
+          state: 'idle',
+          shortcut: 'Command+Q',
+        },
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(connection.getSnapshot().visualInput, {
+      source: 'screen',
+      mode: 'on-demand',
+      fps: 1,
+      liveWidth: 1280,
+      liveHeight: 720,
+    });
+    assert.deepEqual(connection.getSnapshot().capabilities, {
+      outputAudioEndMarkerV1: true,
+    });
+
+    visualCaptureSource = 'camera';
+    peer.send(
+      JSON.stringify({
+        type: 'host.capture_visual',
+        requestId: 'visual-wrong-source',
+        epoch: 0,
+        source: 'screen',
+        snapshotWidth: 1920,
+        snapshotHeight: 1080,
+      }),
+    );
+    const mismatchedVisualCapture = await nextMessage(peer);
+    assert.deepEqual(
+      JSON.parse(mismatchedVisualCapture.data.toString('utf8')),
+      {
+        type: 'host.visual_capture_result',
+        requestId: 'visual-wrong-source',
+        success: false,
+        error: liveText('en', 'host.error.visualWrongSource'),
+      },
+    );
+    assert.equal(visualCaptureCalls, 2);
+
+    visualCaptureSource = 'screen';
+    peer.send(
+      JSON.stringify({
+        type: 'host.capture_visual',
+        requestId: 'visual-error',
+        epoch: 0,
+        source: 'screen',
+        snapshotWidth: 1920,
+        snapshotHeight: 1080,
+      }),
+    );
+    const failedVisualCaptureFrame = await nextMessage(peer);
+    const failedVisualCapture = JSON.parse(
+      failedVisualCaptureFrame.data.toString('utf8'),
+    ) as { success: boolean; error: string };
+    assert.equal(failedVisualCapture.success, false);
+    assert.equal(failedVisualCapture.error.length, 1_024);
+    assert.equal(
+      Buffer.byteLength(
+        failedVisualCaptureFrame.data.toString('utf8'),
+        'utf8',
+      ) <= MAX_CONTROL_FRAME_BYTES,
+      true,
+    );
+    assert.equal(visualCaptureCalls, 3);
+
+    peer.send(
+      JSON.stringify({
+        type: 'host.capture_visual',
+        requestId: 'visual-localized-error',
+        epoch: 0,
+        source: 'screen',
+      }),
+    );
+    const localizedVisualFrame = await nextMessage(peer);
+    const localizedVisualResult = JSON.parse(
+      localizedVisualFrame.data.toString('utf8'),
+    );
+    assert.equal(localizedVisualResult.error, 'Visual capture is unavailable.');
+    assert.equal(localizedVisualResult.error.includes('qwen-live-ui:'), false);
 
     peer.send(
       JSON.stringify({
@@ -197,65 +422,6 @@ describe('LiveDaemonConnection', () => {
       success: true,
     });
     assert.deepEqual(shortcuts, ['Command+E']);
-
-    peer.send(
-      JSON.stringify({
-        type: 'host.capture_screen_context',
-        requestId: 'capture-1',
-        epoch: 0,
-      }),
-    );
-    const captureFrame = await nextMessage(peer);
-    assert.deepEqual(JSON.parse(captureFrame.data.toString('utf8')), {
-      type: 'host.screen_context_result',
-      requestId: 'capture-1',
-      success: true,
-      appName: 'Safari',
-      windowTitle: 'LIVE_APP_A',
-      accessibilityText: 'AXWindow LIVE_APP_A',
-      screenshotPath: '/private/tmp/qwen-live-appshot/test.png',
-    });
-    assert.equal(captureCalls, 1);
-
-    peer.send(
-      JSON.stringify({
-        type: 'host.capture_screen_context',
-        requestId: 'capture-2',
-        epoch: 0,
-      }),
-    );
-    const boundedCaptureFrame = await nextMessage(peer);
-    const boundedCapture = JSON.parse(
-      boundedCaptureFrame.data.toString('utf8'),
-    ) as { accessibilityText: string; success: boolean };
-    assert.equal(boundedCapture.success, true);
-    assert.equal(
-      Buffer.byteLength(boundedCaptureFrame.data.toString('utf8'), 'utf8') <=
-        MAX_CONTROL_FRAME_BYTES,
-      true,
-    );
-    assert.equal(boundedCapture.accessibilityText.length < 32_000, true);
-    assert.equal(captureCalls, 2);
-
-    peer.send(
-      JSON.stringify({
-        type: 'host.capture_screen_context',
-        requestId: 'capture-3',
-        epoch: 0,
-      }),
-    );
-    const failedCaptureFrame = await nextMessage(peer);
-    const failedCapture = JSON.parse(
-      failedCaptureFrame.data.toString('utf8'),
-    ) as { success: boolean; error: string };
-    assert.equal(failedCapture.success, false);
-    assert.equal(failedCapture.error.length, 1_024);
-    assert.equal(
-      Buffer.byteLength(failedCaptureFrame.data.toString('utf8'), 'utf8') <=
-        MAX_CONTROL_FRAME_BYTES,
-      true,
-    );
-    assert.equal(captureCalls, 3);
 
     peer.send(JSON.stringify({ type: 'host.ping', pingId: 'ping-1' }));
     const pongFrame = await nextMessage(peer);
@@ -275,9 +441,155 @@ describe('LiveDaemonConnection', () => {
       Buffer.alloc(640),
     );
 
-    peer.send(Buffer.alloc(1_920), { binary: true });
+    const outputFrame = encodeOutputAudioFrame(0, 23, Buffer.alloc(1_920));
+    assert(outputFrame);
+    peer.send(outputFrame, { binary: true });
     await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(outputFrames.at(-1)?.byteLength, 1_920);
+    assert.equal(outputFrames.at(-1)?.epoch, 0);
+    assert.equal(outputFrames.at(-1)?.outputId, 23);
+    assert.equal(outputFrames.at(-1)?.audio.byteLength, 1_920);
+
+    peer.send(
+      JSON.stringify({
+        type: 'host.output_audio_finished',
+        epoch: 0,
+        outputId: 23,
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(outputEvents, ['audio:0:23', 'finished:0:23']);
+    peer.send(
+      JSON.stringify({
+        type: 'host.output_audio_finished',
+        epoch: 1,
+        outputId: 24,
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(outputEvents, ['audio:0:23', 'finished:0:23']);
+
+    const startedPromise = nextMessage(peer);
+    assert.equal(connection.sendPlaybackStarted(0, 23), true);
+    const started = await startedPromise;
+    assert.equal(started.isBinary, false);
+    assert.deepEqual(JSON.parse(started.data.toString('utf8')), {
+      type: 'host.playback_started',
+      epoch: 0,
+      outputId: 23,
+    });
+
+    const completedPromise = nextMessage(peer);
+    assert.equal(connection.sendPlaybackCompleted(0, 23), true);
+    const completed = await completedPromise;
+    assert.equal(completed.isBinary, false);
+    assert.deepEqual(JSON.parse(completed.data.toString('utf8')), {
+      type: 'host.playback_completed',
+      epoch: 0,
+      outputId: 23,
+    });
+    connection.stop();
+    assert.equal(connection.getConfigFilePath(), undefined);
+  });
+
+  it('withholds configuration authority on nonce mismatch, disconnect and Quit', async () => {
+    for (const outcome of ['mismatch', 'disconnect', 'quit']) {
+      const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+      cleanup.push(() => {
+        for (const client of server.clients) client.terminate();
+        server.close();
+      });
+      await once(server, 'listening');
+      const address = server.address();
+      assert(address && typeof address === 'object');
+      const directory = await mkdtemp(join(tmpdir(), 'live-config-connect-'));
+      cleanup.push(() => rm(directory, { recursive: true, force: true }));
+      const discoveryPath = join(directory, 'daemon.json');
+      const configPath = join(directory, 'config.json');
+      await writeFile(
+        discoveryPath,
+        JSON.stringify({
+          url: `http://127.0.0.1:${address.port}`,
+          token: 'fixture-private-token',
+          configPath,
+          protocolVersion: LIVE_PROTOCOL_VERSION,
+          pid: process.pid,
+          instanceNonce: 'abcdefghijklmnop',
+        }),
+        { mode: 0o600 },
+      );
+      const changes = new EventEmitter();
+      const connection = new LiveDaemonConnection(
+        '0.0.6',
+        {
+          getReadiness: () => ({
+            permissions: {
+              microphone: 'granted',
+              camera: 'granted',
+              accessibility: 'granted',
+              screenRecording: 'granted',
+            },
+            selfChecks: {
+              audioInput: true,
+              audioOutput: true,
+              globalShortcut: true,
+              appshot: true,
+            },
+          }),
+          onSnapshot: () => changes.emit('snapshot'),
+          onOutputAudio: () => undefined,
+          onOutputAudioFinished: () => undefined,
+          onClearOutput: () => undefined,
+        },
+        discoveryPath,
+      );
+      cleanup.push(() => connection.stop());
+      const waitForPhase = async (phase: string) => {
+        const signal = AbortSignal.timeout(3_000);
+        while (connection.getSnapshot().phase !== phase)
+          await once(changes, 'snapshot', { signal });
+      };
+      const peerReady = new Promise<WebSocket>((resolve, reject) => {
+        server.once('connection', (peer) => {
+          void nextMessage(peer).then(() => resolve(peer), reject);
+        });
+      });
+      connection.start();
+      const peer = await peerReady;
+      assert.equal(connection.getConfigFilePath(), undefined);
+      peer.send(
+        JSON.stringify({
+          type: 'host.welcome',
+          protocolVersion: LIVE_PROTOCOL_VERSION,
+          daemonInstanceNonce:
+            outcome === 'mismatch' ? 'wrong_nonce_0001' : 'abcdefghijklmnop',
+          heartbeatIntervalMs: 10_000,
+          epoch: 0,
+          status: {
+            v: 1,
+            available: true,
+            state: 'idle',
+            shortcut: 'Command+E',
+          },
+        }),
+      );
+      if (outcome === 'mismatch') {
+        await waitForPhase('error');
+        assert.equal(connection.getSnapshot().error, 'daemon_identity');
+      } else {
+        await waitForPhase('ready');
+        assert.equal(connection.getConfigFilePath(), configPath);
+        if (outcome === 'quit') {
+          const quitting = connection.requestQuit();
+          assert.equal(connection.getConfigFilePath(), undefined);
+          await quitting;
+        } else {
+          peer.close();
+          await waitForPhase('disconnected');
+        }
+      }
+      assert.equal(connection.getConfigFilePath(), undefined);
+      connection.stop();
+    }
   });
 
   it('keeps retrying the same discovery identity slowly after the fast budget', async () => {
@@ -307,6 +619,7 @@ describe('LiveDaemonConnection', () => {
     );
 
     let connectionCount = 0;
+    let readyPeer: WebSocket | undefined;
     server.on('connection', async (socket) => {
       connectionCount += 1;
       await nextMessage(socket);
@@ -314,6 +627,7 @@ describe('LiveDaemonConnection', () => {
         socket.close(1012, 'retry');
         return;
       }
+      readyPeer = socket;
       socket.send(
         JSON.stringify({
           type: 'host.welcome',
@@ -332,12 +646,14 @@ describe('LiveDaemonConnection', () => {
     });
 
     const errors: Array<string | undefined> = [];
+    const finishedOutputs: string[] = [];
     const connection = new LiveDaemonConnection(
       '0.0.6',
       {
         getReadiness: () => ({
           permissions: {
             microphone: 'granted',
+            camera: 'granted',
             accessibility: 'granted',
             screenRecording: 'granted',
           },
@@ -350,6 +666,9 @@ describe('LiveDaemonConnection', () => {
         }),
         onSnapshot: (snapshot) => errors.push(snapshot.error),
         onOutputAudio: () => undefined,
+        onOutputAudioFinished: (identity) => {
+          finishedOutputs.push(`${identity.epoch}:${identity.outputId}`);
+        },
         onClearOutput: () => undefined,
       },
       discoveryPath,
@@ -376,5 +695,16 @@ describe('LiveDaemonConnection', () => {
     assert.equal(connectionCount, 3);
     assert(errors.includes('daemon_reconnect_exhausted'));
     assert.equal(connection.getSnapshot().phase, 'ready');
+    assert.equal(connection.getConfigFilePath(), undefined);
+    assert(readyPeer);
+    readyPeer.send(
+      JSON.stringify({
+        type: 'host.output_audio_finished',
+        epoch: 0,
+        outputId: 1,
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(finishedOutputs, []);
   });
 });

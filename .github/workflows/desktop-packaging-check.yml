@@ -23,8 +23,14 @@ on:
         default: 'main'
         type: 'string'
 
+# A caller must grant every permission the called workflow's jobs declare, or
+# the run fails to start — the check happens when the file is loaded, before
+# any `if` is evaluated, so the publish job being unreachable in a dry run
+# does not exempt its `contents: write`. Nothing here writes: `dry_run` is
+# hardcoded true below, which skips both the publish and the mirror job.
 permissions:
-  contents: 'read'
+  actions: 'read'
+  contents: 'write'
 
 concurrency:
   group: 'desktop-packaging-check'

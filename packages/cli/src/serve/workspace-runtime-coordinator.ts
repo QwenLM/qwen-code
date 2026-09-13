@@ -19,9 +19,23 @@ import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 const DEFAULT_ENSURE_TIMEOUT_MS = 60_000;
-const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
+export const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
 const MCP_PREPARE_TIMEOUT_MS = 2 * 60_000;
 const MCP_POLL_INTERVAL_MS = 250;
+
+export type EnsureOptions = {
+  timeoutMs?: number;
+  keepAliveMs?: number;
+  /**
+   * Skip keep-alive preheat when the runtime is already live.
+   * Object-form `ensure({})` defaults this to true unless `keepAliveMs` is
+   * set. Numeric `ensure()` / `ensure(timeoutMs)` never skip. Daemon boot
+   * after ACP warm-up must pass `keepAliveMs` so the default
+   * `channelIdleTimeoutMs=0` policy does not reap the child before MCP
+   * prepare finishes.
+   */
+  skipKeepAlivePreheat?: boolean;
+};
 
 type LifecycleAcpSessionBridge = AcpSessionBridge & {
   getWorkspaceRuntimeLifecycleSnapshot(): BridgeWorkspaceRuntimeLifecycleSnapshot;
@@ -170,26 +184,50 @@ export class WorkspaceRuntimeCoordinator {
     };
   }
 
+  /**
+   * `ensure(timeoutMs)` always keep-alive preheats. `ensure({ ... })` skips
+   * that preheat on a live runtime unless `skipKeepAlivePreheat` is false or
+   * `keepAliveMs` is set. Boot discovery must pass `keepAliveMs` so the
+   * already-warm child stays held through `initializeWorkspaceMcp`.
+   */
   async ensure(
-    timeoutMs = DEFAULT_ENSURE_TIMEOUT_MS,
+    timeoutMsOrOptions: number | EnsureOptions = DEFAULT_ENSURE_TIMEOUT_MS,
   ): Promise<ServeWorkspaceRuntimeStatus> {
+    const options =
+      typeof timeoutMsOrOptions === 'number'
+        ? { timeoutMs: timeoutMsOrOptions }
+        : timeoutMsOrOptions;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_ENSURE_TIMEOUT_MS;
     this.assertAcceptingWork();
     const deadline = Date.now() + timeoutMs;
-    try {
-      await withTimeout(
-        this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS }),
-        timeoutMs,
-      );
-    } catch (error) {
-      this.assertAcceptingWork(error);
-      if (error instanceof WorkspaceRuntimeStillStartingError) throw error;
-      throw new WorkspaceRuntimeInitializationError(error);
+    const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    const skipKeepAlivePreheat =
+      snapshot.runtimeLive &&
+      options.keepAliveMs === undefined &&
+      (options.skipKeepAlivePreheat ?? typeof timeoutMsOrOptions !== 'number');
+    if (!skipKeepAlivePreheat) {
+      try {
+        await withTimeout(
+          this.bridge.preheat({
+            keepAliveMs: options.keepAliveMs ?? ENSURE_KEEP_ALIVE_MS,
+          }),
+          timeoutMs,
+        );
+      } catch (error) {
+        this.assertAcceptingWork(error);
+        if (error instanceof WorkspaceRuntimeStillStartingError) throw error;
+        throw new WorkspaceRuntimeInitializationError(error);
+      }
     }
     this.assertAcceptingWork();
     const status = this.status();
     if (!status.runtimeLive) {
       throw new WorkspaceRuntimeInitializationError(
-        new Error('ACP preheat completed without a live runtime'),
+        new Error(
+          skipKeepAlivePreheat
+            ? 'Runtime is not live after skipping keep-alive preheat'
+            : 'ACP preheat completed without a live runtime',
+        ),
       );
     }
     const skillsReady =

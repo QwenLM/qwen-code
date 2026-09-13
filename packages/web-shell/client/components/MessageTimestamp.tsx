@@ -17,6 +17,9 @@ interface MessageTimestampProps {
   toolGroupSpacing?: boolean;
   copyText?: string;
   copyTitle?: string;
+  /** When set, render an edit action after the copy button. */
+  onEdit?: () => void;
+  editTitle?: string;
 }
 
 /**
@@ -30,6 +33,8 @@ export function MessageTimestamp({
   toolGroupSpacing = false,
   copyText,
   copyTitle = 'Copy',
+  onEdit,
+  editTitle = 'Edit',
 }: MessageTimestampProps) {
   const documentMode = useTranscriptRenderMode() === 'document';
   const [copied, flashCopied] = useCopiedFlash();
@@ -42,7 +47,7 @@ export function MessageTimestamp({
       .catch(warnClipboardWriteFailure);
   }, [copyText, flashCopied]);
   if (documentMode) return <>{children}</>;
-  if (timestamp === undefined && !copyText && !toolGroupSpacing) {
+  if (timestamp === undefined && !copyText && !toolGroupSpacing && !onEdit) {
     return <>{children}</>;
   }
   const copyButton = copyText ? (
@@ -56,6 +61,17 @@ export function MessageTimestamp({
       {copied ? <CheckIcon /> : <CopyIcon />}
     </button>
   ) : null;
+  const editButton = onEdit ? (
+    <button
+      type="button"
+      className={styles.copyButton}
+      title={editTitle}
+      aria-label={editTitle}
+      onClick={onEdit}
+    >
+      <PencilIcon />
+    </button>
+  ) : null;
   const rowClassName = chatMode
     ? styles.chatRow
     : toolGroupSpacing
@@ -66,6 +82,7 @@ export function MessageTimestamp({
       <div className={rowClassName}>
         {children}
         {copyButton}
+        {editButton}
       </div>
     );
   }
@@ -78,6 +95,7 @@ export function MessageTimestamp({
             {formatTimestamp(timestamp)}
           </span>
           {copyButton}
+          {editButton}
         </span>
       ) : (
         <span className={styles.tip} aria-hidden="true">
@@ -123,6 +141,21 @@ function CheckIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
         strokeWidth="1.6"
+      />
+    </svg>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M11.1 2.6a1.4 1.4 0 0 1 2 2l-7.2 7.2-2.7.7.7-2.7 7.2-7.2Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.3"
       />
     </svg>
   );

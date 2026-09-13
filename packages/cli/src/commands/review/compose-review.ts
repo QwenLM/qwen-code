@@ -72,6 +72,7 @@ import {
   reviewMode,
   type RosterPlan,
 } from './lib/roster.js';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import { repositoryContextOf } from './lib/repository-context.js';
 import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
@@ -548,6 +549,26 @@ function planNamesPr(planPath: string | undefined): boolean {
     // `'0'` this one rejects, so the budget reserved marker room on a plan
     // the anchor consumers read as PR-less.
     return isPositivePrNumber(plan?.prNumber);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does this plan carry the focused navigation profile? Read for the
+ * mechanism-health note alone: that profile withholds the ledger anchor BY
+ * DESIGN on every round (its disclosed coverage gap caps the verdict), so
+ * an unanchored recovered round is the profile working, not a stopped
+ * chain — the note must not report it as a malfunction on every round of a
+ * navigation-only PR.
+ */
+function planIsFocusedNavigation(planPath: string | undefined): boolean {
+  try {
+    if (!planPath) return false;
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      reviewProfile?: unknown;
+    };
+    return plan?.reviewProfile === DOCS_NAV_PROFILE;
   } catch {
     return false;
   }
@@ -3673,11 +3694,20 @@ export function escapeTagOpeners(text: string): string {
   // each closing one hole and opening the next; a line is the unit the
   // rule below can decide exactly (#9940 review, round 31 reverse audit).
   //
-  // The channels are folded at four sites, not one: `ingestEntryList` for
-  // the entry channels, the `\s+` normalisation for downgrade reasons,
-  // `collapseEntry` for the `Not reviewed:` disclosures, and
-  // `scriptLintGate`'s own push — that last one joins `bodyCriticals`
-  // after `ingestEntryList` has run, so the shared fold never sees it.
+  // The channels are folded at several sites, not one: `collapseEntry` for
+  // the entry channels and the `Not reviewed:` disclosures (the `\r\n?`
+  // normalisation `ingestEntryList` does first folds nothing on its own),
+  // the `\s+` pass for downgrade reasons, `collapseToLine` for the
+  // duplicate-drop leg and — at `toDeferredEntries` and again through
+  // `boundDeferredLine` — for a Critical deferral's relocation exit, and
+  // `scriptLintGate`'s own push. The
+  // relocation exit and the gate push join `bodyCriticals` AFTER
+  // `ingestEntryList` has run, so the shared fold never sees them. (The
+  // deferral LIST line is folded by `mdField` and posts without coming
+  // here at all.) `every model-written channel reaches the escape as ONE
+  // line` in the tests drives every one of these EXCEPT the gate push,
+  // which needs a report fixture and is pinned by `folds its own entry`;
+  // it also says which legs are held more than once.
   // Per-line is NOT a conservative fallback — it is the model that the
   // fold makes correct. Handed a multi-line string anyway it differs from
   // the renderer in BOTH directions: it pairs backticks the renderer keeps
@@ -7670,6 +7700,7 @@ function composeReviewBody(
         // Two consecutive withholds — this round's decision read through the
         // marker's OWN predicate, and the recovered round's recorded anchor.
         anchorChainBroken:
+          !planIsFocusedNavigation(input.planPath) &&
           !convergence.prev.anchored &&
           (convergence.prev.round ?? 0) > 0 &&
           anchorFailsClosed(cappedBy, scopeUnproven, dimensionGapsAreDepthOnly),

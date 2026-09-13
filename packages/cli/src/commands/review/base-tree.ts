@@ -55,12 +55,14 @@ import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath } from './lib/paths.js';
 import {
+  untrustedGitfile,
   discardWorktree,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
 import { runBuildTest, type BuildTestReport } from './build-test.js';
+import { runEpochMs } from './lib/prompt-record.js';
 
 export interface BaseTreeReport {
   /**
@@ -175,11 +177,55 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // rebase between runs — falls through to the rebuild below.)
   const marker = () => join(tree, '.qwen-review-base-ok');
   const failedMarker = () => join(tree, '.qwen-review-base-failed');
+  // The run's epoch, the fence the deadline stamps and the session ledger
+  // already key on. A run captures its plan once, so this is stable for the
+  // whole run and different between two.
+  const runEpoch = String(runEpochMs(args.plan));
   try {
+    const stamp = readFileSync(marker(), 'utf8').trim().split('\n');
     if (
       existsSync(tree) &&
-      readFileSync(marker(), 'utf8').trim() === baseSha &&
-      gitOut(tree, 'rev-parse', 'HEAD') === baseSha
+      stamp[0] === baseSha &&
+      // ...and THIS run built it. `cleanStale` never releases `-base`, so an
+      // earlier round's tree stands into this one with a whole containerized
+      // build/test phase in between — long enough for the reviewed code to drop
+      // untracked executables in here, and `dist/cli.js` is what a host-side A/B
+      // runs. `--untracked-files=no` below cannot see them, and refusing any
+      // untracked file at all would disable every legitimate reuse; the stamp is
+      // the provenance that separates the two.
+      stamp[1] === runEpoch &&
+      // The reuse path RETURNS, so the gate below the rebuild never runs for
+      // it — and both facts it reuses on come from inside the mount: the
+      // marker is a file in the base tree, and `rev-parse HEAD` resolves
+      // through that tree's own `.git`. A planted repository answers the right
+      // sha for a working tree holding anything at all, and the A/B's BASE
+      // side is then the reviewed code's own — every "the base behaves
+      // differently" verdict the shard reports would be its author's.
+      //
+      // Not a refusal: an unusable leftover is what the rebuild exists for.
+      // Falling through discards the tree (removing the plant with it) and
+      // creates a fresh one through the review worktree's pointer, which the
+      // gate before `worktree add` checks. Same shape as `scratch-tree`'s
+      // reuse path, for the same reason.
+      untrustedGitfile(tree) === null &&
+      gitOut(tree, 'rev-parse', 'HEAD') === baseSha &&
+      // ...and its CONTENTS must still be the base's. `rev-parse HEAD` does not
+      // move when working files change, and this tree is a direct child of the
+      // directory the sandbox mounts read-write — which is why the pointer gate
+      // above speaks at all. So the reviewed PR's own build, which runs before
+      // the verifier shards get here, can overwrite the base checkout's tracked
+      // sources with a plain copy: every condition above still passes, and the
+      // A/B then compares the PR against a copy of itself. A test the PR breaks
+      // fails identically on both sides, `test-delta` classifies the regression
+      // as pre-existing, and a real finding against the PR is suppressed.
+      //
+      // `--untracked-files=no`: the pipeline's own build leaves `node_modules/`
+      // and `dist/` here, so an untracked-inclusive check would call every
+      // correctly-built tree dirty and disable reuse outright — reintroducing
+      // the concurrent-shard clobber this fast path exists to prevent. Tracked
+      // dirt is what a rewrite leaves, and `npm run build` in this repository
+      // modifies no tracked file, so a legitimate build still reuses.
+      gitOut(tree, 'status', '--porcelain', '--untracked-files=no') === ''
     ) {
       return {
         available: true,
@@ -265,6 +311,16 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // Clear a stale base tree left by a crashed run — it would fail `add`. Its
       // stderr is kept, because it is usually what explains that failure.
       sweep = discardWorktree(worktree, tree);
+      // The same question the probe phase asks before its own `worktree add`:
+      // this resolves the repository through the REVIEW worktree's gitfile,
+      // which lives inside the directory the sandbox mounts read-write and
+      // which the build/test phase already gave the reviewed code a chance to
+      // rewrite. `worktree add` checks files out, so it runs whatever that
+      // pointer leads to, on the host. See `untrustedGitfile`.
+      const untrusted = untrustedGitfile(worktree);
+      if (untrusted !== null) {
+        throw new Error(`refusing to create a base tree: ${untrusted}`);
+      }
       git(worktree, 'worktree', 'add', '--detach', tree, baseSha);
     } catch (e) {
       return unavailable(
@@ -335,9 +391,9 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     }
 
     // The marker is what the fast path above trusts, so it is written only after
-    // a build that succeeded, and it records the SHA it vouches for.
+    // a build that succeeded, and it records the SHA and the run it vouches for.
     try {
-      writeFileSync(marker(), `${baseSha}\n`);
+      writeFileSync(marker(), `${baseSha}\n${runEpoch}\n`);
     } catch {
       // The tree may be too broken to hold a marker; the next shard rebuilds.
     }

@@ -17,6 +17,7 @@
 // diverge from git's in either direction — a guard needs git's own answer.
 
 import { execFileSync } from 'node:child_process';
+import { NO_EXEC_CONFIG } from './gitUtils.js';
 
 const GIT_TIMEOUT_MS = 5_000;
 
@@ -62,11 +63,15 @@ export function isGitIgnored(
   }
   env['GIT_CONFIG_NOSYSTEM'] = '1';
   try {
-    execFileSync('git', ['-C', worktree, 'check-ignore', '-q', '--', probe], {
-      stdio: 'ignore',
-      timeout: timeoutMs,
-      env,
-    });
+    execFileSync(
+      'git',
+      [...NO_EXEC_CONFIG, '-C', worktree, 'check-ignore', '-q', '--', probe],
+      {
+        stdio: 'ignore',
+        timeout: timeoutMs,
+        env,
+      },
+    );
     return true;
   } catch {
     return false;

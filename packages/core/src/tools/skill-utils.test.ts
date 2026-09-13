@@ -170,6 +170,7 @@ describe('applySkillSideEffects', () => {
       isTrustedFolder: () => true,
       getPermissionManager: () => pm,
       getSessionId: () => 'session-1',
+      enableReviewWorkflow: vi.fn().mockResolvedValue(undefined),
       getHookSystem: () => ({
         getSessionHooksManager: () => ({
           addSessionHook,
@@ -181,9 +182,9 @@ describe('applySkillSideEffects', () => {
     return { config, addSessionAllowRule, addSessionHook };
   }
 
-  it('applies both allowedTools and hooks', () => {
+  it('applies both allowedTools and hooks', async () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig();
-    applySkillSideEffects(config, gatedSkill);
+    await applySkillSideEffects(config, gatedSkill);
     expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
       trustGated: false,
     });
@@ -194,11 +195,13 @@ describe('applySkillSideEffects', () => {
   // mode, the ACP agent's `skipHooks`), so no hook system is built. Dropping
   // the guard would call getSessionHooksManager() on undefined and crash every
   // skill invocation in those sessions.
-  it('registers nothing and does not throw when there is no hook system', () => {
+  it('registers nothing and does not throw when there is no hook system', async () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig({
       getHookSystem: () => undefined,
     });
-    expect(() => applySkillSideEffects(config, gatedSkill)).not.toThrow();
+    await expect(
+      applySkillSideEffects(config, gatedSkill),
+    ).resolves.toBeUndefined();
     expect(addSessionHook).not.toHaveBeenCalled();
     // The allowedTools half still applies — only the hooks are skipped.
     expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
@@ -219,13 +222,13 @@ describe('applySkillSideEffects', () => {
   // for a skill that actually declares a gate. Without it, every hookless
   // skill invoked in a hooks-disabled session emits a warning, which is the
   // steady-state noise the level was chosen to avoid.
-  it('stays silent for a skill that declares no hooks, even with no hook system', () => {
+  it('stays silent for a skill that declares no hooks, even with no hook system', async () => {
     const { config, addSessionAllowRule } = makeConfig({
       getHookSystem: () => undefined,
     });
     const hookless = { ...gatedSkill, hooks: undefined } as SkillConfig;
 
-    applySkillSideEffects(config, hookless);
+    await applySkillSideEffects(config, hookless);
 
     expect(debugLoggerSpies.warn).not.toHaveBeenCalled();
     // The allowedTools half is unaffected by the hooks early return.
@@ -234,7 +237,7 @@ describe('applySkillSideEffects', () => {
     });
   });
 
-  it('stays silent for a skill whose hooks block parses to nothing', () => {
+  it('stays silent for a skill whose hooks block parses to nothing', async () => {
     const { config, addSessionAllowRule } = makeConfig({
       getHookSystem: () => undefined,
     });
@@ -243,7 +246,7 @@ describe('applySkillSideEffects', () => {
     // is the shape a `!skill.hooks` guard alone lets through.
     const emptyHooks = { ...gatedSkill, hooks: {} } as SkillConfig;
 
-    applySkillSideEffects(config, emptyHooks);
+    await applySkillSideEffects(config, emptyHooks);
 
     expect(debugLoggerSpies.warn).not.toHaveBeenCalled();
     expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
@@ -251,11 +254,13 @@ describe('applySkillSideEffects', () => {
     });
   });
 
-  it('registers nothing and does not throw when there is no session id', () => {
+  it('registers nothing and does not throw when there is no session id', async () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig({
       getSessionId: () => undefined,
     });
-    expect(() => applySkillSideEffects(config, gatedSkill)).not.toThrow();
+    await expect(
+      applySkillSideEffects(config, gatedSkill),
+    ).resolves.toBeUndefined();
     expect(addSessionHook).not.toHaveBeenCalled();
     // Same asymmetry as the no-hook-system case: only the hooks half is
     // skipped. Without this, hoisting the session-id guard above
@@ -265,13 +270,13 @@ describe('applySkillSideEffects', () => {
     });
   });
 
-  it('applies neither for a project skill in an untrusted folder', () => {
+  it('applies neither for a project skill in an untrusted folder', async () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig();
     const projectSkill = {
       ...gatedSkill,
       level: 'project',
     } as unknown as SkillConfig;
-    applySkillSideEffects(
+    await applySkillSideEffects(
       { ...config, isTrustedFolder: () => false } as unknown as Config,
       projectSkill,
     );
@@ -279,7 +284,7 @@ describe('applySkillSideEffects', () => {
     expect(addSessionHook).not.toHaveBeenCalled();
   });
 
-  it('warns for a project skill in an untrusted folder that declares only hooks', () => {
+  it('warns for a project skill in an untrusted folder that declares only hooks', async () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig();
     // The sibling test above uses a skill carrying both halves, so it passes
     // on the `allowedTools` operand alone. This one pins the `|| skill.hooks`
@@ -290,7 +295,7 @@ describe('applySkillSideEffects', () => {
       allowedTools: undefined,
     } as unknown as SkillConfig;
 
-    applySkillSideEffects(
+    await applySkillSideEffects(
       { ...config, isTrustedFolder: () => false } as unknown as Config,
       hooksOnly,
     );
@@ -302,10 +307,29 @@ describe('applySkillSideEffects', () => {
     );
   });
 
-  it('is a no-op without a config', () => {
-    expect(() => applySkillSideEffects(null, gatedSkill)).not.toThrow();
-    expect(() => applySkillSideEffects(undefined, gatedSkill)).not.toThrow();
+  it('is a no-op without a config', async () => {
+    await expect(
+      applySkillSideEffects(null, gatedSkill),
+    ).resolves.toBeUndefined();
+    await expect(
+      applySkillSideEffects(undefined, gatedSkill),
+    ).resolves.toBeUndefined();
   });
+  it.each([
+    ['review', 'bundled', true],
+    ['review', 'project', false],
+    ['review', 'user', false],
+    ['other', 'bundled', false],
+  ] as const)(
+    'activates workflows only for %s at %s level',
+    async (name, level, enabled) => {
+      const { config } = makeConfig();
+      await applySkillSideEffects(config, { ...gatedSkill, name, level });
+      expect(config.enableReviewWorkflow).toHaveBeenCalledTimes(
+        enabled ? 1 : 0,
+      );
+    },
+  );
 });
 
 describe('collectAvailableSkillEntries memoize cache', () => {

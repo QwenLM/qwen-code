@@ -1410,80 +1410,34 @@ describe('DwsChannel', () => {
     expect(client.sendImMessage).not.toHaveBeenCalled();
   });
 
-  it('only dispatches complete commands matching the configured message prefix', async () => {
+  it('dispatches ordinary text and preserves literal slash-prefixed text', async () => {
     const client = new FakeDwsClient();
-    const channel = await readyChannel(
-      client,
-      makeConfig({ messagePrefix: '/review' }),
-    );
-
-    for (const [messageId, content] of [
+    const channel = await readyChannel(client);
+    const messages = [
       ['plain', 'please review 123'],
-      ['empty', '/review'],
-      ['whitespace-only', '/review   '],
+      ['command', '/review'],
       ['similar', '/reviewer 123'],
       ['embedded', 'please /review 123'],
       ['wrong-case', '/Review 123'],
       ['joined', '@Qwen/review 123'],
-      ['malformed-mention', '@Qwen@Other /review 123'],
-    ]) {
+      ['multiple-mentions', '@Qwen@Other /review 123'],
+    ];
+    for (const [messageId, content] of messages) {
       await client.emit(
         1,
         message('user_im_message_receive_o2o_all', messageId, content),
       );
     }
-    await client.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'direct',
-        '  /review   456  ',
-        { referencedText: '/review should not affect matching' },
-      ),
-    );
-    await client.emit(
-      0,
-      message(
-        'user_im_message_receive_at',
-        'valid',
-        '@Qwen @Code\n/review https://github.com/QwenLM/qwen-code/pull/123',
-      ),
-    );
-
-    expect(channel.inbound).toEqual([
-      expect.objectContaining({
-        messageId: 'direct',
-        text: '456',
-        bypassMessagePrefix: true,
-      }),
-      expect.objectContaining({
-        messageId: 'valid',
-        text: 'https://github.com/QwenLM/qwen-code/pull/123',
-        bypassMessagePrefix: true,
-      }),
-    ]);
-    expect(channel.processedMessageIds()).toEqual(
-      expect.arrayContaining(
-        [
-          'plain',
-          'empty',
-          'whitespace-only',
-          'similar',
-          'embedded',
-          'wrong-case',
-          'joined',
-          'malformed-mention',
-        ].map((messageId) => `cid-1\0${messageId}`),
+    expect(channel.inbound).toEqual(
+      messages.map(([messageId, text]) =>
+        expect.objectContaining({ messageId, text }),
       ),
     );
   });
 
-  it('lets provider-generated document notifications bypass the prefix', async () => {
+  it('dispatches provider-generated document notifications', async () => {
     const client = new FakeDwsClient();
-    const channel = await readyChannel(
-      client,
-      makeConfig({ messagePrefix: '/review' }),
-    );
+    const channel = await readyChannel(client, makeConfig());
 
     await client.emit(
       1,
@@ -1502,42 +1456,6 @@ describe('DwsChannel', () => {
       expect.objectContaining({
         chatId: 'doc-prefixed',
         threadId: '1786589783750e2a797d2c2c141c295519dbcb07f2274',
-        bypassMessagePrefix: true,
-      }),
-    ]);
-  });
-
-  it('parses a prefixed single-line document link after the strip', async () => {
-    // The anchored link patterns only match a line that is nothing but the
-    // link, so a prefixed link parses only on the second pass over the
-    // stripped text.
-    const client = new FakeDwsClient();
-    const channel = await readyChannel(
-      client,
-      makeConfig({ messagePrefix: '/review' }),
-    );
-    const link = documentMentionCard('doc-prefixed-link', 'comment-link')
-      .split('\n')
-      .find((line) => line.startsWith('[https://alidocs.dingtalk.com/'))!;
-
-    await client.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'document-with-prefix',
-        `/review ${link}`,
-      ),
-    );
-
-    expect(client.readDocument).toHaveBeenCalledWith(
-      'doc-prefixed-link',
-      expect.any(AbortSignal),
-    );
-    expect(channel.inbound).toEqual([
-      expect.objectContaining({
-        chatId: 'doc-prefixed-link',
-        threadId: 'comment-link',
-        bypassMessagePrefix: true,
       }),
     ]);
   });
@@ -2576,19 +2494,18 @@ describe('DwsChannel', () => {
     );
   });
 
-  it('does not retain prefix-filtered ambient group history', async () => {
+  it('retains eligible ambient group history', async () => {
     const client = new FakeDwsClient();
     const { bridge } = await readyPolicyChannel(
       client,
       makeConfig({
         groupHistoryLimit: 5,
-        messagePrefix: '/review',
         groups: {
           '*': { requireMention: false },
           'conversation-shadowed': { dispatchMode: 'followup' },
         },
       }),
-      'prefix-filtered-group-history-dws',
+      'ambient-group-history-dws',
       { groupHistoryPath: join(qwenHome, 'group-history.json') },
     );
 
@@ -2596,8 +2513,8 @@ describe('DwsChannel', () => {
       1,
       message(
         'user_im_message_receive_group_all',
-        'unprefixed-ambient',
-        'unprefixed ambient chatter',
+        'ambient-message',
+        'ambient chatter',
         { conversationId: 'conversation-shadowed' },
       ),
     );
@@ -2605,14 +2522,14 @@ describe('DwsChannel', () => {
       0,
       message(
         'user_im_message_receive_at',
-        'prefixed-mention',
-        '@QwenBot /review summarize',
+        'direct-mention',
+        '@QwenBot summarize',
         { conversationId: 'conversation-shadowed' },
       ),
     );
 
     const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
-    expect(prompt).not.toContain('unprefixed ambient chatter');
+    expect(prompt).toContain('ambient chatter');
   });
 
   it('does not add an @ message twin to its own group history', async () => {
@@ -4750,7 +4667,7 @@ describe('DwsChannel', () => {
     client.todoTasks = [todoTask('task-existing', 'Historical task')];
     const channel = await readyChannel(
       client,
-      makeConfig({ watchTodos: true, messagePrefix: '/review' }),
+      makeConfig({ watchTodos: true }),
     );
 
     await channel.poll();
@@ -4767,9 +4684,7 @@ describe('DwsChannel', () => {
         chatId: 'todo:task-new',
         threadId: 'task-new',
         senderId: 'alice',
-        displayText: 'Investigate the new failure',
         text: expect.stringContaining('Investigate the new failure'),
-        bypassMessagePrefix: true,
         metadata: expect.stringContaining('DWS native todo ID: task-new'),
       }),
     ]);
