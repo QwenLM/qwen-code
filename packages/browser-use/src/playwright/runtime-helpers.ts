@@ -18,6 +18,11 @@ import type {
 import type { Args, ProviderTab } from './runtime-state.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+// The claimTab schema caps title and url at this length; clamping once here
+// gives the discovery record and the object handed to the model the same
+// string, so the documented openTabs() -> claimTab() round trip survives a
+// tab whose URL is longer.
+const MAX_TAB_TEXT_LENGTH = 20_000;
 
 type KeyboardModifier = 'Alt' | 'Control' | 'ControlOrMeta' | 'Meta' | 'Shift';
 type MouseButton = 'left' | 'middle' | 'right';
@@ -40,8 +45,14 @@ export function providerTab(value: unknown): ProviderTab {
     );
   return {
     providerTabId: tab.providerTabId,
-    title: typeof tab.title === 'string' ? tab.title : null,
-    url: typeof tab.url === 'string' ? tab.url : null,
+    title:
+      typeof tab.title === 'string'
+        ? tab.title.slice(0, MAX_TAB_TEXT_LENGTH)
+        : null,
+    url:
+      typeof tab.url === 'string'
+        ? tab.url.slice(0, MAX_TAB_TEXT_LENGTH)
+        : null,
     ...(typeof tab.active === 'boolean' ? { active: tab.active } : {}),
     ...(typeof tab.lastOpened === 'string'
       ? { lastOpened: tab.lastOpened }
@@ -51,6 +62,24 @@ export function providerTab(value: unknown): ProviderTab {
       ? { derivedFromProviderTabId: tab.derivedFromProviderTabId }
       : {}),
   };
+}
+
+// The model-facing contract promises an http(s)-only listing ordered by
+// lastOpened descending; establish that here rather than in prose. An entry
+// without a parseable lastOpened sorts last, and ties keep the relay's order.
+export function orderOpenTabs(tabs: readonly ProviderTab[]): ProviderTab[] {
+  const opened = (tab: ProviderTab): number => {
+    const time =
+      tab.lastOpened === undefined ? NaN : Date.parse(tab.lastOpened);
+    return Number.isNaN(time) ? -Infinity : time;
+  };
+  return tabs
+    .filter((tab) => tab.url === null || /^https?:/.test(tab.url))
+    .sort((left, right) => {
+      const a = opened(left);
+      const b = opened(right);
+      return a === b ? 0 : a > b ? -1 : 1;
+    });
 }
 
 export function matcher(value: LocatorMatcher): string | RegExp {

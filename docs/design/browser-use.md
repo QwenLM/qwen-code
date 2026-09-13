@@ -179,7 +179,11 @@ expose the host filesystem path.
 locator method. Qwen resolves the element through a Playwright locator, briefly
 creates a page-local download link for the resolved media URL, clicks it, and
 removes it immediately. Callers synchronize through Playwright's `download`
-event.
+event. The media bytes are read from the page origin, so a cross-origin
+resource whose server sends no CORS headers cannot be downloaded this way:
+the call fails with an error naming that cause rather than navigating the
+claimed tab or saving an empty file. Downloading such resources with the
+user's cookies needs a browser-side download path and is follow-up work.
 
 JavaScript dialogs use type-specific actions: alerts and before-unload dialogs
 can be dismissed, confirms can be accepted or dismissed, and prompts require

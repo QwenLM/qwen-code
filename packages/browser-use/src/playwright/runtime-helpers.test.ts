@@ -6,12 +6,74 @@
 
 import type { Page } from 'playwright-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { commandSchemas } from '../core/schemas.js';
 import {
+  orderOpenTabs,
   pressKeyChord,
+  providerTab,
   selectOptions,
   withModifiers,
   withTimeout,
 } from './runtime-helpers.js';
+import type { ProviderTab } from './runtime-state.js';
+
+describe('provider tabs', () => {
+  it('clamps title and url so a discovered tab round-trips through claimTab', () => {
+    const tab = providerTab({
+      providerTabId: 7,
+      title: 't'.repeat(20_001),
+      url: `https://app.example/?state=${'a'.repeat(20_001)}`,
+    });
+    expect(tab.title).toHaveLength(20_000);
+    expect(tab.url).toHaveLength(20_000);
+    expect(
+      commandSchemas['browser.user.claimTab'].safeParse({
+        browserId: 'chrome',
+        tab: { id: 'open-1', title: tab.title, url: tab.url },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('lists only http(s) tabs, most recently opened first', () => {
+    const tabs: ProviderTab[] = [
+      {
+        providerTabId: 1,
+        title: 'Gmail',
+        url: 'https://mail.example/a',
+        lastOpened: '2026-09-01T00:00:00.000Z',
+      },
+      { providerTabId: 2, title: 'Gmail', url: 'https://mail.example/b' },
+      {
+        providerTabId: 3,
+        title: 'Gmail',
+        url: 'https://mail.example/c',
+        lastOpened: '2026-09-07T00:00:00.000Z',
+      },
+      {
+        providerTabId: 4,
+        title: 'credentials',
+        url: 'file:///Users/x/.aws/credentials',
+        lastOpened: '2026-09-08T00:00:00.000Z',
+      },
+      {
+        providerTabId: 5,
+        title: null,
+        url: null,
+        lastOpened: '2026-09-01T00:00:00.000Z',
+      },
+      {
+        providerTabId: 6,
+        title: 'Docs',
+        url: 'http://docs.example/',
+        lastOpened: 'yesterday',
+      },
+    ];
+    expect(orderOpenTabs(tabs).map((tab) => tab.providerTabId)).toEqual([
+      3, 1, 5, 2, 6,
+    ]);
+    expect(tabs.map((tab) => tab.providerTabId)).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+});
 
 describe('evaluation deadlines', () => {
   afterEach(() => vi.useRealTimers());

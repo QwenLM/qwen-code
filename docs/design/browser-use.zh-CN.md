@@ -90,7 +90,7 @@ Playwright 公共 CDP session API 提供坐标 CUA 的按钮 4（后退）和 5�
 
 Locator `downloadMedia()` 触发媒体或文件链接下载；`waitForEvent("download")` 用于同步其他页面操作触发的下载。返回的下载对象不透明，不暴露宿主文件系统路径。
 
-`downloadMedia()` 是 Qwen 适配功能，因为 Playwright 没有等价 locator 方法。Qwen 通过 Playwright locator 解析元素，为媒体 URL 临时创建页面内下载链接，点击后立即删除。调用方通过 Playwright `download` 事件同步。
+`downloadMedia()` 是 Qwen 适配功能，因为 Playwright 没有等价 locator 方法。Qwen 通过 Playwright locator 解析元素，为媒体 URL 临时创建页面内下载链接，点击后立即删除。调用方通过 Playwright `download` 事件同步。媒体字节在页面源内读取，因此服务端未返回 CORS 头的跨源资源无法用这种方式下载：调用会以指明该原因的错误失败，而不会让受控标签页跳转或保存空文件。带用户 cookie 下载此类资源需要浏览器侧的下载路径，属于后续工作。
 
 JavaScript 对话框使用类型相关操作：alert 和 before-unload 可以 dismiss，confirm 可以 accept 或 dismiss，prompt 在 accept 时需要文本。SDK 同时暴露对话框消息和 prompt 默认值。
 

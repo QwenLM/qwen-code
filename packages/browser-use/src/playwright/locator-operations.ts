@@ -169,7 +169,13 @@ export async function executeLocatorOperation(
             const objectUrl = URL.createObjectURL(await response.blob());
             const anchor = document.createElement('a');
             anchor.href = objectUrl;
-            anchor.download = url.split('/').pop()?.split('?')[0] || 'download';
+            // Only an http(s) path carries a usable file name; a blob: or
+            // data: URL would yield a UUID or a base64 fragment, and an empty
+            // download attribute lets the browser name the file from the
+            // blob's MIME type instead.
+            anchor.download = /^https?:/.test(url)
+              ? new URL(url).pathname.split('/').pop() || 'download'
+              : '';
             anchor.rel = 'noopener';
             anchor.style.display = 'none';
             document.body.append(anchor);

@@ -25,6 +25,11 @@ const backend = vi.hoisted(() => ({
     if (method === 'browser.documentation') return 'browser docs';
     if (method === 'browser.user.history') return [];
     if (method === 'tabs.new') return { id: 'tab-1' };
+    if (method === 'tabs.selected') return null;
+    if (method === 'browser.user.claimTab') return { id: 'tab-9' };
+    if (method === 'playwright.waitForEvent')
+      return { chooserId: 'chooser-1', multiple: true };
+    if (method === 'fileChooser.setFiles') return null;
     if (method === 'tab.goto') return null;
     if (method === 'tab.dialog.accept' || method === 'tab.dialog.dismiss')
       return null;
@@ -324,6 +329,144 @@ describe('Browser SDK in the existing Node REPL', () => {
         tabId: 'tab-1',
         steps: [{ kind: 'locator', selector: 'img' }],
       },
+    });
+  });
+
+  it('rejects an nth index outside the contract range before dispatch', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+    const locator = tab.playwright.locator('li');
+    const dispatchCount = backend.dispatch.mock.calls.length;
+
+    for (const index of [10_001, -10_001, 1.5, NaN]) {
+      expect(() => locator.nth(index)).toThrow(
+        new TypeError('nth index must be an integer between -10000 and 10000'),
+      );
+    }
+    expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+    await locator.nth(10_000).click();
+    await locator.nth(-10_000).click();
+    expect(backend.calls.slice(-2).map(({ args }) => args)).toEqual([
+      {
+        tabId: 'tab-1',
+        steps: [
+          { kind: 'locator', selector: 'li' },
+          { kind: 'nth', index: 10_000 },
+        ],
+      },
+      {
+        tabId: 'tab-1',
+        steps: [
+          { kind: 'locator', selector: 'li' },
+          { kind: 'nth', index: -10_000 },
+        ],
+      },
+    ]);
+  });
+
+  it('fails all() closed instead of returning locators that cannot be used', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+    const locator = tab.playwright.locator('li');
+
+    backend.dispatch.mockResolvedValueOnce(10_002);
+    await expect(locator.all()).rejects.toThrow(
+      new RangeError(
+        'all() matched 10002 elements, more than nth() can address; narrow the locator',
+      ),
+    );
+    backend.dispatch.mockResolvedValueOnce(10_001);
+    await expect(locator.all()).resolves.toHaveLength(10_001);
+
+    let deep = tab.playwright.locator('ul');
+    for (let depth = 1; depth < 32; depth++) deep = deep.locator('li');
+    const dispatchCount = backend.dispatch.mock.calls.length;
+    await expect(deep.all()).rejects.toThrow(
+      new RangeError(
+        'all() cannot extend a locator that already has 32 steps; narrow the locator',
+      ),
+    );
+    expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+  });
+
+  it('normalizes file chooser uploads', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+
+    const chooser = await tab.playwright.waitForEvent('filechooser');
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'playwright.waitForEvent',
+      args: { tabId: 'tab-1', event: 'filechooser' },
+    });
+    expect(chooser.isMultiple()).toBe(true);
+
+    await chooser.setFiles('/abs/a');
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'fileChooser.setFiles',
+      args: { tabId: 'tab-1', chooserId: 'chooser-1', files: ['/abs/a'] },
+    });
+    await chooser.setFiles(['/abs/a', '/abs/b'], { timeoutMs: 5 });
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'fileChooser.setFiles',
+      args: {
+        tabId: 'tab-1',
+        chooserId: 'chooser-1',
+        files: ['/abs/a', '/abs/b'],
+        timeoutMs: 5,
+      },
+    });
+
+    const dispatchCount = backend.dispatch.mock.calls.length;
+    expect(() => tab.playwright.waitForEvent('popup' as never)).toThrow(
+      'waitForEvent supports only "download" and "filechooser"',
+    );
+    expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+  });
+
+  it('guards claimTab arguments and forwards a discovered tab unchanged', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const dispatchCount = backend.dispatch.mock.calls.length;
+
+    for (const value of [undefined, null, 42]) {
+      await expect(browser.user.claimTab(value as never)).rejects.toThrow(
+        new TypeError(
+          'claimTab expects a tab returned by browser.user.openTabs()',
+        ),
+      );
+    }
+    expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+
+    const discovered = {
+      id: 'open-1',
+      title: 'Gmail',
+      url: 'https://mail.example/',
+      lastOpened: '2026-09-07T00:00:00.000Z',
+    };
+    const claimed = await browser.user.claimTab(discovered);
+    expect(claimed.id).toBe('tab-9');
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'browser.user.claimTab',
+      args: { browserId: 'chrome', tab: discovered },
+    });
+    await browser.user.claimTab('open-1');
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'browser.user.claimTab',
+      args: { browserId: 'chrome', tab: 'open-1' },
+    });
+  });
+
+  it('resolves tabs.selected() to undefined when no tab is selected', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+
+    await expect(browser.tabs.selected()).resolves.toBeUndefined();
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'tabs.selected',
+      args: { browserId: 'chrome' },
     });
   });
 

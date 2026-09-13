@@ -5,6 +5,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_CHROME_DOCUMENTATION } from '../core/chrome-runtime-documentation.js';
+import type { LocatorStep } from '../core/primitives.js';
 import { executeLocatorOperation } from './locator-operations.js';
 import type { TabState } from './runtime-state.js';
 
@@ -243,6 +245,207 @@ describe('locator.press', () => {
   });
 });
 
+describe('locator read defaults', () => {
+  // The model learns the read default from the documentation string, so the
+  // runtime constant and the documented figure must move together.
+  const READ_TIMEOUT_MS = 1_000;
+
+  it('waits the documented default when a read passes no timeoutMs', async () => {
+    const locator = {
+      innerText: vi.fn(async (_options: { timeout: number }) => 'text'),
+      textContent: vi.fn(async (_options: { timeout: number }) => 'text'),
+      getAttribute: vi.fn(
+        async (_name: string, _options: { timeout: number }) => 'value',
+      ),
+      isEnabled: vi.fn(async (_options: { timeout: number }) => true),
+    };
+    const tab = { page: { locator: () => locator } } as unknown as TabState;
+    const steps = [{ kind: 'locator', selector: '#row' }];
+
+    await expect(
+      executeLocatorOperation('locator.innerText', { steps }, tab),
+    ).resolves.toBe('text');
+    await expect(
+      executeLocatorOperation('locator.textContent', { steps }, tab),
+    ).resolves.toBe('text');
+    await expect(
+      executeLocatorOperation(
+        'locator.getAttribute',
+        { steps, name: 'href' },
+        tab,
+      ),
+    ).resolves.toBe('value');
+    await expect(
+      executeLocatorOperation('locator.isEnabled', { steps }, tab),
+    ).resolves.toBe(true);
+
+    expect(locator.innerText).toHaveBeenCalledExactlyOnceWith({
+      timeout: READ_TIMEOUT_MS,
+    });
+    expect(locator.textContent).toHaveBeenCalledExactlyOnceWith({
+      timeout: READ_TIMEOUT_MS,
+    });
+    expect(locator.getAttribute).toHaveBeenCalledExactlyOnceWith('href', {
+      timeout: READ_TIMEOUT_MS,
+    });
+    expect(locator.isEnabled).toHaveBeenCalledExactlyOnceWith({
+      timeout: READ_TIMEOUT_MS,
+    });
+    expect(DEFAULT_CHROME_DOCUMENTATION).toContain(
+      `Reads default to a ${READ_TIMEOUT_MS / 1_000}s timeout`,
+    );
+  });
+});
+
+describe('buildLocator', () => {
+  type Call = [scope: string, method: string, args: unknown[]];
+  const PATH = Symbol('path');
+  const chainMethods = [
+    'locator',
+    'getByRole',
+    'getByText',
+    'getByLabel',
+    'getByPlaceholder',
+    'getByTestId',
+    'contentFrame',
+    'filter',
+    'first',
+    'last',
+    'nth',
+    'and',
+    'or',
+  ] as const;
+
+  // Every chain method records its receiver's path and returns a child, so
+  // a dispatched plan yields the exact Playwright call sequence it produces.
+  function recorder() {
+    const calls: Call[] = [];
+    const describeArg = (value: unknown): unknown => {
+      if (
+        value === null ||
+        typeof value !== 'object' ||
+        value instanceof RegExp
+      )
+        return value;
+      if (PATH in value) return value[PATH];
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, describeArg(item)]),
+      );
+    };
+    const node = (path: string): Record<string | symbol, unknown> => {
+      const self: Record<string | symbol, unknown> = {
+        [PATH]: path,
+        count: vi.fn(async () => 0),
+      };
+      for (const method of chainMethods) {
+        self[method] = (...args: unknown[]) => {
+          calls.push([path, method, args.map(describeArg)]);
+          return node(`${path}.${method}`);
+        };
+      }
+      return self;
+    };
+    return { calls, tab: { page: node('page') } as unknown as TabState };
+  }
+
+  it.each<[string, LocatorStep[], Call[]]>([
+    [
+      'frame scoping',
+      [
+        { kind: 'frame', selector: 'iframe#pay' },
+        { kind: 'getByRole', role: 'button', name: 'Pay' },
+      ],
+      [
+        ['page', 'locator', ['iframe#pay']],
+        ['page.locator', 'contentFrame', []],
+        ['page.locator.contentFrame', 'getByRole', ['button', { name: 'Pay' }]],
+      ],
+    ],
+    [
+      'an and operand',
+      [
+        { kind: 'locator', selector: 'button' },
+        { kind: 'and', steps: [{ kind: 'getByText', text: 'Submit' }] },
+      ],
+      [
+        ['page', 'locator', ['button']],
+        ['page', 'getByText', ['Submit', {}]],
+        ['page.locator', 'and', ['page.getByText']],
+      ],
+    ],
+    [
+      'an or operand',
+      [
+        { kind: 'locator', selector: 'button' },
+        { kind: 'or', steps: [{ kind: 'getByText', text: 'Submit' }] },
+      ],
+      [
+        ['page', 'locator', ['button']],
+        ['page', 'getByText', ['Submit', {}]],
+        ['page.locator', 'or', ['page.getByText']],
+      ],
+    ],
+    [
+      'a filter with text and a nested has operand',
+      [
+        { kind: 'getByTestId', testId: 'row' },
+        {
+          kind: 'filter',
+          hasText: { regex: '^a', flags: 'i' },
+          has: [
+            { kind: 'getByRole', role: 'cell', name: 'Total', exact: true },
+          ],
+          visible: true,
+        },
+      ],
+      [
+        ['page', 'getByTestId', ['row']],
+        ['page', 'getByRole', ['cell', { name: 'Total', exact: true }]],
+        [
+          'page.getByTestId',
+          'filter',
+          [{ hasText: /^a/i, has: 'page.getByRole', visible: true }],
+        ],
+      ],
+    ],
+    [
+      'positional steps',
+      [
+        { kind: 'getByLabel', text: 'Name', exact: true },
+        { kind: 'nth', index: -1 },
+        { kind: 'getByPlaceholder', text: 'Search' },
+        { kind: 'last' },
+      ],
+      [
+        ['page', 'getByLabel', ['Name', { exact: true }]],
+        ['page.getByLabel', 'nth', [-1]],
+        ['page.getByLabel.nth', 'getByPlaceholder', ['Search', {}]],
+        ['page.getByLabel.nth.getByPlaceholder', 'last', []],
+      ],
+    ],
+  ])(
+    'reconstructs %s in Playwright call order',
+    async (_name, steps, expected) => {
+      const f = recorder();
+      await expect(
+        executeLocatorOperation('locator.count', { steps }, f.tab),
+      ).resolves.toBe(0);
+      expect(f.calls).toEqual(expected);
+    },
+  );
+
+  it('rejects a plan that ends inside a frame without an element selector', async () => {
+    const f = recorder();
+    await expect(
+      executeLocatorOperation(
+        'locator.count',
+        { steps: [{ kind: 'frame', selector: 'iframe' }] },
+        f.tab,
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_LOCATOR' });
+  });
+});
+
 describe('locator.allTextContents', () => {
   function textsFixture() {
     const handle = { waitFor: vi.fn(async () => undefined) };
@@ -404,6 +607,32 @@ describe('locator.downloadMedia', () => {
     expect(f.anchor.download).toBe('video.mp4');
     expect(f.anchor.click).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    'blob:https://page.example/7c9e6679-7425-40de-944b-e07fc1f90ae7',
+    'data:image/png;base64,iVBORw0KGgo=',
+  ])('lets the browser name a download from %s by MIME type', async (url) => {
+    const f = downloadFixture({ currentSrc: url });
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.anchor.download).toBe('');
+    expect(f.anchor.click).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    'https://cdn.example.com/photo.jpg#preview',
+    'https://cdn.example.com/photo.jpg?w=1#preview',
+  ])(
+    'strips the query and the fragment from the file name of %s',
+    async (url) => {
+      const f = downloadFixture({ currentSrc: url });
+      await expect(
+        executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+      ).resolves.toBeNull();
+      expect(f.anchor.download).toBe('photo.jpg');
+    },
+  );
 
   it('prefers media contained in a located wrapper over an ancestor link', async () => {
     const f = downloadFixture({ href: '/product' });
