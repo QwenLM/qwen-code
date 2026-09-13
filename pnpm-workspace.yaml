@@ -64,3 +64,4 @@ allowBuilds:
 
 minimumReleaseAgeExclude:
   - '@qwen-code/channel-base'
+  - '@tybys/wasm-util@0.10.4'
