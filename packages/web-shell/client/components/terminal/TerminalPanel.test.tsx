@@ -311,7 +311,14 @@ describe('TerminalPanel', () => {
       ws.open();
       ws.message(new TextEncoder().encode('unmarked history').buffer);
     });
+    expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+    expect(ws.send.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      ws.close.mock.invocationCallOrder[0]!,
+    );
     expect(ws.close).toHaveBeenCalledWith(4002, 'Terminal protocol mismatch');
+    const sent = ws.send.mock.calls.length;
+    act(() => releaseWebTerminal('terminal:one'));
+    expect(ws.send).toHaveBeenCalledTimes(sent);
     expect(terminal.write).not.toHaveBeenCalled();
   });
 

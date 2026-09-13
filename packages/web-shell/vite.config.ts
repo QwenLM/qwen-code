@@ -88,6 +88,8 @@ export default defineConfig(({ command }) => ({
     dedupe: ['react', 'react-dom', '@qwen-code/sdk'],
   },
   build: {
+    // Avoid esbuild lowering xterm's logical assignments into invalid code.
+    target: 'es2021',
     outDir: '../dist',
     emptyOutDir: true,
   },
