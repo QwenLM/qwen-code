@@ -28,7 +28,11 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   repoRelativeOf,
   REVIEW_CACHE_DIR,
@@ -37,7 +41,11 @@ import {
 } from './lib/paths.js';
 import { safeTarget } from '../../utils/paths.js';
 import { planEffortField } from './lib/effort.js';
-import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
+import {
+  deadlineOption,
+  EFFORT_OPTION,
+  type ReviewEffort,
+} from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
 import {
   buildDiffPlan,
@@ -52,7 +60,7 @@ import {
   type PlanReport,
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
-import { hasReviewDeadline } from './lib/deadline.js';
+import { captureDeadline, validateDeadlineFlag } from './lib/deadline.js';
 import { gitOpt } from './lib/git.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
@@ -79,6 +87,8 @@ interface CaptureLocalArgs {
   target: string;
   untracked: boolean;
   effort?: ReviewEffort;
+  /** `--deadline`: minutes, or `none`; omitted for the tier's default wall. */
+  deadline?: string;
   cache?: string;
 }
 
@@ -488,6 +498,12 @@ function cachePathFor(target: string, source: string | undefined): string {
 
 function runCaptureLocal(args: CaptureLocalArgs): void {
   const { out, file } = args;
+  // A malformed or too-short --deadline is a usage error, and it must fail
+  // here, before the tree is captured and planned, not at the plan write
+  // after that work is done — both bars, the env-free floor and this
+  // shell's pricing. The same validation runs again inside
+  // `captureDeadline`; it is pure given the environment.
+  validateDeadlineFlag(process.env, args.deadline);
   // DERIVED here when a file review does not name one, rather than recomputed
   // by whoever calls this. `qwen review run` pins the artifact name it polls
   // for from the same repo-relative path put through the same `safeTarget`,
@@ -1252,6 +1268,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // every hunk touching a file git handed us in a non-UTF-8 encoding.
   writeFileSync(diffPath, diffBytes);
 
+  const wall = captureDeadline(process.env, args.deadline, plan);
   const result: CaptureLocalResult = {
     // The token the CLI derived, so nothing downstream has to re-derive it.
     // `qwen review run` pins the artifact name it waits for from the same
@@ -1266,8 +1283,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // what the topology needs, is not.
     ...buildPlanReport(plan, null, {
       operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-      hasDeadline: hasReviewDeadline(process.env),
+      hasDeadline: wall.explicit,
     }),
+    ...wall.fields,
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
     ...(incremental ? { incremental } : {}),
@@ -1433,6 +1451,7 @@ export const captureLocalCommand: CommandModule = {
           'Include untracked, non-ignored files. On by default: `git diff` cannot see them, so without this a brand-new file goes unreviewed.',
       })
       .option('effort', EFFORT_OPTION)
+      .option('deadline', deadlineOption({ resumes: false }))
       .option('cache', {
         type: 'string',
         describe:
@@ -1449,6 +1468,15 @@ export const captureLocalCommand: CommandModule = {
           'says why.',
       }),
   handler: (argv) => {
-    runCaptureLocal(argv as unknown as CaptureLocalArgs);
+    // plan-diff's contract: a usage error (a TypeError — the malformed
+    // --deadline this command can now throw) exits 2 with one stderr line,
+    // anything else exits 1 — never an uncaught crash banner with a stack
+    // for a repairable invocation.
+    try {
+      runCaptureLocal(argv as unknown as CaptureLocalArgs);
+    } catch (err) {
+      writeStderrLineSafe(`capture-local: ${(err as Error).message}`);
+      process.exitCode = err instanceof TypeError ? 2 : 1;
+    }
   },
 };

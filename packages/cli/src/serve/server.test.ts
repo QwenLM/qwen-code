@@ -12023,7 +12023,10 @@ describe('createServeApp', () => {
           _context,
           _messageId,
           options,
-        ) => (options?.rejectIfIdle ? { accepted: false } : { accepted: true }),
+        ) =>
+          options?.rejectIfIdle
+            ? { accepted: false, reason: 'session_idle' }
+            : { accepted: true },
       });
 
       const res = await midTurnPost(midTurnApp(bridge), 's-1', {
@@ -12032,7 +12035,7 @@ describe('createServeApp', () => {
       });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ accepted: false });
+      expect(res.body).toEqual({ accepted: false, reason: 'session_idle' });
       expect(bridge.enqueueMidTurnCalls[0]?.options).toEqual({
         rejectIfIdle: true,
       });
