@@ -1214,7 +1214,13 @@ remain genuinely open:
    `MAX_THREAD_RUNS` retain active references but trim old terminal history. The
    v1 conservative default also retains messages carrying an `originEventId`
    and runs carrying usage, because trimming either would break replay
-   idempotency or reset the token gate. Because referenced old messages can
+   idempotency or reset the token gate. These are soft trimming thresholds,
+   **not hard storage bounds**: charged runs and their referenced messages can
+   exceed them indefinitely; acknowledged and failed outbox entries also have
+   no retention limit. Safe compaction must preserve both token accounting and
+   replay deduplication. This remains unresolved in the 2026-09-13 PR follow-up;
+   no additional history deletion is enabled by that fix.
+   Because referenced old messages can
    survive while unreferenced messages around them are removed, prompt assembly
    counts missing sequence numbers across the undisplayed range and emits an
    explicit, non-recoverable gap; whether full history and these durable ledgers

@@ -174,20 +174,15 @@ export function assembleAgentPrompt(
   );
   lines.push('');
   lines.push('CURRENT THREAD');
-  for (const line of thread.title.split('\n')) lines.push(`  ${line}`);
+  lines.push(`  Title (untrusted): ${JSON.stringify(thread.title)}`);
   if (thread.body) {
-    for (const line of thread.body.split('\n')) lines.push(`  ${line}`);
+    lines.push(`  Body (untrusted): ${JSON.stringify(thread.body)}`);
   }
   lines.push(`  Status: ${thread.status}`);
-  // The standard this run is checked against, stated in the frame rather than
-  // among the posts: posts are untrusted content that never changes scope, and
-  // this is the one piece of thread text the run is answerable to. Rendered
-  // only when set, so an agent is never handed an empty standard to satisfy.
   if (thread.acceptanceCriteria) {
-    lines.push('  Done when:');
-    for (const line of thread.acceptanceCriteria.split('\n')) {
-      lines.push(`    ${line}`);
-    }
+    lines.push(
+      `  Done when: (untrusted) ${JSON.stringify(thread.acceptanceCriteria)}`,
+    );
   }
   const assignee = thread.assigneeAgentId
     ? input.roster.find((candidate) => candidate.id === thread.assigneeAgentId)

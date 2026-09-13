@@ -1,6 +1,6 @@
 # Agent 服务双向接入：接续实施计划
 
-状态：实施中；实际进度与运行证据见 §3b。2026-09-09。
+状态：实施中；历史进度见 §3b，2026-09-13 评论修复与未完成项见 §3c。
 
 权威方向见[接续架构](../design/2026-09-09-agent-service-collaboration.md)。读取基线为 #11206 `6a69c0b5bbf1232644a297b567bb36350eb58ff4`。本文件不宣称旧 ten-step 全部重验，也不要求按旧步骤继续堆功能。
 
@@ -115,6 +115,18 @@ P2/P3 已有最小可见入口；此步只收束体验：原有新建对话、�
 仍需产品决定：生产 A/B 环境与可达方式、远端 Agent 的最终权限上限、审批接收人；以及上面 P3 那条后果是否接受。它们不阻塞当前只读 Demo。
 
 下一棒入口见 [A2A 传输层与 Host 出站取件](./2026-09-09-a2a-transport-and-host-pickup-handoff.md)：A2A 与受管 Host 的只读执行闭环已完成；Demo 后再补完整 persona/tool ceiling 和跨机器部署。
+
+## 3c. PR 评论复核（2026-09-13）
+
+基线：远程 `214b895b1b97`，本地已合入 main `6a0806faf313`。本轮不宣称旧阶段重新验收，不删除会话记录。
+
+- **A2A 任务存在性泄漏已修。** JSON-RPC 的认证入口现在验证真实 grant，而非只检查请求头形状；核心 `getTask` / `cancelTask` 将错误或撤销凭据与不存在的任务统一为 `not_found`。按 Agent 的授权检查继续保留。前后对照中，错误 secret / 撤销 secret × get / cancel 四组从“已有任务 refused、缺失任务 not_found”变为不可区分。
+- **Host 心跳不再接单。** 复用已有 heartbeat 与 `renewRunLease`，只延长当前 `(hostId, threadId, runId, leaseId, attempt)`；保持 leaseId，拒绝过期、取消、错误 Host 与旧 attempt。启动执行前先确认一次，此后每 20 秒续租。任何续租失败（含 10 秒请求超时）都发出取消信号，不把结果当正常完成；因此短暂网络故障也可能中断本次执行。旧协调端若不返回租约确认，新 Host 拒绝执行，需先升级协调端。`pickup` 只负责领取新工作。
+- **观测边界。** 临时真实 store + client 定时器证明：取消 / 过期后下一任务保持 queued，当前 prompt 收到 abort，执行分别报 `not_leasable` / `stale_lease`；正常续租保持 leaseId 并延长 expiresAt。真实 Express heartbeat：正常 200、非法 tuple 400、错误凭据 401、另一 Host 伪造身份 409 stale_lease、错误 attempt 409 attempt_moved_on。未启动真实模型，未验证模型进程最终退出时间；本机缺少 A2A SDK，认证函数单独验证，不算完整 SDK HTTP 或 Python 互通重验。没有跑 build、lint、typecheck 或全套测试。
+- **提示词格式收窄。** 标题、正文与验收条件改为标记 untrusted 的单行 JSON 字符串，避免换行伪装成帧字段。ambient 绑定仍是操作权限边界；这不等于解决模型提示词注入。
+- **历史容量 Critical 仍未解决。** 旧设计 §9.2 的 200 / 500 是软裁剪阈值，不是容量保证；计费 run、其引用消息及已结束 outbox 可持续增长。不能直接删除它们，否则预算计费与重放去重会失效，也会再次丢失对话。需先明确归档与压缩后账本 / 去重键的保存方式，本轮不做历史清理。
+
+当前仍不能称为完整的多 Agent 协作：受管 Host 只接活并回传 review，尚不能使用 `thread_*` 主动交接；Codex 仍是 `exec --ephemeral`，没有原生会话续跑；同一 Host 连接串行执行。§3b 的跨机器与双向调用缺口不能由这次故障复现覆盖。本地尚未提交的聊天入口 / 进度显示改动也不计入远程交付。
 
 ## 4. 接力清单
 

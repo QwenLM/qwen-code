@@ -124,9 +124,7 @@ describe('assembleAgentPrompt', () => {
     expect(result.text).not.toContain('DELTA AFTER LAST COMMITTED DELIVERY');
   });
 
-  it('states acceptance criteria in the frame, not among the posts', () => {
-    // Posts are untrusted content that never changes scope. The standard the
-    // run is answerable to has to sit where the frame does.
+  it('quotes acceptance criteria without allowing extra frame lines', () => {
     const result = assemble({
       thread: thread({
         acceptanceCriteria: 'The flake is reproduced\nThe cause is named',
@@ -134,8 +132,9 @@ describe('assembleAgentPrompt', () => {
     });
 
     expect(result.text).toContain('Done when:');
-    expect(result.text).toContain('    The flake is reproduced');
-    expect(result.text).toContain('    The cause is named');
+    expect(result.text).toContain(
+      'Done when: (untrusted) "The flake is reproduced\\nThe cause is named"',
+    );
     expect(result.text.indexOf('Done when:')).toBeLessThan(
       result.text.indexOf('RECENT THREAD POSTS'),
     );
