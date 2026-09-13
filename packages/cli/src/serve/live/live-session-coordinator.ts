@@ -10,6 +10,8 @@ import { join } from 'node:path';
 import {
   escapeXml,
   SessionService,
+  encodeSessionListCursor,
+  type SessionListCursor,
   stripTerminalControlSequences,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -606,8 +608,8 @@ export class LiveSessionCoordinator {
     runtime: WorkspaceRuntime,
   ): Promise<SessionListItem | undefined> {
     const service = new SessionService(runtime.workspaceCwd);
-    let cursor: number | undefined;
-    const seenCursors = new Set<number>();
+    let cursor: SessionListCursor | undefined;
+    const seenCursors = new Set<string>();
     while (true) {
       const page = await service.listSessions({
         size: SESSION_SCAN_SIZE,
@@ -617,8 +619,11 @@ export class LiveSessionCoordinator {
       const match = page.items.find(isCompatibleLiveSession);
       if (match) return match;
       if (!page.hasMore || page.nextCursor === undefined) return undefined;
-      if (seenCursors.has(page.nextCursor)) return undefined;
-      seenCursors.add(page.nextCursor);
+      // Cursors are structured objects now; the loop guard must compare the
+      // encoded wire form, not object identity.
+      const cursorKey = encodeSessionListCursor(page.nextCursor);
+      if (seenCursors.has(cursorKey)) return undefined;
+      seenCursors.add(cursorKey);
       cursor = page.nextCursor;
     }
   }

@@ -62,6 +62,57 @@ describe('extractSessionListItems', () => {
   });
 });
 
+describe('QwenAgentManager.getSessionListPaged', () => {
+  it('passes opaque session-list cursors through verbatim', async () => {
+    // Regression: the daemon may return a composite "<mtimeMs>:<sessionId>"
+    // cursor. Number()-parsing it yields NaN, which the old code treated as
+    // "no next page" and silently stopped pagination after page one.
+    const manager = new QwenAgentManager();
+    const listSessions = vi.fn().mockResolvedValue({
+      sessions: [
+        {
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+          title: 'Stored session',
+        },
+      ],
+      nextCursor: '1755000000000.5:550e8400-e29b-41d4-a716-446655440000',
+    });
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions,
+    };
+
+    const page = await manager.getSessionListPaged({
+      cursor: '1755000000000:550e8400-e29b-41d4-a716-446655440001',
+      size: 5,
+    });
+
+    expect(listSessions).toHaveBeenCalledWith({
+      size: 5,
+      cursor: '1755000000000:550e8400-e29b-41d4-a716-446655440001',
+    });
+    expect(page.nextCursor).toBe(
+      '1755000000000.5:550e8400-e29b-41d4-a716-446655440000',
+    );
+    expect(page.hasMore).toBe(true);
+  });
+
+  it('still accepts a legacy numeric cursor from the daemon', async () => {
+    const manager = new QwenAgentManager();
+    const listSessions = vi.fn().mockResolvedValue({
+      sessions: [],
+      nextCursor: '1755000000000',
+    });
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions,
+    };
+
+    const page = await manager.getSessionListPaged({ size: 5 });
+
+    expect(page.nextCursor).toBe('1755000000000');
+    expect(page.hasMore).toBe(true);
+  });
+});
+
 describe('QwenAgentManager.setModelFromUi', () => {
   it('emits the selected model metadata from the available models list', async () => {
     const manager = new QwenAgentManager();

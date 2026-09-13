@@ -609,7 +609,7 @@ export class AcpConnection {
   }
 
   async listSessions(options?: {
-    cursor?: number;
+    cursor?: string | number;
     size?: number;
   }): Promise<ListSessionsResponse> {
     const conn = this.ensureConnection();

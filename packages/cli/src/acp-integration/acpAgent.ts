@@ -134,6 +134,7 @@ import {
   type SessionRestoreProjection,
   type SessionArtifactEventRecordPayload,
   type SessionArtifactSnapshotRecordPayload,
+  type SessionListCursor,
   type WorkspaceRememberContextMode,
   type ChatRecord,
   type ToolInvocationGuard,
@@ -153,6 +154,9 @@ import {
   registerSession,
   SessionSourceService,
   SessionSourceError,
+  decodeSessionListCursor,
+  encodeSessionListCursor,
+  InvalidSessionListCursorError,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -3357,22 +3361,19 @@ function normalizeAcpSessionListSize(value: unknown): number | undefined {
 
 function parseAcpSessionListCursor(
   value: string | null | undefined,
-): number | undefined {
+): number | SessionListCursor | undefined {
   if (value == null || value === '') return undefined;
-  const trimmed = value.trim();
-  const parsedCursor = Number(trimmed);
-  if (
-    trimmed === '' ||
-    !Number.isFinite(parsedCursor) ||
-    parsedCursor < 0 ||
-    parsedCursor > Number.MAX_SAFE_INTEGER
-  ) {
-    throw RequestError.invalidParams(
-      undefined,
-      `Invalid cursor: "${value}" is not a valid numeric cursor`,
-    );
+  try {
+    return decodeSessionListCursor(value);
+  } catch (error) {
+    if (error instanceof InvalidSessionListCursorError) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Invalid cursor: "${value}" is not a valid session-list cursor`,
+      );
+    }
+    throw error;
   }
-  return parsedCursor;
 }
 
 interface TranscriptReplayConfigCacheEntry {
@@ -6138,7 +6139,7 @@ class QwenAgent implements Agent {
     params: ListSessionsRequest,
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
-    const numericCursor = parseAcpSessionListCursor(params.cursor);
+    const parsedCursor = parseAcpSessionListCursor(params.cursor);
 
     // The ACP spec's ListSessionsRequest doesn't include a page-size field,
     // so the SDK's zod validator strips any top-level `size` the client sends
@@ -6153,7 +6154,7 @@ class QwenAgent implements Agent {
     const result = await this.runWithPinnedRuntimeBaseDirForRequest(cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
-        cursor: numericCursor,
+        cursor: parsedCursor,
         size,
       });
     });
@@ -6175,7 +6176,9 @@ class QwenAgent implements Agent {
     return {
       sessions,
       nextCursor:
-        result.nextCursor != null ? String(result.nextCursor) : undefined,
+        result.nextCursor != null
+          ? encodeSessionListCursor(result.nextCursor)
+          : undefined,
     };
   }
 

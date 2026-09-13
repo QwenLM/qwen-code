@@ -190,7 +190,11 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
       case 'getQwenSessions':
         await this.handleGetQwenSessions(
-          (data?.cursor as number | undefined) ?? undefined,
+          // The cursor is an opaque string; older webviews sent a number, so
+          // normalize both to the wire form the daemon understands.
+          typeof data?.cursor === 'number'
+            ? String(data.cursor)
+            : ((data?.cursor as string | undefined) ?? undefined),
           (data?.size as number | undefined) ?? undefined,
         );
         break;
@@ -1445,7 +1449,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
    * Handle get Qwen sessions request
    */
   private async handleGetQwenSessions(
-    cursor?: number,
+    cursor?: string,
     size?: number,
   ): Promise<void> {
     try {
@@ -1454,7 +1458,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         cursor,
         size,
       });
-      const append = typeof cursor === 'number';
+      const append = cursor !== undefined;
       this.sendToWebView({
         type: 'qwenSessionList',
         data: {

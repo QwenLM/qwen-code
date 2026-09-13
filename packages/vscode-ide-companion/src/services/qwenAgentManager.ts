@@ -581,11 +581,11 @@ export class QwenAgentManager {
    * Falls back to file system scan with equivalent pagination semantics.
    */
   async getSessionListPaged(params?: {
-    cursor?: number;
+    cursor?: string;
     size?: number;
   }): Promise<{
     sessions: Array<Record<string, unknown>>;
-    nextCursor?: number;
+    nextCursor?: string;
     hasMore: boolean;
   }> {
     const size = params?.size ?? 20;
@@ -612,22 +612,22 @@ export class QwenAgentManager {
         cwd: item.cwd,
       }));
 
-      // SDK returns nextCursor as string; convert to numeric cursor for paging
-      let nextCursorNum: number | undefined;
+      // The session-list cursor is opaque: servers may return a legacy bare
+      // mtime or the composite "<mtimeMs>:<sessionId>" form. Pass it back
+      // verbatim; never parse it as a number, or pagination silently stops
+      // at the first composite cursor.
+      let nextCursor: string | undefined;
       if (typeof res === 'object' && res !== null && 'nextCursor' in res) {
         const raw = (res as { nextCursor?: unknown }).nextCursor;
         if (typeof raw === 'number') {
-          nextCursorNum = raw;
-        } else if (typeof raw === 'string') {
-          const parsed = Number(raw);
-          if (!Number.isNaN(parsed)) {
-            nextCursorNum = parsed;
-          }
+          nextCursor = String(raw);
+        } else if (typeof raw === 'string' && raw !== '') {
+          nextCursor = raw;
         }
       }
-      const hasMore = nextCursorNum !== undefined;
+      const hasMore = nextCursor !== undefined;
 
-      return { sessions: mapped, nextCursor: nextCursorNum, hasMore };
+      return { sessions: mapped, nextCursor, hasMore };
     } catch (error) {
       logger.warn('[QwenAgentManager] Paged ACP session list failed:', error);
       // fall through to file system
@@ -644,9 +644,13 @@ export class QwenAgentManager {
         raw: s,
         mtime: new Date(s.lastUpdated).getTime(),
       }));
+      // The local fallback only ever produces bare-mtime cursors, so a
+      // numeric parse round-trips; a composite cursor here means the caller
+      // mixed servers mid-pagination; fail closed to an empty next page.
+      const cursorMtime = cursor !== undefined ? Number(cursor) : undefined;
       const filtered =
-        cursor !== undefined
-          ? allWithMtime.filter((x) => x.mtime < cursor)
+        cursorMtime !== undefined && Number.isFinite(cursorMtime)
+          ? allWithMtime.filter((x) => x.mtime < cursorMtime)
           : allWithMtime;
       const page = filtered.slice(0, size);
       const sessions = page.map((x) => ({
@@ -662,7 +666,7 @@ export class QwenAgentManager {
         cwd: x.raw.cwd,
       }));
       const nextCursorVal =
-        page.length > 0 ? page[page.length - 1].mtime : undefined;
+        page.length > 0 ? String(page[page.length - 1].mtime) : undefined;
       const hasMore = filtered.length > size;
       return { sessions, nextCursor: nextCursorVal, hasMore };
     } catch (error) {
