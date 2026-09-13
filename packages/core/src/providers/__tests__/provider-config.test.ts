@@ -41,11 +41,12 @@ function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
 }
 
 describe('buildInstallPlan', () => {
-  it.each([AuthType.USE_OPENAI, AuthType.USE_OPENAI_RESPONSES])(
+  it.each(['chat-completions', 'responses'] as const)(
     'clears explicitly submitted advanced controls without losing unrelated settings (%s)',
-    (protocol) => {
+    (wireApi) => {
       const inputs = {
-        protocol,
+        protocol: AuthType.USE_OPENAI,
+        wireApi,
         baseUrl: 'https://custom.example/v1',
         apiKey: 'new-key',
         modelIds: ['custom-model'],
@@ -95,8 +96,7 @@ describe('buildInstallPlan', () => {
       ).modelProviders![0]!.models[0]!;
       const expectedDisabled = structuredClone(existing[0]!.generationConfig!);
       delete expectedDisabled.extra_body!['enable_thinking'];
-      if (protocol === AuthType.USE_OPENAI_RESPONSES)
-        delete expectedDisabled.reasoning;
+      if (wireApi === 'responses') delete expectedDisabled.reasoning;
       expect(disabled.generationConfig).toEqual(expectedDisabled);
       const withoutModalities = buildInstallPlanSrc(
         customProvider,
@@ -133,7 +133,7 @@ describe('buildInstallPlan', () => {
       ).modelProviders![0]!.models[0]!;
       expect(enabled.generationConfig?.extra_body).toEqual({
         custom_flag: 'retained',
-        ...(protocol === AuthType.USE_OPENAI ? { enable_thinking: true } : {}),
+        ...(wireApi === 'chat-completions' ? { enable_thinking: true } : {}),
       });
       expect(enabled.generationConfig).toEqual(existing[0]!.generationConfig);
       const replaced = buildInstallPlanSrc(
@@ -344,13 +344,12 @@ describe('buildInstallPlan', () => {
     const config = makeConfig({
       models: undefined,
       modelNamePrefix: 'C',
-      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_OPENAI_RESPONSES],
     });
     const plan = buildInstallPlan(config, {
       baseUrl: 'https://custom.com/v1',
       apiKey: 'sk-custom',
       modelIds: ['m1'],
-      protocol: AuthType.USE_OPENAI_RESPONSES,
+      wireApi: 'responses',
       advancedConfig: { enableThinking: true },
     });
 

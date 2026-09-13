@@ -112,7 +112,9 @@ function buildSkippedProviderWarnings(
     return [];
   }
   const warnings: string[] = [];
-  const known = Object.values(AuthType).join(', ');
+  const known = Object.values(AuthType)
+    .filter((value) => value !== AuthType.USE_OPENAI_RESPONSES)
+    .join(', ');
   for (const [providerId, models] of Object.entries(modelProviders)) {
     if (!Array.isArray(models) || models.length === 0) {
       continue;

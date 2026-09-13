@@ -137,7 +137,7 @@ Set `wireApi` beside `id`, `envKey`, and `baseUrl` on an OpenAI-compatible model
 
 The supported values are `chat-completions` and `responses`. Omitting `wireApi` uses Chat Completions for `openai`, including custom providers mapped to `openai`. Other values, or `wireApi` on an Anthropic, Gemini, Vertex AI, or Qwen OAuth model, are configuration errors.
 
-Use `openai` with per-model `wireApi` for both APIs. The previous `modelProviders.openai-responses` format is not supported or automatically migrated, and `api` is not an alias for `wireApi`.
+Use `openai` with per-model `wireApi` for both APIs. The previous `modelProviders.openai-responses` format and `providerProtocol` mappings to `openai-responses` are configuration errors, including empty groups and unused mappings. The error points to the supported format; settings are not automatically migrated. `api` is not an alias for `wireApi`.
 
 `wireApi` is local routing metadata; it does not belong in `generationConfig` or `extra_body` and is not sent in the request body. New custom setup shares one credential slot for the same OpenAI endpoint across both APIs, so rotating that key updates both routes. Manually configured models can use distinct explicit `envKey` references when independent credentials are needed. In `/auth` → Custom Provider, select OpenAI-compatible and then the API format.
 

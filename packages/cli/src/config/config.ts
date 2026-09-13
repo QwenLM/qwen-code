@@ -51,7 +51,7 @@ import {
   loadOutputStyleCatalog,
   stripAnsiAndControl,
   type OutputStyleDefinition,
-  resolveModelProtocol,
+  validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -1965,30 +1965,26 @@ export async function loadCliConfig(
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
     getAuthTypeFromEnv();
 
-  // Validate per-model `wireApi` fields up front: the registry resolver throws a
-  // bare Error on an invalid value, and every startup shape (with or without a
-  // selected model/auth type) passes through here — classify it as a
+  // Validate provider protocols and per-model `wireApi` fields up front. The
+  // registry resolver throws a bare Error, and every startup shape passes
+  // through here, even without a selected model/auth type — classify it as a
   // FatalConfigError so the user gets the message and the "please fix the
   // configuration file(s)" hint instead of a stack trace before the TUI
   // starts.
-  for (const [providerId, models] of Object.entries(
-    settings.modelProviders ?? {},
-  )) {
-    if (!Array.isArray(models)) continue;
-    for (const model of models) {
-      try {
-        resolveModelProtocol(providerId, model, settings.providerProtocol);
-      } catch (err) {
-        throw new FatalConfigError(
-          err instanceof Error ? err.message : String(err),
-        );
-      }
-    }
+  try {
+    validateModelProvidersConfig(
+      settings.modelProviders,
+      settings.providerProtocol,
+    );
+  } catch (err) {
+    throw new FatalConfigError(
+      err instanceof Error ? err.message : String(err),
+    );
   }
 
   // Unified resolution of generation config with source attribution. Note the
-  // up-front `wireApi` validation loop above is what classifies invalid per-model
-  // `wireApi` values; this call's own settings reads must not re-wrap a resolver
+  // up-front provider validation above is what classifies invalid configuration;
+  // this call's own settings reads must not re-wrap a resolver
   // defect as a user config error, so it stays unwrapped.
   const resolvedCliConfig = resolveCliGenerationConfig({
     argv: {

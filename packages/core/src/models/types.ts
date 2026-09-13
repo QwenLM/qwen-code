@@ -105,10 +105,11 @@ export interface ModelConfig {
 /**
  * Model providers configuration grouped by provider id.
  *
- * The key is a provider identity. For built-in providers it equals an
- * {@link AuthType} value (e.g. `openai`, `gemini`); custom providers may use any
+ * The key is a provider identity. For built-in providers it equals a
+ * public provider protocol (e.g. `openai`, `gemini`); custom providers may use any
  * id (e.g. `idealab`) as long as a {@link ProviderProtocolConfig} entry maps it
- * to an SDK protocol.
+ * to an SDK protocol. `openai-responses` is reserved for internal routes;
+ * configure Responses models under `openai` with `wireApi: 'responses'`.
  */
 export type ModelProvidersConfig = {
   [providerId: string]: ModelConfig[];
@@ -116,10 +117,11 @@ export type ModelProvidersConfig = {
 
 /**
  * Maps a `modelProviders` provider id to the SDK protocol that should route its
- * requests. The value is an {@link AuthType} string (e.g. `openai`, `gemini`,
+ * requests. The value is a public protocol string (e.g. `openai`, `gemini`,
  * `anthropic`). Lets a custom provider id (e.g. `idealab`) declare which built-in
  * protocol it speaks, decoupling provider identity from SDK routing without
- * changing the `modelProviders` array shape (so older versions stay compatible).
+ * changing the `modelProviders` array shape. Both OpenAI wires map to `openai`;
+ * `openai-responses` is not a supported mapping value.
  */
 export type ProviderProtocolConfig = {
   [providerId: string]: string;

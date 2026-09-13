@@ -51,7 +51,10 @@ OpenAI Chat Completions 与 Responses 共用凭据配置，但目前 Qwen Code �
 `wireApi`，明确不兼容之前的 `modelProviders.openai-responses` 格式，也不做自动
 迁移。草案字段 `api` 不作为别名保留。不要增加旧配置组的查找、清理、凭据回退或迁移
 代码。内部 `AuthType.USE_OPENAI_RESPONSES` 仍用于标识 Responses 传输和会话记录
-路由，它不是独立的提供商配置选项。
+路由，它不是独立的提供商配置选项。配置入口拒绝旧提供商 id，以及指向
+`openai-responses` 的 `providerProtocol` 映射，包括空配置组和未引用的映射。错误
+提示说明受支持的 `openai` + `wireApi` 格式，不自动改写设置。运行时查找、显式
+切换和会话恢复仍接受内部 Responses 标识。
 
 `wireApi` 明确表示请求协议，借鉴 Codex 的 `wire_api` 含义，同时遵循本项目配置的
 camelCase 风格。该字段仍放在模型层，使同一提供商可以提供两种 API。
@@ -87,11 +90,13 @@ ACP 对两种运行时 API 使用同一个 OpenAI Key 认证入口。删除模�
 ## 验证与验收
 
 - 单元测试覆盖配置表、非法输入、混合 API 配置、精确端点凭据、安装合并和事务性重载。
+  旧提供商 id 和映射被拒绝，且不改变原有 registry。
 - 配置测试覆盖初始 `openai` 选择解析至 Responses、精确路由优先、模型切换和会话恢复。
 - 配置流程测试覆盖 API 选择、预览与保存一致性、共享凭据、新格式配置检查、请求校验，
   以及仅删除目标 API 配置。
 - 隔离的 localhost 服务记录实际 CLI 请求路径和负载：隐式 Chat、显式 Chat、新格式
-  Responses、自定义提供商 Responses、非法 API 拒绝和两种 API 的工具调用续接。
+  Responses、自定义提供商 Responses、在请求前拒绝非法 API 与旧提供商配置，
+  以及两种 API 的工具调用续接。
 - 先对全局 `qwen` 执行基线，再验证本地构建 CLI。使用临时 `QWEN_HOME` 和 mock key，
   不修改真实设置，不向远端模型发送测试提示。
 - 完成 build、typecheck、相关单元测试、bundle、格式和 lint 检查、两次干净自审及

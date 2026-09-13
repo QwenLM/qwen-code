@@ -57,7 +57,11 @@ migration are deliberately out of scope. The draft field name `api` is not an
 alias. Do not add legacy-bucket discovery, pruning, credential fallback, or
 migration code. Internal `AuthType.USE_OPENAI_RESPONSES` still identifies the
 Responses transport and recorded session route; it is not a separate provider
-configuration choice.
+configuration choice. Configuration ingestion rejects the old provider id and
+`providerProtocol` mappings to `openai-responses`, including empty buckets and
+unused mappings. The error names the supported `openai` + `wireApi` format;
+settings are never rewritten. Runtime lookup, explicit switches, and session
+restoration still accept the internal Responses identity.
 
 The name `wireApi` identifies the request protocol explicitly, following the
 meaning of Codex's `wire_api` while retaining this project's camelCase settings.
@@ -105,13 +109,15 @@ documentation. No daemon route ownership or workspace-resolution rules change.
 
 - Unit tests cover the configuration table, invalid inputs, mixed API entries,
   exact endpoint credentials, install merge, and transactional registry reload.
+  Old provider ids and mappings are rejected without changing the prior registry.
 - Configuration tests cover initial `openai` selection resolving Responses,
   explicit route precedence, model switching, and recorded session restoration.
 - Setup tests cover API selection, preview/write parity, shared credentials,
   canonical inspection, request validation, and deletion of only the intended API.
 - An isolated localhost server records actual CLI endpoint paths and payloads:
   implicit Chat, explicit Chat, canonical Responses, custom-provider Responses,
-  invalid API rejection, and tool continuation for both APIs.
+  invalid API and old provider configuration rejection before any request, and
+  tool continuation for both APIs.
 - Dry-run the plan against global `qwen`, then verify the built local CLI. Use
   temporary `QWEN_HOME` directories and mock keys; do not modify real settings
   or send test prompts to a remote model.

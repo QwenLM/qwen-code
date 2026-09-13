@@ -50,17 +50,27 @@ function validateAuthTypeKey(key: string): AuthType | undefined {
  * Returns `undefined` for an unknown provider id with no mapping, or an explicit
  * mapping whose value is not a known protocol, so the caller skips it (keeping
  * the typo guard for hand-edited settings). Pure: callers decide how loudly to
- * report a skip. Additive — configs without `providerProtocol` behave as before.
+ * report a skip. The internal Responses identity is not a provider protocol.
  */
 export function resolveProviderProtocol(
   providerId: string,
   providerProtocol?: ProviderProtocolConfig,
 ): AuthType | undefined {
+  if (providerId === AuthType.USE_OPENAI_RESPONSES) {
+    throw new Error(
+      'Provider "openai-responses" is not supported in modelProviders or providerProtocol. Use "openai" with wireApi: "responses" on each model.',
+    );
+  }
   const explicit =
     providerProtocol && Object.hasOwn(providerProtocol, providerId)
       ? providerProtocol[providerId]
       : undefined;
   if (explicit !== undefined) {
+    if (explicit === AuthType.USE_OPENAI_RESPONSES) {
+      throw new Error(
+        `providerProtocol["${providerId}"] cannot be "openai-responses". Use "openai" with wireApi: "responses" on each model.`,
+      );
+    }
     return validateAuthTypeKey(explicit);
   }
   return validateAuthTypeKey(providerId);
@@ -78,10 +88,7 @@ export function resolveModelProtocol(
       `Invalid wireApi "${model.wireApi}" for provider "${providerId}". Expected "chat-completions" or "responses".`,
     );
   }
-  if (
-    protocol !== AuthType.USE_OPENAI &&
-    protocol !== AuthType.USE_OPENAI_RESPONSES
-  ) {
+  if (protocol !== AuthType.USE_OPENAI) {
     throw new Error(
       `Provider "${providerId}" uses protocol "${protocol}"; wireApi is only supported for OpenAI-compatible models.`,
     );
@@ -93,8 +100,8 @@ export function resolveModelProtocol(
 
 /**
  * {@link resolveModelProtocol} for read paths: returns `undefined` instead of
- * throwing when an entry's `wireApi` is invalid, so one hand-edited entry cannot
- * take down a whole listing or an unrelated install. Write and startup paths
+ * throwing for invalid provider protocols or `wireApi` values, so one entry
+ * cannot take down a whole listing or an unrelated install. Write and startup paths
  * keep using the throwing resolver — an invalid value stays a config error
  * there.
  */
@@ -107,6 +114,23 @@ export function tryResolveModelProtocol(
     return resolveModelProtocol(providerId, model, providerProtocol);
   } catch {
     return undefined;
+  }
+}
+
+export function validateModelProvidersConfig(
+  modelProviders?: ModelProvidersConfig,
+  providerProtocol?: ProviderProtocolConfig,
+): void {
+  for (const providerId of new Set([
+    ...Object.keys(modelProviders ?? {}),
+    ...Object.keys(providerProtocol ?? {}),
+  ])) {
+    resolveProviderProtocol(providerId, providerProtocol);
+    const models = modelProviders?.[providerId];
+    if (!Array.isArray(models)) continue;
+    for (const model of models) {
+      resolveModelProtocol(providerId, model, providerProtocol);
+    }
   }
 }
 
@@ -199,6 +223,7 @@ export class ModelRegistry {
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
   ) {
+    validateModelProvidersConfig(modelProvidersConfig, providerProtocolConfig);
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
     this.modelProvidersConfig = modelProvidersConfig;
@@ -228,7 +253,9 @@ export class ModelRegistry {
       );
 
       if (!protocol) {
-        const knownProtocols = Object.values(AuthType).join(', ');
+        const knownProtocols = Object.values(AuthType)
+          .filter((value) => value !== AuthType.USE_OPENAI_RESPONSES)
+          .join(', ');
         const mapped = Object.hasOwn(this.providerProtocolConfig, providerId)
           ? this.providerProtocolConfig[providerId]
           : undefined;

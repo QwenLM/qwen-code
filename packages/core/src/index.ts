@@ -38,6 +38,7 @@ export {
   resolveProviderProtocol,
   resolveModelProtocol,
   tryResolveModelProtocol,
+  validateModelProvidersConfig,
   resolveModelSelectionAuthType,
   type ModelGenerationConfig,
   ModelsConfig,

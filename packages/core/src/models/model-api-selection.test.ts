@@ -10,9 +10,14 @@ import {
   ModelRegistry,
   resolveModelProtocol,
   resolveModelSelectionAuthType,
+  tryResolveModelProtocol,
 } from './modelRegistry.js';
 import { ModelsConfig } from './modelsConfig.js';
-import type { ModelConfig, ModelProvidersConfig } from './types.js';
+import type {
+  ModelConfig,
+  ModelProvidersConfig,
+  ProviderProtocolConfig,
+} from './types.js';
 
 describe('model API selection', () => {
   afterEach(() => vi.unstubAllEnvs());
@@ -33,9 +38,6 @@ describe('model API selection', () => {
     [AuthType.USE_OPENAI, undefined, AuthType.USE_OPENAI],
     [AuthType.USE_OPENAI, 'chat-completions', AuthType.USE_OPENAI],
     [AuthType.USE_OPENAI, 'responses', AuthType.USE_OPENAI_RESPONSES],
-    [AuthType.USE_OPENAI_RESPONSES, undefined, AuthType.USE_OPENAI_RESPONSES],
-    [AuthType.USE_OPENAI_RESPONSES, 'responses', AuthType.USE_OPENAI_RESPONSES],
-    [AuthType.USE_OPENAI_RESPONSES, 'chat-completions', AuthType.USE_OPENAI],
   ] as const)(
     'resolves %s with api %s to %s',
     (protocol, wireApi, expected) => {
@@ -45,6 +47,48 @@ describe('model API selection', () => {
       ).toBe(expected);
     },
   );
+
+  it.each<{
+    models: ModelProvidersConfig | undefined;
+    mapping?: ProviderProtocolConfig;
+  }>([
+    { models: { 'openai-responses': [{ id: 'old' }] } },
+    { models: { 'openai-responses': [] } },
+    {
+      models: { gateway: [{ id: 'old' }] },
+      mapping: { gateway: 'openai-responses' },
+    },
+    { models: undefined, mapping: { unused: 'openai-responses' } },
+    {
+      models: { 'openai-responses': [{ id: 'old' }] },
+      mapping: { 'openai-responses': 'openai' },
+    },
+  ])(
+    'rejects old provider configuration and preserves routes on reload: %j',
+    ({ models, mapping }) => {
+      expect(() => new ModelRegistry(models, mapping)).toThrow(
+        /openai-responses.*Use "openai" with wireApi: "responses"/,
+      );
+      const registry = new ModelRegistry(routes);
+      expect(() => registry.reloadModels(models, mapping)).toThrow(
+        /openai-responses/,
+      );
+      expect(registry.getModelProvidersConfig()).toBe(routes);
+      expect(
+        registry.getModel(AuthType.USE_OPENAI, 'shared', baseUrl),
+      ).toBeDefined();
+      expect(
+        registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'shared', baseUrl),
+      ).toBeDefined();
+    },
+  );
+
+  it('skips unsupported provider entries in repair reads', () => {
+    expect(tryResolveModelProtocol('openai-responses', {})).toBeUndefined();
+    expect(
+      tryResolveModelProtocol('gateway', {}, { gateway: 'openai-responses' }),
+    ).toBeUndefined();
+  });
 
   it('does not let api validate an unknown provider', () => {
     expect(

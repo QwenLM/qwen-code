@@ -1248,6 +1248,31 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it.each<Settings>([
+    { modelProviders: { 'openai-responses': [{ id: 'old' }] } },
+    { modelProviders: { 'openai-responses': [] } },
+    {
+      modelProviders: { gateway: [{ id: 'old' }] },
+      providerProtocol: { gateway: 'openai-responses' },
+    },
+    { providerProtocol: { unused: 'openai-responses' } },
+    {
+      modelProviders: { 'openai-responses': [{ id: 'old' }] },
+      providerProtocol: { 'openai-responses': 'openai' },
+    },
+  ])(
+    'reports unsupported provider configuration as a config error: %j',
+    async (settings) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const err = await loadCliConfig(settings, argv).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(FatalConfigError);
+      expect((err as Error).message).toMatch(
+        /openai-responses.*Use "openai" with wireApi: "responses"/,
+      );
+    },
+  );
+
   it('reports an invalid model api as a config error, not an unexpected crash', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

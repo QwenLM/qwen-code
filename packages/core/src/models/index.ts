@@ -23,6 +23,7 @@ export {
   resolveProviderProtocol,
   resolveModelProtocol,
   tryResolveModelProtocol,
+  validateModelProvidersConfig,
   resolveModelSelectionAuthType,
 } from './modelRegistry.js';
 
