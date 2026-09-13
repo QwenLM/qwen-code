@@ -153,9 +153,13 @@ function registerProcessSecrets(config: Config | undefined): void {
   // catch-all and silently drop the event (e.g. session_start). Guard
   // like the other pre-auth call sites.
   const secrets: Array<string | undefined> = [
-    config?.getContentGeneratorConfig()?.apiKey,
+    // The whole chain is optional-guarded: beyond the pre-auth window
+    // above, partial Config stand-ins (loggers' tests construct configs
+    // with only the telemetry-relevant getters) must not crash secret
+    // registration — a throw here would drop the event instead.
+    config?.getContentGeneratorConfig?.()?.apiKey,
   ];
-  for (const server of Object.values(config?.getMcpServers() ?? {})) {
+  for (const server of Object.values(config?.getMcpServers?.() ?? {})) {
     for (const value of Object.values(server.headers ?? {})) {
       secrets.push(value);
       // The repo's own MCP docs recommend `"Authorization": "Bearer
