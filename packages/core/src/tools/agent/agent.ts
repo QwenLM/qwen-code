@@ -36,6 +36,7 @@ import {
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { SubagentExecutor } from '../../agents/runtime/subagent-executor.js';
+import { resolveAgentExecutionBackend } from '../../subagents/execution-backend.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
 import type { Content } from '@google/genai';
 import {
@@ -236,7 +237,6 @@ function createLocalExternalInputQueue(): {
 }
 
 export interface AgentParams {
-  execution_backend?: 'container';
   description: string;
   prompt: string;
   /** Todo ID this top-level execution implements, when a visible plan exists. */
@@ -295,14 +295,12 @@ const debugLogger = createDebugLogger('AGENT');
 function getExecutionBackendError(
   config: Config,
   params: AgentParams,
+  backend: 'container' | undefined,
 ): string | undefined {
   if (config.getExecutionEnvironment?.()) {
     return 'Nested agents are unavailable inside a container execution environment.';
   }
-  if (params.execution_backend === undefined) return undefined;
-  if (params.execution_backend !== 'container') {
-    return 'Parameter "execution_backend" must be "container" when set.';
-  }
+  if (backend === undefined) return undefined;
   if (!config.getExecutionEnvironmentFactory?.()) {
     return 'Container execution is not enabled by this host.';
   }
@@ -821,16 +819,6 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           description:
             "Isolation mode. 'worktree' creates a temporary git worktree under <projectRoot>/.qwen/worktrees/agent-<7hex> so the agent works on an isolated copy of the repo. The worktree is auto-removed if the agent makes no changes; otherwise the worktree path and branch are returned in the result.",
         },
-        ...(config.getExecutionEnvironmentFactory?.()
-          ? {
-              execution_backend: {
-                type: 'string',
-                enum: ['container'],
-                description:
-                  "Run this regular subagent's file and shell tools in a container. Composes with worktree isolation. The workspace root's .git is masked; nested Git metadata remains workspace content. Host tools, hooks, nested agents, and task resume are unavailable. Workspace file changes persist.",
-              },
-            }
-          : {}),
         working_dir: {
           type: 'string',
           description:
@@ -1048,7 +1036,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
   }
 
   override validateToolParams(params: AgentParams): string | null {
-    const executionBackendError = getExecutionBackendError(this.config, params);
+    const executionBackendError = getExecutionBackendError(
+      this.config,
+      params,
+      this.config.getAgentExecutionBackend?.(),
+    );
     if (executionBackendError) return executionBackendError;
     // Validate required fields
     if (
@@ -1458,6 +1450,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   private currentDisplay: AgentResultDisplay | null = null;
   private currentToolCalls: AgentResultDisplay['toolCalls'] = [];
   private callId?: string;
+  private executionBackend?: 'container';
 
   constructor(
     private readonly config: Config,
@@ -1951,7 +1944,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   ): Promise<string | undefined> {
     const { agentId, agentType, transcriptPath, resolvedMode, signal } = opts;
     const hookSystem =
-      this.params.execution_backend === 'container'
+      this.executionBackend === 'container'
         ? undefined
         : this.config.getHookSystem();
     if (!hookSystem) return undefined;
@@ -2189,7 +2182,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   ): Promise<string | undefined> {
     const { agentId, agentType, resolvedMode, signal, updateOutput } = opts;
     const hookSystem =
-      this.params.execution_backend === 'container'
+      this.executionBackend === 'container'
         ? undefined
         : this.config.getHookSystem();
 
@@ -2347,6 +2340,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     const executionBackendError = getExecutionBackendError(
       this.config,
       this.params,
+      this.config.getAgentExecutionBackend?.(),
     );
     if (executionBackendError) {
       return this.buildSpawnBlockedResult(
@@ -2785,7 +2779,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
         subagentConfig = loadedConfig;
       }
-      if (this.params.execution_backend === 'container') {
+      this.executionBackend = resolveAgentExecutionBackend(
+        this.config,
+        subagentConfig,
+      );
+      const backendError = getExecutionBackendError(
+        this.config,
+        this.params,
+        this.executionBackend,
+      );
+      if (backendError) throw new Error(backendError);
+      if (this.executionBackend === 'container') {
         const unsupported = [
           ['external executor', subagentConfig.executor],
           ['MCP servers', subagentConfig.mcpServers],
@@ -3160,7 +3164,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         installSessionWorkflowRevisionWriteThrough(worktreeConfig, this.config);
       }
       let executionConfig = worktreeConfig;
-      if (this.params.execution_backend === 'container') {
+      if (this.executionBackend === 'container') {
         executionConfig = deriveWorktreeConfig(
           worktreeConfig,
           await realpath(worktreeConfig.getWorkingDir()),
@@ -3518,7 +3522,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...(sessionWorkflowAgent ? { sessionWorkflow: true } : {}),
           isBackgrounded: true,
           isolation: executionEnvironment ? 'container' : this.params.isolation,
-          executionBackend: this.params.execution_backend,
+          executionBackend: this.executionBackend,
           workspaceIsolation: executionEnvironment
             ? this.params.isolation
             : undefined,
@@ -4422,7 +4426,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...(sessionWorkflowAgent ? { sessionWorkflow: true } : {}),
           isBackgrounded: false,
           isolation: executionEnvironment ? 'container' : this.params.isolation,
-          executionBackend: this.params.execution_backend,
+          executionBackend: this.executionBackend,
           workspaceIsolation: executionEnvironment
             ? this.params.isolation
             : undefined,

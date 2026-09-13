@@ -64,6 +64,7 @@ import {
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { SubagentConfig } from '../../subagents/types.js';
+import { resolveAgentExecutionBackend } from '../../subagents/execution-backend.js';
 import {
   GitWorktreeService,
   generateAgentWorktreeSlug,
@@ -551,6 +552,14 @@ export function createProductionDispatch(
     // agentType definition rides along so the override path reuses it
     // instead of re-scanning subagent files per attempt.
     const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
+    if (
+      resolveAgentExecutionBackend(config, agentIdentity.resolvedAgentType) ===
+      'container'
+    ) {
+      throw new Error(
+        'Container execution is required; workflow agents are unsupported. Start a regular subagent instead.',
+      );
+    }
     if (agentIdentity.resolvedAgentType?.executor !== undefined) {
       throw new Error(
         'Workflow agent() does not support external-executor agents: ' +

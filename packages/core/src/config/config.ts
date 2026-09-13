@@ -914,6 +914,7 @@ export interface SessionWorkflowPlanRevision {
 export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
 
 export interface ConfigParameters {
+  agentExecutionBackend?: 'container';
   executionEnvironmentFactory?: ExecutionEnvironmentFactory;
   sessionId?: string;
   sessionData?: ResumedSessionData;
@@ -2816,6 +2817,7 @@ export class Config {
    * host package. See `ExternalAgentExecutor` and `setExternalAgentExecutor`.
    */
   private externalAgentExecutor?: ExternalAgentExecutor;
+  private readonly agentExecutionBackend?: 'container';
   private readonly executionEnvironmentFactory?: ExecutionEnvironmentFactory;
   private executionEnvironments?: Set<Promise<ExecutionEnvironment>>;
   private readonly modelProposedGoals: ModelProposedGoalsMode;
@@ -2929,6 +2931,7 @@ export class Config {
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
+    this.agentExecutionBackend = params.agentExecutionBackend;
     this.executionEnvironmentFactory = params.executionEnvironmentFactory;
     this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
     this.provisionalWorkspace = params.provisionalWorkspace === true;
@@ -4827,6 +4830,10 @@ export class Config {
     return this.modelsConfig.getModelProvidersConfig();
   }
 
+  getProviderProtocolConfig(): ProviderProtocolConfig {
+    return this.modelsConfig.getProviderProtocolConfig();
+  }
+
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
@@ -5758,11 +5765,14 @@ export class Config {
    */
   async setImageModel(model: string | undefined): Promise<void> {
     this.imageModel = model || undefined;
-    if (!this.initialized || !this.isImageGenerationEnabled()) {
+    if (!this.initialized || !this.toolRegistry) {
       return;
     }
-    await this.registerImageGenerationTool(this.toolRegistry);
-    await this.toolRegistry.ensureTool(ToolNames.IMAGE_GEN);
+    if (this.isImageGenerationEnabled()) {
+      await this.registerImageGenerationTool(this.toolRegistry);
+      await this.toolRegistry.ensureTool(ToolNames.IMAGE_GEN);
+    }
+    await this.llmClient.setTools();
   }
 
   /**
@@ -8728,6 +8738,10 @@ export class Config {
 
   getExternalAgentExecutor(): ExternalAgentExecutor | undefined {
     return this.externalAgentExecutor;
+  }
+
+  getAgentExecutionBackend(): 'container' | undefined {
+    return this.agentExecutionBackend;
   }
 
   getExecutionEnvironmentFactory(): ExecutionEnvironmentFactory | undefined {

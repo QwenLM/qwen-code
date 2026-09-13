@@ -70,6 +70,7 @@ import {
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
+import { resolveAgentExecutionBackend } from '../subagents/execution-backend.js';
 import {
   EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
@@ -1565,6 +1566,13 @@ export class BackgroundAgentResumeService {
     executor?: AgentMeta['executor'],
     ...legacyModels: Array<string | undefined>
   ): Promise<ResolvedResumeTarget> {
+    if (resolveAgentExecutionBackend(this.config) === 'container') {
+      return {
+        agentName: subagentName,
+        isFork: false,
+        unavailableReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+      };
+    }
     // Older external runs wrote a synthetic model label instead of provenance.
     // It can deny replay, but never authorizes selecting an executor.
     if (
@@ -1591,6 +1599,17 @@ export class BackgroundAgentResumeService {
       subagentConfig = await this.config
         .getSubagentManager()
         .loadSubagent(subagentName);
+      if (
+        subagentConfig &&
+        resolveAgentExecutionBackend(this.config, subagentConfig) ===
+          'container'
+      ) {
+        return {
+          agentName: subagentName,
+          isFork: false,
+          unavailableReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+        };
+      }
     } catch (error) {
       // loadSubagent throws a recorded executor-block refusal (R10-2/R11) when a
       // same-named definition failed to load. This is resume *discovery*, not a

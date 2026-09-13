@@ -8,10 +8,48 @@ import { describe, expect, it } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   AGENT_EXECUTION_BACKEND_ENV,
+  agentExecutionBackend,
   agentExecutionFactory,
 } from './agent-execution.js';
 
 describe('agent execution capability', () => {
+  it.each(['docker', 'podman', ' Docker '])(
+    'records the trusted operator requirement for %s independently of capability',
+    (runtime) => {
+      for (const handoff of [
+        {},
+        { SANDBOX: 'sandbox' },
+        { QWEN_CODE_SERVE: '1' },
+      ]) {
+        expect(
+          agentExecutionBackend(
+            { ...handoff, [AGENT_EXECUTION_BACKEND_ENV]: runtime },
+            () => false,
+          ),
+        ).toBe('container');
+      }
+    },
+  );
+
+  it('does not establish a requirement from absent or file-sourced values', () => {
+    expect(agentExecutionBackend({}, () => false)).toBeUndefined();
+    expect(
+      agentExecutionBackend(
+        { [AGENT_EXECUTION_BACKEND_ENV]: 'docker' },
+        () => true,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('rejects invalid trusted policy even if a daemon handoff disables the factory', () => {
+    expect(() =>
+      agentExecutionBackend(
+        { QWEN_CODE_SERVE: '1', [AGENT_EXECUTION_BACKEND_ENV]: 'remote' },
+        () => false,
+      ),
+    ).toThrow('must be docker or podman');
+  });
+
   it.skipIf(process.platform === 'win32')(
     'rejects the source launch before creating a container',
     async () => {
@@ -27,10 +65,16 @@ describe('agent execution capability', () => {
       ).rejects.toThrow('source and tsc launches are unsupported');
     },
   );
-  it('does not advertise container execution on Windows', () => {
+  it('retains the requirement while disabling the factory on Windows', () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
     Object.defineProperty(process, 'platform', { value: 'win32' });
     try {
+      expect(
+        agentExecutionBackend(
+          { [AGENT_EXECUTION_BACKEND_ENV]: 'docker' },
+          () => false,
+        ),
+      ).toBe('container');
       expect(
         agentExecutionFactory(
           { [AGENT_EXECUTION_BACKEND_ENV]: 'docker' },

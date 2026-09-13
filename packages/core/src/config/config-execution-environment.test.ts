@@ -5,7 +5,13 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { Config, deriveConfig } from './config.js';
+import {
+  Config,
+  ApprovalMode,
+  deriveConfig,
+  deriveApprovalModeConfig,
+  deriveWorktreeConfig,
+} from './config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
 import {
@@ -26,6 +32,31 @@ const shutdownOptions = {
 };
 
 describe('execution environment ownership', () => {
+  it('preserves the operator requirement through derivation and shutdown without a factory', async () => {
+    const config = new Config({
+      ...params,
+      agentExecutionBackend: 'container',
+      executionEnvironmentFactory: vi.fn(),
+    });
+    const worktree = deriveWorktreeConfig(config, '/tmp/child');
+    const { config: approval, cleanup } = deriveApprovalModeConfig(
+      worktree,
+      ApprovalMode.PLAN,
+    );
+    const child = deriveConfig(approval, {
+      getExecutionEnvironmentFactory: () => undefined,
+    });
+    for (const context of [config, worktree, approval, child]) {
+      expect(context.getAgentExecutionBackend()).toBe('container');
+    }
+    await config.shutdown(shutdownOptions);
+    expect(config.getExecutionEnvironmentFactory()).toBeUndefined();
+    expect(child.getExecutionEnvironmentFactory()).toBeUndefined();
+    expect(child.getAgentExecutionBackend()).toBe('container');
+    expect(new Config(params).getAgentExecutionBackend()).toBeUndefined();
+    cleanup();
+  });
+
   it.each([false, true])(
     'respects the LS tool opt-in with a container registry: %s',
     async (enabled) => {

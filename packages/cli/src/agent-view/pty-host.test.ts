@@ -349,6 +349,28 @@ describe('launchAgentViewPtyHost', () => {
     expect(pty.process.killCalls).toEqual([undefined, undefined]);
   });
 
+  it('spawns the worker with the bundled ConPTY backend on Windows', async () => {
+    // The inbox backend orphans a `conhost.exe --headless` per natural worker
+    // exit (microsoft/node-pty#965); Windows workers must spawn with the
+    // bundled backend, which releases its host reference right after spawn.
+    const pty = createFakePty();
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    try {
+      await launchAgentViewPtyHost(createLaunch(), { pty });
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: original,
+        configurable: true,
+      });
+    }
+
+    expect(pty.spawnCalls[0]?.options.useConptyDll).toBe(true);
+  });
+
   it('resets the input decoder between attach sessions', async () => {
     const pty = createFakePty();
     const handle = await launchAgentViewPtyHost(createLaunch(), { pty });

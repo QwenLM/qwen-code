@@ -2,7 +2,7 @@
 
 [English](2026-09-12-agent-container-execution.md) | [简体中文](2026-09-12-agent-container-execution.zh-CN.md)
 
-状态：已实现；已有独立 Linux rootful Docker 验证报告，Podman/rootless 验证仍待完成。关联：#11695、#11696、#9556。
+状态：后端及操作者/定义策略已实现。独立 Linux rootful Docker 验证覆盖较早版本，Podman/rootless 验证仍待完成。关联：#11695、#11696、#9556。
 
 ## 问题与现状
 
@@ -16,19 +16,22 @@ shell 入口，无法迁移整个执行面。
 
 ## 范围与启用
 
-本变更为普通子代理实现容器执行后端。父代理和兄弟代理保留各自的执行环境。
-未启用功能时，本地路径不变。
+本变更为普通子代理实现容器执行后端。父级模型循环及工具仍在本地运行。
+每个受支持的子代理拥有独立环境；操作者的容器要求适用于所有普通兄弟子代理。
+这是子代理执行策略，不是整会话隔离。
 
-可信 CLI 操作者使用 `QWEN_AGENT_EXECUTION_BACKEND=docker` 或 `podman` 启用能力。
-来自仓库文件的环境值不能启用或配置运行时。只有启用后，Agent 工具才声明
-`execution_backend: "container"`。省略参数仍使用现有本地执行。
+可信 CLI 操作者使用 `QWEN_AGENT_EXECUTION_BACKEND=docker` 或 `podman` 要求容器执行。
+来自仓库文件的环境值不能启用或配置运行时。Agent 不提供 `execution_backend` 参数。
+定义可声明 `executionBackend: container`；省略时继承操作者策略，定义不能降低该要求。
+两者均未要求容器时，继续本地执行。
 镜像使用现有 sandbox image 覆盖机制；模型参数不能指定镜像、挂载、运行时端点或任意容器标志。
 
-首版后端仅在 Unix 宿主上提供；Windows 不声明该能力。
+首版后端仅在 Unix 宿主上提供。Windows、整会话 sandbox 和 Daemon/Serve 交接不提供 factory。
+要求容器但 factory 不可用时，在启动子代理之前失败；factory 缺失不表示回退本地。
 
 使用独立安装、完整打包的 CLI，在目标项目中启动
-`QWEN_AGENT_EXECUTION_BACKEND=docker qwen`，并让 Agent 工具使用
-`execution_backend: "container"`。使用 Podman 时将 `docker` 换为 `podman`。
+`QWEN_AGENT_EXECUTION_BACKEND=docker qwen`，随后普通 Agent 调度均要求容器执行。
+使用 Podman 时将 `docker` 换为 `podman`。
 操作者可导出 `QWEN_CODE_CUSTOM_SANDBOX_IMAGE` 选择其他工具链镜像。
 工作区不能与 CLI bundle 或依赖查找目录在任一方向重叠，包括规范化后的别名和当前尚不存在的查找目录。
 启动容器前，CLI 检查安装目录及 Node 依赖查找目录中是否存在指向保护范围外的链接，
@@ -47,9 +50,41 @@ CLI 重启时保留环境变量值，供 Node TLS 证书、设置插值等启动
 元数据保留在进程环境中，以覆盖 Shell、review 等普通子 CLI 启动；重载时同步更新，
 保留被冻结或因读取失败而保留的值的来源。容器运行时客户端丢弃该元数据和全部文件来源的环境变量。
 
-该选项可与 `isolation: "worktree"` 和 `working_dir` 组合。
+该策略可与 `isolation: "worktree"` 和 `working_dir` 组合。
 它不扩展面向模型的 isolation 枚举，也不改变 `isolation: "remote"`。
 与 `tools.codeModeOnly` 的组合会在容器启动前被拒绝；首版容器注册表只支持直接工具调用。
+
+## 后端策略与定义边界
+
+最初由模型主动选择的方式允许已启用的操作者能力不被使用。修订后，Config 中不可变的
+要求与 factory 生命周期分离。派生的授权、worktree、workflow 和恢复上下文继承该要求，
+关闭之后也不例外。每次调度只解析一次定义后端，校验、环境归属、hooks 和持久化元数据
+均使用该结果。未知模型参数不能覆盖它。
+
+定义解析后只允许字符串值 `container`。项目声明须位于可信工作区，与外部 executor 一致。
+null、`local`、其他值、重复键、损坏的 YAML 及无效必填字段均须按声明名称拒绝，
+不得回退到较低优先级的本地代理。保存、无关字段编辑、扩展和 SDK 会话对象均保留该字段。
+消费会话对象时校验；不得过滤无效声明后继续初始化并使用内置代理。显式删除仅移除定义
+偏好，不能移除操作者的最低要求。Claude 插件转换保留有效声明，被拒绝的源文件保持原样，
+供扩展加载器记录拒绝。Daemon REST 和 ACP HTTP 创建/更新在现有已解析工作区及信任
+检查内拒绝该字段，不配置运行时。
+
+CLI 变量同时设置能力和要求。Core API 宿主可只注入 factory 而不设置默认要求，允许定义
+单独选择。定义不能创建缺失的能力。本轮不新增 CLI 的仅启用能力设置。
+
+Team、Arena、workflow、外部 executor 和保留的普通/fork 恢复路径没有容器生命周期，
+要求容器时拒绝。直接构造 Headless 和当前 in-process Team 后端须在本地工具循环开始前
+检查。可调用工具的内部 fork（记忆提取、dream、remember 和 skill review）也拒绝；
+明确丢弃工具调用的缓存查询 fork 仍可用。不得清除派生策略来绕过限制。
+Daemon、managed runtime 和 SSH 支持仍不在范围内。没有未决策略：定义可增强，
+不能降低操作者的最低要求。
+
+影响范围包括 Config 和 CLI 启用、Agent 解析、定义类型/解析/序列化、插件转换、SDK 类型
+同步、直接运行时构造和两种 Daemon 修改协议。本次修订不改变传输和 worker 生命周期。
+
+验收必须检查实际调度：省略或伪造模型选择参数不能使要求容器的子代理本地执行；factory
+不可用时明确失败；可信定义单独选择有效；损坏的高优先级声明被拒绝；保存/SDK/插件
+路径保留策略；不支持的入口和 Daemon 修改协议拒绝它。未配置策略的本地调度作为对照。
 
 ## 架构
 
@@ -124,7 +159,7 @@ Git 提交传递或私有 Git 元数据视图需要单独设计。
 镜像与容器运行时属于可信基础设施。Rootful 运行时使用调用者的宿主 UID/GID，
 因此 root 操作者会在容器内以 UID 0 运行。移除 capabilities 和 `no-new-privileges`
 仍然生效；UID 映射不保证使用非特权用户。
-首版不在现有整会话 sandbox 或 daemon/内嵌 bridge 启动的 ACP 子进程内声明该后端，
+首版不在现有整会话 sandbox 或 daemon/内嵌 bridge 启动的 ACP 子进程内提供该后端，
 因为这些启动交接不保留环境来源。
 强制请求容器后端时返回明确的不可用错误，不得自动挂载 Docker socket。
 

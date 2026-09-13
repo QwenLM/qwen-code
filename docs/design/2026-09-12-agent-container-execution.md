@@ -2,7 +2,7 @@
 
 [English](2026-09-12-agent-container-execution.md) | [简体中文](2026-09-12-agent-container-execution.zh-CN.md)
 
-Status: implemented; independent Linux rootful Docker verification reported; Podman/rootless verification remains pending. Related: #11695, #11696, #9556.
+Status: backend and operator/definition policy implemented. Independent Linux rootful Docker verification covers an earlier revision; Podman/rootless verification remains pending. Related: #11695, #11696, #9556.
 
 ## Problem and current state
 
@@ -19,21 +19,26 @@ Install currently has ordinary container networking, not registry-only egress.
 ## Scope and activation
 
 This change implements the container execution backend for ordinary subagents.
-The parent and sibling agents retain their own execution environment. The local
-path remains unchanged when the feature is not enabled.
+The parent model loop and its tools remain local. Each supported child has its
+own environment; an operator container requirement applies to all ordinary
+siblings. This is subagent execution policy, not whole-session confinement.
 
-The trusted CLI operator enables the capability with
+The trusted CLI operator requires container execution with
 `QWEN_AGENT_EXECUTION_BACKEND=docker` or `podman`. Repository-sourced environment
-values cannot enable or configure the runtime. Only when enabled does the Agent
-tool advertise `execution_backend: "container"`. Omission keeps existing local
-execution. The existing sandbox image override selects the image; model arguments
-cannot select images, mounts, runtime endpoints, or arbitrary container flags.
+values cannot enable or configure the runtime. Agent has no `execution_backend`
+parameter. Definitions can request `executionBackend: container`; omission
+inherits the operator policy, and no definition value can weaken it. Without
+either requirement execution stays local. The existing image override selects
+the image; model arguments cannot select images, mounts, runtime endpoints, or
+arbitrary container flags.
 
-This initial backend is available on Unix hosts; Windows does not advertise it.
+This initial backend is available on Unix hosts. Windows, whole-session sandbox
+and Daemon/Serve handoffs have no factory. A required container with no available
+factory fails before child launch; factory absence is not a local default.
 
 Use an independently installed, complete CLI bundle. From the target project,
-launch `QWEN_AGENT_EXECUTION_BACKEND=docker qwen`. Ask the Agent tool to use
-`execution_backend: "container"`. Replace `docker` with `podman` when appropriate.
+launch `QWEN_AGENT_EXECUTION_BACKEND=docker qwen`. Ordinary Agent dispatches then
+require containers. Replace `docker` with `podman` when appropriate.
 An operator can export `QWEN_CODE_CUSTOM_SANDBOX_IMAGE` for another toolchain.
 The workspace must not overlap the CLI bundle or its dependency lookup directories
 in either direction, including canonical aliases and currently absent lookup
@@ -63,10 +68,56 @@ and is refreshed on reload without losing the provenance of frozen or retained
 values. Container runtime clients discard both the metadata and all file-sourced
 values.
 
-The option composes with `isolation: "worktree"` and `working_dir`. It does not
+The policy composes with `isolation: "worktree"` and `working_dir`. It does not
 extend the model-visible isolation enum or change `isolation: "remote"`.
 Combining it with `tools.codeModeOnly` is rejected before container startup;
 the first container registry supports direct tool calls only.
+
+## Backend policy and definition boundaries
+
+The initial model opt-in allowed an enabled operator capability to remain unused.
+The revision separates an immutable Config requirement from the factory lifecycle.
+Derived approval, worktree, workflow and resume contexts inherit that requirement,
+including after shutdown. Resolve a definition's backend once per dispatch; use
+it for validation, environment ownership, hooks and persisted metadata. Unknown
+model arguments cannot override it.
+
+Only the resolved string `container` is a valid definition value. Project
+declarations require a trusted workspace, matching external executors. Null, `local`, other
+values, duplicate keys, malformed YAML and invalid required fields must produce
+a named refusal, not fall through to a lower-priority local agent. Preserve the
+field through save, unrelated edits, extensions and SDK session objects. Validate
+session objects when consumed; never filter invalid declarations and continue
+initialization with a builtin. Explicit deletion removes only the definition
+preference, never the operator floor. Claude plugin conversion preserves valid
+declarations and leaves rejected source unchanged for the extension loader to
+record its refusal. Daemon REST and ACP HTTP create/update reject the field within
+their existing resolved-workspace and trust guards; no runtime is configured.
+
+The CLI variable sets both capability and requirement. Core API hosts can inject
+a factory without a default for definition-only selection. A definition cannot
+provision missing capability. This slice adds no CLI capability-only setting.
+
+Teams, Arena, workflows, external executors and retained regular/fork resumes
+have no container lifecycle and refuse when container execution is required.
+Direct Headless construction and the current in-process team backend must guard
+before a local tool loop starts. Tool-capable internal forks (memory extraction,
+dream, remember and skill review) also refuse; cache-only fork queries that
+discard tool calls remain available. Do not clear derived policy to bypass these
+limits. Daemon, managed runtime and SSH support remain out of scope. No policy
+question remains open: definitions may strengthen, but cannot downgrade, the
+operator floor.
+
+Affected areas are Config and CLI activation, Agent resolution, definition
+types/parser/serializer, plugin conversion, SDK type parity, direct runtime
+construction and both daemon mutation protocols. Transport and worker lifecycle
+remain unchanged by this revision.
+
+Acceptance requires actual dispatch checks: omitted/forged model selectors cannot
+run a required-container child locally; factory-unavailable cases fail loudly;
+trusted definition-only selection works; malformed higher-priority declarations
+refuse; save/SDK/plugin paths preserve policy; unsupported entry points and daemon
+mutation protocols reject it. Unconfigured local dispatch is the control.
 
 ## Architecture
 
@@ -168,7 +219,7 @@ model, GitHub, cloud or MCP credentials are forwarded. Images and the container
 runtime are trusted infrastructure. Rootful runtimes use the invoking host
 UID/GID; a root operator therefore runs UID 0 inside the container. The dropped
 capabilities and `no-new-privileges` still apply; UID mapping does not guarantee
-an unprivileged user. This first backend is not advertised inside
+an unprivileged user. This first backend is unavailable inside
 the existing whole-session sandbox or daemon/embedded-bridge ACP children:
 those handoffs do not preserve environment provenance. A forced container
 request fails as unavailable; the Docker socket

@@ -379,6 +379,48 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
     },
   );
 
+  it.each([false, true])(
+    'waits for visible virtual rows before loading an edge (leave edge: %s)',
+    async (leaveEdge) => {
+      const { click, list, row, getTranscriptPage, settleFrames } =
+        await setup();
+      await click('history.openEarlier');
+      settleFrames();
+      list().scrollTop = 0;
+      const targetKey = `msg:${observed.props!.messages[0]!.id}`;
+      const before = row(targetKey).getBoundingClientRect().top;
+      const getRect = HTMLElement.prototype.getBoundingClientRect;
+      let rowsMounted = false;
+      vi.spyOn(
+        HTMLElement.prototype,
+        'getBoundingClientRect',
+      ).mockImplementation(function (this: HTMLElement) {
+        const rect = getRect.call(this);
+        return !rowsMounted && this.hasAttribute('data-source-block-ids')
+          ? { ...rect, top: 1000, bottom: 1000 + rect.height }
+          : rect;
+      });
+      let resolve!: (value: DaemonSessionTranscriptPage) => void;
+      getTranscriptPage.mockImplementation(
+        () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+      );
+      await click('history.loadEarlier');
+      expect(getTranscriptPage).toHaveBeenCalledTimes(1);
+      if (leaveEdge) list().scrollTop = 250;
+      rowsMounted = true;
+      await act(async () => settleFrames());
+      expect(getTranscriptPage).toHaveBeenCalledTimes(leaveEdge ? 1 : 2);
+      if (!leaveEdge) {
+        await act(async () => resolve(page(['old1', 'old2'])));
+        settleFrames();
+        expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+      }
+    },
+  );
+
   it('captures rows materialized after a boundary request starts before admitting the page', async () => {
     const { click, list, row, getTranscriptPage, settleFrames, render } =
       await setup();

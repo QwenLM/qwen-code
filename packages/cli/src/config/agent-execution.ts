@@ -19,6 +19,26 @@ import {
 
 export const AGENT_EXECUTION_BACKEND_ENV = 'QWEN_AGENT_EXECUTION_BACKEND';
 
+function agentExecutionRuntime(
+  env: NodeJS.ProcessEnv,
+  fileSourced: (key: string) => boolean,
+): 'docker' | 'podman' | undefined {
+  if (fileSourced(AGENT_EXECUTION_BACKEND_ENV)) return undefined;
+  const runtime = env[AGENT_EXECUTION_BACKEND_ENV]?.trim().toLowerCase();
+  if (!runtime) return undefined;
+  if (runtime !== 'docker' && runtime !== 'podman') {
+    throw new Error(`${AGENT_EXECUTION_BACKEND_ENV} must be docker or podman.`);
+  }
+  return runtime;
+}
+
+export function agentExecutionBackend(
+  env: NodeJS.ProcessEnv = process.env,
+  fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
+): 'container' | undefined {
+  return agentExecutionRuntime(env, fileSourced) ? 'container' : undefined;
+}
+
 export function agentExecutionFactory(
   env: NodeJS.ProcessEnv = process.env,
   fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
@@ -30,12 +50,8 @@ export function agentExecutionFactory(
     env['QWEN_CODE_SERVE'] === '1'
   )
     return undefined;
-  if (fileSourced(AGENT_EXECUTION_BACKEND_ENV)) return undefined;
-  const runtime = env[AGENT_EXECUTION_BACKEND_ENV]?.trim().toLowerCase();
+  const runtime = agentExecutionRuntime(env, fileSourced);
   if (!runtime) return undefined;
-  if (runtime !== 'docker' && runtime !== 'podman') {
-    throw new Error(`${AGENT_EXECUTION_BACKEND_ENV} must be docker or podman.`);
-  }
   const clientEnv = trustedProcessEnv(env, fileSourced);
   const pick = (key: string) =>
     fileSourced(key) ? undefined : env[key]?.trim();

@@ -124,6 +124,36 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     return { captured, restore: () => spy.mockRestore() };
   }
 
+  it('rejects a tool-capable fork when the operator requires container execution', async () => {
+    const parent = new ConfigImpl({
+      ...baseParams,
+      agentExecutionBackend: 'container',
+    });
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    const registrySpy = vi
+      .spyOn(parent, 'getToolRegistry')
+      .mockReturnValue(parentRegistry);
+    const executeSpy = vi.spyOn(AgentHeadless.prototype, 'execute');
+
+    try {
+      await expect(
+        runForkedAgent({
+          name: 'test-fork',
+          systemPrompt: 'You are a test fork.',
+          taskPrompt: 'do the task',
+          config: parent,
+        }),
+      ).rejects.toThrow('has no execution environment');
+      expect(executeSpy).not.toHaveBeenCalled();
+    } finally {
+      executeSpy.mockRestore();
+      registrySpy.mockRestore();
+      await parentRegistry.stop();
+    }
+  });
+
   it('does not treat empty extraHistory as caller-owned initial messages by default', async () => {
     const parent = new ConfigImpl(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {

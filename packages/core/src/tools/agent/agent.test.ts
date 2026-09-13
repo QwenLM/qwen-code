@@ -296,13 +296,13 @@ describe('AgentTool', () => {
       description: 'Contained work',
       prompt: 'Inspect the workspace',
       subagent_type: 'file-search',
-      execution_backend: 'container',
       run_in_background: false,
     };
     let environment: ExecutionEnvironment;
     let mockAgent: AgentHeadless;
 
     beforeEach(() => {
+      config.getAgentExecutionBackend = () => 'container';
       environment = {
         dispose: vi.fn().mockResolvedValue(undefined),
       } as unknown as ExecutionEnvironment;
@@ -345,7 +345,7 @@ describe('AgentTool', () => {
       });
     });
 
-    it('advertises the selector only when the host supplies a factory', () => {
+    it('never advertises a model-visible backend selector', () => {
       expect(
         (agentTool.schema.parametersJsonSchema as { properties: object })
           .properties,
@@ -354,20 +354,19 @@ describe('AgentTool', () => {
       expect(
         (enabled.schema.parametersJsonSchema as { properties: object })
           .properties,
-      ).toHaveProperty('execution_backend');
+      ).not.toHaveProperty('execution_backend');
       config.getExecutionEnvironmentFactory = () => undefined;
       expect(enabled.validateToolParams(params)).toContain('not enabled');
     });
 
-    it.each([
-      { name: 'teammate' },
-      { subagent_type: 'fork' },
-      { execution_backend: 'remote' },
-    ])('rejects unsupported selector combinations %j', (extra) => {
-      expect(
-        agentTool.validateToolParams({ ...params, ...extra } as AgentParams),
-      ).not.toBeNull();
-    });
+    it.each([{ name: 'teammate' }, { subagent_type: 'fork' }])(
+      'rejects unsupported container combinations %j',
+      (extra) => {
+        expect(
+          agentTool.validateToolParams({ ...params, ...extra } as AgentParams),
+        ).not.toBeNull();
+      },
+    );
 
     it('refuses unconfigured execution even when validation is bypassed', async () => {
       config.getExecutionEnvironmentFactory = () => undefined;
@@ -394,11 +393,99 @@ describe('AgentTool', () => {
     it('rejects nested launch rather than defaulting to host tools', async () => {
       config.getExecutionEnvironment = () => environment;
       const result = await (agentTool as AgentToolWithProtectedMethods)
-        .createInvocation({ ...params, execution_backend: undefined })
+        .createInvocation(params)
         .execute();
       expect(partToString(result.llmContent)).toContain(
         'Nested agents are unavailable',
       );
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, 'local', 'remote', 'container'])(
+      'cannot weaken the operator requirement with model selector %s',
+      async (selector) => {
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({
+            ...params,
+            execution_backend: selector,
+          } as AgentParams)
+          .execute();
+        expect(result.error).toBeUndefined();
+        expect(config.getExecutionEnvironmentFactory()).toHaveBeenCalledOnce();
+        expect(
+          vi
+            .mocked(mockSubagentManager.createAgentHeadless)
+            .mock.calls[0][1].getExecutionEnvironment(),
+        ).toBe(environment);
+      },
+    );
+
+    it('keeps unconfigured execution local even when a capability is injected', async () => {
+      config.getAgentExecutionBackend = () => undefined;
+      const result = await (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute();
+      expect(result.error).toBeUndefined();
+      expect(mockAgent.execute).toHaveBeenCalledOnce();
+      expect(config.getExecutionEnvironmentFactory()).not.toHaveBeenCalled();
+      expect(
+        vi
+          .mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0][1].getExecutionEnvironment?.(),
+      ).toBeUndefined();
+    });
+
+    it.each([undefined, 'local', 'container'])(
+      'honors the loaded definition independently of model selector %s',
+      async (selector) => {
+        config.getAgentExecutionBackend = () => undefined;
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...mockSubagents[0],
+          executionBackend: 'container',
+        });
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({
+            ...params,
+            execution_backend: selector,
+          } as AgentParams)
+          .execute();
+        expect(result.error).toBeUndefined();
+        expect(mockSubagentManager.loadSubagent).toHaveBeenCalledOnce();
+        expect(config.getExecutionEnvironmentFactory()).toHaveBeenCalledOnce();
+        expect(
+          vi
+            .mocked(mockSubagentManager.createAgentHeadless)
+            .mock.calls[0][1].getExecutionEnvironment(),
+        ).toBe(environment);
+      },
+    );
+
+    it('refuses a container definition without a host capability', async () => {
+      config.getAgentExecutionBackend = () => undefined;
+      config.getExecutionEnvironmentFactory = () => undefined;
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...mockSubagents[0],
+        executionBackend: 'container',
+      });
+      const result = await (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute();
+      expect(partToString(result.llmContent)).toContain('not enabled');
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    });
+
+    it('refuses an untrusted project container definition before startup', async () => {
+      config.getAgentExecutionBackend = () => undefined;
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...mockSubagents[0],
+        executionBackend: 'container',
+      });
+      const result = await (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute();
+      expect(partToString(result.llmContent)).toContain('untrusted');
+      expect(config.getExecutionEnvironmentFactory()).not.toHaveBeenCalled();
       expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
     });
 

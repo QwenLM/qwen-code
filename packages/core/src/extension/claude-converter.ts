@@ -31,6 +31,7 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent, stripAnsiAndControl } from '../utils/textUtils.js';
 import { substituteHookVariables } from './variables.js';
+import { parseAgentExecutionBackend } from '../subagents/execution-backend.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
@@ -276,6 +277,8 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
       }
 
       const [, frontmatterYaml, body] = match;
+      // Reject before rewriting so the extension loader can retain a named refusal.
+      const executionBackend = parseAgentExecutionBackend(frontmatterYaml);
       const frontmatter = parseYaml(frontmatterYaml) as Record<string, unknown>;
 
       // Build Claude agent config from frontmatter
@@ -298,6 +301,9 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
 
       // Convert to Qwen format
       const qwenAgent = convertClaudeAgentConfig(claudeAgent);
+      if (executionBackend !== undefined) {
+        qwenAgent['executionBackend'] = executionBackend;
+      }
 
       // Build new frontmatter (excluding systemPrompt as it goes in body).
       const newFrontmatter: Record<string, unknown> = {};

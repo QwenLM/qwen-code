@@ -35,6 +35,25 @@ describe('ModelsConfig', () => {
     return modelsConfig.getGenerationConfig() as ContentGeneratorConfig;
   }
 
+  it('rejects voice-only primary models and skips them during fallback', async () => {
+    const models = new ModelsConfig({
+      modelProvidersConfig: {
+        openai: [{ id: 'asr', voiceOnly: true }, { id: 'chat' }],
+      },
+    });
+    models.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'missing');
+    expect(models.getModel()).toBe('chat');
+    await expect(
+      models.switchModel(AuthType.USE_OPENAI, 'asr'),
+    ).rejects.toThrow(
+      "Voice-only model 'asr' cannot be used as the primary model",
+    );
+    expect(() =>
+      models.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'asr'),
+    ).toThrow("Voice-only model 'asr' cannot be used as the primary model");
+    expect(models.getModel()).toBe('chat');
+  });
+
   it('rejects image-only models as the primary model', async () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,

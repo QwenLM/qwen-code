@@ -5,7 +5,12 @@
  */
 
 import type { AuthType } from '../core/contentGenerator.js';
-import type { ModelProvidersConfig } from '../models/types.js';
+import { isImageGenerationCapable } from '../models/image-generation-capability.js';
+import type {
+  ModelProvidersConfig,
+  ProviderProtocolConfig,
+} from '../models/types.js';
+import { ModelsConfig } from '../models/modelsConfig.js';
 import type {
   ProviderInstallPlan,
   ProviderModelProvidersPatch,
@@ -139,6 +144,12 @@ export async function applyProviderInstallPlan(
     doRefreshAuth = true,
   } = options;
 
+  const serviceOnly = (plan.modelProviders ?? []).flatMap(
+    (patch) => patch.models,
+  );
+  const preserveSelection =
+    serviceOnly.length > 0 &&
+    serviceOnly.every((model) => model.imageOnly || model.voiceOnly);
   const previousEnvValues = new Map<string, string | undefined>();
   // Snapshot the runtime providers map *before* any setValue/reload so we can
   // restore in-memory state if a callback later in the flow rejects (e.g.
@@ -147,6 +158,93 @@ export async function applyProviderInstallPlan(
   const previousRuntimeProviders: ModelProvidersConfig = {
     ...settings.getModelProviders(),
   };
+  for (const patch of plan.modelProviders ?? []) {
+    const existingModels = previousRuntimeProviders[patch.authType] ?? [];
+    const changesRole = existingModels.some((existing) =>
+      patch.models.some(
+        (model) =>
+          (isSameModelIdentity(existing, model) ||
+            (existing.id === model.id &&
+              patch.ownsModel?.(existing) &&
+              (preserveSelection || patch.mergeStrategy !== 'append'))) &&
+          (Boolean(existing.imageOnly) !== Boolean(model.imageOnly) ||
+            Boolean(existing.voiceOnly) !== Boolean(model.voiceOnly) ||
+            (isImageGenerationCapable(existing) &&
+              !isImageGenerationCapable(model))),
+      ),
+    );
+    const removesConversation =
+      preserveSelection &&
+      existingModels.some(
+        (existing) =>
+          !existing.imageOnly &&
+          !existing.voiceOnly &&
+          (patch.ownsModel?.(existing) ??
+            patch.models.some((model) => isSameModelIdentity(existing, model))),
+      );
+    const removesService =
+      !preserveSelection &&
+      patch.mergeStrategy !== 'append' &&
+      existingModels.some(
+        (existing) =>
+          (existing.imageOnly || existing.voiceOnly) &&
+          patch.ownsModel?.(existing) &&
+          !patch.models.some((model) => model.id === existing.id),
+      );
+    if (changesRole || removesConversation || removesService) {
+      throw new ProviderInstallError(
+        removesConversation
+          ? 'This install would remove existing conversation models. Include them in the provider selection, or add the service model with Custom Provider.'
+          : removesService
+            ? 'This install would remove existing service models. Include them in the provider selection, or add the conversation model with Custom Provider.'
+            : 'This install would replace a model configured for another purpose. Use a different model ID or endpoint.',
+        'modelPurpose',
+        plan.authType,
+      );
+    }
+  }
+
+  const voiceIds = new Set(
+    [
+      ...Object.values(previousRuntimeProviders).flatMap((models) =>
+        Array.isArray(models) ? models : [],
+      ),
+      ...serviceOnly,
+    ]
+      .filter((model) => model?.voiceOnly)
+      .map((model) => model.id),
+  );
+  const selectedVoice = settings.getValue('voiceModel');
+  if (typeof selectedVoice === 'string' && selectedVoice)
+    voiceIds.add(selectedVoice);
+  const changedVoiceIds = [...voiceIds].filter((id) =>
+    plan.modelProviders?.some((patch) =>
+      patch.models.some((model) => model.id === id),
+    ),
+  );
+  if (changedVoiceIds.length) {
+    let prospective = previousRuntimeProviders;
+    for (const patch of plan.modelProviders ?? []) {
+      prospective = applyModelProvidersPatch(prospective, patch);
+    }
+    const configured = new ModelsConfig({
+      modelProvidersConfig: prospective,
+      providerProtocolConfig: settings.getValue('providerProtocol') as
+        | ProviderProtocolConfig
+        | undefined,
+    }).getAllConfiguredModels();
+    if (
+      changedVoiceIds.some(
+        (id) => configured.filter((entry) => entry.id === id).length > 1,
+      )
+    ) {
+      throw new ProviderInstallError(
+        'A voice model with this ID is already configured at another endpoint. Edit that model or use a different model ID.',
+        'modelPurpose',
+        plan.authType,
+      );
+    }
+  }
 
   // Track which step is in flight so a rethrow at the bottom can name it
   // (an EACCES from persist vs a refreshAuth rejection look identical
@@ -203,7 +301,17 @@ export async function applyProviderInstallPlan(
     for (const patch of plan.modelProviders ?? []) {
       updatedModelProviders = applyModelProvidersPatch(
         updatedModelProviders,
-        patch,
+        preserveSelection
+          ? {
+              ...patch,
+              mergeStrategy: 'replace-owned',
+              ownsModel: (existing) =>
+                (patch.ownsModel?.(existing) ?? false) ||
+                patch.models.some((model) =>
+                  isSameModelIdentity(existing, model),
+                ),
+            }
+          : patch,
       );
       settings.setValue(
         `modelProviders.${patch.authType}`,
@@ -211,9 +319,29 @@ export async function applyProviderInstallPlan(
       );
     }
 
+    const effectiveProviders = settings.getModelProviders();
+    for (const patch of plan.modelProviders ?? []) {
+      if (
+        patch.models.some(
+          (model) =>
+            !effectiveProviders[patch.authType]?.some((effective) =>
+              isSameModelIdentity(model, effective),
+            ),
+        )
+      ) {
+        throw new ProviderInstallError(
+          'A higher-precedence settings scope overrides the installed models. Update the scope that owns this provider.',
+          'modelProviders',
+          plan.authType,
+        );
+      }
+    }
+
     // Set auth type
     currentStep = 'authType';
-    settings.setValue('security.auth.selectedType', plan.authType);
+    if (!preserveSelection) {
+      settings.setValue('security.auth.selectedType', plan.authType);
+    }
 
     // Legacy credentials
     currentStep = 'legacyCredentials';
@@ -233,7 +361,9 @@ export async function applyProviderInstallPlan(
     // off a model they chose. If the plan still offers the current model, keep
     // it; a genuine first-time setup still adopts the provider default. (#5819)
     currentStep = 'modelSelection';
-    let effectiveModelSelection = plan.modelSelection;
+    let effectiveModelSelection = preserveSelection
+      ? undefined
+      : plan.modelSelection;
     if (effectiveModelSelection?.modelId) {
       const currentModelId = settings.getValue('model.name');
       const currentBaseUrl = settings.getValue('model.baseUrl') as
@@ -284,6 +414,7 @@ export async function applyProviderInstallPlan(
 
     // Reload runtime config
     currentStep = 'reloadModelProviders';
+    updatedModelProviders = settings.getModelProviders();
     reloadModelProviders?.(updatedModelProviders);
     if (effectiveModelSelection?.modelId) {
       currentStep = 'syncAuthState';
@@ -293,7 +424,7 @@ export async function applyProviderInstallPlan(
         effectiveModelSelection.baseUrl,
       );
     }
-    if (doRefreshAuth && refreshAuth) {
+    if (!preserveSelection && doRefreshAuth && refreshAuth) {
       currentStep = 'refreshAuth';
       await refreshAuth(plan.authType);
     }
