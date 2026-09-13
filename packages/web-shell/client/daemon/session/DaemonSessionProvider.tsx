@@ -1650,7 +1650,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const maySettleToIdle = (
         target = session ?? sessionRef.current ?? connectionRef.current,
       ) => {
-        if (hasCurrentSessionActivePrompt()) return false;
+        if (
+          hasCurrentSessionActivePrompt() ||
+          connectionRef.current.backgroundTurn
+        )
+          return false;
         if (getDaemonActivePrompt(target) === true) {
           // The counterpart to the settle breadcrumb in the action layer:
           // "the pane has said working for 40 minutes" is otherwise
@@ -2393,6 +2397,25 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           turnNotifications.activate(activeSession);
           const activeWorkspaceScoped =
             activeProductSessionContext.kind === 'workspace';
+          if (runnerSession !== activeSession) {
+            setConnectionSynchronous((current) => ({
+              ...current,
+              backgroundTurn:
+                current.sessionId === activeSession.sessionId &&
+                current.finishedBackgroundTurnId ===
+                  activeSession.backgroundTurn?.turnId
+                  ? undefined
+                  : activeSession.backgroundTurn,
+              backgroundTurnObservedAt: performance.now(),
+              finishedBackgroundTurnId:
+                current.sessionId === activeSession.sessionId
+                  ? activeSession.backgroundTurn
+                    ? current.finishedBackgroundTurnId
+                    : (current.backgroundTurn?.turnId ??
+                      current.finishedBackgroundTurnId)
+                  : undefined,
+            }));
+          }
           runnerSession = activeSession;
           // Prompt activity is session state returned by /load. Surface it
           // immediately so a refreshed page shows the running state without
@@ -3390,6 +3413,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   setPromptStatus('waiting');
                 }
               }
+              const backgroundTerminal =
+                connectionRef.current.backgroundTurn !== undefined &&
+                eventPromptId(event) ===
+                  connectionRef.current.backgroundTurn.turnId;
+              const localPrompt = activePromptsRef.current.get(
+                activeSession.sessionId,
+              );
+              const ignoreStaleTerminal =
+                (event.type === 'turn_complete' ||
+                  event.type === 'turn_error') &&
+                connectionRef.current.backgroundTurn &&
+                eventPromptId(event) !==
+                  connectionRef.current.backgroundTurn.turnId &&
+                (!localPrompt ||
+                  (localPrompt.promptId !== undefined &&
+                    eventPromptId(event) !== localPrompt.promptId));
               const normalizedUiEvents = normalizeAndFilterEvent(
                 event,
                 activeSession.clientId,
@@ -3523,18 +3562,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ) {
                 flushTranscriptSync();
               }
-              const activePromptSettled = settleActivePromptFromTurnEvent(
-                activePromptsRef.current,
-                settledPromptsRef.current,
-                activeSession.sessionId,
-                event,
-                store,
-                setPromptStatus,
-                passiveAssistantDoneTimerRef,
-              );
+              // An old background terminal must not claim a local prompt
+              // whose HTTP admission has not returned its ID yet.
+              const activePromptSettled =
+                !backgroundTerminal &&
+                !ignoreStaleTerminal &&
+                settleActivePromptFromTurnEvent(
+                  activePromptsRef.current,
+                  settledPromptsRef.current,
+                  activeSession.sessionId,
+                  event,
+                  store,
+                  setPromptStatus,
+                  passiveAssistantDoneTimerRef,
+                );
               let restoredPromptSettled = false;
               if (
                 !activePromptSettled &&
+                !ignoreStaleTerminal &&
                 restoredActivePrompt &&
                 (event.type === 'turn_complete' || event.type === 'turn_error')
               ) {
@@ -3656,7 +3701,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   );
                 }
               }
-              if (isObserver && event.type === 'turn_complete') {
+              if (
+                isObserver &&
+                !ignoreStaleTerminal &&
+                event.type === 'turn_complete'
+              ) {
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 const stopReason =
                   (event.data as DaemonTurnCompleteData | undefined)
@@ -3665,7 +3714,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   assistantDoneFromTurnEvent(event, stopReason),
                 );
                 setPromptStatus('idle');
-              } else if (isObserver && event.type === 'turn_error') {
+              } else if (
+                isObserver &&
+                !ignoreStaleTerminal &&
+                event.type === 'turn_error'
+              ) {
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 dispatchTranscriptNow(
                   assistantDoneFromTurnEvent(event, 'error'),
@@ -3843,6 +3896,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: undefined,
               reasoning: undefined,
               models: getWorkspaceModelsAfterSessionClear(current),
+              backgroundTurn: undefined,
+              finishedBackgroundTurnId: undefined,
+              backgroundTurnObservedAt: undefined,
               goalState: undefined,
               error: undefined,
               errorStatus: undefined,
@@ -4096,6 +4152,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 context: undefined,
                 reasoning: undefined,
                 models: getWorkspaceModelsAfterSessionClear(current),
+                backgroundTurn: undefined,
+                finishedBackgroundTurnId: undefined,
+                backgroundTurnObservedAt: undefined,
                 goalState: undefined,
                 error: message,
                 errorStatus: resolveConnectionErrorStatus(
@@ -4125,6 +4184,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: undefined,
               reasoning: undefined,
               models: getWorkspaceModelsAfterSessionClear(current),
+              backgroundTurn: undefined,
+              finishedBackgroundTurnId: undefined,
+              backgroundTurnObservedAt: undefined,
               goalState: undefined,
               error: message,
               errorStatus: resolveConnectionErrorStatus(
@@ -4477,6 +4539,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                         context: undefined,
                         reasoning: undefined,
                         models: getWorkspaceModelsAfterSessionClear(current),
+                        backgroundTurn: undefined,
+                        finishedBackgroundTurnId: undefined,
+                        backgroundTurnObservedAt: undefined,
                         goalState: undefined,
                         loadingTranscript: undefined,
                         catchingUp: undefined,
@@ -4497,6 +4562,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     heartbeatFailureThreshold,
     heartbeatIntervalMs,
   ]);
+
+  const settleAdmittedPrompt = useCallback(
+    (owner: DaemonSessionClient, promptId: string) => {
+      const active = activePromptsRef.current.get(owner.sessionId);
+      if (active?.promptId !== promptId) return;
+      const terminal = active.replayedTurnEvents?.get(promptId);
+      delete active.replayedTurnEvents;
+      if (terminal) {
+        settleActivePromptFromTurnEvent(
+          activePromptsRef.current,
+          settledPromptsRef.current,
+          owner.sessionId,
+          terminal,
+          store,
+          setPromptStatus,
+          passiveAssistantDoneTimerRef,
+          { requireBoundPromptId: true, transcriptAlreadyApplied: true },
+        );
+        turnNotifications.observe(owner, terminal, true);
+      }
+    },
+    [store, turnNotifications],
+  );
 
   const actions = useMemo<DaemonSessionActions>(
     () =>
@@ -4643,26 +4731,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           ) {
             turnNavigationStore.recordPromptAdmitted(admission);
           }
+          settleAdmittedPrompt(owner, admission.promptId);
         },
         onContinuationAdmitted: (owner, promptId) => {
           turnNotifications.admit(owner, promptId);
-          const active = activePromptsRef.current.get(owner.sessionId);
-          if (active?.promptId !== promptId) return;
-          const terminal = active.replayedTurnEvents?.get(promptId);
-          delete active.replayedTurnEvents;
-          if (terminal) {
-            settleActivePromptFromTurnEvent(
-              activePromptsRef.current,
-              settledPromptsRef.current,
-              owner.sessionId,
-              terminal,
-              store,
-              setPromptStatus,
-              passiveAssistantDoneTimerRef,
-              { requireBoundPromptId: true, transcriptAlreadyApplied: true },
-            );
-            turnNotifications.observe(owner, terminal, true);
-          }
+          settleAdmittedPrompt(owner, promptId);
         },
         onPromptRemoved: (owner, promptId) => {
           if (sessionRef.current === owner)
@@ -4681,6 +4754,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       resolvedBaseUrl,
       resolvedToken,
       restartEventStreamOnPrompt,
+      settleAdmittedPrompt,
       turnNotifications,
       store,
       turnNavigationStore,

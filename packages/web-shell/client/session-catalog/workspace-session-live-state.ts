@@ -176,10 +176,12 @@ export function useWorkspaceSessionLiveState(
       });
     };
 
-    const readLiveState = async (
-      workspaceCwd: string,
-    ): Promise<DaemonWorkspaceSessionLiveState> => {
-      return await client.getWorkspaceSessionLiveState(workspaceCwd);
+    const readLiveState = async (workspaceCwd: string) => {
+      const requestStartedAt = performance.now();
+      return {
+        ...(await client.getWorkspaceSessionLiveState(workspaceCwd)),
+        requestStartedAt,
+      };
     };
 
     const stageCatalogBundle = async (
@@ -233,7 +235,11 @@ export function useWorkspaceSessionLiveState(
       if (disposed) return;
       const liveB = await readLiveState(state.workspaceCwd);
       if (disposed) return;
-      catalogStore.applyLiveState(state.workspaceCwd, liveB.sessions);
+      catalogStore.applyLiveState(
+        state.workspaceCwd,
+        liveB.sessions,
+        liveB.requestStartedAt,
+      );
       if (versionsEqual(liveA.catalogVersion, liveB.catalogVersion)) {
         if (!catalogStore.commitWorkspaceRefresh(stagedCatalog)) {
           if (allowTrailing) {
@@ -248,7 +254,11 @@ export function useWorkspaceSessionLiveState(
           state.invalidationRequested = false;
           return;
         }
-        catalogStore.applyLiveState(state.workspaceCwd, liveB.sessions);
+        catalogStore.applyLiveState(
+          state.workspaceCwd,
+          liveB.sessions,
+          liveB.requestStartedAt,
+        );
         state.acceptedVersion = liveB.catalogVersion;
         state.reconcileRequested = false;
         state.invalidationRequested = false;
@@ -285,7 +295,7 @@ export function useWorkspaceSessionLiveState(
       const pendingActivity = catalogStore.snapshotSessionActivity(
         state.workspaceCwd,
       );
-      let live: DaemonWorkspaceSessionLiveState;
+      let live: Awaited<ReturnType<typeof readLiveState>>;
       try {
         live = await readLiveState(state.workspaceCwd);
       } catch (error) {
@@ -330,6 +340,7 @@ export function useWorkspaceSessionLiveState(
       const absorbedActivity = catalogStore.applyLiveState(
         state.workspaceCwd,
         live.sessions,
+        live.requestStartedAt,
       );
       state.liveRetryAt = 0;
       if (pendingActivity) {

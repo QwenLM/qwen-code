@@ -11,6 +11,11 @@ import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
+  backgroundTurnContext,
+  type BackgroundNotificationTurn,
+} from '../utils/background-turn-context.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import {
   ChatRecordingService,
   isTurnResultRecordPayload,
   normalizeTurnResultError,
@@ -185,6 +190,95 @@ describe('ChatRecordingService', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe('background execution recording ownership', () => {
+    const turn: BackgroundNotificationTurn = {
+      turnId: 'automatic-turn',
+      taskId: 'completed-agent',
+      kind: 'agent',
+      sourceTurnId: 'original-user-turn',
+      toolUseId: 'launch-tool',
+      startedAt: 1234,
+    };
+
+    it.each([
+      ['ordinary execution', undefined, null, false],
+      ['active parent execution', 'test-session-id', null, true],
+      ['different session', 'other-session-id', null, false],
+      ['nested subagent', 'test-session-id', 'nested-agent', false],
+    ] as const)(
+      'records ownership for %s',
+      async (_, sessionId, agentId, tagged) => {
+        const record = async () =>
+          chatRecordingService.recordUserMessage([{ text: 'message' }]);
+        const inAgent = () =>
+          agentId ? runWithAgentContext(agentId, record) : record();
+        if (sessionId) {
+          await backgroundTurnContext.run(
+            { sessionId, turn, active: true },
+            async () => {
+              await Promise.resolve();
+              await inAgent();
+            },
+          );
+        } else {
+          await inAgent();
+        }
+        await chatRecordingService.flush();
+
+        const persisted = vi.mocked(jsonl.writeLine).mock
+          .calls[0][1] as ChatRecord;
+        expect(persisted.backgroundTurn).toEqual(tagged ? turn : undefined);
+      },
+    );
+
+    it('records task completion as session metadata without model content', async () => {
+      const payload = {
+        displayText: 'A separate background task completed',
+        backgroundTask: {
+          taskId: 'other-agent',
+          status: 'completed',
+          kind: 'agent' as const,
+          sourceTurnId: 'earlier-turn',
+        },
+      };
+      backgroundTurnContext.run(
+        { sessionId: 'test-session-id', turn, active: true },
+        () => chatRecordingService.recordBackgroundTaskCompleted(payload),
+      );
+      await chatRecordingService.flush();
+
+      const persisted = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      expect(persisted).toMatchObject({
+        type: 'system',
+        subtype: 'background_task_completed',
+        systemPayload: payload,
+      });
+      expect(persisted.message).toBeUndefined();
+      expect(persisted.backgroundTurn).toBeUndefined();
+    });
+
+    it('does not tag a callback inherited from a completed automatic execution', async () => {
+      const context = { sessionId: 'test-session-id', turn, active: true };
+      let resume!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const delayed = backgroundTurnContext.run(context, async () => {
+        await gate;
+        chatRecordingService.recordUserMessage([{ text: 'late callback' }]);
+      });
+      context.active = false;
+      resume();
+      await delayed;
+      await chatRecordingService.flush();
+
+      const persisted = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      expect(persisted.backgroundTurn).toBeUndefined();
+    });
   });
 
   describe('recordUserMessage', () => {

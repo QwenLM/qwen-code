@@ -1043,6 +1043,7 @@ vi.mock('./session/Session.js', () => {
   // The agent's active-work reporter walks every live Session on a timer, so
   // even tests that never look at reporting need this to exist on instances.
   SessionMock.prototype.collectActiveWorkHolds = () => [];
+  SessionMock.prototype.getBackgroundTurn = () => undefined;
   return {
     Session: SessionMock,
     // Awaited by every session creation before the session is published.

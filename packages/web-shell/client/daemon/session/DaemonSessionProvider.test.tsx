@@ -72,6 +72,7 @@ import {
 import { persistStableClientId } from './clientLifecycle.js';
 
 interface MockSession {
+  backgroundTurn?: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn;
   sessionId: string;
   workspaceCwd: string;
   clientId: string;
@@ -5967,7 +5968,7 @@ describe('DaemonSessionProvider', () => {
       turnComplete.resolve();
       await flushPromises();
     });
-    expect(streamingState).toBe('idle');
+    expect(streamingState).not.toBe('idle');
 
     const pendingPrompt = promptResult;
     if (!pendingPrompt) throw new Error('prompt was not started');
@@ -5977,9 +5978,10 @@ describe('DaemonSessionProvider', () => {
         stopReason: 'end_turn',
       });
     });
+    expect(streamingState).toBe('idle');
   });
 
-  it('allows the next prompt after a turn completes before acceptance returns', async () => {
+  it('allows the next prompt after acceptance reconciles an early terminal', async () => {
     const firstAccepted = createDeferred<NonBlockingPromptAccepted>();
     const secondAccepted = createDeferred<NonBlockingPromptAccepted>();
     const firstTurnComplete = createDeferred<void>();
@@ -6053,14 +6055,7 @@ describe('DaemonSessionProvider', () => {
       firstTurnComplete.resolve();
       await flushPromises();
     });
-    expect(streamingState).toBe('idle');
-
-    let secondPrompt: Promise<unknown> | undefined;
-    await act(async () => {
-      secondPrompt = providerActions.sendPrompt('next prompt');
-      await flushPromises();
-    });
-    expect(submitPrompt).toHaveBeenCalledTimes(2);
+    expect(streamingState).not.toBe('idle');
 
     const pendingFirstPrompt = firstPrompt;
     if (!pendingFirstPrompt) throw new Error('first prompt was not started');
@@ -6070,6 +6065,15 @@ describe('DaemonSessionProvider', () => {
         stopReason: 'end_turn',
       });
     });
+    expect(streamingState).toBe('idle');
+
+    let secondPrompt: Promise<unknown> | undefined;
+    await act(async () => {
+      secondPrompt = providerActions.sendPrompt('next prompt');
+      await flushPromises();
+    });
+    expect(submitPrompt).toHaveBeenCalledTimes(2);
+
     expect(streamingState).toBe('waiting');
 
     await act(async () => {
@@ -6143,7 +6147,7 @@ describe('DaemonSessionProvider', () => {
       turnError.resolve();
       await flushPromises();
     });
-    expect(streamingState).toBe('idle');
+    expect(streamingState).not.toBe('idle');
 
     const pending = promptResult;
     if (!pending) throw new Error('prompt was not started');
@@ -6151,6 +6155,7 @@ describe('DaemonSessionProvider', () => {
       accepted.resolve({ promptId: 'prompt-1', lastEventId: 10 });
       await expect(pending).rejects.toThrow('Something went wrong');
     });
+    expect(streamingState).toBe('idle');
   });
 
   it('sends image prompt content through the daemon action', async () => {
@@ -9865,6 +9870,404 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(promptStatus).not.toBe('idle');
+  });
+
+  it.each([
+    [false, false, 'turn_complete'],
+    [false, true, 'turn_complete'],
+    [true, false, 'turn_complete'],
+    [true, true, 'turn_complete'],
+    [false, true, 'turn_error'],
+  ] as const)(
+    'settles local input across a background handoff (old end: %s, early terminal: %s, %s)',
+    async (deliverOldTerminal, earlyTerminal, terminalType) => {
+      const accepted = createDeferred<NonBlockingPromptAccepted>();
+      const oldEnd = createDeferred<void>();
+      const newEnd = createDeferred<void>();
+      const oldSeen = createDeferred<void>();
+      const session = createMockSession({
+        hasActivePrompt: true,
+        backgroundTurn: {
+          turnId: 'old-auto',
+          taskId: 'old-task',
+          kind: 'agent',
+          startedAt: 1,
+        },
+        submitPrompt: vi.fn(() => accepted.promise),
+        async *events(opts = {}) {
+          await oldEnd.promise;
+          if (opts.signal?.aborted) return;
+          if (deliverOldTerminal)
+            yield {
+              v: 1,
+              id: 6,
+              type: 'turn_complete',
+              data: { promptId: 'old-auto', stopReason: 'end_turn' },
+            } as DaemonEvent;
+          oldSeen.resolve();
+          await newEnd.promise;
+          if (opts.signal?.aborted) return;
+          yield {
+            v: 1,
+            id: 7,
+            type: terminalType,
+            data: {
+              promptId: 'local-P',
+              stopReason: 'end_turn',
+              message: 'Local prompt failed',
+              code: 'internal_error',
+            },
+          } as DaemonEvent;
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) resolve();
+            else
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+          });
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let actions: DaemonUiSessionActions | undefined;
+      let status = 'idle';
+      function Harness() {
+        actions = useDaemonActions();
+        status = useDaemonPromptStatus();
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      let pending!: Promise<unknown>;
+      let settled = false;
+      await act(async () => {
+        pending = requireActions(actions)
+          .sendPrompt('Local user P')
+          .then(
+            (result) => {
+              settled = true;
+              return result;
+            },
+            (error: unknown) => {
+              settled = true;
+              return error;
+            },
+          );
+        await flushPromises();
+        oldEnd.resolve();
+        await oldSeen.promise;
+        await flushPromises();
+      });
+      expect(settled).toBe(false);
+      expect(status).not.toBe('idle');
+      await act(async () => {
+        if (earlyTerminal) {
+          newEnd.resolve();
+          await flushPromises();
+        }
+        accepted.resolve({ promptId: 'local-P', lastEventId: 6 });
+        await flushPromises();
+      });
+      expect(settled).toBe(earlyTerminal);
+      await act(async () => {
+        newEnd.resolve();
+        if (terminalType === 'turn_complete') {
+          expect(await pending).toEqual({ stopReason: 'end_turn' });
+        } else {
+          expect(await pending).toMatchObject({
+            message: 'Local prompt failed',
+          });
+        }
+        await flushPromises();
+      });
+      expect(settled).toBe(true);
+      expect(status).toBe('idle');
+    },
+  );
+
+  it('keeps an unbound local prompt pending after a foreign terminal', async () => {
+    const accepted = createDeferred<NonBlockingPromptAccepted>();
+    const foreignEnd = createDeferred<void>();
+    const foreignSeen = createDeferred<void>();
+    const localEnd = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      backgroundTurn: {
+        turnId: 'old-auto',
+        taskId: 'old-task',
+        kind: 'agent',
+        startedAt: 1,
+      },
+      submitPrompt: vi.fn(() => accepted.promise),
+      async *events(opts = {}) {
+        await foreignEnd.promise;
+        yield {
+          v: 1,
+          id: 6,
+          type: 'turn_complete',
+          data: { promptId: 'stale-F', stopReason: 'end_turn' },
+        } as DaemonEvent;
+        foreignSeen.resolve();
+        await localEnd.promise;
+        yield {
+          v: 1,
+          id: 7,
+          type: 'turn_complete',
+          data: { promptId: 'local-P', stopReason: 'end_turn' },
+        } as DaemonEvent;
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) resolve();
+          else
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let status = 'idle';
+    function Harness() {
+      actions = useDaemonActions();
+      status = useDaemonPromptStatus();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    let pending!: Promise<unknown>;
+    let settled = false;
+    await act(async () => {
+      pending = requireActions(actions)
+        .sendPrompt('Local user P')
+        .then((result) => {
+          settled = true;
+          return result;
+        });
+      await flushPromises();
+      foreignEnd.resolve();
+      await foreignSeen.promise;
+      await flushPromises();
+    });
+    expect(settled).toBe(false);
+    expect(status).not.toBe('idle');
+    await act(async () => {
+      accepted.resolve({ promptId: 'local-P', lastEventId: 6 });
+      await flushPromises();
+    });
+    expect(settled).toBe(false);
+    expect(status).not.toBe('idle');
+    await act(async () => {
+      localEnd.resolve();
+      expect(await pending).toEqual({ stopReason: 'end_turn' });
+      await flushPromises();
+    });
+    expect(settled).toBe(true);
+    expect(status).toBe('idle');
+  });
+
+  it.each([false, true])(
+    'retains an observer terminal error with background execution: %s',
+    async (withBackground) => {
+      const seen = createDeferred<void>();
+      const release = createDeferred<void>();
+      const session = createMockSession({
+        hasActivePrompt: true,
+        backgroundTurn: withBackground
+          ? { turnId: 'old-auto', taskId: 'task', kind: 'agent', startedAt: 1 }
+          : undefined,
+        lastEventId: 5,
+        async *events(opts = {}) {
+          await release.promise;
+          yield {
+            id: 6,
+            v: 1,
+            type: 'turn_error',
+            data: {
+              promptId: 'other-X',
+              message: 'Boom X',
+              code: 'internal_error',
+            },
+          } as DaemonEvent;
+          seen.resolve();
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) resolve();
+            else
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+          });
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      let notices: readonly DaemonSessionNotice[] = [];
+      let status = 'idle';
+      function Harness() {
+        blocks = useDaemonTranscriptBlocks();
+        notices = useDaemonSessionNotices().notices;
+        status = useDaemonPromptStatus();
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      await act(async () => {
+        release.resolve();
+        await seen.promise;
+        await flushPromises();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+      expect(blocks).toMatchObject([
+        {
+          kind: 'error',
+          text: 'Boom X',
+          promptId: 'other-X',
+          source: 'turn_error',
+        },
+      ]);
+      expect(notices).toEqual([]);
+      expect(status === 'idle').toBe(!withBackground);
+    },
+  );
+
+  it('does not revive a background execution cleared by reload', async () => {
+    const resync = createDeferred<void>();
+    const reloaded = createDeferred<void>();
+    const replay = createDeferred<void>();
+    const replaySeen = createDeferred<void>();
+    const backgroundTurn = {
+      turnId: 'auto-1',
+      taskId: 'task-1',
+      kind: 'agent' as const,
+      startedAt: 1,
+    };
+    const sessionId = 'background-resync';
+    const firstSession = createMockSession({
+      sessionId,
+      hasActivePrompt: true,
+      backgroundTurn,
+      async *events() {
+        await resync.promise;
+        yield {
+          id: 6,
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'ring_evicted' },
+        } satisfies DaemonEvent;
+      },
+    });
+    const secondSession = createMockSession({
+      sessionId,
+      hasActivePrompt: false,
+      backgroundTurn: undefined,
+      async *events(opts = {}) {
+        reloaded.resolve();
+        await replay.promise;
+        yield {
+          id: 7,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                source: 'background_notification_turn_started',
+                backgroundTurn,
+              },
+            },
+          },
+        } satisfies DaemonEvent;
+        replaySeen.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) resolve();
+          else
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+        });
+      },
+    });
+    sdkMocks.sessions.push(firstSession, secondSession);
+    let connection: ReturnType<typeof useDaemonConnection> | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    expect(connection?.backgroundTurn).toEqual(backgroundTurn);
+    await act(async () => {
+      resync.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+    expect(connection?.backgroundTurn).toBeUndefined();
+    await act(async () => {
+      replay.resolve();
+      await replaySeen.promise;
+      await flushPromises();
+    });
+    expect(connection?.backgroundTurn).toBeUndefined();
+    expect(connection?.finishedBackgroundTurnId).toBe('auto-1');
+  });
+
+  it('restores background execution and ignores a stale terminal before its own completion', async () => {
+    const staleSeen = createDeferred<void>();
+    const finish = createDeferred<void>();
+    const finished = createDeferred<void>();
+    const backgroundTurn = {
+      turnId: 'auto-1',
+      taskId: 'task-1',
+      kind: 'agent' as const,
+      startedAt: 100,
+    };
+    const session = createMockSession({
+      hasActivePrompt: true,
+      backgroundTurn,
+      lastEventId: 5,
+      async *events() {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'old-user', stopReason: 'end_turn' },
+        };
+        staleSeen.resolve();
+        await finish.promise;
+        yield {
+          id: 7,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'auto-1', stopReason: 'end_turn' },
+        };
+        finished.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let connection: ReturnType<typeof useDaemonConnection> | undefined;
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+    function Harness() {
+      connection = useDaemonConnection();
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await staleSeen.promise;
+      await flushPromises();
+    });
+    expect(connection?.backgroundTurn).toEqual(backgroundTurn);
+    expect(promptStatus).not.toBe('idle');
+    await act(async () => {
+      finish.resolve();
+      await finished.promise;
+      await flushPromises();
+    });
+    expect(connection?.backgroundTurn).toBeUndefined();
+    expect(promptStatus).toBe('idle');
   });
 
   it('settles restored active prompts when turn_complete arrives', async () => {
@@ -22041,6 +22444,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     clientId: opts.clientId ?? 'client-1',
     state: opts.state ?? {},
     hasActivePrompt: opts.hasActivePrompt ?? false,
+    backgroundTurn: opts.backgroundTurn,
     historyHasMore: opts.historyHasMore ?? false,
     historyAnchorRecordId: opts.historyAnchorRecordId,
     replayDegraded: opts.replayDegraded ?? false,

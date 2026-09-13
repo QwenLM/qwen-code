@@ -7,6 +7,7 @@ import {
   ClientSideConnection,
   ndJsonStream,
   PROTOCOL_VERSION,
+  RequestError,
 } from '@agentclientprotocol/sdk';
 import type {
   Client,
@@ -724,7 +725,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         hasQueuedPrompt: false,
       };
     }
-    throw new Error(`Method not found: ${method}`);
+    throw RequestError.methodNotFound(method);
   }
 
   private async handleClientMcpMessage(

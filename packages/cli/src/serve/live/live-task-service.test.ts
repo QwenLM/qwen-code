@@ -840,6 +840,92 @@ describe('LiveTaskService', () => {
     ]);
   });
 
+  it('does not wake on a background terminal while the user prompt is active', async () => {
+    const harness = makeHarness();
+    harness.summaries.set('task-1', {
+      sessionId: 'task-1',
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      clientCount: 1,
+      hasActivePrompt: true,
+    });
+    harness.resident.add('task-1');
+    persistedSessions.set('task-1', persisted('task-1'));
+    const originalSubscribe = harness.bridge.subscribeEvents;
+    vi.spyOn(harness.bridge, 'subscribeEvents').mockImplementation(
+      async function* (sessionId, options) {
+        yield {
+          v: 1,
+          eventId: 8,
+          type: 'turn_complete',
+          sessionId,
+          timestamp: '2026-07-30T00:00:05.000Z',
+          data: {
+            promptId: 'background-1',
+            backgroundTurn: { turnId: 'background-1' },
+          },
+        };
+        yield* originalSubscribe(sessionId, options);
+      },
+    );
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: { targets: [{ threadId: 'task-1' }], timeoutMs: 20 },
+    });
+    expect(result).toMatchObject({ timedOut: true });
+    expect(result['wake']).toBeNull();
+  });
+
+  it('wakes when the background turn was the only remaining active work', async () => {
+    const harness = makeHarness();
+    const backgroundTurn = {
+      turnId: 'background-1',
+      taskId: 'agent-1',
+      kind: 'agent' as const,
+      startedAt: 1_785_369_603_000,
+    };
+    const summary: BridgeSessionSummary = {
+      sessionId: 'task-1',
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      clientCount: 1,
+      hasActivePrompt: true,
+      backgroundTurn,
+    };
+    harness.summaries.set('task-1', summary);
+    harness.resident.add('task-1');
+    persistedSessions.set('task-1', persisted('task-1'));
+    const originalSubscribe = harness.bridge.subscribeEvents;
+    vi.spyOn(harness.bridge, 'subscribeEvents').mockImplementation(
+      async function* (sessionId, options) {
+        harness.summaries.set('task-1', {
+          ...summary,
+          hasActivePrompt: false,
+          backgroundTurn: undefined,
+        });
+        yield {
+          v: 1,
+          eventId: 8,
+          type: 'turn_complete',
+          sessionId,
+          timestamp: '2026-07-30T00:00:05.000Z',
+          data: { promptId: backgroundTurn.turnId, backgroundTurn },
+        };
+        yield* originalSubscribe(sessionId, options);
+      },
+    );
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: { targets: [{ threadId: 'task-1' }], timeoutMs: 20 },
+    });
+    expect(result).toMatchObject({
+      timedOut: false,
+      wake: { reason: 'turnCompleted', threadId: 'task-1', hostId: 'local' },
+    });
+  });
+
   it('returns inactive snapshots and per-target errors without creating tasks', async () => {
     const harness = makeHarness();
     const summary: BridgeSessionSummary = {

@@ -769,6 +769,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
           const text = content?.['text'];
           if (
             typeof text === 'string' &&
+            activity?.kind === 'message' &&
             (envelope.promptId === undefined ||
               envelope.promptId === state.activeJobRef)
           ) {
@@ -797,6 +798,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       }
       case 'turn_complete': {
         const jobRef = envelope.promptId ?? state.activeJobRef;
+        if (data['backgroundTurn'] && jobRef !== state.activeJobRef) return [];
         const active =
           envelope.promptId === undefined || jobRef === state.activeJobRef;
         const detail = active ? state.turnBuffer.trim() : '';

@@ -128,6 +128,72 @@ describe('createTranscriptReplayMachine', () => {
     expect(projected[0]?._meta?.['promptId']).toBeUndefined();
   });
 
+  it('preserves background execution identity without leaking into the next record', () => {
+    const machine = createTranscriptReplayMachine();
+    const backgroundTurn = {
+      turnId: 'notification-1',
+      taskId: 'Explore-1',
+      kind: 'agent',
+      sourceTurnId: 'user-1',
+      startedAt: 1000,
+    };
+    const backgroundRecord = {
+      ...record('assistant-bg', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [{ text: 'result' }, { text: 'thought', thought: true }],
+        },
+      }),
+      backgroundTurn,
+    };
+    const projected = updates(machine, backgroundRecord);
+    expect(projected.length).toBeGreaterThan(0);
+    for (const update of projected) {
+      expect(update._meta?.['backgroundTurn']).toEqual(backgroundTurn);
+    }
+    const next = updates(
+      machine,
+      record('assistant-next', 'assistant', {
+        message: { role: 'model', parts: [{ text: 'new response' }] },
+      }),
+    );
+    expect(
+      next.every((update) => update._meta?.['backgroundTurn'] === undefined),
+    ).toBe(true);
+  });
+
+  it('replays task completion as session status rather than an automatic execution', () => {
+    const backgroundTask = {
+      taskId: 'Explore-1',
+      kind: 'agent',
+      status: 'completed',
+    };
+    const item = {
+      ...record('completed-1', 'system', {
+        subtype: 'background_task_completed',
+        systemPayload: { displayText: 'Explore completed', backgroundTask },
+      }),
+      backgroundTurn: {
+        turnId: 'unrelated',
+        taskId: 'other',
+        kind: 'agent',
+        startedAt: 1000,
+      },
+    };
+    const projected = updates(createTranscriptReplayMachine(), item);
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Explore completed' },
+      _meta: {
+        source: 'background_task_completed',
+        qwenDiscreteMessage: true,
+        backgroundTask,
+      },
+    });
+    expect(projected[0]._meta?.['backgroundTurn']).toBeUndefined();
+  });
+
   it('stamps stable segment identity across replayed text parts', () => {
     const projected = updates(
       createTranscriptReplayMachine(),

@@ -4424,10 +4424,28 @@ class QwenAgent implements Agent {
     return `${path.resolve(runtimeBaseDir)}\0${sessionId}`;
   }
 
-  private withAskUserQuestionRestoreHint<
+  private withSessionRestoreMeta<
     T extends { _meta?: Record<string, unknown> | null },
-  >(session: Session | undefined, response: T): T {
-    if (this.argv.restoreAskUserQuestion !== true) {
+  >(
+    session: Session | undefined,
+    response: T,
+    suppressQuestionHint: boolean,
+  ): T {
+    const backgroundTurn = session?.getBackgroundTurn?.();
+    const hasRunningBackgroundTasks = session?.hasRunningBackgroundTasks?.();
+    if (backgroundTurn || hasRunningBackgroundTasks !== undefined) {
+      response = {
+        ...response,
+        _meta: {
+          ...response._meta,
+          ...(backgroundTurn ? { backgroundTurn } : {}),
+          ...(hasRunningBackgroundTasks !== undefined
+            ? { hasRunningBackgroundTasks }
+            : {}),
+        },
+      };
+    }
+    if (suppressQuestionHint || this.argv.restoreAskUserQuestion !== true) {
       return response;
     }
     if (!session?.shouldHintAskUserQuestionRestore()) {
@@ -5448,9 +5466,11 @@ class QwenAgent implements Agent {
       session: Session | undefined,
       response: T,
     ): T =>
-      suppressRestoreAskUserQuestion
-        ? response
-        : this.withAskUserQuestionRestoreHint(session, response);
+      this.withSessionRestoreMeta(
+        session,
+        response,
+        suppressRestoreAskUserQuestion,
+      );
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>
@@ -5930,9 +5950,11 @@ class QwenAgent implements Agent {
       session: Session | undefined,
       response: T,
     ): T =>
-      suppressRestoreAskUserQuestion
-        ? response
-        : this.withAskUserQuestionRestoreHint(session, response);
+      this.withSessionRestoreMeta(
+        session,
+        response,
+        suppressRestoreAskUserQuestion,
+      );
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>

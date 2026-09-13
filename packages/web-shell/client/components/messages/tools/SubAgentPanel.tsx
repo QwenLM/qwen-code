@@ -346,6 +346,9 @@ export function SubAgentPanel({
           {description && (
             <span className={styles.desc}>{truncateText(description, 50)}</span>
           )}
+          {tool.backgroundResultPending && (
+            <span className={styles.meta}>· {t('background.pending')}</span>
+          )}
           {isComplete && subToolCount > 0 && (
             <span className={styles.meta}>
               · {t('subagent.toolsCount', { count: subToolCount })}

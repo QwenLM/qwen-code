@@ -852,6 +852,13 @@ export class LiveTaskService {
     )) {
       const reason = eventWakeReason(event);
       if (!reason) continue;
+      if (
+        event.type === 'turn_complete' &&
+        (event.data as { backgroundTurn?: unknown } | null)?.backgroundTurn &&
+        task.runtime.bridge.getSessionSummary(task.bridgeSessionId)
+          .hasActivePrompt
+      )
+        continue;
       return {
         reason,
         threadId: target.threadId,

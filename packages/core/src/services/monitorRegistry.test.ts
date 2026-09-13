@@ -46,6 +46,19 @@ describe('MonitorRegistry', () => {
     vi.useRealTimers();
   });
 
+  it('does not let an old owner clear a newer status callback', () => {
+    const old = vi.fn();
+    const current = vi.fn();
+    registry.setStatusChangeCallback(old);
+    registry.setStatusChangeCallback(current);
+    registry.clearStatusChangeCallback(old);
+    registry.register(createEntry());
+    expect(current).toHaveBeenCalledTimes(1);
+    registry.clearStatusChangeCallback(current);
+    registry.cancel('mon-1');
+    expect(current).toHaveBeenCalledTimes(1);
+  });
+
   it('registers and retrieves a monitor', () => {
     const entry = createEntry();
     registry.register(entry);

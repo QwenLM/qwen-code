@@ -8,6 +8,7 @@ import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
   DaemonCapabilities,
+  DaemonBackgroundTurn,
   DaemonEvent,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
@@ -126,6 +127,11 @@ export interface DaemonConnectionState {
   tokenUsage?: DaemonTokenUsage;
   /** Authoritative Goal v2 state for the current session. */
   goalState?: GoalSnapshotV2;
+  backgroundTurn?: DaemonBackgroundTurn;
+  /** Stops a lagging live-state snapshot from reviving the finished execution. */
+  finishedBackgroundTurnId?: string;
+  /** Local monotonic time; orders background events against live-state requests. */
+  backgroundTurnObservedAt?: number;
   /** Current context-window occupancy, used with contextWindow for percentages. */
   tokenCount?: number;
   contextWindow?: number;
@@ -449,6 +455,8 @@ export interface DaemonSessionActions {
   setDaemonActivePrompt(
     active: boolean | undefined,
     owner?: Pick<DaemonActivePromptState, 'workspaceCwd' | 'sessionId'>,
+    backgroundTurn?: DaemonBackgroundTurn,
+    requestStartedAt?: number,
   ): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
   continueSession(): Promise<void>;
