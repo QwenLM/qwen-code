@@ -8,6 +8,13 @@ export interface FeishuContent {
   text: string;
   resources: FeishuResource[];
   userAuthoredText: boolean;
+  /**
+   * True when `text` is entirely adapter-synthesized placeholder output —
+   * '(image)', '(media)', '(file: …)', '(card message — not supported)' — and
+   * carries nothing a member typed. The quote wrapper gates on this: a
+   * placeholder is never another user's original message.
+   */
+  synthesizedText: boolean;
   /** Resource references dropped by the per-message cap, for reporting. */
   droppedResourceCount: number;
 }
@@ -30,20 +37,29 @@ function string(value: unknown): string {
 }
 
 /**
- * Container prefixes before a block fence: blockquote `>` markers and the
- * indentation of (nested) list items. For the harvest's purpose an
- * over-indented "fence" is code either way — an indented code block is just
- * as much not-a-resource-reference — so the prefix rule deliberately errs
- * toward treating such a line as a fence opener.
+ * Container prefixes before a block fence: blockquote `>` markers (each
+ * preceded by up to 3 spaces) plus the content indentation of an open list
+ * item. A fence closes only on a fence-run-only line carrying the opener's
+ * exact container prefix, and auto-closes where the container ends (a line
+ * without the prefix) — CommonMark's container boundary rule.
  */
-const FENCE_OPEN_RE = /^(?: {0,3}> ?)* {0,6}(`{3,}|~{3,})/;
-const FENCE_CLOSE_RE = /^(?: {0,3}> ?)* {0,6}(`{3,}|~{3,}) *$/;
+const BQ_PREFIX_RE = /^(?: {0,3}> ?)+/;
+
+interface FenceState {
+  char: string;
+  length: number;
+  prefix: string;
+}
 
 /**
- * Line-based code-fence scan: a fence opens on a fence run after optional
- * container prefixes, and closes on a line holding only the same character
- * repeated at least as many times. An unclosed fence consumes the rest of the
- * input. Linear in the input — no backreference rescans.
+ * Line-based code-fence scan with container state. A fence opens when a line
+ * — after its blockquote markers and open-list indentation are stripped —
+ * starts with at most 3 spaces then 3+ backticks or tildes. It closes on a
+ * fence-run-only line with the same character, at least the opener's length,
+ * and the opener's exact container prefix; it auto-closes at a container
+ * boundary. An unclosed fence consumes the rest of its container only. A line
+ * indented 4+ spaces with no container is an indented code block and is never
+ * harvested either. Linear in the input — no backreference rescans.
  *
  * Inline backtick runs are deliberately NOT stripped: a stray backtick is
  * common in chat text, and pairing it with a later one would silently delete
@@ -53,32 +69,68 @@ const FENCE_CLOSE_RE = /^(?: {0,3}> ?)* {0,6}(`{3,}|~{3,}) *$/;
 function scanFenceLines(
   text: string,
   onKeptLine?: (line: string) => void,
-): { fenceChar: string; fenceLength: number } | undefined {
-  let fenceChar = '';
-  let fenceLength = 0;
+): FenceState | undefined {
+  let fence: FenceState | undefined;
+  let listIndent = 0;
   for (const line of text.split('\n')) {
-    if (fenceLength === 0) {
-      const open = FENCE_OPEN_RE.exec(line);
-      if (open) {
-        fenceChar = open[1]!.charAt(0);
-        fenceLength = open[1]!.length;
-        continue;
-      }
-      onKeptLine?.(line);
-    } else {
-      const close = FENCE_CLOSE_RE.exec(line);
-      if (
-        close &&
-        close[1]!.charAt(0) === fenceChar &&
-        close[1]!.length >= fenceLength
-      ) {
-        fenceChar = '';
-        fenceLength = 0;
+    let prefix = '';
+    let rest = line;
+    const bq = BQ_PREFIX_RE.exec(rest);
+    if (bq) {
+      prefix = bq[0];
+      rest = rest.slice(prefix.length);
+    }
+    if (listIndent > 0) {
+      if (rest.startsWith(' '.repeat(listIndent))) {
+        prefix += ' '.repeat(listIndent);
+        rest = rest.slice(listIndent);
+      } else {
+        // The list ends here; a fence it held ends with it.
+        listIndent = 0;
+        fence = undefined;
       }
     }
+
+    if (fence) {
+      if (!prefix.startsWith(fence.prefix)) {
+        // Container boundary: the fence auto-closes and this line is outside.
+        fence = undefined;
+      } else {
+        const close = /^ {0,3}(`{3,}|~{3,}) *$/.exec(rest);
+        if (
+          close &&
+          prefix === fence.prefix &&
+          close[1]!.charAt(0) === fence.char &&
+          close[1]!.length >= fence.length
+        ) {
+          fence = undefined;
+        }
+        continue;
+      }
+    }
+
+    const leadingSpaces = /^ */.exec(rest)![0].length;
+    const open = /^ {0,3}(`{3,}|~{3,})/.exec(rest);
+    if (open && leadingSpaces <= 3) {
+      fence = { char: open[1]!.charAt(0), length: open[1]!.length, prefix };
+      continue;
+    }
+    if (leadingSpaces >= INDENTED_CODE_SPACES && prefix === '') {
+      // An indented code block at top level: code, so never harvested.
+      continue;
+    }
+    onKeptLine?.(line);
+    // A list marker outside a fence opens a list whose content lines carry
+    // the marker's width as extra indentation.
+    const listMarker = /^ {0,3}(?:[-*+]|\d+[.)]) /.exec(rest);
+    if (listMarker) {
+      listIndent = listMarker[0].length;
+    }
   }
-  return fenceLength ? { fenceChar, fenceLength } : undefined;
+  return fence;
 }
+
+const INDENTED_CODE_SPACES = 4;
 
 function stripFencedCode(text: string): string {
   const kept: string[] = [];
@@ -88,11 +140,15 @@ function stripFencedCode(text: string): string {
 
 /**
  * Close a fence left open at end of input (e.g. by a length cap), so text
- * appended after it is not swallowed into another message's code sample.
+ * appended after it is not swallowed into another message's code sample. The
+ * closer carries the opener's container prefix so it closes rather than
+ * opening a fresh top-level fence.
  */
 export function closeOpenFence(text: string): string {
   const open = scanFenceLines(text);
-  return open ? `${text}\n${open.fenceChar.repeat(open.fenceLength)}` : text;
+  return open
+    ? `${text}\n${open.prefix}${open.char.repeat(open.length)}`
+    : text;
 }
 
 /**
@@ -119,6 +175,7 @@ export function parseFeishuContent(
     text: '',
     resources: [],
     userAuthoredText: false,
+    synthesizedText: false,
     droppedResourceCount: 0,
   };
   let body: Record<string, unknown>;
@@ -150,7 +207,7 @@ export function parseFeishuContent(
   }
   if (type === 'image') {
     add('image', body['image_key']);
-    return { ...result, text: '(image)' };
+    return { ...result, text: '(image)', synthesizedText: true };
   }
   if (type === 'file' || type === 'audio' || type === 'media') {
     const kind = type === 'media' ? 'video' : type;
@@ -161,10 +218,15 @@ export function parseFeishuContent(
         type === 'file'
           ? `(file: ${string(body['file_name']) || 'file'})`
           : `(${kind})`,
+      synthesizedText: true,
     };
   }
   if (type === 'interactive') {
-    return { ...result, text: '(card message — not supported)' };
+    return {
+      ...result,
+      text: '(card message — not supported)',
+      synthesizedText: true,
+    };
   }
   if (type !== 'post') return result;
 
@@ -180,6 +242,7 @@ export function parseFeishuContent(
       text: '',
       resources: [],
       userAuthoredText: false,
+      synthesizedText: false,
       droppedResourceCount: 0,
     };
   }
@@ -197,10 +260,16 @@ function parsePostContent(
   const v2 = body['content_v2'];
   const rows = Array.isArray(v2) && v2.length > 0 ? v2 : body['content'];
   const lines: string[] = [];
+  // Whether any node contributed real (non-placeholder) content: title prose,
+  // text/link/mention/code/markdown — anything but an img/media placeholder.
+  let hasNonPlaceholderContent = false;
   const title = string(body['title']);
   if (title) {
     lines.push(title);
-    if (title.trim()) result.userAuthoredText = true;
+    if (title.trim()) {
+      result.userAuthoredText = true;
+      hasNonPlaceholderContent = true;
+    }
   }
   const render = (value: unknown): string => {
     const node = record(value);
@@ -208,7 +277,10 @@ function parsePostContent(
     switch (node['tag']) {
       case 'text':
       case 'a': {
-        if (text.trim() || string(node['href'])) result.userAuthoredText = true;
+        if (text.trim() || string(node['href'])) {
+          result.userAuthoredText = true;
+          hasNonPlaceholderContent = true;
+        }
         return node['tag'] === 'a' && string(node['href'])
           ? `[${text || string(node['href'])}](${string(node['href'])})`
           : text;
@@ -218,6 +290,7 @@ function parsePostContent(
         // keep userAuthoredText false so their synthesized placeholder is
         // never recorded into group history as something a member typed.
         const name = string(node['user_name']);
+        if (name) hasNonPlaceholderContent = true;
         return name ? `@${name}` : '';
       }
       case 'img':
@@ -234,6 +307,7 @@ function parsePostContent(
           .replace(/[\r\n`~]/g, '')
           .trim();
         if (text.trim() || language) result.userAuthoredText = true;
+        hasNonPlaceholderContent = true;
         // Reduce by hand, never spread: an input-sized backtick census
         // overflows the call stack via Math.max(...runs).
         let maxRun = 0;
@@ -258,9 +332,11 @@ function parsePostContent(
           .replace(new RegExp(MD_AT_TAG_SOURCE, 'g'), '')
           .replace(mdImageRe(), '');
         if (visible.trim()) result.userAuthoredText = true;
+        if (text.trim()) hasNonPlaceholderContent = true;
         return text;
       }
       case 'hr':
+        hasNonPlaceholderContent = true;
         return '---';
       default:
         return '';
@@ -319,5 +395,9 @@ function parsePostContent(
   }
   result.text = lines.join('\n').trim();
   if (!result.text && result.resources.length) result.text = '(media)';
+  // The text is adapter-synthesized when every rendered line is a media
+  // placeholder (or there were none and the fallback produced one). Such text
+  // is never wrapped as another user's quoted message.
+  result.synthesizedText = !hasNonPlaceholderContent;
   return result;
 }

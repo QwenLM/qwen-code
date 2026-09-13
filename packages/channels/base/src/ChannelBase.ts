@@ -4922,10 +4922,23 @@ export abstract class ChannelBase {
     );
   }
 
+  /**
+   * The registered local command `text` carries, or null. `/btw` counts only
+   * when the bridge can answer it out of band — without the capability it
+   * forwards to the agent, so it is NOT local then. Adapters use this to skip
+   * model-facing work (quote wrappers, media downloads) on turns the agent
+   * will never see. Synchronous and session-free like parseCommand.
+   */
+  protected localCommandName(text: string): string | null {
+    const parsed = this.parseCommand(text);
+    if (!parsed) return null;
+    if (parsed.command === 'btw') return this.bridge.btw ? 'btw' : null;
+    return this.commands.has(parsed.command) ? parsed.command : null;
+  }
+
   /** Check if a message text matches a registered local command. */
   protected isLocalCommand(text: string): boolean {
-    const parsed = this.parseCommand(text);
-    return parsed !== null && this.commands.has(parsed.command);
+    return this.localCommandName(text) !== null;
   }
 
   private findActiveSessionId(envelope: Envelope): string | undefined {
@@ -5928,24 +5941,6 @@ export abstract class ChannelBase {
     // agent unattributed.
     const firstToken = trimmed.slice(1).split(/\s+/u)[0] ?? '';
     return COMMAND_TOKEN_RE.test(firstToken);
-  }
-
-  /**
-   * Whether `text` is a slash command this channel handles locally and never
-   * forwards to the model (e.g. /approve, /clear, /btw when the bridge
-   * supports it). Agent commands forward as prompt text, so they return false
-   * here. Adapters use this to skip model-facing work (quote wrappers, media
-   * downloads) on turns the agent will never see. Synchronous and
-   * session-free like isSlashCommand.
-   */
-  protected isLocallyHandledCommand(text: string): boolean {
-    if (!this.isSlashCommand(text)) return false;
-    const parsed = this.parseCommand(text);
-    if (!parsed) return false;
-    // /btw is registered unconditionally but handled locally only when the
-    // bridge can answer it out of band (otherwise it forwards to the agent).
-    if (parsed.command === 'btw') return this.bridge.btw !== undefined;
-    return this.commands.has(parsed.command);
   }
 
   /**

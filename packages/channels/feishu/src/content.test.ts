@@ -235,6 +235,44 @@ describe('parseFeishuContent (#11554)', () => {
     expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
   });
 
+  it('auto-closes a blockquoted fence at the container boundary', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '> ```\n> ![doc](img_fenced)\nsee ![real](img_real)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
+  });
+
+  it('never harvests an indented code block', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: 'some text\n    ![sample](img_fake)\nsee ![real](img_real)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
+  });
+
+  it('closeOpenFence closes a container-prefixed fence with its prefix', () => {
+    expect(closeOpenFence('> ```\n> code')).toBe('> ```\n> code\n> ```');
+  });
+
   it('treats a blockquoted fence as a fence', () => {
     const result = parseFeishuContent(
       'post',
