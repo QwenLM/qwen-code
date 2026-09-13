@@ -172,34 +172,6 @@ export function mountWebShellAssets(
   frameAncestors: readonly string[] = [],
 ): void {
   const sendIndex = createSendIndex(webShellDir, frameAncestors);
-  for (const [file, contentType] of [
-    ['manifest.webmanifest', 'application/manifest+json'],
-    ['service-worker.js', 'text/javascript'],
-  ]) {
-    app.get(`/${file}`, (_req: Request, res: Response) => {
-      res
-        .type(contentType)
-        .set('Cache-Control', 'no-cache')
-        .set('X-Content-Type-Options', 'nosniff');
-      res.sendFile(
-        path.join(webShellDir, file),
-        { cacheControl: false, dotfiles: 'allow' },
-        (error) => {
-          if (!error) return;
-          if (res.headersSent) {
-            res.end();
-            return;
-          }
-          res
-            .status(
-              (error as NodeJS.ErrnoException).code === 'ENOENT' ? 404 : 500,
-            )
-            .type('text/plain')
-            .send('Unable to load Web Shell asset');
-        },
-      );
-    });
-  }
   app.use(
     '/assets',
     express.static(path.join(webShellDir, 'assets'), {
@@ -228,6 +200,29 @@ export function mountWebShellAssets(
   app.get('/session/:id', (req: Request, res: Response, next: NextFunction) => {
     if (!isDocumentNavigation(req)) return next();
     sendIndex(req, res);
+  });
+  // PWA manifest — must be pre-auth: browsers fetch it during link parsing
+  // before any Authorization header can be attached. Served with no-cache so
+  // a redeployed daemon serves an updated manifest immediately.
+  app.get('/manifest.webmanifest', (_req: Request, res: Response) => {
+    const manifestPath = path.join(webShellDir, 'manifest.webmanifest');
+    res
+      .set('Content-Type', 'application/manifest+json')
+      .set('Cache-Control', 'no-cache')
+      .set('X-Content-Type-Options', 'nosniff')
+      .sendFile(manifestPath, { dotfiles: 'allow' });
+  });
+  // Service worker — must be at the scope root and must NOT be long-cached.
+  // `Service-Worker-Allowed: /` is implicit for a file served at `/sw.js` but
+  // we send it explicitly to be safe with any intermediary cache.
+  app.get('/sw.js', (_req: Request, res: Response) => {
+    const swPath = path.join(webShellDir, 'sw.js');
+    res
+      .set('Content-Type', 'application/javascript')
+      .set('Cache-Control', 'no-cache')
+      .set('Service-Worker-Allowed', '/')
+      .set('X-Content-Type-Options', 'nosniff')
+      .sendFile(swPath, { dotfiles: 'allow' });
   });
 }
 

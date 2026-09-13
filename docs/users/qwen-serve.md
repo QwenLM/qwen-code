@@ -472,29 +472,39 @@ same server in a standalone window with the Qwen Code name and icon. On iOS,
 use the browser's Share menu and **Add to Home Screen**. Availability depends
 on the browser and device.
 
+The daemon serves the PWA metadata itself: `GET /manifest.webmanifest` and
+`GET /sw.js` are pre-auth routes (the browser fetches both before any
+Authorization header exists), and `sw.js` is served with
+`Service-Worker-Allowed: /` so its scope covers the whole origin. The worker
+caches only Vite-built `/assets/*` files, cache-first; every daemon API route —
+and every request carrying an authorization header — is passed to the network
+untouched.
+
 Use a trusted HTTPS connection for a phone or other remote device; HTTP on
 `localhost` or a loopback address is supported for local development. Plain
 HTTP on a LAN IP does not enable the service worker. See the TLS instructions
 above; installation does not bypass certificate or authentication checks.
 
-Installation always launches the server root. A token, session link or workspace
-in the current address is never included in the app's launch URL. You may need
-to enter the token again in the installed app: it uses the existing Web Shell
-authentication flow and does not add persistent credential storage.
+Installation always launches the server root. A token, session link or
+workspace in the current address is never included in the app's launch URL.
+You may need to enter the token again in the installed app: it uses the
+existing Web Shell authentication flow and does not add persistent credential
+storage.
 
 The server must remain running and reachable. After the service worker has
 activated and taken control of a page, opening the root or a session link when
-the connection fails shows a retry page. No conversations, files, API responses
-or credentials are saved in a service-worker cache. Existing HTTP errors still
-come from the server. This first step does not provide offline work, Web Push
-or notifications while the app is closed. Worker updates use the browser's
-normal lifecycle and do not force an active conversation to reload.
+the connection fails shows a retry page. No conversations, files, API
+responses or credentials are saved in a service-worker cache. Existing HTTP
+errors still come from the server. This first step does not provide offline
+work, Web Push or notifications while the app is closed. Worker updates use
+the browser's normal lifecycle and do not force an active conversation to
+reload.
 
 The installation metadata uses the built-in Qwen Code identity; runtime custom
 branding still applies inside the Web Shell. Embedded library consumers do not
 register the worker. To remove the installation, use your browser or operating
-system's app management; to remove its service worker and stored site data, use
-the browser's site settings.
+system's app management; to remove its service worker and stored site data,
+use the browser's site settings.
 
 ## CLI flags
 

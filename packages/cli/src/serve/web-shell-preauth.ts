@@ -70,8 +70,12 @@ export function isPreAuthWebShellRequest(req: Request): boolean {
     reqPath === '//' ||
     reqPath === '/assets' ||
     reqPath.startsWith('/assets/') ||
-    /^\/(?:manifest\.webmanifest|service-worker\.js)\/?$/u.test(reqPath) ||
-    reqPath === '/mcp-app-sandbox'
+    reqPath === '/mcp-app-sandbox' ||
+    // PWA files: manifest must be pre-auth (browser fetches it during link
+    // parsing before any Authorization header can be attached); sw.js is a
+    // no-credential subresource loaded by the browser's SW registration call.
+    reqPath === '/manifest.webmanifest' ||
+    reqPath === '/sw.js'
   )
     return true;
   return SESSION_DEEP_LINK_PATH.test(reqPath) && isDocumentNavigation(req);

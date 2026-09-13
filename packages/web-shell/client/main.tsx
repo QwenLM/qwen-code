@@ -8,7 +8,6 @@ import {
   type DaemonProductSessionContext,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { BrowserTurnNotifications } from './browser-turn-notifications';
-import { registerServiceWorker } from './register-service-worker';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { StandaloneAuth } from './components/StandaloneAuth';
 import { RootErrorFallback } from './components/RootErrorFallback';
@@ -358,7 +357,6 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
 async function main() {
   const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
   removeDaemonTokenFromUrl();
-  registerServiceWorker();
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -383,3 +381,25 @@ async function main() {
 }
 
 void main();
+
+// Register the PWA service worker.
+//
+// Deferred to `load` so the SW registration does not compete with the React
+// module graph during initial load. `navigator.serviceWorker` is only defined
+// in secure contexts (HTTPS or localhost) — the check also guards against
+// environments where SW is intentionally disabled.
+//
+// The SW is served at /sw.js by the daemon's static handler (pre-auth, no-cache)
+// with `Service-Worker-Allowed: /` so its scope covers the whole origin.
+if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register('/sw.js', { scope: '/' })
+      .catch((err: unknown) => {
+        // Non-fatal: the SW is a progressive enhancement. Log to console so a
+        // developer running the shell locally can see the reason (e.g. HTTP
+        // on a non-localhost origin).
+        console.warn('qwen-code: service worker registration failed:', err);
+      });
+  });
+}

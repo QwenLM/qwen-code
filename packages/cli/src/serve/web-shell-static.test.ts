@@ -40,3 +40,23 @@ describe('Web Shell sandbox framing', () => {
     expect(policy).not.toContain('localhost');
   });
 });
+
+import { isPreAuthWebShellRequest } from './web-shell-preauth.js';
+import type { Request } from 'express';
+
+const pwaRequest = (path: string) =>
+  ({ method: 'GET', path, headers: {} }) as unknown as Request;
+
+describe('isPreAuthWebShellRequest', () => {
+  it('allows PWA files pre-auth', () => {
+    expect(isPreAuthWebShellRequest(pwaRequest('/manifest.webmanifest'))).toBe(
+      true,
+    );
+    expect(isPreAuthWebShellRequest(pwaRequest('/sw.js'))).toBe(true);
+    expect(isPreAuthWebShellRequest(pwaRequest('/assets/icon.svg'))).toBe(true);
+  });
+
+  it('blocks API routes', () => {
+    expect(isPreAuthWebShellRequest(pwaRequest('/capabilities'))).toBe(false);
+  });
+});
