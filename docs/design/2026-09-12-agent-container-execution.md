@@ -2,7 +2,7 @@
 
 [English](2026-09-12-agent-container-execution.md) | [简体中文](2026-09-12-agent-container-execution.zh-CN.md)
 
-Status: backend and operator/definition policy implemented. Independent Linux rootful Docker verification covers an earlier revision; Podman/rootless verification remains pending. Related: #11695, #11696, #9556.
+Status: backend and operator/definition policy implemented. Independent Linux Docker and rootful/rootless Podman verification covers `e544823995`; subsequent review fixes have local controlled-worker verification and still need native-runtime revalidation. Related: #11695, #11696, #9556.
 
 ## Problem and current state
 
@@ -261,7 +261,12 @@ pending preparation and permission; abort listeners are removed first to avoid
 reentrant release. Its release RPC has an independent
 30-second timeout so an unresponsive worker cannot strand cancellation cleanup.
 Container creation may pull a cold
-image and has no fixed 30-second limit; it remains cancellable. Runtime metadata
+image and has no fixed 30-second limit; it remains cancellable. With
+`QWEN_DEBUG_LOG_FILE=1`, the session debug log records the runtime, container name,
+image and possible pull before waiting for creation. Nonempty `ServerErrors`
+from runtime metadata abort startup before temporary directories or containers
+are allocated, even when the command exits successfully. A failed create still
+requires cleanup because its runtime-side outcome may be unknown. Runtime metadata
 and removal commands retain their 30-second limit. Session shutdown aborts
 pending startup and begins container disposal before other exit cleanups. Its
 wait is bounded at one second, within the CLI's unchanged two-second per-step

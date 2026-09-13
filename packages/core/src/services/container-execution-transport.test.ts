@@ -42,6 +42,26 @@ describe.skipIf(process.platform === 'win32')(
     const reply = (id: string, value: unknown) =>
       child.stdout.write(`${JSON.stringify({ id, result: value })}\n`);
 
+    const createEnvironment = () =>
+      ContainerExecutionEnvironment.create(
+        new Config({
+          targetDir: join(root, 'workspace'),
+          cwd: join(root, 'workspace'),
+          debugMode: false,
+          deferTelemetryInitialization: true,
+        }),
+        {
+          runtime: 'docker',
+          image: 'fixture',
+          bundleDirectory: join(root, 'bundle'),
+          trustedDirectories: [],
+          runtimeEnv: {},
+          environment: [],
+          containerHome: '/executor-home',
+        },
+        signal,
+      );
+
     beforeEach(async () => {
       root = await realpath(
         await mkdtemp(join(tmpdir(), 'execution-transport-')),
@@ -85,24 +105,7 @@ describe.skipIf(process.platform === 'win32')(
       runtime.execFile.mockImplementation(
         (_runtime, _args, _options, callback) => callback(null, '{}', ''),
       );
-      environment = await ContainerExecutionEnvironment.create(
-        new Config({
-          targetDir: workspace,
-          cwd: workspace,
-          debugMode: false,
-          deferTelemetryInitialization: true,
-        }),
-        {
-          runtime: 'docker',
-          image: 'fixture',
-          bundleDirectory: bundle,
-          trustedDirectories: [],
-          runtimeEnv: {},
-          environment: [],
-          containerHome: '/executor-home',
-        },
-        signal,
-      );
+      environment = await createEnvironment();
     });
 
     afterEach(async () => {
@@ -117,6 +120,67 @@ describe.skipIf(process.platform === 'win32')(
 
     const prepare = (id: string) =>
       environment.prepare({ id, toolName: 'read_file', params: {} }, signal);
+
+    it('rejects server errors from a successful info command before creating a container', async () => {
+      await environment.dispose();
+      runtime.execFile.mockClear();
+      runtime.spawn.mockClear();
+      runtime.execFile.mockImplementation(
+        (_runtime, args, _options, callback) => {
+          if (args[0] === 'info') {
+            callback(
+              null,
+              JSON.stringify({
+                ServerErrors: ['daemon unavailable', 'connection refused'],
+              }),
+              '',
+            );
+          } else {
+            callback(
+              args[0] === 'create' ? new Error('unexpected create') : null,
+              '',
+              '',
+            );
+          }
+        },
+      );
+      await expect(createEnvironment()).rejects.toThrow(
+        'docker info failed: daemon unavailable; connection refused',
+      );
+      expect(runtime.execFile.mock.calls.map((call) => call[1][0])).toEqual([
+        'info',
+      ]);
+      expect(runtime.spawn).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, null, []])(
+      'still attempts cleanup after an ambiguous create failure when ServerErrors is %j',
+      async (serverErrors) => {
+        await environment.dispose();
+        runtime.execFile.mockClear();
+        runtime.spawn.mockClear();
+        runtime.execFile.mockImplementation(
+          (_runtime, args, _options, callback) => {
+            callback(
+              args[0] === 'create' ? new Error('create response lost') : null,
+              args[0] === 'info'
+                ? JSON.stringify({ ServerErrors: serverErrors })
+                : '',
+              '',
+            );
+          },
+        );
+        await expect(createEnvironment()).rejects.toThrow(
+          'create response lost',
+        );
+        expect(runtime.execFile.mock.calls.map((call) => call[1][0])).toEqual([
+          'info',
+          'create',
+          'rm',
+        ]);
+        expect(runtime.spawn).not.toHaveBeenCalled();
+      },
+    );
 
     it('cancels only the interrupted request and ignores its late reply without replay', async () => {
       await prepare('a');

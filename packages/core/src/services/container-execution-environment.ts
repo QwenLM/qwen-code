@@ -27,6 +27,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import type {
   ToolConfirmationOutcome,
@@ -44,6 +45,8 @@ import type {
   PreparedExecution,
 } from './execution-environment.js';
 import { ExecutionCleanupError } from './execution-environment.js';
+
+const debugLogger = createDebugLogger('ContainerExecutionEnvironment');
 
 export interface ContainerExecutionOptions {
   runtime: 'docker' | 'podman';
@@ -198,6 +201,9 @@ class ContainerWorker {
     signal: AbortSignal,
   ): Promise<void> {
     signal.throwIfAborted();
+    debugLogger.debug(
+      `Creating ${this.options.runtime} container ${this.name} with image ${this.options.image} (may pull the image; cancellation is available).`,
+    );
     await runtimeCommand(
       this.options,
       workerContainerArguments(
@@ -409,6 +415,14 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
       ['info', '--format', '{{json .}}'],
       signal,
     );
+    const serverErrors = (
+      JSON.parse(info) as { ServerErrors?: string[] | null }
+    ).ServerErrors;
+    if (serverErrors?.length) {
+      throw new Error(
+        `${options.runtime} info failed: ${serverErrors.join('; ')}`,
+      );
+    }
     const rootless =
       info.includes('"name=rootless"') ||
       info.includes('"rootless":true') ||
