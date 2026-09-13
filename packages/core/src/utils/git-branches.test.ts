@@ -757,7 +757,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     // Tracking must still point at upstream, not origin.
     const tracking = git(
@@ -781,7 +781,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const branch = currentBranch(dir);
     const tracking = git(
@@ -804,7 +804,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '--amend', '-m', 'amended');
 
-    await gitPush(dir, { force: true });
+    await gitPush(dir, { force: true }, hermeticEnv());
 
     const remoteLog = git(remote, 'log', '--oneline', '-1');
     expect(remoteLog).toContain('amended');
