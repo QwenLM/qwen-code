@@ -32,8 +32,10 @@ let tmpDir: string;
 function makeConfig(overrides?: {
   arenaManager?: unknown;
   teamManager?: unknown;
+  agentExecutionBackend?: 'container';
 }) {
   return {
+    getAgentExecutionBackend: () => overrides?.agentExecutionBackend,
     getArenaManager: () => overrides?.arenaManager ?? null,
     getTeamManager: () => overrides?.teamManager ?? null,
     getSubagentManager: () => null,
@@ -106,6 +108,57 @@ describe('TeamCreateTool', () => {
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('A dev team');
   });
+
+  it.each(['empty', 'orphan', 'stale'])(
+    'refuses required-container teams without changing %s state',
+    async (state) => {
+      const teamDir = path.join(tmpDir, 'teams', 'protected-team');
+      const files = new Map<string, string>();
+      if (state !== 'empty') {
+        files.set(
+          path.join(tmpDir, 'tasks', 'protected-team', '1.json'),
+          JSON.stringify({ id: '1', subject: 'Existing task' }),
+        );
+        files.set(
+          path.join(teamDir, 'inboxes', 'leader.json'),
+          JSON.stringify([{ text: 'Existing message' }]),
+        );
+      }
+      if (state === 'stale') {
+        const child = spawnSync(process.execPath, ['-e', '']);
+        files.set(
+          path.join(teamDir, 'config.json'),
+          JSON.stringify({
+            name: 'protected-team',
+            leadPid: child.pid,
+            members: [],
+          }),
+        );
+      }
+      for (const [file, content] of files) {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, content);
+      }
+      const before = (await fs.readdir(tmpDir, { recursive: true })).sort();
+      const config = makeConfig({ agentExecutionBackend: 'container' });
+      const result = await new TeamCreateTool(config)
+        .build({ team_name: 'protected-team' })
+        .execute(new AbortController().signal);
+
+      expect(result.error?.message).toContain(
+        'Container execution is required',
+      );
+      expect(result.llmContent).not.toContain('created');
+      expect(config.setTeamManager).not.toHaveBeenCalled();
+      expect(config.setTeamContext).not.toHaveBeenCalled();
+      expect((await fs.readdir(tmpDir, { recursive: true })).sort()).toEqual(
+        before,
+      );
+      for (const [file, content] of files) {
+        expect(await fs.readFile(file, 'utf-8')).toBe(content);
+      }
+    },
+  );
 
   it('returns error for empty team name', async () => {
     const tool = new TeamCreateTool(makeConfig());

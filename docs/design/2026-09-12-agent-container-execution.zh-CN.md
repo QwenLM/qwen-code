@@ -73,7 +73,9 @@ CLI 变量同时设置能力和要求。Core API 宿主可只注入 factory 而�
 单独选择。定义不能创建缺失的能力。本轮不新增 CLI 的仅启用能力设置。
 
 Team、Arena、workflow、外部 executor 和保留的普通/fork 恢复路径没有容器生命周期，
-要求容器时拒绝。直接构造 Headless 和当前 in-process Team 后端须在本地工具循环开始前
+要求容器时拒绝。操作者要求容器时，Team 创建和 Arena 启动在创建或回收 Team 文件、
+重置任务或收件箱、挂载 Team 状态、创建 Arena worktree 之前拒绝。
+直接构造 Headless 和当前 in-process Team 后端须在本地工具循环开始前
 检查。可调用工具的内部 fork（记忆提取、dream、remember 和 skill review）也拒绝；
 明确丢弃工具调用的缓存查询 fork 仍可用。不得清除派生策略来绕过限制。
 Daemon、managed runtime 和 SSH 支持仍不在范围内。没有未决策略：定义可增强，

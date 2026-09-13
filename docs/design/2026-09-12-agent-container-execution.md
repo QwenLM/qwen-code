@@ -100,6 +100,9 @@ provision missing capability. This slice adds no CLI capability-only setting.
 
 Teams, Arena, workflows, external executors and retained regular/fork resumes
 have no container lifecycle and refuse when container execution is required.
+When the operator requires containers, Team creation and Arena startup refuse
+before creating or reclaiming team files, resetting tasks or inboxes, attaching
+team state, or provisioning Arena worktrees.
 Direct Headless construction and the current in-process team backend must guard
 before a local tool loop starts. Tool-capable internal forks (memory extraction,
 dream, remember and skill review) also refuse; cache-only fork queries that
