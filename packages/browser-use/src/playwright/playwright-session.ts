@@ -23,6 +23,7 @@ import {
 } from './qwen-playwright-transport.js';
 import {
   consoleLevel,
+  orderOpenTabs,
   providerTab,
   providerTabs,
   pushBounded,
@@ -198,7 +199,9 @@ export class PlaywrightSession {
 
   async newTab(): Promise<TabInfo> {
     const provider = providerTab(await this.bridge.request('tabs.create'));
-    return await this.registerTab(provider);
+    const info = await this.registerTab(provider);
+    this.selectedTabId = info.id;
+    return info;
   }
 
   async listTabs(): Promise<TabInfo[]> {
@@ -225,7 +228,12 @@ export class PlaywrightSession {
   }
 
   async openTabs(): Promise<BrowserUserTabInfo[]> {
-    const providers = providerTabs(await this.bridge.request('tabs.queryOpen'));
+    // The model is told it sees http(s) tabs newest first, so establish that
+    // here rather than trusting the relay's order; the discovery records and
+    // the returned list are built from the same ordered list.
+    const providers = orderOpenTabs(
+      providerTabs(await this.bridge.request('tabs.queryOpen')),
+    );
     this.discoveredTabs.clear();
     return providers.map((provider) => {
       const tab: DiscoveredTab = {
@@ -278,9 +286,13 @@ export class PlaywrightSession {
         'STALE_TAB',
         'The Chrome tab changed after discovery; list open tabs again',
       );
-    return await this.registerTab(current);
+    const info = await this.registerTab(current);
+    this.selectedTabId = info.id;
+    return info;
   }
 
+  // Background callers (popup adoption) register tabs too, so registration
+  // must not move the selection; newTab and claimTab select what they return.
   private async registerTab(provider: ProviderTab): Promise<TabInfo> {
     this.assertRunning();
     const tabIdPrefix = this.tabIdPrefix;
@@ -288,7 +300,6 @@ export class PlaywrightSession {
       (tab) => tab.providerTabId === provider.providerTabId && !tab.stale,
     );
     if (existing !== undefined) {
-      this.selectedTabId = existing.id;
       const info = await this.tabInfo(existing);
       this.assertRunning();
       if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
@@ -301,7 +312,6 @@ export class PlaywrightSession {
         (tab) => tab.providerTabId === provider.providerTabId && !tab.stale,
       );
       if (registered !== undefined) {
-        this.selectedTabId = registered.id;
         const info = await this.tabInfo(registered);
         this.assertRunning();
         if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
@@ -345,7 +355,6 @@ export class PlaywrightSession {
       };
       this.installPageObservers(tab, transport);
       this.tabs.set(tab.id, tab);
-      this.selectedTabId = tab.id;
       const info = await this.tabInfo(tab);
       this.assertRunning();
       if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();

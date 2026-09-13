@@ -206,6 +206,9 @@ describe('Chrome screenshot acquisition', () => {
     };
     const image = await captureTabScreenshot(tab(), {}, bridge);
     expect(image.base64).toBe(jpeg(800, 600).toString('base64'));
+    // The fallback capture answers the same bytes, so only the absence of a
+    // capture shows the fresh frame was accepted.
+    expect(bridge.methods()).not.toContain('Page.captureScreenshot');
     expect(
       bridge.request.mock.calls
         .filter(([, args]) => args?.method === 'Page.screencastFrameAck')
@@ -522,6 +525,28 @@ describe('Chrome screenshot acquisition', () => {
     expect(bridge.request.mock.calls.at(-1)?.[1]?.params).toMatchObject({
       clip: { scale: 1.25 },
     });
+  });
+
+  it('bounds a viewport capture that bypasses the screencast', async () => {
+    const bridge = new ScreenshotBridge();
+    bridge.pixelRatio = 0.5;
+    bridge.viewport = {
+      clientWidth: 3000,
+      clientHeight: 1914,
+      pageX: 0,
+      pageY: 0,
+    };
+    bridge.captureData = Buffer.concat([
+      jpeg(3000, 1914),
+      Buffer.alloc(4 * 1024 * 1024),
+    ]).toString('base64');
+    await expect(captureTabScreenshot(tab(), {}, bridge)).rejects.toMatchObject(
+      {
+        code: 'OPERATION_FAILED',
+        message: expect.stringContaining('byte budget'),
+      },
+    );
+    expect(bridge.methods()).not.toContain('Page.startScreencast');
   });
 
   it('rejects a fallback capture that does not match the CSS viewport', async () => {

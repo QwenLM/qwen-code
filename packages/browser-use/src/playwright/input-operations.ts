@@ -163,6 +163,9 @@ async function dispatchAuxiliaryClick(
   const session = await page.context().newCDPSession(page);
   try {
     for (const key of held) await page.keyboard.down(key);
+    // The CDP button events bypass Playwright's cursor tracking; a later
+    // wheel without a target must land where this click did.
+    await page.mouse.move(x, y);
     await session.send('Input.dispatchMouseEvent', {
       type: 'mousePressed',
       x,

@@ -559,6 +559,7 @@ export class PlaywrightRuntime {
 function assertDialogAllows(method: string, tab: TabState): void {
   if (
     tab.dialog === undefined ||
+    method === 'tabs.get' ||
     method === 'tab.getJsDialog' ||
     method === 'tab.dialog.accept' ||
     method === 'tab.dialog.dismiss' ||

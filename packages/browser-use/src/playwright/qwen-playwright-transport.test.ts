@@ -154,7 +154,6 @@ describe('QwenPlaywrightTransport', () => {
       'tabs.attach',
       'tabs.detach',
     ]);
-    expect(transport.providerTabId('target-7')).toBeUndefined();
   });
 
   it('aborts the attachment when the tab is removed mid-attach', async () => {
@@ -192,7 +191,6 @@ describe('QwenPlaywrightTransport', () => {
         (message) => message.method === 'Target.attachedToTarget',
       ),
     ).toEqual([]);
-    expect(transport.providerTabId('target-7')).toBeUndefined();
     await transport.close();
   });
 

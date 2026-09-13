@@ -220,12 +220,6 @@ export class BrowserModel {
     return undefined;
   }
 
-  providerTabId(targetId: string): number | undefined {
-    return this.findSession(
-      (candidate) => candidate.targetInfo.targetId === targetId,
-    )?.tabId;
-  }
-
   attachToBrowserTarget(): { sessionId: string } {
     const sessionId = `pw-browser-${this.nextSessionId++}`;
     this.browserSessions.add(sessionId);
