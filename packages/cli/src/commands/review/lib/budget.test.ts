@@ -1308,7 +1308,7 @@ describe('isFixAuditRound and the topology override (#10104)', () => {
     // `incrementalScopeOf` degrades to full scope when the delta list is
     // empty beside an empty interaction list, and when it carries a
     // non-string element; the shape readers must refuse the same plans, or
-    // the roster drops Agent 0 while every brief runs full-scope.
+    // the roster fans out per territory while every brief runs full-scope.
     const scope = POSTURE.incremental.scope;
     const divergent = [
       { ...scope, deltaFiles: [], interaction: [] },
@@ -1394,24 +1394,16 @@ describe('isFixAuditRound and the topology override (#10104)', () => {
   });
 });
 
-describe('interactionEntryOf — one admission for every census reader (#10136)', () => {
-  it('keeps the entry and drops a census that cannot be true', () => {
-    for (const seam of [
-      { kept: 5, total: 2 },
-      { kept: -1, total: 2 },
-      { kept: 1.5, total: 2 },
-      { kept: '1', total: 2 },
-      null,
-      'garbled',
-    ]) {
-      expect(
-        interactionEntryOf({
-          path: 'src/b.ts',
-          importsChanged: ['src/a.ts'],
-          seam,
-        }),
-      ).toEqual({ path: 'src/b.ts', importsChanged: ['src/a.ts'] });
-    }
+describe('interactionEntryOf — one admission for every interaction-entry reader (#10136)', () => {
+  it('keeps the edge and nothing else an entry carries', () => {
+    expect(
+      interactionEntryOf({
+        path: 'src/b.ts',
+        importsChanged: ['src/a.ts'],
+        seam: { kept: 1, total: 2 },
+        note: 'a field no reader renders',
+      }),
+    ).toEqual({ path: 'src/b.ts', importsChanged: ['src/a.ts'] });
   });
 
   it('refuses an entry the briefs would not render', () => {

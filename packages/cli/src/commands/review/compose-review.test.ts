@@ -3307,13 +3307,16 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     expect(r.body).not.toContain('were recorded and deferred');
   });
 
-  it('an RC body owns the reduced shape, cause and seam census', () => {
+  it('an RC body owns the reduced shape, cause and interaction clause', () => {
     const r = composeReview(rcInput(POSTURE));
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.body).toContain(
       'fix-audit round under the critical posting posture',
     );
     expect(r.body).toContain('engaged by the round schedule');
+    expect(r.body).toContain(
+      'covered the commits since the previous round plus their import-seam interaction files',
+    );
     // The wave sentence states the scheduler's INCLUSION rule (#10136
     // R12-2) — true of delta ∪ non-dry ∪ stale-dry ∪ no-history on every
     // wave, engaged narrowing or not — never the past-tense "only delta
@@ -3325,12 +3328,12 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       're-launched delta territories under the ordinary retirement rules (a twice-dry one only on its cold-check rounds)',
     );
     expect(r.body).toContain(
-      'a yield, an uncertified receipt, an uncertified SIBLING in the same round, a findings list that cannot be read where an earlier round was not dry, or no audit history keeps a chunk in the wave; a dry receipt that shows no evidence of having seen an earlier yield or uncertified receipt — same list, same entries modulo verification tags, no entry for the filed finding, or a filing whose file line this reader cannot turn into a comparable token — returns it to the ordinary retirement rules',
+      'a yield, an uncertified receipt, or no audit history keeps a chunk in the wave; a dry receipt returns it to the ordinary retirement rules when it shares its launch with a yield or uncertified receipt — rounds 1 and 2, the convergence pair, are one launch — was built on the same findings-list bytes as one, or ran in a different session from some earlier return that was not dry, or beside one no session stamped',
     );
     expect(r.body).not.toContain('chunks whose previous wave yielded');
   });
 
-  it('the Chinese half carries the same shape, rule, cause, census and licence tail', () => {
+  it('the Chinese half carries the same shape, rule, cause, interaction clause and licence tail', () => {
     // The zh twin of every round-shape string, rendered through the same
     // bilingual switch the posted body uses (a Han-description PR).
     const hanInput = (
@@ -3349,12 +3352,18 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       '轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行',
     );
     expect(r.body).toContain('由轮次日程触发');
+    expect(r.body).toContain(
+      '领地扇出只覆盖上一轮以来的 commits 及其 import 接缝 interaction 文件',
+    );
     expect(r.body).toContain('此前各波未能证实干燥的非 delta chunk');
     expect(r.body).toContain(
       '按普通退役规则重发 delta 领地（两次干燥的只在其冷检轮重发）',
     );
     expect(r.body).toContain(
-      '出过发现、收据未认证、同轮存在未认证的兄弟、在此前某轮非干燥时发现清单不可读、或无审计历史，都会让 chunk 留在波内；干燥收据若没有证据表明见过此前的发现或未认证收据',
+      '出过发现、收据未认证或无审计历史，都会让 chunk 留在波内；干燥收据若与出过发现或未认证的收据属于同一次启动',
+    );
+    expect(r.body).toContain(
+      '又或与此前某个非干燥返回不在同一个会话里（或该返回没有会话戳），则该 chunk 回到普通退役规则',
     );
     expect(r.body).not.toContain('上一波出过发现的 chunk');
 
@@ -3510,9 +3519,9 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     expect(r.body).not.toContain('import-seam interaction files');
   });
 
-  it('counts a seam census only on an entry the briefs would render — one admission (#10136)', () => {
-    // An entry with no surviving edge is one `incrementalScopeOf` drops; its
-    // census must not reach the body either, or the disclosure counts a
+  it('counts an interaction file only on an entry the briefs would render — one admission (#10136)', () => {
+    // An entry with no surviving edge is one `incrementalScopeOf` drops; it
+    // must not be counted in the body either, or the disclosure counts a
     // reduction on a file no brief described.
     const r = composeReview(
       rcInput({
@@ -3532,7 +3541,7 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
         },
       }),
     );
-    expect(r.body).not.toContain('seam-bounded');
+    expect(r.body).not.toContain('plus their import-seam interaction files');
     expect(r.body).toContain('no still-clean importer re-entered the scope');
   });
 

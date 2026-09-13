@@ -5982,6 +5982,11 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).toContain('— chunk 15 ─');
     expect(out).not.toContain('— chunk 14 ─');
     expect(out).toContain('posture-narrowed chunk(s) skipped');
+    // Nothing retired this round, so the clause names the one note there is.
+    expect(out).toContain(
+      '1 posture-narrowed chunk(s) skipped; the posture narrowing note after the end-of-round line says which',
+    );
+    expect(out).not.toMatch(/\(0 retired/);
     expect(out).toContain('posture narrowing (#10104)');
     expect(out).toContain('chunk 14 — not a delta territory, dry in round 2');
     // The note states the scheduler's inclusion rule — a non-delta chunk
@@ -5992,7 +5997,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     );
     expect(out).toContain('uncertified (unknown)');
     expect(out).toContain(
-      'stale against a same-digest yield, an uncertified receipt, or a filing whose file line cannot be read as a comparable token',
+      'shares its launch with a yield or an uncertified receipt (rounds 1 and 2, the convergence pair, are one launch), was built on the same findings-list bytes as one, or ran in a different session from some return on record that was not dry (or beside one no session stamped) returns to the ordinary retirement rules',
     );
     expect(out).toContain('under the ordinary retirement rules');
     expect(out).toContain('returns to the ordinary retirement rules');

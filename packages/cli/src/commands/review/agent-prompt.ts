@@ -326,10 +326,9 @@ function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
     Array.isArray(v)
       ? v.filter((s): s is string => typeof s === 'string' && s.length > 0)
       : [];
-  // ONE admission per entry, shared with the roster and compose's
-  // round-shape disclosure (`interactionEntryOf`, #10136): an entry IS its
-  // edge, and a census that cannot be true is dropped from an entry that
-  // is otherwise kept.
+  // ONE admission per entry, shared with compose's round-shape disclosure
+  // (`interactionEntryOf`, #10136): an entry IS its edge — a path and the
+  // changed imports that pulled it in — and nothing else it carries is read.
   const interaction = Array.isArray(raw.interaction)
     ? raw.interaction
         .map(interactionEntryOf)
@@ -3032,7 +3031,8 @@ function refuseConverged(
   writeStderrLine(
     'CONVERGED: every chunk has left the wave — retired territories hold ' +
       'two consecutive substantive dry audits, and on a fix-audit round a ' +
-      'posture-narrowed territory holds its single one; ' +
+      'posture-narrowed territory holds its single dry launch, every member ' +
+      'of it certified dry; ' +
       'the reverse audit has converged — stop the loop and proceed to ' +
       'Step 6. This is a clean convergence, not a gap: no ' +
       'unreviewedDimensions entry is owed. If an earlier round-cap or ' +
@@ -3112,7 +3112,7 @@ function postureNarrowing(
     // never ruled on. An honest capture cannot produce it (`widenScope`
     // publishes exactly touched ∪ interaction, and the sections are tiled
     // from that), so the input is a hand-edited or corrupted plan — and
-    // narrowing such a chunk out on one dry receipt would fail it toward
+    // narrowing such a chunk out on one dry launch would fail it toward
     // LESS coverage. Null restores the ordinary schedule, like every
     // sibling reader of malformed input.
     if (
@@ -3365,8 +3365,8 @@ function runAllChunks(
   });
   // The scope clause names the retirement when there is one, so the reader
   // learns the round shrank from the header and not from a diff of block
-  // counts; when nothing is retired the sentence is byte-identical to what
-  // it always said.
+  // counts; when nothing is retired or narrowed the sentence is
+  // byte-identical to what it always said.
   const scope =
     skipped.length === 0 && narrowedOut.length === 0
       ? 'one per chunk'
@@ -3374,10 +3374,15 @@ function runAllChunks(
         ? `one per chunk still under audit (${skipped.length} retired ` +
           `chunk(s) skipped; the retirement note after the end-of-round line ` +
           `says which — relay it to the terminal)`
-        : `one per chunk still under audit (${skipped.length} retired and ` +
-          `${narrowedOut.length} posture-narrowed chunk(s) skipped; the ` +
-          `notes after the end-of-round line say which — relay them to ` +
-          `the terminal)`;
+        : skipped.length === 0
+          ? `one per chunk still under audit (${narrowedOut.length} ` +
+            `posture-narrowed chunk(s) skipped; the posture narrowing note ` +
+            `after the end-of-round line says which — relay it to the ` +
+            `terminal)`
+          : `one per chunk still under audit (${skipped.length} retired and ` +
+            `${narrowedOut.length} posture-narrowed chunk(s) skipped; the ` +
+            `notes after the end-of-round line say which — relay them to ` +
+            `the terminal)`;
   const planRoundCap = reverseAuditRoundCap(
     report,
     hasReviewDeadline(process.env, planPath, report),
@@ -3413,14 +3418,15 @@ function runAllChunks(
             `rounds) and every non-delta chunk the previous waves could not ` +
             `certify dry — one that yielded, one whose latest receipt is ` +
             `uncertified (unknown), or one with no audit history stays in ` +
-            `the wave, and one whose dry receipt is stale against a ` +
-            `same-digest yield, an uncertified receipt, or a filing whose ` +
-            `file line cannot be read as a comparable token returns to the ` +
-            `ordinary retirement rules; a chunk holding no delta file ` +
-            `leaves the schedule after one substantive dry audit — a round the ` +
-            `record certifies dry in every member, and whose findings list ` +
-            `can be read at all where an earlier round was not dry — and ` +
-            `takes no cold checks. Narrowed out this round:\n` +
+            `the wave, and one whose dry receipt shares its launch with a ` +
+            `yield or an uncertified receipt (rounds 1 and 2, the ` +
+            `convergence pair, are one launch), was built on the same ` +
+            `findings-list bytes as one, or ran in a different session from ` +
+            `some return on record that was not dry (or beside one no ` +
+            `session stamped) returns to the ordinary retirement rules; a ` +
+            `chunk holding no delta file leaves the schedule after ` +
+            `one substantive dry launch — every member of it certified dry — ` +
+            `and takes no cold checks. Narrowed out this round:\n` +
             narrowedOut
               .map(
                 (n) =>

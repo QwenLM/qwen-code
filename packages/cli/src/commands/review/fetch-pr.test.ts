@@ -1824,6 +1824,14 @@ describe('fetch-pr report assembly', () => {
     // default wall stays the one those sizes earn: a posture is not a size.
     expect(report.budget.reverseAuditRounds).toBe(5);
     expect(report.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.small);
+    // …and the capture says so, naming both halves of the narrowed wave.
+    expect(
+      producerMocks.writeStderrLine.mock.calls.some((c) =>
+        String(c[0]).includes(
+          'reverse-audit waves narrowed to the delta territories plus the non-delta territories the previous waves could not certify dry',
+        ),
+      ),
+    ).toBe(true);
   });
 
   // The capture-time recovery of the operator's RECORDED floor (#10136
@@ -1870,8 +1878,8 @@ describe('fetch-pr report assembly', () => {
     const report = await reportFor({ since: ANCHOR });
 
     // The side file alone would resolve `round`; the record wins, and the
-    // round keeps the full shape: no posture, the interaction file
-    // republished in full with no seam census.
+    // round keeps the full shape: no posture, and the interaction file
+    // republished in full.
     expect(report.incremental.posture).toBeUndefined();
     expect(report.incremental.postureCause).toBeUndefined();
     expect(report.incremental.scope.interaction).toEqual([
@@ -1976,9 +1984,9 @@ describe('fetch-pr report assembly', () => {
   });
 
   it('a heavy interaction file keeps its invariant agents on a fix-audit round (#10136)', async () => {
-    // The fix-audit roster drops Agent 0's siblings but NOT the whole-file
-    // invariant agents, and heaviness is classified from the published
-    // slice — so a still-clean file the widening pulls back in, heavy in
+    // The fix-audit roster is the territory fan-out yet keeps the
+    // whole-file invariant agents, and heaviness is classified from the
+    // published slice — so a still-clean file the widening pulls back in, heavy in
     // its own right, must republish whole and must still roster the three
     // agents that read it from the worktree. They are the only auditors of
     // hunks a backward base move smuggles into a full-range slice.

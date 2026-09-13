@@ -92,27 +92,6 @@ interface Classification {
   outcome: AuditOutcome;
   /** Defined exactly when `outcome` is `unknown`. */
   failure: CertificationFailure | null;
-  /**
-   * The `file:line` TOKEN of the first finding this return filed — the entry
-   * a later round's findings list must carry to prove it was built after
-   * that finding merged. Set on a `yielded` return, and on the `unknown`
-   * returns that follow a filing this classifier refused as a quotation
-   * (#10136 R21-12): the orchestrator merges what an auditor reports
-   * whatever the ruling here, so the refused line is staleness evidence even
-   * where it is not a certified yield. A token, not the rendered line, so
-   * membership can be asked exactly (#10136 R20-4).
-   */
-  filedFile?: string;
-  /**
-   * This return filed something whose file line is NON-EMPTY after the tag
-   * strip yet yields no token the reader can compare (#10136 R20-3 round
-   * 23): a spelling the allow-list does not know — a backticked path, a
-   * shape the format gains later — rather than a line that names nothing.
-   * Arm 3 reads an absent `filedFile` as "there is nothing to look for";
-   * on this flag it reads "we cannot look", which is the doubt direction
-   * `listUnreadable` already takes.
-   */
-  filedTokenlessly?: boolean;
 }
 
 /** A retired chunk skipped this round, with the receipts that earned it. */
@@ -133,27 +112,29 @@ export interface RoundSchedule {
   skipped: RetiredChunk[];
   /**
    * Chunks the fix-audit posture narrowed out of the wave (#10104): not a
-   * delta territory, and the most recent ROUND on record is provably dry —
-   * dry in every member of that round (#10136 R20-2: a filing merges into
-   * the cumulative list before the next round begins, so a dry receipt
-   * beside an uncertified sibling cannot have seen what that sibling
-   * filed), and not stale against an earlier yield or uncertified receipt
-   * (same digest, same entries modulo verification tags, or a filed
-   * finding the receipt's list never carried). Unlike a retired chunk they
-   * get no alternating cold check —
-   * on a critical-posture round the wave re-launches the delta territories
-   * under the ordinary retirement rules and every non-delta chunk the
-   * previous waves could not certify dry: a yield, an uncertified receipt
-   * or no history keeps the chunk in the wave, and a stale dry receipt
-   * returns it to the ordinary rules (hot until twice dry, then
-   * cold-checked). The note disclosing the narrowing IS this list. Empty
-   * whenever the caller passed no narrowing context.
+   * delta territory, and the most recent LAUNCH on record is provably dry —
+   * every member of every round in it certified dry. A launch is one round,
+   * except the convergence pair: rounds 1 and 2 are built together against
+   * one findings list, so a dry pair member cannot have seen what its
+   * partner filed (#10136 R17-1, R20-2). Every earlier launch's findings
+   * entered the list before the latest launch was built — the loop merges
+   * before every round build — unless the latest launch ran on the very list
+   * bytes of an earlier round with a member not certified dry, which says the
+   * merge never ran, or unless some return on record that was not dry (a
+   * launch that matched several records included) does not share one stamped
+   * session with every dry receipt of the latest launch — across a resume
+   * only `recover-findings` could have carried it onto the list. Unlike a
+   * retired chunk they get no alternating cold check: on a
+   * critical-posture round the wave re-launches the delta territories under
+   * the ordinary retirement rules and every non-delta chunk the previous
+   * waves could not certify dry. The note disclosing the narrowing IS this
+   * list. Empty whenever the caller passed no narrowing context.
    */
   narrowed: Array<{ chunkId: number; dryRound: number }>;
   /**
    * No chunk is due: retired chunks are between cold checks, posture-narrowed
    * chunks have left the wave (#10104 — on a fix-audit round a non-delta
-   * chunk converges on its single dry receipt), and the audit has converged.
+   * chunk converges on its single dry launch), and the audit has converged.
    */
   converged: boolean;
   /**
@@ -225,24 +206,6 @@ export function bakedRanges(
 
 /** A finding's file line — the shape `FINDING_FORMAT` asks every role for. */
 const FILE_LINE_RE = /\*\*File:\*\*\s*([^\n]*)/g;
-
-/**
- * The same marker where a findings LIST puts it: at the start of its own
- * line, a bullet allowed before it, and the rest of that line captured
- * without crossing into the next one. Anchored because `FILE_LINE_RE` is
- * not (#10136 R20-3), and a list is read as lines, not as text: the
- * unanchored form matches the marker anywhere — including an entry's own
- * prose quoting it, which contributes a junk token — and its `\s*` crosses
- * the newline, so a quoted marker at a line's end captures the NEXT line
- * whole and the genuine entry there yields no token at all.
- *
- * The bullet is optional and covers the numbered spelling too: the list is
- * model-edited markdown, and an entry this reader cannot see is an entry a
- * quotation of which reads as a filing. Prose cannot slip in behind it —
- * the marker must follow the bullet immediately.
- */
-const ENTRY_FILE_LINE_RE =
-  /^[^\S\r\n]*(?:(?:[-*+]|\d+[.)])[^\S\r\n]*)?\*\*File:\*\*[^\S\r\n]*([^\r\n]*)/gm;
 
 /**
  * The other half of a filed finding. A `**File:**` line alone is not proof
@@ -516,116 +479,18 @@ function substantiveClause(clause: string): boolean {
  * pairing walk reads each round's list once, not once per record.
  */
 
-/**
- * A finding entry's trailing `— [unverified]` tag — the marker the merge
- * adds at admission and removes once the verdict lands (SKILL.md:789).
- * Whitespace-tolerant like compose-review's own reader of the same tag.
- */
-const UNVERIFIED_FINDING_TAG_RE = /—\s*\[unverified\]/gi;
-
-/**
- * The `file:line` tokens of a list's entries, as a SET — the granularity
- * the staleness ruling compares at (#10136 R17-1 round 19). `FILE_LINE_RE`
- * captures the rest of the line, which a re-wrap of the orchestrator's
- * model-edited markdown rewrites; the first whitespace-delimited token is
- * the `file:line` the entry names, which re-wraps and re-orders cannot
- * change — so the comparison is insensitive to both by construction, and
- * tag state is stripped per token. Null for a NON-EMPTY list no entry
- * extracts from: that list cannot be compared, and the fail direction is
- * stale, never a fresh reading of a list nobody could parse.
- */
-function entryTokensOf(list: string): ReadonlySet<string> | null {
-  const out = new Set<string>();
-  for (const rest of entryRestsOf(list)) {
-    const token = fileLineToken(rest);
-    if (token !== '') out.add(token);
-  }
-  return out.size === 0 && list.trim() !== '' ? null : out;
-}
-
-/** The rest of each entry line of a findings list, in order. */
-function entryRestsOf(list: string): string[] {
-  return [...list.matchAll(ENTRY_FILE_LINE_RE)].map((m) => m[1] ?? '');
-}
-
-/**
- * The `file:line` an entry line names: its first whitespace-delimited token,
- * tag state stripped. Empty when the line names nothing.
- */
-function fileLineToken(rest: string): string {
-  const token = strippedFileLine(rest).split(/\s+/)[0] ?? '';
-  // …and it has to LOOK like one (#10136 R20-3 round 22). The anchor
-  // decides where an entry may start; it cannot tell an entry from a
-  // finding's own `**Anchor:**` block quoting `FINDING_FORMAT`'s template
-  // verbatim, which puts `- **File:** <file>:<line>` at a line start too.
-  // A genuine entry names a path and a line — the shape the format
-  // mandates — so a token that is not one (`<file`, `[list`) is a
-  // quotation the entry set must not gain. Dropping it can only SHRINK
-  // the set, and a list left with no token at all still reads as the
-  // unparseable doubt state.
-  //
-  // The allow-list is a bar this reader can be WRONG about, though — it was
-  // one spelling short of the format for a whole round (#10136 R20-3 round
-  // 23), and a backticked filing still yields nothing. So callers that rule
-  // on a filing must ask `filedTokenlessly` rather than read an empty token
-  // as "nothing was filed": absence of a readable token is doubt, not
-  // absence of a finding.
-  return FILE_LINE_TOKEN_RE.test(token) ? token : '';
-}
-
-/** An entry line with its verification tag state removed. */
-function strippedFileLine(rest: string): string {
-  return rest.replace(UNVERIFIED_FINDING_TAG_RE, ' ').trim();
-}
-
-/**
- * A `file:line` as `FINDING_FORMAT` mandates it — `<file path>:<line number
- * or RANGE>` (`agent-prompt.ts`, interpolated into every findings-producing
- * role) — and nothing a markdown template would leave behind. The range
- * half is not optional: measured over the lists one real round produced,
- * 36 of 92 entries used it (#10136 R20-3 round 23), so a reader that knows
- * only `:12` is blind to the format its own briefs order.
- */
-const FILE_LINE_TOKEN_RE = /^[^\s<>[\]{}`'"]+:\d+(?:-\d+)?$/;
-
-/**
- * Whether a return's file line quotes this listed entry line. The listed
- * line is the bar — a quotation reproduces it — and the comparison ends at
- * a TOKEN boundary, so a shorter `file:line` cannot satisfy a longer one it
- * merely prefixes (#10136 R21-12, R20-4).
- */
-function quotesEntryLine(rest: string, file: string): boolean {
-  if (!rest.startsWith(file)) return false;
-  const next = rest.charAt(file.length);
-  return next === '' || /\s/.test(next);
-}
-
-/**
- * Whether two findings lists carry the same entries, compared as SETS of
- * `file:line` tokens. Either side unreadable — a non-empty list no entry
- * extracts from — reads as the same list, the fail-closed direction
- * everywhere this is asked: "the receipt cannot be proven newer".
- */
-function sameEntrySet(a: string, b: string): boolean {
-  const ea = entryTokensOf(a);
-  const eb = entryTokensOf(b);
-  if (ea === null || eb === null) return true;
-  return ea.size === eb.size && [...ea].every((x) => eb.has(x));
-}
-
 function findingsListFor(
   prompt: string,
   recordDir: string,
   memo: Map<string, string>,
-): { content: string; fromFile: boolean } {
+): string {
   const pointer = findingsPointerOf(prompt);
-  if (pointer === null) return { content: prompt, fromFile: false };
+  if (pointer === null) return prompt;
   const root = resolve(recordDir);
   const target = resolve(pointer);
-  if (target !== root && !target.startsWith(root + sep))
-    return { content: prompt, fromFile: false };
+  if (target !== root && !target.startsWith(root + sep)) return prompt;
   const cached = memo.get(pointer);
-  if (cached !== undefined) return { content: cached, fromFile: true };
+  if (cached !== undefined) return cached;
   try {
     const content = readFileSync(target, 'utf8');
     // Memoize ONLY a successful read: the pointer is shared by every chunk of
@@ -634,10 +499,9 @@ function findingsListFor(
     // other chunk's findings list. On a miss each record falls back to its
     // OWN prompt (no entry matches there → stays hot), uncached.
     memo.set(pointer, content);
-    return { content, fromFile: true };
+    return content;
   } catch {
-    // Fall back to this record's own prompt.
-    return { content: prompt, fromFile: false };
+    return prompt; // Fall back to this record's own prompt.
   }
 }
 
@@ -705,10 +569,6 @@ function classifyReturn(
     return { outcome: 'unknown', failure: 'auditor never returned' };
   }
   const text = rec.finalText.trim();
-  /** A filing this walk refused as a quotation — see the refusal below. */
-  let refusedFile: string | undefined;
-  /** A file line this reader could not turn into a comparable token. */
-  let tokenless = false;
   if (SEVERITY_LINE_RE.test(text)) {
     // The cumulative list is on hand for this agent: since #8597 it rides
     // a digest-named findings file the launch prompt points at (before, it
@@ -719,52 +579,11 @@ function classifyReturn(
     // list cannot be a new finding against it. Skipping costs an audit at
     // most; counting a quotation re-opens the never-retire direction on
     // the loop's most common honest return.
-    //
-    // The list's entry lines, read anchored. A NON-EMPTY list no entry
-    // extracts from is a shape this reader does not recognise, and
-    // narrowing the quotation bar on it would read a genuine quotation as
-    // a filing — the never-retire direction. There, the raw containment
-    // test the module always applied stands.
-    const listed = entryRestsOf(findingsList);
-    const quotes = (file: string): boolean =>
-      listed.length > 0
-        ? listed.some((rest) => quotesEntryLine(rest, file))
-        : findingsList.includes(`**File:** ${file}`);
     for (const m of text.matchAll(FILE_LINE_RE)) {
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
-      // A quotation reproduces a listed entry's own LINE, so that line is
-      // the bar — matched at a token boundary, never as a raw substring
-      // (#10136 R21-12): a filing at `src/pay.ts:12` is no quotation of a
-      // listed `src/pay.ts:123`, and refusing it as one dropped a live
-      // finding into an `unknown` that named nothing.
-      const token = fileLineToken(file);
-      // A file line that is NON-EMPTY after the tag strip yet yields no
-      // token is not a line that names nothing — it is a spelling the
-      // allow-list does not know (#10136 R20-3 round 23). Remember that,
-      // whichever way the ruling below goes, so the staleness arms can read
-      // it as doubt. A line that IS empty after the strip names nothing and
-      // is no evidence either way.
-      const unreadable = token === '' && strippedFileLine(file) !== '';
-      if (unreadable) tokenless = true;
-      if (quotes(file)) {
-        // The refusal stands — counting a quotation re-opens the
-        // never-retire direction — but the line rides along as staleness
-        // EVIDENCE: the orchestrator merges what an auditor reports
-        // whatever this classifier ruled, so a later dry receipt whose
-        // list does not carry this entry was built before it (#10136
-        // R21-12). Evidence only; the outcome below is unchanged. A line
-        // that yields no token carries no evidence a list could be asked
-        // for — `tokenless` above is what the arms read instead.
-        if (token !== '') refusedFile ??= token;
-        continue;
-      }
-      return {
-        outcome: 'yielded',
-        failure: null,
-        ...(token !== '' ? { filedFile: token } : {}),
-        ...(unreadable ? { filedTokenlessly: true } : {}),
-      };
+      if (findingsList.includes(`**File:** ${file}`)) continue;
+      return { outcome: 'yielded', failure: null };
     }
   }
   // The receipt is judged WITHOUT its budget-gap disclosure lines. Two
@@ -809,8 +628,6 @@ function classifyReturn(
   const unknown = (failure: CertificationFailure): Classification => ({
     outcome: 'unknown',
     failure,
-    ...(refusedFile === undefined ? {} : { filedFile: refusedFile }),
-    ...(tokenless ? { filedTokenlessly: true } : {}),
   });
   if (rec.successfulToolCalls === 0) return unknown('no successful tool calls');
   if (rec.diffToolCalls === 0) return unknown('no read of the diff');
@@ -889,6 +706,21 @@ function mergeOutcomes(outcomes: AuditOutcome[]): AuditOutcome {
 }
 
 /**
+ * The launch a reverse-audit round was built in. Rounds 1 and 2 are the
+ * convergence pair — both built, on one findings list and in one workflow,
+ * before either returns (SKILL.md Step 5), whatever order a concurrency
+ * limit then runs them in — so they are ONE launch, the way SKILL.md counts
+ * the pair for convergence. Every later round is its own launch, built after
+ * the merge of everything before it.
+ */
+function launchOf(round: number): number {
+  return Math.max(round, CONVERGENCE_PAIR_LAST_ROUND);
+}
+
+/** The later round of the convergence pair. */
+const CONVERGENCE_PAIR_LAST_ROUND = 2;
+
+/**
  * Which chunks round `round` owes an auditor, from the audit history the
  * harness and the prompt records agree on.
  *
@@ -903,17 +735,16 @@ function mergeOutcomes(outcomes: AuditOutcome[]): AuditOutcome {
  *
  * Narrowing (#10104): on a fix-audit round the caller passes the delta
  * territories, and from round 3 a NON-delta chunk leaves the wave after ONE
- * substantive dry audit — a round dry in EVERY member, since a filing merges
- * into the cumulative list before the next round begins and a dry receipt
- * beside an uncertified sibling cannot have seen what that sibling filed
- * (#10136 R20-2) — and no alternating cold check brings it back. That is
- * the posture's deliberate recall trade ("re-launch only the chunks that
- * produced findings in the previous wave, plus the delta chunks"), and it
- * narrows the wave's WIDTH instead of lowering the round cap, because the
- * late waves are where measured fix-induced Criticals kept surfacing. The
- * failure directions are unchanged: an `unknown` outcome still reads as
- * hot, a yield still re-launches, and with no narrowing context the
- * schedule is exactly what it always was.
+ * substantive dry LAUNCH — every member of it dry — and no alternating cold
+ * check brings it back. That is the posture's deliberate recall trade
+ * ("re-launch only the chunks that produced findings in the previous wave,
+ * plus the delta chunks"), read the way SKILL.md reads "previous": the
+ * convergence pair is one wave. It narrows the wave's WIDTH instead of
+ * lowering the round cap, because the late waves are where measured
+ * fix-induced Criticals kept surfacing. The failure directions are
+ * unchanged: an `unknown` outcome still reads as hot, a yield still
+ * re-launches, and with no narrowing context the schedule is exactly what
+ * it always was.
  *
  * Throws whatever the transcript or record readers throw
  * (`TranscriptsUnavailableError` included): the CALLER owns the fail-open,
@@ -978,8 +809,6 @@ export function scheduleReverseAuditRound(
     lines: string[];
     territory: Array<[number, number]>;
     findings: string;
-    /** The list was read back from its `.findings.md` file, not the prompt fallback. */
-    findingsFromFile: boolean;
     pointer: string | null;
   }> = [];
   for (const [key, prompt] of built) {
@@ -987,7 +816,6 @@ export function scheduleReverseAuditRound(
     if (!m) continue;
     const r = Number(m[2]);
     if (r >= round) continue;
-    const list = findingsListFor(prompt, recordDir, findingsMemo);
     records.push({
       chunkId: Number(m[1]),
       round: r,
@@ -997,8 +825,7 @@ export function scheduleReverseAuditRound(
       // pair.
       lines: promptLines(prompt),
       territory: bakedRanges(prompt, diffPath),
-      findings: list.content,
-      findingsFromFile: list.fromFile,
+      findings: findingsListFor(prompt, recordDir, findingsMemo),
       pointer: findingsPointerOf(prompt),
     });
   }
@@ -1053,6 +880,10 @@ export function scheduleReverseAuditRound(
   // was, only no longer silent.
   const classificationsByRecord: Classification[][] = [];
   const failuresByRecord: CertificationFailure[][] = [];
+  /** The session of each classification's transcript, index for index. */
+  const sessionsByRecord: string[][] = [];
+  /** The sessions of the launches that matched several records. */
+  const ambiguousSessionsByRecord: string[][] = [];
   matchesByRecord.forEach((matches, i) => {
     const unique = matches.filter((t) => recordsPerTranscript.get(t) === 1);
     const classifications = unique.map((t) =>
@@ -1072,6 +903,16 @@ export function scheduleReverseAuditRound(
       ),
     );
     classificationsByRecord.push(classifications);
+    sessionsByRecord.push(unique.map((t) => t.recordedSession));
+    // A launch matching several records certifies none of them, and
+    // `recover-findings` refuses it the same way — so across a resume
+    // whatever it filed never reaches the list. Its session rides as a
+    // return that was not dry.
+    ambiguousSessionsByRecord.push(
+      matches
+        .filter((t) => recordsPerTranscript.get(t) !== 1)
+        .map((t) => t.recordedSession),
+    );
     if (classifications.some((c) => c.outcome === 'dry')) {
       // The round's merge takes this dry; whatever else the record's
       // launches did cannot hold the chunk back from retirement.
@@ -1092,9 +933,10 @@ export function scheduleReverseAuditRound(
   // chunk id → prior round → every outcome that round's records produced,
   // plus the certification failures behind its unknowns. A record no
   // transcript certifies (a blank partial write, an undelivered build, an
-  // ambiguous launch) contributes nothing, and its round classifies
-  // `unknown`: the round was scheduled for this chunk, and nothing proves
-  // it dry.
+  // ambiguous launch) contributes no outcome to the fold, and a round of
+  // only such records classifies `unknown`: the round was scheduled for
+  // this chunk, and nothing proves it dry. The narrowing still counts such a
+  // record as an uncertified member (`memberOutcomes`, `heldSessions`).
   const history = new Map<
     number,
     Map<
@@ -1102,21 +944,20 @@ export function scheduleReverseAuditRound(
       {
         outcomes: AuditOutcome[];
         failures: CertificationFailure[];
+        /** The findings-list digests this round's records were built on. */
         digests: Set<string>;
-        fileLists: Set<string>;
-        filedFiles: Set<string>;
         /**
-         * Some member of this round filed a finding whose file line yields
-         * no comparable token (#10136 R20-3 round 23). Arm 3 has nothing
-         * to look for then — and "nothing to look for" must not read as
-         * "nothing was filed".
+         * The sessions of this round's returns that were not dry (a launch
+         * that matched several records included), and of its dry receipts —
+         * the resume rule in the narrowing branch.
          */
-        tokenlessFiling: boolean;
+        heldSessions: Set<string>;
+        drySessions: Set<string>;
         /**
          * One outcome per audit MEMBER of the round. The round-level fold
          * above hides these — `mergeOutcomes` folds `['unknown', 'dry']` to
-         * `'dry'` — and the narrowing branch needs them: a round holding one
-         * dry receipt beside an uncertified sibling is not a round that
+         * `'dry'` — and the narrowing branch needs them: a launch holding one
+         * dry receipt beside an uncertified sibling is not a launch that
          * certified the territory (#10136 R20-2). A record no transcript
          * certified is a member too — it names no outcome of its own, and
          * the round was still scheduled for it.
@@ -1135,17 +976,12 @@ export function scheduleReverseAuditRound(
       outcomes: [],
       failures: [],
       digests: new Set<string>(),
-      fileLists: new Set<string>(),
-      filedFiles: new Set<string>(),
+      heldSessions: new Set<string>(),
+      drySessions: new Set<string>(),
       memberOutcomes: [] as AuditOutcome[],
-      tokenlessFiling: false,
     };
     entry.outcomes.push(...classificationsByRecord[i].map((c) => c.outcome));
     entry.failures.push(...failuresByRecord[i]);
-    for (const c of classificationsByRecord[i]) {
-      if (c.filedFile !== undefined) entry.filedFiles.add(c.filedFile);
-      if (c.filedTokenlessly === true) entry.tokenlessFiling = true;
-    }
     if (classificationsByRecord[i].length === 0) {
       // A record no transcript certified: nothing proves it dry, and the
       // round was scheduled for it — an uncertified member, not an absent
@@ -1158,7 +994,24 @@ export function scheduleReverseAuditRound(
       );
     }
     entry.digests.add(rec.digest);
-    if (rec.findingsFromFile) entry.fileLists.add(rec.findings);
+    classificationsByRecord[i].forEach((c, j) => {
+      const session = sessionsByRecord[i][j];
+      if (c.outcome === 'dry') entry.drySessions.add(session);
+      else entry.heldSessions.add(session);
+    });
+    for (const session of ambiguousSessionsByRecord[i]) {
+      entry.heldSessions.add(session);
+    }
+    // …and it is a member of the round that certified nothing: beside a dry
+    // relaunch of the same record it may still carry a filing that never
+    // merged, so the launch it belongs to is not dry in every member. (A
+    // record with no unique transcript already counts as one `unknown`.)
+    if (
+      ambiguousSessionsByRecord[i].length > 0 &&
+      classificationsByRecord[i].length > 0
+    ) {
+      entry.memberOutcomes.push('unknown');
+    }
     byRound.set(rec.round, entry);
   });
 
@@ -1174,132 +1027,77 @@ export function scheduleReverseAuditRound(
         outcome: mergeOutcomes(entry.outcomes),
         failures: entry.failures,
         digests: [...entry.digests],
-        fileLists: [...entry.fileLists],
-        filedFiles: [...entry.filedFiles],
+        heldSessions: [...entry.heldSessions],
+        drySessions: [...entry.drySessions],
         memberOutcomes: entry.memberOutcomes,
-        tokenlessFiling: entry.tokenlessFiling,
       }))
       .sort((a, b) => a.round - b.round);
     // The posture narrowing, ruled before retirement so a non-delta chunk
-    // never earns a cold-check slot the posture does not run: its most
-    // recent ROUND being provably dry — folded dry, and dry in every
-    // member — is the whole bar. Everything less certain — no history, an
-    // unknown, a yield, a dry receipt beside an uncertified sibling —
-    // falls through to the ordinary rules and stays hot, the same
-    // fail-toward-auditing floor as every other refusal in this file. One dry receipt is NOT decisive
-    // when it shares its findings digest with ANY round the record does
-    // not certify dry — a yield, or an uncertified `unknown`: fix-audit
-    // rounds run their first two waves as a convergence pair against the
-    // SAME cumulative list (#10136), and findings merge into that list
-    // unconditionally — the yield scan refuses a filed finding whose file
-    // line is a substring of a listed entry, classifying the receipt
-    // `unknown` while the orchestrator still merges the finding — so the
-    // dry member was built before those findings entered it. It never saw
-    // them, and pricing the chunk out of the wave on it would certify
-    // convergence over live findings. Digest inequality does NOT lift the
-    // doubt (#10136 R17-1): the pair's two lists may differ by tag state
-    // alone, so staleness is ruled on the lists themselves below, with the
-    // digest kept as the same-bytes arm.
+    // never earns a cold-check slot the posture does not run.
+    //
+    // The bar is ORDER, never the findings list's rendering (#10136 R20-3).
+    // One dry receipt prices a chunk out only when it cannot have been built
+    // before an earlier yield's or uncertified receipt's findings entered the
+    // cumulative list, and the loop fixes that order itself: findings merge
+    // unconditionally before every round build, and the one exception is the
+    // convergence pair, whose two rounds are built together against one list
+    // (SKILL.md Step 5). So the unit is the LAUNCH. A dry receipt counts only
+    // when every member of its launch is dry — a dry pair member beside a
+    // yielding or uncertified partner, or a dry relaunch beside its round's
+    // uncertified sibling, was built before what they filed (#10136 R17-1,
+    // R20-2) — and every non-dry round of an earlier launch is, by that
+    // order, already on the list the dry launch was built against.
+    //
+    // Eight review rounds of reading the list instead — its entry set, the
+    // locations a return filed, the quotation a return made — each found a
+    // rendering (a re-wrapped list, a range, an aggregate, a `./` prefix, a
+    // second finding at one location) where a misreading GRANTED the
+    // narrowing. Order has no rendering. The one list fact kept is exact
+    // bytes: an earlier round with a member not certified dry, whose findings
+    // digest is also one of the dry launch's, says the merge between them
+    // never ran, and it only ever keeps the chunk in the wave.
+    //
+    // The order is the LIVE orchestrator's, though: it merges the returns it
+    // received. A resumed session receives the interrupted attempt's returns
+    // only through `recover-findings`, whose bar (brief opened, findings list
+    // read, diff read) is stricter than this module's scan — so every return
+    // on record that was not dry (a yield, or an `unknown` that may carry a
+    // filing the quotation guard refused) must share ONE stamped session with
+    // every dry receipt of the latest launch, or it holds the narrowing. The
+    // session boundary is exact; a second copy of recovery's bar here would
+    // be one more re-implementation to drift.
     if (narrowing != null && !narrowing.deltaChunkIds.has(chunkId)) {
       const latest = audits[audits.length - 1];
       if (latest !== undefined && latest.outcome === 'dry') {
-        // A dry receipt is stale against a non-dry round it shows no
-        // evidence of having been launched after (#10136 R17-1). Digest
-        // INEQUALITY alone is not freshness: the convergence pair's two
-        // lists legitimately differ by `— [unverified]` tag state alone
-        // (SKILL.md:771 — the merge clears tags between the pair's
-        // rounds), so a receipt built against the same entries under a
-        // different digest never saw the round's findings. Four arms, each
-        // its own evidence — and each reached only for a round the record
-        // does NOT certify dry, so a dry round's own text never rules:
-        const staleAgainstYield = audits.some((a) => {
-          if (a.outcome === 'dry') return false;
-          // Same digest: built against the same list bytes.
-          if (a.digests.some((d) => latest.digests.includes(d))) return true;
-          // Same entries, compared as a SET of `file:line` tokens — the
-          // pair's two lists legitimately differ by tag state alone
-          // (SKILL.md:771), and the orchestrator's list is model-edited
-          // markdown whose re-wraps and re-orders must not read as a
-          // different list either (#10136 R17-1 round 19: whole-text
-          // equality normalised neither). Only a list read back from its
-          // findings file is evidence — a prompt fallback is not a list
-          // — and a non-empty one no entry extracts from reads as stale
-          // (fail closed), never fresh.
-          if (
-            a.fileLists.length > 0 &&
-            latest.fileLists.length > 0 &&
-            a.fileLists.some((l) =>
-              latest.fileLists.some((ll) => sameEntrySet(l, ll)),
-            )
-          )
-            return true;
-          // A round filed a finding; a receipt whose list carries no
-          // entry for that file was built before the finding merged.
-          // Only a list read back from its findings file is evidence here
-          // — a prompt fallback names no entries either way (the serial
-          // shape narrows on it exactly as before). Membership of the
-          // `file:line` TOKEN, never a substring of the rendered line
-          // (#10136 R20-4): `**File:** src/other.ts:70` contains
-          // `**File:** src/other.ts:7`, and a raw match let a DIFFERENT
-          // entry certify that the receipt had seen this one. A list that
-          // extracts no entry cannot certify anything, so it reads as not
-          // carrying the token — the same fail-closed direction as the
-          // arms above.
-          // A round that filed something this reader cannot turn into a
-          // token leaves the arm nothing to look for — and the arm must
-          // not read that as "nothing was filed" (#10136 R20-3 round 23).
-          // The allow-list was one spelling short of the CLI's own format
-          // for a whole round, so every spelling it does not know fails
-          // toward auditing, the direction `listUnreadable` takes.
-          if (a.tokenlessFiling) return true;
-          return (
-            latest.fileLists.length > 0 &&
-            a.filedFiles.some(
-              (f) =>
-                !latest.fileLists.some((l) => {
-                  const seen = entryTokensOf(l);
-                  return seen !== null && seen.has(f);
-                }),
-            )
-          );
-        });
-        // The within-round half of the same doubt (#10136 R20-2). Every arm
-        // above iterates ROUND-level folds, and `mergeOutcomes` folds
-        // `['unknown', 'dry']` to `'dry'` — so a round holding one
-        // substantive dry receipt beside an uncertified sibling reads as
-        // wholly dry, passes the bar above, and is skipped by all three
-        // arms.
-        //
-        // Unlike arms 1 and 2 this asks NO question about the two members'
-        // lists, and deliberately: a finding an auditor files is merged
-        // into the cumulative list before the NEXT round begins, so a
-        // filing by any member of this round post-dates EVERY list this
-        // round was built against — the newer of the two lists included.
-        // "The dry member was launched against a different list" therefore
-        // says nothing here, where across rounds it says the receipt may be
-        // newer. So the bar is the round itself: every member certified
-        // dry, or the chunk stays in the wave. Ruled here, in the narrowing
-        // branch — `mergeOutcomes`' contract is load-bearing for the
-        // ordinary retirement rule, which must keep reading what it always
-        // read.
-        const staleWithinRound = latest.memberOutcomes.some((o) => o !== 'dry');
-        // Arms 2 and 3 are both gated on `latest.fileLists.length > 0`, and
-        // arm 1 needs a shared digest a re-rendered list does not have — so
-        // when the latest round's list came back INLINE (the pointer read
-        // missed and `findingsListFor` fell back to the record's own
-        // prompt, which names no entries) and there IS an earlier round
-        // they would have ruled on, the whole staleness ruling goes silent
-        // and reads as "not stale" (#10136 R22-2). That is absence of
-        // evidence read as evidence of absence, on the one branch with no
-        // cold check and no return path — so it is the doubt state the
-        // arms themselves use: refuse, and the chunk stays hot for a round
-        // that can prove it. With no non-dry round in the history there is
-        // nothing the arms could have said, and the ordinary narrowing
-        // stands.
-        const listUnreadable =
-          latest.fileLists.length === 0 &&
-          audits.some((a) => a !== latest && a.outcome !== 'dry');
-        if (!staleAgainstYield && !staleWithinRound && !listUnreadable) {
+        const launch = launchOf(latest.round);
+        const members = audits.filter((a) => launchOf(a.round) === launch);
+        const launchDry = members.every((a) =>
+          a.memberOutcomes.every((o) => o === 'dry'),
+        );
+        const unmerged = audits.some(
+          (a) =>
+            launchOf(a.round) < launch &&
+            // Member-level, like the launch bar: a round folded dry beside an
+            // uncertified member may still hold a filing that never merged.
+            // A round dry in every member changes nothing on the list, so
+            // sharing its bytes is the ordinary case, not a skipped merge.
+            a.memberOutcomes.some((o) => o !== 'dry') &&
+            a.digests.some((d) => members.some((m) => m.digests.includes(d))),
+        );
+        const launchSessions = new Set(members.flatMap((m) => m.drySessions));
+        // When any return on record was not dry, it and every dry receipt of
+        // the latest launch must share ONE stamped session: a launch whose
+        // dry receipts span two sessions, or a return no session stamped,
+        // cannot show that the live merge covered it. An all-dry history
+        // filed nothing and needs no merge.
+        // Every round, not only earlier launches: a return inside the latest
+        // launch that was not dry already fails `launchDry`.
+        const acrossResume = audits.some((a) =>
+          a.heldSessions.some(
+            (s) => s === '' || [...launchSessions].some((d) => d !== s),
+          ),
+        );
+        if (launchDry && !unmerged && !acrossResume) {
           narrowed.push({ chunkId, dryRound: latest.round });
           continue;
         }

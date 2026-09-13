@@ -424,7 +424,6 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // carries hunks no round has read, they arrive inside a heavy interaction
   // file's full-range slice, and these three agents are the only ones that
   // would have walked them. A clean verdict re-anchors past them for good.
-
   //
   // So the skip is off until the anchor can prove base continuity. It costs
   // three agents on a rare shape — heavy, unchanged since the anchor, and

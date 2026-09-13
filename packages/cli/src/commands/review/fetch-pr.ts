@@ -1667,8 +1667,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
               `Critical posture (${postureCause}): fix-audit round shape — ` +
                 `territory fan-out over the delta and its import-seam ` +
                 `interaction files, with the reverse-audit waves narrowed ` +
-                `to the territories the previous waves could not certify ` +
-                `dry.`,
+                `to the delta territories plus the non-delta territories ` +
+                `the previous waves could not certify dry.`,
             );
           }
           // The published hunks are byte-identical hunks of

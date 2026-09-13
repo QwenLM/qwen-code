@@ -3723,9 +3723,10 @@ export function tryIngestBodyCriticals(value: unknown): string[] | undefined {
 
 /**
  * The plan's fix-audit posture record (#10104), for the body's round-shape
- * disclosure — null on every plan that did not run one. Read defensively:
- * the plan sits behind a model-written path, and a malformed block must
- * silence the disclosure rather than render `undefined` into a posted body.
+ * disclosure and the posting floor's fix-audit arm — null on every plan that
+ * did not run one. Read defensively: the plan sits behind a model-written
+ * path, and a malformed block must silence the disclosure rather than render
+ * `undefined` into a posted body.
  */
 function fixAuditShapeFacts(planPath: string | undefined): {
   cause: 'explicit' | 'round' | 'flat-trend' | null;
@@ -7928,29 +7929,26 @@ function composeReviewBody(
             `re-launched delta territories under the ordinary retirement ` +
             `rules (a twice-dry one only on its cold-check rounds) and ` +
             `non-delta chunks the previous waves could not certify dry (a ` +
-            `yield, an uncertified receipt, an uncertified SIBLING in the ` +
-            `same round, a findings list that cannot be read where an ` +
-            `earlier round was not dry, or no audit history keeps a chunk ` +
-            `in the wave; a dry receipt that shows no evidence of having ` +
-            `seen an earlier yield or uncertified receipt — same list, same ` +
-            `entries modulo verification tags, no entry for the filed ` +
-            `finding, or a filing whose file line this reader cannot turn ` +
-            `into a comparable token — returns it to the ordinary ` +
-            `retirement rules). ` +
+            `yield, an uncertified receipt, or no audit history keeps a ` +
+            `chunk in the wave; a dry receipt returns it to the ordinary ` +
+            `retirement rules when it shares its launch with a yield or ` +
+            `uncertified receipt — rounds 1 and 2, the convergence pair, are ` +
+            `one launch — was built on the same findings-list bytes as one, ` +
+            `or ran in a different session from some earlier return that was ` +
+            `not dry, or beside one no session stamped). ` +
             `${fixAuditFloorEn}${planLicenceEn}`,
           zh:
             `轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行` +
             `（由${fixAuditCauseZh}触发）——领地扇出只覆盖上一轮以来的 commits` +
             (fixAudit.interactionFiles > 0
-              ? '及其 import 接缝 interaction 文件'
+              ? ' 及其 import 接缝 interaction 文件'
               : '（没有仍然干净的 importer 重新进入范围）') +
             `，反向审计各波按普通退役规则重发 delta ` +
             `领地（两次干燥的只在其冷检轮重发），并重发此前各波未能证实干燥的非 delta ` +
-            `chunk（出过发现、收据未认证、同轮存在未认证的兄弟、在此前某轮非干燥时` +
-            `发现清单不可读、或无审计历史，都会让 chunk 留在波内；干燥收据若` +
-            `没有证据表明见过此前的发现或未认证收据——同一份清单、仅验证标记不同的` +
-            `同批条目、清单中找不到该发现的条目、或某次提交的 File 行无法被读成` +
-            `可比较的记号——则让它回到普通退役规则）。` +
+            `chunk（出过发现、收据未认证或无审计历史，` +
+            `都会让 chunk 留在波内；干燥收据若与出过发现或未认证的收据属于同一次启动` +
+            `——第 1、2 轮的收敛对算作一次启动——或与之使用字节完全相同的发现清单，` +
+            `又或与此前某个非干燥返回不在同一个会话里（或该返回没有会话戳），则该 chunk 回到普通退役规则）。` +
             `${fixAuditFloorZh}${planLicenceZh}`,
         },
       ]
