@@ -2792,7 +2792,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: undefined as number | undefined,
             description:
-              'Total time budget for one web_search call, in milliseconds (default 120000, max 600000; other values fall back to the default). The search agent runs several queries and may open result pages; a search that exceeds the budget returns whatever arrived as a partial result. Env override: WEB_SEARCH_TIMEOUT_MS.',
+              'Total time budget for one web_search call, in milliseconds (default 120000, max 600000; other values fall back to the default). The search agent runs several queries and may open result pages; a search that exceeds the budget returns whatever arrived as a partial result. A per-tool execution cap (QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS) below this budget fires first and discards the partial result; keep it above timeoutMs. Env override: WEB_SEARCH_TIMEOUT_MS.',
             showInDialog: true,
           },
         },
