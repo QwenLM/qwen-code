@@ -461,6 +461,15 @@ describe('WebTerminalRegistry', () => {
 
   it('reports a spawn failure and frees the id when both backends fail', async () => {
     osPlatform.mockReturnValue('win32');
+    const responder = new Terminal();
+    const dispose = vi.spyOn(responder, 'dispose');
+    loadXtermHeadless.mockResolvedValueOnce({
+      Terminal: class {
+        constructor() {
+          return responder;
+        }
+      },
+    });
     spawn.mockImplementation(() => {
       throw new Error('spawn failed');
     });
@@ -473,6 +482,7 @@ describe('WebTerminalRegistry', () => {
       }),
     ).resolves.toEqual({ error: 'Failed to spawn shell' });
     expect(spawn).toHaveBeenCalledTimes(2);
+    expect(dispose).toHaveBeenCalledOnce();
 
     // finishCreating ran on the failure path: the same id is creatable again
     // instead of being stuck on "is being created".
