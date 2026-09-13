@@ -6,6 +6,13 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import type { WebShellSidebarSessionActionsOptions } from './WebShellSidebar';
 import sidebarStyles from './WebShellSidebar.module.css';
+import {
+  clickSidebarElement as click,
+  flushSidebar,
+  installSidebarDomShims,
+  makeSidebarSession as makeSession,
+  resolveWebShellSessions,
+} from '../../test/sidebarHarness';
 
 const { connection, workspace, workspaceActions, active, pinned, archived } =
   vi.hoisted(() => {
@@ -114,14 +121,11 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
       workspaceCwd: connection.workspaceCwd,
       options,
     };
-    if (options?.enabled === false) {
-      return { ...state, sessions: [], data: undefined, catalogQuery };
-    }
-    return {
-      ...state,
-      data: state.data ?? state.sessions,
+    return resolveWebShellSessions(
+      state,
+      options?.enabled !== false,
       catalogQuery,
-    };
+    );
   },
   useSessionCatalogController: () => ({
     refreshQueries: refreshSessionCatalogQueries,
@@ -164,42 +168,7 @@ const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } = await import(
   './collapsedSessionSections'
 );
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-if (!globalThis.PointerEvent) {
-  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
-}
-if (!Element.prototype.hasPointerCapture) {
-  Element.prototype.hasPointerCapture = () => false;
-}
-if (!Element.prototype.setPointerCapture) {
-  Element.prototype.setPointerCapture = () => {};
-}
-if (!Element.prototype.releasePointerCapture) {
-  Element.prototype.releasePointerCapture = () => {};
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
-
-function makeSession(
-  sessionId: string,
-  over: Partial<DaemonSessionSummary> = {},
-): DaemonSessionSummary {
-  return {
-    sessionId,
-    workspaceCwd: '/tmp/project',
-    displayName: `Session ${sessionId}`,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    clientCount: 0,
-    hasActivePrompt: false,
-    isArchived: false,
-    isPinned: false,
-    groupId: null,
-    color: null,
-    ...over,
-  } as DaemonSessionSummary;
-}
+installSidebarDomShims();
 
 const organizationCapabilities = {
   qwenCodeVersion: '1.2.3',
@@ -260,13 +229,6 @@ function renderSidebar(
   });
 }
 
-async function flushSidebar() {
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-}
-
 function groupHeader(label: string): HTMLButtonElement {
   const section = container.querySelector<HTMLElement>(
     `section[aria-label="${label}"]`,
@@ -277,10 +239,6 @@ function groupHeader(label: string): HTMLButtonElement {
   );
   expect(header).not.toBeNull();
   return header!;
-}
-
-function click(element: HTMLElement): void {
-  element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
 beforeEach(() => {
@@ -1235,13 +1193,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).find((item) => item.textContent?.includes('Group'));
     expect(groupItem).not.toBeNull();
     act(() => {
-      groupItem!.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-      );
-      groupItem!.dispatchEvent(
-        new PointerEvent('pointerup', { bubbles: true }),
-      );
-      groupItem!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      click(groupItem!, true);
     });
     await flushSidebar();
 
@@ -1549,13 +1501,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).find((item) => item.textContent?.includes('Rename'));
     expect(renameItem).toBeDefined();
     act(() => {
-      renameItem!.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-      );
-      renameItem!.dispatchEvent(
-        new PointerEvent('pointerup', { bubbles: true }),
-      );
-      renameItem!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      click(renameItem!, true);
     });
     await flushSidebar();
 
@@ -1579,13 +1525,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     act(() => {
-      document.body.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-      );
-      document.body.dispatchEvent(
-        new PointerEvent('pointerup', { bubbles: true }),
-      );
-      document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      click(document.body, true);
     });
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));

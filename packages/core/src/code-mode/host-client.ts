@@ -28,7 +28,9 @@ import {
   type ParentMessage,
 } from './protocol.js';
 
-const CODE_MODE_HOST_STARTUP_GRACE_MS = 5000;
+// Startup grace must cover host spawn + QuickJS WASM init, which takes
+// several seconds on slow or heavily loaded machines.
+const CODE_MODE_HOST_STARTUP_GRACE_MS = 30_000;
 
 export interface CodeModeExecutionResult {
   output: string;
@@ -169,7 +171,9 @@ export async function executeCodeMode(
   };
   const onWallTimeout = () => {
     protocolError = new Error(
-      `JavaScript execution timed out after ${timeoutMs}ms.`,
+      `JavaScript execution timed out after ${
+        timeoutMs + CODE_MODE_HOST_STARTUP_GRACE_MS
+      }ms (guest budget ${timeoutMs}ms; the code-mode host may not have finished starting).`,
     );
     cancelNested(protocolError);
     terminate(child);

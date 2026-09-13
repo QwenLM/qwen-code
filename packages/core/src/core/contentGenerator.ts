@@ -56,6 +56,16 @@ export type PromptCacheSharingParameters = GenerateContentParameters & {
    * final message is deliberately excluded from cache breakpoints.
    */
   promptCacheSharing?: boolean;
+  /**
+   * Local control signal, never sent on the wire: true when a streaming send
+   * is a transport-continuation attempt resuming an answer whose prefix was
+   * already delivered (LlmChat's transportContinuationPrefix). The OpenAI
+   * pipeline seeds its per-stream delivered-content flag from it, because
+   * with a continuation in flight the turn's replay gate is already shut by
+   * the accumulated prefix — so a parked tool-call finish must be released
+   * rather than withheld for a replay that can no longer happen.
+   */
+  continuationInFlight?: boolean;
 };
 
 /**
@@ -97,6 +107,16 @@ export type ContentGeneratorConfig = {
   retryMaxDelayMs?: number; // Maximum delay for stream rate-limit retries
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
   enableCacheControl?: boolean; // Enable provider prompt-cache controls
+  /**
+   * Whether to send DashScope's request-body `metadata` object (sessionId /
+   * promptId / channel). Undefined means auto: sent for qwen-family wire models
+   * only, because DashScope's endpoint is an aggregating gateway and a
+   * third-party vendor backend types `metadata` as a string and rejects the
+   * object with a flat 400 (issue #11590). Set `true` to send it regardless,
+   * for a non-qwen model that DashScope serves first-party and whose tracing
+   * you still want; `false` to never send it.
+   */
+  enableRequestMetadata?: boolean;
   // Force `scope: 'global'` on Anthropic cache_control entries even when the
   // base URL is not an Anthropic-native origin (e.g. proxy providers like
   // Routify, OpenRouter). Requires the proxy to forward `cache_control` fields

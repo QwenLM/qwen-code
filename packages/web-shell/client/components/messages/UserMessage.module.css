@@ -226,40 +226,68 @@
   height: 14px;
 }
 
-.editButton {
-  display: inline-flex;
-  width: 24px;
-  height: 24px;
-  align-items: center;
-  justify-content: center;
-  margin-top: 2px;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted-foreground);
-  cursor: pointer;
-  opacity: 0;
+.editArea {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: min(420px, 60vw);
 }
 
-.chatMessageColumn:hover .editButton,
-.editButton:focus-visible {
-  opacity: 1;
-}
-
-.editButton:hover {
-  background: var(--vscode-toolbar-hoverBackground, var(--accent));
+.editInput {
+  width: 100%;
+  min-height: 56px;
+  max-height: 40vh;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
   color: var(--foreground);
+  font: inherit;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  resize: vertical;
 }
 
-.editButton:focus-visible {
+.editInput:focus-visible {
   outline: 1px solid var(--vscode-focusBorder, var(--ring));
   outline-offset: -1px;
 }
 
-.editButton svg {
-  width: 14px;
-  height: 14px;
+.editActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.editCancel,
+.editSubmit {
+  padding: 3px 10px;
+  border: 0;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.editCancel {
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.editCancel:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--accent));
+  color: var(--foreground);
+}
+
+.editCancel:disabled,
+.editSubmit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.editSubmit {
+  background: var(--vscode-button-background, var(--primary));
+  color: var(--vscode-button-foreground, var(--primary-foreground));
 }
 
 .chatContent {

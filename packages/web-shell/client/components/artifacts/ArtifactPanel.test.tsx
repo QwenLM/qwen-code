@@ -70,6 +70,7 @@ const {
       },
       client: {
         workspaceByCwd: vi.fn(() => mockSecondaryWorkspaceActions),
+        readSessionArtifactContent: vi.fn(),
       },
     },
   };
@@ -81,6 +82,10 @@ vi.mock(
     ...(await importOriginal()),
     useActions: () => mockActions,
     useWorkspace: () => mockWorkspace,
+    useConnection: () => ({
+      sessionId: 'active-session',
+      clientId: 'active-viewer',
+    }),
     useWorkspaceActions: () => mockWorkspaceActions,
   }),
 );
@@ -227,7 +232,11 @@ function linkArtifact(): DaemonSessionArtifact {
 
 function artifactPanel(
   artifact: DaemonSessionArtifact,
-  owner: { workspaceCwd: string; workspaceId: string } | null = {
+  owner: {
+    workspaceCwd: string;
+    workspaceId: string;
+    sourceSessionId?: string;
+  } | null = {
     workspaceCwd: '/primary',
     workspaceId: 'primary-id',
   },
@@ -489,6 +498,52 @@ describe('ArtifactPanel terminal tabs', () => {
   });
 });
 
+describe('ArtifactPanel web previews', () => {
+  it('keeps the application frame mounted across tab and viewport changes', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderPanel = (
+      activeTabId: string,
+      viewport: 'desktop' | 'mobile' = 'desktop',
+    ) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            {
+              id: 'preview',
+              kind: 'web_preview',
+              title: 'Web preview',
+              url: 'http://localhost:6543',
+              viewport,
+            },
+            { id: 'terminal', kind: 'terminal', title: 'Terminal' },
+          ]}
+          activeTabId={activeTabId}
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+    act(() => root.render(renderPanel('preview')));
+    const frame = container.querySelector('iframe');
+    expect(frame).not.toBeNull();
+    act(() => root.render(renderPanel('terminal')));
+    expect(container.querySelector('iframe')).toBe(frame);
+    expect(frame?.closest('[hidden]')).not.toBeNull();
+    act(() => root.render(renderPanel('preview', 'mobile')));
+    expect(container.querySelector('iframe')).toBe(frame);
+    expect(frame?.closest('[hidden]')).toBeNull();
+    expect(frame?.style.width).toBe('390px');
+  });
+});
+
 describe('artifact workspace authority', () => {
   it('keeps an in-flight read across an equivalent capabilities refresh', async () => {
     let resolveRead:
@@ -662,6 +717,43 @@ async function flush() {
 }
 
 describe('ArtifactPanel code review artifacts', () => {
+  it('reads a saved artifact from the panel tab source session', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    mockWorkspace.client.readSessionArtifactContent.mockResolvedValue(
+      '<h1>Source session</h1>',
+    );
+    await act(async () =>
+      root.render(
+        artifactPanel(
+          {
+            ...linkArtifact(),
+            kind: 'html',
+            storage: 'published',
+            metadata: { artifactType: 'web_preview_snapshot' },
+          },
+          {
+            workspaceCwd: '/primary',
+            workspaceId: 'primary-id',
+            sourceSessionId: 'original-session',
+          },
+        ),
+      ),
+    );
+    expect(
+      mockWorkspace.client.readSessionArtifactContent,
+    ).toHaveBeenCalledWith('original-session', linkArtifact().id, {
+      clientId: undefined,
+      signal: expect.any(AbortSignal),
+    });
+    expect(
+      container
+        .querySelector('iframe[title="Saved webpage version"]')
+        ?.getAttribute('srcdoc'),
+    ).toContain('Source session');
+  });
+
   it('uses the artifact format icon in the panel tab', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -720,6 +812,38 @@ describe('ArtifactPanel code review artifacts', () => {
     );
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain('PRIMARY_WORKSPACE_SECRET');
+  });
+
+  it('renders a saved webpage version without a workspace owner', async () => {
+    mockWorkspace.client.readSessionArtifactContent.mockResolvedValue(
+      '<h1>Saved version</h1>',
+    );
+    const artifact = {
+      ...linkArtifact(),
+      kind: 'html',
+      storage: 'published',
+      metadata: { artifactType: 'web_preview_snapshot' },
+    } as DaemonSessionArtifact;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    await act(async () => root.render(artifactPanel(artifact, null)));
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-saved-preview]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).not.toContain(
+      'This workspace may have been removed',
+    );
+    expect(
+      container
+        .querySelector('iframe[title="Saved webpage version"]')
+        ?.getAttribute('srcdoc'),
+    ).toContain('Saved version');
   });
 
   it('fails closed when a file tab has no workspace owner', async () => {
@@ -870,9 +994,11 @@ describe('ArtifactPanel code review artifacts', () => {
       ).click();
     });
     await flush();
-    expect(container.querySelector('iframe')?.getAttribute('srcdoc')).toContain(
-      '<h1>Attachment page</h1>',
-    );
+    expect(
+      new DOMParser()
+        .parseFromString(container.querySelector('iframe')!.srcdoc, 'text/html')
+        .querySelector('iframe')!.srcdoc,
+    ).toContain('<h1>Attachment page</h1>');
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
   });
 
@@ -2969,7 +3095,12 @@ describe('ArtifactPanel workspace artifact previews', () => {
       );
     } else {
       expect(
-        container.querySelector('iframe')?.getAttribute('srcdoc'),
+        new DOMParser()
+          .parseFromString(
+            container.querySelector('iframe')!.srcdoc,
+            'text/html',
+          )
+          .querySelector('iframe')!.srcdoc,
       ).toContain(testCase.content);
     }
   });

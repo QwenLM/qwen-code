@@ -131,10 +131,14 @@ export interface WebShellChatHeaderOptions {
   items?: readonly WebShellChatHeaderItem[];
 }
 
-export type WebShellRightPanelItem = 'review' | 'sideTask' | 'terminal';
+export type WebShellRightPanelItem =
+  | 'review'
+  | 'sideTask'
+  | 'terminal'
+  | 'webPreview';
 
 export interface WebShellRightPanelOptions {
-  /** Empty-state actions to show. Defaults to all actions. */
+  /** Empty-state actions to show. Defaults to review and sideTask. */
   items?: readonly WebShellRightPanelItem[];
 }
 

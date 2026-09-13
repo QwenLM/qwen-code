@@ -23,6 +23,7 @@ import {
   EyeIcon,
   ExpandIcon,
   GaugeIcon,
+  GlobeIcon,
   ImageIcon,
   LayersIcon,
   MessageCirclePlusIcon,
@@ -82,7 +83,7 @@ import {
   normalizeArtifactMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
-  withArtifactPreviewCsp,
+  artifactPreviewDocument,
 } from './artifactUtils';
 import {
   displayPath,
@@ -104,6 +105,9 @@ import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
 import { SideTaskPanel } from './SideTaskPanel';
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
 import { TerminalPanel } from '../terminal/TerminalPanel';
+import { WebPreviewPanel } from '../preview/WebPreviewPanel';
+import { SavedWebPreview } from '../preview/SavedWebPreview';
+import type { WebPreviewState } from '../preview/web-preview';
 import { TokenUsagePanel } from './TokenUsagePanel';
 import { ContextUsagePanel } from './ContextUsagePanel';
 import {
@@ -141,6 +145,11 @@ export type ImageTabSource = {
 };
 
 export type ArtifactPanelTab =
+  | (WebPreviewState & {
+      id: string;
+      kind: 'web_preview';
+      title: string;
+    })
   | {
       id: string;
       kind: 'source';
@@ -366,6 +375,8 @@ interface ArtifactPanelProps {
   onOpenLatestReview?: () => void;
   /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
   onOpenTerminal?: () => void;
+  onOpenWebPreview?: () => void;
+  onWebPreviewChange?: (tabId: string, state: WebPreviewState) => void;
   items?: readonly WebShellRightPanelItem[];
   sideTaskAvailable?: boolean;
   sideTasks?: readonly SideTaskListItem[];
@@ -436,6 +447,8 @@ export function ArtifactPanel({
   latestReviewAvailable = false,
   onOpenLatestReview,
   onOpenTerminal,
+  onOpenWebPreview,
+  onWebPreviewChange,
   items = DEFAULT_RIGHT_PANEL_ITEMS,
   sideTaskAvailable = false,
   sideTasks = [],
@@ -522,9 +535,14 @@ export function ArtifactPanel({
     sideTaskAvailable &&
     Boolean(onCreateSideTask);
   const showTerminalMenuItem = Boolean(onOpenTerminal);
+  const showWebPreviewMenuItem =
+    items.includes('webPreview') && Boolean(onOpenWebPreview);
   const showAddMenu =
     Boolean(activeTab) &&
-    (showReviewMenuItem || showSideTaskMenuItems || showTerminalMenuItem);
+    (showReviewMenuItem ||
+      showSideTaskMenuItems ||
+      showTerminalMenuItem ||
+      showWebPreviewMenuItem);
   const activeWorkspaceIdentity =
     activeTab && isWorkspaceScopedTab(activeTab)
       ? {
@@ -538,6 +556,10 @@ export function ArtifactPanel({
   const activeWorkspaceActions =
     activeWorkspaceTarget?.workspaceId === activeWorkspaceIdentity?.workspaceId
       ? activeWorkspaceTarget?.actions
+      : undefined;
+  const activeTabArtifact =
+    activeTab?.kind === 'artifact'
+      ? artifacts.find((item) => item.id === activeTab.artifactId)
       : undefined;
 
   return (
@@ -620,6 +642,8 @@ export function ArtifactPanel({
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
+                    ) : tab.kind === 'web_preview' ? (
+                      <GlobeIcon className={styles.tabIconSvg} />
                     ) : tab.kind === 'terminal' ? (
                       <SquareTerminalIcon
                         className={styles.tabIconSvg}
@@ -723,6 +747,14 @@ export function ArtifactPanel({
                     </span>
                   </DropdownMenuItem>
                 )}
+                {showWebPreviewMenuItem && (
+                  <DropdownMenuItem onSelect={onOpenWebPreview}>
+                    <GlobeIcon className={styles.sideTaskNewIcon} />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('webPreview.title')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           )}
@@ -763,6 +795,20 @@ export function ArtifactPanel({
           activeTab?.kind === 'side_task' ? styles.bodySideTask : ''
         }`.trim()}
       >
+        {tabs
+          .filter((tab) => tab.kind === 'web_preview')
+          .map((tab) => (
+            <div
+              key={tab.id}
+              className="h-full"
+              hidden={tab.id !== activeTab?.id}
+            >
+              <WebPreviewPanel
+                state={tab}
+                onChange={(state) => onWebPreviewChange?.(tab.id, state)}
+              />
+            </div>
+          ))}
         {tabs
           .filter((tab) => tab.kind === 'terminal')
           .map((tab) => (
@@ -821,7 +867,8 @@ export function ArtifactPanel({
             <Skeleton className="h-4 w-4/5" />
             <Skeleton className="h-4 w-3/5" />
           </div>
-        ) : activeTab?.kind === 'terminal' ? null : !activeTab ? (
+        ) : activeTab?.kind === 'terminal' ||
+          activeTab?.kind === 'web_preview' ? null : !activeTab ? (
           <div
             className={styles.emptyActions}
             data-testid="right-panel-empty-actions"
@@ -943,6 +990,27 @@ export function ArtifactPanel({
                   </DropdownMenuContent>
                 </DropdownMenu>
               ))}
+            {showWebPreviewMenuItem && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                onClick={onOpenWebPreview}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <GlobeIcon strokeWidth={1.6} />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('webPreview.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('webPreview.openHint')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
             {onOpenTerminal && (
               <button
                 type="button"
@@ -989,6 +1057,9 @@ export function ArtifactPanel({
         ) : isWorkspaceScopedTab(activeTab) &&
           (activeTab.kind !== 'scheduled_task' || activeTab.task.durable) &&
           (activeTab.kind !== 'file' || !activeTab.previewOnly) &&
+          (activeTab.kind !== 'artifact' ||
+            activeTabArtifact?.metadata?.['artifactType'] !==
+              'web_preview_snapshot') &&
           !activeWorkspaceActions ? (
           <div className={styles.empty} role="alert">
             {t('workspace.notFoundDescription')}
@@ -1075,6 +1146,7 @@ export function ArtifactPanel({
             key={activeTab.id}
             artifacts={artifacts}
             artifactId={activeTab.artifactId}
+            sourceSessionId={activeTab.sourceSessionId}
             workspaceActions={activeWorkspaceActions!}
             previewContent={activeTab.previewContent}
             loading={loading}
@@ -1279,6 +1351,7 @@ function TabScheduledTaskIcon() {
 function ArtifactDetailTab({
   artifacts,
   artifactId,
+  sourceSessionId,
   workspaceActions,
   previewContent,
   loading,
@@ -1286,6 +1359,7 @@ function ArtifactDetailTab({
 }: {
   artifacts: readonly DaemonSessionArtifact[];
   artifactId: string;
+  sourceSessionId?: string;
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
   loading?: boolean;
@@ -1296,6 +1370,7 @@ function ArtifactDetailTab({
     return (
       <ArtifactDetail
         artifact={artifact}
+        sourceSessionId={sourceSessionId}
         workspaceActions={workspaceActions}
         previewContent={previewContent}
       />
@@ -2710,10 +2785,12 @@ function fileExtensionLabel(value: string) {
 
 function ArtifactDetail({
   artifact,
+  sourceSessionId,
   workspaceActions,
   previewContent,
 }: {
   artifact: DaemonSessionArtifact;
+  sourceSessionId?: string;
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
 }) {
@@ -2727,6 +2804,12 @@ function ArtifactDetail({
   const canPreviewWorkspaceFile =
     artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
   const imageMimeType = getArtifactImageMimeType(artifact);
+
+  if (artifact.metadata?.['artifactType'] === 'web_preview_snapshot') {
+    return (
+      <SavedWebPreview artifact={artifact} sourceSessionId={sourceSessionId} />
+    );
+  }
 
   if (isCodeReview) {
     if (artifact.status !== 'available') {
@@ -3588,7 +3671,7 @@ function HtmlArtifactPreview({
           className={styles.htmlPreview}
           referrerPolicy="no-referrer"
           sandbox="allow-scripts"
-          srcDoc={withArtifactPreviewCsp(content)}
+          srcDoc={artifactPreviewDocument(content, `Preview ${workspacePath}`)}
           title={`Preview ${workspacePath}`}
         />
       )}

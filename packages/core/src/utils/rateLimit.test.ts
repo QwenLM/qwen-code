@@ -330,6 +330,10 @@ describe('rate-limit retry diagnostics', () => {
 
     expect(getRateLimitErrorDetails(error)).toEqual({
       providerCode: 'invalid_request_error',
+      // The same value again on its own field: `providerCode` is the collapsed
+      // `code ?? type`, so a body carrying both would otherwise hide the type
+      // from the classifier's permanence guard.
+      providerType: 'invalid_request_error',
       providerMessage,
       transport: 'unknown',
     });
