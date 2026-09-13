@@ -115,10 +115,12 @@
  * `container-type`; until then keep this block to what actually resolves,
  * rather than leaving half a responsive rule that silently does nothing.
  */
-@container (max-width: 620px) {
-  .activity,
-  .separator,
-  .elapsed {
-    display: none;
+@supports (container-type: inline-size) {
+  @container (max-width: 620px) {
+    .activity,
+    .separator,
+    .elapsed {
+      display: none;
+    }
   }
 }

@@ -109,20 +109,22 @@
    rendered hover-action count so the chip never slides under that overlay —
    text may truncate, an interactive chip may not. Rows without the count
    attribute render no actions and keep the full width. */
-.headerRow:has(.gitPill) .header {
-  flex-grow: 0;
-}
+@supports (selector(:has(*))) {
+  .headerRow:has(.gitPill) .header {
+    flex-grow: 0;
+  }
 
-.headerRow:has(.gitPill):has([data-workspace-action-count='1']) .header {
-  max-width: calc(100% - 49px);
-}
+  .headerRow:has(.gitPill):has([data-workspace-action-count='1']) .header {
+    max-width: calc(100% - 49px);
+  }
 
-.headerRow:has(.gitPill):has([data-workspace-action-count='2']) .header {
-  max-width: calc(100% - 72px);
-}
+  .headerRow:has(.gitPill):has([data-workspace-action-count='2']) .header {
+    max-width: calc(100% - 72px);
+  }
 
-.headerRow:has(.gitPill):has([data-workspace-action-count='3']) .header {
-  max-width: calc(100% - 95px);
+  .headerRow:has(.gitPill):has([data-workspace-action-count='3']) .header {
+    max-width: calc(100% - 95px);
+  }
 }
 
 /* Trusted sessions use the sidebar's shared row with its own left indent;

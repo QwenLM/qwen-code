@@ -68,7 +68,10 @@
   display: flex;
   flex-direction: column;
   width: min(100%, 560px);
+  /* dvh tracks the dynamic viewport (shrinks when browser toolbar is visible).
+     Fallback to 100vh for pre-Chrome 108 / pre-Safari 15.4 engines. */
   max-height: min(80vh, calc(100vh - 48px));
+  max-height: min(80dvh, calc(100dvh - 48px));
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
   border-radius: 10px;
@@ -192,6 +195,7 @@
   flex-direction: column;
   flex: 0 1 auto;
   max-height: calc(min(80vh, calc(100vh - 48px)) - 46px);
+  max-height: calc(min(80dvh, calc(100dvh - 48px)) - 46px);
   min-height: 0;
   overflow-y: auto;
   padding: 14px;
@@ -203,10 +207,12 @@
   width: calc(100vw - 32px);
   max-width: none;
   max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
 }
 
 .panelFullscreen .body {
   max-height: calc(100vh - 32px - 46px);
+  max-height: calc(100dvh - 32px - 46px);
 }
 
 @media (max-width: 560px) {
@@ -217,6 +223,7 @@
 
   .panel {
     max-height: min(80vh, calc(100vh - 32px));
+    max-height: min(80dvh, calc(100dvh - 32px));
   }
 
   /* Keep fullscreen dominant on mobile: `.panel` above has equal specificity
@@ -224,9 +231,11 @@
      without this it clamps fullscreen back to 80vh on narrow screens. */
   .panelFullscreen {
     max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
   }
 
   .body {
     max-height: calc(min(80vh, calc(100vh - 32px)) - 46px);
+    max-height: calc(min(80dvh, calc(100dvh - 32px)) - 46px);
   }
 }

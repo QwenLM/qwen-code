@@ -53,6 +53,13 @@ daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程�
 - `@qwen-code/sdk`：`>=0.1.8`
 - 浏览器环境需要能访问 Qwen Code daemon serve 的 HTTP 接口。
 
+### Browser Support Matrix
+
+- Chrome / Edge 107+
+- Firefox 104+
+- Safari 16+
+- Android System WebView 107+
+
 组件包会自动注入自身的 CSS（包括 Tailwind 编译产物），接入方不需要配置
 Tailwind 或额外引入全局 CSS。
 

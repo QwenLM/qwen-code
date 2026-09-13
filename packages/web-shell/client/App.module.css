@@ -1188,13 +1188,15 @@
   height: 14px;
 }
 
-@container (max-width: 699px) {
-  .queuedPromptStateLabel {
-    display: none;
-  }
+@supports (container-type: inline-size) {
+  @container (max-width: 699px) {
+    .queuedPromptStateLabel {
+      display: none;
+    }
 
-  .queuedPromptState:not(.queuedPromptStateLoading) {
-    display: none;
+    .queuedPromptState:not(.queuedPromptStateLoading) {
+      display: none;
+    }
   }
 }
 
