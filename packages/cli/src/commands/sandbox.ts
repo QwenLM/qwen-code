@@ -18,7 +18,11 @@ interface VerifyCase {
   argv: string[];
   /** Why this case exists, printed on failure so the report is self-contained. */
   expectation: string;
-  check: (result: { status: number | null; output: string }) => boolean;
+  check: (result: {
+    status: number | null;
+    output: string;
+    stdout: string;
+  }) => boolean;
 }
 
 interface SandboxArgs {
@@ -91,6 +95,7 @@ export const sandboxCommand: CommandModule = {
       resolveBwrapWritableRoots,
       resolveSandboxNetworkMode,
     } = sandboxModule;
+    type BwrapWritableRoots = ReturnType<typeof resolveBwrapWritableRoots>;
 
     const args = argv as unknown as SandboxArgs;
     // A command may arrive as positionals or after `--`; the latter is required
@@ -130,7 +135,12 @@ export const sandboxCommand: CommandModule = {
 
     let sandboxConfig;
     try {
-      sandboxConfig = await loadSandboxConfig(effectiveSettings, args);
+      // Selection must match the hop, which passes `settings.merged` even in
+      // safe mode (llm.tsx). Clearing settings here would report "no backend"
+      // for a session that really does get confined. Bare mode stays cleared
+      // because the hop skips settings there too. `effectiveSettings` still
+      // feeds the roots below, matching the Config record's safe-mode rule.
+      sandboxConfig = await loadSandboxConfig(settings, args);
     } catch (error) {
       // A probe failure for an explicitly requested backend is fatal by design
       // (never silently unconfined). Surfacing it here is the whole point of
@@ -182,9 +192,22 @@ export const sandboxCommand: CommandModule = {
     // main command is not reachable from this subcommand's argv, so the roots
     // below are the settings-derived set, not necessarily every root a
     // differently-invoked session would get.
-    const { targetDir, roots } = resolveBwrapWritableRoots(
-      effectiveSettings.context?.includeDirectories ?? [],
-    );
+    let rootsResult: BwrapWritableRoots;
+    try {
+      rootsResult = resolveBwrapWritableRoots(
+        effectiveSettings.context?.includeDirectories ?? [],
+      );
+    } catch (error) {
+      // Same failure shape as the probe rejection above: the refusal (e.g. a
+      // workspace that is the home directory) is exactly what someone runs
+      // this subcommand to understand, so it must not escape as a raw stack.
+      writeStderrLine(
+        `Sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const { targetDir, roots } = rootsResult;
 
     writeReportLine('Enforcement: full');
     writeReportLine(
@@ -204,7 +227,7 @@ export const sandboxCommand: CommandModule = {
 
     const runConfined = (
       cmdArgv: string[],
-    ): { status: number | null; output: string } => {
+    ): { status: number | null; output: string; stdout: string } => {
       const result = spawnSync(
         'bwrap',
         buildBwrapArgs({
@@ -213,11 +236,20 @@ export const sandboxCommand: CommandModule = {
           networkMode,
           cliArgs: cmdArgv,
         }),
-        { encoding: 'utf8' },
+        // The battery matches on message text rendered by the confined
+        // libc, and glibc localizes strerror() through its own catalogs —
+        // under a non-English LC_ALL/LANG the EROFS message comes back
+        // localized and a holding confinement would report FAIL. The C
+        // locale pins the dialect for every message-based case at once.
+        // Only the probes get this; the requested-command spawn below runs
+        // the user's own argv and inherits the environment untouched.
+        { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } },
       );
+      const stdout = result.stdout ?? '';
       return {
         status: result.status,
-        output: `${result.stdout ?? ''}${result.stderr ?? ''}`,
+        stdout,
+        output: `${stdout}${result.stderr ?? ''}`,
       };
     };
 
@@ -304,11 +336,18 @@ export const sandboxCommand: CommandModule = {
           networkMode === 'closed'
             ? 'closed mode unshares the network namespace, leaving only loopback'
             : 'open and proxied modes keep the host interfaces visible',
-        check: ({ output }) => {
-          const nonLoopback = output
-            .trim()
-            .split(/\s+/)
-            .filter((name) => name && name !== 'lo');
+        check: ({ status, stdout }) => {
+          if (status !== 0) {
+            return false;
+          }
+          const names = stdout.trim().split(/\s+/).filter(Boolean);
+          // Every network namespace has `lo`; without it the probe listed
+          // nothing (e.g. `tail` missing in a minimal image) and neither
+          // direction of the property was actually measured.
+          if (!names.includes('lo')) {
+            return false;
+          }
+          const nonLoopback = names.filter((name) => name !== 'lo');
           return networkMode === 'closed'
             ? nonLoopback.length === 0
             : nonLoopback.length > 0;

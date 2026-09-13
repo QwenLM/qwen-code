@@ -128,7 +128,7 @@ describe('qwen sandbox', () => {
     expect(report()).toContain('Image: flag/image');
   });
 
-  it.each(['bare', 'safeMode'])('ignores settings in %s mode', async (mode) => {
+  it('ignores settings in bare mode', async () => {
     loadSettingsMock.mockReturnValue({
       merged: {
         tools: { sandbox: true },
@@ -136,15 +136,57 @@ describe('qwen sandbox', () => {
       },
     } as never);
     loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
-    await run({ [mode]: true });
+    await run({ bare: true });
     expect(loadSandboxConfigMock).toHaveBeenCalledWith(
       {},
-      expect.objectContaining({ [mode]: true }),
+      expect.objectContaining({ bare: true }),
     );
     expect(resolveBwrapWritableRootsMock).toHaveBeenCalledWith([]);
-    if (mode === 'bare') {
-      expect(loadSettingsMock).not.toHaveBeenCalled();
-    }
+    expect(loadSettingsMock).not.toHaveBeenCalled();
+  });
+
+  // The session hop selects the backend from the full merged settings even in
+  // safe mode (llm.tsx), so reporting "none" here would contradict the
+  // confinement the same invocation actually gets. Safe mode still suppresses
+  // the settings-derived roots, matching the Config record's rule.
+  it('keeps settings for backend selection in safe mode, matching the hop', async () => {
+    const merged = {
+      tools: { sandbox: true },
+      context: { includeDirectories: ['/extra'] },
+    };
+    loadSettingsMock.mockReturnValue({ merged } as never);
+    loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
+    await run({ safeMode: true });
+    expect(loadSandboxConfigMock).toHaveBeenCalledWith(
+      merged,
+      expect.objectContaining({ safeMode: true }),
+    );
+    expect(resolveBwrapWritableRootsMock).toHaveBeenCalledWith([]);
+    expect(report()).toContain('Backend: bwrap');
+  });
+
+  // The root resolver throws FatalSandboxError for a workspace at or above the
+  // home directory; that refusal is exactly what this subcommand exists to
+  // explain, so it must take the reported failure path, not escape as a raw
+  // rejection.
+  it('reports a writable-root refusal instead of rejecting with a stack', async () => {
+    loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
+    resolveBwrapWritableRootsMock.mockImplementation(() => {
+      throw new Error(
+        "Refusing sandbox writable root '/home/user': the home directory and its ancestors must stay read-only.",
+      );
+    });
+
+    await run();
+
+    expect(writeStderrLineMock.mock.calls[0]?.[0]).toContain(
+      'Sandbox unavailable',
+    );
+    expect(writeStderrLineMock.mock.calls[0]?.[0]).toContain(
+      'Refusing sandbox writable root',
+    );
+    expect(process.exitCode).toBe(1);
+    expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
   it('rejects command flags before -- instead of silently dropping them', () => {
@@ -354,6 +396,75 @@ describe('qwen sandbox', () => {
       await run({ verify: true });
 
       expect(report()).toContain('FAIL  host processes stay visible');
+      expect(process.exitCode).toBe(1);
+    });
+
+    // glibc renders strerror() in the child's locale, so a non-English
+    // LC_ALL/LANG would turn a holding confinement into a FAIL on the EROFS
+    // match. The probes run with the C locale pinned so the battery never
+    // matches a localized message; the user's own command spawn is untouched.
+    it('pins the C locale on the probe spawns', async () => {
+      respond([
+        [/proc\/net\/dev/, { status: 0, stdout: 'lo\neth0\n', stderr: '' }],
+        [
+          /usr\/local\/bin/,
+          { status: 1, stdout: '', stderr: 'Read-only file system' },
+        ],
+        [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+      ]);
+
+      await run({ verify: true });
+
+      expect(report()).toContain('Confinement verified (4 checks).');
+      for (const call of spawnSyncMock.mock.calls) {
+        expect(call[2]).toEqual(
+          expect.objectContaining({
+            encoding: 'utf8',
+            env: expect.objectContaining({ LC_ALL: 'C' }),
+          }),
+        );
+      }
+    });
+
+    // The probe pipeline exits with `cut`'s status, so a minimal image without
+    // `tail` still reports status 0 and writes the error to stderr. A check
+    // that read the combined output would count "tail:" as a host interface
+    // and pass a property it never measured.
+    it('fails the network check when the probe could not list interfaces', async () => {
+      respond([
+        [
+          /proc\/net\/dev/,
+          { status: 0, stdout: '', stderr: 'sh: 1: tail: not found' },
+        ],
+        [
+          /usr\/local\/bin/,
+          { status: 1, stdout: '', stderr: 'Read-only file system' },
+        ],
+        [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+      ]);
+
+      await run({ verify: true });
+
+      expect(report()).toContain('FAIL  host network is shared in open mode');
+      expect(process.exitCode).toBe(1);
+    });
+
+    it('fails the network check on a non-zero probe status', async () => {
+      respond([
+        [
+          /proc\/net\/dev/,
+          { status: 127, stdout: '', stderr: 'sh: 1: tail: not found' },
+        ],
+        [
+          /usr\/local\/bin/,
+          { status: 1, stdout: '', stderr: 'Read-only file system' },
+        ],
+        [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+      ]);
+
+      await run({ verify: true });
+
+      expect(report()).toContain('FAIL  host network is shared in open mode');
       expect(process.exitCode).toBe(1);
     });
 

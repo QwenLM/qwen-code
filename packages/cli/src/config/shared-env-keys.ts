@@ -159,6 +159,26 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'XDG_CONFIG_HOME',
   'GIT_CONFIG_COUNT',
   'GIT_CONFIG_PARAMETERS',
+  // The sandbox backend selection and network mode are confinement decisions:
+  // `resolveSandboxNetworkMode` flips to `proxied` purely on the presence of
+  // QWEN_SANDBOX_PROXY_COMMAND, and the bwrap branch then executes that value
+  // through `bash -c` on the host, outside the confinement, before the agent
+  // starts. A project `.env` or settings.env supplying it is repository
+  // content running as the user — the same class as GIT_PROXY_COMMAND. The
+  // operator's launch environment or a home `.env` remains the only trusted
+  // source.
+  'QWEN_SANDBOX_PROXY_COMMAND',
+  'QWEN_SANDBOX_NET',
+  // The bwrap writable-root derivation reads XDG_CACHE_HOME and, via
+  // os.tmpdir(), TMPDIR/TMP/TEMP (its POSIX fallback order). A project `.env`
+  // pointing one inside the home directory ($HOME/.ssh, $HOME/.aws, …) would
+  // make the confinement bind that directory read-write. Values from the
+  // launch environment or a home `.env` are the operator's own choice and
+  // stay honored.
+  'XDG_CACHE_HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
   // git falls back to executing $SSH_ASKPASS for passphrase prompts (its
   // askpass order is GIT_ASKPASS > core.askPass > SSH_ASKPASS, and ssh runs
   // it whenever SSH_ASKPASS_REQUIRE=force or no terminal is available), so a

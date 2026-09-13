@@ -47,9 +47,6 @@ const RELOAD_EXCLUDED_KEYS = new Set([
   'ENV',
   'PATH',
   'HOME',
-  'TMPDIR',
-  'TMP',
-  'TEMP',
 ]);
 
 // Windows env lookup is case-insensitive, so a reload matching only the
