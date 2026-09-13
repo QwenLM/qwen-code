@@ -80,6 +80,8 @@ export interface ThreadViewProps {
     enabled: boolean;
     /** Retired identities stay in the list and are never offered new work. */
     retiredAt?: number;
+    status?: string;
+    runtime?: { label: string; status: string };
   }[];
   /** Server-computed routing for the current draft. */
   preview?: readonly RoutingPreviewTarget[];
@@ -108,10 +110,12 @@ function formatTime(at: number): string {
 
 export function RunRowView({
   row,
+  agent,
   onOpenAgentSession,
   onCancelRun,
 }: {
   row: RunRow;
+  agent?: { status?: string; runtime?: { label: string; status: string } };
   onOpenAgentSession?: (sessionId: string) => void;
   onCancelRun?: (runId: string) => void;
 }) {
@@ -133,15 +137,19 @@ export function RunRowView({
     responding: '正在回复',
   };
   const state =
-    row.run.status === 'running'
-      ? progress
-        ? stale
-          ? '连接中断待确认'
-          : quiet
-            ? '等待新输出'
-            : (stages[progress.stage] ?? '执行中')
-        : '执行中 · 暂无过程上报'
-      : row.state;
+    row.run.status === 'queued'
+      ? agent?.status === 'offline' || agent?.runtime?.status === 'offline'
+        ? `执行主机 ${agent.runtime?.label ?? ''} 离线，等待恢复`
+        : '消息已接收，排队等待启动'
+      : row.run.status === 'running'
+        ? progress
+          ? stale
+            ? '连接中断待确认'
+            : quiet
+              ? '等待新输出'
+              : (stages[progress.stage] ?? '执行中')
+          : '执行中 · 暂无过程上报'
+        : row.state;
   const stateClass = row.outstanding
     ? `${styles.runState} ${styles.runStateOutstanding}`
     : row.live
@@ -196,14 +204,29 @@ export function RunRowView({
               </div>
             </>
           ) : (
-            <div>尚未收到执行过程；不能仅凭“执行中”判断模型仍在工作。</div>
+            <div>
+              {row.run.status === 'queued'
+                ? '尚未启动模型，不是在思考。任务保留在队列中，无需重发。'
+                : '尚未收到执行过程；不能仅凭“执行中”判断模型仍在工作。'}
+            </div>
           )}
         </div>
       )}
       {progress?.detail && (
-        <details className={styles.runProgress}>
+        <details className={styles.runProgress} open={row.live}>
           <summary>最近执行活动</summary>
           <div>{progress.detail}</div>
+        </details>
+      )}
+      {progress?.thoughtText && (
+        <details className={styles.runProgress} open={row.live}>
+          <summary>思考过程（执行器提供）</summary>
+          <div className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words">
+            {progress.thoughtText}
+          </div>
+          {progress.thoughtText.length >= 65536 && (
+            <p>思考预览已达长度上限。</p>
+          )}
         </details>
       )}
       {progress?.outputText && (
@@ -546,6 +569,7 @@ export function ThreadView({
               <RunRowView
                 key={row.run.id}
                 row={row}
+                agent={agents.find((agent) => agent.name === row.run.agentName)}
                 {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
                 {...(onCancelRun ? { onCancelRun } : {})}
               />

@@ -5,9 +5,15 @@ export async function streamAgentTurn(
   sessionId: string,
   promptId: string,
   signal: AbortSignal,
-  report: (stage: string, detail: string, outputText?: string) => void,
+  report: (
+    stage: string,
+    detail: string,
+    outputText?: string,
+    thoughtText?: string,
+  ) => void,
 ): Promise<void> {
   let text = '';
+  let thought = '';
   for await (const event of bridge.subscribeEvents(sessionId, { signal })) {
     if (event.promptId !== promptId || event.type !== 'session_update')
       continue;
@@ -29,7 +35,8 @@ export async function streamAgentTurn(
       text += update.content.text ?? '';
       report('responding', '正在回复', text);
     } else if (update.sessionUpdate === 'agent_thought_chunk') {
-      report('thinking', 'Qwen Code 正在思考');
+      if (update.content?.type === 'text') thought += update.content.text ?? '';
+      report('thinking', 'Qwen Code 正在思考', undefined, thought);
     } else if (
       update.sessionUpdate === 'tool_call' ||
       update.sessionUpdate === 'tool_call_update'

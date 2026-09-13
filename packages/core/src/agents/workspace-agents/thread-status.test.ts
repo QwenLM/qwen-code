@@ -94,7 +94,10 @@ describe('resolveThreadStatus', () => {
     );
 
     expect(result.status).toBe('in_progress');
-    expect(result.reason).toBe('1 Agent run(s) active');
+    expect(result.reason).toBe('1 个智能体执行中');
+    expect(resolve(thread({ runs: [run({ status: 'queued' })] })).reason).toBe(
+      '1 个智能体排队中，尚未开始执行',
+    );
   });
 
   it('reports in_review once the last run is quiescent', () => {

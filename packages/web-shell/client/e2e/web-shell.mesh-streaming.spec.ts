@@ -49,7 +49,13 @@ test('mesh shows growing replies before completion, survives reload, and replace
     runs: [],
     budget: { turnsUsed: 0, turnLimit: 12, tokensUsed: 0, tokenLimit: 10000 },
   };
-  const agent = { id: 'ag_stream', name: 'stream-worker', enabled: true };
+  const agent = {
+    id: 'ag_stream',
+    name: 'stream-worker',
+    enabled: true,
+    status: 'offline',
+    runtime: { label: 'Demo-Host', status: 'offline' },
+  };
   let sent = 0;
   await page.route('**/workspaces/*/agent/**', async (route) => {
     const pathname = new URL(route.request().url()).pathname;
@@ -77,7 +83,7 @@ test('mesh shows growing replies before completion, survives reload, and replace
           id: 'run-stream',
           agentId: agent.id,
           agentName: agent.name,
-          status: 'running',
+          status: 'queued',
           closeAcknowledged: false,
           trigger: 'mentioned by you',
           startedAt: Date.now(),
@@ -115,11 +121,27 @@ test('mesh shows growing replies before completion, survives reload, and replace
   const activity = page.getByRole('complementary').filter({
     has: page.getByRole('heading', { name: 'Agent activity', exact: true }),
   });
-  await expect(activity).toContainText('思考中');
-  const transcript = page.locator('[data-web-shell-message-list]:visible');
+  await expect(activity).toContainText('Demo-Host 离线');
   const run = thread.runs[0];
+  agent.status = 'idle';
+  agent.runtime.status = 'online';
+  run.status = 'running';
+  await expect(activity).toContainText('思考中');
+  for (const thought of [
+    'Checking the task.',
+    'Checking the task. Choosing a collaborator.',
+  ]) {
+    run.progress = { ...run.progress!, thoughtText: thought };
+    await expect(activity).toContainText(thought);
+  }
+  await page.reload();
+  await expect(activity).toContainText(
+    'Checking the task. Choosing a collaborator.',
+  );
+  const transcript = page.locator('[data-web-shell-message-list]:visible');
   for (const text of ['First fragment.', 'First fragment. Second fragment.']) {
     run.progress = {
+      ...run.progress,
       receivedAt: Date.now(),
       activityAt: Date.now(),
       stage: 'responding',
@@ -204,13 +226,14 @@ test('mesh real Host streams into the browser @mesh-live', async ({
     await openChat(page, id, cwd!);
     await send(
       page,
-      `@${name} Do not use tools, inspect files or change files. Explain the water cycle in one plain-text paragraph of about 400 words. No Markdown, lists, numbering, headings or formatting.`,
+      `@${name} Do not inspect or change files, run commands, or browse the web. Explain the water cycle in one plain-text paragraph of about 400 words. No Markdown, lists, numbering, headings or formatting. Stream your answer as text. If thread_review is available, you MUST then call thread_review with that answer as the summary to hand it back for review; this collaboration closing tool is explicitly allowed.`,
     );
     const transcript = page.locator('[data-web-shell-message-list]:visible');
     const replies = transcript.locator('[data-web-shell-message-row]').filter({
-      has: page.getByText(name!, { exact: true }),
+      has: page.locator('strong').filter({ hasText: name! }),
     });
     const samples: { elapsedMs: number; chars: number }[] = [];
+    const thoughtSamples: { elapsedMs: number; chars: number }[] = [];
     const started = Date.now();
     let finalText = '';
     await expect
@@ -226,6 +249,27 @@ test('mesh real Host streams into the browser @mesh-live', async ({
             JSON.stringify(run),
           ).toBe(false);
           const text = run.progress?.outputText ?? '';
+          const thought = run.progress?.thoughtText ?? '';
+          if (
+            run.status === 'running' &&
+            thought.length > (thoughtSamples.at(-1)?.chars ?? 0)
+          ) {
+            const activity = page.getByRole('complementary').filter({
+              has: page.getByRole('heading', {
+                name: 'Agent activity',
+                exact: true,
+              }),
+            });
+            await expect(activity).toContainText(thought.slice(-80));
+            thoughtSamples.push({
+              elapsedMs: Date.now() - started,
+              chars: thought.length,
+            });
+            if (thoughtSamples.length === 1)
+              await page.screenshot({
+                path: info.outputPath('live-thinking.png'),
+              });
+          }
           if (
             run.status === 'running' &&
             text.length > (samples.at(-1)?.chars ?? 0)
@@ -262,7 +306,11 @@ test('mesh real Host streams into the browser @mesh-live', async ({
     await expect(replies).toContainText(finalText.slice(-80));
     await expect(replies).toHaveCount(1);
     await info.attach('live-observations', {
-      body: JSON.stringify(samples, null, 2),
+      body: JSON.stringify(
+        { thoughts: thoughtSamples, replies: samples },
+        null,
+        2,
+      ),
       contentType: 'application/json',
     });
     await page.screenshot({ path: info.outputPath('live-completed.png') });

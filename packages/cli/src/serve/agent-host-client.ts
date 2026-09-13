@@ -221,6 +221,7 @@ async function executeAssignment(
     stage: 'starting',
     detail: '执行器已接单，正在启动',
     outputText: '',
+    thoughtText: '',
   };
   let sending = false;
   const flush = async () => {
@@ -255,6 +256,7 @@ async function executeAssignment(
     stage: string,
     detail: string,
     outputText = progress.outputText,
+    thoughtText = progress.thoughtText,
   ) => {
     // ponytail: bounded live preview; the final result retains the full answer.
     progress = {
@@ -262,6 +264,7 @@ async function executeAssignment(
       stage,
       detail: detail.slice(0, 1200),
       outputText: outputText.slice(0, 262144),
+      thoughtText: thoughtText.slice(0, 65536),
     };
   };
   void flush();
@@ -285,6 +288,13 @@ async function executeAssignment(
             );
           },
           onActivity: report,
+          onThought: (delta) =>
+            report(
+              'thinking',
+              'Codex 正在思考',
+              undefined,
+              progress.thoughtText + delta,
+            ),
         },
         modelPrompt(assignment),
         'read-only',

@@ -63,6 +63,7 @@ export async function runCodexAppServer(
     cwd: string;
     maxTimeMinutes?: number;
     onMessage?: (itemId: string, text: string) => void;
+    onThought?: (delta: string) => void;
     onActivity?: (stage: string, detail: string) => void;
     onCleanupWarning?: (detail: string) => void;
   },
@@ -241,6 +242,10 @@ export async function runCodexAppServer(
         const text = (messageText.get(itemId) ?? '') + parameters['delta'];
         messageText.set(itemId, text);
         params.onMessage?.(itemId, text);
+      } else if (method === 'item/reasoning/summaryTextDelta') {
+        associateTurn(parameters['turnId']);
+        if (typeof parameters['delta'] === 'string')
+          params.onThought?.(parameters['delta']);
       } else if (method === 'item/started') {
         associateTurn(parameters['turnId']);
         const item = object(parameters['item']);

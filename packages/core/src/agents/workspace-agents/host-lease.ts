@@ -236,6 +236,7 @@ export async function reportHostRunProgress(
     stage: string;
     detail: string;
     outputText?: string;
+    thoughtText?: string;
   },
 ) {
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
@@ -267,6 +268,10 @@ export async function reportHostRunProgress(
         previous?.sequence === input.sequence
           ? previous.outputText
           : (input.outputText ?? previous?.outputText),
+      thoughtText:
+        previous?.sequence === input.sequence
+          ? previous.thoughtText
+          : (input.thoughtText ?? previous?.thoughtText),
     };
     await transaction.writeThread(thread);
     return { ok: true };

@@ -34,6 +34,8 @@ export function ThreadChat({
     name: string;
     enabled: boolean;
     retiredAt?: number;
+    status?: string;
+    runtime?: { label: string; status: string };
   }[];
   thread: ThreadDetailView;
   pending: boolean;
@@ -48,46 +50,61 @@ export function ThreadChat({
   const customization = useWebShellCustomization();
   const { live, past } = buildRunRows(thread.runs);
   const messages = useMemo<Message[]>(
-    () => [
-      ...(thread.body
-        ? [
-            {
-              id: `${thread.id}:description`,
-              role: 'user' as const,
-              content: thread.body,
-            },
-          ]
-        : []),
-      ...thread.posts.map(
-        (post): Message => ({
-          id: post.id,
-          role: post.authorKind === 'human' ? 'user' : 'assistant',
-          content:
-            post.authorKind === 'human'
-              ? post.text
-              : `**${post.authorName}**\n\n${post.text}`,
-          timestamp: post.at,
-        }),
-      ),
-      ...thread.runs
-        .filter(
-          (run) =>
-            run.progress?.outputText &&
-            !(
-              run.closeKind === 'review' &&
-              thread.posts.some((post) => post.sourceRunId === run.id)
-            ),
-        )
-        .map(
-          (run): Message => ({
-            id: `${run.id}:output`,
-            role: 'assistant',
-            content: `**${run.agentName}**\n\n${run.progress?.outputText}`,
-            timestamp: run.startedAt,
-            isStreaming: run.status === 'running',
+    () =>
+      [
+        ...(thread.body
+          ? [
+              {
+                id: `${thread.id}:description`,
+                role: 'user' as const,
+                content: thread.body,
+              },
+            ]
+          : []),
+        ...thread.posts.map(
+          (post): Message => ({
+            id: post.id,
+            role: post.authorKind === 'human' ? 'user' : 'assistant',
+            content:
+              post.authorKind === 'human'
+                ? post.text
+                : `**${post.authorName}**\n\n${post.text}`,
+            timestamp: post.at,
           }),
         ),
-    ],
+        ...thread.runs
+          .filter((run) => run.progress?.thoughtText)
+          .map(
+            (run): Message => ({
+              id: `${run.id}:thought`,
+              role: 'thinking',
+              content: `${run.agentName}\n\n${run.progress!.thoughtText}`,
+              timestamp: run.startedAt,
+              isStreaming:
+                run.status === 'running' && run.progress?.stage === 'thinking',
+            }),
+          ),
+        ...thread.runs
+          .filter(
+            (run) =>
+              run.progress?.outputText &&
+              !(
+                run.closeKind === 'review' &&
+                thread.posts.some((post) => post.sourceRunId === run.id)
+              ),
+          )
+          .map(
+            (run): Message => ({
+              id: `${run.id}:output`,
+              role: 'assistant',
+              content: `**${run.agentName}**\n\n${run.progress?.outputText}`,
+              timestamp: run.startedAt,
+              isStreaming: run.status === 'running',
+            }),
+          ),
+      ].sort(
+        (a: Message, b: Message) => (a.timestamp ?? 0) - (b.timestamp ?? 0),
+      ),
     [thread.id, thread.body, thread.posts, thread.runs],
   );
   return (
@@ -182,6 +199,7 @@ export function ThreadChat({
             <RunRowView
               key={row.run.id}
               row={row}
+              agent={agents.find((agent) => agent.id === row.run.agentId)}
               onOpenAgentSession={onOpenAgentSession}
               onCancelRun={pending ? undefined : onCancelRun}
             />

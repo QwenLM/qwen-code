@@ -137,6 +137,7 @@ export function registerAgentHostTransportRoutes(
         stage,
         detail,
         outputText,
+        thoughtText,
       } = body(req);
       if (
         typeof threadId !== 'string' ||
@@ -155,7 +156,9 @@ export function registerAgentHostTransportRoutes(
         typeof detail !== 'string' ||
         detail.length > 1200 ||
         (outputText !== undefined &&
-          (typeof outputText !== 'string' || outputText.length > 262144))
+          (typeof outputText !== 'string' || outputText.length > 262144)) ||
+        (thoughtText !== undefined &&
+          (typeof thoughtText !== 'string' || thoughtText.length > 65536))
       ) {
         res.status(400).json({ error: 'Invalid progress.' });
         return;
@@ -170,6 +173,7 @@ export function registerAgentHostTransportRoutes(
         stage,
         detail,
         outputText,
+        thoughtText,
       });
       res.status(result.ok ? 200 : 409).json(result);
     },

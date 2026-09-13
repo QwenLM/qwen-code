@@ -2,7 +2,7 @@ import { expect, it } from 'vitest';
 import { streamAgentTurn } from './stream-agent-turn.js';
 
 it('accumulates only this turn’s reply without rendering thoughts as text', async () => {
-  const updates: Array<[string, string | undefined]> = [];
+  const updates: Array<[string, string | undefined, string | undefined]> = [];
   await streamAgentTurn(
     {
       async *subscribeEvents() {
@@ -10,6 +10,7 @@ it('accumulates only this turn’s reply without rendering thoughts as text', as
           ['other', 'agent_message_chunk', 'wrong conversation'],
           ['turn', 'agent_message_chunk', 'hello'],
           ['turn', 'agent_thought_chunk', 'not reply text'],
+          ['turn', 'agent_thought_chunk', ' continued'],
           ['turn', 'agent_message_chunk', ' world'],
         ]) {
           yield {
@@ -26,13 +27,14 @@ it('accumulates only this turn’s reply without rendering thoughts as text', as
     'session',
     'turn',
     new AbortController().signal,
-    (stage, _detail, text) => {
-      updates.push([stage, text]);
+    (stage, _detail, text, thought) => {
+      updates.push([stage, text, thought]);
     },
   );
   expect(updates).toEqual([
-    ['responding', 'hello'],
-    ['thinking', undefined],
-    ['responding', 'hello world'],
+    ['responding', 'hello', undefined],
+    ['thinking', undefined, 'not reply text'],
+    ['thinking', undefined, 'not reply text continued'],
+    ['responding', 'hello world', undefined],
   ]);
 });

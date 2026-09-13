@@ -193,6 +193,7 @@ export interface RunView {
     stage: string;
     detail: string;
     outputText?: string;
+    thoughtText?: string;
   };
   id: string;
   agentId: string;

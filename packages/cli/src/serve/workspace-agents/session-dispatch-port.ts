@@ -145,6 +145,7 @@ export function createSessionDispatchPort(
       stage: 'starting',
       detail: '正在启动',
       outputText: '',
+      thoughtText: '',
     };
     let saving: Promise<unknown> | undefined;
     const flush = () => {
@@ -185,13 +186,19 @@ export function createSessionDispatchPort(
           sessionId,
           deliveryId,
           controller.signal,
-          (stage, detail, outputText = progress.outputText) => {
+          (
+            stage,
+            detail,
+            outputText = progress.outputText,
+            thoughtText = progress.thoughtText,
+          ) => {
             progress = {
               ...progress,
               sequence: progress.sequence + 1,
               stage,
               detail: detail.slice(0, 1200),
               outputText: outputText.slice(0, 262144),
+              thoughtText: thoughtText.slice(0, 65536),
             };
           },
         ).catch(() => {

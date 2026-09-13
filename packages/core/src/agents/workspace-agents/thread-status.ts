@@ -175,9 +175,13 @@ export function resolveThreadStatus(
 
   const live = thread.runs.filter((run) => LIVE_RUN_STATUSES.has(run.status));
   if (live.length > 0) {
+    const queued = live.filter((run) => run.status === 'queued').length;
     return {
       status: 'in_progress',
-      reason: `${live.length} Agent run(s) active`,
+      reason:
+        queued === live.length
+          ? `${queued} 个智能体排队中，尚未开始执行`
+          : `${live.length - queued} 个智能体执行中${queued ? `，${queued} 个排队中` : ''}`,
       outstanding,
     };
   }
