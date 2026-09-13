@@ -140,8 +140,8 @@ export default {
   'All available skills are locked at a higher scope (see below).':
     'Totes les habilitats disponibles estan bloquejades en un àmbit superior (veure a sota).',
   'No skills match the search.': 'Cap habilitat coincideix amb la cerca.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    "Bloquejades per paràmetres d'àmbit superior (aquí no es poden commutar):",
+  'Locked by settings entries you cannot toggle here:':
+    'Bloquejades per entrades de paràmetres (aquí no es poden commutar):',
   'higher scope': 'àmbit superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [bloquejada: {{scope}}]',

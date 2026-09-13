@@ -3947,17 +3947,22 @@ jobs:
         run: |-
           set -uo pipefail
           # Download the browser binary for the Playwright package the
-          # capture harness actually imports. This lockfile has TWO
-          # Playwright trees: terminal-capture.ts imports `playwright`, but
-          # node_modules/.bin/playwright is @playwright/test's CLI, which
-          # pins a different chromium revision — so `npx playwright install`
-          # would download a browser the harness cannot launch. Resolve the
-          # CLI from the harness's own directory: require.resolve runs the
-          # same algorithm as its `from 'playwright'` import, so the binary
-          # matches the lockfile even if npm's hoist layout changes (nothing
-          # pins playwright to the root node_modules). cli.js is not in the
-          # package's exports map, so resolve the exported package.json and
-          # join. Runs as node so the tree is agent-readable without chmod.
+          # capture harness actually imports. Root `playwright` and Web
+          # Shell's `@playwright/test` carry the same exact pin, and
+          # `npm run check:lockfile` fails if the two manifests or their
+          # resolved trees drift apart, so both of those CLIs install the
+          # same chromium revision. The parity stops there: a transitive
+          # dependency of packages/mobile-mcp hoists an older
+          # `playwright-core` to the root, and its own bin pins an older
+          # revision. Resolve the CLI from the harness's own directory
+          # rather than assuming a hoist location anyway: require.resolve
+          # runs the same algorithm as the harness's `from 'playwright'`
+          # import, so the binary keeps matching the imported package if
+          # npm's hoist layout changes, if a workspace later nests its own
+          # copy, or if that parity check is ever bypassed. cli.js is not in
+          # the package's exports map, so resolve the exported package.json
+          # and join. Runs as node so the tree is agent-readable without
+          # chmod.
           # Best-effort: failure degrades to a text-only report.
           PW_PATH="${RUNNER_TEMP:?}/pw-browsers"
           mkdir -p "$PW_PATH"
