@@ -166,6 +166,8 @@ By default, the bot requires an @mention in group chats (`requireMention: true`)
 
 Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default and only applies to agent replies with a DingTalk staff ID. Replies are sent as DingTalk markdown whether or not they carry a mention; the mention prefix is included in the first message chunk.
 
+Qwen Code preserves the text content supplied by DingTalk when constructing the canonical message; it does not remove a leading mention itself. When DingTalk omits the bot mention from a plain-text callback, a body such as `/clear` or `!command` still begins with that command marker and follows the normal local-command rules. When the callback retains a leading bot mention, as rich-text callbacks can, `@Bot /clear` and `@Bot !command` remain ordinary agent input because the canonical text does not begin with `/` or `!`. `isInAtList` continues to determine whether the group message addressed the bot.
+
 ### Finding a Group's Conversation ID
 
 DingTalk uses `conversationId` to identify groups. You can find it in the channel service logs when someone sends a message in the group — look for the `conversationId` field in the log output.
