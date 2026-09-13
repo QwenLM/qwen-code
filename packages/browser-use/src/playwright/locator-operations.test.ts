@@ -492,6 +492,45 @@ describe('locator.allTextContents', () => {
   });
 });
 
+describe('locator.evaluate bindings', () => {
+  // The SDK emits scripts that read the free variables `element` and
+  // `elements`; the runtime binds them when it compiles the script inside
+  // the page. Run the real page-side callbacks here so a renamed binding on
+  // either side surfaces as the ReferenceError it would be in production.
+  it('binds element and elements for the page-side script', async () => {
+    const evaluate = vi.fn(
+      async (
+        run: (element: unknown, source: string) => Promise<string>,
+        source: string,
+      ) => run({ tagName: 'BODY' }, source),
+    );
+    const evaluateAll = vi.fn(
+      async (
+        run: (elements: unknown[], source: string) => Promise<string>,
+        source: string,
+      ) => run([{}, {}], source),
+    );
+    const handle = { waitFor: vi.fn(async () => undefined) };
+    const locator = { first: vi.fn(() => handle), evaluate, evaluateAll };
+    const tab = { page: { locator: () => locator } } as unknown as TabState;
+    const steps = [{ kind: 'locator', selector: 'body' }];
+    await expect(
+      executeLocatorOperation(
+        'locator.evaluate',
+        { steps, script: 'return element.tagName;', timeoutMs: 50 },
+        tab,
+      ),
+    ).resolves.toBe('BODY');
+    await expect(
+      executeLocatorOperation(
+        'locator.evaluateAll',
+        { steps, script: 'return elements.length;', timeoutMs: 50 },
+        tab,
+      ),
+    ).resolves.toBe(2);
+  });
+});
+
 describe('locator.evaluateAll', () => {
   function evaluateAllFixture() {
     const handle = { waitFor: vi.fn(async () => undefined) };
