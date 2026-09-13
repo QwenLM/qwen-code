@@ -1062,11 +1062,12 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
           RUNNER_WORKSPACE: rws,
           PATH: `${bin}:${process.env.PATH}`,
         });
-        // The step has no continue-on-error, so its own never-fail exit
-        // is what keeps the heal chain alive: a wipe that cannot
-        // complete must warn and exit 0 so the retry checkout still
-        // runs against the survivors — a double checkout failure is
-        // what turns the job red, not the heal step.
+        // The job is already red when this step runs — failure() is its
+        // precondition — and with no continue-on-error the exit code IS
+        // the step conclusion, so a wipe that cannot complete must warn
+        // and exit 0: a hard failure here adds the heal step to the
+        // failed-step list the per-commit issue (main-ci-failure-issue.yml)
+        // carries, beside the checkout that actually doomed the job.
         assert.equal(r.status, 0, r.stderr);
         assert.ok(existsSync(ws));
         assert.deepEqual(readdirSync(ws).sort(), [
