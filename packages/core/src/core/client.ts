@@ -596,10 +596,6 @@ export class LlmClient {
           counts.outputTokenCount,
           counts.isEstimated,
         );
-      } else {
-        chat.setLastPromptTokenCount(
-          uiTelemetryService.getLastPromptTokenCount(),
-        );
       }
     } else if (resumedSessionData) {
       this.armTelemetrySwapUndo(sessionId);
@@ -625,10 +621,6 @@ export class LlmClient {
           resumeTokenCounts.promptTokenCount,
           resumeTokenCounts.outputTokenCount,
           resumeTokenCounts.isEstimated,
-        );
-      } else {
-        chat.setLastPromptTokenCount(
-          uiTelemetryService.getLastPromptTokenCount(),
         );
       }
 
