@@ -416,7 +416,11 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
     const restored = new Map<string, SkillConfig>();
     const unmatched = new Map<string, SkillConfig>();
-    const restoreSkill = (requestedName: unknown, output: unknown): void => {
+    const restoreSkill = (
+      requestedName: unknown,
+      output: unknown,
+      rearm: boolean,
+    ): void => {
       if (typeof requestedName !== 'string' || typeof output !== 'string') {
         return;
       }
@@ -426,12 +430,12 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         // Refusals, truncated or persisted bodies and bodies of an edited
         // SKILL.md all land here. None can be checked against the file on
         // disk, so none may grant what its current frontmatter declares.
-        unmatched.set(skill.name, skill.config);
+        if (rearm) unmatched.set(skill.name, skill.config);
         return;
       }
       this.loadedSkillContents.add(skill.output);
       this.loadedSkillNames.add(skill.name);
-      restored.set(skill.name, skill.config);
+      if (rearm) restored.set(skill.name, skill.config);
     };
 
     const pendingSkillCalls = new Map<string, string>();
@@ -487,7 +491,9 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
               'skill' in result.args &&
               'output' in result
             ) {
-              restoreSkill(result.args.skill, result.output);
+              // A script can print this line itself, so it restores the
+              // body only and never re-arms grants or hooks.
+              restoreSkill(result.args.skill, result.output, false);
             }
           }
           continue;
@@ -503,7 +509,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         const requestedName = pendingSkillCalls.get(response.id);
         pendingSkillCalls.delete(response.id);
         if (requestedName === undefined) continue;
-        restoreSkill(requestedName, output);
+        restoreSkill(requestedName, output, true);
       }
     }
 

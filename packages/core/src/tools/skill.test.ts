@@ -1622,6 +1622,50 @@ describe('SkillTool', () => {
         });
       });
 
+      it('does not re-arm a Skill recorded only inside exec output', async () => {
+        const execOutput = JSON.stringify({
+          toolResults: [
+            {
+              name: ToolNames.SKILL,
+              args: { skill: gatedSkill.name },
+              output: bodyOf(gatedSkill),
+            },
+          ],
+        });
+        await skillTool.restoreLoadedSkillsFromHistory([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  args: { code: `text(${JSON.stringify(execOutput)})` },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  response: { output: execOutput },
+                },
+              },
+            ],
+          },
+        ]);
+
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set(['gated-skill']),
+        );
+        expect(registerSkillHooks).not.toHaveBeenCalled();
+        expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      });
+
       it.each([
         [
           'disabled',
