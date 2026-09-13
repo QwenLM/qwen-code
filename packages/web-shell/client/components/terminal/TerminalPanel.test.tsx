@@ -67,6 +67,8 @@ vi.mock('../../i18n', () => ({
         'terminal.notice.error': `Error: ${values?.['message'] ?? ''}`,
         'terminal.notice.unknownError': 'Unknown error',
         'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+        'terminal.notice.protocolMismatch':
+          'Terminal protocol changed; restart the daemon and reload this page.',
       })[key] ?? key,
   }),
 }));
@@ -316,9 +318,17 @@ describe('TerminalPanel', () => {
       ws.close.mock.invocationCallOrder[0]!,
     );
     expect(ws.close).toHaveBeenCalledWith(4002, 'Terminal protocol mismatch');
+    // The localized restart notice is a named deliverable; without pinning it
+    // the mock's `?? key` fallback would silently render the raw key instead.
+    expect(terminal.writeln).toHaveBeenCalledWith(
+      expect.stringContaining('Terminal protocol changed'),
+    );
     const sent = ws.send.mock.calls.length;
     act(() => releaseWebTerminal('terminal:one'));
     expect(ws.send).toHaveBeenCalledTimes(sent);
+    // The mismatch branch already released this PTY: the releaseRequested flag
+    // must keep release() from opening a second, release-only socket.
+    expect(FakeWebSocket.instances).toHaveLength(1);
     expect(terminal.write).not.toHaveBeenCalled();
   });
 
