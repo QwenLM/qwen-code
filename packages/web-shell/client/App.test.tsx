@@ -277,6 +277,8 @@ const {
   editorCommit,
   editorFocus,
   editorInsertText,
+  editorRestoreImages,
+  editorRestoreFiles,
   editorRestoreInputAnnotations,
   settingsReload,
   settingsSetValue,
@@ -768,6 +770,8 @@ const {
     editorCommit: vi.fn(),
     editorFocus: vi.fn(),
     editorInsertText: vi.fn(),
+    editorRestoreImages: vi.fn(),
+    editorRestoreFiles: vi.fn(),
     editorRestoreInputAnnotations: vi.fn(),
     settingsReload: vi.fn().mockResolvedValue(undefined),
     settingsSetValue,
@@ -1034,8 +1038,8 @@ vi.mock('./components/ChatEditor', async () => {
           setText: (text) => {
             testState.prompt = text;
           },
-          restoreImages: () => undefined,
-          restoreFiles: () => undefined,
+          restoreImages: editorRestoreImages,
+          restoreFiles: editorRestoreFiles,
           restoreInputAnnotations: editorRestoreInputAnnotations,
           submit: (input) => {
             const accepted = props.onSubmit(
@@ -10547,6 +10551,8 @@ beforeEach(() => {
   editorClear.mockClear();
   editorCommit.mockClear();
   editorFocus.mockClear();
+  editorRestoreImages.mockClear();
+  editorRestoreFiles.mockClear();
   editorRestoreInputAnnotations.mockClear();
   editorInsertText.mockClear();
   mockStore.appendLocalUserMessage.mockReset();
@@ -35060,6 +35066,59 @@ describe('App prompt send failure retry', () => {
       }),
     );
   });
+
+  it.each([false, true])(
+    'preserves an unadmitted slash prompt after failure (new input: %s)',
+    async (hasNewInput) => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const firstSend = deferred<void>();
+      mockSessionActions.sendPrompt.mockImplementationOnce(
+        () => firstSend.promise,
+      );
+      const images = [{ data: 'AQID', mimeType: 'image/png' }];
+      const files = [
+        {
+          name: 'review.txt',
+          media_type: 'text/plain',
+          text: 'review context',
+        },
+      ];
+      const onToast = vi.fn();
+      testState.prompt = '/review this image';
+      renderApp({ onToast });
+      await flush();
+      act(() => {
+        const accepted = testState.latestChatEditorProps?.onSubmit(
+          '/review this image',
+          images,
+          files,
+        );
+        expect(accepted).toBe(true);
+        testState.prompt = '';
+      });
+      await flush();
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+      if (hasNewInput) testState.prompt = 'a newer message';
+      await act(async () => {
+        firstSend.reject(new Error('Loading commands timed out after 5000ms'));
+        await Promise.resolve();
+      });
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        expect.stringContaining('Loading commands timed out'),
+      );
+      expect(testState.prompt).toBe(
+        hasNewInput ? 'a newer message' : '/review this image',
+      );
+      if (hasNewInput) {
+        expect(editorRestoreImages).not.toHaveBeenCalled();
+        expect(editorRestoreFiles).not.toHaveBeenCalled();
+      } else {
+        expect(editorRestoreImages).toHaveBeenCalledWith(images);
+        expect(editorRestoreFiles).toHaveBeenCalledWith(files);
+      }
+    },
+  );
 
   it('retries a rejected failed prompt with its file attachment intact', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});

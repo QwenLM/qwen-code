@@ -14830,7 +14830,7 @@ export function App({
               inputAnnotations: submittedInputAnnotations,
             });
           }
-          if (startedWithoutSession && !admissionStarted) {
+          if (!admissionStarted && (startedWithoutSession || !failedMessage)) {
             const editor = editorRef.current;
             if (editor && !editor.hasInput()) {
               editor.setText(submittedPromptText);

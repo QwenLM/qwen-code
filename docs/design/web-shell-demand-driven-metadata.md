@@ -69,9 +69,13 @@ plus Web Shell workspace-provider tests to verify the consumer boundary.
 The App's providers hook serves model management in Settings. Enable its
 automatic reads and event reloads only while project features are available
 and Settings is open. SessionProvider retains its providers read for chat model
-initialization. Ordinary chat startup therefore uses one providers request
-instead of two; opening Settings later adds one request. Starting directly in
-Settings can still require both reads.
+initialization. This removes one hidden-Settings request from chat startup;
+opening Settings later adds one request. The [maintainer's real-daemon
+verification](https://github.com/QwenLM/qwen-code/pull/11644#issuecomment-5649574918)
+measured three startup requests before this change and two afterward: the
+SessionProvider deferred-connect batch still ran twice during boot. That
+intra-provider duplicate remains outside this change, so #11604 remains open.
+Starting directly in Settings can still require both consumers.
 
 Each opening reads fresh data once. The providers hook tells the shared event
 reload helper when automatic loading already covers activation or a changed
@@ -112,7 +116,7 @@ and unchanged MCP/extension category demand loading. No endpoint is added.
 
 Equivalent capability responses preserve the loaded catalog even when their feature arrays have new identities. Changes to the actual Skills protocol capabilities still invalidate the load. Command-refresh failures appear as errors in empty suggestions, clear on retry, and belong only to the session that failed. Changing either prefetch option at runtime reconnects the session; hosts should normally select those options when mounting their provider.
 
-Runtime preparation errors retain the configuration fallback but surface failure and permit retry on reopening. Legacy primary-workspace daemons advertising ACP preheat prepare their runtime on first demand and then reread Skills. Clearing a session retains known commands only within the same workspace; opting out of prefetch must not erase custom commands that Skill reads cannot restore. Slash status messages appear only for empty results. A skipped provider prefetch preserves unknown command state. When submitting attachments with an unresolved slash command, read the session command snapshot before deciding whether to discard them; known commands and ordinary messages need no extra read. Empty queries can trigger the first load, but unmatched menus close after a successful catalog load. Attached sessions with pending extension or Skill changes retain empty suggestions until their deferred refresh completes, including when a new command is pasted directly.
+Runtime preparation errors retain the configuration fallback but surface failure and permit retry on reopening. Legacy primary-workspace daemons advertising ACP preheat prepare their runtime on first demand and then reread Skills. Clearing a session retains known commands only within the same workspace; opting out of prefetch must not erase custom commands that Skill reads cannot restore. Slash status messages appear only for empty results. A skipped provider prefetch preserves unknown command state. When submitting attachments with an unresolved slash command, read the session command snapshot before deciding whether to discard them; known commands and ordinary messages need no extra read. If this read fails before prompt admission, show the error and restore the unsent text and attachments into an empty composer in the same session; preserve any new user input. Empty queries can trigger the first load, but unmatched menus close after a successful catalog load. Attached sessions with pending extension or Skill changes retain empty suggestions until their deferred refresh completes, including when a new command is pasted directly.
 
 ## Live setup reads
 
