@@ -3615,11 +3615,11 @@ describe('setupUncaughtExceptionHandler', () => {
   let exitSpy: MockInstance;
   let debugLogPathSpy: MockInstance;
 
-  const makeConfig = (abortAll: () => void) =>
+  const makeConfig = (abortAll: () => void, running: unknown[] = []) =>
     ({
       ...sessionRegistryConfigStub,
       getSessionId: () => 'uncaught-test-session',
-      getMonitorRegistry: () => ({ abortAll }),
+      getMonitorRegistry: () => ({ abortAll, getRunning: () => running }),
     }) as unknown as Config;
 
   const installHandler = (config: Config): ((error: unknown) => void) => {
@@ -3658,7 +3658,7 @@ describe('setupUncaughtExceptionHandler', () => {
 
   it('reaps running monitors before exiting on an uncaught exception', () => {
     const abortAll = vi.fn();
-    const handler = installHandler(makeConfig(abortAll));
+    const handler = installHandler(makeConfig(abortAll, [{}, {}]));
 
     handler(new Error('boom'));
 
@@ -3671,6 +3671,9 @@ describe('setupUncaughtExceptionHandler', () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     const log = readFileSync(join(tmpDir, 'debug.txt'), 'utf8');
     expect(log).toContain('[UNCAUGHT_EXCEPTION] boom');
+    // A successful reap also leaves a synchronous record — without it a crash
+    // log cannot tell "reap skipped a monitor" from "signalled but ignored".
+    expect(log).toContain('[MONITOR_REAP] reaped=2');
   });
 
   it('leaves monitors alone for expected PTY teardown races', () => {

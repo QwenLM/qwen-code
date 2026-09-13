@@ -250,15 +250,37 @@ export function setupUncaughtExceptionHandler(config: Config) {
     );
     // Monitors are spawned `detached` (their own process group) so the tool
     // can group-kill them; a side effect is that they outlive this process
-    // unless something kills them first. Reap whatever is still running:
-    // the crashed session can never consume their terminal events, and the
+    // unless something kills them first. Reap whatever is still running on
+    // the registry of the Config this handler was installed with — each ACP
+    // session builds its own Config with its own MonitorRegistry, and those
+    // per-session registries are not covered here (a daemon-wide reap needs
+    // process-wide registry tracking; deliberately follow-up work). The
+    // crashed session can never consume their terminal events, and the
     // in-memory registry gives a resumed session no way to reattach. The
     // SIGKILL escalation timer in the abort path cannot survive the exit
     // below, so children ignoring SIGTERM may still leak — best-effort, and
     // a crash handler must never throw. (On Windows the taskkill spawn is
     // fire-and-forget for the same reason.)
+    // Snapshot the running count before abortAll: the abort path settles and
+    // prunes entries, and this summary — written synchronously, since
+    // debugLogger is async and abandoned by the exit below — is the only
+    // record distinguishing "the reap skipped it" from "signalled but the
+    // child ignored SIGTERM".
+    const monitorRegistry = config.getMonitorRegistry();
+    const reapCount = monitorRegistry.getRunning().length;
     try {
-      config.getMonitorRegistry().abortAll({ notify: false });
+      monitorRegistry.abortAll({ notify: false });
+      try {
+        if (logPath) {
+          fs.appendFileSync(
+            logPath,
+            `${new Date().toISOString()} [ERROR] [STARTUP] [MONITOR_REAP] reaped=${reapCount}\n`,
+            'utf8',
+          );
+        }
+      } catch {
+        // Nothing safe left to do.
+      }
     } catch (reapError) {
       // A failed reap means monitors still leak — the one distinguishing
       // fact this path can produce. The crash lines above were written
