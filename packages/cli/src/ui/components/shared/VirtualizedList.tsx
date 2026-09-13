@@ -7,6 +7,7 @@
 import {
   useState,
   useRef,
+  useEffect,
   useLayoutEffect,
   forwardRef,
   useImperativeHandle,
@@ -18,11 +19,19 @@ import type React from 'react';
 import { useBatchedScroll } from '../../hooks/useBatchedScroll.js';
 import { useAnimatedScrollbar } from '../../hooks/useAnimatedScrollbar.js';
 import { StaticRender } from './StaticRender.js';
-import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
+import { type DOMElement, Box, Text, useStdout } from 'ink';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { measureElementPosition } from '../../utils/measure-element-position.js';
 
 const debugLogger = createDebugLogger('VIRTUALIZED_LIST');
+
+function findRootNode(node: DOMElement | null): DOMElement | null {
+  let rootNode = node;
+  while (rootNode?.parentNode) {
+    rootNode = rootNode.parentNode;
+  }
+  return rootNode?.nodeName === 'ink-root' ? rootNode : null;
+}
 
 export const SCROLL_TO_ITEM_END = Number.MAX_SAFE_INTEGER;
 
@@ -112,6 +121,7 @@ const VirtualizedListItem = memo(
     width,
     containerWidth,
     itemKey,
+    forceHeightReport,
     onHeightChange,
   }: {
     content: React.ReactElement;
@@ -119,30 +129,73 @@ const VirtualizedListItem = memo(
     width: number | string | undefined;
     containerWidth: number;
     itemKey: string;
+    forceHeightReport: boolean;
     onHeightChange: (key: string, height: number) => void;
   }) => {
     const itemRef = useRef<DOMElement>(null);
-
-    const { height, hasMeasured } = useBoxMetrics(
-      itemRef as React.RefObject<DOMElement>,
-    );
+    const lastReportedHeight = useRef<number | undefined>(undefined);
+    const pendingHeight = useRef<number | undefined>(undefined);
+    const heightReportQueued = useRef(false);
 
     const onHeightChangeRef = useRef(onHeightChange);
     onHeightChangeRef.current = onHeightChange;
 
-    useLayoutEffect(() => {
+    const reportHeight = useCallback(
+      (force = false) => {
+        const measuredHeight = itemRef.current?.yogaNode?.getComputedHeight();
+        if (
+          measuredHeight === undefined ||
+          (!force && measuredHeight === lastReportedHeight.current)
+        )
+          return;
+
+        lastReportedHeight.current = measuredHeight;
+        pendingHeight.current = measuredHeight;
+        if (heightReportQueued.current) return;
+
+        // Ink emits layout listeners inside React's commit. Leave that commit
+        // before updating the list, but mark the height seen first so an
+        // unchanged row cannot enqueue another report from the next commit.
+        heightReportQueued.current = true;
+        const flushHeightReport = () => {
+          heightReportQueued.current = false;
+          const height = pendingHeight.current;
+          pendingHeight.current = undefined;
+          if (itemRef.current && height !== undefined) {
+            onHeightChangeRef.current(itemKey, height);
+          }
+        };
+        queueMicrotask(flushHeightReport);
+      },
+      [itemKey],
+    );
+
+    useEffect(() => {
       // Report zero heights too: a collapsed thought continuation renders
       // nothing (height 0), and skipping the report would leave the cached
       // expanded height in `heights`, inflating totalHeight with a blank gap.
-      // Only mounted (in-window) items report, so collapse-all leaves
-      // off-screen items' cached heights stale until they scroll back into
-      // the window (same as the grow direction).
-      const measuredHeight =
-        itemRef.current?.yogaNode?.getComputedHeight() ?? height;
-      if (hasMeasured) {
-        onHeightChangeRef.current(itemKey, measuredHeight);
-      }
-    }, [itemKey, height, hasMeasured, content]);
+      reportHeight(forceHeightReport);
+    }, [
+      reportHeight,
+      content,
+      shouldBeStatic,
+      width,
+      containerWidth,
+      forceHeightReport,
+    ]);
+
+    useEffect(() => {
+      const rootNode = findRootNode(itemRef.current);
+      if (!rootNode) return;
+
+      rootNode.internal_layoutListeners ??= new Set();
+      rootNode.internal_layoutListeners.add(reportHeight);
+      reportHeight();
+
+      return () => {
+        rootNode.internal_layoutListeners?.delete(reportHeight);
+      };
+    }, [reportHeight]);
 
     return (
       <Box width="100%" flexDirection="column" flexShrink={0} ref={itemRef}>
@@ -225,12 +278,53 @@ function VirtualizedList<T>(
 
   const containerRef = useRef<DOMElement>(null);
   const rootRef = useRef<DOMElement>(null);
+  const { stdout } = useStdout();
+  // The viewport only consumes width and its fallback height. Tracking the
+  // container's position and its content-driven height when a height prop is
+  // present feeds unrelated layout changes back into React.
+  const [containerMetrics, setContainerMetrics] = useState({
+    width: 0,
+    height: 0,
+  });
+  const lastContainerMetrics = useRef(containerMetrics);
+  const updateContainerMetrics = useCallback(() => {
+    const layout = containerRef.current?.yogaNode?.getComputedLayout();
+    if (!layout) return;
 
-  const { width: measuredContainerWidth, height: measuredContainerHeight } =
-    useBoxMetrics(containerRef as React.RefObject<DOMElement>);
+    const nextMetrics = {
+      width: layout.width,
+      height: props.containerHeight ?? layout.height,
+    };
+    if (
+      nextMetrics.width === lastContainerMetrics.current.width &&
+      nextMetrics.height === lastContainerMetrics.current.height
+    )
+      return;
 
-  const containerHeight = props.containerHeight ?? measuredContainerHeight;
-  const containerWidth = measuredContainerWidth;
+    lastContainerMetrics.current = nextMetrics;
+    setContainerMetrics(nextMetrics);
+  }, [props.containerHeight]);
+
+  useEffect(updateContainerMetrics);
+  useEffect(() => {
+    const rootNode = findRootNode(containerRef.current);
+    if (!rootNode) return;
+
+    rootNode.internal_layoutListeners ??= new Set();
+    rootNode.internal_layoutListeners.add(updateContainerMetrics);
+    return () => {
+      rootNode.internal_layoutListeners?.delete(updateContainerMetrics);
+    };
+  }, [updateContainerMetrics]);
+  useEffect(() => {
+    stdout.on('resize', updateContainerMetrics);
+    return () => {
+      stdout.off('resize', updateContainerMetrics);
+    };
+  }, [stdout, updateContainerMetrics]);
+
+  const containerHeight = props.containerHeight ?? containerMetrics.height;
+  const containerWidth = containerMetrics.width;
 
   const [heights, setHeights] = useState<Record<string, number>>({});
   const measureAtFullHeight = props.measureAtFullHeight === true;
@@ -623,6 +717,10 @@ function VirtualizedList<T>(
           );
         }
         const key = keyExtractor(item, i);
+        // An unchanged first row still completes a requested full-height
+        // measurement pass; every other report remains edge-triggered.
+        const forceHeightReport =
+          fullHeightMeasurementPending && i === renderRangeStart;
 
         items.push(
           <VirtualizedListItem
@@ -632,6 +730,7 @@ function VirtualizedList<T>(
             shouldBeStatic={shouldBeStatic}
             width={width}
             containerWidth={containerWidth}
+            forceHeightReport={forceHeightReport}
             onHeightChange={onHeightChange}
           />,
         );
@@ -651,6 +750,7 @@ function VirtualizedList<T>(
     keyExtractor,
     width,
     containerWidth,
+    fullHeightMeasurementPending,
     onHeightChange,
   ]);
 
