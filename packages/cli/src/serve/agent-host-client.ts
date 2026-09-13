@@ -20,6 +20,7 @@ import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import { runCodexAppServer } from '../external-agents/codex-subagent-executor.js';
 import { streamAgentTurn } from './workspace-agents/stream-agent-turn.js';
+import { codexHostSession } from './workspace-agents/codex-host-session.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
@@ -274,11 +275,24 @@ async function executeAssignment(
   let summary: string | undefined;
   try {
     if (options.provider === 'codex') {
+      const session = await codexHostSession(
+        path.join(Storage.getGlobalQwenDir(), 'agent-hosts', 'codex-sessions'),
+        [
+          credential.serverUrl,
+          credential.workspaceId,
+          credential.hostId,
+          options.workspaceCwd,
+          assignment.agent.id,
+          assignment.threadId,
+        ],
+      );
+      if (session.threadId) report('resuming', '正在继续原 Codex 会话');
       const messages = new Map<string, string>();
       summary = await runCodexAppServer(
         {
           command: 'codex',
           cwd: options.workspaceCwd,
+          session,
           onMessage: (id, text) => {
             messages.set(id, text);
             report(

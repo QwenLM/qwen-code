@@ -140,6 +140,11 @@ test('mesh shows growing replies before completion, survives reload, and replace
   await expect(starting).toBeVisible();
   await page.getByRole('button', { name: '展开活动', exact: true }).click();
   await expect(activity).toBeVisible();
+  run.progress = { ...run.progress, stage: 'resuming' };
+  await expect(activity).toContainText('继续会话中');
+  await expect(
+    page.getByRole('status').filter({ hasText: 'stream-worker 正在继续原会话…' }),
+  ).toBeVisible();
   run.progress = { ...run.progress, stage: 'thinking' };
   await expect(activity).toContainText('思考中');
   await expect(starting).toHaveCount(0);

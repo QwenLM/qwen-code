@@ -154,7 +154,8 @@ export function ThreadChat({
               .filter(
                 ({ run }) =>
                   run.status === 'running' &&
-                  run.progress?.stage === 'starting' &&
+                  (run.progress?.stage === 'starting' ||
+                    run.progress?.stage === 'resuming') &&
                   Date.now() - run.progress.receivedAt <= 20000,
               )
               .map(({ run }) => (
@@ -167,7 +168,10 @@ export function ThreadChat({
                     aria-hidden="true"
                     className="size-4 shrink-0 animate-spin motion-reduce:animate-none"
                   />
-                  {run.agentName} 正在启动…
+                  {run.agentName}{' '}
+                  {run.progress?.stage === 'resuming'
+                    ? '正在继续原会话…'
+                    : '正在启动…'}
                 </div>
               ))}
             {preview && (

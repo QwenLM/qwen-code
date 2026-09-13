@@ -131,6 +131,7 @@ export function RunRowView({
   const quiet = progress && now - progress.activityAt > 15000;
   const stages: Record<string, string> = {
     starting: '正在启动',
+    resuming: '继续会话中',
     waiting: '等待模型',
     thinking: '思考中',
     tool: '调用工具中',

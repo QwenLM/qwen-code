@@ -66,6 +66,10 @@ export async function runCodexAppServer(
     onThought?: (delta: string) => void;
     onActivity?: (stage: string, detail: string) => void;
     onCleanupWarning?: (detail: string) => void;
+    session?: {
+      threadId?: string;
+      save: (threadId: string) => Promise<void>;
+    };
   },
   prompt: string,
   sandbox: string,
@@ -300,16 +304,22 @@ export async function runCodexAppServer(
       capabilities: { experimentalApi: false },
     });
     write({ method: 'initialized' });
-    const started = await request('thread/start', {
+    const resumeId = params.session?.threadId;
+    const started = await request(resumeId ? 'thread/resume' : 'thread/start', {
       cwd: params.cwd,
-      ephemeral: true,
+      ...(resumeId ? { threadId: resumeId } : { ephemeral: !params.session }),
       approvalPolicy: 'never',
       sandbox,
     });
     const thread = object(started['thread']);
     threadId = id(thread['id']);
-    if (thread['ephemeral'] !== true)
+    if (resumeId && threadId !== resumeId)
+      throw new Error('Codex resumed a different thread.');
+    if (params.session && thread['ephemeral'] === true)
+      throw new Error('Codex did not create a persistent thread.');
+    if (!params.session && thread['ephemeral'] !== true)
       throw new Error('Codex did not create an ephemeral thread.');
+    await params.session?.save(threadId);
     clearTimeout(initTimer);
     const startedTurn = await request('turn/start', {
       threadId,
