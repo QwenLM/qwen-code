@@ -56,7 +56,7 @@ export function resolveProviderProtocol(
   providerId: string,
   providerProtocol?: ProviderProtocolConfig,
 ): AuthType | undefined {
-  if (providerId === AuthType.USE_OPENAI_RESPONSES) {
+  if (providerId === 'openai-responses') {
     throw new Error(
       'Provider "openai-responses" is not supported in modelProviders or providerProtocol. Use "openai" with wireApi: "responses" on each model.',
     );
