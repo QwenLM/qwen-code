@@ -471,14 +471,18 @@ describe('e2e workflow', () => {
     // previous pair exempted a whole body for carrying any retry loop — a
     // trailing bare install rode the exemption — and saw only installs
     // opening their line, so `cd … && npm ci` and `time npm ci` were
-    // invisible. Require every executable line mentioning `npm ci` to belong
-    // to one of the install steps pinned above, so an unrecognised shape
-    // reddens the suite for a human to judge instead of passing silently.
-    // Full-line `#` comments never execute, so a body quoting the recipe in
-    // prose is excluded rather than flagged.
-    const retriedInstalls = new Set(
-      installSteps.map(([jobName, step]) => `${jobName}/${step.name}`),
-    );
+    // invisible. The exemption is keyed on the line's shape, never the
+    // step's name: a name key pardons the six pinned bodies wholesale, so a
+    // bare install appended after `done` would ride the step's identity
+    // with its body never read. Require every executable line mentioning
+    // `npm ci` to open with one of the two retry-loop lines pinned above,
+    // so an unrecognised shape reddens the suite for a human to judge
+    // instead of passing silently. Full-line `#` comments never execute, so
+    // a body quoting the recipe in prose is excluded rather than flagged.
+    const retriedInstallLines = [
+      'if npm ci --prefer-offline --no-audit --progress=false; then',
+      'echo "::warning::npm ci',
+    ];
     const findUnretriedInstalls = (jobs) =>
       Object.entries(jobs).flatMap(([jobName, job]) =>
         (job.steps ?? [])
@@ -488,9 +492,13 @@ describe('e2e workflow', () => {
               step.run
                 .split('\n')
                 .filter((line) => !line.trimStart().startsWith('#'))
-                .join('\n')
-                .includes('npm ci') &&
-              !retriedInstalls.has(`${jobName}/${step.name ?? '(unnamed)'}`),
+                .some(
+                  (line) =>
+                    line.includes('npm ci') &&
+                    !retriedInstallLines.some((ok) =>
+                      line.trimStart().startsWith(ok),
+                    ),
+                ),
           )
           .map((step) => `${jobName}/${step.name ?? '(unnamed)'}`),
       );
@@ -505,13 +513,37 @@ describe('e2e workflow', () => {
     it('flags an unretried install however shell spells it', () => {
       // Each synthetic body slipped the old regex pair — the loop exempting
       // a trailing bare install was the filed escape; the rest never open
-      // their install line. The six real bodies ride along under their own
-      // keys to pin that the exemption recognises exactly them, and a
+      // their install line. The real bodies ride along under their own keys
+      // to pin that the allowlist recognises exactly the two retried lines,
+      // and `build` is overridden by a copy carrying a bare install appended
+      // after `done` — the shape a name-keyed exemption pardons unread. A
       // comment-only mention stays unflagged because it never executes.
       const jobs = {
         ...Object.fromEntries(
           installSteps.map(([jobName, step]) => [jobName, { steps: [step] }]),
         ),
+        build: {
+          steps: [
+            {
+              name: 'Install dependencies',
+              run: [
+                'for attempt in 1 2 3; do',
+                '  if npm ci --prefer-offline --no-audit --progress=false; then',
+                '    if [[ "${attempt}" != "1" ]]; then',
+                '      echo "::warning::npm ci failed $((attempt - 1)) time(s)"',
+                '    fi',
+                '    break',
+                '  fi',
+                '  if [[ "${attempt}" == "3" ]]; then',
+                '    exit 1',
+                '  fi',
+                '  sleep $((attempt * 15))',
+                'done',
+                'cd integration-tests && npm ci',
+              ].join('\n'),
+            },
+          ],
+        },
         synthetic: {
           steps: [
             {
@@ -540,6 +572,7 @@ describe('e2e workflow', () => {
         },
       };
       expect(findUnretriedInstalls(jobs)).toEqual([
+        'build/Install dependencies',
         'synthetic/Install dependencies and build',
         'synthetic/Install integration dependencies',
         'synthetic/Time the install',
