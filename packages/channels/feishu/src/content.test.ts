@@ -336,7 +336,7 @@ describe('parseFeishuContent (#11554)', () => {
       'post',
       JSON.stringify({
         content_v2: [
-          [{ tag: 'md', text: '<at user_id="ou_x">'.repeat(5_000) }],
+          [{ tag: 'md', text: '<at user_id="ou_x">'.repeat(20_000) }],
         ],
       }),
     );
