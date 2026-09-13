@@ -19,7 +19,10 @@ import {
   applyCollapsePolicyAndSummary,
   computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
-import { recordPromptCountFloor } from '../utils/prompt-count-floor.js';
+import {
+  getPromptCountFloor,
+  recordPromptCountFloor,
+} from '../utils/prompt-count-floor.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
@@ -295,11 +298,16 @@ export function useBranchCommand(
         // above reinstalls promptCount 0, and the seed is monotonic (0 is
         // a no-op), so this ordering is load-bearing. forkSession remaps
         // record promptIds to the new session id, so the seed keys on
-        // newSessionId.
+        // newSessionId. As in handleResume, the floor may have advanced
+        // past the transcript-derived seed while the swap window was open,
+        // so seed from the higher of the two (R45-1).
         seedPromptCount(
-          computeResumedPromptCountSeed(
-            resumed.conversation.messages,
-            newSessionId,
+          Math.max(
+            computeResumedPromptCountSeed(
+              resumed.conversation.messages,
+              newSessionId,
+            ),
+            getPromptCountFloor(newSessionId),
           ),
         );
         uiSwapped = true;

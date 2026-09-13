@@ -308,6 +308,20 @@ function convertToHistoryItems(
       promptIdRecordCount.get(record.promptId) === 1
         ? record.promptId
         : undefined;
+    // A well-formed id that failed the uniqueness census is withheld from
+    // `promptId` above, but the turn still OWNS its API entry: keep the
+    // ambiguous id here so the rewind gate's claim scans count the entry as
+    // owned by a displayed turn rather than as unowned excess (R45-2). The
+    // census itself is unchanged — `promptId` resolution still refuses a
+    // shared id.
+    const promptIdAmbiguous =
+      record.type === 'user' &&
+      !record.subtype &&
+      typeof record.promptId === 'string' &&
+      record.promptId.length > 0 &&
+      promptId === undefined
+        ? record.promptId
+        : undefined;
     // A detected history gap begins at this record — surface a visible divider
     // so the surviving turns below are not read as contiguous across the lost
     // segment. Flush any pending tool group first so the divider is not
@@ -466,6 +480,7 @@ function convertToHistoryItems(
               type: 'user',
               text,
               ...(promptId ? { promptId } : {}),
+              ...(promptIdAmbiguous ? { promptIdAmbiguous } : {}),
               ...(promptId && ownerText && ownerText !== text
                 ? { promptOwnerText: ownerText }
                 : {}),
@@ -509,6 +524,7 @@ function convertToHistoryItems(
             type: 'user',
             text,
             ...(promptId ? { promptId } : {}),
+            ...(promptIdAmbiguous ? { promptIdAmbiguous } : {}),
             ...(promptId && ownerText && ownerText !== text
               ? { promptOwnerText: ownerText }
               : {}),

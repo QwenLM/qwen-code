@@ -345,7 +345,11 @@ export function computeApiTruncationIndex(
     // targets carry ordinary text and never reach this branch.
     // Whether a real, non-file-key-only UI turn before the target claims
     // `mark` — the ownership question both the backstop's claimed-entry
-    // clause and the demotion's safe-cut scan answer.
+    // clause and the demotion's safe-cut scan answer. A resumed turn whose
+    // id was withheld by the duplicate census still owns its entry: the
+    // census removes the resolution key (`promptId`), not the ownership, so
+    // the scan must read the withheld id too — otherwise an ownership-proven
+    // match is demoted onto a boundary that drops a displayed turn (R45-2).
     const isMarkClaimedByPreTargetTurn = (mark: string): boolean =>
       uiHistory.some(
         (item, index) =>
@@ -353,7 +357,7 @@ export function computeApiTruncationIndex(
           (compressionIndex === -1 || index > compressionIndex) &&
           isRealUserTurn(item) &&
           !item.promptIdFileKeyOnly &&
-          item.promptId === mark,
+          (item.promptId === mark || item.promptIdAmbiguous === mark),
       );
     // A drained background-agent/cron completion renders one notification
     // ITEM per drained task but submits one user-role ENTRY per drain batch,

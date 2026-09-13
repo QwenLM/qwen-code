@@ -179,6 +179,15 @@ export type HistoryItemUser = HistoryItemBase & {
    */
   promptIdFileKeyOnly?: boolean;
   /**
+   * The `promptId` this turn's record carried when the resume builder
+   * withheld it from `promptId` because another record in the same
+   * transcript claims it too. The census removes the resolution key, not
+   * the ownership: the API entry still wears the mark, so the rewind gate's
+   * claim scans read this field to count the entry as owned by a displayed
+   * turn instead of treating it as unowned excess (R45-2).
+   */
+  promptIdAmbiguous?: string;
+  /**
    * The model-facing text of this turn, when it differs from `text`.
    *
    * The rewind ownership proof checks that the entry wearing the target's

@@ -6,15 +6,18 @@
 
 import { describe, it, expect } from 'vitest';
 import { computeApiTruncationIndex, isRealUserTurn } from './historyMapping.js';
-import type { HistoryItem } from '../types.js';
+import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content, Part } from '@google/genai';
 import {
+  buildApiHistoryFromConversation,
   CompressionStatus,
   markApiHistoryNotification,
   markApiHistoryPrompt,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
+import type { ChatRecord, ResumedSessionData } from '@qwen-code/qwen-code-core';
+import { buildResumedHistoryItems } from './resumeHistoryUtils.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2775,5 +2778,94 @@ describe('isRealUserTurn', () => {
     const item = userItem(1, 'hello world');
     item.display = { suppressOnRestore: true };
     expect(isRealUserTurn(item)).toBe(true);
+  });
+});
+
+describe('census-withheld duplicate identities (R45-2)', () => {
+  // Two records in one transcript can share a re-minted promptId; the resume
+  // census then withholds the id from BOTH UI items while the API rebuild
+  // still marks both entries. The gate's claim scans must still see that
+  // ownership through the item's recorded ambiguous id: with an unowned
+  // excess entry ahead (a Goal continuation — counted by the walk, owned by
+  // no UI item), the early-walk demotion otherwise treats the withheld
+  // turn's entry as unowned excess and cuts a turn the UI still displays,
+  // reporting the rewind as a success at the wrong boundary.
+  //
+  // Built through the REAL resume builders on both sides so the census —
+  // not a hand-placed fixture — is what withholds the id.
+  const rec = (over: Record<string, unknown>): ChatRecord =>
+    ({
+      sessionId: 's',
+      timestamp: new Date().toISOString(),
+      version: '1',
+      ...over,
+    }) as unknown as ChatRecord;
+
+  const model = (text: string): ChatRecord =>
+    rec({ type: 'assistant', message: { role: 'model', parts: [{ text }] } });
+
+  it('keeps the ownership-proven match when the cut range holds a withheld-id turn', () => {
+    const messages = [
+      rec({
+        type: 'user',
+        promptId: 's########0',
+        message: { role: 'user', parts: [{ text: 'first prompt' }] },
+      }),
+      model('r0'),
+      rec({
+        type: 'user',
+        promptId: 's########1',
+        message: { role: 'user', parts: [{ text: 'second prompt' }] },
+      }),
+      model('r1'),
+      rec({
+        // A re-minted duplicate: shares the first turn's id.
+        type: 'user',
+        promptId: 's########0',
+        message: { role: 'user', parts: [{ text: 'third prompt' }] },
+      }),
+      model('r2'),
+      rec({
+        type: 'user',
+        promptId: 's########2',
+        message: { role: 'user', parts: [{ text: 'target prompt' }] },
+      }),
+      model('r3'),
+    ];
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const api = buildApiHistoryFromConversation(
+      sessionData.conversation as never,
+    );
+    // One unowned excess entry ahead of the group (a Goal continuation:
+    // counted by the walk, owned by no UI item).
+    api.unshift(userContent('goal continuation'));
+
+    const userItems = ui.filter(
+      (item): item is HistoryItem & HistoryItemUser => item.type === 'user',
+    );
+    // The census withheld the shared id from BOTH turns that carried it...
+    expect(userItems.map((item) => item.promptId)).toEqual([
+      undefined,
+      's########1',
+      undefined,
+      's########2',
+    ]);
+    // ...and kept it as the ambiguous marker on both.
+    expect(userItems.map((item) => item.promptIdAmbiguous)).toEqual([
+      's########0',
+      undefined,
+      's########0',
+      undefined,
+    ]);
+
+    const target = userItems[userItems.length - 1]!;
+    // The target's own entry is the final user entry (index 7). The
+    // census-blinded demotion instead returns 5 — the still-displayed third
+    // turn's entry — dropping that turn's prompt and response from model
+    // context while reporting the rewind as a success.
+    expect(computeApiTruncationIndex(ui, target.id, api)).toBe(7);
   });
 });

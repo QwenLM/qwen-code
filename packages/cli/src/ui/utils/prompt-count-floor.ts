@@ -40,7 +40,12 @@ export function resetPromptCountFloorForTesting(): void {
  * Ink's live promptId mint (`sessionId########<promptCount>`), floored by
  * the session-keyed switch floor above so a submit inside a /resume or
  * /branch swap window can never mint an id the incoming transcript already
- * claims.
+ * claims. A mint inside that window persists its id onto the incoming
+ * session's transcript, so the ordinal is spent: advance the floor past it,
+ * or the re-key seed (computed from transcript claims alone) would reinstall
+ * a counter that walks back up through the spent id (R45-1). Advances only
+ * when a switch recorded a floor for this session, so a plain live session
+ * mints exactly as before.
  */
 export function mintLivePromptId(
   config: { getSessionId: () => string },
@@ -48,5 +53,8 @@ export function mintLivePromptId(
 ): string {
   const sessionId = config.getSessionId();
   const count = Math.max(getPromptCount(), getPromptCountFloor(sessionId));
+  if (floor?.sessionId === sessionId) {
+    recordPromptCountFloor(sessionId, count + 1);
+  }
   return `${sessionId}########${count}`;
 }

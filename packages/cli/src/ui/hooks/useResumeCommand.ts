@@ -26,7 +26,10 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
-import { recordPromptCountFloor } from '../utils/prompt-count-floor.js';
+import {
+  getPromptCountFloor,
+  recordPromptCountFloor,
+} from '../utils/prompt-count-floor.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -259,11 +262,17 @@ export function useResumeCommand(
         // Seed the prompt counter past the ids the resumed transcript
         // claims before any new prompt can mint one (R38-1): the reset
         // above reinstalls promptCount 0, and the seed is monotonic (0 is
-        // a no-op), so this ordering is load-bearing.
+        // a no-op), so this ordering is load-bearing. The floor may have
+        // advanced past the transcript-derived seed while the swap window
+        // was open — an in-window mint spends its ordinal onto this
+        // transcript — so seed from the higher of the two (R45-1).
         seedPromptCount(
-          computeResumedPromptCountSeed(
-            sessionData.conversation.messages,
-            sessionId,
+          Math.max(
+            computeResumedPromptCountSeed(
+              sessionData.conversation.messages,
+              sessionId,
+            ),
+            getPromptCountFloor(sessionId),
           ),
         );
         uiSwapped = true;
