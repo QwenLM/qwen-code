@@ -4152,6 +4152,51 @@ describe('ShellTool', () => {
             vi.useRealTimers();
           }
         });
+
+        it('keeps a sub-advisory explicit threshold from disarming the pass it marks', async () => {
+          // Regression: the reservation subtracts the advisory size from the
+          // declared threshold. An explicit `truncateToolOutputThreshold`
+          // below the advisory length (the setting has no schema minimum)
+          // drove the in-tool threshold non-positive, and truncateToolOutput
+          // returns the body untouched on `threshold <= 0` — while the
+          // unconditional marker still vouched for it, standing the
+          // scheduler's failure-path gate down with nothing behind it. The
+          // clamp keeps the pass running so the marker never attests to a
+          // sizing that did not happen.
+          (
+            mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+          ).mockReturnValue(true);
+          (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+            100,
+          );
+          vi.useFakeTimers({ toFake: ['Date', 'performance'] });
+          try {
+            const output = 'x'.repeat(5_000);
+            const invocation = shellTool.build({
+              command: 'mid-output-cmd',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            // Past the 60s advisory threshold so the ~619-char reservation
+            // exceeds the explicit 100-char threshold.
+            await vi.advanceTimersByTimeAsync(60_000);
+            resolveShellExecution({ output, exitCode: 3, error: null });
+            const result = await promise;
+
+            // The failure-path branch makes error.message BE llmContent, so
+            // the sentinel on the body is the only bound the model sees.
+            expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+            expect(result.error?.message).toBe(result.llmContent);
+            expect(result.outputBudgetApplied).toBe(true);
+            expect(result.llmContent).toContain(
+              'Tool output was too large and has been truncated',
+            );
+            expect(String(result.llmContent)).not.toContain(output);
+            expect(result.persistedOutputFiles?.length).toBeGreaterThan(0);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
       });
     });
 

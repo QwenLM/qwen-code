@@ -2986,6 +2986,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
     if (typeof llmContent === 'string') {
       const originalLlmContent = llmContent;
       const outputThreshold = getShellOutputThreshold(this.config);
+      // Clamp at 1: truncateToolOutput returns the body untouched on
+      // threshold <= 0, so an explicit threshold smaller than the reserved
+      // metadata (the setting has no schema minimum) would stand the pass
+      // down while outputBudgetApplied below still vouches for the body —
+      // leaving the failure path, whose only bound is that marker, unbounded.
+      const bodyBudgetChars = Math.max(
+        1,
+        outputThreshold - appendedMetadataChars,
+      );
       const truncatedResult = await truncateToolOutput(
         this.config,
         ShellTool.Name,
@@ -3000,8 +3009,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // cap can't undercut the effective Shell char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
-          threshold: outputThreshold - appendedMetadataChars,
-          previewChars: Math.min(4000, outputThreshold - appendedMetadataChars),
+          threshold: bodyBudgetChars,
+          previewChars: Math.min(4000, bodyBudgetChars),
           keep: 'both',
           lines: Number.POSITIVE_INFINITY,
         },
