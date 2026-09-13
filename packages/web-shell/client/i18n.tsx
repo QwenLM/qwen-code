@@ -1469,6 +1469,8 @@ const EN: Messages = {
   'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
   'terminal.notice.unknownError': 'Unknown error',
   'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+  'terminal.notice.protocolMismatch':
+    'Terminal protocol changed; restart the daemon and reload this page.',
   'localFiles.title': 'Local files',
   'localFiles.trigger': 'Local files',
   'localFiles.hint':
@@ -5164,6 +5166,8 @@ const ZH: Messages = {
   'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
   'terminal.notice.unknownError': '未知错误',
   'terminal.notice.reconnecting': '连接已断开，正在重连…',
+  'terminal.notice.protocolMismatch':
+    '终端协议已更新，请重启 daemon 并刷新页面。',
   'localFiles.title': '本地文件',
   'localFiles.trigger': '本地文件',
   'localFiles.hint':

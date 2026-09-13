@@ -25,6 +25,10 @@ Colors, modes and cursor/geometry queries belong to the browser that renders the
 live output. Headless does not supply those answers. PTY output and bounded
 scrollback retain their original bytes, including split escape sequences.
 
+Queries emitted while no browser is attached remain unanswered on reconnect: all
+history is replayed without replies, even if a query was never answered live.
+Applications waiting for browser-owned replies must tolerate a timeout or retry.
+
 ## Transport and compatibility
 
 The workspace-resolved `/terminal` connection requests `replay=1`. Before the
@@ -40,7 +44,8 @@ interpreted as control frames. A newly created PTY uses `replay:false`: its
 buffered startup queries have not been answered by a browser yet.
 
 Legacy clients are rejected before PTY creation with a reload message. The new
-client rejects an unmarked binary snapshot from an older daemon. Both must be
+client releases the PTY before rejecting an unmarked binary snapshot from an
+older daemon, with a localized restart notice. Both must be
 updated together; release-only connections still work. Workspace validation,
 ownership checks, heartbeat and output/input backpressure remain unchanged.
 
