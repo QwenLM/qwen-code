@@ -70,7 +70,11 @@ import {
   type DebugLogger,
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
-import { sanitizeHookName } from '../sanitize.js';
+import {
+  sanitizeHookName,
+  redactErrorText,
+  registerKnownSecretValues,
+} from '../sanitize.js';
 import { InstallationManager } from '../../config/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
@@ -108,6 +112,63 @@ const REDACTED_ERROR_TEXT = '***REDACTED***';
 
 export interface LogResponse {
   nextRequestWaitMs?: number;
+}
+
+/**
+ * Sink-side pass over the error-text fields of every queued RUM event.
+ * Runs at the single choke point all log methods share, so future call
+ * sites inherit the redaction instead of reopening the gap per field
+ * (#11198): tool error messages carry raw shell command lines, which can
+ * embed credentials no source-level redactor sees.
+ */
+function redactErrorTextFields(event: RumEvent): void {
+  const exception = event as RumExceptionEvent;
+  if (typeof exception.message === 'string') {
+    exception.message = redactErrorText(exception.message);
+  }
+  if (typeof exception.stack === 'string') {
+    exception.stack = redactErrorText(exception.stack);
+  }
+  const properties = event.properties;
+  if (properties === undefined) {
+    return;
+  }
+  for (const key of ['error', 'error_message', 'error_excerpt'] as const) {
+    const value = properties[key];
+    if (typeof value === 'string') {
+      properties[key] = redactErrorText(value);
+    }
+  }
+}
+
+// Secrets the process holds at runtime — masked by exact value wherever
+// they appear in queued error text (closed by construction, unlike the
+// spelling-based patterns). Re-registered on every event so credential
+// refreshes mid-session are covered.
+function registerProcessSecrets(config: Config | undefined): void {
+  // The getter's declared return type is non-nullable, but the backing
+  // field is assigned only in refreshAuth and the ALS runtime store is
+  // empty at startup, so before auth initialization it yields undefined —
+  // dereferencing `.apiKey` here would throw inside enqueueLogEvent's
+  // catch-all and silently drop the event (e.g. session_start). Guard
+  // like the other pre-auth call sites.
+  const secrets: Array<string | undefined> = [
+    config?.getContentGeneratorConfig()?.apiKey,
+  ];
+  for (const server of Object.values(config?.getMcpServers() ?? {})) {
+    for (const value of Object.values(server.headers ?? {})) {
+      secrets.push(value);
+      // The repo's own MCP docs recommend `"Authorization": "Bearer
+      // <token>"`, so the whole envelope is the registered value; the
+      // credential half must be registered too or the exact-value mask
+      // only fires when the envelope appears verbatim and a bare token
+      // echo ships. `Bearer token`-style short remainders are still
+      // refused by MIN_SECRET_VALUE_LENGTH inside registerKnownSecretValues.
+      const credential = value.replace(/^[A-Za-z][A-Za-z0-9+._-]*\s+/, '');
+      if (credential !== value) secrets.push(credential);
+    }
+  }
+  registerKnownSecretValues(secrets);
 }
 
 // Singleton class for batch posting log events to RUM. When a new event comes in, the elapsed time
@@ -177,6 +238,12 @@ export class QwenLogger {
       return undefined;
     if (!QwenLogger.instance) {
       QwenLogger.instance = new QwenLogger(config);
+    } else {
+      // ACP builds one Config per session; the singleton keeps the FIRST
+      // session's Config, so a later session's credentials would never be
+      // registered by enqueueLogEvent reading this.config. The registry is
+      // add-only, so folding in the caller's config widens masking only.
+      registerProcessSecrets(config);
     }
 
     return QwenLogger.instance;
@@ -184,7 +251,14 @@ export class QwenLogger {
 
   enqueueLogEvent(event: RumEvent): void {
     try {
+      // The blanket pass owns `message` / `error_message` / `error_excerpt`;
+      // the targeted pass covers what it leaves raw (`stack`,
+      // `properties.error`). `redactErrorText` is a no-op on the blanket
+      // constant, so the order only avoids re-scanning discarded text.
       this.redactEventErrorText(event);
+      registerProcessSecrets(this.config);
+      redactErrorTextFields(event);
+
       // Manually handle overflow for FixedDeque, which throws when full.
       const wasAtCapacity = this.events.size >= MAX_EVENTS;
 
