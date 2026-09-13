@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
-import type { ProxyOptions } from 'vite';
+import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
@@ -92,6 +92,13 @@ function developmentCsp(requestUrl: string): string {
   ].join('; ');
 }
 
+function configureCsp(server: ViteDevServer | PreviewServer): void {
+  server.middlewares.use((req, res, next) => {
+    res.setHeader('Content-Security-Policy', developmentCsp(req.url || '/'));
+    next();
+  });
+}
+
 export default defineConfig(({ command }) => ({
   root: 'client',
   plugins: [
@@ -99,15 +106,8 @@ export default defineConfig(({ command }) => ({
     tailwindcss(),
     {
       name: 'web-shell-development-csp',
-      configureServer(server) {
-        server.middlewares.use((req, res, next) => {
-          res.setHeader(
-            'Content-Security-Policy',
-            developmentCsp(req.url || '/'),
-          );
-          next();
-        });
-      },
+      configureServer: configureCsp,
+      configurePreviewServer: configureCsp,
     },
   ],
   resolve: {
