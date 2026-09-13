@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { AuthType } from '../core/contentGenerator.js';
+import { ProviderInstallError } from './install.js';
 import type {
   ModelSpec,
   ProviderConfig,
@@ -24,9 +25,14 @@ function resolveEnvKey(
   inputs: ProviderSetupInputs,
 ): string {
   const protocol = inputs.protocol ?? config.protocol;
-  return typeof config.envKey === 'function'
-    ? config.envKey(protocol, inputs.baseUrl)
-    : config.envKey;
+  const key =
+    typeof config.envKey === 'function'
+      ? config.envKey(protocol, inputs.baseUrl)
+      : config.envKey;
+  return config.id === 'custom-openai-compatible' &&
+    inputs.advancedConfig?.purpose
+    ? `${key}_${inputs.advancedConfig.purpose.toUpperCase()}`
+    : key;
 }
 
 function resolveModelNamePrefix(
@@ -211,6 +217,11 @@ function buildModelConfigs(
         name: displayName(id),
         baseUrl: inputs.baseUrl,
         envKey,
+        ...(advCfg?.purpose === 'image'
+          ? { supportsImageGeneration: true, imageOnly: true }
+          : advCfg?.purpose === 'voice'
+            ? { voiceOnly: true }
+            : {}),
         ...(genConfig ? { generationConfig: genConfig } : {}),
       };
     });
@@ -272,14 +283,143 @@ function resolveProviderState(
 export function buildInstallPlan(
   config: ProviderConfig,
   inputs: ProviderSetupInputs,
+  existingModels: readonly ProviderModelConfig[] = [],
 ): ProviderInstallPlan {
   const protocol = inputs.protocol ?? config.protocol;
-  const envKey = resolveEnvKey(config, inputs);
-  const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  let envKey = resolveEnvKey(config, inputs);
+  const providerOwns = resolveOwnsModel(config);
+  let models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  const providerState = resolveProviderState(config, inputs.baseUrl, models);
+  if (
+    config.id === 'custom-openai-compatible' &&
+    existingModels?.some(
+      (entry) =>
+        providerOwns?.(entry) &&
+        (entry.imageOnly || entry.voiceOnly) &&
+        models.some((model) => model.id === entry.id) &&
+        typeof entry.baseUrl === 'string' &&
+        entry.baseUrl !== inputs.baseUrl &&
+        resolveEnvKey(config, { ...inputs, baseUrl: entry.baseUrl }) === envKey,
+    )
+  ) {
+    throw new ProviderInstallError(
+      'A service model already uses this credential endpoint. Reconnect using its exact saved base URL.',
+      'modelPurpose',
+      protocol,
+    );
+  }
+  if (existingModels?.length && !inputs.advancedConfig?.purpose) {
+    models = models.map((model) => {
+      const existing = existingModels.find(
+        (entry) =>
+          providerOwns?.(entry) &&
+          entry.id === model.id &&
+          entry.baseUrl === model.baseUrl,
+      );
+      if (!existing) return model;
+      const preservedGeneration = { ...existing.generationConfig };
+      const advanced = inputs.advancedConfig;
+      if (!config.models && advanced) {
+        if (advanced.replaceExisting) {
+          delete preservedGeneration.contextWindowSize;
+          if (preservedGeneration.samplingParams) {
+            preservedGeneration.samplingParams = {
+              ...preservedGeneration.samplingParams,
+            };
+            delete preservedGeneration.samplingParams.max_tokens;
+            if (!Object.keys(preservedGeneration.samplingParams).length)
+              delete preservedGeneration.samplingParams;
+          }
+        }
+        if (advanced.replaceExisting || advanced.multimodal !== undefined)
+          delete preservedGeneration.modalities;
+        if (advanced.replaceExisting || advanced.enableThinking !== undefined) {
+          if (preservedGeneration.extra_body) {
+            preservedGeneration.extra_body = {
+              ...preservedGeneration.extra_body,
+            };
+            delete preservedGeneration.extra_body['enable_thinking'];
+            if (!Object.keys(preservedGeneration.extra_body).length)
+              delete preservedGeneration.extra_body;
+          }
+          if (protocol === AuthType.USE_OPENAI_RESPONSES)
+            delete preservedGeneration.reasoning;
+        }
+      }
+      const generationConfig =
+        Object.keys(preservedGeneration).length || model.generationConfig
+          ? {
+              ...preservedGeneration,
+              ...model.generationConfig,
+              ...(preservedGeneration.extra_body ||
+              model.generationConfig?.extra_body
+                ? {
+                    extra_body: {
+                      ...preservedGeneration.extra_body,
+                      ...model.generationConfig?.extra_body,
+                    },
+                  }
+                : {}),
+              ...(preservedGeneration.contextWindowSize !== undefined &&
+              inputs.advancedConfig?.contextWindowSize === undefined
+                ? {
+                    contextWindowSize: preservedGeneration.contextWindowSize,
+                  }
+                : {}),
+              ...(preservedGeneration.samplingParams ||
+              model.generationConfig?.samplingParams
+                ? {
+                    samplingParams: {
+                      ...preservedGeneration.samplingParams,
+                      ...model.generationConfig?.samplingParams,
+                    },
+                  }
+                : {}),
+              ...(preservedGeneration.customHeaders ||
+              model.generationConfig?.customHeaders
+                ? {
+                    customHeaders: {
+                      ...preservedGeneration.customHeaders,
+                      ...model.generationConfig?.customHeaders,
+                    },
+                  }
+                : {}),
+            }
+          : undefined;
+      return {
+        ...existing,
+        ...model,
+        name: existing?.name ?? model.name,
+        generationConfig,
+        ...(existing?.supportsImageGeneration
+          ? { supportsImageGeneration: true }
+          : {}),
+        ...(existing?.imageOnly ? { imageOnly: true } : {}),
+        ...(existing?.voiceOnly ? { voiceOnly: true } : {}),
+        ...((existing?.imageOnly || existing?.voiceOnly) && existing.envKey
+          ? { envKey: existing.envKey }
+          : {}),
+      };
+    });
+  }
+  if (
+    models.length > 0 &&
+    models.every((model) => model.imageOnly || model.voiceOnly)
+  ) {
+    const keys = new Set(models.map((model) => model.envKey));
+    if (keys.size > 1) {
+      throw new Error(
+        'Reconnect image and voice models separately to preserve their independent API keys.',
+      );
+    }
+    if (keys.size === 1 && models[0]?.envKey) envKey = models[0].envKey;
+  }
   const ownsModel = config.mergeModelsByIdentity
     ? undefined
     : resolveOwnsModel(config);
-  const firstModel = models[0];
+  const firstModel = models.find(
+    (model) => !model.imageOnly && !model.voiceOnly,
+  );
   if (models.length === 0) {
     throw new Error(
       `No models configured for provider "${config.id}". Check model list or provider configuration.`,
@@ -291,7 +431,7 @@ export function buildInstallPlan(
       ? undefined
       : {
           modelId: firstModelId,
-          ...(config.mergeModelsByIdentity && firstModel.baseUrl
+          ...(config.mergeModelsByIdentity && firstModel?.baseUrl
             ? { baseUrl: firstModel.baseUrl }
             : {}),
         };
@@ -309,7 +449,7 @@ export function buildInstallPlan(
         ...(ownsModel ? { ownsModel } : {}),
       },
     ],
-    providerState: resolveProviderState(config, inputs.baseUrl, models),
+    providerState,
   };
 }
 
@@ -478,8 +618,12 @@ export function providerMatchesCredentials(
     for (const proto of protocols) {
       try {
         const derived = config.envKey(proto, baseUrl);
-        if (derived === envKey) {
-          configEnvKey = derived;
+        if (
+          derived === envKey ||
+          (config.id === 'custom-openai-compatible' &&
+            (envKey === `${derived}_IMAGE` || envKey === `${derived}_VOICE`))
+        ) {
+          configEnvKey = envKey;
           break;
         }
       } catch (err) {

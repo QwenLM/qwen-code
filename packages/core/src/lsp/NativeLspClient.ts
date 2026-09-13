@@ -33,7 +33,7 @@ import type {
   LspServiceReinitializeResult,
 } from './types.js';
 
-import type { NativeLspService } from './NativeLspService.js';
+import type { NativeLspService } from './native-lsp-service.js';
 
 function getErrorMessage(error: unknown): string | undefined {
   if (error === undefined || error === null) {
