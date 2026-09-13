@@ -36,6 +36,7 @@ import {
   getTask,
   listTasks,
   TaskOwnershipError,
+  TaskSnapshotChangedError,
   RECIPROCAL_CALLER,
 } from '../agents/team/tasks.js';
 import { LEADER_NAME, type SwarmTask } from '../agents/team/types.js';
@@ -478,6 +479,15 @@ class TaskUpdateInvocation extends BaseToolInvocation<
 
     let task;
     try {
+      const updateOptions =
+        teammateCallerName !== undefined
+          ? { callerName: teammateCallerName }
+          : explicitOwner !== undefined || this.params.status !== undefined
+            ? {
+                expectedOwner: existingOwner ?? null,
+                expectedStatus: existing.status,
+              }
+            : undefined;
       task = await updateTask(
         teamName,
         taskId,
@@ -491,16 +501,23 @@ class TaskUpdateInvocation extends BaseToolInvocation<
           addBlocks: this.params.addBlocks,
           addBlockedBy: this.params.addBlockedBy,
         },
-        teammateCallerName !== undefined
-          ? { callerName: teammateCallerName }
-          : undefined,
+        updateOptions,
       );
     } catch (err) {
-      if (err instanceof TaskOwnershipError) {
+      if (
+        err instanceof TaskOwnershipError ||
+        err instanceof TaskSnapshotChangedError
+      ) {
+        const dispatchHint =
+          err instanceof TaskSnapshotChangedError && explicitOwner !== undefined
+            ? ' A content-only task_update persists changes without ' +
+              're-delivering the assignment.'
+            : '';
+        const message = err.message + dispatchHint;
         return {
-          llmContent: err.message,
-          returnDisplay: err.message,
-          error: { message: err.message },
+          llmContent: message,
+          returnDisplay: message,
+          error: { message },
         };
       }
       throw err;
@@ -547,6 +564,7 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       // sees the task on its next task_list (no notification path).
       persistedOwner !== LEADER_NAME &&
       persistedOwner !== teammateCallerName &&
+      (explicitOwner !== undefined || this.params.status !== undefined) &&
       (persistedOwner !== existingOwner || statusBecameInProgress)
     ) {
       const dispatched = await teamManager.dispatchAssignedTask(task);

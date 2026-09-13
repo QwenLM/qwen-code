@@ -15,6 +15,7 @@ import {
   launchToolBudget,
   reverseAuditRoundCap,
   reverseAuditRoundTier,
+  sizeTier,
   cappedRoundTier,
   reviewBudget as deriveReviewBudget,
   isFixAuditRound,
@@ -1216,18 +1217,20 @@ describe('cappedRoundTier — the operator ceiling may only lower a tier', () =>
   });
 });
 
-describe('the huge reduction applies only where there is a wall to fit inside', () => {
+describe('the huge reduction applies only under an explicit clock — a ceiling to fit inside', () => {
   const HUGE = { srcDiffLines: 5000, diffLines: 5000 };
   const LARGE = { srcDiffLines: 900, diffLines: 900 };
   const SMALL = { srcDiffLines: 100, diffLines: 100 };
 
-  it('a huge diff with no deadline is just a large 3B diff', () => {
+  it('a huge diff without an explicit clock is just a large 3B diff', () => {
     // Three is not a claim that a huge diff converges sooner — it has more
     // defects and more territory, and on recall it deserves MORE rounds. It is
-    // a claim that five ~90-minute rounds do not fit a six-hour ceiling. With
-    // no ceiling the premise is absent, and trading recall away to fit a wall
-    // that is not there is a pure loss on exactly the tier where recall
-    // matters most.
+    // a claim that five ~90-minute rounds do not fit a six-hour ceiling. The
+    // premise is an EXPLICIT clock — CI's epoch or `--deadline` — not the
+    // presence of a wall: the plan's default wall is sized above the run,
+    // so under it the premise is absent, and trading recall away to fit a
+    // ceiling that is not there is a pure loss on exactly the tier where
+    // recall matters most.
     expect(reverseAuditRoundTier(HUGE, false)).toBe(5);
     expect(reverseAuditRoundTier(HUGE, true)).toBe(3);
     expect(reviewBudget(HUGE, { hasDeadline: false }).reverseAuditRounds).toBe(
@@ -1372,7 +1375,11 @@ describe('isFixAuditRound and the topology override (#10104)', () => {
     const small = { srcDiffLines: 120, diffLines: 400 };
     expect(reverseAuditRoundTier(small, false)).toBe(10);
     expect(reverseAuditRoundTier({ ...small, ...POSTURE }, false)).toBe(5);
-    // The huge finishability ruling still wins where there is a wall.
+    // …while the size reading the default wall shares never sees the
+    // posture: a posture is not a size, so the same plan reads the same
+    // tier with or without its incremental block.
+    expect(sizeTier({ ...small, ...POSTURE })).toBe('small');
+    // The huge finishability ruling still wins under an explicit clock.
     const huge = { srcDiffLines: 4000, diffLines: 5000, ...POSTURE };
     expect(reverseAuditRoundTier(huge, true)).toBe(3);
   });
@@ -1418,6 +1425,49 @@ describe('interactionEntryOf — one admission for every census reader (#10136)'
       { path: 'src/b.ts', importsChanged: ['', 3] },
     ]) {
       expect(interactionEntryOf(raw)).toBeNull();
+    }
+  });
+});
+
+describe('sizeTier — the one topology reading the caps and the default wall share', () => {
+  it('names the three tiers by the same arithmetic the round cap uses', () => {
+    expect(sizeTier({ srcDiffLines: 100, diffLines: 100 })).toBe('small');
+    expect(sizeTier({ srcDiffLines: 500, diffLines: 3200 })).toBe('small'); // at both floors
+    expect(sizeTier({ srcDiffLines: 501, diffLines: 501 })).toBe('large'); // src past the floor
+    expect(sizeTier({ srcDiffLines: 10, diffLines: 3201 })).toBe('large'); // total past the floor
+    expect(sizeTier({ srcDiffLines: 2999, diffLines: 2999 })).toBe('large');
+    expect(sizeTier({ srcDiffLines: 3000, diffLines: 3000 })).toBe('huge');
+    // An all-non-source diff counts at an eighth: 24,000 total → 3,000 effective.
+    expect(sizeTier({ srcDiffLines: 0, diffLines: 24_000 })).toBe('huge');
+    expect(sizeTier({ srcDiffLines: 0, diffLines: 23_999 })).toBe('large');
+  });
+
+  it('reads garbled or missing sizes as the large tier, like the cap does', () => {
+    for (const bad of [
+      {},
+      { srcDiffLines: 100 },
+      { diffLines: 100 },
+      { srcDiffLines: -1, diffLines: 100 },
+      { srcDiffLines: Number.NaN, diffLines: 100 },
+      { srcDiffLines: '100' as unknown as number, diffLines: 100 },
+    ]) {
+      expect(sizeTier(bad)).toBe('large');
+    }
+  });
+
+  it('agrees with reverseAuditRoundTier on every tier, both sides of the clock', () => {
+    const byTier = { small: 10, large: 5, huge: 3 } as const;
+    for (const size of [
+      { srcDiffLines: 100, diffLines: 100 },
+      { srcDiffLines: 900, diffLines: 900 },
+      { srcDiffLines: 5000, diffLines: 5000 },
+      {},
+    ]) {
+      const tier = sizeTier(size);
+      expect(reverseAuditRoundTier(size, true)).toBe(byTier[tier]);
+      expect(reverseAuditRoundTier(size, false)).toBe(
+        tier === 'huge' ? 5 : byTier[tier],
+      );
     }
   });
 });

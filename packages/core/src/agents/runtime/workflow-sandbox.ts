@@ -440,6 +440,12 @@ function isRegexContext(source: string, i: number): boolean {
 
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import {
+  normalizeReasoningEffort,
+  REASONING_EFFORT_TIERS,
+  type ReasoningEffort,
+} from '../../core/reasoning-effort.js';
+import { resolveBuiltinToolName } from '../../tools/tool-names.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import { parseWorkflowMetaLiteral } from './workflow-meta-literal.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
@@ -499,6 +505,22 @@ export interface WorkflowAgentOpts {
    * for this call.
    */
   stallMs?: number;
+  /**
+   * Reasoning effort for this one agent (`low` … `max`). The sandbox accepts
+   * the aliases `/effort` accepts and hands the host the canonical tier; the
+   * dispatch writes it onto the agent's own content-generator config, never
+   * the session's. Part of the resume key.
+   */
+  effort?: ReasoningEffort;
+  /**
+   * Tools this agent may not call, on top of the workflow floor. It only
+   * narrows: the dispatch unions it with the floor and the agentType's own
+   * denies, and refuses an entry that matches no tool. The sandbox hands the
+   * host a sorted, de-duplicated list with built-in display names mapped to
+   * tool names (and drops an empty one), so order, duplicates and the choice
+   * of name never change the resume key.
+   */
+  disallowedTools?: string[];
   // The index signature exists so TypeScript accepts forward-compat opt names
   // at compile time; the runtime allowlist still rejects unknown names.
   [key: string]: unknown;
@@ -984,6 +1006,21 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     pushLog: safeLog,
     lastPhase: () => phases[phases.length - 1],
     hostAgent: opts.dispatch,
+    // Effort tiers are resolved host-side so the sandbox accepts exactly the
+    // aliases `/effort` does without a second copy of the alias table. Takes
+    // and returns primitives only.
+    normalizeEffort: (raw: unknown): string | null =>
+      typeof raw === 'string' ? (normalizeReasoningEffort(raw) ?? null) : null,
+    effortTiers: REASONING_EFFORT_TIERS.join(', '),
+    // A built-in tool named by its display name or a legacy alias becomes its
+    // tool name, so both spellings share one resume key; any other entry comes
+    // back as given for the host to judge. Primitives only.
+    canonicalDenyName: (raw: unknown): string | null =>
+      typeof raw === 'string' ? (resolveBuiltinToolName(raw) ?? raw) : null,
+    // JSON.stringify escapes only C0: strip DEL / C1 (incl. NEL) from a
+    // script-controlled echo so it cannot fragment a rejection message.
+    sanitizeForMessage: (raw: unknown): string =>
+      typeof raw === 'string' ? stripAnsiAndControl(raw) : '',
     // PR #4947 R2 T7 (qwen-code-ci-bot): host-side log hook for reviveInRealm's
     // catch path. Mirrors the rejection-logging in settleToNullArray so an
     // operator running with debug logging can distinguish "thunk rejected"
@@ -1484,7 +1521,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
-      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs', 'workingDir'];
+      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'effort', 'isolation', 'agentType', 'stallMs', 'workingDir', 'disallowedTools'];
       globalThis.agent = vmAsync(function (prompt, agentOpts) {
         agentOpts = agentOpts || {};
         const keys = Object.keys(agentOpts);
@@ -1542,11 +1579,6 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             );
           }
         }
-        if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
-          if (__b.lastPhase() !== agentOpts.phase) {
-            __b.pushPhase(agentOpts.phase);
-          }
-        }
         // SECURITY (P3 R2 self-review): user-script-controlled agentOpts
         // cross the vm/host boundary verbatim via vmAsync's hostFn.apply.
         // A Proxy / inherited-getter / non-plain object in agentOpts.schema
@@ -1564,6 +1596,55 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             "agent() opts contain a non-JSON-serializable value: " +
             String(e && e.message != null ? e.message : e)
           );
+        }
+        // effort and disallowedTools are validated on the REVIVED copy: that
+        // is the object the host dispatch and the resume key see, so a getter
+        // cannot show one value here and hand another to the dispatch. Both
+        // are normalized in place (an effort alias becomes its tier; a deny
+        // list has built-in display names mapped to tool names and is sorted
+        // and de-duplicated) so equivalent spellings share one resume key.
+        if (safeOpts.effort !== undefined) {
+          var tier = __b.normalizeEffort(safeOpts.effort);
+          if (tier === null) {
+            throw new Error(
+              "agent({effort}): unknown effort tier " + __b.sanitizeForMessage(JSON.stringify(safeOpts.effort)) + ". " +
+              "Known tiers are: " + __b.effortTiers + "."
+            );
+          }
+          safeOpts.effort = tier;
+        }
+        if (safeOpts.disallowedTools !== undefined) {
+          var denied = safeOpts.disallowedTools;
+          if (
+            !Array.isArray(denied) ||
+            denied.some(function (name) {
+              return typeof name !== 'string' || name.length === 0 || name !== name.trim();
+            })
+          ) {
+            throw new Error(
+              "agent({disallowedTools}): must be an array of non-empty tool-name strings " +
+              "without surrounding whitespace, e.g. ['run_shell_command', 'write_file']."
+            );
+          }
+          var uniqueDenied = [];
+          for (var d = 0; d < denied.length; d++) {
+            var deniedName = __b.canonicalDenyName(denied[d]);
+            if (uniqueDenied.indexOf(deniedName) === -1) uniqueDenied.push(deniedName);
+          }
+          uniqueDenied.sort();
+          if (uniqueDenied.length === 0) {
+            delete safeOpts.disallowedTools;
+          } else {
+            safeOpts.disallowedTools = uniqueDenied;
+          }
+        }
+        // The phase is recorded only once every option gate above has passed,
+        // so a call its options rejected leaves no phase that dispatched
+        // nothing.
+        if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
+          if (__b.lastPhase() !== agentOpts.phase) {
+            __b.pushPhase(agentOpts.phase);
+          }
         }
         // SECURITY (PR #4947 R1 wenshao, extended for P3): vmAsync's resolve
         // path is verbatim (no re-wrap of resolved values). Host-realm

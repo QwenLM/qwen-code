@@ -5,7 +5,7 @@
  */
 
 import { describe, beforeEach, afterEach, expect, test, vi } from 'vitest';
-import { NativeLspService } from './NativeLspService.js';
+import { NativeLspService } from './native-lsp-service.js';
 import { EventEmitter } from 'events';
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -342,6 +342,7 @@ describe('NativeLspService', () => {
           transport: 'stdio',
         },
         status: 'READY',
+        textDocumentSync: 1,
         connection,
       };
       const reconcileServerConfigs = vi.fn(async () => ({
@@ -356,11 +357,14 @@ describe('NativeLspService', () => {
         getHandles: () => new Map([['typescript-language-server', handle]]),
       };
       const internals = service as unknown as {
-        openedDocuments: Map<string, Set<string>>;
+        openedDocuments: Map<
+          string,
+          Map<string, { text: string; version: number }>
+        >;
       };
       internals.openedDocuments.set(
         'typescript-language-server',
-        new Set([uri]),
+        new Map([[uri, { text: 'old', version: 1 }]]),
       );
 
       const reinitialize = service.reinitialize();
@@ -378,6 +382,106 @@ describe('NativeLspService', () => {
             }),
           },
         }),
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('replays URIs that were only parked when a server reloads', async () => {
+    vi.useFakeTimers();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-parked-'));
+    try {
+      const firstPath = path.join(tempDir, 'main.ts');
+      const secondPath = path.join(tempDir, 'second.ts');
+      const firstUri = pathToFileURL(firstPath).toString();
+      const secondUri = pathToFileURL(secondPath).toString();
+      fs.writeFileSync(firstPath, 'const value = 1;\n', 'utf-8');
+      fs.writeFileSync(secondPath, 'const other = 2;\n', 'utf-8');
+      fs.writeFileSync(
+        path.join(tempDir, '.lsp.json'),
+        JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+          },
+        }),
+      );
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      const connection = {
+        listen: vi.fn(),
+        send: vi.fn(),
+        onNotification: vi.fn(),
+        onRequest: vi.fn(),
+        request: vi.fn(),
+        initialize: vi.fn(),
+        shutdown: vi.fn(),
+        end: vi.fn(),
+      };
+      const handle = {
+        config: {
+          name: 'typescript-language-server',
+          languages: ['typescript'],
+          command: 'typescript-language-server',
+          args: [],
+          transport: 'stdio',
+        },
+        status: 'READY',
+        textDocumentSync: 1,
+        connection,
+      };
+      const reconcileServerConfigs = vi.fn(async () => ({
+        added: [],
+        removed: [],
+        restarted: ['typescript-language-server'],
+        unchanged: [],
+        failed: [],
+      }));
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        reconcileServerConfigs,
+        getHandles: () => new Map([['typescript-language-server', handle]]),
+      };
+      const internals = service as unknown as {
+        openedDocuments: Map<
+          string,
+          Map<string, { text: string; version: number }>
+        >;
+        replayUris: Map<string, Set<string>>;
+      };
+      internals.openedDocuments.set(
+        'typescript-language-server',
+        new Map([[firstUri, { text: 'old', version: 1 }]]),
+      );
+      internals.replayUris.set(
+        'typescript-language-server',
+        new Set([secondUri]),
+      );
+
+      const reinitialize = service.reinitialize();
+      await vi.runAllTimersAsync();
+      await reinitialize;
+
+      const openedUris = connection.send.mock.calls
+        .filter(([message]) => message.method === 'textDocument/didOpen')
+        .map(
+          ([message]) =>
+            (message.params as { textDocument: { uri: string } }).textDocument
+              .uri,
+        );
+      expect(new Set(openedUris)).toEqual(new Set([firstUri, secondUri]));
+      // The reload snapshot consumed the durable set.
+      expect(internals.replayUris.has('typescript-language-server')).toBe(
+        false,
       );
       expect(vi.getTimerCount()).toBe(0);
     } finally {
@@ -451,6 +555,7 @@ describe('NativeLspService', () => {
               transport: 'stdio',
             },
             status: 'READY',
+            textDocumentSync: 1,
             connection: firstConnection,
           },
         ],
@@ -465,6 +570,7 @@ describe('NativeLspService', () => {
               transport: 'stdio',
             },
             status: 'READY',
+            textDocumentSync: 1,
             connection: secondConnection,
           },
         ],
@@ -481,21 +587,30 @@ describe('NativeLspService', () => {
         getHandles: () => handles,
       };
       const internals = service as unknown as {
-        openedDocuments: Map<string, Set<string>>;
+        openedDocuments: Map<
+          string,
+          Map<string, { text: string; version: number }>
+        >;
         lastConnections: Map<string, unknown>;
       };
       internals.openedDocuments.set(
         'typescript-language-server',
-        new Set([firstUri]),
+        new Map([[firstUri, { text: 'old', version: 1 }]]),
       );
-      internals.openedDocuments.set('pyright-langserver', new Set([secondUri]));
+      internals.openedDocuments.set(
+        'pyright-langserver',
+        new Map([[secondUri, { text: 'old', version: 1 }]]),
+      );
 
       const reinitialize = service.reinitialize();
       await vi.runAllTimersAsync();
       await expect(reinitialize).resolves.toBeDefined();
 
       expect(firstConnection.send).toHaveBeenCalledOnce();
-      expect(internals.lastConnections.has('typescript-language-server')).toBe(
+      expect(internals.lastConnections.get('typescript-language-server')).toBe(
+        firstConnection,
+      );
+      expect(internals.openedDocuments.has('typescript-language-server')).toBe(
         false,
       );
       expect(internals.lastConnections.get('pyright-langserver')).toBe(
@@ -563,6 +678,7 @@ describe('NativeLspService', () => {
           transport: 'stdio',
         },
         status: 'READY',
+        textDocumentSync: 1,
         connection,
       };
       const reconcileServerConfigs = vi
@@ -586,17 +702,20 @@ describe('NativeLspService', () => {
         getHandles: () => new Map([['typescript-language-server', handle]]),
       };
       const internals = service as unknown as {
-        openedDocuments: Map<string, Set<string>>;
+        openedDocuments: Map<
+          string,
+          Map<string, { text: string; version: number }>
+        >;
       };
       internals.openedDocuments.set(
         'typescript-language-server',
-        new Set([uri]),
+        new Map([[uri, { text: 'old', version: 1 }]]),
       );
 
       await service.reinitialize();
       expect(
         internals.openedDocuments.get('typescript-language-server'),
-      ).toEqual(new Set([uri]));
+      ).toEqual(new Map([[uri, { text: 'old', version: 1 }]]));
 
       const reinitialize = service.reinitialize();
       await vi.runAllTimersAsync();
@@ -737,6 +856,7 @@ describe('NativeLspService', () => {
           transport: 'stdio',
         },
         status: 'READY',
+        textDocumentSync: 1,
         connection,
       };
       let resolveReconcile: (
@@ -757,7 +877,10 @@ describe('NativeLspService', () => {
         getHandles: () => new Map([['typescript-language-server', handle]]),
       };
       const internals = service as unknown as {
-        openedDocuments: Map<string, Set<string>>;
+        openedDocuments: Map<
+          string,
+          Map<string, { text: string; version: number }>
+        >;
       };
 
       const reinitialize = service.reinitialize();
@@ -766,7 +889,7 @@ describe('NativeLspService', () => {
       });
       internals.openedDocuments.set(
         'typescript-language-server',
-        new Set([uri]),
+        new Map([[uri, { text: 'old', version: 1 }]]),
       );
       resolveReconcile!({
         added: [],
@@ -840,6 +963,7 @@ describe('NativeLspService', () => {
           transport: 'stdio',
         },
         status: 'READY',
+        textDocumentSync: 1,
         connection,
       };
       const stopAll = vi.fn(async () => {});
@@ -856,12 +980,15 @@ describe('NativeLspService', () => {
         stopAll,
       };
       const internals = service as unknown as {
-        openedDocuments: Map<string, Set<string>>;
+        openedDocuments: Map<
+          string,
+          Map<string, { text: string; version: number }>
+        >;
         lastConnections: Map<string, unknown>;
       };
       internals.openedDocuments.set(
         'typescript-language-server',
-        new Set([uri]),
+        new Map([[uri, { text: 'old', version: 1 }]]),
       );
       internals.lastConnections.set('typescript-language-server', connection);
 
@@ -960,14 +1087,20 @@ describe('NativeLspService', () => {
     const stopAll = vi.fn(async () => {});
     const internals = service as unknown as {
       serverManager: unknown;
-      openedDocuments: Map<string, Set<string>>;
+      openedDocuments: Map<
+        string,
+        Map<string, { text: string; version: number }>
+      >;
       lastConnections: Map<string, unknown>;
     };
     internals.serverManager = {
       getHandles: () => new Map([['tsserver', {}]]),
       stopAll,
     };
-    internals.openedDocuments.set('tsserver', new Set(['file:///a.ts']));
+    internals.openedDocuments.set(
+      'tsserver',
+      new Map([['file:///a.ts', { text: 'old', version: 1 }]]),
+    );
     internals.lastConnections.set('tsserver', {});
 
     const result = await service.reinitialize();
@@ -1087,11 +1220,17 @@ describe('NativeLspService', () => {
     const stopAll = vi.fn(async () => {});
     const internals = lspService as unknown as {
       serverManager: { stopAll: () => Promise<void> };
-      openedDocuments: Map<string, Set<string>>;
+      openedDocuments: Map<
+        string,
+        Map<string, { text: string; version: number }>
+      >;
       lastConnections: Map<string, unknown>;
     };
     internals.serverManager = { stopAll };
-    internals.openedDocuments.set('tsserver', new Set(['file:///a.ts']));
+    internals.openedDocuments.set(
+      'tsserver',
+      new Map([['file:///a.ts', { text: 'old', version: 1 }]]),
+    );
     internals.lastConnections.set('tsserver', {});
 
     await lspService.stop();
@@ -1118,6 +1257,7 @@ describe('NativeLspService', () => {
                 workspaceFolder: '/test/workspace',
               },
               status: 'READY',
+              textDocumentSync: 1,
               process: { pid: 12345 },
               warmedUp: true,
               restartAttempts: 1,
@@ -1223,6 +1363,7 @@ describe('NativeLspService', () => {
         transport: 'stdio',
       },
       status: 'READY',
+      textDocumentSync: 1,
       connection,
     };
 
@@ -1334,6 +1475,7 @@ describe('NativeLspService', () => {
         transport: 'stdio',
       },
       status: 'READY',
+      textDocumentSync: 1,
       connection,
     };
 
@@ -1442,6 +1584,7 @@ describe('NativeLspService', () => {
         transport: 'stdio',
       },
       status: 'READY',
+      textDocumentSync: 1,
       connection,
     };
 
@@ -1516,6 +1659,7 @@ describe('NativeLspService', () => {
         transport: 'stdio',
       },
       status: 'READY',
+      textDocumentSync: 1,
       connection,
     };
 
@@ -1594,6 +1738,7 @@ describe('NativeLspService', () => {
         transport: 'stdio',
       },
       status: 'READY',
+      textDocumentSync: 1,
       connection: connection1,
     };
 
@@ -1703,6 +1848,7 @@ describe('NativeLspService', () => {
         transport: 'stdio',
       },
       status: 'READY',
+      textDocumentSync: 1,
       connection,
     };
 
@@ -1770,6 +1916,7 @@ describe('NativeLspService', () => {
         transport: 'stdio',
       },
       status: 'READY',
+      textDocumentSync: 1,
       connection,
     };
 
@@ -1856,13 +2003,16 @@ describe('NativeLspService', () => {
         transport: 'stdio',
       },
       status: 'READY',
+      textDocumentSync: 1,
       connection,
     };
 
-    // First call: warmup returns warmupUri (different from queryUri)
+    // Warmup delegates its open through the service-owned synchronization.
     const serverManager = {
       getHandles: () => new Map([['typescript', handle]]),
-      warmupTypescriptServer: vi.fn(async () => warmupUri),
+      warmupTypescriptServer: vi.fn(async (_handle, synchronizeDocument) => {
+        synchronizeDocument(warmupUri, 'typescript');
+      }),
     };
 
     (lspService as unknown as { serverManager: unknown }).serverManager =
@@ -1870,7 +2020,7 @@ describe('NativeLspService', () => {
 
     vi.useFakeTimers();
     try {
-      // First request: opens queryUri via ensureDocumentOpen, warmup returns warmupUri
+      // First request: opens queryUri via ensureDocumentSynchronized, warmup opens warmupUri
       const promise1 = lspService.hover({
         uri: queryUri,
         range: {
@@ -1881,7 +2031,7 @@ describe('NativeLspService', () => {
       await vi.runAllTimersAsync();
       await promise1;
 
-      // queryUri should have been opened via ensureDocumentOpen
+      // queryUri should have been opened via ensureDocumentSynchronized
       expect(didOpenUris).toContain(queryUri);
       const countAfterFirst = didOpenUris.length;
 
@@ -1896,7 +2046,7 @@ describe('NativeLspService', () => {
       await vi.runAllTimersAsync();
       await promise2;
 
-      // warmupUri should NOT have been opened again via ensureDocumentOpen
+      // warmupUri should NOT have been opened again via ensureDocumentSynchronized
       // because it was tracked from the warmup in the first call
       expect(didOpenUris.length).toBe(countAfterFirst);
     } finally {
@@ -1955,6 +2105,7 @@ describe('NativeLspService', () => {
         transport: 'stdio',
       },
       status: 'READY',
+      textDocumentSync: 1,
       connection,
     };
 
@@ -2030,6 +2181,7 @@ describe('NativeLspService', () => {
         transport: 'stdio',
       },
       status: 'READY',
+      textDocumentSync: 1,
       connection,
     };
 
@@ -2094,6 +2246,7 @@ describe('NativeLspService', () => {
         transport: 'stdio',
       },
       status: 'READY',
+      textDocumentSync: 1,
       connection,
     };
 

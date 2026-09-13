@@ -9,12 +9,60 @@ import { CommandService } from './CommandService.js';
 import { type ICommandLoader } from './types.js';
 import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
 
+const mocks = vi.hoisted(() => ({
+  logger: {
+    isEnabled: () => true,
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    createDebugLogger: () => mocks.logger,
+  };
+});
+
 const createMockCommand = (name: string, kind: CommandKind): SlashCommand => ({
   name,
   description: `Description for ${name}`,
   kind,
   action: vi.fn(),
 });
+
+const skillCommand = (name: string, authoredName?: string): SlashCommand => ({
+  name,
+  description: `Description for ${name}`,
+  kind: CommandKind.SKILL,
+  skillDetail: {
+    name,
+    ...(authoredName ? { authoredName } : {}),
+    level: 'extension',
+    extensionName: 'rust',
+  },
+  action: async () => {},
+});
+
+const serviceFor = (
+  commands: SlashCommand[],
+  disabledNames?: string[],
+): Promise<CommandService> =>
+  CommandService.create(
+    [new MockCommandLoader(commands)],
+    new AbortController().signal,
+    disabledNames ? new Set(disabledNames) : undefined,
+  );
+
+const commandNamed = (
+  service: CommandService,
+  name: string,
+): SlashCommand | undefined =>
+  service.getCommands().find((cmd) => cmd.name === name);
 
 const mockCommandA = createMockCommand('command-a', CommandKind.BUILT_IN);
 const mockCommandB = createMockCommand('command-b', CommandKind.BUILT_IN);
@@ -421,8 +469,18 @@ describe('CommandService', () => {
         new Set(['COMMAND-A', 'Command-B']),
       );
 
-      const commands = service.getCommands();
-      expect(commands).toHaveLength(0);
+      expect(service.getCommands()).toHaveLength(0);
+    });
+
+    it('should match disabled names case-insensitively against a capitalized command name', async () => {
+      // The denylist side is normalized, so the command side has to be too: a
+      // user file command `/Report.md` is disabled by the entry `report`.
+      const service = await serviceFor(
+        [createMockCommand('Report', CommandKind.FILE)],
+        ['report'],
+      );
+
+      expect(service.getCommands()).toHaveLength(0);
     });
 
     it('should not filter any commands when disabledNames is empty', async () => {
@@ -445,6 +503,94 @@ describe('CommandService', () => {
       );
 
       expect(service.getCommands()).toHaveLength(2);
+    });
+
+    it.each([
+      { label: 'the legacy bare entry', disabled: ['pdf'] },
+      { label: 'the registry entry', disabled: ['rust:pdf'] },
+    ])(
+      'hides a qualified skill command named by $label',
+      async ({ disabled }) => {
+        const service = await serviceFor(
+          [
+            skillCommand('rust:pdf', 'pdf'),
+            createMockCommand('help', CommandKind.BUILT_IN),
+          ],
+          disabled,
+        );
+
+        expect(commandNamed(service, 'rust:pdf')).toBeUndefined();
+        expect(commandNamed(service, 'help')).toBeDefined();
+      },
+    );
+
+    it('hides a command that only an alias in the denylist names', async () => {
+      // The gate matches through `commandRestrictionNames`, which appends every
+      // normalized `altNames` entry. `/compress` really does carry `summarize`
+      // (compressCommand.ts:27), so `slashCommands.disabled: ['summarize']` has
+      // to remove the command — a gate that read only `name`, or only the first
+      // alias, or skipped the trim/lowercase, would leave the alias live at
+      // dispatch while the settings entry claims the command is off.
+      const service = await serviceFor(
+        [
+          {
+            ...createMockCommand('compress', CommandKind.BUILT_IN),
+            altNames: ['COMP', ' summarize'],
+          },
+          createMockCommand('help', CommandKind.BUILT_IN),
+        ],
+        ['summarize'],
+      );
+
+      expect(commandNamed(service, 'compress')).toBeUndefined();
+      expect(commandNamed(service, 'help')).toBeDefined();
+    });
+
+    it('still hides every other command a bare entry names', async () => {
+      // `slashCommands.disabled` is a global denylist on main: an entry already
+      // hides a built-in of that name (`getDisabledSlashCommands`, config.ts:6121).
+      // This change adds the authored-spelling match for skill commands and must
+      // not narrow the global one, so the bare entry bites both.
+      const service = await serviceFor(
+        [
+          createMockCommand('pdf', CommandKind.BUILT_IN),
+          skillCommand('rust:pdf', 'pdf'),
+        ],
+        ['pdf'],
+      );
+
+      expect(commandNamed(service, 'pdf')).toBeUndefined();
+      expect(commandNamed(service, 'rust:pdf')).toBeUndefined();
+    });
+  });
+
+  describe('shadowing diagnostic', () => {
+    beforeEach(() => {
+      mocks.logger.warn.mockClear();
+    });
+
+    it('names the replacement when a later command shadows an earlier one', async () => {
+      // The outcome is unchanged — FileCommandLoader loads last and still wins.
+      // The log only names what happened to a command the user can no longer run.
+      const service = await serviceFor([
+        skillCommand('pdf', 'pdf'),
+        createMockCommand('pdf', CommandKind.FILE),
+      ]);
+
+      expect(commandNamed(service, 'pdf')?.kind).toBe(CommandKind.FILE);
+      expect(mocks.logger.warn).toHaveBeenCalledWith(
+        'Slash command "/pdf" from skill command "pdf" is replaced by ' +
+          'file command "pdf"',
+      );
+    });
+
+    it('does not warn when nothing is replaced', async () => {
+      await serviceFor([
+        createMockCommand('alpha', CommandKind.BUILT_IN),
+        createMockCommand('beta', CommandKind.FILE),
+      ]);
+
+      expect(mocks.logger.warn).not.toHaveBeenCalled();
     });
   });
 });
