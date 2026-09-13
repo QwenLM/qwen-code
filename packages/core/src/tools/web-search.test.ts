@@ -664,6 +664,16 @@ describe('evaluateWebSearchGate auto derivation', () => {
     }
   });
 
+  it('normalizes an out-of-range budget on the automatic path', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD], STANDARD.id, { settings: { timeoutMs: 0 } }),
+    );
+    expect(gate.ok && gate.backend.timeoutMs).toBe(
+      DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    );
+  });
+
   it('derives the backend from a Standard API Key entry', () => {
     expect(
       findProviderByCredentials(STANDARD.baseUrl, STANDARD.envKey)?.id,
@@ -2085,6 +2095,34 @@ describe('WebSearchTool budget', () => {
     expect(envDeclared.ok && envDeclared.backend.timeoutMs).toBe(45_000);
   });
 
+  it('normalizes an out-of-range budget on the explicit and env-declared paths', () => {
+    // settings.json is not re-validated at load, so the gate read sites are
+    // the only guard keeping a hand-edited value from reaching the backend.
+    const explicit = evaluateWebSearchGate(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 0 },
+      }),
+    );
+    const envDeclared = evaluateWebSearchGate(
+      makeConfig({
+        settings: {
+          enabled: true,
+          model: 'qwen3.6-plus',
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKeyEnv: TEST_ENV_KEY,
+          timeoutMs: 0,
+        },
+        models: [],
+      }),
+    );
+    expect(explicit.ok && explicit.backend.timeoutMs).toBe(
+      DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    );
+    expect(envDeclared.ok && envDeclared.backend.timeoutMs).toBe(
+      DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    );
+  });
+
   it('times out on the configured budget rather than a fixed one', async () => {
     mockCreate.mockImplementation(
       (_params: unknown, { signal }: { signal: AbortSignal }) =>
@@ -2110,6 +2148,39 @@ describe('WebSearchTool budget', () => {
     // The SDK's own request timeout follows the same budget.
     expect((mockCtorOpts.current as { timeout: number }).timeout).toBe(200);
   });
+
+  it('salvages the partial result when the budget expires after a search ran', async () => {
+    // terminalFailure tries partial salvage before the timeout arm: a search
+    // that spent its budget after collecting evidence must return it.
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.created' };
+            yield { type: 'response.output_item.done', item: SEARCH_ITEM };
+            yield {
+              type: 'response.output_item.done',
+              item: { ...EXTRACTOR_ITEM, output: 'x'.repeat(20_000) },
+            };
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            });
+          },
+        }),
+    );
+    const result = await runSearch(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 200 },
+      }),
+    );
+    expect(result.error).toBeUndefined();
+    const content = result.llmContent as string;
+    expect(content).toContain('[Partial result:');
+    expect(content).toContain('[Raw page content salvaged');
+    expect(content).toContain('Truncated to 6000 characters.');
+  });
 });
 
 describe('WebSearchTool extractor fallback', () => {
@@ -2133,6 +2204,19 @@ describe('WebSearchTool extractor fallback', () => {
     );
     expect(content).toContain('page content');
     expect(content).not.toContain('Truncated to');
+  });
+
+  it('does not split a surrogate pair when salvaged page text is truncated', async () => {
+    // The fixture length leans on the 41-unit '[Extracted content — goal:
+    // verify facts]\n' prefix collectFromItems prepends: 41 + 5958 'a's
+    // places the emoji's high surrogate exactly at the 6000-unit cut.
+    mockCreate.mockResolvedValueOnce(
+      streamDyingAfterPageRead('a'.repeat(5_958) + '\u{1F600}'),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('Truncated to 6000 characters.]');
+    // No high surrogate without its low surrogate anywhere in the payload.
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(content)).toBe(false);
   });
 
   it('bounds salvaged page text when the narration never arrived', async () => {

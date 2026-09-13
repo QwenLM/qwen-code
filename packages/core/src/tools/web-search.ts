@@ -68,7 +68,7 @@ export const DEFAULT_WEB_SEARCH_MODEL = 'qwen3.8-flash';
  */
 export const DEFAULT_WEB_SEARCH_TIMEOUT_MS = 120_000;
 /** Guard against a misconfigured budget pinning a turn for many minutes. */
-const MAX_WEB_SEARCH_TIMEOUT_MS = 600_000;
+export const MAX_WEB_SEARCH_TIMEOUT_MS = 600_000;
 
 /**
  * Effective budget for `tools.webSearch.timeoutMs`: a positive integer up to
