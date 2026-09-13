@@ -24,6 +24,8 @@ import {
   createReviewWorktreeLease,
   readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession,
+  recordReviewWorktreeLeaseMergeBase,
+  restoreReviewWorktreeLeaseMergeBase,
 } from '../../services/review-worktree-lease.js';
 import * as environment from '../../config/environment.js';
 import { classifyHeavy } from './lib/heavy.js';
@@ -346,6 +348,8 @@ vi.mock('../../services/review-worktree-lease.js', () => {
     clearReviewWorktreeLease: vi.fn(),
     clearReviewWorktreeLeaseIfOwned: vi.fn(),
     createReviewWorktreeLease: vi.fn(),
+    recordReviewWorktreeLeaseMergeBase: vi.fn(),
+    restoreReviewWorktreeLeaseMergeBase: vi.fn(),
     readReviewWorktreeLease,
     // The found-at variant the held-lease refusal uses: delegate so the
     // `mockReturnValueOnce` steering above reaches both.
@@ -1307,6 +1311,57 @@ describe('fetch-pr report assembly', () => {
       expect(producerMocks.gitOpt.mock.invocationCallOrder[0]!).toBeLessThan(
         vi.mocked(clearReviewWorktreeLeaseIfOwned).mock.invocationCallOrder[0]!,
       );
+    });
+
+    it('records the resolved merge base host-side, fetch failure or not (R3-5, R3-7)', async () => {
+      // The only production caller of the host-side anchor `base-tree` rules
+      // on. The anchor has to belong to the capture that OWNS the plan:
+      // skipping the record on a failed base fetch left a previous round's
+      // value standing in the lease, and the anchor then AUTHENTICATED a plan
+      // the mount had rewritten back to that stale sha.
+      const recorded = vi.mocked(recordReviewWorktreeLeaseMergeBase);
+
+      producerMocks.resolveMergeBase.mockImplementation(() => ({
+        sha: 'mb-resolved',
+        baseFetchFailed: false,
+      }));
+      await reportFor({});
+      // The session id is passed too, so a capture that lost the
+      // acquisition race cannot write its base over the live review's lease.
+      expect(recorded).toHaveBeenCalledWith(
+        process.cwd(),
+        'pr-42',
+        'mb-resolved',
+        expect.any(String),
+        { stale: false },
+      );
+
+      // The failed-fetch round records too — WITH the capture's ruling that
+      // the sha may be stale, which `base-tree` refuses on. Left in the plan
+      // alone, that ruling was the reviewed code's to flip (R5-7); and it is
+      // not a reason to leave the anchor pointing at someone else's round.
+      recorded.mockClear();
+      producerMocks.resolveMergeBase.mockImplementation(() => ({
+        sha: 'mb-stale',
+        baseFetchFailed: true,
+      }));
+      await reportFor({});
+      expect(recorded).toHaveBeenCalledWith(
+        process.cwd(),
+        'pr-42',
+        'mb-stale',
+        expect.any(String),
+        { stale: true },
+      );
+
+      // No merge base at all: nothing to anchor, and nothing recorded.
+      recorded.mockClear();
+      producerMocks.resolveMergeBase.mockImplementation(() => ({
+        sha: null,
+        baseFetchFailed: false,
+      }));
+      await reportFor({});
+      expect(recorded).not.toHaveBeenCalled();
     });
 
     it('lets the step-4 launch-dir refusal propagate unwrapped, with no rollback', async () => {
@@ -4325,6 +4380,18 @@ describe('fetch-pr --resume', () => {
     );
     expect(vi.mocked(recordResume)).toHaveBeenCalledWith(OUT);
     expect(vi.mocked(appendRunSession)).toHaveBeenCalledWith(OUT);
+    // The continuation returns before the resolution that records the
+    // host-side merge base, and the lease acquisition has already dropped
+    // it — so the anchor is put back from the lease's own prior, or every
+    // `base-tree` ask of the resumed review refuses (R5-2).
+    expect(vi.mocked(restoreReviewWorktreeLeaseMergeBase)).toHaveBeenCalledWith(
+      process.cwd(),
+      'pr-42',
+      process.env['QWEN_CODE_SESSION_ID'],
+    );
+    expect(
+      vi.mocked(recordReviewWorktreeLeaseMergeBase),
+    ).not.toHaveBeenCalled();
   });
 
   it('falls through to a fresh fetch when the head moved, and says so', async () => {
@@ -4346,6 +4413,10 @@ describe('fetch-pr --resume', () => {
     });
     await run();
     expect(reportWritten()).toBe(true);
+    // A real recapture records its own merge base; nothing is restored.
+    expect(
+      vi.mocked(restoreReviewWorktreeLeaseMergeBase),
+    ).not.toHaveBeenCalled();
     const lines = await stdoutJsonLines();
     expect(lines).toEqual([{ resumed: false, resumeRefused: 'head-moved' }]);
     // The once-per-review restart bound becomes a fact on disk here.

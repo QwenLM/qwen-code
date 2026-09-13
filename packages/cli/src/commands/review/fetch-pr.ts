@@ -33,6 +33,8 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
+  recordReviewWorktreeLeaseMergeBase,
+  restoreReviewWorktreeLeaseMergeBase,
   readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
@@ -976,7 +978,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     let priorFetchedSha: string | null = null;
     if (args.resume) {
       const outcome = tryResume(args, wt, platform);
-      if (outcome.resumed) return;
+      if (outcome.resumed) {
+        // A continuation returns before the resolution that records the
+        // host-side merge base, and the lease acquisition above has already
+        // dropped the anchor (on purpose — see `createReviewWorktreeLease`).
+        // Without putting it back, every resumed review had no anchor and
+        // `base-tree` refused for the rest of it. The value restored is the
+        // lease's own prior, never the report or the plan.
+        restoreReviewWorktreeLeaseMergeBase(
+          process.cwd(),
+          leaseTarget,
+          sessionId,
+        );
+        return;
+      }
       resumeRefusal = outcome.reason;
       priorFetchedSha = outcome.priorFetchedSha;
       writeStdoutLine(
@@ -1158,6 +1173,47 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `WARNING: could not fetch ${remote}/${meta.baseRefName}. The merge-base ` +
           `is resolved from a possibly stale local ref, so the diff may not be ` +
           `the one under review.`,
+      );
+    }
+    // Record the resolved merge base in the host-side lease, beside the
+    // review-lease directory nothing mounts.
+    //
+    // `base-tree` builds and certifies the A/B's BASE side at this sha, and
+    // the plan it reads is written into `.qwen/tmp` — the directory the
+    // sandbox hands the reviewed code read-write, minutes before the first
+    // `base-tree` ask exists. Without a host-side copy, the value the fence
+    // pins is whatever the plan says at that first ask, and the pin then
+    // authenticates the mount's choice against itself. With one, `base-tree`
+    // refuses a plan that disagrees with what this capture actually
+    // resolved. Not recorded when there is no merge base: `base-tree`
+    // reports the A/B unavailable for that case on its own.
+    //
+    // Never fatal HERE — but not harmless either, and this comment used to
+    // claim it was: `base-tree` now REFUSES when the lease carries no merge
+    // base, because the alternative is the mount-writable plan being the sole
+    // authority again. So a capture that cannot record it costs this review
+    // its A/B lane, and the note `base-tree` prints says how to get it back
+    // (re-run this command). Debug-logged rather than thrown, because the
+    // fetch itself succeeded and failing the capture over this write would be
+    // the worse trade.
+    //
+    // UNCONDITIONALLY when a merge base was resolved at all — the
+    // `baseFetchFailed` half used to skip it, and that skip is what let a
+    // PREVIOUS round's value survive in the lease and then AUTHENTICATE a
+    // plan rewritten back to it. The anchor has to belong to the capture
+    // that owns the plan, so a capture that resolved a (possibly stale)
+    // merge base records it — together with the capture's own ruling that it
+    // may be stale, which is what `base-tree` refuses the stale-base round
+    // on. That ruling used to be read from `plan.baseFetchFailed` alone,
+    // inside the mount, where the reviewed code could flip it to "fresh" and
+    // have the anchor authenticate a stale base; see `mergeBaseStale`.
+    if (mergeBaseSha !== null) {
+      recordReviewWorktreeLeaseMergeBase(
+        process.cwd(),
+        leaseTarget,
+        mergeBaseSha,
+        sessionId,
+        { stale: baseFetchFailed },
       );
     }
     const diffRel = tmpFile(`pr-${prNumber}`, 'diff.txt');

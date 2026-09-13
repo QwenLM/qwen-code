@@ -1431,6 +1431,21 @@ export function localFilterCommands(worktree: string): string[] {
  * path the screen exists to cover. Only the target's existence is asked here;
  * origin-resolution of what a hit came from is #10441.
  */
+/**
+ * The unflattened filter screen for a tree, or null when its repository
+ * could not be resolved.
+ *
+ * `checkoutFilterCommands` and `localFilterCommands` flatten this into one
+ * list for callers that refuse on any hit. A caller that measures instead —
+ * `worktreeResidue`, and base-tree's reuse and post-build checks — needs the
+ * halves apart: the `filters` it can BLANK on its own git invocation
+ * (`filterBlankEnv`), and the `unread`/`dangling` config it could not see to
+ * the bottom and therefore must refuse on.
+ */
+export function filterScreenForTree(worktree: string): FilterScreen | null {
+  return screenForTree(worktree);
+}
+
 export function checkoutFilterCommands(worktree: string): string[] {
   const screen = screenForTree(worktree);
   if (screen === null) return [UNRESOLVED_REPO];

@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -21,6 +22,8 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cleanupReviewWorktreeLeases,
+  recordReviewWorktreeLeaseMergeBase,
+  restoreReviewWorktreeLeaseMergeBase,
   clearReviewWorktreeLease,
   clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
@@ -1462,6 +1465,445 @@ describe('lease acquisition is atomic (#9205)', () => {
     createReviewWorktreeLease(leaseParams(root));
     createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
     expect(readReviewWorktreeLease(root, 'pr-1')?.promptId).toBe('prompt-b');
+  });
+
+  it('carries the run identity in the lease CONTENT across same-session refreshes', () => {
+    // The review pipeline keys the base-tree trust file's run identity on
+    // this value: a resumed run re-acquires here, and a moved identity
+    // rotates the trust state and discards the standing base tree.
+    //
+    // It lives in the content because the earlier carrier — the file's mtime,
+    // restored through `utimesSync` on every refresh — could not survive its
+    // own arithmetic: the restore floors sub-millisecond precision, so the
+    // SECOND refresh of a run drifted past the trust store's 1 ms tolerance
+    // and rotated a live run's state. Hence the loop: one refresh could not
+    // see it.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    const first = readReviewWorktreeLease(root, 'pr-1')?.identity;
+    expect(typeof first).toBe('number');
+    for (let i = 0; i < 8; i++) {
+      createReviewWorktreeLease(leaseParams(root, { promptId: `prompt-${i}` }));
+      const now = readReviewWorktreeLease(root, 'pr-1');
+      expect(now?.promptId).toBe(`prompt-${i}`);
+      expect(now?.identity).toBe(first); // exactly, not within a tolerance
+    }
+  });
+
+  it("mints a FRESH identity on the heal arm, never the standing file's", () => {
+    // The heal arm rewrites a lease that did not parse, so the standing
+    // file's owner, session and target were never verified. The mtime
+    // carrier donated that file's timestamp to this run regardless, which
+    // made an unrelated earlier run's base-tree trust state ADOPTED instead
+    // of rotated — its pinned merge base and its recorded trees inherited by
+    // a run that had nothing to do with it. A fresh mint rotates, which
+    // loses a base tree rather than trusting one.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    const path = reviewLeasePath(root, 'pr-1');
+    const before = readReviewWorktreeLease(root, 'pr-1')?.identity;
+    writeFileSync(path, '{ torn'); // the crash window: not parseable
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
+    const after = readReviewWorktreeLease(root, 'pr-1');
+    expect(after?.promptId).toBe('prompt-b');
+    expect(after?.identity).not.toBe(before);
+  });
+
+  it('records the merge base even when the base fetch FAILED (R3-5)', () => {
+    // The anchor has to belong to the capture that owns the plan. Skipping
+    // the record on a failed base fetch left a PREVIOUS round's value
+    // standing in the lease — and the anchor then AUTHENTICATED a plan the
+    // mount had rewritten back to that stale sha, so the run reused and
+    // certified a base tree at a commit that was not this round's base at
+    // all. Whether a stale fetch makes the sha untrustworthy is
+    // `base-tree`'s to judge, from the ruling recorded beside the anchor (see
+    // the R5-7 case); it is not a reason to leave the anchor pointing at
+    // someone else's round.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'a'.repeat(40));
+    const first = readReviewWorktreeLease(root, 'pr-1')?.identity;
+
+    // Round 2 re-captures after a rebase; its base fetch fails, and it
+    // resolves a different (possibly stale) sha. The lease must follow it.
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'b'.repeat(40));
+
+    const after = readReviewWorktreeLease(root, 'pr-1');
+    expect(after?.mergeBaseSha).toBe('b'.repeat(40));
+    // A MOVED base rotates, and the rotation survives the refresh having
+    // dropped the anchor — see the R4-9 case for why it is dropped.
+    expect(after?.identity).not.toBe(first);
+  });
+
+  it('reclaims the base-tree trust state from the FINALIZER too (R3-9)', () => {
+    // A session that ends through `cleanupReviewWorktreeLeases` never passes
+    // through `clearReviewWorktreeLease`, so the reclaim on that path alone
+    // left a ~9 MB file per plan path behind forever.
+    const root = createRepository();
+    const worktree = join(root, '.qwen', 'tmp', 'review-pr-1');
+    execFileSync('git', [
+      '-C',
+      root,
+      'worktree',
+      'add',
+      '-q',
+      '--detach',
+      worktree,
+      'HEAD',
+    ]);
+    createReviewWorktreeLease({
+      sessionId: 'session-a',
+      promptId: 'prompt-a',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath: worktree,
+      branch: 'qwen-review/pr-1',
+    });
+    const trustDir = join(root, '.qwen', 'review-leases', 'base-tree', 'pr-1');
+    mkdirSync(trustDir, { recursive: true });
+    writeFileSync(join(trustDir, 'deadbeefdeadbeef.json'), '{"identity":1}');
+
+    cleanupReviewWorktreeLeases({
+      sessionId: 'session-a',
+      promptId: 'prompt-a',
+      repositoryRoot: root,
+    });
+
+    expect(readReviewWorktreeLease(root, 'pr-1')).toBeNull(); // it finalized
+    expect(existsSync(trustDir)).toBe(false);
+  });
+
+  it("refuses to write the merge base over ANOTHER session's lease (R3-11)", () => {
+    // A capture that lost the acquisition race, or one still running after an
+    // operator handed the target to a new session, would otherwise write its
+    // merge base — and a fresh identity — over the lease the live review is
+    // keyed on, rotating that review's trust state and sweeping the base tree
+    // it is mid-A/B in.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root)); // session-a holds it
+    const before = readReviewWorktreeLease(root, 'pr-1');
+
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'f'.repeat(40), 'other');
+
+    const after = readReviewWorktreeLease(root, 'pr-1');
+    expect(after?.mergeBaseSha).toBeUndefined();
+    expect(after?.identity).toBe(before?.identity);
+
+    // The owner's own write lands.
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'f'.repeat(40),
+      before!.sessionId,
+    );
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBe(
+      'f'.repeat(40),
+    );
+  });
+
+  it('never leaves a torn lease for the lock-free reader (R3-10)', () => {
+    // `base-tree`'s `runIdentity` reads this file with no lock on every ask,
+    // and every reader treats a torn lease as NO lease — which makes that ask
+    // refuse and costs the review its A/B for that shard. Every writer here
+    // publishes by rename, so a reader sees the old file or the new one.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    const path = reviewLeasePath(root, 'pr-1');
+    const seen: Array<string | undefined> = [];
+    // The refresh and the merge-base write are the two in-place writers this
+    // diff adds a lock-free reader to; read between every one of them.
+    for (let i = 0; i < 6; i++) {
+      createReviewWorktreeLease(leaseParams(root, { promptId: `p-${i}` }));
+      seen.push(readReviewWorktreeLease(root, 'pr-1')?.promptId);
+      recordReviewWorktreeLeaseMergeBase(
+        root,
+        'pr-1',
+        `${i}`.repeat(40),
+        'session-a',
+      );
+      seen.push(readReviewWorktreeLease(root, 'pr-1')?.promptId);
+    }
+    // Never a torn read, and never a leftover tmp file for a sweep to meet.
+    expect(seen.every((v) => typeof v === 'string')).toBe(true);
+    expect(
+      readdirSync(dirname(path)).filter((f) => f.endsWith('.tmp')),
+    ).toEqual([]);
+
+    // The mechanism, measured rather than inferred: publishing by RENAME
+    // replaces the directory entry, so the inode moves. A truncate in place
+    // keeps it — and keeps the window where a lock-free reader sees a file
+    // that is neither the old content nor the new. A single-threaded test
+    // cannot catch that window directly, so it pins the property that makes
+    // the window impossible.
+    const inodeBefore = lstatSync(path).ino;
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'after' }));
+    expect(lstatSync(path).ino).not.toBe(inodeBefore);
+    expect(readReviewWorktreeLease(root, 'pr-1')?.promptId).toBe('after');
+  });
+
+  it('mints a fresh identity only when the merge base MOVES, across refreshes (R4-9)', () => {
+    // The refresh used to carry the previous capture's `mergeBaseSha`
+    // forward, so a round whose own record write failed inherited a stale
+    // host-side anchor that `base-tree` then read as this capture's fact —
+    // and both invariants (`fetch-pr`'s "the anchor belongs to the capture
+    // that owns the plan" and `base-tree`'s "a missing anchor refuses") held
+    // only for round 1.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+    );
+    const n1 = readReviewWorktreeLease(root, 'pr-1')?.identity;
+
+    // Round 2 acquires. The anchor is DROPPED — a capture that records
+    // nothing has none, which refuses — while the identity stands.
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
+    const afterRefresh = readReviewWorktreeLease(root, 'pr-1');
+    expect(afterRefresh?.mergeBaseSha).toBeUndefined();
+    expect(afterRefresh?.identity).toBe(n1);
+
+    // Round 2 records the SAME base: no move, so no rotation, and the
+    // standing base tree is still reused.
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+    );
+    expect(readReviewWorktreeLease(root, 'pr-1')?.identity).toBe(n1);
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBe(
+      'a'.repeat(40),
+    );
+
+    // Round 3 acquires and records a MOVED base — a genuine rebase. The
+    // rotation survives the dropped anchor because the previous value is
+    // remembered in a field that is not the anchor.
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-c' }));
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'b'.repeat(40),
+      'session-a',
+    );
+    const moved = readReviewWorktreeLease(root, 'pr-1');
+    expect(moved?.mergeBaseSha).toBe('b'.repeat(40));
+    expect(moved?.identity).not.toBe(n1);
+  });
+
+  it('restores the anchor on a RESUMED capture from the host-side prior (R5-2)', () => {
+    // `fetch-pr --resume` re-acquires the lease — whose refresh drops the
+    // anchor — and returns before the resolution that records one, because a
+    // continuation does not recapture. Every resumed review then had no
+    // anchor, and `base-tree` refused for the rest of it.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+      { stale: true },
+    );
+    const n1 = readReviewWorktreeLease(root, 'pr-1')?.identity;
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBeUndefined();
+
+    // Only this session's lease.
+    restoreReviewWorktreeLeaseMergeBase(root, 'pr-1', 'session-other');
+    restoreReviewWorktreeLeaseMergeBase(root, 'pr-1', undefined);
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBeUndefined();
+
+    restoreReviewWorktreeLeaseMergeBase(root, 'pr-1', 'session-a');
+    const restored = readReviewWorktreeLease(root, 'pr-1');
+    expect(restored?.mergeBaseSha).toBe('a'.repeat(40));
+    // The staleness ruling comes back WITH it, and nothing moved.
+    expect(restored?.mergeBaseStale).toBe(true);
+    expect(restored?.identity).toBe(n1);
+
+    // Never over an anchor that already stands.
+    writeFileSync(
+      reviewLeasePath(root, 'pr-1'),
+      JSON.stringify({ ...restored, mergeBaseSha: 'c'.repeat(40) }),
+    );
+    restoreReviewWorktreeLeaseMergeBase(root, 'pr-1', 'session-a');
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBe(
+      'c'.repeat(40),
+    );
+
+    // Never inventing one where no capture recorded any.
+    const fresh = createRepository();
+    createReviewWorktreeLease(leaseParams(fresh));
+    restoreReviewWorktreeLeaseMergeBase(fresh, 'pr-1', 'session-a');
+    const untouched = readReviewWorktreeLease(fresh, 'pr-1');
+    expect(untouched?.mergeBaseSha).toBeUndefined();
+    expect(untouched?.mergeBaseStale).toBeUndefined();
+  });
+
+  it('carries the staleness ruling host-side WITH the merge base (R5-7)', () => {
+    // The anchor covered the sha while the capture's own judgement that the
+    // sha may be STALE stayed in the plan, inside the mount — so the reviewed
+    // code flipped it and the anchor authenticated a stale base as fresh.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+      { stale: true },
+    );
+    const n1 = readReviewWorktreeLease(root, 'pr-1')?.identity;
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseStale).toBe(true);
+
+    // A capture at the same sha whose base fetch now succeeds clears it: a
+    // changed ruling is a change, and it moves no identity.
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+      { stale: false },
+    );
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseStale).toBe(false);
+    expect(readReviewWorktreeLease(root, 'pr-1')?.identity).toBe(n1);
+
+    // A refresh drops it with the anchor, into the prior pair.
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
+    const refreshed = readReviewWorktreeLease(root, 'pr-1');
+    expect(refreshed?.mergeBaseSha).toBeUndefined();
+    expect(refreshed?.mergeBaseStale).toBeUndefined();
+    expect(refreshed?.priorMergeBaseSha).toBe('a'.repeat(40));
+    expect(refreshed?.priorMergeBaseStale).toBe(false);
+
+    // And a ruling that is not a boolean is no lease at all.
+    writeFileSync(
+      reviewLeasePath(root, 'pr-1'),
+      JSON.stringify({ ...refreshed, mergeBaseStale: 'false' }),
+    );
+    expect(readReviewWorktreeLease(root, 'pr-1')).toBeNull();
+  });
+
+  it('restores only the prior of the capture being resumed (R5-2)', () => {
+    // A capture that acquired after the anchor was recorded and never recorded
+    // its own — no merge base resolved, or the write failed — left the prior
+    // naming the round BEFORE it. A later `--resume` restored that, and a plan
+    // rewritten back to it was authenticated.
+    const root = createRepository();
+    const lease = () => readReviewWorktreeLease(root, 'pr-1');
+    const resume = (promptId: string) => {
+      createReviewWorktreeLease(leaseParams(root, { promptId }));
+      restoreReviewWorktreeLeaseMergeBase(root, 'pr-1', 'session-a');
+    };
+    createReviewWorktreeLease(leaseParams(root));
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+    );
+    expect(lease()?.priorMergeBaseCurrent).toBe(true);
+
+    // Round N acquires — the acquisition snapshots and clears the flag in its
+    // one atomic write, so there is no separate write to fail — and records
+    // nothing.
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
+    expect(lease()?.priorMergeBaseCurrent).toBeUndefined();
+    expect(lease()?.priorMergeBaseResumable).toBe(true);
+
+    // A later resume restores nothing: its acquisition saw a prior that no
+    // capture since had recorded.
+    resume('prompt-c');
+    expect(lease()?.priorMergeBaseResumable).toBe(false);
+    expect(lease()?.mergeBaseSha).toBeUndefined();
+
+    // A capture records again; resuming it restores — and so does resuming the
+    // resumed capture, because a restore makes the prior current again.
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'a'.repeat(40),
+      'session-a',
+    );
+    resume('prompt-d');
+    expect(lease()?.mergeBaseSha).toBe('a'.repeat(40));
+    resume('prompt-e');
+    expect(lease()?.mergeBaseSha).toBe('a'.repeat(40));
+
+    // And a flag that is not a boolean is no lease at all, for either field.
+    const standing = lease();
+    for (const field of ['priorMergeBaseCurrent', 'priorMergeBaseResumable']) {
+      writeFileSync(
+        reviewLeasePath(root, 'pr-1'),
+        JSON.stringify({ ...standing, [field]: 'yes' }),
+      );
+      expect(readReviewWorktreeLease(root, 'pr-1')).toBeNull();
+    }
+  });
+
+  it('reclaims the base-tree trust state for the target it clears, and only that one', () => {
+    // The trust file is keyed by the PLAN's path — a digest no other module
+    // can reconstruct — so nothing outside this ever deleted it, and a real
+    // built tree's per-file inventory measures ~9 MB. One per plan path per
+    // review, kept forever. The lease directory is where it lives and this
+    // is the call that ends a review's hold on the target, so the reclaim
+    // belongs here; the per-target directory is what makes it precise.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    const mine = join(root, '.qwen', 'review-leases', 'base-tree', 'pr-1');
+    const other = join(root, '.qwen', 'review-leases', 'base-tree', 'pr-2');
+    for (const dir of [mine, other]) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'deadbeefdeadbeef.json'), '{"identity":1}');
+    }
+
+    clearReviewWorktreeLease(root, 'pr-1');
+
+    expect(existsSync(mine)).toBe(false);
+    // A concurrent review of another PR in the same repository keeps its own.
+    expect(existsSync(join(other, 'deadbeefdeadbeef.json'))).toBe(true);
+  });
+
+  it('records the merge base host-side, and rotates the identity only when it MOVES', () => {
+    // `base-tree` pins the base it certifies against, and its only source
+    // used to be the plan — which lives inside the directory the sandbox
+    // mounts read-write, and which the build/test phase gives the reviewed
+    // code a chance to rewrite BEFORE the run's first base-tree ask. This is
+    // the host-side anchor that ask compares against.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    const minted = readReviewWorktreeLease(root, 'pr-1')?.identity;
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBeUndefined();
+
+    // The first recording is this capture's own fact: nothing to disagree
+    // with, so the identity stands and a standing base tree is still reused.
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'a'.repeat(40));
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBe(
+      'a'.repeat(40),
+    );
+    expect(readReviewWorktreeLease(root, 'pr-1')?.identity).toBe(minted);
+
+    // Re-recording the SAME base changes nothing at all.
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'a'.repeat(40));
+    expect(readReviewWorktreeLease(root, 'pr-1')?.identity).toBe(minted);
+
+    // A MOVED base is a genuine rebase arriving through a fresh capture: the
+    // trust state must rotate rather than report a conflict between its pin
+    // and the new plan and then decline for the rest of the session.
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'b'.repeat(40));
+    const moved = readReviewWorktreeLease(root, 'pr-1');
+    expect(moved?.mergeBaseSha).toBe('b'.repeat(40));
+    expect(moved?.identity).not.toBe(minted);
+
+    // Never fatal, and never inventing a lease: an absent one is left absent.
+    const other = createRepository();
+    expect(() =>
+      recordReviewWorktreeLeaseMergeBase(other, 'pr-9', 'c'.repeat(40)),
+    ).not.toThrow();
+    expect(readReviewWorktreeLease(other, 'pr-9')).toBeNull();
   });
 
   it('heals an unreadable lease file instead of wedging on it', () => {
