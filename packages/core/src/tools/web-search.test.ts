@@ -2181,6 +2181,34 @@ describe('WebSearchTool budget', () => {
     expect(content).toContain('[Raw page content salvaged');
     expect(content).toContain('Truncated to 6000 characters.');
   });
+
+  it('reports cancellation instead of salvaging when the caller aborts', async () => {
+    // terminalFailure checks the caller's signal before the salvage arm: an
+    // aborted search must not hand the model salvaged partial evidence.
+    const controller = new AbortController();
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.created' };
+            yield { type: 'response.output_item.done', item: SEARCH_ITEM };
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+              controller.abort();
+            });
+          },
+        }),
+    );
+    const tool = new WebSearchTool(makeConfig());
+    const result = await tool
+      .build({ query: 'test query' })
+      .execute(controller.signal);
+    expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+    expect(result.error?.message).toBe('Web search cancelled.');
+    expect(result.llmContent).not.toContain('[Partial result:');
+  });
 });
 
 describe('WebSearchTool extractor fallback', () => {
