@@ -17,7 +17,7 @@ overrides:
   '@types/react': ^19.2.0
   '@types/react-dom': ^19.2.0
   axios: ^1.19.0
-  '@tybys/wasm-util': 0.10.4
+  '@tybys/wasm-util': 0.10.3
   react-markdown: ^9.0.0
 
 pnpmfileChecksum: sha256-YMmpx+dQrBqa8zfJspP6zukr7YJJ5XNi4HD4BYo9SzM=
@@ -4445,8 +4445,8 @@ packages:
   '@ts-morph/common@0.27.0':
     resolution: {integrity: sha512-Wf29UqxWDpc+i61k3oIOzcUfQt79PIT9y/MWfAGlrkjg6lBC1hwDECLXPVJAhWjiGbfBCxZd65F/LIZF3+jeJQ==}
 
-  '@tybys/wasm-util@0.10.4':
-    resolution: {integrity: sha512-W3c4gRigFS0T/Ma4qIYF3GDAc5AQdHb1yL5znJT1Zv1YaD9Kitx656wBjvr19qbiosmZT8lWDM5BEMynUqX65A==}
+  '@tybys/wasm-util@0.10.3':
+    resolution: {integrity: sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg==}
 
   '@types/archiver@6.0.3':
     resolution: {integrity: sha512-a6wUll6k3zX6qs5KlxIggs1P1JcYJaTCx2gnlr+f0S1yd2DoaEwoIK10HmBaLnZwWneBz+JBm0dwcZu0zECBcQ==}
@@ -11606,7 +11606,7 @@ snapshots:
     dependencies:
       '@emnapi/core': 2.0.0-alpha.4
       '@emnapi/runtime': 2.0.0-alpha.4
-      '@tybys/wasm-util': 0.10.4
+      '@tybys/wasm-util': 0.10.3
 
   '@noble/hashes@1.8.0': {}
 
@@ -13241,7 +13241,7 @@ snapshots:
       minimatch: 10.2.5
       path-browserify: 1.0.1
 
-  '@tybys/wasm-util@0.10.4':
+  '@tybys/wasm-util@0.10.3':
     dependencies:
       tslib: 2.8.1
 
