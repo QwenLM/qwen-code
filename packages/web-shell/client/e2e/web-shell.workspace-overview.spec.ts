@@ -148,7 +148,9 @@ async function gotoSession(
   daemon: MockDaemonController,
 ): Promise<void> {
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   const connection = await daemon.sse.waitForConnection(scenario.sessionId);
   await daemon.sendEvent(
     replayCompleteEvent({
@@ -374,8 +376,8 @@ test('polls an expanded workspace once per 30 s tick and not faster @smoke', asy
   // loader, any connection-settle re-fetch) from eating into the interval
   // the assertions measure: every startup timer is pinned to one fake
   // instant, and nothing fires until runFor below.
-  await page.clock.install();
-  await page.clock.pauseAt(Date.now());
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00.000Z') });
+  await page.clock.pauseAt(new Date('2026-01-01T01:00:00.000Z'));
   await gotoSession(page, scenario, daemon);
   const facets = (cwd: string) =>
     [...new Set(overviewRequests(daemon, cwd))].sort();
@@ -434,7 +436,9 @@ test('opens the workspace folder and terminal locally when the daemon is loopbac
     baseURL: String(testInfo.project.use.baseURL),
   });
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   const connection = await daemon.sse.waitForConnection(scenario.sessionId);
   await daemon.sendEvent(
     replayCompleteEvent({

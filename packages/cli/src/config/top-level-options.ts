@@ -46,6 +46,7 @@ const APPROVAL_MODE_DESCRIPTIONS: Record<`${ApprovalMode}`, string> = {
 
 const AUTH_TYPE_CHOICES = [
   'openai',
+  'openai-responses',
   'anthropic',
   'qwen-oauth',
   'gemini',
@@ -58,6 +59,7 @@ const AUTH_TYPE_CHOICES = [
 // runtime; exported only so noUnusedLocals preserves the witness.
 export const AUTH_TYPE_PARITY_WITNESS: Record<`${CoreAuthType}`, true> = {
   openai: true,
+  'openai-responses': true,
   anthropic: true,
   'qwen-oauth': true,
   gemini: true,
@@ -422,7 +424,8 @@ export const DEFAULT_COMMAND_OPTIONS = {
       'Slash command names to hide/disable (comma-separated or ' +
       'repeated). Merged with the `slashCommands.disabled` setting ' +
       'and QWEN_DISABLED_SLASH_COMMANDS. Matched case-insensitively ' +
-      'against the final command name.',
+      'against the final command name; a skill command matches under ' +
+      'its registered name (rust:pdf) or its authored name (pdf).',
   },
   'auth-type': {
     type: 'string' as const,

@@ -15,6 +15,13 @@ import {
 } from './tokenLimits.js';
 
 describe('normalize', () => {
+  it('keeps unrecognized batch routing tags out of token lookup', () => {
+    expect(normalize('google/gemini-2.5-flash:batch')).toBe('batch');
+    expect(
+      knownTokenLimit('google/gemini-2.5-flash:batch', 'output'),
+    ).toBeUndefined();
+  });
+
   it('should lowercase and trim the model string', () => {
     expect(normalize('  GEMINI-1.5-PRO  ')).toBe('gemini-1.5-pro');
   });

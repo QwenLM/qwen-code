@@ -4,26 +4,65 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, describe, it, beforeEach, afterEach } from 'vitest';
-import { TestRig } from '../test-helper.js';
+import { expect, describe, it, beforeEach, afterEach, vi } from 'vitest';
+import {
+  CONTAINER_SANDBOX_NO_PROXY,
+  fakeServerHostOptions,
+  IS_CONTAINER_SANDBOX,
+  TestRig,
+} from '../test-helper.js';
+import {
+  startFakeOpenAIServer,
+  type FakeOpenAIServer,
+} from '../fake-openai-server.js';
 
 describe('JSON output', () => {
   let rig: TestRig;
+  let fakeServer: FakeOpenAIServer;
 
   beforeEach(async () => {
     rig = new TestRig();
+    // The spawned CLI routes through any inherited HTTP(S)_PROXY; without a
+    // loopback NO_PROXY entry the fake-server POST is tunnelled and these
+    // tests hang. Mirrors test-helper.ts:993-995.
+    const noProxy = IS_CONTAINER_SANDBOX
+      ? CONTAINER_SANDBOX_NO_PROXY
+      : '127.0.0.1,localhost';
+    vi.stubEnv('NO_PROXY', noProxy);
+    vi.stubEnv('no_proxy', noProxy);
+    fakeServer = await startFakeOpenAIServer(
+      ({ body }) =>
+        body['stream'] === true
+          ? { contentChunks: ['Par', 'is'] }
+          : { content: '{"selected_memories":[]}' },
+      fakeServerHostOptions(),
+    );
     await rig.setup('json-output-test');
   });
 
   afterEach(async () => {
+    await fakeServer?.close();
+    vi.unstubAllEnvs();
     await rig.cleanup();
   });
+
+  const fakeModelArgs = () => [
+    '--auth-type',
+    'openai',
+    '--model',
+    'fake-model',
+    '--openai-base-url',
+    fakeServer.baseUrl,
+    '--openai-api-key',
+    'fake-key',
+  ];
 
   it('should return a valid JSON array with result message containing response and stats', async () => {
     const result = await rig.run(
       'What is the capital of France?',
       '--output-format',
       'json',
+      ...fakeModelArgs(),
     );
     const parsed = JSON.parse(result);
 
@@ -58,6 +97,7 @@ describe('JSON output', () => {
       'What is the capital of France?',
       '--output-format',
       'stream-json',
+      ...fakeModelArgs(),
     );
 
     // Stream-json output is line-delimited JSON (one JSON object per line)
@@ -133,6 +173,7 @@ describe('JSON output', () => {
       '--output-format',
       'stream-json',
       '--include-partial-messages',
+      ...fakeModelArgs(),
     );
 
     // Stream-json output is line-delimited JSON (one JSON object per line)
@@ -233,8 +274,6 @@ describe('JSON output', () => {
   });
 
   it('should return a JSON error for enforced auth mismatch before running', async () => {
-    const originalOpenaiApiKey = process.env['OPENAI_API_KEY'];
-    process.env['OPENAI_API_KEY'] = 'test-key';
     await rig.setup('json-output-auth-mismatch', {
       settings: {
         security: { auth: { enforcedType: 'qwen-oauth' } },
@@ -243,12 +282,10 @@ describe('JSON output', () => {
 
     let thrown: Error | undefined;
     try {
-      await rig.run('Hello', '--output-format', 'json');
+      await rig.run('Hello', '--output-format', 'json', ...fakeModelArgs());
       expect.fail('Expected process to exit with error');
     } catch (e) {
       thrown = e as Error;
-    } finally {
-      process.env['OPENAI_API_KEY'] = originalOpenaiApiKey;
     }
 
     expect(thrown).toBeDefined();

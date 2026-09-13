@@ -136,15 +136,27 @@ export function buildModelEntries(
             model.id,
             model.baseUrl,
           );
+    const isRuntime = model.isRuntimeModel ?? false;
+    const isQwenOAuth = model.authType === AuthType.QWEN_OAUTH;
+    // ink folds the runtime / discontinued markers into the row description as
+    // well as its title, so a runtime model with no description of its own still
+    // gets an explanatory line under the title.
+    let description = model.description ?? '';
+    if (isRuntime) {
+      description = description ? `${description} (Runtime)` : 'Runtime model';
+    }
+    if (isQwenOAuth && !isRuntime) {
+      description = t('Discontinued — switch to Coding Plan or API Key');
+    }
     entries.push({
       key,
       value: key,
       authType: String(model.authType ?? ''),
       label: model.label || model.id,
       modelId: model.id,
-      ...(model.description ? { description: model.description } : {}),
-      isRuntime: model.isRuntimeModel ?? false,
-      isQwenOAuth: model.authType === AuthType.QWEN_OAUTH,
+      ...(description ? { description } : {}),
+      isRuntime,
+      isQwenOAuth,
       ...(model.modalities ? { modalities: model.modalities } : {}),
       ...(model.contextWindowSize
         ? { contextWindowSize: model.contextWindowSize }

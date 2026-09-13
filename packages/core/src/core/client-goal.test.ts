@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { LlmChat } from './llm-chat.js';
 import {
@@ -27,12 +27,6 @@ import {
 } from '../goals/goal-protocol.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { ApprovalMode } from '../config/config.js';
-import {
-  __resetActiveGoalStoreForTests,
-  clearActiveGoal,
-  setActiveGoal,
-} from '../goals/activeGoalStore.js';
-import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { PendingGoalProposal } from '../goals/goal-tools.js';
 
 const turnMocks = vi.hoisted(() => ({
@@ -250,6 +244,7 @@ function setupGoalClient() {
     startAutomaticActiveTodoWorkChain: vi.fn(),
     endAutomaticActiveTodoWorkChain: vi.fn(),
     takeActiveTodoReminder: vi.fn(() => undefined),
+    getActiveTodoReminder: vi.fn(() => undefined),
     getContentGeneratorConfig: vi.fn(() => undefined),
     hasHooksForEvent: vi.fn(() => false),
     getStopHookBlockingCap: vi.fn(() => 8),
@@ -265,6 +260,7 @@ function setupGoalClient() {
       toolResultsNumToKeep: 5,
     })),
     getApprovalMode: vi.fn(() => ApprovalMode.DEFAULT),
+    getGoalProposalHostSupported: vi.fn(() => false),
     getSystemPrompt: vi.fn(() => undefined),
     getOutputStyle: vi.fn(() => undefined),
     getExperimentalZedIntegration: vi.fn(() => false),
@@ -291,17 +287,12 @@ function setupGoalClient() {
 
 describe('LlmClient Goal admission', () => {
   beforeEach(() => {
-    __resetActiveGoalStoreForTests();
     turnMocks.constructors.length = 0;
     turnMocks.pendingToolCalls.length = 0;
     turnMocks.run.mockReset().mockImplementation(emptyStream);
     nextSpeakerMocks.check.mockReset().mockResolvedValue({
       next_speaker: 'model',
     });
-  });
-
-  afterEach(() => {
-    __resetActiveGoalStoreForTests();
   });
 
   it('sets an approved propose_goal proposal once the turn ends without tool calls', async () => {
@@ -315,7 +306,11 @@ describe('LlmClient Goal admission', () => {
     const takePendingGoalProposal = vi
       .fn()
       .mockReturnValueOnce(undefined) // the new-query discard
-      .mockReturnValueOnce({ objective: 'ship it', turnKey: 'real-user-key' });
+      .mockReturnValueOnce({
+        objective: 'ship it',
+        turnKey: 'real-user-key',
+        reviewedGoal: null,
+      });
     Object.assign(config, {
       takePendingGoalProposal,
       getUsageStatisticsEnabled: vi.fn(() => false),
@@ -337,6 +332,160 @@ describe('LlmClient Goal admission', () => {
     });
   });
 
+  it('leaves a host-owned approved proposal for Session settlement', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getGoalProposalHostSupported).mockReturnValue(true);
+    const store = pendingGoalProposalStore({
+      objective: 'ship it',
+      turnKey: 'host-owned-key',
+      reviewedGoal: null,
+    });
+    const loadGoalRuntime = vi.fn(async () => runtime);
+    Object.assign(config, { takePendingGoalProposal: store.take });
+
+    await client['settlePendingGoalProposal'](
+      true,
+      new AbortController().signal,
+      loadGoalRuntime,
+      'host-owned-key',
+      vi.fn(),
+    );
+
+    expect(store.get()).toEqual({
+      objective: 'ship it',
+      turnKey: 'host-owned-key',
+      reviewedGoal: null,
+    });
+    expect(store.take).not.toHaveBeenCalled();
+    expect(loadGoalRuntime).not.toHaveBeenCalled();
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+    expect(store.take('host-owned-key')).toEqual({
+      objective: 'ship it',
+      turnKey: 'host-owned-key',
+      reviewedGoal: null,
+    });
+  });
+
+  it('reports recovery when the core-owned proposal runtime is unavailable', async () => {
+    const { client, config } = setupGoalClient();
+    const store = pendingGoalProposalStore({
+      objective: 'ship it',
+      turnKey: 'runtime-unavailable-key',
+      reviewedGoal: null,
+    });
+    const reportFailure = vi.fn();
+    Object.assign(config, { takePendingGoalProposal: store.take });
+
+    await client['settlePendingGoalProposal'](
+      true,
+      new AbortController().signal,
+      async () => undefined,
+      'runtime-unavailable-key',
+      reportFailure,
+    );
+
+    expect(store.get()).toBeUndefined();
+    expect(reportFailure).toHaveBeenCalledWith(
+      'The approved Goal could not be started. Check the Goal status before trying again, or run:\n/goal set ship it',
+    );
+  });
+
+  it('reports a proposal that could not be applied to the terminal user', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getSkipNextSpeakerCheck).mockReturnValue(true);
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    vi.mocked(runtime.dispatch).mockResolvedValueOnce({
+      snapshot: { v: 2, activity: 'idle', goal: null },
+    });
+    const store = pendingGoalProposalStore();
+    Object.assign(config, {
+      takePendingGoalProposal: store.take,
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+    turnMocks.run.mockImplementationOnce(() => {
+      store.set({
+        objective: 'ship it',
+        turnKey: 'failed-settlement-key',
+        reviewedGoal: null,
+      });
+      return emptyStream();
+    });
+
+    const events = await collect(
+      client.sendMessageStream(
+        [{ text: 'set a goal for this' }],
+        new AbortController().signal,
+        'failed-settlement-key',
+        { type: SendMessageType.UserQuery },
+      ),
+    );
+
+    expect(events).toContainEqual({
+      type: LlmEventType.GoalSettlementFailed,
+      value:
+        'The approved Goal could not be started. Check the Goal status before trying again, or run:\n/goal set ship it',
+    });
+  });
+
+  it('does not suggest replacing a Goal that changed after approval', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getSkipNextSpeakerCheck).mockReturnValue(true);
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'newer-goal',
+        revision: 2,
+        objective: 'newer objective',
+        status: 'paused',
+        evidenceCursor: { recordId: 'newer-record' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        tokensUsed: 0,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    });
+    const store = pendingGoalProposalStore();
+    Object.assign(config, {
+      takePendingGoalProposal: store.take,
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+    turnMocks.run.mockImplementationOnce(() => {
+      store.set({
+        objective: 'stale objective',
+        turnKey: 'changed-goal-key',
+        reviewedGoal: null,
+      });
+      return emptyStream();
+    });
+
+    const events = await collect(
+      client.sendMessageStream(
+        [{ text: 'set a goal for this' }],
+        new AbortController().signal,
+        'changed-goal-key',
+        { type: SendMessageType.UserQuery },
+      ),
+    );
+    const failure = events.find(
+      (event) =>
+        (event as { type?: LlmEventType }).type ===
+        LlmEventType.GoalSettlementFailed,
+    ) as Extract<
+      ServerLlmStreamEvent,
+      { type: LlmEventType.GoalSettlementFailed }
+    >;
+
+    expect(failure.value).toContain('Goal changed after the proposal');
+    expect(failure.value).not.toContain('/goal set');
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+  });
+
   it('settles an approved proposal on the default skip-next-speaker exit', async () => {
     const { client, config, runtime } = setupGoalClient();
     vi.mocked(runtime.getSnapshot).mockReturnValue({
@@ -344,7 +493,7 @@ describe('LlmClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string; turnKey: string } | undefined;
+    let pending: PendingGoalProposal | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -356,7 +505,11 @@ describe('LlmClient Goal admission', () => {
       getUsageStatisticsEnabled: vi.fn(() => false),
     });
     turnMocks.run.mockImplementationOnce(() => {
-      pending = { objective: 'ship it', turnKey: 'default-exit-key' };
+      pending = {
+        objective: 'ship it',
+        turnKey: 'default-exit-key',
+        reviewedGoal: null,
+      };
       return emptyStream();
     });
 
@@ -383,7 +536,7 @@ describe('LlmClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string; turnKey: string } | undefined;
+    let pending: PendingGoalProposal | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -403,7 +556,11 @@ describe('LlmClient Goal admission', () => {
       getUsageStatisticsEnabled: vi.fn(() => false),
     });
     turnMocks.run.mockImplementationOnce(() => {
-      pending = { objective: 'ship it', turnKey: 'stop-cap-key' };
+      pending = {
+        objective: 'ship it',
+        turnKey: 'stop-cap-key',
+        reviewedGoal: null,
+      };
       return emptyStream();
     });
 
@@ -422,73 +579,52 @@ describe('LlmClient Goal admission', () => {
     });
   });
 
-  it('settles an approved proposal when a cleared Goal removes the Stop continuation', async () => {
+  it('reports a failed proposal settlement from the Stop-hook-cap exit', async () => {
     const { client, config, runtime } = setupGoalClient();
     vi.mocked(runtime.getSnapshot).mockReturnValue({
       v: 2,
       activity: 'idle',
       goal: null,
     });
-    setActiveGoal('goal-test-session', {
-      condition: 'finish the old goal',
-      iterations: 1,
-      setAt: 1,
-      tokensAtStart: 1,
-      hookId: 'old-goal-hook',
+    vi.mocked(runtime.dispatch).mockResolvedValueOnce({
+      snapshot: { v: 2, activity: 'idle', goal: null },
     });
-    let pending: { objective: string; turnKey: string } | undefined;
-    const takePendingGoalProposal = vi.fn(() => {
-      const proposal = pending;
-      pending = undefined;
-      return proposal;
-    });
+    const store = pendingGoalProposalStore();
     Object.assign(config, {
-      takePendingGoalProposal,
+      takePendingGoalProposal: store.take,
       getDisableAllHooks: vi.fn(() => false),
       hasHooksForEvent: vi.fn((event) => event === 'Stop'),
       getMessageBus: vi.fn(() => ({
         request: vi.fn(async () => ({
-          output: {
-            decision: 'block',
-            reason: 'Keep working',
-            hookSpecificOutput: {
-              [GOAL_HOOK_ID_OUTPUT_KEY]: 'old-goal-hook',
-            },
-          },
+          output: { decision: 'block', reason: 'Keep working' },
           stopHookCount: 1,
-          hasNonGoalBlockingStopHook: false,
         })),
       })),
-      getMaxSessionTurns: vi.fn(() => 0),
+      getStopHookBlockingCap: vi.fn(() => 1),
       getUsageStatisticsEnabled: vi.fn(() => false),
     });
     turnMocks.run.mockImplementationOnce(() => {
-      pending = { objective: 'ship it', turnKey: 'stop-clear-key' };
+      store.set({
+        objective: 'ship it',
+        turnKey: 'stop-cap-failure-key',
+        reviewedGoal: null,
+      });
       return emptyStream();
     });
-    const getSteerInput = vi
-      .fn()
-      .mockResolvedValueOnce(undefined)
-      .mockImplementationOnce(async () => {
-        clearActiveGoal('goal-test-session');
-        return undefined;
-      });
 
-    await drain(
+    const events = await collect(
       client.sendMessageStream(
         [{ text: 'set a goal for this' }],
         new AbortController().signal,
-        'stop-clear-key',
-        { type: SendMessageType.UserQuery, getSteerInput },
+        'stop-cap-failure-key',
+        { type: SendMessageType.UserQuery },
       ),
     );
 
-    expect(turnMocks.run).toHaveBeenCalledOnce();
-    expect(getSteerInput).toHaveBeenCalledTimes(2);
-    expect(takePendingGoalProposal).toHaveBeenCalledTimes(2);
-    expect(runtime.dispatch).toHaveBeenCalledWith({
-      action: 'create',
-      objective: 'ship it',
+    expect(events).toContainEqual({
+      type: LlmEventType.GoalSettlementFailed,
+      value:
+        'The approved Goal could not be started. Check the Goal status before trying again, or run:\n/goal set ship it',
     });
   });
 
@@ -496,9 +632,10 @@ describe('LlmClient Goal admission', () => {
     const { client, config, runtime } = setupGoalClient();
     const controller = new AbortController();
     controller.abort();
-    let pending: { objective: string; turnKey: string } | undefined = {
+    let pending: PendingGoalProposal | undefined = {
       objective: 'ship it',
       turnKey: 'settle-key',
+      reviewedGoal: null,
     };
     const loadGoalRuntime = vi.fn(async () => runtime);
     Object.assign(config, {
@@ -514,6 +651,7 @@ describe('LlmClient Goal admission', () => {
       controller.signal,
       loadGoalRuntime,
       'settle-key',
+      vi.fn(),
     );
 
     expect(pending).toBeUndefined();
@@ -529,7 +667,7 @@ describe('LlmClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string; turnKey: string } | undefined;
+    let pending: PendingGoalProposal | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -543,7 +681,11 @@ describe('LlmClient Goal admission', () => {
     turnMocks.pendingToolCalls.push([{ name: 'read_file' }], []);
     turnMocks.run
       .mockImplementationOnce(() => {
-        pending = { objective: 'ship it', turnKey: 'pending-tool-key' };
+        pending = {
+          objective: 'ship it',
+          turnKey: 'pending-tool-key',
+          reviewedGoal: null,
+        };
         return emptyStream();
       })
       .mockImplementation(emptyStream);
@@ -562,6 +704,7 @@ describe('LlmClient Goal admission', () => {
     expect(pending).toEqual({
       objective: 'ship it',
       turnKey: 'pending-tool-key',
+      reviewedGoal: null,
     });
 
     await drain(
@@ -587,11 +730,55 @@ describe('LlmClient Goal admission', () => {
     });
   });
 
+  it('reports a failed proposal settlement from the ToolResult exit', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    vi.mocked(runtime.dispatch).mockResolvedValueOnce({
+      snapshot: { v: 2, activity: 'idle', goal: null },
+    });
+    const store = pendingGoalProposalStore({
+      objective: 'ship it',
+      turnKey: 'tool-result-failure-key',
+      reviewedGoal: null,
+    });
+    Object.assign(config, {
+      takePendingGoalProposal: store.take,
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+
+    const events = await collect(
+      client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'tool-result-failure-key',
+        { type: SendMessageType.ToolResult },
+      ),
+    );
+
+    expect(events).toContainEqual({
+      type: LlmEventType.GoalSettlementFailed,
+      value:
+        'The approved Goal could not be started. Check the Goal status before trying again, or run:\n/goal set ship it',
+    });
+  });
+
   it('keeps an approved proposal parked through a queued steer continuation', async () => {
     const { client, config, runtime } = setupGoalClient();
     vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
     nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
-    let pending: { objective: string; turnKey: string } | undefined;
+    let pending: PendingGoalProposal | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -628,7 +815,11 @@ describe('LlmClient Goal admission', () => {
     });
     turnMocks.run
       .mockImplementationOnce(() => {
-        pending = { objective: 'ship it', turnKey: 'real-user-key' };
+        pending = {
+          objective: 'ship it',
+          turnKey: 'real-user-key',
+          reviewedGoal: null,
+        };
         return emptyStream();
       })
       .mockImplementationOnce(() => {
@@ -680,6 +871,7 @@ describe('LlmClient Goal admission', () => {
         store.set({
           objective: 'stale proposal',
           turnKey: 'failed-user-key',
+          reviewedGoal: null,
         });
         yield {
           type: LlmEventType.Error,
@@ -719,9 +911,10 @@ describe('LlmClient Goal admission', () => {
       goal: null,
     });
     const controller = new AbortController();
-    let pending: { objective: string; turnKey: string } | undefined = {
+    let pending: PendingGoalProposal | undefined = {
       objective: 'ship it',
       turnKey: 'settle-key',
+      reviewedGoal: null,
     };
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
@@ -738,6 +931,7 @@ describe('LlmClient Goal admission', () => {
         return runtime;
       },
       'settle-key',
+      vi.fn(),
     );
 
     // Dropped means taken and not applied: the slot is empty afterwards, so
@@ -754,6 +948,7 @@ describe('LlmClient Goal admission', () => {
       takePendingGoalProposal: vi.fn(() => ({
         objective: 'ship it',
         turnKey: 'settle-key',
+        reviewedGoal: null,
       })),
     });
     const appliedGoal = {
@@ -793,6 +988,7 @@ describe('LlmClient Goal admission', () => {
       controller.signal,
       async () => runtime,
       'settle-key',
+      vi.fn(),
     );
 
     expect(runtime.dispatch).toHaveBeenNthCalledWith(1, {
@@ -820,6 +1016,7 @@ describe('LlmClient Goal admission', () => {
       const store = pendingGoalProposalStore({
         objective: 'approved earlier',
         turnKey: 'owner-key',
+        reviewedGoal: null,
       });
       Object.assign(config, {
         takePendingGoalProposal: store.take,
@@ -835,6 +1032,7 @@ describe('LlmClient Goal admission', () => {
           controller.signal,
           async () => runtime,
           'foreign-key',
+          vi.fn(),
         );
       } else {
         if (exit === 'throwing') {
@@ -866,6 +1064,7 @@ describe('LlmClient Goal admission', () => {
       expect(store.get()).toEqual({
         objective: 'approved earlier',
         turnKey: 'owner-key',
+        reviewedGoal: null,
       });
       expect(runtime.dispatch).not.toHaveBeenCalled();
 
@@ -874,6 +1073,7 @@ describe('LlmClient Goal admission', () => {
         new AbortController().signal,
         async () => runtime,
         'owner-key',
+        vi.fn(),
       );
 
       expect(store.get()).toBeUndefined();
@@ -889,6 +1089,7 @@ describe('LlmClient Goal admission', () => {
     const store = pendingGoalProposalStore({
       objective: 'stale approval',
       turnKey: 'cancelled-key',
+      reviewedGoal: null,
     });
     Object.assign(config, { takePendingGoalProposal: store.take });
     vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
@@ -932,6 +1133,7 @@ describe('LlmClient Goal admission', () => {
     const store = pendingGoalProposalStore({
       objective: 'stale approval',
       turnKey: 'cancelled-key',
+      reviewedGoal: null,
     });
     Object.assign(config, {
       takePendingGoalProposal: store.take,
@@ -965,6 +1167,7 @@ describe('LlmClient Goal admission', () => {
       const store = pendingGoalProposalStore({
         objective: 'ship it',
         turnKey: 'owner-key',
+        reviewedGoal: null,
       });
       Object.assign(config, {
         takePendingGoalProposal: store.take,
@@ -1062,7 +1265,11 @@ describe('LlmClient Goal admission', () => {
         nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'model' });
       }
       turnMocks.run.mockImplementationOnce(() => {
-        store.set({ objective: 'ship it', turnKey: 'owner-key' });
+        store.set({
+          objective: 'ship it',
+          turnKey: 'owner-key',
+          reviewedGoal: null,
+        });
         return emptyStream();
       });
 
@@ -1099,6 +1306,7 @@ describe('LlmClient Goal admission', () => {
       .mockReturnValueOnce({
         objective: 'stale',
         turnKey: 'cancelled-turn-key',
+        reviewedGoal: null,
       })
       .mockReturnValue(undefined);
     Object.assign(config, {
@@ -1716,6 +1924,93 @@ describe('LlmClient Goal admission', () => {
     expect(loopIndex).toBeGreaterThan(inactiveProjectionIndex);
   });
 
+  it('reports stop_hook_active on a goal-bound Stop hook continuation', async () => {
+    const { client, config } = setupGoalClient();
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          output: { decision: 'block', reason: 'Run the policy check' },
+          stopHookCount: 1,
+        })
+        .mockResolvedValue({ output: undefined, stopHookCount: 1 }),
+    };
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+
+    await collect(
+      client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'goal-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+        },
+      ),
+    );
+
+    const stopFlags = messageBus.request.mock.calls
+      .filter(([request]) => request.eventName === 'Stop')
+      .map(([request]) => request.input.stop_hook_active);
+    expect(stopFlags).toEqual([false, true]);
+  });
+
+  it('reports stop_hook_active false when a goal turn reuses a hook-forced prompt id', async () => {
+    const { client, config } = setupGoalClient();
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          output: { decision: 'block', reason: 'Run the policy check' },
+          stopHookCount: 1,
+        })
+        .mockResolvedValue({ output: undefined, stopHookCount: 1 }),
+    };
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+    vi.mocked(config.getStopHookBlockingCap).mockReturnValue(2);
+    // Goal turn 1: the hook-forced continuation ends with a tool call that is
+    // never returned. Goal turn 2 then runs under the same prompt id, which
+    // is how consecutive goal continuations are submitted.
+    turnMocks.pendingToolCalls.push([], [{ name: 'read_file' }], []);
+    const goalSend = () =>
+      collect(
+        client.sendMessageStream(
+          [{ text: 'continue' }],
+          new AbortController().signal,
+          'goal-prompt-shared',
+          {
+            type: SendMessageType.Goal,
+            goalPermit: permit,
+            goalTurnKey: `goal-runtime:${permit.turnId}`,
+          },
+        ),
+      );
+
+    await goalSend();
+    const secondTurnEvents = await goalSend();
+
+    const stopFlags = messageBus.request.mock.calls
+      .filter(([request]) => request.eventName === 'Stop')
+      .map(([request]) => request.input.stop_hook_active);
+    expect(stopFlags).toEqual([false, false]);
+    expect(secondTurnEvents).not.toContainEqual(
+      expect.objectContaining({ type: LlmEventType.HookSystemMessage }),
+    );
+  });
+
   it('drains a concurrent pause before a non-blocking Stop true-stops', async () => {
     const { client, config, runtime } = setupGoalClient();
     const messageBus = {
@@ -2117,8 +2412,6 @@ describe('LlmClient Goal admission', () => {
     );
   });
 
-  afterEach(() => __resetActiveGoalStoreForTests());
-
   it('admits a runtime Goal turn to steer input at a hit session cap', async () => {
     // Second half of the session-cap exclusion: runtime Goal turns skip the
     // count increment (pinned by the 75-turn test above) and must also be
@@ -2142,59 +2435,5 @@ describe('LlmClient Goal admission', () => {
     );
 
     expect(getSteerInput).toHaveBeenCalled();
-  });
-
-  it('does not decrement the caller recursion budget inside a legacy hook Goal chain', async () => {
-    // A legacy /goal chain recurses inside one sendMessageStream call. With
-    // the caller budget of 2 preserved at every hop, two blocked stops still
-    // run three model turns; a decremented budget would refuse the third.
-    // Unsupported Goal runtime: the legacy hook chain owns the send, so the
-    // branch under test is the one that keys the budget on the active goal.
-    const { client, config } = setupGoalClient();
-    vi.mocked(config.getGoalRuntimeReady).mockRejectedValue(
-      new GoalPersistenceUnavailableError('legacy-only session'),
-    );
-    vi.mocked(config.getSkipNextSpeakerCheck).mockReturnValue(true);
-    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
-    vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
-    vi.mocked(config.hasHooksForEvent).mockImplementation(
-      (event) => event === 'Stop',
-    );
-    let stopRequestCount = 0;
-    const messageBus = {
-      request: vi.fn(async () => {
-        stopRequestCount += 1;
-        if (stopRequestCount <= 2) {
-          return {
-            output: { decision: 'block', reason: 'keep going' },
-            stopHookCount: 1,
-          };
-        }
-        return { output: undefined, stopHookCount: 1 };
-      }),
-    };
-    vi.mocked(config.getMessageBus).mockReturnValue(
-      messageBus as unknown as ReturnType<Config['getMessageBus']>,
-    );
-    setActiveGoal('goal-test-session', {
-      condition: 'ship',
-      iterations: 0,
-      setAt: 1,
-      tokensAtStart: 0,
-      hookId: 'goal-hook:test',
-    });
-
-    await drain(
-      client.sendMessageStream(
-        [{ text: 'start the chain' }],
-        new AbortController().signal,
-        'legacy-goal-chain',
-        undefined,
-        2,
-      ),
-    );
-
-    expect(messageBus.request).toHaveBeenCalledTimes(3);
-    expect(turnMocks.run).toHaveBeenCalledTimes(3);
   });
 });

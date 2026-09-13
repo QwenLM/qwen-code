@@ -23,6 +23,7 @@
 // FRESH run: resuming stale state reviews code nobody is reviewing anymore.
 
 import { EFFORT_LEVELS } from '../parse-args.js';
+import { DOCS_NAV_PROFILE } from './docs-nav-profile.js';
 import { RESUME_MAX } from './run-ledger.js';
 
 /** Why a resume was refused. Stable identifiers: the report carries one. */
@@ -37,7 +38,9 @@ export type ResumeRefusal =
   | 'diff-unreadable' // the captured diff is gone or cannot be read
   | 'diff-hash-mismatch' // the diff file changed since it was captured
   | 'head-moved' // the PR head advanced — the once-per-review restart case
-  | 'resume-cap'; // this review has already resumed RESUME_MAX times
+  | 'profile-not-resumable' // a focused-profile run starts fresh by design
+  | 'resume-cap' // this review has already resumed RESUME_MAX times
+  | 'worktree-untrusted'; // the tree's gitfile no longer resolves to its own admin entry
 
 export type ResumeAssessment =
   | { ok: true }
@@ -45,6 +48,7 @@ export type ResumeAssessment =
 
 /** What the previous fetch report claims. All fields as parsed, unvalidated. */
 export interface PreviousReport {
+  reviewProfile?: unknown;
   prNumber?: unknown;
   fetchedSha?: unknown;
   diffSha256?: unknown;
@@ -144,6 +148,12 @@ export function assessResume(
   // posted, so failing open here costs nothing that gate does not catch.
   if (probes.liveHeadSha !== null && probes.liveHeadSha !== prev.fetchedSha) {
     return { ok: false, reason: 'head-moved' };
+  }
+  // Below head-moved on purpose: a moved head must report (and be charged)
+  // as a head-moved restart even on a profiled run — masking it as
+  // profile-not-resumable would bypass the restart accounting.
+  if (prev.reviewProfile === DOCS_NAV_PROFILE) {
+    return { ok: false, reason: 'profile-not-resumable' };
   }
   if (probes.resumeCount >= RESUME_MAX) {
     return { ok: false, reason: 'resume-cap' };

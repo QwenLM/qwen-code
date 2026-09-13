@@ -6,7 +6,8 @@
 
 import { useEffect, useState } from 'react';
 import { appEvents } from '../../utils/events.js';
-import { type McpClient, MCPServerStatus } from '@qwen-code/qwen-code-core';
+import type { McpClient } from '@qwen-code/qwen-code-core/tools/mcp-client.js';
+import { MCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import { t } from '../../i18n/index.js';
 
 // Tracks MCP connection progress. Returns the current status string while

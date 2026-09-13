@@ -325,8 +325,8 @@ export interface AgentTask extends TaskBase {
   result?: string;
   error?: string;
   /**
-   * Present only when the task is intentionally kept paused but cannot be
-   * safely resumed under the current conditions.
+   * Present when the task cannot accept input or be continued, including
+   * one-shot executors and paused tasks blocked from recovery.
    */
   resumeBlockedReason?: string;
   stats?: AgentCompletionStats;
@@ -397,6 +397,7 @@ export interface NotificationMeta {
   stats?: AgentCompletionStats;
   toolUseId?: string;
   todoWorkChainId?: string;
+  label?: string;
 }
 
 export type BackgroundNotificationCallback = (
@@ -1512,6 +1513,7 @@ export class BackgroundTaskRegistry {
     const entry = this.agents.get(agentId);
     if (
       !entry ||
+      entry.resumeBlockedReason !== undefined ||
       entry.status !== 'running' ||
       this.finishingAgents.has(agentId)
     ) {
@@ -1771,6 +1773,7 @@ export class BackgroundTaskRegistry {
       stats: entry.stats,
       toolUseId: entry.toolUseId,
       todoWorkChainId: entry.todoWorkChainId,
+      label: buildBackgroundEntryLabel(entry, { includePrefix: false }),
     };
 
     try {

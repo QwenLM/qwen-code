@@ -28,10 +28,11 @@ function isCoreProductionFile(filename) {
 }
 
 const CORE_PACKAGE_SPECIFIER = '@qwen-code/qwen-code-core';
-// The package exports map ("./src/*", "./dist/*") also exposes the root
+// The package exports map ("./*", "./src/*", "./dist/*") also exposes the root
 // barrel through these self-reference subpaths.
 const CORE_BARREL_SPECIFIERS = new Set([
   CORE_PACKAGE_SPECIFIER,
+  `${CORE_PACKAGE_SPECIFIER}/index.js`,
   `${CORE_PACKAGE_SPECIFIER}/src/index.js`,
   `${CORE_PACKAGE_SPECIFIER}/src/index.ts`,
   `${CORE_PACKAGE_SPECIFIER}/dist/index.js`,

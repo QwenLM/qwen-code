@@ -13,13 +13,16 @@ import type {
   GoalRuntime,
   GoalSnapshotV2,
   GoalTurnHost,
+  GoalContinuationTurn,
   GoalTurnPermit,
   ActiveGoal,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
+  ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
+import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
@@ -78,6 +81,7 @@ import {
   getErrorType,
   getActiveInteractionSpan,
   buildGoalContinuationParts,
+  goalCheckpointHealthLine,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -222,15 +226,11 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
   return `Loop detection halted the run${detail}.${hint}`;
 }
 
-interface HeadlessGoalTurn {
+interface HeadlessGoalTurn extends GoalContinuationTurn {
   permit: GoalTurnPermit;
   turnKey: string;
   controller: AbortController;
   origin: 'runtime' | 'user';
-  continuationContext: string;
-  objectiveUpdated?: boolean;
-  windDown?: boolean;
-  verifierFeedback?: string;
 }
 
 function sameGoalPermit(
@@ -257,7 +257,14 @@ function projectLegacyActiveGoal(snapshot: GoalSnapshotV2): ActiveGoal | null {
   };
 }
 
-function formatGoalState(
+/**
+ * The TEXT rendering of a Goal control's outcome.
+ *
+ * Exported so its shape can be pinned directly: the states worth checking --
+ * a Goal mid-run, one with no budget, one that has billed nothing -- are far
+ * cheaper to construct as snapshots than to drive a headless run into.
+ */
+export function formatGoalState(
   snapshot: GoalSnapshotV2,
   operation: 'status' | 'set' | 'edit' | 'pause' | 'resume' | 'clear',
 ): string {
@@ -268,12 +275,35 @@ function formatGoalState(
   const status =
     goal.status === 'usage_limited' ? 'usage limited' : goal.status;
   const summary = `Goal ${status}: ${goal.objective}`;
+  // Spelled out rather than abbreviated: this output is read in a terminal
+  // scrollback and piped into scripts, neither of which is helped by `1.2k`.
+  const usage: string[] = [];
+  if (goal.turnCount > 0) {
+    usage.push(`${goal.turnCount} ${goal.turnCount === 1 ? 'turn' : 'turns'}`);
+  }
+  if (goal.tokensUsed > 0) {
+    const used = goal.tokensUsed.toLocaleString('en-US');
+    usage.push(
+      goal.tokenBudget === undefined
+        ? `${used} tokens`
+        : `${used} of ${goal.tokenBudget.toLocaleString('en-US')} tokens`,
+    );
+  }
+  const lines = [summary];
+  if (usage.length > 0) lines.push(`Usage: ${usage.join(' · ')}`);
   // Every non-active status now carries a reason, so gating on two of them
   // drops a paused Goal's reason from TEXT output while STREAM_JSON still
   // ships it -- and the user doc promises every pause states why.
-  return goal.status !== 'active' && goal.lastReason
-    ? `${summary}\nReason: ${goal.lastReason}`
-    : summary;
+  // Both lines are written to stdout as they are, so both are sanitized: a
+  // pause reason can embed a raw provider error.
+  if (goal.status !== 'active' && goal.lastReason) {
+    lines.push(`Reason: ${sanitizeTerminalText(goal.lastReason)}`);
+  }
+  // The checkpoint line the interactive cards show, in the same words: a
+  // checkpoint stop reason names the kind of failure, only this says which.
+  const checkpoint = goalCheckpointHealthLine(goal, sanitizeTerminalText);
+  if (checkpoint !== undefined) lines.push(`Checkpoint: ${checkpoint}`);
+  return lines.join('\n');
 }
 
 async function claimUserGoalTurn(
@@ -634,19 +664,13 @@ export async function runNonInteractive(
         ) {
           return;
         }
+        const { permit, ...continuation } = input;
         queuedGoalTurns.push({
-          permit: { ...input.permit },
-          turnKey: `goal-runtime:${input.permit.turnId}`,
+          permit: { ...permit },
+          turnKey: `goal-runtime:${permit.turnId}`,
           controller: new AbortController(),
           origin: 'runtime',
-          continuationContext: input.continuationContext,
-          ...(input.objectiveUpdated
-            ? { objectiveUpdated: input.objectiveUpdated }
-            : {}),
-          ...(input.windDown ? { windDown: true } : {}),
-          ...(input.verifierFeedback
-            ? { verifierFeedback: input.verifierFeedback }
-            : {}),
+          ...continuation,
         });
       },
       preemptGoalTurn: (reason) => {
@@ -1023,9 +1047,13 @@ export async function runNonInteractive(
             pendingTeammateMessages.push(
               `<team_notice>\n${reason}\n</team_notice>`,
             );
-            event.respond(ToolConfirmationOutcome.Cancel).catch((err) => {
-              debugLogger.warn('Teammate approval Cancel failed:', err);
-            });
+            event
+              .respond(ToolConfirmationOutcome.Cancel, {
+                cancelMessage: reason,
+              })
+              .catch((err) => {
+                debugLogger.warn('Teammate approval Cancel failed:', err);
+              });
           };
         }
         manager
@@ -1705,6 +1733,71 @@ export async function runNonInteractive(
         return 1;
       };
 
+      const emitRetryProgress = (
+        event: ServerLlmStreamEvent,
+        discardedToolCallCount: number,
+        preserveText: boolean,
+      ): void => {
+        if (event.type === LlmEventType.ModelFallback) {
+          process.stderr.write(
+            `Falling back from ${event.fromModel} to ${event.toModel} (${discardedToolCallCount} buffered tool call(s) discarded).\n`,
+          );
+          return;
+        }
+        if (event.type !== LlmEventType.Retry) return;
+        if (!event.retryInfo) {
+          process.stderr.write(
+            `Retrying provider attempt (${discardedToolCallCount} buffered tool call(s) discarded${
+              preserveText ? '; preserving delivered text' : ''
+            }).\n`,
+          );
+          return;
+        }
+        const { attempt, maxRetries, delayMs, message } = event.retryInfo;
+        const delaySeconds = Math.ceil(delayMs / 1000);
+        process.stderr.write(
+          `Retrying in ${delaySeconds}s (attempt ${attempt}/${maxRetries})${
+            message ? `: ${message}` : ''
+          }\n`,
+        );
+      };
+
+      const discardAbandonedAttempt = (
+        event: ServerLlmStreamEvent,
+        pendingRequests: ToolCallRequestInfo[],
+        onDiscardText?: () => void,
+      ): void => {
+        if (
+          event.type !== LlmEventType.Retry &&
+          event.type !== LlmEventType.ModelFallback
+        ) {
+          return;
+        }
+        const discardedToolCalls = pendingRequests.splice(0);
+        const preserveText =
+          event.type === LlmEventType.Retry && event.isContinuation === true;
+        adapter.restartAttempt(preserveText, discardedToolCalls);
+        if (!preserveText) {
+          onDiscardText?.();
+        }
+        const retryInfo =
+          event.type === LlmEventType.Retry ? event.retryInfo : undefined;
+        adapter.emitSystemMessage('retry', {
+          reason:
+            event.type === LlmEventType.Retry ? 'retry' : 'model_fallback',
+          ...(retryInfo
+            ? {
+                attempt: retryInfo.attempt,
+                maxRetries: retryInfo.maxRetries,
+                delayMs: retryInfo.delayMs,
+              }
+            : {}),
+          discardedToolCalls: discardedToolCalls.length,
+          preserveText,
+        });
+        emitRetryProgress(event, discardedToolCalls.length, preserveText);
+      };
+
       /**
        * Shared per-turn tool-call dispatch for the main-turn loop and
        * `drainBatch`. Both call sites used to reproduce ~120 lines of
@@ -2378,6 +2471,7 @@ export async function runNonInteractive(
         );
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
+        const attemptPreviewLength = plainTextPreview.length;
         const apiStartTime = Date.now();
         const responseStream = llmClient.sendMessageStream(
           currentMessages[0]?.parts || [],
@@ -2441,13 +2535,14 @@ export async function runNonInteractive(
             adapter.finalizeAssistantMessage();
             await routeAbort();
           }
-          // Use adapter for all event processing
+          discardAbandonedAttempt(event, toolCallRequests, () => {
+            plainTextPreview = plainTextPreview.slice(0, attemptPreviewLength);
+          });
+          // Process fallback metadata only after the abandoned attempt has
+          // been reset, so batch adapters do not roll the system event back.
           adapter.processEvent(event);
           if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
-          }
-          if (event.type === LlmEventType.ModelFallback) {
-            toolCallRequests.length = 0;
           }
           if (
             event.type === LlmEventType.Content &&
@@ -2466,19 +2561,17 @@ export async function runNonInteractive(
             }
             loopDetected = true;
           }
-          if (
-            outputFormat === OutputFormat.TEXT &&
-            event.type === LlmEventType.Error
-          ) {
+          if (event.type === LlmEventType.Error) {
             const errorText = parseAndFormatApiError(
               event.value.error,
               config.getContentGeneratorConfig()?.authType,
             );
-            process.stderr.write(`${errorText}\n`);
-            // We have already formatted and written the message; mark the
-            // throw so the top-level handleError doesn't reformat (which
-            // would yield "[API Error: [API Error: ...]]") or print it a
-            // second time. Exit code stays 1 — same as before.
+            if (outputFormat === OutputFormat.TEXT) {
+              process.stderr.write(`${errorText}\n`);
+            }
+            // The adapter has already captured the formatted error in JSON
+            // modes, while text mode wrote it above. Mark the throw so the
+            // terminal error result is emitted without formatting it again.
             throw new AlreadyReportedError(errorText);
           }
         }
@@ -2769,6 +2862,7 @@ export async function runNonInteractive(
                   finalizeOneShotMonitors();
                   await routeAbort();
                 }
+                discardAbandonedAttempt(event, itemToolCallRequests);
                 adapter.processEvent(event);
                 if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
@@ -2782,18 +2876,15 @@ export async function runNonInteractive(
                   }
                   loopDetected = true;
                 }
-                if (
-                  outputFormat === OutputFormat.TEXT &&
-                  event.type === LlmEventType.Error
-                ) {
+                if (event.type === LlmEventType.Error) {
                   const errorText = parseAndFormatApiError(
                     event.value.error,
                     config.getContentGeneratorConfig()?.authType,
                   );
-                  process.stderr.write(`${errorText}\n`);
-                  // See the matching note in the first stream loop above —
-                  // we mark the throw so handleError doesn't reformat or
-                  // reprint downstream.
+                  if (outputFormat === OutputFormat.TEXT) {
+                    process.stderr.write(`${errorText}\n`);
+                  }
+                  // See the matching main-stream branch above.
                   throw new AlreadyReportedError(errorText);
                 }
               }

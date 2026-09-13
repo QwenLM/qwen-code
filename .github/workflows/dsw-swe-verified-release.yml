@@ -74,7 +74,7 @@ jobs:
         id: 'gate'
         env:
           EVENT_NAME: '${{ github.event_name }}'
-          RELEASE_TAG: '${{ github.event.release.tag_name || '''' }}'
+          RELEASE_TAG: "${{ github.event.release.tag_name || '' }}"
           RELEASE_PRERELEASE: '${{ github.event.release.prerelease || false }}'
           INPUT_EXECUTION_BACKEND: '${{ inputs.execution_backend }}'
           INPUT_INSTANCE_LIMIT: '${{ inputs.instance_limit }}'
@@ -136,12 +136,12 @@ jobs:
   benchmark:
     name: 'Dispatch SWE-bench and Terminal-Bench to DSW'
     needs: 'release_gate'
-    if: '${{ needs.release_gate.outputs.should_run == ''true'' }}'
+    if: "${{ needs.release_gate.outputs.should_run == 'true' }}"
     runs-on: ['self-hosted', 'Linux', 'X64', 'qwen-benchmark-dsw-hk-eas']
     timeout-minutes: 15
     env:
-      RELEASE_TAG: '${{ github.event_name == ''release'' && github.event.release.tag_name || inputs.release_tag }}'
-      QWEN_REF: '${{ github.event_name == ''release'' && github.event.release.tag_name || inputs.qwen_release_tag || inputs.release_tag }}'
+      RELEASE_TAG: "${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}"
+      QWEN_REF: "${{ github.event_name == 'release' && github.event.release.tag_name || inputs.qwen_release_tag || inputs.release_tag }}"
       INSTANCE_LIMIT: '${{ needs.release_gate.outputs.instance_limit }}'
       BENCHMARK_INSTANCE_ID: '${{ needs.release_gate.outputs.instance_id }}'
       TERMINAL_BENCH_LIMIT: '${{ needs.release_gate.outputs.terminal_bench_limit }}'

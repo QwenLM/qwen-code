@@ -85,6 +85,8 @@ describe('scripts/dev.js launcher', () => {
     expect(command).toBe('C:\\Program Files\\nodejs\\node.exe');
     expect(args.map(normalizePath)).toEqual([
       expect.stringContaining('node_modules/tsx/dist/cli.mjs'),
+      '--tsconfig',
+      expect.stringContaining('packages/cli/tsconfig.json'),
       expect.stringContaining('packages/cli/index.ts'),
       '--help',
     ]);
@@ -102,6 +104,8 @@ describe('scripts/dev.js launcher', () => {
     const [command, args, options] = spawnMock.mock.calls[0];
     expect(normalizePath(command)).toContain('tsx.cmd');
     expect(args.map(normalizePath)).toEqual([
+      '--tsconfig',
+      expect.stringContaining('packages/cli/tsconfig.json'),
       expect.stringContaining('packages/cli/index.ts'),
     ]);
     expect(options).toEqual(expect.objectContaining({ shell: true }));
@@ -149,6 +153,16 @@ describe('scripts/dev.js launcher', () => {
     }
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'keeps the dev entry executable for QWEN_CODE_CLI subprocesses',
+    async () => {
+      const fs = await vi.importActual('node:fs');
+      expect(() =>
+        fs.accessSync(new URL('../dev.js', import.meta.url), fs.constants.X_OK),
+      ).not.toThrow();
+    },
+  );
+
   it('resolves core subpaths to packages/core/src, not the exports map dist', async () => {
     // Intercepting only the package root leaves a named subpath to Node's
     // `exports` map, which resolves into packages/core/dist while the root
@@ -180,6 +194,8 @@ describe('scripts/dev.js launcher', () => {
         'packages/core/src/config/storage.ts',
       '@qwen-code/qwen-code-core/atomicFileWrite':
         'packages/core/src/utils/atomicFileWrite.ts',
+      '@qwen-code/qwen-code-core/utils/debugLogger.js':
+        'packages/core/src/utils/debugLogger.ts',
     };
 
     // Every named subpath the exports map publishes, so the interception

@@ -164,3 +164,110 @@ describe('scheduled-tasks workspace actions', () => {
     });
   });
 });
+
+describe('scheduled-task routing workspace actions', () => {
+  it('uses an explicit workspace even when no current workspace is bound', async () => {
+    const qualified = {
+      listSessionGroups: vi.fn().mockResolvedValue({
+        groups: [],
+        colorOptions: ['blue'],
+      }),
+      createSessionGroup: vi.fn().mockResolvedValue({ id: 'group-1' }),
+      workspaceProviders: vi.fn().mockResolvedValue({ providers: [] }),
+    };
+    const client = {
+      workspaceByCwd: vi.fn().mockReturnValue(qualified),
+      listSessionGroups: vi.fn(),
+      createSessionGroup: vi.fn(),
+      workspaceProviders: vi.fn(),
+    };
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client as never,
+      getWorkspaceCwd: () => undefined,
+      baseUrl: '',
+    });
+
+    await actions.listSessionGroups('/repo/secondary');
+    await actions.createSessionGroup(
+      { name: 'Automations', color: 'blue' },
+      '/repo/secondary',
+    );
+    await actions.loadProviders('/repo/secondary');
+
+    expect(client.workspaceByCwd).toHaveBeenCalledTimes(3);
+    expect(client.workspaceByCwd).toHaveBeenCalledWith('/repo/secondary');
+    expect(qualified.listSessionGroups).toHaveBeenCalledOnce();
+    expect(qualified.createSessionGroup).toHaveBeenCalledWith({
+      name: 'Automations',
+      color: 'blue',
+    });
+    expect(qualified.workspaceProviders).toHaveBeenCalledOnce();
+    expect(client.listSessionGroups).not.toHaveBeenCalled();
+    expect(client.createSessionGroup).not.toHaveBeenCalled();
+    expect(client.workspaceProviders).not.toHaveBeenCalled();
+  });
+
+  it('uses an explicit workspace when a different workspace is bound', async () => {
+    const qualified = {
+      listSessionGroups: vi.fn().mockResolvedValue({
+        groups: [],
+        colorOptions: ['blue'],
+      }),
+      createSessionGroup: vi.fn().mockResolvedValue({ id: 'group-1' }),
+      workspaceProviders: vi.fn().mockResolvedValue({ providers: [] }),
+    };
+    const client = {
+      workspaceByCwd: vi.fn().mockReturnValue(qualified),
+      listSessionGroups: vi.fn(),
+      createSessionGroup: vi.fn(),
+      workspaceProviders: vi.fn(),
+    };
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client as never,
+      getWorkspaceCwd: () => '/repo/main',
+      baseUrl: '',
+    });
+
+    await actions.listSessionGroups('/repo/secondary');
+    await actions.createSessionGroup(
+      { name: 'Automations', color: 'blue' },
+      '/repo/secondary',
+    );
+    await actions.loadProviders('/repo/secondary');
+
+    expect(client.workspaceByCwd).toHaveBeenCalledTimes(3);
+    expect(client.workspaceByCwd).toHaveBeenCalledWith('/repo/secondary');
+    expect(client.listSessionGroups).not.toHaveBeenCalled();
+    expect(client.createSessionGroup).not.toHaveBeenCalled();
+    expect(client.workspaceProviders).not.toHaveBeenCalled();
+  });
+
+  it('uses unqualified actions when the explicit workspace is already bound', async () => {
+    const client = {
+      workspaceByCwd: vi.fn(),
+      listSessionGroups: vi.fn().mockResolvedValue({
+        groups: [],
+        colorOptions: ['blue'],
+      }),
+      createSessionGroup: vi.fn().mockResolvedValue({ id: 'group-1' }),
+      workspaceProviders: vi.fn().mockResolvedValue({ providers: [] }),
+    };
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client as never,
+      getWorkspaceCwd: () => '/repo/main',
+      baseUrl: '',
+    });
+
+    await actions.listSessionGroups('/repo/main');
+    await actions.createSessionGroup(
+      { name: 'Automations', color: 'blue' },
+      '/repo/main',
+    );
+    await actions.loadProviders('/repo/main');
+
+    expect(client.workspaceByCwd).not.toHaveBeenCalled();
+    expect(client.listSessionGroups).toHaveBeenCalledOnce();
+    expect(client.createSessionGroup).toHaveBeenCalledOnce();
+    expect(client.workspaceProviders).toHaveBeenCalledOnce();
+  });
+});

@@ -6,7 +6,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { canUseRipgrep } from '@qwen-code/qwen-code-core';
+import { canUseRipgrep } from '@qwen-code/qwen-code-core/utils/ripgrepUtils.js';
 
 type WarningCheckOptions = {
   workspaceRoot: string;

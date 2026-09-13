@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { globSync } from 'glob';
 
 function toGlobPath(filePath) {
@@ -30,4 +32,19 @@ export function getWorkspacePackageJsonPaths(root, workspaces) {
   }
 
   return [...packageJsonPaths].sort();
+}
+
+export function getTestCiWorkspacePackageJsonPaths(root) {
+  const { workspaces } = JSON.parse(
+    readFileSync(join(root, 'package.json'), 'utf8'),
+  );
+
+  return getWorkspacePackageJsonPaths(root, workspaces).filter(
+    (packageJsonPath) => {
+      const { scripts } = JSON.parse(
+        readFileSync(join(root, packageJsonPath), 'utf8'),
+      );
+      return Boolean(scripts?.['test:ci']);
+    },
+  );
 }

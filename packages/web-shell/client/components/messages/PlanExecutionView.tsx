@@ -19,6 +19,7 @@ import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { formatRuntime } from '../../utils/formatRuntime';
 import {
   getAgentDescription,
+  getSubagentDetailsUnavailableReason,
   getAgentDisplayStatus,
   isAgentCancelled,
   sanitizeControlChars,
@@ -919,6 +920,10 @@ export function PlanExecutionView({
     };
   }, [drawsDependencyEdges, topologyKey]);
 
+  const openSubagentDetails = (tool: ACPToolCall) => {
+    if (!getSubagentDetailsUnavailableReason(tool)) onOpenSubagent?.(tool);
+  };
+
   if (todos.length === 0) return null;
 
   const selectedTodo = todosById.get(selectedTodoId ?? '');
@@ -979,9 +984,15 @@ export function PlanExecutionView({
             expanded ? ` ${styles.executionExpanded}` : ''
           }`}
           data-plan-interactive
-          onClick={() => onOpenSubagent?.(tool)}
+          onClick={() => openSubagentDetails(tool)}
           disabled={!onOpenSubagent}
-          title={t('planExecution.openDetails')}
+          aria-disabled={
+            !!getSubagentDetailsUnavailableReason(tool) || undefined
+          }
+          title={t(
+            getSubagentDetailsUnavailableReason(tool) ??
+              'planExecution.openDetails',
+          )}
         >
           <span className={styles.executionHeading}>
             <span className={styles.executionLabel}>{label}</span>
@@ -1031,9 +1042,15 @@ export function PlanExecutionView({
               data-plan-interactive
               key={task.id}
               style={{ paddingLeft: `${Math.min(depth, 3) * 12}px` }}
-              onClick={() => onOpenSubagent?.(nestedTool)}
+              onClick={() => openSubagentDetails(nestedTool)}
               disabled={!onOpenSubagent}
-              title={t('planExecution.openDetails')}
+              aria-disabled={
+                !!getSubagentDetailsUnavailableReason(nestedTool) || undefined
+              }
+              title={t(
+                getSubagentDetailsUnavailableReason(nestedTool) ??
+                  'planExecution.openDetails',
+              )}
             >
               {content}
             </button>
@@ -1054,9 +1071,15 @@ export function PlanExecutionView({
             data-plan-interactive
             key={nestedTool.callId}
             style={{ paddingLeft: `${Math.min(depth, 3) * 12}px` }}
-            onClick={() => onOpenSubagent?.(nestedTool)}
+            onClick={() => openSubagentDetails(nestedTool)}
             disabled={!onOpenSubagent}
-            title={t('planExecution.openDetails')}
+            aria-disabled={
+              !!getSubagentDetailsUnavailableReason(nestedTool) || undefined
+            }
+            title={t(
+              getSubagentDetailsUnavailableReason(nestedTool) ??
+                'planExecution.openDetails',
+            )}
           >
             <span className={styles.executionLabel}>
               ↳{' '}

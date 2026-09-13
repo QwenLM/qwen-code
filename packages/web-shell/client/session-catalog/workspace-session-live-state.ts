@@ -9,9 +9,19 @@ import {
   getSessionCatalogStore,
   type StagedWorkspaceSessionCatalog,
 } from './session-catalog-store';
+import { resolveSessionLiveStatePollInterval } from './session-live-state-poll-interval';
 
-export const SESSION_LIVE_STATE_POLL_MS = 2_000;
+export { SESSION_LIVE_STATE_POLL_MS } from './session-live-state-poll-interval';
 export const SESSION_LIVE_STATE_ERROR_RETRY_MS = 30_000;
+/**
+ * Consecutive live-state request failures before the retained snapshot is
+ * dropped as no longer current. Failures are spaced by
+ * `SESSION_LIVE_STATE_ERROR_RETRY_MS`, so this is a ~minute of a channel that
+ * cannot answer — long enough to ride out a daemon restart, short enough that
+ * a pane held loading by this authority is released while the turn is still
+ * interesting (#9487).
+ */
+export const SESSION_LIVE_STATE_STALE_AFTER_FAILURES = 3;
 export const SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS = 10_000;
 
 interface WorkspacePollState {
@@ -30,6 +40,7 @@ interface WorkspacePollState {
 
 interface WorkspaceSessionLiveStateOptions {
   enabled: boolean;
+  pollIntervalMs?: number;
   workspaceCwds: readonly string[];
   groupWorkspaceCwds: readonly string[];
 }
@@ -70,11 +81,16 @@ export function useWorkspaceSessionLiveState(
   client: DaemonClient,
   {
     enabled,
+    pollIntervalMs: configuredPollIntervalMs,
     workspaceCwds,
     groupWorkspaceCwds,
   }: WorkspaceSessionLiveStateOptions,
 ): ReadonlyMap<string, DaemonSessionGroupCatalog> {
   const catalogStore = useMemo(() => getSessionCatalogStore(client), [client]);
+  const pollIntervalMs = resolveSessionLiveStatePollInterval(
+    configuredPollIntervalMs,
+  );
+  const pollAllRef = useRef<(() => void) | undefined>(undefined);
   const targetsKey = [...new Set(workspaceCwds)].sort().join('\n');
   const targets = useMemo(
     () => targetsKey.split('\n').filter(Boolean),
@@ -275,6 +291,20 @@ export function useWorkspaceSessionLiveState(
       } catch (error) {
         if (disposed) return;
         state.liveRetryAt = Date.now() + SESSION_LIVE_STATE_ERROR_RETRY_MS;
+        // Only backoff-paced failures count. Interactive refreshes bypass
+        // `liveRetryAt`, so a user deleting or archiving a few sessions during
+        // a 10s daemon restart could otherwise push the streak to the
+        // threshold seconds apart — dropping the snapshot inside the very blip
+        // the threshold exists to ride out.
+        if (
+          !bypassRetry &&
+          catalogStore.recordLiveStateFailure(state.workspaceCwd) ===
+            SESSION_LIVE_STATE_STALE_AFTER_FAILURES
+        ) {
+          // The channel has stopped answering. Retaining the last snapshot
+          // would let a reader keep vouching for a turn nobody can confirm.
+          catalogStore.markWorkspaceLiveStateUnavailable(state.workspaceCwd);
+        }
         console.warn('[session-live-state] request failed:', error);
         if (!state.acceptedVersion && !state.fallbackAttempted) {
           try {
@@ -365,7 +395,7 @@ export function useWorkspaceSessionLiveState(
     // Interactive refresh requests (explicit refresh(), expiring
     // maxAgeMs subscriptions, group-membership growth) and recorded turn
     // completions wake the loop immediately instead of waiting for the
-    // next 2s tick.
+    // next periodic tick.
     const stopWake = catalogStore.onLiveStateWake(
       (workspaceCwd, bypassRetry) => {
         const state = states.find(
@@ -383,20 +413,27 @@ export function useWorkspaceSessionLiveState(
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', onVisibilityWake);
     }
+    pollAllRef.current = onVisibilityWake;
     for (const state of states) void poll(state);
-    const interval = window.setInterval(() => {
-      for (const state of states) void poll(state);
-    }, SESSION_LIVE_STATE_POLL_MS);
     return () => {
       disposed = true;
+      pollAllRef.current = undefined;
       stopWake();
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', onVisibilityWake);
       }
-      window.clearInterval(interval);
       for (const release of releaseLiveState) release();
     };
   }, [catalogStore, client, enabled, targets]);
+
+  useEffect(() => {
+    if (!enabled || targets.length === 0) return;
+    const interval = window.setInterval(
+      () => pollAllRef.current?.(),
+      pollIntervalMs,
+    );
+    return () => window.clearInterval(interval);
+  }, [client, enabled, pollIntervalMs, targets]);
 
   return groupCatalogs;
 }

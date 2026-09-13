@@ -196,4 +196,68 @@ describe('runThrottledOnce', () => {
     expect(fs.statSync(markerPath).isDirectory()).toBe(true);
     expect(fs.existsSync(lockPath)).toBe(false);
   });
+
+  it('creates the lock directory when it does not exist yet', async () => {
+    const qwenDir = path.join(tempDir, 'qwen-dir');
+    const task = vi.fn(async () => {});
+
+    const result = await runThrottledOnce(
+      {
+        name: 'test',
+        markerPath: path.join(qwenDir, '.marker'),
+        lockPath: path.join(qwenDir, '.marker.lock'),
+      },
+      task,
+    );
+
+    expect(result).toEqual({ status: 'completed' });
+    expect(task).toHaveBeenCalledOnce();
+    const stat = fs.statSync(qwenDir);
+    expect(stat.isDirectory()).toBe(true);
+    // No group/other access, per the ~/.qwen/ convention. Asserting the
+    // absence of those bits rather than an exact mode keeps this umask-proof.
+    // On Windows mkdir's mode is a no-op and libuv duplicates owner bits to
+    // group/other, so only POSIX platforms can pin the 0o700 convention.
+    if (process.platform !== 'win32') {
+      expect(stat.mode & 0o077).toBe(0);
+    }
+  });
+
+  // Regression: this mkdir used to pass `recursive: true`. On a bind mount
+  // whose source directory was deleted, the mountpoint still stats as a
+  // directory but rejects creates with ENOENT, and Node's recursive mkdir
+  // retries the parent forever without ever settling its promise — wedging the
+  // housekeeping chain and spinning a core per orphaned CI sandbox container.
+  it('never asks for a recursive mkdir', async () => {
+    const task = vi.fn(async () => {});
+
+    await runThrottledOnce({ name: 'test', markerPath, lockPath }, task);
+
+    expect(fsPromises.mkdir).toHaveBeenCalled();
+    for (const [, options] of vi.mocked(fsPromises.mkdir).mock.calls) {
+      expect(options).not.toMatchObject({ recursive: true });
+    }
+  });
+
+  // Effect-shaped companion to the option-shape regression above: pin what
+  // the deleted-mount state actually does. The non-recursive mkdir cannot
+  // create a directory whose own parent is missing, and the lock open must
+  // surface that ENOENT on the first attempt — not settle as 'locked'
+  // (misread as contention by the scheduler), and never bootstrap the parent.
+  it('surfaces ENOENT instead of bootstrapping a missing parent', async () => {
+    const missingDir = path.join(tempDir, 'nope', 'nested');
+    const task = vi.fn(async () => {});
+
+    await expect(
+      runThrottledOnce(
+        {
+          name: 'test',
+          markerPath: path.join(missingDir, '.marker'),
+          lockPath: path.join(missingDir, '.marker.lock'),
+        },
+        task,
+      ),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(task).not.toHaveBeenCalled();
+  });
 });

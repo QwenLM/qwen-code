@@ -6,8 +6,10 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  contextUsageLabel,
   formatDuration,
   formatMemoryUsage,
+  formatPercentageUsed,
   formatRelativeTime,
   formatTokenCount,
 } from './formatters.js';
@@ -212,6 +214,33 @@ describe('formatters', () => {
       expect(formatTokenCount(10000)).toBe('10k');
       expect(formatTokenCount(15000)).toBe('15k');
       expect(formatTokenCount(100000)).toBe('100k');
+    });
+  });
+
+  describe('formatPercentageUsed', () => {
+    it('renders the used fraction with one decimal', () => {
+      expect(formatPercentageUsed(0)).toBe('0.0');
+      expect(formatPercentageUsed(0.045)).toBe('4.5');
+    });
+
+    it('treats exactly 100% as in limit', () => {
+      expect(formatPercentageUsed(1)).toBe('100.0');
+    });
+
+    it('reports past-limit usage as >100', () => {
+      expect(formatPercentageUsed(1.5)).toBe('>100');
+    });
+  });
+
+  describe('contextUsageLabel', () => {
+    it('uses the full label at 100 columns and wider', () => {
+      expect(contextUsageLabel(100)).toBe('% context used');
+      expect(contextUsageLabel(110)).toBe('% context used');
+    });
+
+    it('drops "context" below 100 columns', () => {
+      expect(contextUsageLabel(99)).toBe('% used');
+      expect(contextUsageLabel(40)).toBe('% used');
     });
   });
 });

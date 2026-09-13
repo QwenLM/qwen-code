@@ -1144,6 +1144,22 @@ export function projectItemToStreamEvent(
         type: 'warning',
         text: formatUserPromptSubmitBlocked(item.reason, item.originalPrompt),
       };
+    case 'away_recap':
+      return { type: 'away-recap', text: item.text };
+    case 'user_shell':
+      return { type: 'user-shell', text: item.text };
+    case 'advisor':
+      return { type: 'advisor', text: item.text, model: item.model };
+    case 'arena_agent_complete':
+      return { type: 'arena-agent', agent: item.agent };
+    case 'arena_session_complete':
+      return {
+        type: 'arena-session',
+        sessionStatus: item.sessionStatus,
+        task: item.task,
+        totalDurationMs: item.totalDurationMs,
+        agents: item.agents,
+      };
     case 'about':
     case 'tools_list':
     case 'model_stats':
@@ -1170,11 +1186,10 @@ export function projectItemToStreamEvent(
     //  - `help`: `/help` resolves to a dialog and the overlay renders from
     //    help-content.ts; no command returns a HELP message, so nothing writes
     //    this item in either renderer.
-    //  - the rest: ink renders these through dedicated components and this
-    //    renderer has no row shape for them yet. `/advisor`, `/arena` and
-    //    `/recap` are registered here and do write four of these kinds, so
-    //    their output stays invisible — a registered gap (U-34), not an
-    //    accident of the switch.
+    //  - the rest: ink renders these through dedicated components and no
+    //    OpenTUI writer produces them (tool_use_summary is written by ink's
+    //    use-llm-stream only; diff_stats comes from the file-history rewind
+    //    flow, which has no OpenTUI seam; notification has no writer yet).
     case 'tool_group':
     case 'retry_countdown':
     case 'vision_notice':
@@ -1184,11 +1199,6 @@ export function projectItemToStreamEvent(
     case 'gemini_thought_content':
     case 'help':
     case 'notification':
-    case 'user_shell':
-    case 'advisor':
-    case 'arena_agent_complete':
-    case 'arena_session_complete':
-    case 'away_recap':
     case 'tool_use_summary':
     case 'diff_stats':
       return null;

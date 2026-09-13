@@ -40,6 +40,7 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { buildFailureLines } from './workflow-failure-lines.js';
 import {
   buildResumeCall,
   hasUninlinableResumeArgs,
@@ -324,6 +325,17 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   agentsDispatched: number;
   /** Cumulative `agent()` dispatches that have resolved (success or thrown). */
   agentsCompleted: number;
+  /**
+   * Journaled `agent()` calls this resume ran live again — because the
+   * previous run failed them, or was interrupted with them in flight. `0` for
+   * a fresh run. Reported so a resume that looks like it re-did everything
+   * can be told apart from one that genuinely had nothing to replay.
+   *
+   * Optional on read: a snapshot written before this field existed has no
+   * value for it, and an old run's history is worth more than a uniform
+   * shape. Treat `undefined` as `0`.
+   */
+  agentsRespawned?: number;
   /** Most recent log lines from the sandbox's `getLogs()`. Capped at 100 for the UI. */
   recentLogs: string[];
   /** Ordered runtime facts used to replay this run after it settles. */
@@ -375,6 +387,13 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * reconstructing the path from a storage handle it does not have.
    */
   journalPath?: string;
+  /**
+   * Failure hint naming where the authoring reference is in this session, for
+   * a script the model authored. The foreground tool result carries it in the
+   * run trailer; a backgrounded run has only its completion notification, so
+   * it rides here. Process-local, like the notification it feeds.
+   */
+  authoringHint?: string;
   /** Process-local approval requests; omitted from persisted snapshots. */
   pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
@@ -401,6 +420,7 @@ export type WorkflowTaskRegistration = Omit<
   | 'dispatches'
   | 'agentsDispatched'
   | 'agentsCompleted'
+  | 'agentsRespawned'
   | 'recentLogs'
   | 'events'
   | 'tokensSpent'
@@ -618,6 +638,17 @@ export class WorkflowRunRegistry {
     // number instead of a guess. `agents_cached` is the resume-relevant half:
     // a resumed run whose agents all replayed spent nothing and proves it here.
     modelParts.push(`<usage>${escapeXml(buildUsageLine(entry))}</usage>`);
+    // Which agents were lost, not just how many. A run can complete with a
+    // third of its fan-out missing — the script simply saw `null` for those
+    // slots — and the count alone gives the reader no way to judge whether
+    // the result is thin because the work was thin or because the agents
+    // failed. These are the errors the registry already recorded.
+    const failures = buildFailureLines(entry);
+    if (failures.length > 0) {
+      modelParts.push(
+        `<failures>${escapeXmlElementText(failures.join('\n'))}</failures>`,
+      );
+    }
     // The two recovery routes a backgrounded run needs and cannot reconstruct:
     // a failure needs the resume call (the script is on disk, editable before
     // the retry); a success needs the journal, because an empty-looking result
@@ -747,6 +778,7 @@ export class WorkflowRunRegistry {
     entry.dispatches = [];
     entry.agentsDispatched = 0;
     entry.agentsCompleted = 0;
+    entry.agentsRespawned = 0;
     entry.recentLogs = [];
     entry.events = [];
     entry.tokensSpent = 0;
@@ -1243,6 +1275,23 @@ export class WorkflowRunRegistry {
     if (!entry || entry.agentsCompleted >= entry.agentsDispatched) return;
     entry.agentsCompleted++;
     this.emitStatusChange(entry);
+  }
+
+  /**
+   * A resume re-ran a call the journal already knew about. Counted for the
+   * usage line and written to the log the user reads in `/workflows`, because
+   * "why is it running that agent again?" is the first question a resume
+   * raises and the journal alone cannot answer it out loud.
+   */
+  onResumeRespawn(runId: string, line: string): void {
+    const entry = this.entries.get(runId);
+    if (
+      !entry ||
+      (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
+    )
+      return;
+    entry.agentsRespawned = (entry.agentsRespawned ?? 0) + 1;
+    this.onLogAppended(runId, line);
   }
 
   /**
@@ -1767,6 +1816,7 @@ function buildUsageLine(entry: WorkflowTask): string {
     `agents_cached=${countByStatus('cached')}`,
     `agents_failed=${countByStatus('failed')}`,
     `agents_cancelled=${countByStatus('cancelled')}`,
+    `agents_respawned=${entry.agentsRespawned ?? 0}`,
     `tokens_spent=${entry.tokensSpent}`,
     `duration_ms=${durationMs}`,
   ].join(' ');
@@ -1790,6 +1840,9 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
   }
   if (entry.journalPath) {
     lines.push(`Journal: ${stripAnsiAndControl(entry.journalPath)}`);
+  }
+  if (entry.authoringHint) {
+    lines.push(stripAnsiAndControl(entry.authoringHint));
   }
   return lines;
 }

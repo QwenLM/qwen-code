@@ -9,6 +9,7 @@ import type { Settings } from '../../config/settings.js';
 import { LiveHostCoordinator } from './live-host-coordinator.js';
 import { LiveHostInstaller } from './live-host-installer.js';
 import { LiveSetupController } from './live-setup-controller.js';
+import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
 
 function createHarness(options: { initiallyEnabled?: boolean } = {}) {
   const initiallyEnabled = options.initiallyEnabled ?? false;
@@ -38,7 +39,10 @@ function createHarness(options: { initiallyEnabled?: boolean } = {}) {
   const setEnabled = vi.fn(async (next: boolean) => {
     enabled = next;
   });
-  const installLatest = vi.fn(async () => ({ version: '0.1.0' }));
+  const installLatest = vi.fn(async () => ({
+    version: '0.1.0',
+    protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+  }));
   const installer = new LiveHostInstaller({
     platform: 'darwin',
     architecture: 'arm64',

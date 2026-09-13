@@ -42,6 +42,10 @@ import {
   compileWorkflowScript,
   describeWorkflowCompileError,
 } from './workflow-sandbox.js';
+import {
+  resolveReviewWorkflowLimits,
+  type ReviewWorkflowLimits,
+} from './review-workflow.js';
 
 export interface WorkflowRunnerOptions {
   config: Config;
@@ -55,6 +59,12 @@ export interface WorkflowRunnerOptions {
   dispatch?: WorkflowAgentDispatch;
   onUpdate?: (entry: WorkflowTask) => void;
   runInBackground?: boolean;
+  /**
+   * Where this session's authoring reference is, sent with a failed background
+   * run's completion notification. Omitted for a script the model did not
+   * author (a saved workflow), where "fix the script" would be wrong advice.
+   */
+  authoringHint?: string;
 }
 
 export type WorkflowRunSettlement =
@@ -203,6 +213,7 @@ export class WorkflowRunner {
     let persistedInlineScript = false;
     let callerWasAbortedBeforeStart: boolean;
     let orchestrator: WorkflowOrchestrator;
+    let reviewLimits: ReviewWorkflowLimits | undefined;
     try {
       const loaded =
         options.scriptPath && options.script === undefined
@@ -213,6 +224,13 @@ export class WorkflowRunner {
           : undefined;
       script = loaded?.script ?? options.script ?? '';
       scriptPath = loaded?.scriptPath ?? options.scriptPath;
+      if (loaded && scriptPath && storage) {
+        reviewLimits = await resolveReviewWorkflowLimits(
+          scriptPath,
+          storage.getGeneratedWorkflowsDir(),
+          script,
+        );
+      }
       const workflowName =
         options.workflowName ??
         loaded?.savedWorkflowName ??
@@ -277,6 +295,7 @@ export class WorkflowRunner {
                     )
                   : () => undefined
             : undefined,
+          reviewLimits?.subagent,
         );
       orchestrator = new WorkflowOrchestrator(dispatch);
       entry = registry?.register(
@@ -293,6 +312,13 @@ export class WorkflowRunner {
           script,
           scriptPath,
           ...(journalPath ? { journalPath } : {}),
+          // A saved workflow is the user's file, and the recovery advice says to
+          // copy it first. The name is resolved here — from the resumed run
+          // too, which a caller re-running a saved workflow's inline source
+          // does not pass — so the hint follows the same decision.
+          ...(options.authoringHint && !workflowName
+            ? { authoringHint: options.authoringHint }
+            : {}),
           args: options.args,
           ...(options.resumeFromRunId
             ? {
@@ -380,10 +406,15 @@ export class WorkflowRunner {
         registry?.onBudgetUpdated(runId, spent, total);
         emitUpdate();
       },
+      resumeRespawn: (line) => {
+        if (!isCurrentEntry()) return;
+        registry?.onResumeRespawn(runId, line);
+        emitUpdate();
+      },
     };
 
     const scheduler = new WorkflowDispatchScheduler(
-      resolveConcurrencyLimit(),
+      reviewLimits?.concurrency ?? resolveConcurrencyLimit(),
       controller.signal,
       ({ state }) => {
         if (!isCurrentEntry()) return;
@@ -402,6 +433,7 @@ export class WorkflowRunner {
           const outcome = await orchestrator.run({
             script,
             args: options.args,
+            maxWallClockMs: reviewLimits?.maxWallClockMs,
             abortOnTimeout: controller,
             runId,
             emitter,
@@ -481,6 +513,19 @@ export class WorkflowRunner {
               status: entry.status,
               agents_dispatched: entry.agentsDispatched,
               agents_completed: entry.agentsCompleted,
+              // Read off the dispatch traces rather than the counters: a
+              // dispatch that failed or replayed from cache still counts as
+              // completed, so without these three a run that lost half its
+              // fan-out and one that lost none report identically.
+              agents_failed: entry.dispatches.reduce(
+                (n, dispatch) => (dispatch.status === 'failed' ? n + 1 : n),
+                0,
+              ),
+              agents_cached: entry.dispatches.reduce(
+                (n, dispatch) => (dispatch.status === 'cached' ? n + 1 : n),
+                0,
+              ),
+              agents_respawned: entry.agentsRespawned ?? 0,
               phase_count: entry.phases.length,
               tokens_spent: entry.tokensSpent,
               duration_ms: (entry.endTime ?? entry.startTime) - entry.startTime,

@@ -7,13 +7,11 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
-import {
-  createDebugLogger,
-  isSubpath,
-  Storage,
-  type Config,
-  type ExtensionMutationEvent,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import type { ExtensionMutationEvent } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { ExtensionRefreshState } from './extension-refresh-state.js';
 
 const debugLogger = createDebugLogger('EXTENSION_FILE_WATCHER');

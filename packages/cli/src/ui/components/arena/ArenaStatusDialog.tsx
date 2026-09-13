@@ -7,15 +7,13 @@
 import type React from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
-import {
-  type ArenaManager,
-  type ArenaAgentState,
-  type InProcessBackend,
-  type AgentStatsSummary,
-  isSettledStatus,
-  ArenaSessionStatus,
-  DISPLAY_MODE,
-} from '@qwen-code/qwen-code-core';
+import type { ArenaManager } from '@qwen-code/qwen-code-core/agents/arena/ArenaManager.js';
+import { ArenaSessionStatus } from '@qwen-code/qwen-code-core/agents/arena/types.js';
+import type { ArenaAgentState } from '@qwen-code/qwen-code-core/agents/arena/types.js';
+import type { InProcessBackend } from '@qwen-code/qwen-code-core/agents/backends/InProcessBackend.js';
+import { DISPLAY_MODE } from '@qwen-code/qwen-code-core/agents/backends/types.js';
+import type { AgentStatsSummary } from '@qwen-code/qwen-code-core/agents/runtime/agent-statistics.js';
+import { isSettledStatus } from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { formatDuration } from '../../utils/formatters.js';

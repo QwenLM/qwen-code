@@ -19,7 +19,8 @@ import {
   useMemo,
   useState,
 } from 'react';
-import { type Config, createDebugLogger } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   type DialogEntry,
   useBackgroundTaskView,

@@ -6,6 +6,11 @@
   color: var(--foreground);
 }
 
+.inspector button[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .inspector button:focus-visible,
 .inspector summary:focus-visible {
   outline: 2px solid var(--agent-blue-500);
@@ -326,7 +331,7 @@
   font-size: 11px;
 }
 
-.linkedAgents button:hover,
+.linkedAgents button:not([aria-disabled='true']):hover,
 .deliverables button:not(:disabled):hover {
   background: var(--accent);
 }
@@ -481,7 +486,7 @@
   cursor: pointer;
 }
 
-.activityList > button:hover {
+.activityList > button:not([aria-disabled='true']):hover {
   background: var(--accent);
 }
 

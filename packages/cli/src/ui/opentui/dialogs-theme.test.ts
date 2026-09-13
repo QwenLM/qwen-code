@@ -88,12 +88,12 @@ describe('preview pane content parity', () => {
     );
   });
 
-  it('keeps the original diff sample byte-for-byte', () => {
+  it('keeps the ink diff sample with the hunk-header counts corrected', () => {
     expect(THEME_PREVIEW_DIFF).toBe(
       [
         '--- a/util.py',
         '+++ b/util.py',
-        '@@ -1,2 +1,2 @@',
+        '@@ -1,1 +1,1 @@',
         '- print("Hello, " + name)',
         '+ print(f"Hello, {name}!")',
         '',

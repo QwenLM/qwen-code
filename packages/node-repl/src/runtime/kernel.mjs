@@ -839,10 +839,7 @@ function readSuccessfulBindings(module, bindingExports) {
 async function handleExec(message) {
   if (!config || !loader) throw new Error('kernel is not initialized');
   if (activeExec) throw new Error('kernel received overlapping executions');
-  if (
-    pendingCancelExecId !== null &&
-    pendingCancelExecId !== message.execId
-  ) {
+  if (pendingCancelExecId !== null && pendingCancelExecId !== message.execId) {
     pendingCancelExecId = null;
   }
   const expected = sortedBindingDescriptors();

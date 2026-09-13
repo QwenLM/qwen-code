@@ -1,11 +1,28 @@
 # Web Shell global turn navigation Phase 2 implementation plan
 
-- Status: In progress — Phase 2A implemented; Phase 2B pending
+- Status: Phase 2A merged in #11054; Phase 2B and the agreed Phase 3 rail implemented in open [#11208](https://github.com/QwenLM/qwen-code/pull/11208)
 - Date: 2026-09-04
 - Base: `cf44c778c0775d640560143828d851fa30dbd893`
 - Tracks: [#10750](https://github.com/QwenLM/qwen-code/issues/10750)
 - Consumes: merged Phase 1 protocol [#10751](https://github.com/QwenLM/qwen-code/pull/10751)
 - Architecture: `docs/design/web-shell/web-shell-global-turn-navigation.md`
+
+**2026-09-06 update:** Phase 2A merged as #11054. The
+[Phase 2B viewport design](../design/web-shell/web-shell-global-turn-navigation-phase2b.md)
+supersedes this plan's sequential-history migration, public-history-hook
+replacement, and blanket UI/browser-test deferrals. It implements a separate
+historical viewport for built-in main/split views, retains legacy public hook
+semantics, and moves minimal scrolling/boundary UI into Phase 2B. The original
+sections below are retained as historical rationale, not competing requirements.
+
+**2026-09-07 delivery update:** #11208 also implements the Phase 3 global rail:
+compact ticks, hover/focus previews, keyboard and distant-turn navigation, and
+the existing return-to-latest action. Ordinary upward pagination is preserved
+without a snapshot toolbar. Scoped frontend lifecycle verification passed;
+integrated browser-to-real-daemon acceptance remains unverified. The
+[parent design](../design/web-shell/web-shell-global-turn-navigation.md) records
+the current scope and optional follow-ups; earlier Phase 3 deferrals below do
+not represent outstanding UI work.
 
 ## Outcome
 
@@ -672,7 +689,13 @@ Opaque snapshot tokens make client lineage proof deliberately conservative.
 Exact overlap is sufficient for ordinary append; lack of proof clears cached
 pages. Correctness is preferred over metadata-cache hit rate.
 
-## Deferred to Phase 3
+## Original Phase 3 deferrals (superseded)
+
+This historical list predates the final #11208 implementation. The parent
+design's Phase 3 delivery section is authoritative: the global rail and frontend
+navigation are implemented; exhaustive state styling and dedicated expiry copy
+are optional, while the broader performance/accessibility and real-daemon
+acceptance matrix remains separate verification work.
 
 - virtualized rail DOM and placeholder ticks;
 - keyboard navigation and WAI-ARIA attributes;

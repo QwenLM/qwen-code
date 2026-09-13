@@ -5576,16 +5576,19 @@ describe('qwen-triage verify round-3 hardening', () => {
 
     // Browser binary: downloaded after npm ci, and by the CLI of the
     // package the capture harness actually imports — never a hardcoded pin
-    // (M5). This lockfile has TWO Playwright trees: terminal-capture.ts
-    // imports `playwright`, but node_modules/.bin/playwright (what `npx
-    // playwright` resolves) is @playwright/test's CLI, which pins a
-    // different chromium revision. The install must therefore resolve the
+    // (M5). Root `playwright` and Web Shell's `@playwright/test` carry the
+    // same exact pin, and `npm run check:lockfile` fails if the manifests
+    // or their resolved trees drift, so both of those CLIs install one
+    // chromium revision. The parity does not reach the root
+    // `playwright-core` bin, which a mobile-mcp transitive dependency
+    // hoists there at an older revision. The install still resolves the
     // imported package's cli.js from the harness's own directory (the same
-    // algorithm as its import), not assume npm hoists `playwright` to the
-    // root — a hoist nothing pins. cli.js is absent from the package's
-    // exports map, so the workflow resolves the exported package.json and
-    // joins; binding this assertion to the harness's import keeps the two
-    // from drifting apart.
+    // algorithm as its import) instead of assuming npm hoists `playwright`
+    // to the root, so the binary keeps matching the import when the hoist
+    // layout changes or a workspace nests its own copy. cli.js is absent
+    // from the package's exports map, so the workflow resolves the exported
+    // package.json and joins; binding this assertion to the harness's
+    // import keeps the two from drifting apart.
     const capture = readFileSync(
       'integration-tests/terminal-capture/terminal-capture.ts',
       'utf8',

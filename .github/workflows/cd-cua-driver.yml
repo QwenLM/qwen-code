@@ -30,7 +30,7 @@ on:
       version:
         description: 'Version to release (without v prefix)'
         required: true
-        default: '0.20.3'
+        default: '0.20.5'
       notarize:
         description:
           'Codesign + notarize the macOS artifacts (false to skip during
@@ -206,6 +206,14 @@ jobs:
     steps:
       - name: 'Install base tooling (container is bare)'
         run: |
+          # Debian 11 is intentionally retained for glibc 2.31 compatibility.
+          # Pin all repositories to one coherent end-of-LTS snapshot: the live
+          # security mirror can retain an expired index after removing its .debs.
+          printf '%s\n' \
+            'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260831T000000Z bullseye main' \
+            'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260831T000000Z bullseye-updates main' \
+            'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260831T000000Z bullseye-security main' \
+            > /etc/apt/sources.list
           apt-get -o Acquire::Retries=3 update
           apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
             git ca-certificates curl build-essential pkg-config \

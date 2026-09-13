@@ -6,12 +6,19 @@ interface RootErrorFallbackProps {
   onRetry: () => void;
   /** Selects the fallback copy. Defaults to English when omitted. */
   language?: WebShellLanguage;
+  /**
+   * What the retry button does, so its label stays honest. Defaults to
+   * 'reset' (an in-place boundary retry); 'reload' is for callers whose
+   * retry navigates (e.g. the standalone root boundary reloads the page).
+   */
+  retryMode?: 'reset' | 'reload';
 }
 
 interface FallbackCopy {
   title: string;
   body: string;
   retry: string;
+  reload: string;
 }
 
 // This surface renders OUTSIDE the in-app I18nProvider (the boundary wraps the
@@ -22,11 +29,13 @@ const COPY: Record<WebShellLanguage, FallbackCopy> = {
     title: 'Something went wrong',
     body: 'An unexpected error occurred and this content could not be displayed.',
     retry: 'Try again',
+    reload: 'Reload page',
   },
   'zh-CN': {
     title: '出了点问题',
     body: '发生意外错误，无法显示此内容。',
     retry: '重试',
+    reload: '重新加载',
   },
 };
 
@@ -82,6 +91,7 @@ export function RootErrorFallback({
   error,
   onRetry,
   language = 'en',
+  retryMode = 'reset',
 }: RootErrorFallbackProps) {
   const copy = COPY[language] ?? COPY.en;
   return (
@@ -97,7 +107,7 @@ export function RootErrorFallback({
         </p>
       )}
       <button type="button" style={buttonStyle} onClick={onRetry}>
-        {copy.retry}
+        {retryMode === 'reload' ? copy.reload : copy.retry}
       </button>
     </div>
   );

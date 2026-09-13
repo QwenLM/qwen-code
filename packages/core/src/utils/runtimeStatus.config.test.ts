@@ -183,14 +183,15 @@ describe('Config.startNewSession session-registry patch', () => {
     // registerSession never throws — it returns false on a failed write.
     // Assert the seam itself before relying on anything downstream of
     // it, or a write failure surfaces as a confusing patch-path error.
-    expect(
-      await registerSession({
-        sessionId: sessionA,
-        cwd: tmpDir,
-        qwenVersion: '0.0.0-test',
-      }),
-    ).toBe(true);
-    config.trackSessionRegistration(Promise.resolve(true));
+    const registration = await registerSession({
+      sessionId: sessionA,
+      cwd: tmpDir,
+      qwenVersion: '0.0.0-test',
+    });
+    expect(registration.registered).toBe(true);
+    // The real outcome rather than a stand-in: it carries the slot the
+    // record was written under, which is what the patch below has to name.
+    config.trackSessionRegistration(Promise.resolve(registration));
 
     const [before] = await listLiveSessions();
 
@@ -221,14 +222,15 @@ describe('Config.startNewSession session-registry patch', () => {
     const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
     const config = makeConfig(sessionA);
     // No markRuntimeStatusEnabled(): models the failed sidecar write.
-    expect(
-      await registerSession({
-        sessionId: sessionA,
-        cwd: tmpDir,
-        qwenVersion: '0.0.0-test',
-      }),
-    ).toBe(true);
-    config.trackSessionRegistration(Promise.resolve(true));
+    const registration = await registerSession({
+      sessionId: sessionA,
+      cwd: tmpDir,
+      qwenVersion: '0.0.0-test',
+    });
+    expect(registration.registered).toBe(true);
+    // The real outcome rather than a stand-in: it carries the slot the
+    // record was written under, which is what the patch below has to name.
+    config.trackSessionRegistration(Promise.resolve(registration));
 
     config.startNewSession(sessionB);
 

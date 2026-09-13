@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  restoreSessionSources,
+  type SessionSourcesRestoreState,
+} from './session-sources.js';
+
 import { Storage } from '../config/storage.js';
 import {
   commitUsageBeforeTranscriptDeletion,
@@ -48,6 +53,8 @@ import {
 } from '../utils/sessionStorageUtils.js';
 import {
   isSessionArtifactRecord,
+  getWebPreviewSnapshotId,
+  type PersistedSessionArtifact,
   rebuildSessionArtifactSnapshot,
   remapSessionArtifactPayloadForFork,
   selectActiveSideArtifactRecordUuids,
@@ -55,6 +62,10 @@ import {
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
+import {
+  deleteArtifactSnapshot,
+  retainArtifactSnapshot,
+} from '../tools/artifact/artifact-snapshots.js';
 import {
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
@@ -380,7 +391,7 @@ export interface ConversationRecord {
 /**
  * Data structure for resuming an existing session.
  */
-export interface ResumedSessionData {
+export interface ResumedSessionData extends SessionSourcesRestoreState {
   conversation: ConversationRecord;
   filePath: string;
   /** UUID of the last completed message - new messages should use this as parentUuid */
@@ -2867,9 +2878,12 @@ export class SessionService {
   /**
    * Reads all records from a session file.
    */
-  private async readAllRecords(filePath: string): Promise<ChatRecord[]> {
+  private async readAllRecords(
+    filePath: string,
+    onIncompleteRead?: () => void,
+  ): Promise<ChatRecord[]> {
     try {
-      return await jsonl.read<ChatRecord>(filePath);
+      return await jsonl.read<ChatRecord>(filePath, { onIncompleteRead });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         debugLogger.error('Error reading session file:', error);
@@ -2916,6 +2930,32 @@ export class SessionService {
     sessionId: string,
   ): Promise<ResumedSessionData | undefined> {
     return this.loadSessionFromState(sessionId, 'active');
+  }
+
+  async readSessionSources(
+    sessionId: string,
+  ): Promise<SessionSourcesRestoreState> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`))
+      throw new Error('Invalid source session ID');
+    const filePath = this.getSessionFilePath(sessionId, 'active');
+    try {
+      await fs.promises.stat(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      return { sourcesUnavailable: true };
+    }
+    const { records, complete } =
+      await jsonl.readLinesWithIntegrity<ChatRecord>(filePath, Infinity);
+    if (!complete) return { sourcesUnavailable: true };
+    if (
+      records[0] &&
+      !(await this.sessionBelongsToCurrentProject(
+        records[0].sessionId,
+        records[0].cwd,
+      ))
+    )
+      throw new Error('Source session workspace does not match');
+    return restoreSessionSources(records, sessionId);
   }
 
   async readRestoreProjection(
@@ -2979,7 +3019,10 @@ export class SessionService {
   ): Promise<ResumedSessionData | undefined> {
     const filePath = this.getSessionFilePath(sessionId, state);
 
-    const records = await this.readAllRecords(filePath);
+    let sourceReadComplete = true;
+    const records = await this.readAllRecords(filePath, () => {
+      sourceReadComplete = false;
+    });
     if (records.length === 0) {
       return;
     }
@@ -3052,6 +3095,9 @@ export class SessionService {
       filePath,
       lastCompletedUuid: lastMessage.uuid,
       fileHistorySnapshots,
+      ...(sourceReadComplete
+        ? restoreSessionSources(records, firstRecord.sessionId)
+        : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
       historyGaps: gaps.length > 0 ? gaps : undefined,
     };
@@ -3193,6 +3239,46 @@ export class SessionService {
     }
   }
 
+  private async collectSessionArtifactSnapshots(
+    filePath: string,
+    sessionId: string,
+  ): Promise<PersistedSessionArtifact[]> {
+    const artifacts = new Map<string, PersistedSessionArtifact>();
+    const stream = fs.createReadStream(filePath);
+    const lines = readline.createInterface({
+      input: stream,
+      crlfDelay: Infinity,
+    });
+    try {
+      for await (const line of lines) {
+        for (const record of jsonl.parseLineTolerant<ChatRecord>(
+          line,
+          filePath,
+        )) {
+          if (
+            record.sessionId !== sessionId ||
+            !isSessionArtifactRecord(record)
+          )
+            continue;
+          for (const artifact of rebuildSessionArtifactSnapshot(
+            [record],
+            sessionId,
+          )?.artifacts ?? []) {
+            const id = getWebPreviewSnapshotId(artifact);
+            if (id) artifacts.set(id, artifact);
+          }
+        }
+      }
+    } catch {
+      // Unreadable history must not prevent deleting the session. Keep files
+      // whose ownership cannot be established instead of scanning other projects.
+    } finally {
+      lines.close();
+      stream.destroy();
+    }
+    return [...artifacts.values()];
+  }
+
   private async removeSessionTranscripts(
     sessionId: string,
     options: RemoveSessionOptions = {},
@@ -3221,7 +3307,14 @@ export class SessionService {
         PreparedUsageBeforeTranscriptDeletion
       >();
       const preparedSessionIds = new Set<string>();
+      const artifactSnapshots: PersistedSessionArtifact[] = [];
       for (const identity of physicalSnapshot.identities) {
+        artifactSnapshots.push(
+          ...(await this.collectSessionArtifactSnapshots(
+            identity.filePath,
+            sessionId,
+          )),
+        );
         const prepared = await this.prepareUsageSalvageBestEffort(
           identity.filePath,
         );
@@ -3261,6 +3354,16 @@ export class SessionService {
       }
       if (durableParent) {
         await syncDurableDirectory(durableParent);
+      }
+      for (const artifact of artifactSnapshots) {
+        (options.assertCleanupOwned ?? options.assertCanMutate)?.();
+        await deleteArtifactSnapshot(
+          artifact,
+          this.storage.getRuntimeBaseDir(),
+          sessionId,
+          undefined,
+          options.assertCleanupOwned ?? options.assertCanMutate,
+        );
       }
       return true;
     } catch (error) {
@@ -3842,7 +3945,8 @@ export class SessionService {
       (record) =>
         !(
           record.type === 'system' &&
-          (record.subtype === 'parent_session' ||
+          (record.subtype === 'session_sources_snapshot' ||
+            record.subtype === 'parent_session' ||
             record.subtype === 'session_source' ||
             record.subtype === 'turn_result' ||
             (options.source && record.subtype === 'custom_title'))
@@ -4003,6 +4107,8 @@ export class SessionService {
 
     const body = forked.map((r) => JSON.stringify(r)).join('\n') + '\n';
     const operationId = randomUUID();
+    const artifactSnapshots =
+      rebuildSessionArtifactSnapshot(forked, newSessionId)?.artifacts ?? [];
     const stagedTranscriptPath = path.join(
       chatsDir,
       `.${newSessionId}.${operationId}.tmp`,
@@ -4062,6 +4168,21 @@ export class SessionService {
         }
       }
 
+      for (const artifact of artifactSnapshots) {
+        try {
+          await retainArtifactSnapshot(
+            artifact,
+            this.storage.getRuntimeBaseDir(),
+            newSessionId,
+            operationId,
+          );
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          this.warn(
+            `branch ${newSessionId} retained saved webpage record ${artifact.id} with missing snapshot storage; its content may be unavailable`,
+          );
+        }
+      }
       try {
         await fs.promises.link(stagedTranscriptPath, targetPath);
       } catch (error) {
@@ -4084,6 +4205,16 @@ export class SessionService {
       }
     } finally {
       const cleanupFailures: string[] = [];
+      if (!committed) {
+        for (const artifact of artifactSnapshots) {
+          await deleteArtifactSnapshot(
+            artifact,
+            this.storage.getRuntimeBaseDir(),
+            newSessionId,
+            operationId,
+          );
+        }
+      }
       await fs.promises.unlink(stagedTranscriptPath).catch((error) => {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
           cleanupFailures.push(`transcript staging: ${String(error)}`);

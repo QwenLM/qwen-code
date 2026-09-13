@@ -105,6 +105,82 @@ describe('SessionWorkflowInspector', () => {
     container.remove();
   });
 
+  it('gates both linked-agent and activity detail buttons until ready', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onOpenSubagent = vi.fn();
+    const render = (subagentSessionReady: boolean) => {
+      const agent: ACPToolCall = {
+        callId: 'ship-agent',
+        toolName: 'Agent',
+        title: 'Shipping Agent',
+        status: 'in_progress',
+        args: { todo_id: 'ship' },
+        subagentSessionReady,
+      };
+      act(() =>
+        root.render(
+          <I18nProvider language="zh-CN">
+            <SessionWorkflowInspector
+              todos={[{ id: 'ship', content: 'Ship', status: 'in_progress' }]}
+              tools={[agent]}
+              tasks={[
+                {
+                  kind: 'agent',
+                  id: 'ship-task',
+                  label: 'Shipping Agent',
+                  description: 'Ship',
+                  status: 'running',
+                  startTime: 1,
+                  runtimeMs: 1000,
+                  isBackgrounded: false,
+                  toolUseId: 'ship-agent',
+                },
+              ]}
+              artifacts={[]}
+              onSelectedTodoIdChange={vi.fn()}
+              onExpandGraph={vi.fn()}
+              onOpenSubagent={onOpenSubagent}
+            />
+          </I18nProvider>,
+        ),
+      );
+    };
+    try {
+      render(false);
+      const buttons = [
+        ...container.querySelectorAll<HTMLButtonElement>(
+          'button[title="创建中"]',
+        ),
+      ];
+      expect(buttons).toHaveLength(2);
+      for (const button of buttons) {
+        expect(button.getAttribute('aria-disabled')).toBe('true');
+        button.focus();
+        expect(document.activeElement).toBe(button);
+        act(() => button.click());
+      }
+      expect(onOpenSubagent).not.toHaveBeenCalled();
+      render(true);
+      for (const button of buttons) {
+        expect(button.hasAttribute('aria-disabled')).toBe(false);
+        expect(button.title).not.toBe('创建中');
+        act(() => button.click());
+      }
+      expect(onOpenSubagent).toHaveBeenCalledTimes(2);
+      expect(onOpenSubagent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          callId: 'ship-agent',
+          subagentSessionReady: true,
+        }),
+      );
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+
   // R11-2: same input as the overview strip's transcript-only case — one
   // in_progress Agent tool call, no live daemon tasks. The strip reports
   // "Active agents: 1" via the executionStatus fallback; the summary here

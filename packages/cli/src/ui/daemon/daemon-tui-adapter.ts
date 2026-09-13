@@ -9,15 +9,15 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
+import { isVisionBridgeNoticeDisplay } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
 import {
-  createDebugLogger,
   FINDING_CONFIDENCES,
   FINDING_OUTCOMES,
   FINDING_SEVERITIES,
   FINDING_SOURCES,
-  isVisionBridgeNoticeDisplay,
   REPORT_FINDINGS_LEVELS,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/report-findings.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   ToolCallStatus,
   type HistoryItemToolGroup,
@@ -336,6 +336,13 @@ function formatToolResultDisplay(
     typeof value['fallbackText'] === 'string'
   ) {
     return sanitizeDisplayText(value['fallbackText']);
+  }
+  if (
+    isRecord(value) &&
+    value['type'] === 'ask_user_question_answers' &&
+    typeof value['text'] === 'string'
+  ) {
+    return sanitizeDisplayText(value['text']);
   }
   if (isRecord(value) && value['type'] === 'findings_list') {
     // Discriminator-first rejection: a findings_list record that fails the

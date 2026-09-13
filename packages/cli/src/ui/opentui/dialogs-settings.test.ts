@@ -69,6 +69,9 @@ describe('buildSettingsListItems', () => {
     expect(items.length).toBeGreaterThan(0);
     const keys = items.map((item) => item.key);
     expect(keys).toContain('ui.theme');
+    expect(keys.indexOf('tools.codeModeOnly')).toBe(
+      keys.indexOf('tools.approvalMode') + 1,
+    );
     // Labels are resolved from the schema definitions.
     const themeItem = items.find((item) => item.key === 'ui.theme');
     expect(themeItem?.label).toBeTruthy();
@@ -106,6 +109,10 @@ describe('nextToggleValue', () => {
   it('flips booleans', () => {
     expect(nextToggleValue({ type: 'boolean' }, true)).toBe(false);
     expect(nextToggleValue({ type: 'boolean' }, false)).toBe(true);
+  });
+
+  it('turns an unset tri-state boolean off', () => {
+    expect(nextToggleValue({ type: 'boolean' }, undefined)).toBe(false);
   });
 
   it('cycles enums and loops back to the first option', () => {

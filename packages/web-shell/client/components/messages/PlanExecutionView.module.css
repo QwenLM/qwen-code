@@ -461,11 +461,17 @@
   color: var(--agent-blue-500);
 }
 
+.execution[aria-disabled='true'],
+button.nestedExecution[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .execution:disabled {
   cursor: default;
 }
 
-.execution:not(:disabled):hover,
+.execution:not(:disabled):not([aria-disabled='true']):hover,
 .execution:not(:disabled):focus-visible {
   background: var(--muted);
 }
@@ -504,11 +510,11 @@
   text-align: left;
 }
 
-button.nestedExecution:not(:disabled) {
+button.nestedExecution:not(:disabled):not([aria-disabled='true']) {
   cursor: pointer;
 }
 
-button.nestedExecution:not(:disabled):hover {
+button.nestedExecution:not(:disabled):not([aria-disabled='true']):hover {
   color: var(--foreground);
 }
 

@@ -12,8 +12,8 @@ import {
   getActiveGoal,
   recordGoalIteration,
   setActiveGoal,
-  type ActiveGoal,
 } from './activeGoalStore.js';
+import type { ActiveGoal } from './goal-legacy-projection.js';
 
 const makeGoal = (overrides: Partial<ActiveGoal> = {}): ActiveGoal => ({
   condition: 'write a hello world script',
