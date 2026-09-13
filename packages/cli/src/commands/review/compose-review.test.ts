@@ -18238,18 +18238,19 @@ describe('terminalState — coverage, not verdict', () => {
       modelId: MODEL,
     });
     expect(r.chunkLedger.find((i) => i.id === 2)?.classification).toBe(
-      'unknown',
+      'read-not-credited',
     );
     expect(r.cappedBy).toContain('chunk-nobody-read');
     const line = verdictLine(r);
-    // Neither the "never read" clause (two agents read the window) nor the
-    // "could not be credited to this plan" one (nothing was refused on plan
-    // grounds) — the neutral clause, which is the only one true here.
-    expect(line).toContain('went uncovered — see the disclosures');
+    // Not the "never read" clause: two agents read the window. The fact axis
+    // now CARRIES that — their spanning reads were offered and refused by
+    // their own unanimous verdict — so both channels take the refusal arm
+    // rather than the neutral one, which is what this test is about: they
+    // take the SAME arm (R39-8).
+    expect(line).toContain('was read but could not be credited to this plan');
     expect(line).not.toContain('was never read');
     expect(r.body).not.toContain('nobody read');
-    // The two channels still agree, which is what this test is about.
-    expect(r.body).toContain('went uncovered; see the disclosures');
+    expect(r.body).toContain('no read of it could be accepted for this plan');
   });
 
   it('keeps "never read" in the verdict line for a chunk nothing was launched for', () => {
@@ -18304,14 +18305,55 @@ describe('terminalState — coverage, not verdict', () => {
       modelId: MODEL,
     });
     expect(r.chunkLedger.find((i) => i.id === 2)?.classification).toBe(
-      'unknown',
+      'read-not-credited',
     );
     expect(r.body).not.toContain('nobody read');
-    // Not the "could not be accepted for this plan" clause either: nothing
-    // was refused on plan grounds here — the two declarations stood each
-    // other down. A clause that names a refusal is a positive claim, and
-    // the complement of "read nothing" does not establish one (R38-119).
-    expect(r.body).toContain('went uncovered; see the disclosures');
+    // The refusal clause, and it is a POSITIVE claim the ledger now
+    // supports: the two agents' reads spanned the window and this run
+    // refused them — the two declarations stood each other down. What the
+    // body must never do is infer that clause from the COMPLEMENT of "read
+    // nothing", which is why the fact rides `chunkReadSomething` and why the
+    // neutral arm below exists for a chunk the run genuinely cannot answer
+    // for (R38-119, R39-8).
+    expect(r.body).toContain('no read of it could be accepted for this plan');
+  });
+
+  it('claims no refusal, and points nowhere, for a chunk the run cannot answer for', () => {
+    // The neutral arm, and the reason it may not point at disclosures:
+    // `unexplainedReceipts` is by construction the missing chunks NO
+    // `chunk <id>` disclosure explains, so "see the disclosures above for
+    // each" sent the author to an empty set — and every disclosure this
+    // array carries renders BELOW this sentence anyway (R39-5). Chunk 2's
+    // agent cleared every guard and simply read the wrong lines: nothing was
+    // refused, nobody is disclosed, and the ledger says `unknown`.
+    const p = plan();
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), {
+      toolCalls: 1,
+      range: [0, 50],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+    recordBuilt(p, 1, goodPrompt(1));
+    recordBuilt(p, 2, goodPrompt(2));
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.chunkLedger.find((i) => i.id === 2)?.classification).toBe(
+      'unknown',
+    );
+    expect(r.body).toContain(
+      'went uncovered; no read this review could accept',
+    );
+    expect(r.body).not.toContain('see the disclosures');
+    expect(r.body).not.toContain('nobody read');
+    expect(r.body).not.toContain('could be accepted for this plan');
   });
 
   it('does not post a relayed uncoverable the run\u2019s own records refute', () => {
@@ -19003,6 +19045,36 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     expect(r.terminalState).toBe('complete');
     expect(r.body).not.toContain('ran on a prompt the run wrote itself');
     expect(r.cappedBy).not.toContain('unreviewed-dimension');
+
+    // The COLLIDING twin — `chunk 2 of 9`, an id this plan does carry with
+    // another chunking's count — reaches the same channel and must reach
+    // the same sentence. Routed to the capping rewritten arm it held `ok`
+    // false over a run that covered every planned chunk, with a repair
+    // aimed at a launch that never happened (R39-11); and the line that
+    // names it may not say "a chunk this plan does not carry", because this
+    // plan carries chunk 2.
+    rmSync(join(dir, 'subagents', 'S1', 'agent-stale.jsonl'));
+    const q = coveredPlan(['verify', 'reverse-audit']);
+    transcript(
+      'stale2',
+      goodPrompt(2).replace('chunk 2 of 2', 'chunk 2 of 9'),
+      { toolCalls: 1 },
+    );
+    const r2 = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: q,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r2.remediation.join('\n')).toMatch(
+      /stale transcripts: chunk 2 of 9/,
+    );
+    expect(r2.remediation.join('\n')).toContain(
+      'written against a different chunking',
+    );
+    expect(r2.remediation.join('\n')).not.toContain('this plan does not carry');
+    expect(r2.terminalState).toBe('complete');
   });
 
   it('names the seal refusal, not an unread diff, when the plan identity cannot be read', () => {

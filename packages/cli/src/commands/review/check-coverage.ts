@@ -39,6 +39,7 @@ import {
   ChunkPartitionError,
   coverageFromTranscripts,
   chunkReadNothing,
+  chunkReadSomething,
   TranscriptsUnavailableError,
   type ChunkCoverageItem,
 } from './lib/coverage.js';
@@ -66,31 +67,58 @@ interface CheckCoverageArgs {
  * The half-sentence that says WHAT happened to the missing chunks, true of
  * every one of them.
  *
- * Three answers, not two, because the line names a LIST: a set that mixes a
+ * FOUR answers, not two, because the line names a LIST: a set that mixes a
  * chunk whose agents read nothing with one whose reads could not be accepted
  * has no sentence true of both, and an all-or-nothing split has to post a
  * false one for half the list. The mixed case therefore claims neither and
  * sends the reader to the per-agent lines, which are per chunk and already
  * printed above (undirected audit of R36-1's fix).
+ *
+ * ...and the refusal arm reads the POSITIVE predicate, not the complement of
+ * the other one — the rule `chunkGapReason` and the posted body already
+ * follow, and the third channel was left behind on the complement (R38-119,
+ * R39-1). "Their reads could not be accepted" is a claim that something WAS
+ * refused; a chunk whose records cleared every guard and simply never
+ * spanned its lines had nothing refused, and `unknown` with no causes means
+ * the run cannot say. So a set that is neither all-read-nothing nor
+ * all-read-something falls to a sentence that claims neither and points
+ * nowhere: a pointer at per-agent lines is worth printing only when the
+ * ledger says there are some.
+ *
+ * And no sentence here points at "the per-agent lines above" any more. That
+ * pointer was printed whether or not a line about these chunks existed —
+ * `blindAgents`, `idleAgents`, `unopenedAgents`, `rewrittenPrompts` and
+ * `driftedLaunches` can all be empty for a chunk whose read was simply
+ * refused — so the operator was sent to nothing (R39-1). The lines are
+ * printed above regardless; a claim that they exist is not this sentence's
+ * to make.
  */
 function readWhatHappened(report: {
   missingChunks: readonly number[];
   chunkItems: readonly ChunkCoverageItem[];
 }): string {
-  const readNothing = report.missingChunks.filter((id) => {
-    const item = report.chunkItems.find((i) => i.id === id);
-    return item !== undefined && chunkReadNothing(item);
-  }).length;
-  if (readNothing === report.missingChunks.length) {
+  const items = report.missingChunks.map((id) =>
+    report.chunkItems.find((i) => i.id === id),
+  );
+  const known = (pred: (i: ChunkCoverageItem) => boolean): boolean =>
+    items.length > 0 && items.every((i) => i !== undefined && pred(i));
+  if (known(chunkReadNothing)) {
     return `Nobody read those lines. `;
   }
-  if (readNothing === 0) {
-    return (
-      `Their reads could not be accepted for this plan — see the ` +
-      `per-agent lines above for which, and why. `
-    );
+  if (known(chunkReadSomething)) {
+    return `Their reads could not be accepted for this plan. `;
   }
-  return `See the per-agent lines above for what happened to each. `;
+  // A mix of the two still has a line per chunk above; a set carrying a
+  // chunk the ledger cannot answer for has none to point at.
+  const nothing = items.filter(
+    (i) => i !== undefined && chunkReadNothing(i),
+  ).length;
+  const something = items.filter(
+    (i) => i !== undefined && chunkReadSomething(i),
+  ).length;
+  return nothing + something === items.length
+    ? `What happened differs by chunk; the coverage report's per-chunk ledger says which. `
+    : `No read this run could accept spans those lines. `;
 }
 
 function runCheckCoverage(args: CheckCoverageArgs): void {
@@ -190,10 +218,12 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
     // earlier plan of this diff, and nothing in this plan can be relaunched
     // to satisfy them. They count for nothing above.
     writeStderrLine(
-      `NOTE: ${report.staleTranscripts.length} transcript(s) name a chunk ` +
-        `this plan does not carry — ${report.staleTranscripts.join(', ')}. ` +
-        `Left over from an earlier plan of this diff; they count for ` +
-        `nothing in the coverage above and need no repair.`,
+      `NOTE: ${report.staleTranscripts.length} transcript(s) were written ` +
+        `against a different chunking of this diff — ` +
+        `${report.staleTranscripts.join(', ')}. Either the chunk id or the ` +
+        `\`of M\` count names a chunking this plan is not, so the lines they ` +
+        `name are not the lines those ids name here; they count for nothing ` +
+        `in the coverage above and need no repair.`,
     );
   }
 
@@ -287,6 +317,26 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `instead of containing it, so an agent that did not read it reviewed with ` +
         `no dimension, no severity definitions and no project rules. Relaunch each ` +
         `once, with the prompt \`agent-prompt\` printed.`,
+    );
+  }
+  // The paging failure, named. `rangeOf` records the range a read REQUESTED,
+  // so one call over an oversized window records the whole window while the
+  // agent saw a truncated view — the credit loop refuses it, and before this
+  // block the refusal reached no channel at all: the `chunk(s) were not
+  // reviewed` line below announced it and sent the reader to per-agent lines
+  // that did not exist, while the explainer's own definition of a read was
+  // satisfied and the repair it prescribes reproduces the identical
+  // transcript (R39-1). Printed ABOVE that line, which is what makes its
+  // pointer true.
+  if (report.oversizedWindows.length > 0) {
+    writeStderrLine(
+      `ERROR: ${report.oversizedWindows.length} chunk(s) were read in a ` +
+        `single call over a window one read cannot return — ` +
+        `${report.oversizedWindows.join('; ')}. Relaunching the same agent ` +
+        `on the same prompt reproduces the same truncated read: the launch ` +
+        `block \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ` +
+        `${shellQuotePath(args.plan)} --chunk <id>\` spells the paging the ` +
+        `chunk needs, and the brief carries the rule.`,
     );
   }
   if (report.unopenedAgents.length > 0) {

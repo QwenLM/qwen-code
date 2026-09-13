@@ -19,8 +19,12 @@
 // lines to the launches they write (measured: twelve finders shared one
 // PR-summary first line, and every disclosure rendered the same PR quote).
 
+/** Non-newline whitespace: the slot lives inside one backticked line. */
+const WS = '[^\\S\\n]';
+
 /**
- * The chunk role slot — `chunk 3 of 7` — as a regex SOURCE, spelled once.
+ * The chunk role slot — `chunk 3 of 7` and the drift this file has measured
+ * around it — as a regex SOURCE, spelled once.
  *
  * Case by character class rather than `/i`, because the source is spliced
  * into two regexes with different needs: `CHUNK_ROLE_RE` below matches a
@@ -32,9 +36,30 @@
  * is any run of NON-newline whitespace: the slot lives inside one backticked
  * line (`[^`\n]+`), and a `\s+` that spanned a newline once assigned a chunk
  * the label parser refused, leaving one record half-owned (R32-1).
+ *
+ * The DRIFT AFFIXES — a `territory ` prefix, a hyphen for the space
+ * (`chunk-3`), `/` for `of`, a missing count, a trailing `(round N)` — are
+ * part of this source rather than a second grammar somewhere else, and that
+ * is the point. Coverage's launch POSTURE had them hand-spelled: a slot
+ * `chunk 1 of 2 (round 1)` was a chunk launch to the posture and nothing at
+ * all to the assignment, so the record walked the credit gate on the
+ * WHOLE-DIFF arm — token only, no count, no territory — and a stale round-1
+ * record certified four chunks of an eight-chunk re-plan (R39-13); the same
+ * gap left a `chunk 2 of 2 (round 2)` owner unnamed in every chunk-keyed
+ * channel while the ledger answered `no-agent` over lines it had read
+ * (R39-10). Two grammars for one question drift; one cannot.
+ *
+ * The count stays OPTIONAL and the id does not: `assignedChunkTotal` reads
+ * `null` for a countless slot, and every credit-grade seal ANDs on the count
+ * agreeing with this plan's chunk count — so a slot that carries no count
+ * earns no coverage, exactly as it earned none when it was unreadable. What
+ * it gains is a name, a cause and a disclosure.
  */
 export const CHUNK_ROLE_SLOT_SOURCE =
-  '[cC][hH][uU][nN][kK][^\\S\\n]+(\\d+)[^\\S\\n]+[oO][fF][^\\S\\n]+(\\d+)';
+  `(?:[tT][eE][rR][rR][iI][tT][oO][rR][yY]${WS}+)?` +
+  `[cC][hH][uU][nN][kK](?:${WS}|-)+(\\d+)` +
+  `(?:${WS}*(?:[oO][fF]|\\/)${WS}*(\\d+))?` +
+  `(?:${WS}*\\([rR][oO][uU][nN][dD]${WS}+\\d+\\))?`;
 
 /**
  * A role that IS a chunk assignment — `chunk 3 of 7` — labels as its id.
@@ -50,9 +75,7 @@ export const CHUNK_ROLE_SLOT_SOURCE =
  * reason. Anchored, because here the whole role slot is the candidate, not
  * a substring of a prompt.
  */
-const CHUNK_ROLE_RE = new RegExp(
-  `^[^\\S\\n]*${CHUNK_ROLE_SLOT_SOURCE}[^\\S\\n]*$`,
-);
+const CHUNK_ROLE_RE = new RegExp(`^${WS}*${CHUNK_ROLE_SLOT_SOURCE}${WS}*$`);
 
 const IDENTITY_LINE_RE = /^You are review agent `([^`\n]+)`(.*)$/;
 
@@ -91,13 +114,20 @@ function firstIdentityLine(prompt: string): string | null {
  */
 export function chunkAssignmentFromLaunchPrompt(
   prompt: string,
-): { id: number; total: number } | null {
+): { id: number; total: number | null } | null {
   const line = firstIdentityLine(prompt);
   if (line === null) return null;
   const m = IDENTITY_LINE_RE.exec(line.replace(/\r$/, ''));
   if (!m) return null;
   const chunk = CHUNK_ROLE_RE.exec(m[1]);
-  return chunk ? { id: Number(chunk[1]), total: Number(chunk[2]) } : null;
+  if (chunk === null) return null;
+  // A drifted slot may carry no count at all (`chunk 3`, `territory chunk
+  // 3`). `null` is the honest answer, and every credit-grade seal refuses
+  // it — an absent count cannot agree with this plan's chunk count.
+  return {
+    id: Number(chunk[1]),
+    total: chunk[2] === undefined ? null : Number(chunk[2]),
+  };
 }
 
 /**

@@ -5890,8 +5890,14 @@ function composeReviewBody(
       // no repair — they belong to an earlier plan of this diff (R34-5).
       if (cov.staleTranscripts.length > 0) {
         remediation.push(
-          `stale transcripts: ${cov.staleTranscripts.join(', ')} name a ` +
-            `chunk this plan does not carry and count for nothing here.`,
+          // "were written against a different chunking", not "name a chunk
+          // this plan does not carry": the channel also carries records
+          // whose id this plan DOES carry with another plan's `of M` count
+          // (`chunk 2 of 9`), and the two channels that state this fact must
+          // not wear different sentences (R39-11).
+          `stale transcripts: ${cov.staleTranscripts.join(', ')} were ` +
+            `written against a different chunking of this diff and count ` +
+            `for nothing here.`,
         );
       }
       for (const id of cov.missingChunks) missingReceipts.push(id);
@@ -7446,9 +7452,18 @@ function composeReviewBody(
                   en: `Not reviewed: ${gap.phrase} — no read of ${pron} could be accepted for this plan.`,
                   zh: `未审查：${gap.phraseZh}——没有任何针对它的读取能被本 plan 采信。`,
                 }
-              : {
-                  en: `Not reviewed: ${gap.phrase} — ${gap.plural ? 'they went' : 'it went'} uncovered; see the disclosures above for each.`,
-                  zh: `未审查：${gap.phraseZh}——未被覆盖，具体原因见上方各条披露。`,
+              : // No pointer, and no direction. `unexplainedReceipts` is BY
+                // CONSTRUCTION the ids no `chunk <id>` disclosure explains —
+                // that filter is three lines up — so "see the disclosures"
+                // sent the author to a set this arm has just proven empty;
+                // and "above" was inverted besides, since every disclosure
+                // this array carries is pushed AFTER this one and renders
+                // below it (R39-5). What is left is the fact, which is true
+                // by construction: the chunk is `missing`, so no read the
+                // plan could accept spans it.
+                {
+                  en: `Not reviewed: ${gap.phrase} — ${gap.plural ? 'they went' : 'it went'} uncovered; no read this review could accept spans ${pron}.`,
+                  zh: `未审查：${gap.phraseZh}——未被覆盖；没有任何能被本次审查采信的读取跨越${gap.plural ? '它们' : '它'}的全部行。`,
                 },
       );
     }

@@ -713,6 +713,13 @@ describe('saveReviewArtifact', () => {
         classification: 'unknown',
         agents: ['chunk 9'],
       },
+      {
+        id: 10,
+        files: ['src/j.ts'],
+        outcome: 'missing',
+        classification: 'read-not-credited',
+        agents: ['chunk 10'],
+      },
     ];
     const triple = { terminalState: 'partial', capAxes, chunkLedger };
 

@@ -140,6 +140,31 @@ function meetsBar(
   // transcript. `latestReverseAuditRound` regressed with the drop and the
   // resumed run restarted a round the dead attempt had completed.
   if (declaresOwnUncoverable(rec, assignedChunk(rec))) return false;
+  // ...and the assignment can be absent. `chunkAssignmentFromLaunchPrompt`
+  // reads an ANCHORED identity line, so a launch the orchestrator
+  // paraphrased into prose de-assigns the record while its declaration
+  // line survives — and keyed on the assignment alone the veto then went
+  // silently inert: a chunk agent that returned `Uncoverable: chunk 3`
+  // cleared this bar, its final text was written into the recovery file as
+  // chunk 3's reviewed result, and `latestReverseAuditRound` counted the
+  // round, while the same run's coverage ledger listed chunk 3 as a gap.
+  // Coverage's walk got the compensating arm for exactly this de-assignment
+  // (R17-4); this consumer did not (R39-4).
+  //
+  // Scoped to the BARE chunk key, which is what keeps it off the shape the
+  // assignment key protects: the production per-chunk AUDIT prompt carries
+  // no `chunk N of M` line either, and its brief mandates quoting the
+  // evidence verbatim — so keying this on the key's chunk for
+  // `reverse-audit--chunk-N--…` would drop a certified auditor for quoting
+  // the declaration it audited. A record paired with `chunk-N` IS that
+  // chunk's agent, and `Uncoverable: chunk N` in its return is its own.
+  if (
+    chunk !== null &&
+    assignedChunk(rec) === null &&
+    /^chunk-\d+$/.test(key)
+  ) {
+    if (declaresOwnUncoverable(rec, chunk)) return false;
+  }
   // EVERY role opens its brief — the live walk gates `ok` on `unreadBriefs`
   // for chunk agents too: the brief carries the severity bar, the finding
   // format and the project's own rules, and a chunk agent that skipped it
