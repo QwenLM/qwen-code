@@ -215,8 +215,10 @@ describe('operation error classification', () => {
         ),
       ),
     ).toMatchObject({ code: 'OPERATION_FAILED' });
-    // The genuine failure reaches that channel behind Playwright's
-    // "Error: " layer and keeps its code.
+    // A page-thrown Error object crosses CDP rendered as "Error: message",
+    // byte-identical to the wrapped genuine failure, so on the evaluate
+    // channel even the wrapped strict-mode form fails closed; the phrase
+    // stays visible in the message for the model.
     expect(
       sanitizeOperationError(
         'locator.evaluate',
@@ -224,7 +226,18 @@ describe('operation error classification', () => {
           "locator.evaluate: Error: strict mode violation: locator('button') resolved to 2 elements:",
         ),
       ),
-    ).toMatchObject({ code: 'LOCATOR_NOT_UNIQUE' });
+    ).toMatchObject({
+      code: 'OPERATION_FAILED',
+      message: expect.stringContaining('strict mode violation'),
+    });
+    expect(
+      sanitizeOperationError(
+        'locator.evaluateHandle',
+        new Error(
+          "locator.evaluateHandle: Error: strict mode violation: locator('button') resolved to 2 elements:",
+        ),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
     // The same phrases stay classified on channels that never run page code.
     expect(
       sanitizeOperationError('locator.click', new Error('Target crashed ')),

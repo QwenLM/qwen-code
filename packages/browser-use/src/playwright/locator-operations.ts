@@ -99,9 +99,10 @@ export async function executeLocatorOperation(
           async (element, budgetMs) => {
             element.scrollIntoView({ block: 'center', inline: 'nearest' });
             // A located wrapper (picture/figure) must resolve to the media it
-            // contains: document order puts a wrapping anchor before its
-            // image, so try media elements before anchors and keep the first
-            // candidate that actually exposes a URL.
+            // contains, and a located anchor's own href must not win over the
+            // media inside it: probe media properties across every candidate
+            // first, and read an anchor's href only as the file-link fallback
+            // when no candidate exposes a media URL.
             const candidates = [
               element,
               ...element.querySelectorAll('img, video, source'),
@@ -134,10 +135,14 @@ export async function executeLocatorOperation(
               url =
                 readString(candidate, 'currentSrc') ??
                 readString(candidate, 'src') ??
-                readString(candidate, 'href') ??
                 readSrcset(candidate);
               if (url !== null) break;
             }
+            if (url === null)
+              for (const candidate of candidates) {
+                url = readString(candidate, 'href');
+                if (url !== null) break;
+              }
             if (url === null)
               throw new Error(
                 'Matched element does not expose a downloadable URL',

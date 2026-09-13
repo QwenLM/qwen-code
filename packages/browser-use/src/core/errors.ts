@@ -70,22 +70,24 @@ export function sanitizeOperationError(
   // page-thrown Error arrives behind an "Error: " wrapper — neither may pick
   // the code, so text phrases match only at the start of the first line.
   const firstLine = failure.split('\n', 1)[0] ?? '';
-  // Page code runs only on Playwright's evaluate channel, so a page-thrown
-  // primitive string arrives verbatim — behind no wrapper — only under an
-  // evaluate apiName. Crash/close/detach phrases from that channel are
-  // page-controlled text, so they fail closed to OPERATION_FAILED there.
+  // Page code runs only on Playwright's evaluate channel, so text arriving
+  // under an evaluate apiName is page-controlled whether it is wrapped (a
+  // page-thrown Error renders as "Error: message") or not (a page-thrown
+  // primitive arrives verbatim). Every text phrase therefore fails closed to
+  // OPERATION_FAILED there; the phrase stays visible in the message.
   const pageChannel = apiName !== undefined && /evaluate/i.test(apiName);
   if (!pageChannel && /^(?:target|page) crashed/i.test(firstLine))
     return new BrowserRuntimeError('STALE_TAB', message);
   // A genuine strict-mode failure crosses CDP as the raw exception
-  // description, so Playwright's own phrase sits behind an "Error: " layer.
-  // On the evaluate channel only that wrapped form may classify: a
-  // page-thrown primitive arrives unwrapped, and the element count is one
-  // character of page-authored text, so it cannot tell a lookalike apart.
-  const strictMode = pageChannel
-    ? /^Error: strict mode violation: .* resolved to \d+ elements:/i
-    : /^(?:Error: )?strict mode violation: .* resolved to \d+ elements:/i;
-  if (strictMode.test(firstLine))
+  // description, so Playwright's own phrase sits behind an "Error: " layer —
+  // the same rendering a page-thrown Error produces, so the wrapped form
+  // cannot classify on the evaluate channel either.
+  if (
+    !pageChannel &&
+    /^(?:Error: )?strict mode violation: .* resolved to \d+ elements:/i.test(
+      firstLine,
+    )
+  )
     return new BrowserRuntimeError('LOCATOR_NOT_UNIQUE', message);
   if (
     !pageChannel &&

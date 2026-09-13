@@ -705,6 +705,36 @@ describe('locator.downloadMedia', () => {
     );
   });
 
+  it('prefers contained media over the located anchor\u2019s own href', async () => {
+    const f = downloadFixture({});
+    Object.assign(f.element, { href: '/products/42' });
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ src: 'https://cdn.example.com/photo.jpg' }]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/photo.jpg',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('downloads the located anchor\u2019s own href when it wraps no media', async () => {
+    const f = downloadFixture({});
+    Object.assign(f.element, { href: 'https://example.com/report.pdf' });
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://example.com/report.pdf',
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(f.anchor.download).toBe('report.pdf');
+  });
+
   it('reads the first srcset URL when a matched source exposes no src', async () => {
     const f = downloadFixture({});
     f.element.querySelectorAll.mockImplementation((selector: string) =>
