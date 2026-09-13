@@ -404,6 +404,38 @@ describe('prependMissingSystemReminders', () => {
     ).toBe(`${first}\n\n${text}`);
   });
 
+  it('does not stack a block the pile already carries behind another block', () => {
+    // The re-arm accumulator passes the armed pile as `text`: a pile led
+    // by one block must still recognize a re-armed copy of a later block,
+    // or every abort appends it again and the pile grows without bound.
+    const first = '<system-reminder>\nrecovered\n</system-reminder>';
+    const second = '<system-reminder>\nsteering\n</system-reminder>';
+    const pile = `${first}\n\n${second}\n\n`;
+    expect(prependMissingSystemReminders(`${second}\n\n`, pile)).toBe(pile);
+  });
+
+  it('keeps the pile stable across repeated re-arms of the same block set', () => {
+    const first = '<system-reminder>\nrecovered\n</system-reminder>';
+    const second = '<system-reminder>\nsteering\n</system-reminder>';
+    const rearm = `${first}\n\n${second}\n\n`;
+    let pile = rearm;
+    for (let i = 0; i < 3; i++) {
+      pile = prependMissingSystemReminders(rearm, pile);
+    }
+    expect(pile).toBe(rearm);
+  });
+
+  it('still arms a block the text only quotes mid-string', () => {
+    // Membership is limited to the text's own LEADING block run: a block
+    // the user's own prompt quotes mid-string is content, not a delivered
+    // copy, so the armed block must still be prepended.
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    const text = `explain ${envelope} please`;
+    expect(prependMissingSystemReminders(`${envelope}\n\n`, text)).toBe(
+      `${envelope}\n\n${text}`,
+    );
+  });
+
   it('returns the text unchanged for an empty envelope run', () => {
     expect(prependMissingSystemReminders('', 'review this')).toBe(
       'review this',

@@ -3263,7 +3263,7 @@ describe('AppContainer State Management', () => {
       }));
       mockedRestorePromptStash.mockImplementation(
         (_targetDir, _currentText, onRestore) => {
-          onRestore(stashedText);
+          onRestore(stashedText, 1);
           return true;
         },
       );
@@ -3304,6 +3304,57 @@ describe('AppContainer State Management', () => {
       expect(setText).toHaveBeenCalledTimes(2);
     });
 
+    it('restores a current-build prompt stash verbatim, keeping a user-authored leading envelope', () => {
+      // A stash this build writes (format version 2) holds only composer
+      // text — user content by construction — so a user-pasted leading
+      // <system-reminder> block survives the restore instead of being
+      // shape-stripped like a legacy (version 1) stash.
+      const stashedText =
+        '<system-reminder>\nuser pasted note\n</system-reminder>\n\nuser text';
+      const mockQueueMessage = vi.fn();
+      const setText = vi.fn();
+      mockedUseTextBuffer.mockImplementation(() => ({
+        text: '',
+        setText,
+      }));
+      mockedRestorePromptStash.mockImplementation(
+        (_targetDir, _currentText, onRestore) => {
+          onRestore(stashedText, 2);
+          return true;
+        },
+      );
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(setText).toHaveBeenCalledWith(stashedText);
+      capturedUIActions.handleFinalSubmit(stashedText, {
+        submittedPrompt: stashedText,
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        stashedText,
+        false,
+        undefined,
+      );
+    });
+
     it('clears restored prompt undo history after a manual clear', () => {
       const stashedText =
         '<system-reminder>\ngenerated context\n</system-reminder>\n\nuser text';
@@ -3324,7 +3375,7 @@ describe('AppContainer State Management', () => {
       });
       mockedRestorePromptStash.mockImplementation(
         (_targetDir, _currentText, onRestore) => {
-          onRestore(stashedText);
+          onRestore(stashedText, 1);
           return true;
         },
       );
@@ -3475,7 +3526,7 @@ describe('AppContainer State Management', () => {
       }));
       mockedRestorePromptStash.mockImplementation(
         (_targetDir, _currentText, onRestore) => {
-          onRestore(stashedText);
+          onRestore(stashedText, 1);
           return true;
         },
       );
@@ -5603,6 +5654,198 @@ describe('AppContainer State Management', () => {
         `<system-reminder>\n${notice}\n</system-reminder>\n\nanother draft`,
         false,
         'another draft',
+      );
+    });
+
+    it('keeps an earlier armed notice when a later restore carries a different envelope', async () => {
+      // Both restores' producer latches are spent, so the second restore
+      // must merge its envelope with the armed one, not replace it —
+      // replacing loses the first notice for the rest of the session.
+      const notice = 'Use list_agents to inspect restored agents.';
+      const other = 'The workflow run resumed.';
+      const modelText = `<system-reminder>\n${notice}\n</system-reminder>\n\nreview this`;
+      const queuedModelText = `<system-reminder>\n${other}\n</system-reminder>\n\nanother draft`;
+      const mockSetText = vi.fn();
+      const mockQueueMessage = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'review this' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: vi.fn().mockResolvedValue(true),
+      });
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: vi.fn().mockReturnValue(false),
+        stripOrphanedUserEntriesFromHistory: vi.fn(),
+      } as unknown as LlmClient);
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        // Empty during the cancel itself (its own queue-drain check), then
+        // holding the enveloped draft the user pops afterwards.
+        popAllMessages: vi.fn().mockReturnValueOnce(null).mockReturnValue({
+          kind: 'user',
+          modelText: queuedModelText,
+          submittedPrompt: 'another draft',
+          turnKey: 'k1',
+        }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Arm the first notice via a cancel-restore, then restore a queued
+      // draft that carries a DIFFERENT envelope.
+      triggerCancel(cancelInfoFor('review this', 1, 'review this', modelText));
+      expect(mockSetText).toHaveBeenCalledWith('review this');
+
+      const poppedText = capturedUIActions.popAllQueuedMessages();
+      expect(poppedText).toBe('another draft');
+
+      capturedUIActions.handleFinalSubmit('another draft', {
+        submittedPrompt: 'another draft',
+      });
+      // Both notices ride the resubmit: the second restore's envelope leads
+      // (newest first), the earlier notice survives behind it.
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        `<system-reminder>\n${other}\n</system-reminder>\n\n<system-reminder>\n${notice}\n</system-reminder>\n\nanother draft`,
+        false,
+        'another draft',
+      );
+    });
+
+    it('keeps an armed notice when an unrelated dispatched turn is cancelled', async () => {
+      // The dispatched cancel already delivered its own envelope, so only
+      // that copy is declined; a notice armed by an earlier source must
+      // survive and the delivered copy must not re-fire.
+      const notice = 'Use list_agents to inspect restored agents.';
+      const delivered = 'The workflow run resumed.';
+      const modelText = `<system-reminder>\n${notice}\n</system-reminder>\n\nreview this`;
+      const unrelatedModelText = `<system-reminder>\n${delivered}\n</system-reminder>\n\nunrelated prompt`;
+      const mockSetText = vi.fn();
+      const mockQueueMessage = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'review this' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: vi.fn().mockResolvedValue(true),
+      });
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: vi.fn().mockReturnValue(false),
+        stripOrphanedUserEntriesFromHistory: vi.fn(),
+      } as unknown as LlmClient);
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Arm the first notice via a rewind cancel-restore (the turn never
+      // reached the API, so the re-arm survives).
+      triggerCancel(cancelInfoFor('review this', 1, 'review this', modelText));
+      expect(mockSetText).toHaveBeenCalledWith('review this');
+
+      // Cancel an unrelated DISPATCHED turn that carried a different
+      // envelope: its own copy was already delivered and must not re-arm,
+      // but the earlier notice is still owed.
+      triggerCancel({
+        pendingItem: { type: 'gemini_thought', text: 'thinking…' },
+        lastTurnUserItem: {
+          id: 3,
+          text: 'unrelated prompt',
+          modelText: unrelatedModelText,
+        },
+        canUndoLastLoggedUserMessage: true,
+        turnProducedMeaningfulContent: true,
+        turnDispatchedToApi: true,
+      });
+      expect(mockSetText).toHaveBeenCalledWith('unrelated prompt');
+
+      capturedUIActions.handleFinalSubmit('fresh prompt', {
+        submittedPrompt: 'fresh prompt',
+      });
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        `<system-reminder>\n${notice}\n</system-reminder>\n\nfresh prompt`,
+        false,
+        'fresh prompt',
       );
     });
 

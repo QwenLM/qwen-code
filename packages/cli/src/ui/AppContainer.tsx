@@ -1579,12 +1579,15 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
     restoredPromptStashTargetsRef.current.add(promptStashTargetDir);
-    restorePromptStash(promptStashTargetDir, buffer.text, (text) => {
+    restorePromptStash(promptStashTargetDir, buffer.text, (text, version) => {
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
-      // A stash written by an older build can hold the model-facing text
-      // with its injected envelope; restore only the user-visible form.
-      buffer.setText(stripLeadingSystemReminders(text));
+      // A version-1 stash was written by an older build and can hold the
+      // model-facing text with its injected envelope; restore only the
+      // user-visible form. A version-2 stash holds composer text only —
+      // user content by construction — so a user-pasted leading
+      // <system-reminder> block survives verbatim.
+      buffer.setText(version === 1 ? stripLeadingSystemReminders(text) : text);
     });
   }, [buffer, promptStashTargetDir]);
 
@@ -2735,9 +2738,16 @@ export const AppContainer = (props: AppContainerProps) => {
       // Merge, don't overwrite: a restore carrying no envelope of its own
       // must not null one an earlier restore or deferred submit armed —
       // that notice's latch is spent, so dropping it here loses the
-      // notice for the rest of the session.
+      // notice for the rest of the session. A restore carrying a
+      // DIFFERENT envelope must not replace it either: membership-merge
+      // so both notices ride the next submit.
       pendingRestoredRemindersRef.current =
-        reminders === '' ? pendingRestoredRemindersRef.current : reminders;
+        reminders === ''
+          ? pendingRestoredRemindersRef.current
+          : prependMissingSystemReminders(
+              reminders,
+              pendingRestoredRemindersRef.current ?? '',
+            );
       submittedPromptProvenanceUnavailableRef.current = false;
       restoredPromptEditedRef.current = false;
       return displayText;
@@ -3640,6 +3650,10 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
       const restoreCancelledPrompt = (rearmReminders: boolean) => {
+        // Capture the pile before the stash arms this turn's envelopes: a
+        // dispatched cancel declines only its own copy (below), so the
+        // restore must not let it destroy a notice an earlier source armed.
+        const armedBeforeRestore = pendingRestoredRemindersRef.current;
         // `text` is the producer display text and stays the identity token;
         // the envelopes `modelText` carried are armed for the resubmit.
         buffer.setText(
@@ -3656,10 +3670,13 @@ export const AppContainer = (props: AppContainerProps) => {
         if (!rearmReminders) {
           // The cancelled turn kept its API-side copy (it was dispatched),
           // so the envelope was already delivered once — re-arming would
-          // deliver the one-shot notice twice. When the turn never reached
-          // the API the notice has not been delivered anywhere, so the
-          // stash's armed envelope must survive.
-          pendingRestoredRemindersRef.current = null;
+          // deliver the one-shot notice twice. Restore the pile to what was
+          // armed BEFORE this restore rather than clearing it: a notice
+          // armed by an earlier source (a pre-dispatch abort, an earlier
+          // restore) is still owed. When the turn never reached the API the
+          // notice has not been delivered anywhere, so the stash's armed
+          // envelope must survive.
+          pendingRestoredRemindersRef.current = armedBeforeRestore;
         }
       };
 

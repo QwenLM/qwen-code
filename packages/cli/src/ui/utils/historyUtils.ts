@@ -197,16 +197,38 @@ export function splitLeadingSystemReminders(text: string): {
 
 /**
  * Prepends the armed reminder `envelopes` to `text`, skipping each block
- * that already leads `text`. The re-arm runs after the submit path's
- * injectors, and the one injector that can re-fire (the un-latched
- * workflow-steering notice) would otherwise stack a duplicate copy on every
- * cancel/resubmit cycle. Comparison is per envelope block, so a partially
- * re-fired prefix still re-arms the blocks that did not re-fire.
+ * that `text`'s own leading envelope run already carries. The re-arm runs
+ * after the submit path's injectors, and the one injector that can re-fire
+ * (the un-latched workflow-steering notice) would otherwise stack a
+ * duplicate copy on every cancel/resubmit cycle. Comparison is per envelope
+ * block, so a partially re-fired prefix still re-arms the blocks that did
+ * not re-fire.
+ *
+ * Membership is over the whole leading block run, not just the first block:
+ * the re-arm accumulator (AppContainer's `rearmRestoredReminders`) passes
+ * the armed pile as `text`, and a pile led by block A must still recognize
+ * a re-armed copy of block B sitting behind it — a prefix-only test would
+ * append B again on every abort and grow the pile without bound. A block
+ * the user's own text quotes mid-string does NOT count: only the leading
+ * run is injector-shaped, so an armed block whose twin is user content
+ * further down still prepends.
  */
 export function prependMissingSystemReminders(
   envelopes: string,
   text: string,
 ): string {
+  const present = new Set<string>();
+  let scan = text;
+  while (scan.startsWith(SYSTEM_REMINDER_OPEN)) {
+    const close = scan.indexOf(
+      SYSTEM_REMINDER_CLOSE,
+      SYSTEM_REMINDER_OPEN.length,
+    );
+    if (close === -1) break;
+    const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
+    present.add(scan.slice(0, blockEnd));
+    scan = scan.slice(blockEnd).replace(/^\s+/, '');
+  }
   let missing = '';
   let rest = envelopes;
   while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
@@ -218,7 +240,7 @@ export function prependMissingSystemReminders(
     const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
     const block = rest.slice(0, blockEnd);
     rest = rest.slice(blockEnd).replace(/^\s+/, '');
-    if (!text.startsWith(block)) {
+    if (!present.has(block)) {
       missing += `${block}\n\n`;
     }
   }
