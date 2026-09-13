@@ -11,23 +11,46 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const workspace = vi.hoisted(() => ({ baseUrl: 'http://localhost' }));
 const fit = vi.hoisted(() => vi.fn());
-const terminal = vi.hoisted(() => ({
-  options: {} as Record<string, unknown>,
-  cols: 80,
-  rows: 24,
-  loadAddon: vi.fn(),
-  open: vi.fn(),
-  reset: vi.fn(),
-  write: vi.fn(),
-  writeln: vi.fn(),
-  focus: vi.fn(),
-  blur: vi.fn(),
-  refresh: vi.fn(),
-  dispose: vi.fn(),
-  onData: vi.fn((_listener: (data: string) => void) => ({ dispose: vi.fn() })),
-}));
+const { terminal, terminalInstances, createMockTerminal } = vi.hoisted(() => {
+  const createMockTerminal = () => ({
+    options: {} as Record<string, unknown>,
+    cols: 80,
+    rows: 24,
+    loadAddon: vi.fn(),
+    open: vi.fn(),
+    resize: vi.fn(),
+    write: vi.fn<(text: string, callback?: () => void) => void>(),
+    writeln: vi.fn(),
+    focus: vi.fn(),
+    blur: vi.fn(),
+    refresh: vi.fn(),
+    dispose: vi.fn(),
+    onData: vi.fn((_listener: (data: string) => void) => ({
+      dispose: vi.fn(),
+    })),
+    parser: {
+      registerCsiHandler: vi.fn(
+        (_id: { final: string }, _handler: () => boolean) => ({
+          dispose: vi.fn(),
+        }),
+      ),
+    },
+  });
+  return {
+    terminal: createMockTerminal(),
+    terminalInstances: [] as Array<ReturnType<typeof createMockTerminal>>,
+    createMockTerminal,
+  };
+});
 
-vi.mock('@xterm/xterm', () => ({ Terminal: vi.fn(() => terminal) }));
+vi.mock('@xterm/xterm', () => ({
+  Terminal: vi.fn((options: Record<string, unknown>) => {
+    const instance = terminalInstances.length ? createMockTerminal() : terminal;
+    instance.options = options;
+    terminalInstances.push(instance);
+    return instance;
+  }),
+}));
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: vi.fn(() => ({ fit })),
 }));
@@ -69,7 +92,7 @@ class FakeWebSocket {
   onerror: (() => void) | null = null;
   onclose: ((event: CloseEvent) => void) | null = null;
   readonly send = vi.fn();
-  readonly close = vi.fn(() => {
+  readonly close = vi.fn((_code?: number, _reason?: string) => {
     this.readyState = FakeWebSocket.CLOSED;
   });
 
@@ -102,6 +125,7 @@ describe('TerminalPanel', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    terminalInstances.length = 0;
     workspace.baseUrl = 'http://localhost';
     FakeWebSocket.instances.length = 0;
     vi.stubGlobal('WebSocket', FakeWebSocket);
@@ -144,6 +168,14 @@ describe('TerminalPanel', () => {
   it('keeps binary PTY output distinct from text control frames', async () => {
     const ws = render();
     act(() => ws.open());
+    act(() => {
+      ws.message(
+        '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":false}',
+      );
+      ws.message(new ArrayBuffer(0));
+      terminalInstances[1]!.write.mock.calls[0]?.[1]?.();
+    });
+    const restored = terminalInstances[1]!;
 
     await act(async () => {
       ws.message(
@@ -153,14 +185,14 @@ describe('TerminalPanel', () => {
       await Promise.resolve();
     });
 
-    expect(terminal.write).toHaveBeenCalledWith(
+    expect(restored.write).toHaveBeenCalledWith(
       '\x00{"type":"exit","exitCode":0}',
     );
-    expect(terminal.writeln).toHaveBeenCalledWith(
+    expect(restored.writeln).toHaveBeenCalledWith(
       expect.stringContaining('[Error: denied]'),
     );
 
-    const handleInput = terminal.onData.mock.calls.at(-1)?.[0];
+    const handleInput = restored.onData.mock.calls.at(-1)?.[0];
     ws.send.mockClear();
     act(() => handleInput?.('\x00{"type":"release"}'));
     const sent = ws.send.mock.calls[0]?.[0];
@@ -192,20 +224,102 @@ describe('TerminalPanel', () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
-  it('reconnects transient failures without clearing the notice early', async () => {
+  it('keeps the old terminal interactive until reconnect replay finishes', async () => {
     const ws = render();
     act(() => ws.open());
-    terminal.reset.mockClear();
     act(() => ws.closeWith(1006));
 
     expect(terminal.writeln).toHaveBeenCalledWith(
       expect.stringContaining('Connection lost'),
     );
-    expect(terminal.reset).not.toHaveBeenCalled();
+    expect(terminal.dispose).not.toHaveBeenCalled();
     await act(async () => vi.advanceTimersByTimeAsync(500));
     expect(FakeWebSocket.instances).toHaveLength(2);
     act(() => FakeWebSocket.instances[1]!.open());
-    expect(terminal.reset).toHaveBeenCalledOnce();
+    const reconnected = FakeWebSocket.instances[1]!;
+    act(() => {
+      reconnected.message(
+        '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":true}',
+      );
+      reconnected.message(
+        new TextEncoder().encode('history\x1b]11;?\x07').buffer,
+      );
+      reconnected.message(new TextEncoder().encode('live\x1b]11;?\x07').buffer);
+    });
+    const restored = terminalInstances[1]!;
+    expect(restored.write.mock.calls.map(([text]) => text)).toEqual([
+      'history\x1b]11;?\x07',
+      'live\x1b]11;?\x07',
+    ]);
+    expect(restored.onData).not.toHaveBeenCalled();
+    const oldInput = terminal.onData.mock.calls[0]![0];
+    reconnected.send.mockClear();
+    act(() => oldInput('k'));
+    expect(new TextDecoder().decode(reconnected.send.mock.calls[0]![0])).toBe(
+      'k',
+    );
+    expect(terminal.dispose).not.toHaveBeenCalled();
+
+    act(() => restored.write.mock.calls[0]![1]!());
+    expect(terminal.dispose).toHaveBeenCalledOnce();
+    expect(restored.onData).toHaveBeenCalledOnce();
+    expect(restored.parser.registerCsiHandler.mock.calls[0]![1]()).toBe(true);
+    act(() => restored.onData.mock.calls[0]![0]('live reply'));
+    expect(
+      new TextDecoder().decode(reconnected.send.mock.calls.at(-1)![0]),
+    ).toBe('live reply');
+  });
+
+  it('allows first-connection queries and leaves DA to the browser without a server responder', () => {
+    const ws = render();
+    act(() => {
+      ws.open();
+      ws.message(
+        '\x00{"type":"snapshot","replay":false,"handlesPrimaryDa":false}',
+      );
+      ws.message(new TextEncoder().encode('\x1b[c').buffer);
+    });
+    const next = terminalInstances[1]!;
+    expect(next.onData).toHaveBeenCalledOnce();
+    expect(next.parser.registerCsiHandler.mock.calls[0]![1]()).toBe(false);
+    act(() => next.onData.mock.calls[0]![0]('\x1b[?1;2c'));
+    expect(new TextDecoder().decode(ws.send.mock.calls.at(-1)![0])).toBe(
+      '\x1b[?1;2c',
+    );
+  });
+
+  it('disposes an interrupted replay and ignores its late write callback', () => {
+    const ws = render();
+    act(() => {
+      ws.open();
+      ws.message(
+        '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":true}',
+      );
+      ws.message(new TextEncoder().encode('history').buffer);
+      ws.closeWith(1006);
+    });
+    const next = terminalInstances[1]!;
+    expect(next.dispose).toHaveBeenCalledOnce();
+    act(() => next.write.mock.calls[0]![1]!());
+    expect(terminal.dispose).not.toHaveBeenCalled();
+    expect(next.onData).not.toHaveBeenCalled();
+  });
+
+  it('rejects an old server that does not mark the snapshot boundary', () => {
+    const ws = render();
+    act(() => {
+      ws.open();
+      ws.message(new TextEncoder().encode('unmarked history').buffer);
+    });
+    expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+    expect(ws.send.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      ws.close.mock.invocationCallOrder[0]!,
+    );
+    expect(ws.close).toHaveBeenCalledWith(4002, 'Terminal protocol mismatch');
+    const sent = ws.send.mock.calls.length;
+    act(() => releaseWebTerminal('terminal:one'));
+    expect(ws.send).toHaveBeenCalledTimes(sent);
+    expect(terminal.write).not.toHaveBeenCalled();
   });
 
   it('sends an explicit release control when the tab is closed', () => {
@@ -225,7 +339,7 @@ describe('TerminalPanel', () => {
     );
 
     expect(FakeWebSocket.instances[0]?.url).toBe(
-      'ws://localhost/base/terminal?terminalId=terminal%3Adetached&cwd=%2Fworkspace&release=1',
+      'ws://localhost/base/terminal?terminalId=terminal%3Adetached&replay=1&cwd=%2Fworkspace&release=1',
     );
   });
 
@@ -316,6 +430,7 @@ describe('TerminalPanel', () => {
     expect(url.pathname).toBe('/terminal');
     expect(url.searchParams.get('terminalId')).toBe('terminal:one');
     expect(url.searchParams.get('cwd')).toBe('/workspace');
+    expect(url.searchParams.get('replay')).toBe('1');
 
     act(() => ws.open());
     expect(ws.send).toHaveBeenCalledWith(

@@ -95,6 +95,212 @@ function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {
 }
 
 describe('ModelManagementSection', () => {
+  it.each([
+    {
+      result: { updated: true as const, requiresRestart: true },
+      notice: 'Saved. Restart existing sessions to apply.',
+    },
+    {
+      result: {
+        updated: true as const,
+        requiresRestart: true,
+        runtimeSync: { status: 'applied' as const },
+      },
+      notice: 'Saved. Restart existing sessions to apply.',
+    },
+    {
+      result: {
+        updated: true as const,
+        requiresRestart: true,
+        runtimeSync: { status: 'failed' as const },
+      },
+      notice:
+        'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+    },
+  ])(
+    'reports the context-window save result ($result)',
+    async ({ result, notice }) => {
+      const onUpdateContextWindow = vi.fn().mockResolvedValue(result);
+      const { container } = renderSection({
+        providers: [],
+        configurations: [
+          {
+            key: 'saved-model',
+            authType: 'openai',
+            modelId: 'gpt-4o',
+            contextWindowSize: 65536,
+            purpose: 'chat',
+            canEditContextWindow: true,
+          },
+        ],
+        onUpdateContextWindow,
+      });
+      act(() => buttonByText(container, 'Edit context window').click());
+      await act(async () => {
+        container
+          .querySelector('form')!
+          .dispatchEvent(
+            new Event('submit', { bubbles: true, cancelable: true }),
+          );
+      });
+      expect(onUpdateContextWindow).toHaveBeenCalledExactlyOnceWith(
+        'saved-model',
+        65536,
+      );
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        notice,
+      );
+    },
+  );
+
+  it('labels an ambiguous saved row and keeps its exact delete action without an ineffective window editor', () => {
+    const { container, props } = renderSection({
+      onUpdateContextWindow: vi.fn(),
+      configurations: [
+        {
+          key: 'alias-key',
+          authType: 'openai',
+          modelId: 'gpt-4o',
+          name: 'Saved alias',
+          baseUrl: 'https://api.openai.com/v1',
+          purpose: 'chat',
+          contextWindowSize: 8192,
+          canEditContextWindow: false,
+        },
+      ],
+    });
+    expect(
+      container.querySelector('[aria-label="Delete GPT-4o"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('Saved configuration');
+    expect(container.textContent).toContain(
+      'Multiple configurations share this route',
+    );
+    expect(
+      container.querySelector('[aria-label="Edit context window Saved alias"]'),
+    ).toBeNull();
+    act(() =>
+      (
+        container.querySelector(
+          '[aria-label="Delete Saved alias"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+    act(() => buttonByText(container, 'Confirm').click());
+    expect(props.onDeleteModel).toHaveBeenCalledWith({
+      key: 'alias-key',
+      authType: 'openai',
+      modelId: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1',
+    });
+  });
+
+  it('pairs rows by persisted key even when their displayed endpoint differs', () => {
+    const configured = providers();
+    configured[0].models[0].configurationKey = 'exact-key';
+    const { container } = renderSection({
+      providers: configured,
+      onUpdateContextWindow: vi.fn(),
+      configurations: [
+        {
+          key: 'exact-key',
+          authType: 'openai',
+          modelId: 'gpt-4o',
+          name: 'GPT-4o',
+          baseUrl: 'https://api.openai.com/v1',
+          purpose: 'chat',
+        },
+      ],
+    });
+    expect(
+      container.querySelectorAll('[aria-label="Edit context window GPT-4o"]'),
+    ).toHaveLength(1);
+    expect(
+      container.querySelectorAll('[aria-label="Delete GPT-4o"]'),
+    ).toHaveLength(1);
+  });
+
+  it('keeps distinct persisted service rows and deletes their exact key without selecting them', () => {
+    const { container, props } = renderSection({
+      providers: [],
+      configurations: ['first', 'second'].map((key) => ({
+        key,
+        authType: 'openai',
+        modelId: 'image',
+        name: key,
+        baseUrl: 'https://media.example/v1',
+        purpose: 'image',
+      })),
+    });
+    expect(
+      container.querySelector('[aria-label="Delete first"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Delete second"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('Image generation');
+    expect(
+      Array.from(container.querySelectorAll('button')).filter(
+        (button) => button.textContent === 'Set current',
+      ),
+    ).toHaveLength(0);
+    act(() =>
+      (
+        container.querySelector(
+          '[aria-label="Delete second"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+    act(() => buttonByText(container, 'Confirm').click());
+    expect(props.onDeleteModel).toHaveBeenCalledWith({
+      key: 'second',
+      authType: 'openai',
+      modelId: 'image',
+      baseUrl: 'https://media.example/v1',
+    });
+    expect(props.onSelectModel).not.toHaveBeenCalled();
+  });
+  it.each([1, 2])(
+    'deduplicates %s occurrences of a persisted key and labels empty names with the model ID',
+    (count) => {
+      const configuration = {
+        key: 'same',
+        authType: 'openai',
+        modelId: 'image',
+        name: '',
+        purpose: 'image' as const,
+      };
+      const { container } = renderSection({
+        providers: [],
+        configurations: Array.from({ length: count }, () => configuration),
+        onUpdateContextWindow: vi.fn().mockResolvedValue(undefined),
+      });
+      expect(
+        container.querySelectorAll('[aria-label="Delete image"]'),
+      ).toHaveLength(1);
+      expect(
+        container.querySelectorAll('[aria-label="Edit context window image"]'),
+      ).toHaveLength(count === 1 ? 1 : 0);
+    },
+  );
+
+  it('shows model configuration metadata and only declared input capabilities', () => {
+    const configured = providers();
+    Object.assign(configured[0].models[0], {
+      description: 'A configured model',
+      contextLimit: 131072,
+      modalities: { image: true, audio: true, video: false },
+      envKey: 'CUSTOM_MODEL_KEY',
+    });
+    const { container } = renderSection({ providers: configured });
+    expect(container.textContent).toContain('gpt-4o');
+    expect(container.textContent).toContain('A configured model');
+    expect(container.textContent).toContain('131,072');
+    expect(container.textContent).toContain('Image');
+    expect(container.textContent).toContain('Audio');
+    expect(container.textContent).not.toContain('Video');
+    expect(container.textContent).toContain('CUSTOM_MODEL_KEY');
+  });
   it('lists models grouped by provider', () => {
     const { container } = renderSection();
     expect(container.textContent).toContain('GPT-4o');
