@@ -126,7 +126,23 @@ test('mesh shows growing replies before completion, survives reload, and replace
   agent.status = 'idle';
   agent.runtime.status = 'online';
   run.status = 'running';
+  run.progress = {
+    ...run.progress!,
+    stage: 'starting',
+    receivedAt: Date.now(),
+  };
+  const starting = page.getByRole('status').filter({
+    hasText: 'stream-worker 正在启动…',
+  });
+  await expect(starting).toBeVisible();
+  await page.getByRole('button', { name: '收起活动', exact: true }).click();
+  await expect(activity).toBeHidden();
+  await expect(starting).toBeVisible();
+  await page.getByRole('button', { name: '展开活动', exact: true }).click();
+  await expect(activity).toBeVisible();
+  run.progress = { ...run.progress, stage: 'thinking' };
   await expect(activity).toContainText('思考中');
+  await expect(starting).toHaveCount(0);
   for (const thought of [
     'Checking the task.',
     'Checking the task. Choosing a collaborator.',
@@ -139,6 +155,7 @@ test('mesh shows growing replies before completion, survives reload, and replace
     'Checking the task. Choosing a collaborator.',
   );
   const transcript = page.locator('[data-web-shell-message-list]:visible');
+  await page.getByRole('button', { name: '收起活动', exact: true }).click();
   for (const text of ['First fragment.', 'First fragment. Second fragment.']) {
     run.progress = {
       ...run.progress,
@@ -152,6 +169,8 @@ test('mesh shows growing replies before completion, survives reload, and replace
     expect(run.status).toBe('running');
     expect(thread.posts).toHaveLength(1);
   }
+  await expect(activity).toBeHidden();
+  await page.getByRole('button', { name: '展开活动', exact: true }).click();
   await page.screenshot({ path: info.outputPath('01-growing.png') });
   await page.reload();
   await expect(transcript).toContainText('First fragment. Second fragment.');

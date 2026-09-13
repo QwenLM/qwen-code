@@ -1,4 +1,5 @@
-import { useMemo } from 'react';
+import { useId, useMemo, useState } from 'react';
+import { LoaderCircle } from 'lucide-react';
 import { MessageList } from '../MessageList';
 import { ChatEditor } from '../ChatEditor';
 import { Button } from '../ui/button';
@@ -48,6 +49,8 @@ export function ThreadChat({
   onOpenThread: (threadId: string) => void;
 }) {
   const customization = useWebShellCustomization();
+  const [activityOpen, setActivityOpen] = useState(true);
+  const activityId = useId();
   const { live, past } = buildRunRows(thread.runs);
   const messages = useMemo<Message[]>(
     () =>
@@ -122,6 +125,15 @@ export function ThreadChat({
         <Button variant="outline" onClick={onDetails}>
           Task details
         </Button>
+        <Button
+          variant="ghost"
+          className="hidden shrink-0 lg:inline-flex"
+          aria-expanded={activityOpen}
+          aria-controls={activityId}
+          onClick={() => setActivityOpen((open) => !open)}
+        >
+          {activityOpen ? '收起活动' : '展开活动'}
+        </Button>
       </header>
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
@@ -138,6 +150,26 @@ export function ThreadChat({
             </WebShellCustomizationProvider>
           </div>
           <div className="p-4">
+            {live
+              .filter(
+                ({ run }) =>
+                  run.status === 'running' &&
+                  run.progress?.stage === 'starting' &&
+                  Date.now() - run.progress.receivedAt <= 20000,
+              )
+              .map(({ run }) => (
+                <div
+                  key={run.id}
+                  role="status"
+                  className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"
+                >
+                  <LoaderCircle
+                    aria-hidden="true"
+                    className="size-4 shrink-0 animate-spin motion-reduce:animate-none"
+                  />
+                  {run.agentName} 正在启动…
+                </div>
+              ))}
             {preview && (
               <div role="status" className="mb-2 text-xs text-muted-foreground">
                 {summarizePreview(preview)}
@@ -193,7 +225,10 @@ export function ThreadChat({
             />
           </div>
         </div>
-        <aside className="hidden w-60 shrink-0 overflow-y-auto border-l border-border p-4 lg:block">
+        <aside
+          id={activityId}
+          className={`hidden w-60 shrink-0 overflow-y-auto border-l border-border p-4${activityOpen ? ' lg:block' : ''}`}
+        >
           <h2 className="mb-3 text-sm font-medium">Agent activity</h2>
           {live.map((row) => (
             <RunRowView
