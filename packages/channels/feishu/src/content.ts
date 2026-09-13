@@ -193,13 +193,11 @@ export function parseFeishuContent(
         // Code examples are not resource references, so keys are harvested
         // from fence-stripped prose. Remote URLs are never fetched.
         const prose = stripFencedCode(text);
-        prose.replace(
+        for (const match of prose.matchAll(
           /!\[[^\]\n]*\]\((img_[A-Za-z0-9_-]+)\)/g,
-          (_match, key: string) => {
-            add('image', key);
-            return '';
-          },
-        );
+        )) {
+          add('image', match[1]);
+        }
         // Authorship is judged on the RETURNED text (minus image references
         // and at-tags), not on the harvest-stripped variant.
         const visible = text
