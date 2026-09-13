@@ -284,12 +284,15 @@ const makeMessages = (n: number): AgentMessage[] =>
     timestamp: Date.now(),
   }));
 
-const makeCore = (messages: AgentMessage[]) => {
+const makeCore = (
+  messages: AgentMessage[],
+  pendingApprovals: ReadonlyMap<string, unknown> = new Map(),
+) => {
   const emitter = { on: vi.fn(), off: vi.fn() };
   return {
     getEventEmitter: () => emitter,
     getMessages: () => messages,
-    getPendingApprovals: () => new Map(),
+    getPendingApprovals: () => pendingApprovals,
     getLiveOutputs: () => new Map(),
     getShellPids: () => new Map(),
     runtimeContext: { getTargetDir: () => '' },
@@ -317,34 +320,39 @@ const MenuProbe = () => {
   return null;
 };
 
-const renderContent = (
+const contentElement = (
   uiState: UIState,
   core: unknown,
   { allExpanded = true }: { allExpanded?: boolean } = {},
-) =>
-  render(
-    <KeypressProvider kittyProtocolEnabled={false}>
-      <ContextMenuProvider>
-        <UIStateContext.Provider value={uiState}>
-          <ThoughtExpandedProvider
-            value={{
-              allExpanded,
-              expandedHeadIds: new Set<number>(),
-              toggle: () => {},
-            }}
-          >
-            <AgentChatContent
-              core={core as never}
-              interactiveAgent={makeInteractiveAgent()}
-              instanceKey="teammate@team"
-              modelName="teammate"
-            />
-            <MenuProbe />
-          </ThoughtExpandedProvider>
-        </UIStateContext.Provider>
-      </ContextMenuProvider>
-    </KeypressProvider>,
-  );
+) => (
+  <KeypressProvider kittyProtocolEnabled={false}>
+    <ContextMenuProvider>
+      <UIStateContext.Provider value={uiState}>
+        <ThoughtExpandedProvider
+          value={{
+            allExpanded,
+            expandedHeadIds: new Set<number>(),
+            toggle: () => {},
+          }}
+        >
+          <AgentChatContent
+            core={core as never}
+            interactiveAgent={makeInteractiveAgent()}
+            instanceKey="teammate@team"
+            modelName="teammate"
+          />
+          <MenuProbe />
+        </ThoughtExpandedProvider>
+      </UIStateContext.Provider>
+    </ContextMenuProvider>
+  </KeypressProvider>
+);
+
+const renderContent = (
+  uiState: UIState,
+  core: unknown,
+  options?: { allExpanded?: boolean },
+) => render(contentElement(uiState, core, options));
 
 const PAGE_UP = '\x1b[5~';
 const settle = () => act(async () => {});
@@ -528,6 +536,41 @@ describe('AgentChatContent teammate-tab scrolling (#9507)', () => {
     expect(contentMouseControllerSpy).toHaveBeenCalledWith(
       expect.objectContaining({ isActive: true }),
     );
+  });
+
+  it('VP mode: a pending teammate approval pulls the tail back and keeps the viewport quiet', async () => {
+    // On the VP path a teammate's pending approval is a tail item inside the
+    // windowed list, and `dialogsVisible` is derived from main-app dialog state
+    // only — a scheduler approval never reaches it. Scrolling that tail out of
+    // the render range unmounts the confirmation dialog together with its key
+    // handler, which blocks the agent round with nothing on screen to answer
+    // and no timeout to recover it. The legacy `<Static>` path renders pending
+    // items outside `<Static>`, so they cannot scroll away there.
+    const approvals = new Map<string, unknown>();
+    const core = makeCore(makeMessages(40), approvals);
+    const uiState = createUIState();
+    const view = render(contentElement(uiState, core));
+    await settle();
+
+    // Control: with nothing pending the viewport owns the scroll keys.
+    expect(latestScrollableListProps().hasFocus).toBe(true);
+    await pageUpToTop(view);
+    expect(view.lastFrame()).not.toContain('user-msg-39');
+
+    // The teammate now needs an approval while the user is scrolled up.
+    approvals.set('call-1', {});
+    view.rerender(contentElement(uiState, core));
+    await settle();
+
+    // Half one: the tail is pulled back into view, so the dialog is mounted
+    // before the keys are taken away. Without this a user who scrolled up
+    // BEFORE the approval arrived would be locked out of ever scrolling back.
+    expect(view.lastFrame()).toContain('user-msg-39');
+    // Half two: the viewport goes quiet, so the tail cannot be scrolled away.
+    expect(latestScrollableListProps().hasFocus).toBe(false);
+
+    await pageUpToTop(view);
+    expect(view.lastFrame()).toContain('user-msg-39');
   });
 
   it('legacy mode: does not mount ContentMouseController (terminal still owns the mouse)', async () => {

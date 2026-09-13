@@ -200,7 +200,11 @@ export const AgentChatContent = ({
         }
       }
     },
-    { isActive: !readonly },
+    // An open right-click menu owns the keys, and KeypressContext broadcasts
+    // without consuming, so this subscriber has to go quiet itself: flipping
+    // embedded-shell focus deactivates both controllers below, which closes
+    // the menu and CLEARS the selection its Copy Selection item offers.
+    { isActive: !readonly && contextMenuOpen === null },
   );
 
   // tickRef.current in deps ensures we rebuild when events fire even if
@@ -349,13 +353,43 @@ export const AgentChatContent = ({
     ],
   );
 
+  // A teammate's pending tool approval renders its ToolConfirmationMessage as
+  // a tail item INSIDE this windowed viewport, and `dialogsVisible` is derived
+  // from main-app dialog state only (AppContainer.tsx) — a scheduler approval
+  // never reaches it. On the legacy `<Static>` path below, pending items are
+  // rendered outside `<Static>` so they can never scroll away; the VP path has
+  // no such guarantee. Scrolling the tail out of `[renderRangeStart,
+  // renderRangeEnd]` unmounts the dialog together with its `useKeypress`
+  // subscription, which blocks the agent round with nothing on screen to
+  // answer and no timeout to recover it.
+  const approvalPending = pendingApprovals.size > 0;
+
+  // Two halves, both required. Quieting the viewport alone would trap a user
+  // who scrolled up BEFORE the approval arrived — the dialog is already out of
+  // the render window and, with the scroll keys now dead, could never be
+  // brought back. So pull the tail into view first, then take the keys away.
+  const approvalScrolledRef = useRef(false);
+  useEffect(() => {
+    if (!useVirtualScroll) return;
+    if (!approvalPending) {
+      approvalScrolledRef.current = false;
+      return;
+    }
+    if (approvalScrolledRef.current) return;
+    approvalScrolledRef.current = true;
+    scrollRef.current?.scrollToEnd();
+  }, [approvalPending, useVirtualScroll]);
+
   if (useVirtualScroll) {
     return (
       <>
         <ScrollableList
           ref={scrollRef}
           hasFocus={
-            !dialogsVisible && !embeddedShellFocused && contextMenuOpen === null
+            !dialogsVisible &&
+            !embeddedShellFocused &&
+            !approvalPending &&
+            contextMenuOpen === null
           }
           data={virtualItems}
           renderItem={renderVirtualItem}

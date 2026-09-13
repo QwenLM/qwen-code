@@ -162,7 +162,12 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         setAgentApprovalMode(agentId, APPROVAL_MODES[nextIndex]!);
       }
     },
-    { isActive: !agentShellFocused },
+    // Same broadcast rule as the Escape subscriber above: an open right-click
+    // menu cannot consume a key for us, so this subscriber has to go quiet
+    // itself. This one writes straight through to the agent runtime's
+    // tool-scheduling policy, so a Shift+Tab aimed at the menu would silently
+    // change the approval mode of the very teammate being decided about.
+    { isActive: !agentShellFocused && contextMenu === null },
   );
 
   // ── Input buffer (independent from main agent) ──

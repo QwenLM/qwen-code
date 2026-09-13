@@ -5,9 +5,15 @@
  */
 
 import { render } from 'ink-testing-library';
+import { act } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 import type { KeypressHandler, Key } from '../../contexts/KeypressContext.js';
+import {
+  ContextMenuProvider,
+  useContextMenu,
+  type ContextMenuContextValue,
+} from '../../context-menu/ContextMenuContext.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import {
   useAgentViewActions,
@@ -26,6 +32,15 @@ vi.mock('../../contexts/BackgroundTaskViewContext.js');
 vi.mock('../../contexts/UIStateContext.js');
 
 let activeKeypressHandler: KeypressHandler | null = null;
+let latestKeypressActive = false;
+// Module scope (as in AgentComposer.test) so TS does not narrow the probe's
+// assignment away at the assertion site.
+let menuApi: ContextMenuContextValue | null = null;
+
+const MenuProbe = () => {
+  menuApi = useContextMenu();
+  return null;
+};
 
 const createKey = (overrides: Partial<Key>): Key => ({
   name: '',
@@ -73,11 +88,15 @@ describe('AgentTabBar', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     activeKeypressHandler = null;
+    latestKeypressActive = false;
+    menuApi = null;
 
     vi.mocked(useKeypress).mockImplementation((handler, { isActive }) => {
-      if (isActive) {
-        activeKeypressHandler = handler;
-      }
+      // Mirror the real hook: it subscribes only while `isActive`, so a
+      // deactivated call site must stop answering keys rather than keep the
+      // last registered handler alive.
+      latestKeypressActive = isActive;
+      activeKeypressHandler = isActive ? handler : null;
     });
     setActiveView('agent-1');
     vi.mocked(useAgentViewActions).mockReturnValue({
@@ -195,5 +214,37 @@ describe('AgentTabBar', () => {
     expect(setPillFocused).not.toHaveBeenCalled();
     expect(setLivePanelFocused).not.toHaveBeenCalled();
     expect(setAgentTabBarFocused).not.toHaveBeenCalled();
+  });
+
+  it('goes quiet while the right-click context menu is open', async () => {
+    // AgentChatContent mounts ContentMouseController on the teammate tab, so
+    // this bar is now reachable with the menu open. KeypressContext broadcasts
+    // to every subscriber and discards return values, so the overlay cannot
+    // consume a key for us: ungated, ←/→ still switch tabs (remounting the
+    // active tab away from a teammate awaiting approval) and ↑/↓ still release
+    // tab-bar focus, which nothing restores after the menu closes.
+    render(
+      <ContextMenuProvider>
+        <AgentTabBar />
+        <MenuProbe />
+      </ContextMenuProvider>,
+    );
+
+    // Control: with no menu open the bar owns the arrows.
+    expect(latestKeypressActive).toBe(true);
+    pressKey({ name: 'up', sequence: '[A' });
+    expect(setAgentTabBarFocused).toHaveBeenCalledWith(false);
+
+    await act(async () => {
+      menuApi?.openMenu(
+        [{ id: 'open-link', label: 'Open Link', onSelect: () => {} }],
+        { x: 4, y: 2 },
+      );
+    });
+    expect(menuApi?.menu).not.toBeNull();
+
+    // The subscription is gone, so the menu's navigation keys cannot reach it.
+    expect(latestKeypressActive).toBe(false);
+    expect(activeKeypressHandler).toBeNull();
   });
 });

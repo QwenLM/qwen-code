@@ -62,6 +62,7 @@ type KeypressHandler = (key: Key) => void;
 // `AgentComposer` calls useKeypress twice per render, in a fixed order:
 // [0] Escape-to-cancel, [1] Shift+Tab approval-mode cycler.
 const ESCAPE_CANCEL = 0;
+const SHIFT_TAB_CYCLE = 1;
 
 const MenuProbe = () => {
   menuApi = useContextMenu();
@@ -232,6 +233,7 @@ describe('AgentComposer', () => {
 
     // Control: with no menu open the composer still owns its keys.
     expect(latestOptions(ESCAPE_CANCEL).isActive).toBe(true);
+    expect(latestOptions(SHIFT_TAB_CYCLE).isActive).toBe(true);
     expect(baseTextInputProps.onKeypress?.({ name: 'down' } as Key)).toBe(true);
     expect(setAgentTabBarFocused).toHaveBeenCalledWith(true);
 
@@ -246,6 +248,11 @@ describe('AgentComposer', () => {
 
     // Escape no longer reaches the cancel-round handler at all...
     expect(latestOptions(ESCAPE_CANCEL).isActive).toBe(false);
+    // ...and neither does Shift+Tab reach the approval-mode cycler, which
+    // writes straight through to the agent runtime's tool-scheduling policy:
+    // a key aimed at the menu must not silently change the approval mode of
+    // the teammate the user is deciding about.
+    expect(latestOptions(SHIFT_TAB_CYCLE).isActive).toBe(false);
     // ...and BaseTextInput never sees the menu's navigation keys, so the draft
     // survives and the tab bar keeps its focus.
     for (const name of ['up', 'down', 'return', 'escape']) {
