@@ -7351,62 +7351,61 @@ describe('Feishu inbound media delivery (#11554)', () => {
     return { bridge, channel, receive };
   }
 
-  it.each([
-    ' inspect',
-    '\n![photo](img_only)',
-    ' inspect ![photo](img_only)',
-  ])('delivers content_v2 after a bot mention: %s', async (body) => {
-    const { bridge, channel } = setup();
-    Object.assign(channel, { botOpenId: 'ou_bot' });
-    vi.spyOn(global, 'fetch').mockImplementation(async (input) =>
-      String(input).includes('/resources/')
-        ? new Response('image-bytes', {
-            headers: { 'content-type': 'image/png' },
-          })
-        : jsonResponse({ code: 0 }),
-    );
-    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
-      channel,
-      {
-        message: {
-          message_id: 'om_v2',
-          chat_id: 'oc_group',
-          chat_type: 'group',
-          message_type: 'post',
-          mentions: [
-            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Bot' },
-          ],
-          content: JSON.stringify({
-            title: '',
-            content_v2: [
-              [
-                {
-                  tag: 'md',
-                  text: `<at user_id="ou_bot"></at>${body}`,
-                },
-              ],
+  it.each([' inspect', '\n![photo](img_only)', ' inspect ![photo](img_only)'])(
+    'delivers content_v2 after a bot mention: %s',
+    async (body) => {
+      const { bridge, channel } = setup();
+      Object.assign(channel, { botOpenId: 'ou_bot' });
+      vi.spyOn(global, 'fetch').mockImplementation(async (input) =>
+        String(input).includes('/resources/')
+          ? new Response('image-bytes', {
+              headers: { 'content-type': 'image/png' },
+            })
+          : jsonResponse({ code: 0 }),
+      );
+      getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+        channel,
+        {
+          message: {
+            message_id: 'om_v2',
+            chat_id: 'oc_group',
+            chat_type: 'group',
+            message_type: 'post',
+            mentions: [
+              { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Bot' },
             ],
-          }),
-        },
-        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
-      },
-    );
-    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-    const args = vi.mocked(bridge.prompt).mock.calls[0]!;
-    expect(args[1]).not.toContain('<at');
-    if (body.includes('img_only')) {
-      expect(args[2]).toMatchObject({
-        images: [
-          {
-            data: Buffer.from('image-bytes').toString('base64'),
-            mimeType: 'image/png',
+            content: JSON.stringify({
+              title: '',
+              content_v2: [
+                [
+                  {
+                    tag: 'md',
+                    text: `<at user_id="ou_bot"></at>${body}`,
+                  },
+                ],
+              ],
+            }),
           },
-        ],
-      });
-    } else {
-      expect(args[1]).toContain('inspect');
-    }
-  });
+          sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+        },
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const args = vi.mocked(bridge.prompt).mock.calls[0]!;
+      expect(args[1]).not.toContain('<at');
+      if (body.includes('img_only')) {
+        expect(args[2]).toMatchObject({
+          images: [
+            {
+              data: Buffer.from('image-bytes').toString('base64'),
+              mimeType: 'image/png',
+            },
+          ],
+        });
+      } else {
+        expect(args[1]).toContain('inspect');
+      }
+    },
+  );
 
   it('does not download resources from a sender denied by preflight', async () => {
     const { bridge, channel, receive } = setup({
@@ -7675,9 +7674,9 @@ describe('Feishu inbound media delivery (#11554)', () => {
     const sends = vi
       .spyOn(channel as never, 'sendThreadMessage')
       .mockResolvedValue(undefined);
-    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async () =>
-      jsonResponse({ code: 0 }),
-    );
+    const fetchSpy = vi
+      .spyOn(global, 'fetch')
+      .mockImplementation(async () => jsonResponse({ code: 0 }));
     getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
       channel,
       {
@@ -7788,7 +7787,10 @@ describe('Feishu inbound media delivery (#11554)', () => {
           })
         : jsonResponse({ code: 0 }),
     );
-    receive('file', { file_key: 'file_evil', file_name: 'a/../../../evil.txt' });
+    receive('file', {
+      file_key: 'file_evil',
+      file_name: 'a/../../../evil.txt',
+    });
     await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
     const prompt = vi.mocked(bridge.prompt).mock.calls[0]![1];
     const path = prompt.match(/saved to: ([^\n]+)/)?.[1];
@@ -7968,24 +7970,28 @@ describe('Feishu inbound media delivery (#11554)', () => {
     const sends = vi
       .spyOn(channel as never, 'sendThreadMessage')
       .mockResolvedValue(undefined);
-    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.includes('/messages/om_parent?'))
-        return jsonResponse({
-          code: 0,
-          data: {
-            items: [
-              {
-                message_id: 'om_parent',
-                msg_type: 'image',
-                sender: { sender_type: 'user' },
-                body: { content: JSON.stringify({ image_key: 'img_parent' }) },
-              },
-            ],
-          },
-        });
-      return jsonResponse({ code: 0 });
-    });
+    const fetchSpy = vi
+      .spyOn(global, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.includes('/messages/om_parent?'))
+          return jsonResponse({
+            code: 0,
+            data: {
+              items: [
+                {
+                  message_id: 'om_parent',
+                  msg_type: 'image',
+                  sender: { sender_type: 'user' },
+                  body: {
+                    content: JSON.stringify({ image_key: 'img_parent' }),
+                  },
+                },
+              ],
+            },
+          });
+        return jsonResponse({ code: 0 });
+      });
     receive('text', { text: '/clear' }, 'om_parent');
     await vi.waitFor(() =>
       expect(

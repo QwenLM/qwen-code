@@ -104,10 +104,7 @@ describe('parseFeishuContent (#11554)', () => {
       JSON.stringify({ content_v2: [[{ tag: 'md', text: refs }]] }),
     );
     expect(result.resources.map((r) => r.key)).toEqual(
-      Array.from(
-        { length: 8 },
-        (_, i) => `img_${String(i).padStart(3, '0')}`,
-      ),
+      Array.from({ length: 8 }, (_, i) => `img_${String(i).padStart(3, '0')}`),
     );
   });
 
@@ -168,7 +165,10 @@ describe('parseFeishuContent (#11554)', () => {
       'post',
       JSON.stringify({
         content: [
-          [{ tag: 'at', user_name: 'Alice' }, { tag: 'img', image_key: 'img_x' }],
+          [
+            { tag: 'at', user_name: 'Alice' },
+            { tag: 'img', image_key: 'img_x' },
+          ],
         ],
       }),
     );
