@@ -823,6 +823,9 @@ describe('QwenLogger', () => {
       // is forwarded to the sink even when telemetry log prompts are on.
       const callArgs = enqueueSpy.mock.calls[0][0];
       expect(callArgs.properties).not.toHaveProperty('error');
+      const serializedEvent = JSON.stringify(callArgs);
+      expect(serializedEvent).not.toContain('error output');
+      expect(serializedEvent).not.toContain('Command failed');
     });
 
     it('should sanitize hook name to remove sensitive information', () => {
