@@ -313,8 +313,8 @@ Guidelines:
       // `getFunctionDeclarationsFiltered` drops unknown names silently, and
       // naming a deferred tool here would declare it, so nothing is zero-cost:
       //   TOOL_SEARCH + TOOL_CALL — together they would let an agent inspect
-      //     and invoke tools outside this closed list. Neither bridge is
-      //     declared here, so deferred tools stay unavailable to review parts.
+      //     hidden deferred-tool schemas, but invocation still honors this
+      //     allowlist. Neither bridge is needed by review parts.
       //   AGENT — `prepareTools` special-cases it and would have granted it
       //     (nesting is allowed to depth 5), so this DOES remove a capability
       //     the inherited surface had. Review parts are leaf workers: the

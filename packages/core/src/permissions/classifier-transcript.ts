@@ -32,7 +32,11 @@
 
 import type { Content, Part } from '@google/genai';
 import type { ToolRegistry } from '../tools/tool-registry.js';
-import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
+import {
+  canonicalToolName,
+  resolveBuiltinToolName,
+  ToolNames,
+} from '../tools/tool-names.js';
 import type {
   TrustedUserAnswerRecord,
   TrustedUserAnswerSnapshot,
@@ -355,14 +359,24 @@ function projectFunctionArgs(
 
   if (projected === '') return {};
   if (projected && typeof projected === 'object') return projected;
-  if (canonicalToolName(name) === ToolNames.TOOL_CALL) {
+  const normalizedName =
+    resolveBuiltinToolName(name.trim()) ?? name.trim().toLowerCase();
+  if (canonicalToolName(normalizedName) === ToolNames.TOOL_CALL) {
     const rawTargetName = rawArgs['name'];
     if (typeof rawTargetName !== 'string') return {};
 
-    const targetName = canonicalToolName(rawTargetName);
+    let targetName = canonicalToolName(rawTargetName.trim());
+    const lowerTargetName = targetName.toLowerCase();
+    for (const registeredName of toolRegistry.getAllToolNames?.() ?? []) {
+      if (registeredName.toLowerCase() === lowerTargetName) {
+        targetName = registeredName;
+      }
+    }
     // History is unvalidated. Limit fallback unwrapping to one bridge layer
     // so a nested tool_call envelope cannot recurse or expose its payload.
-    if (targetName === ToolNames.TOOL_CALL) return {};
+    const normalizedTargetName =
+      resolveBuiltinToolName(targetName) ?? targetName.toLowerCase();
+    if (normalizedTargetName === ToolNames.TOOL_CALL) return {};
 
     const target = toolRegistry.getTool(targetName);
     if (!target) return { name: targetName };
