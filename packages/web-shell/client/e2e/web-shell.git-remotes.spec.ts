@@ -8,21 +8,34 @@ import { expect, test, type Page } from '@playwright/test';
 import {
   installMockDaemon,
   type MockDaemonController,
+  type WebShellDaemonScenario,
 } from './utils/mockDaemon';
 import { createGitWorkspaceScenario } from './utils/gitScenario';
 
-async function openSidebarGitPicker(page: Page) {
-  // The workspace header's git pill in the left sidebar.
-  const pill = page.locator(`button[aria-label="Git — main"]`);
-  await expect(pill).toBeVisible({ timeout: 10_000 });
-  await pill.click();
+async function openBranchPicker(page: Page, scenario: WebShellDaemonScenario) {
+  // Post-#11700 the branch picker's trigger in the session view is the
+  // environment panel's branch row (the composer chip only renders in
+  // layouts this harness does not produce), same route the visual spec uses.
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(page.locator('[data-web-shell-composer]')).toBeVisible({
+    timeout: 10_000,
+  });
+  await page.locator('[data-web-shell-environment-toggle]').click();
+  const environment = page.getByTestId('environment-panel');
+  await expect(environment).toBeVisible();
+  const branchRow = environment.getByRole('button', {
+    name: 'main',
+    exact: true,
+  });
+  await expect(branchRow).toBeVisible({ timeout: 10_000 });
+  await branchRow.click();
   const popover = page.locator('[data-slot="popover-content"]');
   await expect(popover).toBeVisible({ timeout: 5_000 });
   return popover;
 }
 
-async function openRemotesPanel(page: Page) {
-  const popover = await openSidebarGitPicker(page);
+async function openRemotesPanel(page: Page, scenario: WebShellDaemonScenario) {
+  const popover = await openBranchPicker(page, scenario);
   await popover.locator('[data-testid="branch-picker-manage-remotes"]').click();
   await expect(popover.locator('[data-testid="remotes-back"]')).toBeVisible();
   return popover;
@@ -35,16 +48,14 @@ function remoteRequests(daemon: MockDaemonController, suffix: string) {
   );
 }
 
-test('sidebar git picker manages remotes: list, add, remove @smoke', async ({
+test('git picker manages remotes: list, add, remove @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createGitWorkspaceScenario();
   const daemon = await installMockDaemon(page, scenario, {
     baseURL: String(testInfo.project.use.baseURL),
   });
-  await page.goto('/');
-
-  const popover = await openRemotesPanel(page);
+  const popover = await openRemotesPanel(page, scenario);
 
   // The default fixture lists origin with its URL.
   const originRow = popover.locator('[data-testid="remote-remove-origin"]');
@@ -93,9 +104,7 @@ test('remotes panel surfaces a duplicate add as an error', async ({
   await installMockDaemon(page, scenario, {
     baseURL: String(testInfo.project.use.baseURL),
   });
-  await page.goto('/');
-
-  const popover = await openRemotesPanel(page);
+  const popover = await openRemotesPanel(page, scenario);
 
   await popover.locator('[data-testid="remote-add-name"]').fill('origin');
   await popover
@@ -152,9 +161,7 @@ test('remotes panel search filters by name and URL', async ({
   await installMockDaemon(page, scenario, {
     baseURL: String(testInfo.project.use.baseURL),
   });
-  await page.goto('/');
-
-  const popover = await openRemotesPanel(page);
+  const popover = await openRemotesPanel(page, scenario);
   await expect(popover.locator('[data-testid="remote-row"]')).toHaveCount(2);
 
   await popover.locator('[data-testid="remotes-search"]').fill('upstream');
@@ -174,9 +181,7 @@ test('the add form fits inside the popover clip', async ({
   await installMockDaemon(page, scenario, {
     baseURL: String(testInfo.project.use.baseURL),
   });
-  await page.goto('/');
-
-  const popover = await openRemotesPanel(page);
+  const popover = await openRemotesPanel(page, scenario);
   // Geometry, not fill()/click(): Playwright scrolls the overflow container
   // into place before interacting, so an off-clip Add button still passes a
   // click-based assertion.
@@ -224,9 +229,7 @@ test('the remotes list keeps rows and chrome inside the clip while scrolled', as
   await installMockDaemon(page, scenario, {
     baseURL: String(testInfo.project.use.baseURL),
   });
-  await page.goto('/');
-
-  const popover = await openRemotesPanel(page);
+  const popover = await openRemotesPanel(page, scenario);
 
   const rows = popover.locator('[data-testid="remote-row"]');
   await expect(rows).toHaveCount(15);
