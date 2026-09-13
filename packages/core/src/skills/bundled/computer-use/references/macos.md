@@ -116,9 +116,6 @@ the state needed for the next decision:
 
 ```js
 await app.click(37);
-await app.hotkey(['super', 'a']);
-await app.typeText('hello');
-await app.pressKey('Return');
 nodeRepl.write((await app.getState()).text);
 ```
 
@@ -141,10 +138,13 @@ call.
 - Literal `\n` or `\r` in `typeText` sends Return. In a composer or form this may submit rather than insert a newline.
 - If AX is incomplete or does not explain the interface, request a screenshot and inspect it. Only currently captured actionable IDs can be used for element actions.
 
-## Paste and select text
+## Replace and select text
 
-These App methods are available on macOS only. Read current state first and use
-an observed element ID for selection.
+To replace existing text in a writable field, prefer `selectText` with that
+field's observed ID and exact current text. It selects within the intended
+control. Read the selection result and state before typing; resolve focus first
+if another control remains focused. These text methods are available on macOS
+only.
 
 ```js
 await app.selectText(37, 'draft', { prefix: 'Status: ' });
@@ -155,12 +155,15 @@ Use a real ID and text from your observation; the example assumes that the
 selected element contains exactly one matching `draft` immediately after
 `Status: `.
 
-After confirming the selection, replace it with plain text:
+After confirming the selection and intended field, replace it with short plain
+text:
 
 ```js
-await app.paste('ready');
+await app.typeText('ready');
 nodeRepl.write((await app.getState()).text);
 ```
+
+Use `await app.paste('ready')` when clipboard insertion is appropriate.
 
 - `selectText(element, text)` selects one exact, case-sensitive match. Optional
   `prefix` and `suffix` must be immediately adjacent to that match. Missing or

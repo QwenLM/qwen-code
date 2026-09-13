@@ -31,6 +31,13 @@ results still require observation. Prefer AX text when sufficient, and use
 screenshots for missing context, coordinates or visual properties. Close the
 connection after final verification in the same call when the task is complete.
 
+For replacing existing field text, prefer selecting the observed text through
+`selectText`. Confirm the selection and intended field before typing or pasting.
+A pointer click alone may leave another editor focused, causing a select-all
+shortcut and subsequent typing to modify that editor. Keep focus uncertainty as
+an observation boundary. This guidance uses the existing text API and adds no
+app-specific controls, shortcuts or automatic retries.
+
 Keep shared MCP server instructions short and put the complete execution rules
 in the `node_repl` tool description. Clients that prepend server instructions to
 every tool then avoid repeating those rules across all five tools. The primary
