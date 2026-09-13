@@ -1388,6 +1388,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
           {
             "type": "command",
             "command": "\"$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh\"",
+            "shell": "bash",
             "async": true,
             "timeout": 300
           }

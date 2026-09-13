@@ -42,8 +42,8 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 // PowerShell probe: pwsh preferred, powershell (5.1) fallback. Cached
 // per-process, negative cache included; throws when neither is on PATH.
-export let cachedPowerShell: string | null | undefined;
-export function __resetPowerShellCache(): void {
+let cachedPowerShell: string | null | undefined;
+export function __resetPowerShellCacheForTests(): void {
   cachedPowerShell = undefined;
 }
 export function resolvePowerShellExecutable(): string {
@@ -1228,14 +1228,16 @@ export class HookRunner {
       // Set-StrictMode makes undefined $VAR throw; ErrorActionPreference=Stop
       // turns that non-terminating error into a script abort, so a later
       // statement cannot mask the failure with exit 0.
+      // Narrow by design: multi-line commands and names that merely contain
+      // an extension (app.exe.log) opt out; they are legitimate usages.
       if (
         shellConfig.shell === 'powershell' &&
-        /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe)(?![\w.\n])(?![\s\S]*\n)/i.test(
+        /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe|ps1)(?![\w.\n])(?![\s\S]*\n)/i.test(
           hookConfig.command,
         )
       ) {
         throw new Error(
-          `PowerShell command contains a bare-quoted Windows executable path; ` +
+          `PowerShell command contains a bare-quoted Windows program or script path; ` +
             `if you intend to invoke it, prefix with the call operator '& '. ` +
             `Example: & ${stripAnsiAndControl(hookConfig.command)}`,
         );

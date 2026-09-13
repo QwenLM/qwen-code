@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   HookRunner,
-  __resetPowerShellCache,
+  __resetPowerShellCacheForTests,
   resolvePowerShellExecutable,
 } from './hookRunner.js';
 import * as shellUtils from '../utils/shell-utils.js';
@@ -74,7 +74,7 @@ describe('HookRunner', () => {
       if (name === 'powershell') return { path: 'powershell' };
       return { path: null };
     }) as never);
-    __resetPowerShellCache();
+    __resetPowerShellCacheForTests();
   });
 
   afterEach(() => {
@@ -2792,6 +2792,8 @@ describe('HookRunner', () => {
       ],
       ['bare-quoted .exe path at start', '"C:\\Windows\\notepad.exe"'],
       ['single-quoted .exe', "'C:\\foo.exe'"],
+      ['bare-quoted .ps1 path at start', '"C:\\foo.ps1"'],
+      ['bare-quoted .ps1 with arguments', '"C:\\foo.ps1" arg1 arg2'],
       [
         'bare-quoted path carrying terminal escapes',
         '"C:\\foo\u001b[2Jbar.cmd"',
@@ -2817,8 +2819,6 @@ describe('HookRunner', () => {
       ['command with quoted arguments', 'Get-Process "name"'],
       ['write-output with quoted argument', 'Write-Output "hello"'],
       ['cmd-style invocation with quoted tail', 'cmd /c "echo hello"'],
-      ['bare-quoted .ps1 not in cmd-regression class', '"C:\\foo.ps1"'],
-      ['bare-quoted .ps1 with arguments', '"C:\\foo.ps1" arg1 arg2'],
       ['bare-quoted no-extension command', '"foo"'],
       [
         'multi-line array of paths with bare-quoted .cmd',
