@@ -68,6 +68,9 @@ interface PersistedVerdict
     // the flag beside those strings would be a second derivation of one
     // fact, which is how the two come to disagree.
     | 'coverageIdentityUnreadable'
+    // Same reason: a compose-time input to the `uncoverable-chunk` clause,
+    // whose words the persisted `verdictLine` already carries.
+    | 'uncoverableRelayRefuted'
     | 'fixedFindings'
     // Submit-time stamp inputs, live-only: the validator neither reads
     // nor writes them, so carrying them here would advertise fields no

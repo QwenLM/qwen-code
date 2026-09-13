@@ -134,6 +134,24 @@ const PLAN = {
   ],
 };
 
+/**
+ * The diff reads each PLAN chunk's launch spells, written out rather than
+ * computed from the chunk — a test that derives its expectation with the same
+ * arithmetic as the builder cannot catch the builder getting it wrong.
+ *
+ * Chunk 14 is `oversized` with `chars: 40_000`, more than one read returns,
+ * so its 176-line window is spelled as two contiguous pages: coverage refuses
+ * to credit an oversized window off a read that spans it, and a launch that
+ * spelled one whole-window read prescribed exactly that read (R40-3). Chunk 13
+ * fits one read. Chunk 15's longest line alone exceeds the cap — no page can
+ * reach its tail — so it keeps one read too.
+ */
+const CHUNK_READS: Record<number, string[]> = {
+  13: ['offset=3807, limit=217'],
+  14: ['offset=4024, limit=88', 'offset=4112, limit=88'],
+  15: ['offset=4200, limit=2'],
+};
+
 describe('buildChunkAgentPrompt — what the real launches left out', () => {
   it('scopes the agent to its own territory, by line', () => {
     // The diff path and the read moved to the launch prompt — a chunk agent's brief
@@ -669,7 +687,7 @@ describe('agent-prompt (command boundary)', () => {
         /^reverse-audit--chunk-14--round-1--[0-9a-f]{12}$/,
       );
       const briefText = readFileSync(briefPath(plan, keys[0]), 'utf8');
-      expect(briefText).toContain('offset=4024, limit=176'); // chunk 14 only
+      for (const read of CHUNK_READS[14]) expect(briefText).toContain(read); // chunk 14 only
       expect(briefText).not.toContain('offset=3807'); // not chunk 13
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -2454,11 +2472,11 @@ describe('--findings — point the block at the list file, record EXACTLY that b
     expect(printed).toContain('Already confirmed — do not re-report these');
     expect(printed).not.toContain('foo.ts:10 — the collision drops arguments');
     expect(printed).toContain('.findings.md');
-    expect(printed).toContain('offset=4024, limit=176'); // this chunk's range only
+    for (const read of CHUNK_READS[14]) expect(printed).toContain(read); // this chunk's range only
     expect(printed).not.toContain('offset=3807'); // not chunk 13's
     const recorded = recordByPrefix(plan, 'reverse-audit--chunk-14--');
     expect(recorded).toBe(printed);
-    expect(recorded).toContain('offset=4024, limit=176');
+    for (const read of CHUNK_READS[14]) expect(recorded).toContain(read);
   });
 
   it('throws for a role it has no framing for, rather than falling through', () => {
@@ -2727,12 +2745,14 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
     const block = buildWholeDiffBlock(PLAN);
     expect(block).toContain(PLAN.diffPathAbsolute);
     for (const c of PLAN.chunks) {
-      const offset = c.startLine - 1;
-      const limit = c.endLine - c.startLine + 1;
-      expect(block).toContain(
-        `read_file(file_path="${PLAN.diffPathAbsolute}", offset=${offset}, limit=${limit})`,
-      );
+      for (const read of CHUNK_READS[c.id]) {
+        expect(block).toContain(
+          `read_file(file_path="${PLAN.diffPathAbsolute}", ${read})`,
+        );
+      }
     }
+    // The oversized chunk's pages, never its whole window (R40-3).
+    expect(block).not.toContain('offset=4024, limit=176');
   });
 
   it('says the source tree is not a substitute for the diff', () => {
@@ -2817,8 +2837,8 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
     const p = buildRoleLaunchPrompt(PLAN, 'reverse-audit', '/t/ra.brief.md', {
       chunk: 14,
     });
-    // Chunk 14 is lines 4025-4200 → offset 4024, limit 176.
-    expect(p).toContain('offset=4024, limit=176');
+    // Chunk 14 is lines 4025-4200, oversized → two pages from offset 4024.
+    for (const read of CHUNK_READS[14]) expect(p).toContain(read);
     // and NOT chunk 13's or chunk 15's range.
     expect(p).not.toContain('offset=3807');
   });
@@ -3071,9 +3091,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     const p = buildRoleBrief(PLAN, role);
     expect(p).toContain(PLAN.diffPathAbsolute);
     for (const c of PLAN.chunks) {
-      expect(p).toContain(
-        `offset=${c.startLine - 1}, limit=${c.endLine - c.startLine + 1}`,
-      );
+      for (const read of CHUNK_READS[c.id]) expect(p).toContain(read);
     }
     // And the things a paraphrase drops.
     expect(p).toContain('say what you examined');
@@ -4267,9 +4285,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // coverage gate.
     expect(p).toContain(PR_PLAN.diffPathAbsolute);
     for (const c of PR_PLAN.chunks) {
-      expect(p).toContain(
-        `offset=${c.startLine - 1}, limit=${c.endLine - c.startLine + 1}`,
-      );
+      for (const read of CHUNK_READS[c.id]) expect(p).toContain(read);
     }
     // And no frame without a PR: the roster gates 6d on the PR identity, so
     // a plan without it is a launch bug, not a degraded mode.
@@ -4643,9 +4659,7 @@ describe('buildRoleLaunchPrompt — small enough to actually be carried', () => 
     const p = buildRoleLaunchPrompt(PLAN, '2', '/tmp/2.brief.md');
     expect(p).toContain(PLAN.diffPathAbsolute);
     for (const c of PLAN.chunks) {
-      expect(p).toContain(
-        `offset=${c.startLine - 1}, limit=${c.endLine - c.startLine + 1}`,
-      );
+      for (const read of CHUNK_READS[c.id]) expect(p).toContain(read);
     }
   });
 
@@ -5142,7 +5156,7 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     // per-chunk design exists to spare it. Its brief reads chunk 14's range alone —
     // the same range its launch prompt reads.
     const scoped = buildRoleBrief(PLAN, 'reverse-audit', { chunk: 14 });
-    expect(scoped).toContain('offset=4024, limit=176'); // chunk 14
+    for (const read of CHUNK_READS[14]) expect(scoped).toContain(read); // chunk 14
     expect(scoped).not.toContain('offset=3807'); // not chunk 13
     expect(scoped).not.toContain('offset=4200'); // not chunk 15
     expect(scoped).toContain('chunk 14');
@@ -5150,7 +5164,7 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     // A whole-diff (3A) reverse audit, with no chunk, still walks every chunk.
     const whole = buildRoleBrief(PLAN, 'reverse-audit');
     expect(whole).toContain('offset=3807');
-    expect(whole).toContain('offset=4024, limit=176');
+    for (const read of CHUNK_READS[14]) expect(whole).toContain(read);
     expect(whole).toMatch(/Walk it chunk by chunk/);
   });
 
@@ -8130,5 +8144,110 @@ describe('agent-prompt --batch', () => {
   it('rejects incomplete custom specialist blocks', () => {
     expect(() => run({ 'whole-diff': true })).toThrow(/complete role/);
     expect(writeStdoutLine).not.toHaveBeenCalled();
+  });
+});
+
+describe('diff pages — an oversized window is spelled as reads the gate credits', () => {
+  const pagesOf = (text: string): Array<[number, number]> =>
+    [...text.matchAll(/offset=(\d+), limit=(\d+)/g)].map(
+      (m) =>
+        [Number(m[1]) + 1, Number(m[1]) + Number(m[2])] as [number, number],
+    );
+
+  it('tiles an oversized chunk exactly, in pages none of which spans it', () => {
+    // Coverage credits an oversized window only off several reads, none
+    // spanning it, that cover it between them. The launch spelled ONE
+    // whole-window read, so the compliant agent was refused by construction
+    // and the stderr repair — rebuild with `agent-prompt --chunk` — rebuilt
+    // the same read (R40-3).
+    const launch = buildChunkLaunchPrompt(PLAN, 14, '/tmp/x.brief.md');
+    const pages = pagesOf(launch);
+    expect(pages.length).toBeGreaterThan(1);
+    // Contiguous, starting at the window's first line and ending at its last.
+    expect(pages[0][0]).toBe(4025);
+    expect(pages[pages.length - 1][1]).toBe(4200);
+    for (let i = 1; i < pages.length; i++) {
+      expect(pages[i][0]).toBe(pages[i - 1][1] + 1);
+    }
+    // None of them is the whole window.
+    for (const [start, end] of pages) {
+      expect(start === 4025 && end === 4200).toBe(false);
+    }
+    expect(launch).not.toContain('offset=4024, limit=176');
+    // The agent is told not to trade the pages for the read the gate refuses.
+    expect(launch).toMatch(
+      /never replace the pages with one whole-window read/,
+    );
+  });
+
+  it('budgets every page the launch spells, not the older truncation estimate', () => {
+    // Two quantities that must be one: the pages the launch MANDATES and the
+    // reads the budget block counts for them. Pages are sized at
+    // `MAX_CHUNK_CHARS`, the budget estimate was `ceil(chars /
+    // READ_FILE_CHAR_CAP)` — a 45 000-character window was spelled as three
+    // reads and budgeted for two (audit of R40-3's fix). The fixture's 40k
+    // chunk happens to agree under both, which is why this needs its own.
+    const plan = {
+      ...PLAN,
+      budget: {
+        inlineAngles: 4,
+        sweep: true,
+        specialistCap: 2,
+        verifyShard: 8,
+        agentToolBudget: 42,
+      },
+      chunks: [
+        {
+          id: 21,
+          startLine: 1,
+          endLine: 900,
+          lines: 900,
+          chars: 45_000,
+          maxLineChars: 120,
+          oversized: true,
+          files: [{ path: 'a.ts', newStart: 1, newEnd: 900 }],
+        },
+      ],
+    };
+    const spelled = pagesOf(
+      buildChunkLaunchPrompt(plan as never, 21, '/tmp/x.brief.md'),
+    );
+    expect(spelled).toHaveLength(3);
+    // The brief's reading list: the brief itself plus every spelled page.
+    expect(buildChunkAgentPrompt(plan as never, 21)).toContain(
+      `~${1 + spelled.length} reads your launch is assigned`,
+    );
+  });
+
+  it('keeps one read for a chunk that fits, and for one whose LINE cannot', () => {
+    expect(
+      pagesOf(buildChunkLaunchPrompt(PLAN, 13, '/tmp/x.brief.md')),
+    ).toEqual([[3808, 4024]]);
+    // Chunk 15: a single line over the cap. Paging cannot reach its tail, and
+    // its brief asks for a declaration, not a read.
+    expect(
+      pagesOf(buildChunkLaunchPrompt(PLAN, 15, '/tmp/x.brief.md')),
+    ).toEqual([[4201, 4202]]);
+  });
+
+  it('spells the same pages for every reader credited off these ranges', () => {
+    // A whole-diff role and a per-chunk reverse auditor are credited off the
+    // ranges their blocks spell, exactly as the chunk agent is — so they must
+    // spell the pages too, or the same refusal lands on them.
+    const launchPages = pagesOf(
+      buildChunkLaunchPrompt(PLAN, 14, '/tmp/x.brief.md'),
+    );
+    const scoped = buildRoleLaunchPrompt(
+      PLAN,
+      'reverse-audit',
+      '/t/ra.brief.md',
+      {
+        chunk: 14,
+      },
+    );
+    expect(pagesOf(scoped)).toEqual(launchPages);
+    const whole = buildWholeDiffBlock(PLAN as never);
+    for (const read of CHUNK_READS[14]) expect(whole).toContain(read);
+    expect(whole).not.toContain('offset=4024, limit=176');
   });
 });

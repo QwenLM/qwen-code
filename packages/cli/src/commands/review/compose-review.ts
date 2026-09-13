@@ -1614,6 +1614,17 @@ export interface ComposeReviewResult {
    */
   coverageIdentityUnreadable: boolean;
   /**
+   * How much of the `uncoverable-chunk` cap's input this run's own ledger
+   * refutes: every relayed id is `covered`/`recovered` (`all`), some are
+   * (`some`), or none are (`none`). The cap fires either way — the relay is
+   * the caller's claim — and this is the one bit the verdict line needs to
+   * word that cap without contradicting the body's "Relay not credited"
+   * sentence (R40-10). Compose-time wording input only; not persisted.
+   * Optional so a result built without it — a hand-built fixture, a caller
+   * predating the field — reads as `none`, the clause it always had.
+   */
+  uncoverableRelayRefuted?: 'all' | 'some' | 'none';
+  /**
    * `cappedBy`, split by what kind of fact each cap is. A view over that
    * array, so the two can never disagree about which caps fired.
    */
@@ -5896,8 +5907,9 @@ function composeReviewBody(
           // (`chunk 2 of 9`), and the two channels that state this fact must
           // not wear different sentences (R39-11).
           `stale transcripts: ${cov.staleTranscripts.join(', ')} were ` +
-            `written against a different chunking of this diff and count ` +
-            `for nothing here.`,
+            `written against a different chunking of this diff — their ` +
+            `chunk id, \`of M\` count or window is not this plan's — and ` +
+            `count for nothing here.`,
         );
       }
       for (const id of cov.missingChunks) missingReceipts.push(id);
@@ -6521,7 +6533,22 @@ function composeReviewBody(
           // `reverse audit` is not: that is the whiff's subject (R22-4).
           (verificationFloorEntries.has(e) &&
             e.subject === 'verification and reverse audit' &&
-            (entry === 'verification' || entry === '验证'))),
+            (entry === 'verification' || entry === '验证')) ||
+          // A bare `reverse audit` is a whiff's only detector only where a
+          // reverse auditor was OWED. The by-design exemption above keys on
+          // one producer's subject literal, so the other floor entry that
+          // proves no auditor exists — the docs-nav profile's
+          // `the full review and reverse audit`, `noRepair`, with no
+          // reverse-audit agent in its roster — fell outside both the
+          // exemption and the match, and a bare relay posted "the agent
+          // returned no evidence of its walk twice" against an agent that
+          // was never launched, routed to the coverage axis (R40-4). Keyed on
+          // the fact rather than the literal: a `noRepair` entry naming the
+          // reverse audit. The repairable reverse-audit entry is not
+          // `noRepair`, so R22-4's whiff detector is untouched.
+          (noRepairFloorEntries.has(e) &&
+            e.subject.includes('reverse audit') &&
+            (entry === 'reverse audit' || entry === '反向审计'))),
     );
   const nonEchoedDimensionGaps = [
     ...unreviewed,
@@ -7468,6 +7495,7 @@ function composeReviewBody(
       );
     }
   }
+  let uncoverableRelayRefuted: 'all' | 'some' | 'none' = 'none';
   if (uncoverable.length > 0) {
     // The CLI's own entries are bare `chunk <id>` (pushed above, from the
     // report) and render through the same translation as every other chunk
@@ -7503,6 +7531,12 @@ function composeReviewBody(
       if (m) bareIds.push(Number(m[1]));
       else callerNamed.push(e);
     }
+    uncoverableRelayRefuted =
+      refutedByLedger.length === 0
+        ? 'none'
+        : refutedByLedger.length === uncoverable.length
+          ? 'all'
+          : 'some';
     const bareGap =
       bareIds.length > 0 ? describeChunkGap(bareIds, plannedChunks) : null;
     // Caller-named entries are prose the CLI does not control; comment
@@ -8363,6 +8397,7 @@ function composeReviewBody(
       body,
       terminalState,
       coverageIdentityUnreadable: coverageSealRefusedAll,
+      uncoverableRelayRefuted,
       capAxes,
       chunkLedger,
       baseEvent,
@@ -8463,6 +8498,7 @@ function composeReviewBody(
       body,
       terminalState,
       coverageIdentityUnreadable: coverageSealRefusedAll,
+      uncoverableRelayRefuted,
       capAxes,
       chunkLedger,
       baseEvent,
@@ -8809,6 +8845,7 @@ function composeReviewBody(
     body: visibleBody,
     terminalState,
     coverageIdentityUnreadable: coverageSealRefusedAll,
+    uncoverableRelayRefuted,
     capAxes,
     chunkLedger,
     baseEvent,
@@ -10060,6 +10097,24 @@ export function buildLedger(
  * A mixed set claims neither, for the reason the stderr twin does: the cap
  * covers a LIST, and no single clause is true of one holding both kinds.
  */
+function uncoverableGapReason(r: ComposeReviewResult): string {
+  // The `uncoverable-chunk` cap's clause, worded off the same ledger check the
+  // body's "Relay not credited" sentence reads. Hard-coded, the verdict line
+  // said "part of the diff cannot be read at all" beside a body saying this
+  // run's own records credit a read of that very chunk — the two channels the
+  // orchestrator publishes contradicting each other about one chunk (R40-10).
+  // The cap still fires in every case: this words it, it does not lift it.
+  // An artifact older than the field reads as `undefined` and keeps the
+  // original clause.
+  if (r.uncoverableRelayRefuted === 'all') {
+    return "a relayed uncoverable declaration was not credited — this run's own records credit a read of every chunk it named";
+  }
+  if (r.uncoverableRelayRefuted === 'some') {
+    return "part of the diff was relayed as uncoverable, and this run's own records refute part of that relay — see the disclosures for each";
+  }
+  return 'part of the diff cannot be read at all';
+}
+
 function chunkGapReason(r: ComposeReviewResult): string {
   if (r.coverageIdentityUnreadable) {
     return 'part of the diff could not be credited to this plan, whose identity could not be read';
@@ -10094,7 +10149,7 @@ export function verdictLine(r: ComposeReviewResult): string {
     'cannot-tell-existing-critical':
       'an existing blocker could not be ruled on',
     'chunk-nobody-read': chunkGapReason(r),
-    'uncoverable-chunk': 'part of the diff cannot be read at all',
+    'uncoverable-chunk': uncoverableGapReason(r),
     'unreviewed-dimension': 'a dimension nobody reviewed',
     'context-unavailable': "the PR's existing discussion could not be read",
     'unlicensed-deferral': 'findings were deferred without a posture licence',

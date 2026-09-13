@@ -18380,7 +18380,33 @@ describe('terminalState — coverage, not verdict', () => {
       // And it does not open with a 'Not reviewed:' claim of its own —
       // this entry says the chunk WAS read.
       expect(r.body).toContain('Relay not credited: chunk 2');
+      // ...and the verdict line agrees with the body. The cap's clause was
+      // hard-coded "part of the diff cannot be read at all" beside a body
+      // saying this run's own records credit a read of that chunk (R40-10).
+      expect(verdictLine(r)).not.toContain('cannot be read at all');
+      expect(verdictLine(r)).toContain(
+        'a relayed uncoverable declaration was not credited',
+      );
     }
+  });
+
+  it('words the uncoverable cap for a relay the ledger refutes only in PART', () => {
+    // One relayed id the ledger covered, one the plan does not carry: the
+    // body posts one of each, so the verdict clause may claim neither.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      uncoverableChunks: ['chunk 2', 'chunk 5 (src/big.min.js)'],
+    });
+    expect(r.body).toContain('Relay not credited: chunk 2');
+    expect(r.body).toContain('a line there exceeds the read limit');
+    const line = verdictLine(r);
+    expect(line).toContain('refute part of that relay');
+    expect(line).not.toContain('cannot be read at all');
+    expect(line).not.toContain('was not credited');
   });
 
   it('still posts a relayed uncoverable the ledger cannot refute', () => {
@@ -18396,6 +18422,8 @@ describe('terminalState — coverage, not verdict', () => {
     });
     expect(r.body).toContain('a line there exceeds the read limit');
     expect(r.body).not.toContain('Relay not credited');
+    // The unrefuted clause stays what it was, so the two arms stay distinct.
+    expect(verdictLine(r)).toContain('part of the diff cannot be read at all');
   });
 
   it('holds `complete` beside a coverage cap when the relay names a chunk the ledger COVERED', () => {
@@ -18993,6 +19021,81 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     expect(r.capAxes.coverage).toEqual([]);
     expect(r.capAxes.posture).toContain('unreviewed-dimension');
     expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it('dedups a bare `reverse audit` relay of the docs-nav profile’s no-repair entry', () => {
+    // The by-design exemption keys on one producer's subject literal, so the
+    // other floor entry that proves no reverse auditor was ever owed — the
+    // docs-nav profile's `the full review and reverse audit`, `noRepair`,
+    // whose roster holds no reverse-audit agent — fell outside it, and a bare
+    // relay posted "the agent returned no evidence of its walk twice"
+    // against an agent that was never launched, on the coverage axis
+    // (R40-4). Written as an invariant: the relay changes nothing the
+    // no-relay control reports.
+    const docsNav = (): string => {
+      const p = plan({
+        step45: false,
+        effort: 'high',
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: 11426,
+        fetchedSha: 'a'.repeat(40),
+        reviewModelId: 'fixture-model@1a2b3c4d',
+      });
+      const captured = JSON.parse(readFileSync(p, 'utf8'));
+      Object.assign(captured, {
+        reviewProfile: 'docs-nav',
+        srcDiffLines: 13,
+        fullSrcDiffLines: 13,
+        diffLines: 13,
+        files: [
+          {
+            path: 'docs/developers/_meta.ts',
+            kind: 'source',
+            removedLines: 3,
+            heavy: false,
+          },
+        ],
+        chunks: [
+          {
+            id: 1,
+            startLine: 1,
+            endLine: 13,
+            files: [
+              { path: 'docs/developers/_meta.ts', newStart: 1, newEnd: 9 },
+            ],
+          },
+        ],
+      });
+      writeFileSync(p, JSON.stringify(captured));
+      const old = new Date(2020, 0, 1);
+      utimesSync(p, old, old);
+      const brief = briefPath(p, 'docs-nav');
+      const launch = `read_file(file_path="${brief}")\nread_file(file_path="${DIFF}", offset=0, limit=13)`;
+      mkdirSync(promptRecordDir(p), { recursive: true });
+      writeFileSync(brief, 'Review the navigation diff.');
+      writeFileSync(join(promptRecordDir(p), 'docs-nav.txt'), launch);
+      transcript('docs-nav', launch, { toolCalls: 2, range: [0, 13] });
+      return p;
+    };
+    const compose = (relay?: string) =>
+      composeReview({
+        criticalsInline: 1,
+        suggestionsInline: 0,
+        planPath: docsNav(),
+        env: ENV,
+        modelId: MODEL,
+        ...(relay === undefined ? {} : { unreviewedDimensions: [relay] }),
+      });
+    const control = compose();
+    for (const relay of ['reverse audit', '反向审计']) {
+      const r = compose(relay);
+      expect(r.body).not.toContain('returned no evidence of its walk twice');
+      expect({ relay, axes: r.capAxes }).toEqual({
+        relay,
+        axes: control.capAxes,
+      });
+      expect(r.capAxes.coverage).toEqual([]);
+    }
   });
 
   it('dedups a bare verification relay against the COMBINED floor entry too', () => {

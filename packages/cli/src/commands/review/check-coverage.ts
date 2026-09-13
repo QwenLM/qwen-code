@@ -220,10 +220,11 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
     writeStderrLine(
       `NOTE: ${report.staleTranscripts.length} transcript(s) were written ` +
         `against a different chunking of this diff — ` +
-        `${report.staleTranscripts.join(', ')}. Either the chunk id or the ` +
-        `\`of M\` count names a chunking this plan is not, so the lines they ` +
-        `name are not the lines those ids name here; they count for nothing ` +
-        `in the coverage above and need no repair.`,
+        `${report.staleTranscripts.join(', ')}. Their chunk id, their ` +
+        `\`of M\` count or the window they were told to read names a ` +
+        `chunking this plan is not, so the lines they name are not the lines ` +
+        `those ids name here; they count for nothing in the coverage above ` +
+        `and need no repair.`,
     );
   }
 
@@ -330,13 +331,18 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   // pointer true.
   if (report.oversizedWindows.length > 0) {
     writeStderrLine(
-      `ERROR: ${report.oversizedWindows.length} chunk(s) were read in a ` +
-        `single call over a window one read cannot return — ` +
-        `${report.oversizedWindows.join('; ')}. Relaunching the same agent ` +
-        `on the same prompt reproduces the same truncated read: the launch ` +
-        `block \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ` +
-        `${shellQuotePath(args.plan)} --chunk <id>\` spells the paging the ` +
-        `chunk needs, and the brief carries the rule.`,
+      // "Never paged", not "read in a single call": an agent that read the
+      // whole window and then paged its tail is refused too — its reads
+      // never show the head as a page — and "in a single call" was false
+      // of it (R40-3).
+      `ERROR: ${report.oversizedWindows.length} chunk(s) were never paged — ` +
+        `each is a window one read cannot return, and no agent's reads ` +
+        `covered it in pages that each fit — ` +
+        `${report.oversizedWindows.join('; ')}. A relaunch on a block that ` +
+        `spells one whole-window read reproduces the same truncated read. ` +
+        `Rebuild the block with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
+        `--plan ${shellQuotePath(args.plan)} --chunk <id>\`, which spells the ` +
+        `window as pages, and pass it verbatim.`,
     );
   }
   if (report.unopenedAgents.length > 0) {

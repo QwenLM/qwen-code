@@ -45,7 +45,7 @@ import {
   findingsFilePath,
 } from './lib/prompt-record.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
-import { buildWholeDiffBlock } from './agent-prompt.js';
+import { buildChunkLaunchPrompt, buildWholeDiffBlock } from './agent-prompt.js';
 import { checkCoverageCommand } from './check-coverage.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -4247,8 +4247,8 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.uncoverableChunks).toEqual([]);
     // ...and the chunk is still a gap, not coverage. A declarer's own read
     // is the read its declaration ANSWERED, so it is not evidence the chunk
-    // was read; `refutedByReturnedSpanningRead` states the same rule from
-    // the other side when it refuses to let a declarer refute itself. Both
+    // was read; the same rule read from the other side forbids a declarer
+    // refuting its own declaration. Both
     // declarer arms charge this price now, and neither charges it for the
     // chunks the record read and said nothing about (R38-3, answered on the
     // thread: the two arms were unified the other way).
@@ -5296,6 +5296,13 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     const entry = r.chunkItems.find((i) => i.id === 2);
     expect(entry?.outcome).toBe('covered');
     expect(entry?.classification).toBeUndefined();
+    // And the CAPPING half. Chunk 2's own launch was byte-verbatim and every
+    // chunk is covered; the leftover's lines are not chunk 2's, so it is a
+    // stale transcript, not "not launched with the prompt this CLI built"
+    // (R40-8).
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.staleTranscripts).toEqual(['chunk 2 of 2 (stale)']);
+    expect(r.ok).toBe(true);
   });
 
   it("still admits a declaration whose told-range is its chunk's own window", () => {
@@ -5483,6 +5490,10 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     expect(r.coveredChunks).toEqual([1, 2]);
     const entry = r.chunkItems.find((i) => i.id === 2);
     expect(entry?.outcome).toBe('covered');
+    // The capping half, as in the moved-window twin above (R40-8).
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.staleTranscripts).toEqual(['chunk 2 of 2 (stale)']);
+    expect(r.ok).toBe(true);
   });
 
   it('still admits a declaration whose told-range is the shrunken window itself', () => {
@@ -6119,8 +6130,8 @@ describe('coverage — a declaration must be evidenced by the declarer\u2019s ow
     // record demonstrably read and said nothing about — keep their credit,
     // which is the whole of R34-13's claim. Chunk 2 does not: the read the
     // declaration ANSWERED is not evidence that the chunk was read, the
-    // same rule `refutedByReturnedSpanningRead` states from the other side
-    // when it refuses to let a declarer refute itself (R38-3, answered).
+    // same rule that, read from the other side, forbids a declarer
+    // refuting its own declaration (R38-3, answered).
     expect(r.coveredChunks).toEqual([1, 3]);
     expect(r.missingChunks).toEqual([2]);
   });
@@ -6678,12 +6689,16 @@ describe('coverage — the plan-identity token orders records against a re-plan'
     expect(entry?.outcome).toBe('covered');
   });
 
-  it('drops a marker-less stale budget-gap disclosure the re-plan kept every window for', () => {
-    // The budget-gap arm's twin: the gate is sealed because a disclosure
-    // has NO geometry backstop — it rides straight into the posted report.
-    // The seal's token conjunct failed open on the marker-less launch, so
-    // the stale record's OLD-plan gap capped this run. Fail-closed, the
-    // gap is dropped (R22-3).
+  it('keeps a budget gap whose launch lost only its token line — absence is not another plan', () => {
+    // A budget gap is a DISCLOSURE, and its fail-closed direction is the
+    // opposite of credit's: `canCertify` refuses the "Reviewed — no
+    // blockers." opener while any kept gap stands, so a dropped gap is the
+    // one that lets the body certify depth the agent said it did not reach.
+    // The token seal's credit-grade question ("is this launch marked as
+    // THIS plan's?") dropped the gap of a launch whose relay merely lost its
+    // `Plan identity:` line; the gate now asks the naming question ("is it
+    // positively ANOTHER plan's?"), and a launch that carries another plan's
+    // token is still refused (R40-6, reversing R22-3's direction).
     const p = identityPlan(NEW);
     const current = tokenOf(NEW);
     built(p, 1, launch(1, current));
@@ -6720,8 +6735,66 @@ describe('coverage — the plan-identity token orders records against a re-plan'
     const r = coverageFromTranscripts(p, ENV);
     expect(r.budgetGaps).toEqual([
       { agent: 'chunk 2', gaps: ['the reconnect state machine'] },
+      {
+        agent: 'chunk 2',
+        gaps: ['second-order callers of getAuthTypeFromEnv'],
+      },
     ]);
     expect(r.coveredChunks).toEqual([1, 2]);
+
+    // The same record carrying ANOTHER plan's token is positively that
+    // plan's, and its gap stays out.
+    rmSync(join(dir, 'subagents', 'S1', 'agent-g2stale.jsonl'));
+    transcript('g2stale', launch(2, tokenOf(OLD)), {
+      calls: 1,
+      range: [100, 100],
+      toolPath: diffPath,
+      opens: [],
+      text: 'Walked the diff.\nBudget gap: second-order callers of getAuthTypeFromEnv',
+    });
+    expect(coverageFromTranscripts(p, ENV).budgetGaps).toEqual([
+      { agent: 'chunk 2', gaps: ['the reconnect state machine'] },
+    ]);
+  });
+
+  it('keeps a CHUNK-LESS launch’s budget gap when only its token line is missing', () => {
+    // The arm R40-6 was filed on. A role or whole-diff launch has no count
+    // and no territory for a seal to read, so the token was its whole seal —
+    // and asked at credit grade, a relay that dropped one line took the
+    // agent's mandated `Budget gap:` lines with it, while no other channel
+    // in the walk can name a chunk-less record at all.
+    const p = identityPlan(NEW);
+    const current = tokenOf(NEW);
+    built(p, 1, launch(1, current));
+    built(p, 2, launch(2, current));
+    for (const c of [1, 2]) {
+      transcript(`a${c}`, launch(c, current), {
+        calls: 1,
+        range: [(c - 1) * 100, 100],
+        toolPath: diffPath,
+      });
+    }
+    const whole = (tok: string | null) =>
+      'Security review of the whole diff.\n' +
+      (tok === null ? '' : `Plan identity: ${tok}\n`) +
+      `read_file(file_path="${diffPath}", offset=0, limit=100)\n` +
+      `read_file(file_path="${diffPath}", offset=100, limit=100)`;
+    const gapsWith = (tok: string | null) => {
+      transcript('w1', whole(tok), {
+        ranges: [
+          [0, 100],
+          [100, 100],
+        ],
+        toolPath: diffPath,
+        text: 'Walked.\nBudget gap: the reconnect state machine',
+      });
+      const g = coverageFromTranscripts(p, ENV).budgetGaps;
+      rmSync(join(dir, 'subagents', 'S1', 'agent-w1.jsonl'));
+      return g.map((x) => x.gaps).flat();
+    };
+    expect(gapsWith(current)).toEqual(['the reconnect state machine']);
+    expect(gapsWith(null)).toEqual(['the reconnect state machine']);
+    expect(gapsWith(tokenOf(OLD))).toEqual([]);
   });
 
   it('refuses the drift rescue to a marker-less stale record the count cannot tell apart', () => {
@@ -7179,8 +7252,10 @@ describe('coverage — the plan-identity token orders records against a re-plan'
 
     const r = coverageFromTranscripts(p, ENV);
     expect(r.budgetGaps).toEqual([]);
-    // The record is still disclosed — as a prompt defect.
-    expect(r.rewrittenPrompts.join(' ')).toContain('chunk 2');
+    // Named on the stale channel: its window is not this plan's chunk 2,
+    // and this plan's chunk 2 WAS delivered verbatim to `a2live` (R40-8).
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.staleTranscripts).toEqual(['chunk 2 of 2 (stale2)']);
     expect(r.coveredChunks).toEqual([1, 2]);
   });
 
@@ -7363,8 +7438,11 @@ describe('coverage — a window-moving re-plan cannot key causes through the not
 
     const r = coverageFromTranscripts(plan(), ENV);
     expect(r.missingChunks).toEqual([2]);
-    // The prose array still names the record — that describes the RECORD.
-    expect(r.rewrittenPrompts.join(' ')).toContain('chunk 2');
+    // Named on the stale channel, not as this plan's rewritten chunk-2
+    // launch: `a2` carries that launch verbatim, and this record's window
+    // is not chunk 2's (R40-8).
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.staleTranscripts).toEqual(['chunk 2 of 2 (stale)']);
     const entry = r.chunkItems.find((i) => i.id === 2);
     expect(entry?.outcome).toBe('missing');
     expect(entry?.classification).toBe('idle');
@@ -8461,7 +8539,7 @@ describe('coverage — an oversized window is paged, or it is refused and said s
     expect(pub?.publicReason).not.toContain('Page the window');
 
     const lines = driveHandler(p);
-    expect(lines.join('\n')).toContain('over a window one read cannot return');
+    expect(lines.join('\n')).toContain('were never paged');
     const gap = lines.find((l) => l.includes('chunk(s) were not reviewed'));
     expect(gap).toContain('could not be accepted for this plan');
     // ...and no pointer at lines that may not exist.
@@ -8487,6 +8565,146 @@ describe('coverage — an oversized window is paged, or it is refused and said s
       l.includes('chunk(s) were not reviewed'),
     );
     expect(gap).not.toContain('could not be accepted for this plan');
+  });
+
+  it('refuses an oversized window’s declaration: the plan says every LINE fits', () => {
+    // `planContradictsDeclaration` answers the declaration's own claim — a
+    // line exceeds the read limit — and a window larger than one read is a
+    // different fact with a different repair. Carrying a window conjunct
+    // there stopped the plan contradicting a false declaration on exactly
+    // this shape: the declaration was admitted as terminal
+    // `declared-uncoverable` (R40-1).
+    const { p, mk } = oversizedPlan();
+    transcript('a1', mk(900), {
+      calls: 1,
+      range: [0, 900],
+      text: 'Uncoverable: chunk 1 — window exceeds one read',
+    });
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([1]);
+    expect(r.oversizedWindows.join(' ')).toContain('chunk 1');
+
+    // ...and a pager beside that declarer keeps its credit: the refused
+    // declaration no longer feeds the unanimity veto over a read the credit
+    // loop accepts.
+    transcript(
+      'w1',
+      'Security review of the whole diff.\n' +
+        `read_file(file_path="${DIFF}", offset=0, limit=900)`,
+      {
+        ranges: [
+          [0, 300],
+          [300, 300],
+          [600, 300],
+        ],
+      },
+    );
+    expect(coverageFromTranscripts(p, ENV).coveredChunks).toEqual([1]);
+  });
+
+  it('credits the compliant agent of the BUILT launch block', () => {
+    // The stderr repair for an unpaged oversized window is "rebuild with
+    // `agent-prompt --chunk`" — so the block it rebuilds must spell reads the
+    // credit gate accepts. It spelled one whole-window read, which the gate
+    // refuses by construction (R40-3). The escape transcript here is derived
+    // from the BUILT block's own spelled reads, not written by hand.
+    const { p } = oversizedPlan();
+    const launch = buildChunkLaunchPrompt(
+      {
+        diffPathAbsolute: DIFF,
+        chunks: [
+          {
+            id: 1,
+            startLine: 1,
+            endLine: 900,
+            lines: 900,
+            chars: 45_000,
+            maxLineChars: 120,
+            oversized: true,
+            files: [],
+          },
+        ],
+      } as unknown as Parameters<typeof buildChunkLaunchPrompt>[0],
+      1,
+      briefPath(p, 'chunk-1'),
+    );
+    const spelled = [...launch.matchAll(/offset=(\d+), limit=(\d+)/g)].map(
+      (m) => [Number(m[1]), Number(m[2])] as [number, number],
+    );
+    expect(spelled.length).toBeGreaterThan(1);
+    built(p, 1, launch);
+    transcript('a1', launch, { ranges: spelled });
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.rewrittenPrompts).toEqual([]);
+  });
+
+  it('does not both refuse a truncated read and let it refute a declaration', () => {
+    // A whole-diff record's single read of chunk 2's oversized window was
+    // refused as truncated by the credit loop and, in the same pass, used by
+    // a refutation guard to refuse chunk 2's declaration. That guard was
+    // gated on the same measurement as `planContradictsDeclaration`, so it
+    // could only ever run on this one shape, where a spanning read proves
+    // nothing — it is gone, and the declaration is refused by the plan's
+    // own measurement instead (R40-9).
+    const p = join(dir, 'plan.json');
+    const mk = (c: number) =>
+      `You are review agent \`chunk ${c} of 2\` — the territory agent.\n` +
+      `read_file(file_path="${briefPath(p, `chunk-${c}`)}")\n` +
+      `read_file(file_path="${DIFF}", offset=${(c - 1) * 900}, limit=900)`;
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 1800,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          { id: 1, startLine: 1, endLine: 900, maxLineChars: 120 },
+          {
+            id: 2,
+            startLine: 901,
+            endLine: 1800,
+            maxLineChars: 120,
+            chars: 45_000,
+            oversized: true,
+          },
+        ],
+      }),
+    );
+    for (const c of [1, 2]) {
+      built(p, c, mk(c));
+      writeFileSync(briefPath(p, `chunk-${c}`), 'b');
+    }
+    satisfyRoster(p);
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    transcript('a1', mk(1), { calls: 1, range: [0, 900] });
+    transcript('a2', mk(2), {
+      calls: 1,
+      range: [900, 900],
+      text: 'Uncoverable: chunk 2 — window exceeds one read',
+    });
+    transcript(
+      'w1',
+      'Security review of the whole diff.\n' +
+        `read_file(file_path="${DIFF}", offset=0, limit=900)\n` +
+        `read_file(file_path="${DIFF}", offset=900, limit=900)`,
+      {
+        ranges: [
+          [0, 900],
+          [900, 900],
+        ],
+      },
+    );
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([2]);
+    expect(entryFor(r, 2).classification).toBe('read-not-credited');
+    expect(r.oversizedWindows.join(' ')).toContain('chunk 2');
   });
 
   it('says nothing about paging for a window another record paged', () => {
@@ -8772,5 +8990,145 @@ describe('coverage — a launch nothing can place is still named', () => {
     // and this record made one. The claim it must never make is that the
     // agent read the diff, and it does not.
     expect(driveHandler(p)[0]).toContain('agent(s) ran');
+  });
+});
+
+describe('coverage — round 40: absence is not mismatch, and every refusal is a fact', () => {
+  it('names a countless slot’s record for the facts it has no reads to prove', () => {
+    // A count that is absent says nothing about which chunking the launch
+    // was written against; only a PRESENT, different count does. Refusing
+    // the name unless the record's reads reached the chunk refused exactly
+    // the records with no ranged reads by construction — so stderr named
+    // `chunk 2` idle while the ledger said `no-agent` (R40-5).
+    const countless = good(2).replace('`chunk 2 of 2`', '`chunk 2`');
+    for (const [shape, opts, cls] of [
+      [
+        'unopened',
+        { calls: 1, toolPath: join(dir, 'x.ts'), opens: [chunkBrief(2)] },
+        'unopened',
+      ],
+      ['idle', { calls: 0 }, 'idle'],
+    ] as Array<
+      [string, Parameters<typeof transcript>[2], 'unopened' | 'idle']
+    >) {
+      const p = plan(2, { maxLineChars: 42 });
+      transcript('a1', good(1), { calls: 1, range: [0, 100] });
+      transcript('a2', countless, opts);
+      const entry = entryFor(coverageFromTranscripts(p, ENV), 2);
+      expect({ shape, entry }).toMatchObject({
+        shape,
+        entry: { outcome: 'missing', classification: cls, agents: ['chunk 2'] },
+      });
+      expect(entry.causes).toContain(cls);
+      rmSync(join(dir, 'subagents', 'S1', 'agent-a2.jsonl'));
+      rmSync(join(dir, 'subagents', 'S1', 'agent-a1.jsonl'));
+    }
+    // A PRESENT foreign count with no reads keeps its refusal — that shape
+    // leaves the walk as a stale transcript.
+    const p = plan(2, { maxLineChars: 42 });
+    transcript('a1', good(1), { calls: 1, range: [0, 100] });
+    transcript('a2', good(2).replace('`chunk 2 of 2`', '`chunk 2 of 9`'), {
+      calls: 0,
+    });
+    expect(entryFor(coverageFromTranscripts(p, ENV), 2).agents).toEqual([]);
+  });
+
+  it('records the refused read on a truncatable chunk its agent did not declare', () => {
+    // The line-level truncatable skip was the one refusal of four that
+    // recorded nothing on the fact axis, so a chunk whose agent read its
+    // window landed `unknown` with no causes (R40-7).
+    const p = plan(2, { longLineChunk: 2, maxLineChars: 42 });
+    transcript('a1', good(1), { calls: 1, range: [0, 100] });
+    transcript('a2', good(2), {
+      calls: 1,
+      range: [100, 100],
+      text: 'Found nothing.',
+    });
+    const entry = entryFor(coverageFromTranscripts(p, ENV), 2);
+    expect(entry.classification).toBe('read-not-credited');
+    expect(entry.causes).toContain('read-not-credited');
+    expect(chunkReadSomething(entry)).toBe(true);
+  });
+
+  it('keeps a relay that altered this plan’s own read line on the capping arm', () => {
+    // The counter-pin to the window-axis stale route (R40-8). A leftover of
+    // another chunking is told to read OUTSIDE chunk 2's window; a relay that
+    // altered chunk 2's own read line (`limit=100` → `limit=60`) is told a
+    // range INSIDE it, fails territory just the same, and is chunk 2's
+    // launch, rewritten. Beside a verbatim sibling that died before
+    // returning — nothing supersedes it — it must stay on the capping arm with
+    // its rebuild, not be filed as a stale transcript that "needs no repair".
+    const p = plan(2, { maxLineChars: 42 });
+    transcript('a1', good(1), { calls: 1, range: [0, 100] });
+    transcript('a2', good(2), { calls: 1, text: '' });
+    transcript('a2relay', good(2).replace('limit=100', 'limit=60'), {
+      calls: 1,
+      range: [100, 60],
+    });
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.staleTranscripts).toEqual([]);
+    expect(r.rewrittenPrompts.join(' ')).toContain('chunk 2');
+    expect(r.ok).toBe(false);
+  });
+
+  it('does not count a prior single reader of an oversized WINDOW as recovered work', () => {
+    // The recovered-work exclusion read one of the credit loop's two
+    // plan-proven refusals — the over-cap line — and not the other, so a
+    // prior reader the loop refused for an unpaged oversized window was
+    // counted as work the resumed run reused (R39-13).
+    const p = join(dir, 'plan.json');
+    const mk = (c: number) =>
+      `You are review agent \`chunk ${c} of 2\` — the territory agent.\n` +
+      `read_file(file_path="${briefPath(p, `chunk-${c}`)}")\n` +
+      `read_file(file_path="${DIFF}", offset=${(c - 1) * 900}, limit=900)`;
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 1800,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          { id: 1, startLine: 1, endLine: 900, maxLineChars: 120 },
+          {
+            id: 2,
+            startLine: 901,
+            endLine: 1800,
+            maxLineChars: 120,
+            chars: 45_000,
+            oversized: true,
+          },
+        ],
+      }),
+    );
+    for (const c of [1, 2]) {
+      built(p, c, mk(c));
+      writeFileSync(briefPath(p, `chunk-${c}`), 'b');
+    }
+    satisfyRoster(p);
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const now = Date.now();
+    appendRunSession(p, { QWEN_CODE_SESSION_ID: 'S0' }, now);
+    appendRunSession(p, { QWEN_CODE_SESSION_ID: 'S1' }, now + 1500);
+    recordResume(p, ENV, now + 1500);
+    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+    transcript('a1', mk(1), { calls: 1, range: [0, 900] });
+    transcript('a2', mk(2), { calls: 1, range: [900, 900] });
+    const live = join(dir, 'subagents', 'S1', 'agent-a2.jsonl');
+    writeFileSync(
+      join(dir, 'subagents', 'S0', 'agent-a2.jsonl'),
+      readFileSync(live, 'utf8').replaceAll(
+        '"sessionId":"S1"',
+        '"sessionId":"S0"',
+      ),
+    );
+    rmSync(live);
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.recoveredAgents).toBe(0);
   });
 });
