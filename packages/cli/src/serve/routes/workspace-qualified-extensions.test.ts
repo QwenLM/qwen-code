@@ -3513,6 +3513,85 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('keeps a newer parked install waiting when the older install commits', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    let releaseOlderRefresh!: () => void;
+    const olderRefreshGate = new Promise<void>((resolve) => {
+      releaseOlderRefresh = resolve;
+    });
+    vi.mocked(ExtensionManager.prototype.refreshCache).mockImplementationOnce(
+      () => olderRefreshGate,
+    );
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockImplementation(async function (this: ExtensionManager, options) {
+      if (options.installMetadata.source === '@scope/newer') {
+        await requestApiKey(this);
+      }
+      return {} as never;
+    });
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'demo' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    try {
+      const older = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/older',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+      expect(older.status).toBe(202);
+      const newer = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/newer',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+      expect(newer.status).toBe(202);
+      await vi.waitFor(async () => {
+        const waiting = await auth(
+          request(h.app).get(
+            `/extensions/operations/${newer.body.operationId}`,
+          ),
+        );
+        expect(waiting.body.status).toBe('waiting_for_input');
+      });
+      // The older install's prepare — and with it the supersede sweep — runs
+      // only now, while the newer install is already parked.
+      releaseOlderRefresh();
+      await expect(
+        pollOperation(h.app, older.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      const parked = await auth(
+        request(h.app).get(`/extensions/operations/${newer.body.operationId}`),
+      );
+      expect(parked.body.status).toBe('waiting_for_input');
+      await answerSettingInteraction(h.app, newer.body.operationId);
+      await expect(
+        pollOperation(h.app, newer.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('re-drives the runtime when a mutation receipt observes a reused generation', async () => {
     const h = await makeHarness();
     const extension = mockExtensionManager();
