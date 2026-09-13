@@ -2264,6 +2264,7 @@ export interface DaemonWorkspaceProviderCurrent {
 }
 
 export interface DaemonWorkspaceProviderModel {
+  configurationKey?: string;
   modelId: string;
   baseModelId: string;
   name: string;
@@ -3582,8 +3583,29 @@ export interface DaemonSettingUpdateResult {
   requiresRestart: boolean;
 }
 
+export interface DaemonModelConfiguration {
+  key: string;
+  authType: string;
+  modelId: string;
+  name?: string;
+  baseUrl?: string;
+  envKey?: string;
+  contextWindowSize?: number;
+  canEditContextWindow?: boolean;
+  purpose: 'chat' | 'image' | 'voice';
+  imageModel?: string;
+  advisorModel?: string;
+}
+
+export interface DaemonModelConfigurationUpdateResult {
+  updated: true;
+  requiresRestart: boolean;
+  runtimeSync?: DaemonModelProviderRuntimeSyncResult;
+}
+
 /** Identifies a configured model to remove from `modelProviders`. */
 export interface DaemonModelDeleteRequest {
+  key?: string;
   authType: string;
   modelId: string;
   baseUrl?: string;
@@ -3609,6 +3631,9 @@ export type DaemonVoiceTransport =
   | 'dashscope-task-realtime';
 
 export interface DaemonVoiceModelDescriptor {
+  name?: string;
+  baseUrl?: string;
+  contextWindow?: number;
   id: string;
   transport: DaemonVoiceTransport;
 }
@@ -4637,6 +4662,9 @@ export interface DaemonAuthProviderInstallRequest {
   apiKey: string;
   modelIds?: string[];
   advancedConfig?: {
+    /** Replace all advanced form controls; omitted fields otherwise stay unchanged. */
+    replaceExisting?: boolean;
+    purpose?: 'image' | 'voice';
     enableThinking?: boolean;
     multimodal?: {
       image?: boolean;

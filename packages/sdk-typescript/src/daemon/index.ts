@@ -490,6 +490,8 @@ export type {
   DaemonWorkspacePermissionsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelConfiguration,
+  DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
   DaemonModelProviderRuntimeSyncResult,

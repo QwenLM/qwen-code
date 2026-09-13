@@ -30,9 +30,11 @@
  * key, and so on — so the cache naturally invalidates from the edit point.
  *
  * The `canonicalOpts` projection keeps only the dispatch and replay-affecting
- * opts (`schema`, `model`, `isolation`, `agentType`, `workingDir`, `stepId`,
- * `extensions`) with object keys sorted, so cosmetic opt differences (a
- * re-ordered schema, a `label` change) don't bust the cache.
+ * opts
+ * (`schema`, `model`, `effort`, `isolation`, `agentType`, `workingDir`,
+ * `disallowedTools`, `stepId`, `extensions`) with object keys sorted, so
+ * cosmetic opt differences (a re-ordered schema, a `label` change) don't bust
+ * the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`
@@ -108,11 +110,43 @@ export interface JournalReplay {
 }
 
 /**
- * Project the dispatch and replay-identity opts into a stable canonical
- * string. Runtime choices plus `stepId` and ordered `extensions` determine
- * whether a completed call may be reused; `label` / `phase` / `stallMs` are
+ * 必须进入 runtime override path 的 `agent()` 选项。Orchestrator 仅在这些
+ * 选项全部缺省时复用 session config；resume key 还会追加下方的 replay 身份项。
+ * `label` / `phase` / `stallMs` 只影响展示或运行控制，不属于两者。
+ */
+export const DISPATCH_AFFECTING_AGENT_OPTS = [
+  'schema',
+  'model',
+  'effort',
+  'isolation',
+  'agentType',
+  'workingDir',
+  'disallowedTools',
+] as const;
+
+/** 除运行时覆盖项外，stepId 与 extensions 也会改变 resume replay 身份。 */
+const REPLAY_AFFECTING_AGENT_OPTS = [
+  ...DISPATCH_AFFECTING_AGENT_OPTS,
+  'stepId',
+  'extensions',
+] as const;
+
+/**
+ * Project dispatch and replay-affecting opts into a stable canonical string.
+ * `schema` / `model` / `effort` / `isolation` / `agentType` / `workingDir` /
+ * `disallowedTools` change runtime dispatch, while `stepId` and ordered
+ * `extensions` change replay identity. `label` / `phase` / `stallMs` are
  * cosmetic or operational and must NOT bust the cache. Object keys are sorted
  * recursively so a re-serialized schema with reordered keys hashes the same.
+ *
+ * `effort` and `disallowedTools` change how hard the agent thinks and what it
+ * may do, so a resume that changed either has to run live. The sandbox
+ * normalizes both before they get here — an effort alias to its tier, a deny
+ * list to a sorted, de-duplicated array of tool names — so `'med'` and
+ * `'medium'`, `Edit` and `edit`, or the same tools in another order, are one
+ * key. `stepId` separates business stages with otherwise equal prompts, and
+ * `extensions` determines which selected extension capabilities reach the
+ * agent.
  *
  * `workingDir` is dispatch-affecting for the same reason it exists: the same
  * prompt run against two different worktrees is two different questions. Were
@@ -121,15 +155,7 @@ export interface JournalReplay {
  */
 export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   const projected: Record<string, unknown> = {};
-  for (const k of [
-    'schema',
-    'model',
-    'isolation',
-    'agentType',
-    'workingDir',
-    'stepId',
-    'extensions',
-  ] as const) {
+  for (const k of REPLAY_AFFECTING_AGENT_OPTS) {
     const v = opts[k];
     if (v === undefined || typeof v === 'function') continue;
     projected[k] = v;
@@ -206,6 +232,7 @@ export function deriveArgsSeed(args: unknown): string {
  * entries win last-write; `started` entries accumulate (so a key started
  * N times surfaces N prior attempts for the respawn telemetry); `failed`
  * keys are collected as a set.
+ * `source-ref` 只保留最后一条来源记录，且不参与 dispatch replay key。
  *
  * An entry type this build does not know is skipped rather than rejected, so
  * a journal written by a newer build still replays here for the records this

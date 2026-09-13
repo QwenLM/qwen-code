@@ -160,3 +160,44 @@ export const ToolDisplayNamesMigration = {
   Task: ToolDisplayNames.AGENT, // Old display name for Agent (renamed from Task)
   TodoWrite: ToolDisplayNames.TODO_WRITE, // Old display name for TodoList (renamed from TodoWrite)
 } as const;
+
+/**
+ * Every spelling of a built-in tool, mapped to the name it is registered
+ * under: the tool name itself, its display name, and the legacy aliases of
+ * either. Built at module end so every table above is initialised.
+ */
+const BUILTIN_TOOL_NAMES: ReadonlyMap<string, string> = (() => {
+  const lookup = new Map<string, string>();
+  const displayNames = ToolDisplayNames as Record<string, string>;
+  for (const name of Object.values(ToolNames)) {
+    lookup.set(name, name);
+  }
+  for (const [key, name] of Object.entries(ToolNames)) {
+    const display = displayNames[key];
+    if (display !== undefined && !lookup.has(display)) {
+      lookup.set(display, name);
+    }
+  }
+  for (const [legacy, name] of Object.entries(ToolNamesMigration)) {
+    if (!lookup.has(legacy)) lookup.set(legacy, name);
+  }
+  for (const [legacyDisplay, display] of Object.entries(
+    ToolDisplayNamesMigration,
+  )) {
+    const name = lookup.get(display);
+    if (name !== undefined && !lookup.has(legacyDisplay)) {
+      lookup.set(legacyDisplay, name);
+    }
+  }
+  return lookup;
+})();
+
+/**
+ * The tool name a built-in tool is registered under, given its tool name, its
+ * display name, or a legacy alias of either; `undefined` for anything that is
+ * not a built-in tool (an MCP tool, a discovered tool, a typo). Static, so the
+ * answer does not depend on whether the tool is registered in this session.
+ */
+export function resolveBuiltinToolName(name: string): string | undefined {
+  return BUILTIN_TOOL_NAMES.get(name);
+}

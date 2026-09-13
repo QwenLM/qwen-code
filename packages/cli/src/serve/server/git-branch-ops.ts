@@ -6,6 +6,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core';
 
 const execFileAsync = promisify(execFile);
 
@@ -22,7 +23,7 @@ export async function branchExists(
   try {
     await execFileAsync(
       'git',
-      ['rev-parse', '--verify', `refs/heads/${name}`],
+      [...NO_EXEC_CONFIG, 'rev-parse', '--verify', `refs/heads/${name}`],
       { cwd, timeout: GIT_BRANCH_TIMEOUT_MS },
     );
     return true;
@@ -34,7 +35,13 @@ export async function branchExists(
 export async function isDirtyTree(cwd: string): Promise<boolean> {
   const { stdout } = await execFileAsync(
     'git',
-    ['status', '--porcelain', '--untracked-files=no'],
+    [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '--untracked-files=no',
+    ],
     {
       cwd,
       maxBuffer: 10 * 1024 * 1024,
@@ -45,7 +52,7 @@ export async function isDirtyTree(cwd: string): Promise<boolean> {
 }
 
 export async function getHeadCommit(cwd: string): Promise<string | undefined> {
-  return execFileAsync('git', ['rev-parse', 'HEAD'], {
+  return execFileAsync('git', [...NO_EXEC_CONFIG, 'rev-parse', 'HEAD'], {
     cwd,
     timeout: GIT_BRANCH_TIMEOUT_MS,
   })
@@ -53,22 +60,26 @@ export async function getHeadCommit(cwd: string): Promise<string | undefined> {
     .catch(() => undefined);
 }
 
+// A checkout runs the repository's own `post-checkout` hook whatever config it
+// is given — `core.hooksPath` is deliberately not emptied, because qwen installs
+// it in every worktree it creates — so the guard below narrows these two calls
+// rather than sealing them.
 export async function createBranch(cwd: string, name: string): Promise<void> {
-  await execFileAsync('git', ['checkout', '-b', name], {
+  await execFileAsync('git', [...NO_EXEC_CONFIG, 'checkout', '-b', name], {
     cwd,
     timeout: GIT_BRANCH_TIMEOUT_MS,
   });
 }
 
 export async function checkoutRef(cwd: string, ref: string): Promise<void> {
-  await execFileAsync('git', ['checkout', ref], {
+  await execFileAsync('git', [...NO_EXEC_CONFIG, 'checkout', ref], {
     cwd,
     timeout: GIT_BRANCH_TIMEOUT_MS,
   });
 }
 
 export async function deleteBranch(cwd: string, name: string): Promise<void> {
-  await execFileAsync('git', ['branch', '-D', name], {
+  await execFileAsync('git', [...NO_EXEC_CONFIG, 'branch', '-D', name], {
     cwd,
     timeout: GIT_BRANCH_TIMEOUT_MS,
   });

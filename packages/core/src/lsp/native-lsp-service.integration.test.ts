@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
-import { NativeLspService } from './NativeLspService.js';
+import { NativeLspService } from './native-lsp-service.js';
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { IdeContextStore } from '../ide/ideContext.js';
