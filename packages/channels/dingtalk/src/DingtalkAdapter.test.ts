@@ -5737,7 +5737,10 @@ describe('DingtalkChannel quoted media', () => {
     vi.restoreAllMocks();
   });
 
-  function mockMediaDownload(mimeType: string, bytes: Uint8Array): string[] {
+  function mockMediaDownload(
+    mimeType: string,
+    bytes: Uint8Array | Record<string, Uint8Array>,
+  ): string[] {
     const downloadCodes: string[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(
       (input: RequestInfo | URL, init?: RequestInit) => {
@@ -5759,16 +5762,22 @@ describe('DingtalkChannel quoted media', () => {
           downloadCodes.push(request.downloadCode);
           return Promise.resolve(
             new Response(
-              JSON.stringify({ downloadUrl: 'https://example.com/media' }),
+              JSON.stringify({
+                downloadUrl: `https://example.com/${request.downloadCode}`,
+              }),
               { status: 200 },
             ),
           );
         }
+        const downloadCode = url.slice(url.lastIndexOf('/') + 1);
         return Promise.resolve(
-          new Response(bytes, {
-            status: 200,
-            headers: { 'content-type': mimeType },
-          }),
+          new Response(
+            bytes instanceof Uint8Array ? bytes : bytes[downloadCode],
+            {
+              status: 200,
+              headers: { 'content-type': mimeType },
+            },
+          ),
         );
       },
     );
@@ -6037,6 +6046,48 @@ describe('DingtalkChannel quoted media', () => {
         mimeType: 'image/png',
       },
     ]);
+  });
+
+  it('summarizes and downloads nested pictures from replied rich text', async () => {
+    const downloadCodes = mockMediaDownload('image/png', {
+      'quoted-rich-picture-1': new Uint8Array([1]),
+      'quoted-rich-picture-2': new Uint8Array([2]),
+    });
+    const channel = createChannel();
+
+    replyToMedia(channel, 'richText', {
+      richText: [
+        { msgType: 'picture', downloadCode: 'quoted-rich-picture-1' },
+        { msgType: 'text', content: '输出123' },
+        { msgType: 'picture', downloadCode: 'quoted-rich-picture-2' },
+      ],
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(downloadCodes).toEqual([
+      'quoted-rich-picture-1',
+      'quoted-rich-picture-2',
+    ]);
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'inspect this',
+        referencedText: '[image]输出123[image]',
+        attachments: [
+          {
+            type: 'image',
+            data: Buffer.from([1]).toString('base64'),
+            mimeType: 'image/png',
+          },
+          {
+            type: 'image',
+            data: Buffer.from([2]).toString('base64'),
+            mimeType: 'image/png',
+          },
+        ],
+      }),
+    );
   });
 
   it('downloads a replied picture and attaches it to the prompt', async () => {
