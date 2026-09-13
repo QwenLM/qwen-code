@@ -6,8 +6,11 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  checkpointBatchRecordLimit,
+  GOAL_CHECKPOINT_BATCH_RECORD_LIMIT,
   isGoalCheckpointStalled,
   materializeGoalEvidenceCheckpoint,
+  splitCheckpointEvidence,
   type GoalCheckpointVerificationResult,
 } from './goal-checkpoint.js';
 import {
@@ -168,5 +171,58 @@ describe('isGoalCheckpointStalled', () => {
         { claims: claims(GOAL_CHECKPOINT_CLAIM_LIMIT) },
       ),
     ).toBe(false);
+  });
+});
+
+describe('checkpointBatchRecordLimit', () => {
+  it('sends the whole window until a check stalls, then halves after each stall', () => {
+    expect(checkpointBatchRecordLimit(0)).toBeUndefined();
+    expect(checkpointBatchRecordLimit(1)).toBe(
+      GOAL_CHECKPOINT_BATCH_RECORD_LIMIT,
+    );
+    expect(checkpointBatchRecordLimit(2)).toBe(
+      GOAL_CHECKPOINT_BATCH_RECORD_LIMIT / 2,
+    );
+    expect(checkpointBatchRecordLimit(3)).toBe(
+      GOAL_CHECKPOINT_BATCH_RECORD_LIMIT / 4,
+    );
+  });
+
+  it('never returns an empty batch size, however long the streak', () => {
+    // A zero would never advance the split.
+    for (let stalls = 1; stalls <= 40; stalls++) {
+      expect(checkpointBatchRecordLimit(stalls)).toBeGreaterThanOrEqual(1);
+    }
+  });
+});
+
+describe('splitCheckpointEvidence', () => {
+  const records = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      ...evidence[0]!,
+      uuid: `assistant-${index}`,
+    }));
+  const uuids = (batches: ReadonlyArray<ReadonlyArray<{ uuid: string }>>) =>
+    batches.map((batch) => batch.map(({ uuid }) => uuid));
+
+  it('keeps the window whole when there is no limit or it already fits', () => {
+    const window = records(5);
+    expect(splitCheckpointEvidence(window, undefined)).toEqual([window]);
+    expect(splitCheckpointEvidence(window, 5)).toEqual([window]);
+  });
+
+  it('cuts consecutive batches in window order, the last one short', () => {
+    expect(uuids(splitCheckpointEvidence(records(7), 3))).toEqual([
+      ['assistant-0', 'assistant-1', 'assistant-2'],
+      ['assistant-3', 'assistant-4', 'assistant-5'],
+      ['assistant-6'],
+    ]);
+    expect(
+      splitCheckpointEvidence(records(6), 3).map((batch) => batch.length),
+    ).toEqual([3, 3]);
+  });
+
+  it('still yields one batch for an empty window, so the check still runs', () => {
+    expect(splitCheckpointEvidence([], 12)).toEqual([[]]);
   });
 });
