@@ -300,6 +300,51 @@ describe('container execution boundary', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32').each([
+    ['getGlobalQwenDir', true],
+    ['getGlobalQwenDir', false],
+    ['getRuntimeBaseDir', true],
+    ['getRuntimeBaseDir', false],
+  ] as const)(
+    'resolves an uncreated %s through its symlink ancestor (inside=%s)',
+    async (getter, inside) => {
+      const root = await mkdtemp(join(tmpdir(), 'execution-protected-root-'));
+      const workspace = join(root, 'workspace');
+      const bundle = join(root, 'bundle');
+      const outside = join(root, 'outside');
+      const alias = join(root, 'alias');
+      await mkdir(workspace);
+      await mkdir(bundle);
+      await mkdir(outside);
+      await symlink(inside ? workspace : outside, alias, 'dir');
+      const protectedPath = join(alias, 'missing', 'private-state');
+      const mock = vi.spyOn(Storage, getter).mockReturnValue(protectedPath);
+      try {
+        const creation = ContainerExecutionEnvironment.create(
+          { getWorkingDir: () => workspace } as Config,
+          { ...options, bundleDirectory: bundle },
+          new AbortController().signal,
+        );
+        if (inside) {
+          await expect(creation).rejects.toThrow(
+            'Qwen credentials or runtime directory',
+          );
+        } else {
+          await expect(creation).rejects.toMatchObject({
+            code: 'ENOENT',
+            path: expect.stringContaining('execution-worker.js'),
+          });
+        }
+        await expect(access(protectedPath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      } finally {
+        mock.mockRestore();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform === 'win32').each(['inside', 'equal', 'symlink'])(
     'rejects a temporary root %s the writable workspace',
     async (relationship) => {

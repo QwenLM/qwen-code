@@ -20,13 +20,14 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parse } from 'shell-quote';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import type {
   ToolConfirmationOutcome,
   ToolConfirmationPayload,
@@ -373,9 +374,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
       Storage.getRuntimeBaseDir(),
       temporaryRoot,
     ]) {
-      const canonical = await realpath(protectedDirectory).catch(() =>
-        resolve(protectedDirectory),
-      );
+      const canonical = resolveWorkspacePath(protectedDirectory);
       const fromWorkspace = relative(workspace, canonical);
       if (
         fromWorkspace === '' ||

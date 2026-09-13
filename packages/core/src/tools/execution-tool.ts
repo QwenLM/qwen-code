@@ -91,10 +91,10 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
   }
 
   private async releaseOnce(): Promise<void> {
-    this.preparationAbort.abort();
     for (const [signal, listener] of this.abortListeners)
       signal.removeEventListener('abort', listener);
     this.abortListeners.clear();
+    this.preparationAbort.abort();
     try {
       if (this.prepared) {
         await this.prepared.catch(() => undefined);
@@ -152,7 +152,7 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
   }
 
   override async getDefaultPermission(
-    signal = new AbortController().signal,
+    signal = this.preparationAbort.signal,
   ): Promise<PermissionDecision> {
     try {
       await this.prepare(signal);

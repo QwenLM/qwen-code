@@ -124,37 +124,58 @@ describe('execution tool facade', () => {
     expect(invalidate).toHaveBeenCalledTimes(2);
   });
 
-  it.each(['caller abort', 'release'])(
-    'cancels pending permission preparation on %s',
-    async (action) => {
-      let prepareSignal!: AbortSignal;
-      vi.spyOn(environment, 'prepare').mockImplementation(
-        (_request, signal) =>
-          new Promise((_resolve, reject) => {
-            prepareSignal = signal;
-            signal.addEventListener('abort', () => reject(signal.reason), {
-              once: true,
-            });
-          }),
-      );
-      const release = vi.spyOn(environment, 'release');
-      const invocation = wrapExecutionTool(
-        new ReadFileTool(config),
-        environment,
-        config,
-      ).build({ file_path: path.join(workspace, 'file.txt') });
-      const controller = new AbortController();
-      const permission = invocation.getDefaultPermission(controller.signal);
-      const rejected = permission.catch((error: unknown) => error);
-      await vi.waitFor(() => expect(prepareSignal).toBeDefined());
-      if (action === 'caller abort') controller.abort();
-      else await invocation.release?.();
-      expect(await rejected).toBe(prepareSignal.reason);
-      await invocation.release?.();
-      expect(prepareSignal.aborted).toBe(true);
-      expect(release).toHaveBeenCalledOnce();
-    },
-  );
+  it.each([
+    ['prepare', 'caller abort'],
+    ['prepare', 'release'],
+    ['prepare', 'release without caller signal'],
+    ['permission', 'caller abort'],
+    ['permission', 'release'],
+    ['permission', 'release without caller signal'],
+  ] as const)('cancels pending %s on %s', async (phase, action) => {
+    let pendingSignal!: AbortSignal;
+    vi.spyOn(environment, phase).mockImplementation(
+      (_request, signal) =>
+        new Promise<never>((_resolve, reject) => {
+          pendingSignal = signal;
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const release = vi.spyOn(environment, 'release');
+    const invocation = wrapExecutionTool(
+      new ReadFileTool(config),
+      environment,
+      config,
+    ).build({ file_path: path.join(workspace, 'file.txt') });
+    const controller = new AbortController();
+    const permission = invocation.getDefaultPermission(
+      action === 'release without caller signal'
+        ? undefined
+        : controller.signal,
+    );
+    const rejected = permission.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(pendingSignal).toBeDefined());
+    if (action === 'caller abort') controller.abort();
+    else await invocation.release?.();
+    expect(await rejected).toBe(pendingSignal.reason);
+    await invocation.release?.();
+    expect(pendingSignal.aborted).toBe(true);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('releases a no-argument permission denial exactly once', async () => {
+    vi.spyOn(environment, 'permission').mockResolvedValue('deny');
+    const release = vi.spyOn(environment, 'release');
+    const invocation = wrapExecutionTool(
+      new ReadFileTool(config),
+      environment,
+      config,
+    ).build({ file_path: path.join(workspace, 'file.txt') });
+    expect(await invocation.getDefaultPermission()).toBe('deny');
+    await invocation.release?.();
+    expect(release).toHaveBeenCalledOnce();
+  });
 
   it('bounds release when a cancelled permission request also loses its cleanup reply', async () => {
     const file = path.join(workspace, 'file.txt');

@@ -180,6 +180,9 @@ the mount to satisfy dependency symlinks outside that tree. Use a temporary HOME
 do not mount the host HOME, credential stores, runtime directory, or container
 socket. The same-path mapping reduces translation but is not authorization:
 actual path resolution and file operations occur inside the container.
+Protected host directories are resolved through their existing ancestors even
+when the directory itself has not been created. A symlink alias must not hide
+their containment in the writable workspace.
 
 A separate temporary output directory is mounted at the same path in both the
 primary and installation workers. The harness writes truncated tool output there
@@ -248,9 +251,14 @@ not grounds for replaying an already completed command. Automatic history
 compression invalidates the worker cache directly across derived Config layers.
 An invalidation failure is logged without abandoning the already compressed
 history and token bookkeeping; the next tool still requires successful cache
-synchronization. Memory-only cache eviction does not invalidate worker reads.
-Permission preparation receives the caller cancellation signal, and releasing
-an invocation cancels pending preparation. Its release RPC has an independent
+synchronization. Failed path-specific invalidation after microcompaction also
+advances the host cache generation, so the next tool must resynchronize before
+reading; already compressed history and its result are retained.
+Memory-only cache eviction does not invalidate worker reads.
+Permission preparation receives the caller cancellation signal, defaulting to
+the invocation-owned signal when omitted. Releasing an invocation cancels
+pending preparation and permission; abort listeners are removed first to avoid
+reentrant release. Its release RPC has an independent
 30-second timeout so an unresponsive worker cannot strand cancellation cleanup.
 Container creation may pull a cold
 image and has no fixed 30-second limit; it remains cancellable. Runtime metadata
@@ -315,6 +323,15 @@ pulled, and a local HTTP tarball server because the bridge lacked public egress.
 Podman, a live rootless daemon and the configured 0.23.3 image remain unverified
 by that report. These are external results, distinct from local process-fixture
 checks.
+
+[Independent Linux round 2](https://github.com/QwenLM/qwen-code/pull/11711#issuecomment-5652725410)
+reports policy and lifecycle verification at `e544823995`, including fourteen
+boundary checks on each of Docker 26.1.5 and rootful/rootless Podman 5.4.2 with
+the configured 0.23.3 image. It used a copied independent bundle, a local HTTP
+tarball server, and rootless Podman via `runuser` with cgroupfs and tmpfs storage.
+Public-registry egress, npm packed installation and subsequent review fixes are
+outside that report. Its results are attributed external evidence, not local
+runtime verification.
 
 Build, typecheck, bundle, run focused tests, then perform two clean self-audit
 passes and the repository code-review workflow before declaring completion.
