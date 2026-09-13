@@ -48,6 +48,7 @@ import {
   type DaemonUnrecognizedDiagnostic,
 } from '@qwen-code/sdk/daemon';
 import {
+  advanceSessionRecoveryGeneration,
   createDaemonSessionActions,
   getConnectionAfterSessionClear,
   getPromptSettledKey,
@@ -72,6 +73,7 @@ import {
   getDaemonErrorCode,
   getStandaloneConnectionState,
   isDaemonErrorExplicitlyNonRetryable,
+  isSessionWriterBlockedCode,
   resolveLiveSessionWorkspaceCwd,
   resolveProviderSessionContext,
   restoreSessionContextMatches,
@@ -81,6 +83,7 @@ import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider
 import { loadReadyWorkspaceSkills } from '../workspace/load-ready-skills.js';
 import {
   getCurrentMode,
+  getPlanExecutionMode,
   getSessionDisplayName,
   getReplayTokenUsage,
   getTokenCountFromUsage,
@@ -137,11 +140,16 @@ import type {
   PendingSessionLoad,
   SettledPrompt,
 } from './types.js';
+import {
+  getTurnNotificationContent,
+  useTurnNotificationBinding,
+} from './turn-notification-context.js';
 import { SESSION_TURN_NAVIGATION_FEATURE } from '../../constants/sessions.js';
 import {
   createDaemonTurnNavigationStore,
   type DaemonTurnNavigationSnapshot,
   type DaemonTurnNavigationStore,
+  type DaemonHistoryNavigationStore,
 } from './turn-navigation-store.js';
 
 export type {
@@ -193,7 +201,6 @@ interface LiveJournalRepairEpisode {
 interface TranscriptHistoryMaterialization {
   blocks: readonly DaemonTranscriptBlock[];
   nextOrdinal: number;
-  retainedBytes: number;
   toolBlockByCallId: Record<string, string>;
   permissionBlockByRequestId: Record<string, string>;
   unrecognizedDiagnostics: readonly DaemonUnrecognizedDiagnostic[];
@@ -407,11 +414,16 @@ function materializeTranscriptHistory(
       break;
     }
   }
-  let pageBytes = 0;
-  for (const block of pageBlockList) {
-    pageBytes += estimateDaemonTranscriptBlockBytes(block);
-  }
-  const pageBlocks = pageBlockList.length;
+  const mergedBlocks = mergeTranscriptHistoryBlocks(
+    current.blocks,
+    pageBlockList,
+  );
+  const pageBytes =
+    mergedBlocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    ) - current.retainedBytes;
+  const pageBlocks = mergedBlocks.length - current.blocks.length;
   // `impossible` must be evaluated across BOTH dimensions, regardless of
   // which branch rejects: a page that alone fills the whole block window can
   // never be admitted (an anchored window always retains at least one block),
@@ -450,7 +462,6 @@ function materializeTranscriptHistory(
     materialization: {
       blocks: pageBlockList,
       nextOrdinal: history.nextOrdinal,
-      retainedBytes: pageBytes,
       toolBlockByCallId: history.toolBlockByCallId,
       permissionBlockByRequestId: history.permissionBlockByRequestId,
       // History pages can carry frames recorded by newer daemon versions, exactly
@@ -459,6 +470,44 @@ function materializeTranscriptHistory(
       unrecognizedDiagnostics: history.unrecognizedDiagnostics,
     },
   };
+}
+
+function mergeTranscriptHistoryBlocks(
+  current: readonly DaemonTranscriptBlock[],
+  history: readonly DaemonTranscriptBlock[],
+): DaemonTranscriptBlock[] {
+  const cancellations = new Map(
+    history
+      .filter((block) => block.kind === 'prompt_cancelled' && block.promptId)
+      .map((block) => [block.promptId, block]),
+  );
+  const displayedCancelledPromptIds = new Set<string>();
+  const updated = current.map((block) => {
+    if (block.kind !== 'prompt_cancelled' || !block.promptId) return block;
+    displayedCancelledPromptIds.add(block.promptId);
+    const persisted = cancellations.get(block.promptId);
+    if (
+      persisted?.kind !== 'prompt_cancelled' ||
+      persisted.elapsedMs === undefined
+    ) {
+      return block;
+    }
+    return {
+      ...block,
+      elapsedMs: persisted.elapsedMs,
+      serverTimestamp: persisted.serverTimestamp,
+      sourceRecordIds: persisted.sourceRecordIds,
+    };
+  });
+  return [
+    ...history.filter(
+      (block) =>
+        block.kind !== 'prompt_cancelled' ||
+        !block.promptId ||
+        !displayedCancelledPromptIds.has(block.promptId),
+    ),
+    ...updated,
+  ];
 }
 
 function applyTranscriptHistory(
@@ -509,10 +558,14 @@ function applyTranscriptHistory(
     }
     permissionBlockByRequestId[requestId] = blockId;
   }
+  const blocks = mergeTranscriptHistoryBlocks(current.blocks, history.blocks);
   return {
     ...current,
-    blocks: [...history.blocks, ...current.blocks],
-    retainedBytes: current.retainedBytes + history.retainedBytes,
+    blocks,
+    retainedBytes: blocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    ),
     nextOrdinal: history.nextOrdinal,
     toolBlockByCallId,
     trimmedToolNotificationByCallId,
@@ -590,6 +643,9 @@ function projectSubagentToolUpdate(
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
         ...(isTaskExecutionMode(executionMode) ? { executionMode } : {}),
+        ...(typeof rawOutput['subagentSessionReady'] === 'boolean'
+          ? { subagentSessionReady: rawOutput['subagentSessionReady'] }
+          : {}),
         ...(terminateReason ? { terminateReason } : {}),
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
@@ -668,7 +724,7 @@ const DaemonTranscriptHistoryContext = createContext<
   DaemonTranscriptHistory | undefined
 >(undefined);
 const DaemonTurnNavigationContext = createContext<
-  DaemonTurnNavigationStore | undefined
+  DaemonHistoryNavigationStore | undefined
 >(undefined);
 const DaemonPromptStatusContext = createContext<DaemonPromptStatus | undefined>(
   undefined,
@@ -734,6 +790,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   mcpVersion: 0,
   extensionsVersion: 0,
   artifactsVersion: 0,
+  sourcesVersion: 0,
   initVersion: 0,
   authVersion: 0,
 };
@@ -768,6 +825,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     sessionContext,
     sessionId,
     clientId,
+    sessionSourceType,
     createSessionRequest,
     maxQueued = 1024,
     maxBlocks = DEFAULT_MAX_BLOCKS,
@@ -831,6 +889,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     initialRestoreSessionId === undefined;
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
+  // Restore-time attribution is read inside the reconnect/restore effect;
+  // mirror it so a host prop change never re-triggers a session load.
+  const sessionSourceTypeRef = useRef(sessionSourceType);
+  sessionSourceTypeRef.current = sessionSourceType;
   const resolvedSessionContextRef = useRef(resolvedSessionContext);
   resolvedSessionContextRef.current = resolvedSessionContext;
   const sessionContextResolutionErrorRef = useRef(
@@ -847,11 +909,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const sessionConfigGenerationRef = useRef(
     new WeakMap<DaemonSessionClient, number>(),
   );
+  const sessionRecoveryGenerationRef = useRef(
+    new WeakMap<DaemonSessionClient, number>(),
+  );
   const transcriptHistoryRef = useRef<{
     sessionId?: string;
     beforeRecordId?: string;
     cursor?: string;
     hasMore: boolean;
+    persistedReachable?: boolean;
     loading: boolean;
     capacityReached: boolean;
     paginationError: boolean;
@@ -903,6 +969,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // (`evictedOldest === false`) drops the newest blocks and leaves
           // the oldest anchor intact, so it must not trigger re-anchoring.
           if (detail.evictedOldest !== false) {
+            history.persistedReachable = true;
             if (detail.oldestRetainedRecordId !== undefined) {
               history.beforeRecordId = detail.oldestRetainedRecordId;
               history.cursor = undefined;
@@ -1038,7 +1105,33 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     [maxBlocks, maxRetainedBytes, subagentTranscriptMode],
   );
   const turnNavigationStore = useMemo(
-    () => createDaemonTurnNavigationStore(),
+    () =>
+      createDaemonTurnNavigationStore({
+        captureLiveBoundary: () => {
+          const history = transcriptHistoryRef.current;
+          const owner = sessionRef.current;
+          const generation = paginationGenerationRef.current;
+          const beforeRecordId = history.beforeRecordId;
+          const repair = liveJournalRepairRef.current;
+          return {
+            beforeRecordId,
+            reachable:
+              !!owner &&
+              owner.sessionId === history.sessionId &&
+              !!beforeRecordId &&
+              !repair &&
+              !history.loading &&
+              (history.persistedReachable ?? history.hasMore),
+            isCurrent: () =>
+              sessionRef.current === owner &&
+              transcriptHistoryRef.current === history &&
+              history.beforeRecordId === beforeRecordId &&
+              !history.loading &&
+              paginationGenerationRef.current === generation &&
+              liveJournalRepairRef.current === repair,
+          };
+        },
+      }),
     [],
   );
   const eventStreamRef = useRef<
@@ -1120,6 +1213,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [attachSessionNonce, setAttachSessionNonce] = useState(0);
   const [newSessionNonce, setNewSessionNonce] = useState(0);
   const [connection, setConnection] = useState<DaemonConnectionState>({
+    capabilities: workspace?.capabilities,
     status: sessionContextResolutionError
       ? 'error'
       : autoConnect
@@ -1134,6 +1228,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       ? { error: sessionContextResolutionError }
       : {}),
   });
+  const turnNotifications = useTurnNotificationBinding(
+    resolvedBaseUrl,
+    connection,
+  );
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   const initialClientIdDependencyRef = useRef(clientId);
@@ -1508,6 +1606,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     tryLiveJournalRepairRef.current = tryLiveJournalRepair;
 
     const run = async () => {
+      // Let StrictMode discard its first effect before starting a session load.
+      if (!runnerSession) {
+        await Promise.resolve();
+        if (disposed) return;
+      }
       const client =
         workspaceClientRef.current ??
         new DaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });
@@ -1985,6 +2088,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               resolveSessionRestoreTimeouts(capabilities).requestTimeoutMs;
             const restoreRequest = {
               timeoutMs: restoreRequestTimeoutMs,
+              // Workspace restores only: the standalone request type omits
+              // source attribution, and the daemon applies it solely when the
+              // restored session has none persisted (legacy upgrade path).
+              ...(effectSessionContext?.kind !== 'standalone' &&
+              sessionSourceTypeRef.current !== undefined
+                ? { sourceType: sessionSourceTypeRef.current }
+                : {}),
               ...(!shouldResumeRequestedSession &&
               subagentTranscriptModeRef.current === 'summary'
                 ? { liveReplayMode: 'summary' as const }
@@ -2276,6 +2386,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     kind: 'workspace' as const,
                     cwd: activeSession.workspaceCwd,
                   };
+          turnNotifications.remember(
+            activeSession,
+            activeProductSessionContext,
+          );
+          turnNotifications.activate(activeSession);
           const activeWorkspaceScoped =
             activeProductSessionContext.kind === 'workspace';
           runnerSession = activeSession;
@@ -2414,6 +2529,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ? { beforeRecordId: firstPersistedRecordId }
                 : {}),
               hasMore: historyHasMore,
+              persistedReachable: historyHasMore,
               loading: false,
               capacityReached: false,
               paginationError: false,
@@ -2456,6 +2572,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const markerIndex = replayTarget
               ? sourceEvents.indexOf(replayTarget.marker)
               : -1;
+            const notificationReplayEvents: DaemonEvent[] = [];
             const eventGroups: Array<{
               transcript: DaemonUiEvent[];
               sideEffects: DaemonUiEvent[];
@@ -2512,6 +2629,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     assistantDoneFromTurnEvent(replayEvent, 'error'),
                   );
                 }
+                notificationReplayEvents.push(replayEvent);
                 eventGroups.push({
                   transcript: groupEvents,
                   sideEffects:
@@ -2707,6 +2825,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
             if (replayExceededCapacity) {
+              transcriptHistoryRef.current.persistedReachable = true;
               if (replayTrimmed) {
                 if (replayTrimmedAnchor !== undefined) {
                   transcriptHistoryRef.current.beforeRecordId =
@@ -2763,8 +2882,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 store,
                 setPromptStatus,
                 passiveAssistantDoneTimerRef,
-                { requireBoundPromptId: true },
+                {
+                  requireBoundPromptId: true,
+                  transcriptAlreadyApplied: true,
+                },
               );
+            }
+            if (sessionRef.current === activeSession) {
+              for (const event of notificationReplayEvents) {
+                turnNotifications.observe(activeSession, event, true, () =>
+                  getTurnNotificationContent(
+                    event,
+                    store.getSnapshot().blocks,
+                    getSessionDisplayName(activeSession.state),
+                  ),
+                );
+              }
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
             // Release the raw snapshot only after the injection above
@@ -2855,6 +2988,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     .workspaceGit()
                 : client.workspaceGit()
               : Promise.resolve(undefined);
+          const readRecovery =
+            !canReuseSessionMetadata ||
+            !!connectionRef.current.context?.recovery;
+          const recoveryGeneration = readRecovery
+            ? advanceSessionRecoveryGeneration(
+                sessionRecoveryGenerationRef.current,
+                activeSession,
+              )
+            : undefined;
           const metadataPromise = Promise.allSettled([
             canReuseSessionMetadata || !activeWorkspaceScoped
               ? Promise.resolve(undefined)
@@ -2862,9 +3004,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             canReuseSessionMetadata
               ? Promise.resolve(undefined)
               : activeSession.supportedCommands(),
-            canReuseSessionMetadata
-              ? Promise.resolve(undefined)
-              : activeSession.context(),
+            readRecovery ? activeSession.context() : Promise.resolve(undefined),
             gitPromise,
           ]);
           // Hydrate Goal ownership independently so unrelated metadata cannot
@@ -2974,8 +3114,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ?.contextWindow ??
             providerContextWindow;
           const { commands, skills } = mapSupportedCommands(supportedCommands);
-          const currentMode =
-            getCurrentMode(context) ?? providerModelStatus.currentMode;
+          const currentMode = getCurrentMode(context);
 
           setConnection((current) => {
             if (
@@ -2990,6 +3129,23 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               configGeneration % 2 === 0 &&
               (sessionConfigGenerationRef.current.get(activeSession) ?? 0) ===
                 configGeneration;
+            const recoverySnapshotCurrent =
+              context?.sessionId === activeSession.sessionId &&
+              recoveryGeneration !== undefined &&
+              sessionRecoveryGenerationRef.current.get(activeSession) ===
+                recoveryGeneration;
+            const nextContext =
+              configSnapshotCurrent && context
+                ? context
+                : (current.context ??
+                  (context?.recovery
+                    ? {
+                        v: context.v,
+                        sessionId: context.sessionId,
+                        workspaceCwd: context.workspaceCwd,
+                        state: {},
+                      }
+                    : undefined));
             return {
               ...current,
               status: 'connected',
@@ -3021,7 +3177,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               currentModel: configSnapshotCurrent
                 ? (sessionCurrentModel ?? current.currentModel)
                 : current.currentModel,
-              currentMode: currentMode ?? current.currentMode,
+              currentMode: configSnapshotCurrent
+                ? (currentMode ??
+                  current.currentMode ??
+                  providerModelStatus.currentMode)
+                : current.currentMode,
+              planExecutionMode:
+                configSnapshotCurrent && currentMode !== undefined
+                  ? getPlanExecutionMode(context)
+                  : current.planExecutionMode,
               reasoning:
                 configSnapshotCurrent && context !== undefined
                   ? mapSessionContextReasoning(context)
@@ -3038,9 +3202,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   : current.providers
                 : undefined,
               supportedCommands: supportedCommands ?? current.supportedCommands,
-              context: configSnapshotCurrent
-                ? (context ?? current.context)
-                : current.context,
+              context: nextContext
+                ? {
+                    ...nextContext,
+                    recovery: recoverySnapshotCurrent
+                      ? context?.recovery
+                      : ((current.context?.sessionId === activeSession.sessionId
+                          ? current.context.recovery
+                          : undefined) ??
+                        (context?.recovery
+                          ? { ...context.recovery, canContinue: false }
+                          : undefined)),
+                  }
+                : undefined,
               // Reconcile rather than reference-compare: the load response and
               // any frame that arrived during the load window share a revision
               // domain, and routing through `selectGoalState` is what registers
@@ -3160,6 +3334,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             abort.signal.removeEventListener('abort', abortEventStream);
           const sseConnectReason = nextSseConnectReason;
           nextSseConnectReason = undefined;
+          const recoveryEventCursor = activeSession.lastEventId ?? 0;
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
@@ -3230,6 +3405,83 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
+              if (
+                (context?.recovery ||
+                  connectionRef.current.context?.recovery) &&
+                (event.id === undefined || event.id > recoveryEventCursor)
+              ) {
+                if (
+                  event.type === 'pending_prompt_started' ||
+                  hasActiveGenerationSignal(uiEvents) ||
+                  uiEvents.some((item) => item.type === 'user.text.delta')
+                ) {
+                  advanceSessionRecoveryGeneration(
+                    sessionRecoveryGenerationRef.current,
+                    activeSession,
+                  );
+                  setConnection((current) =>
+                    sessionRef.current === activeSession &&
+                    current.context?.recovery?.canContinue
+                      ? {
+                          ...current,
+                          context: {
+                            ...current.context,
+                            recovery: {
+                              ...current.context.recovery,
+                              canContinue: false,
+                            },
+                          },
+                        }
+                      : current,
+                  );
+                }
+                if (
+                  event.type === 'turn_complete' ||
+                  event.type === 'turn_error' ||
+                  uiEvents.some((item) => item.type === 'prompt.cancelled')
+                ) {
+                  const generation = advanceSessionRecoveryGeneration(
+                    sessionRecoveryGenerationRef.current,
+                    activeSession,
+                  );
+                  void activeSession.context().then(
+                    (updated) => {
+                      if (
+                        disposed ||
+                        abort.signal.aborted ||
+                        eventStreamController.signal.aborted ||
+                        eventStreamRef.current !== eventStream ||
+                        sessionRef.current !== activeSession ||
+                        generation !==
+                          sessionRecoveryGenerationRef.current.get(
+                            activeSession,
+                          ) ||
+                        updated.sessionId !== activeSession.sessionId
+                      ) {
+                        return;
+                      }
+                      setConnection((current) =>
+                        current.context &&
+                        eventStreamRef.current === eventStream &&
+                        sessionRef.current === activeSession &&
+                        generation ===
+                          sessionRecoveryGenerationRef.current.get(
+                            activeSession,
+                          )
+                          ? {
+                              ...current,
+                              context: {
+                                ...current.context,
+                                recovery: updated.recovery,
+                              },
+                            }
+                          : current,
+                      );
+                    },
+                    () => {},
+                  );
+                }
+              }
               const transcriptUiEvents =
                 subagentTranscriptModeRef.current === 'summary'
                   ? projectMainTranscriptEvents(uiEvents)
@@ -3338,6 +3590,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               enqueueTranscriptEvents(eventsToDispatch);
               for (const uiEvent of uiEvents) {
                 if (
+                  event.type === 'prompt_cancelled' &&
                   uiEvent.type === 'prompt.cancelled' &&
                   (restoredActivePrompt ||
                     uiEvent.originatorClientId !== activeSession.clientId)
@@ -3435,6 +3688,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     if (!maySettleToIdle()) return;
                     setPromptStatus('idle');
                   },
+                );
+              }
+              if (sessionRef.current === activeSession) {
+                turnNotifications.observe(activeSession, event, false, () =>
+                  getTurnNotificationContent(
+                    event,
+                    store.getSnapshot().blocks,
+                    connectionRef.current.sessionId === activeSession.sessionId
+                      ? connectionRef.current.displayName
+                      : getSessionDisplayName(activeSession.state),
+                  ),
                 );
               }
               const pendingRepair = liveJournalRepairRef.current;
@@ -3784,6 +4048,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             pendingLoad.reject(error);
           }
           if (
+            (session === undefined &&
+              activeSessionContextRef.current?.kind === 'standalone' &&
+              isSessionWriterBlockedCode(getDaemonErrorCode(error))) ||
             productContextFailure ||
             error instanceof DaemonCapabilityMissingError ||
             (session === undefined &&
@@ -4053,6 +4320,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }, [
     autoConnect,
     autoReconnect,
+    turnNotifications,
     resolvedBaseUrl,
     resolvedToken,
     sessionEffectContext,
@@ -4240,6 +4508,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         pendingSessionLoadRef,
         pendingSessionLoadIdRef,
         sessionConfigGeneration: sessionConfigGenerationRef.current,
+        sessionRecoveryGeneration: sessionRecoveryGenerationRef.current,
         heartbeatSupportedRef,
         manualSessionClearRef,
         skipNextCleanupDetachSessionRef,
@@ -4316,6 +4585,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             client,
             request,
             requestClientId,
+          ).then((owner) =>
+            turnNotifications.remember(owner, {
+              kind: 'workspace',
+              cwd: owner.workspaceCwd,
+            }),
           );
         },
         createDetachedStandaloneSession: (overrides) => {
@@ -4335,7 +4609,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           return DaemonSessionClient.createStandalone(client, {
             ...(modelServiceId !== undefined ? { modelServiceId } : {}),
             ...(approvalMode !== undefined ? { approvalMode } : {}),
-          });
+          }).then((owner) =>
+            turnNotifications.remember(owner, { kind: 'standalone' }),
+          );
         },
         getDefaultSessionContext: () => {
           const error = sessionContextResolutionErrorRef.current;
@@ -4359,6 +4635,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current = undefined;
         },
         onPromptAdmitted: (owner, admission) => {
+          if (sessionRef.current === owner)
+            turnNotifications.admit(owner, admission.promptId, admission.label);
           if (
             sessionRef.current === owner &&
             turnNavigationStore.getSnapshot().sessionId === owner.sessionId
@@ -4366,7 +4644,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             turnNavigationStore.recordPromptAdmitted(admission);
           }
         },
+        onContinuationAdmitted: (owner, promptId) => {
+          turnNotifications.admit(owner, promptId);
+          const active = activePromptsRef.current.get(owner.sessionId);
+          if (active?.promptId !== promptId) return;
+          const terminal = active.replayedTurnEvents?.get(promptId);
+          delete active.replayedTurnEvents;
+          if (terminal) {
+            settleActivePromptFromTurnEvent(
+              activePromptsRef.current,
+              settledPromptsRef.current,
+              owner.sessionId,
+              terminal,
+              store,
+              setPromptStatus,
+              passiveAssistantDoneTimerRef,
+              { requireBoundPromptId: true, transcriptAlreadyApplied: true },
+            );
+            turnNotifications.observe(owner, terminal, true);
+          }
+        },
         onPromptRemoved: (owner, promptId) => {
+          if (sessionRef.current === owner)
+            turnNotifications.remove(owner, promptId);
           if (
             sessionRef.current === owner &&
             turnNavigationStore.getSnapshot().sessionId === owner.sessionId
@@ -4381,6 +4681,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       resolvedBaseUrl,
       resolvedToken,
       restartEventStreamOnPrompt,
+      turnNotifications,
       store,
       turnNavigationStore,
     ],
@@ -4580,6 +4881,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           nextBeforeRecordId === undefined ? page.nextCursor : undefined;
         history.beforeRecordId = nextBeforeRecordId;
         history.hasMore = page.hasMore && hasCapacity;
+        history.persistedReachable = page.hasMore;
         history.loading = false;
         setTranscriptHistoryState({
           hasMore: history.hasMore,
@@ -4726,9 +5028,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   const ownerGuardValue = useMemo<DaemonSessionOwnerGuard>(
     () => ({
-      capture: () => {
+      capture: (options) => {
         const session = sessionRef.current;
-        return { isCurrent: () => sessionRef.current === session };
+        const includeRecovery = options?.includeRecovery === true;
+        const recoveryGeneration = session
+          ? sessionRecoveryGenerationRef.current.get(session)
+          : undefined;
+        return {
+          isCurrent: () =>
+            sessionRef.current === session &&
+            (!includeRecovery ||
+              (session !== undefined &&
+                sessionRecoveryGenerationRef.current.get(session) ===
+                  recoveryGeneration)),
+        };
       },
     }),
     [],
@@ -4778,7 +5091,10 @@ function settleActivePromptFromTurnEvent(
   store: DaemonTranscriptStore,
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>,
   passiveAssistantDoneTimerRef: TimerRef,
-  opts: { requireBoundPromptId?: boolean } = {},
+  opts: {
+    requireBoundPromptId?: boolean;
+    transcriptAlreadyApplied?: boolean;
+  } = {},
 ): boolean {
   if (event.type !== 'turn_complete' && event.type !== 'turn_error') {
     return false;
@@ -4788,19 +5104,40 @@ function settleActivePromptFromTurnEvent(
   if (!promptId) return false;
   const active = activePrompts.get(sessionId);
   if (!active) return false;
-  if (opts.requireBoundPromptId && active.promptId === undefined) {
+  if (
+    active.promptId === undefined &&
+    (opts.requireBoundPromptId || active.replayedTurnEvents)
+  ) {
+    // Keep continuation terminals until the ACK identifies their owner; a
+    // later queued turn can finish before that ACK too.
+    active.replayedTurnEvents?.set(promptId, event);
+    if (!opts.requireBoundPromptId) {
+      store.dispatch(
+        assistantDoneFromTurnEvent(
+          event,
+          event.type === 'turn_error'
+            ? 'error'
+            : ((event.data as DaemonTurnCompleteData | undefined)?.stopReason ??
+                'end_turn'),
+        ),
+      );
+    }
     return false;
   }
   if (active.promptId !== undefined && active.promptId !== promptId) {
     return false;
   }
 
-  clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+  if (!opts.transcriptAlreadyApplied) {
+    clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+  }
   try {
     const result = matchTurnEvent(event, promptId);
     if (!result) return false;
-    store.dispatch(assistantDoneFromTurnEvent(event, result.stopReason));
-    setPromptStatus('idle');
+    if (!opts.transcriptAlreadyApplied) {
+      store.dispatch(assistantDoneFromTurnEvent(event, result.stopReason));
+      setPromptStatus('idle');
+    }
     if (active.resolve) {
       activePrompts.delete(sessionId);
       active.resolve(result);
@@ -4812,8 +5149,10 @@ function settleActivePromptFromTurnEvent(
       });
     }
   } catch (error) {
-    store.dispatch(assistantDoneFromTurnEvent(event, 'error'));
-    setPromptStatus('idle');
+    if (!opts.transcriptAlreadyApplied) {
+      store.dispatch(assistantDoneFromTurnEvent(event, 'error'));
+      setPromptStatus('idle');
+    }
     if (active.reject) {
       activePrompts.delete(sessionId);
       active.reject(error);
@@ -4852,7 +5191,10 @@ function normalizeAndFilterEvent(
   });
   const goalStatusEvent = normalizeGoalStatusEvent(event);
   if (isPromptLifecycleTurnEvent(event)) {
-    return goalStatusEvent ? [goalStatusEvent] : [];
+    const cancellation = normalized.filter(
+      (item) => item.type === 'prompt.cancelled',
+    );
+    return goalStatusEvent ? [...cancellation, goalStatusEvent] : cancellation;
   }
   return goalStatusEvent ? [...normalized, goalStatusEvent] : normalized;
 }
@@ -5051,6 +5393,10 @@ export function useDaemonTranscriptHistory(): DaemonTranscriptHistory {
 }
 
 export function useDaemonTurnNavigationStore(): DaemonTurnNavigationStore {
+  return useDaemonHistoryNavigationStore();
+}
+
+export function useDaemonHistoryNavigationStore(): DaemonHistoryNavigationStore {
   const store = useContext(DaemonTurnNavigationContext);
   if (!store) {
     throw new Error(
@@ -5214,17 +5560,14 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
     return createGoalStatusUiEvent(event, terminal);
   }
 
-  const loop = meta['stopHookLoop'];
-  if (!isRecord(loop)) return null;
-  const goal = loop['goal'];
-  if (!isRecord(goal)) return null;
-  const condition = getString(goal, 'condition');
-  if (!condition) return null;
-
-  // Suppress per-iteration "checking" events from the transcript to avoid
-  // flooding with one card per stop-hook turn. The active goal state is
-  // already visible in the status bar; only terminal events and the initial
-  // "set" event are shown as transcript cards.
+  // Per-iteration "checking" events are deliberately not turned into
+  // transcript cards: one card per stop-hook turn floods the transcript, and
+  // the active goal state is already visible in the status bar. Which kinds do
+  // become cards is decided by `normalizeGoalStatus` below, not here -- it
+  // admits `paused`, `cleared` and `usage_limited` as well as the terminal
+  // kinds, and dropping any of them regresses the bug recorded beside its
+  // `paused` entry. This return is only the fallthrough for an event that
+  // carried neither a status nor a terminal.
   return null;
 }
 
@@ -5252,8 +5595,12 @@ function restoreCanonicalGoalStatusKind(
   // value stable for older clients while restoring its precise Web Shell label.
   if (status['kind'] !== 'aborted' || !isRecord(goalState)) return status;
   const goal = goalState['goal'];
-  if (!isRecord(goal) || goal['status'] !== 'usage_limited') return status;
-  return { ...status, kind: 'usage_limited' };
+  if (!isRecord(goal)) return status;
+  const canonicalStatus = goal['status'];
+  if (canonicalStatus !== 'blocked' && canonicalStatus !== 'usage_limited') {
+    return status;
+  }
+  return { ...status, kind: canonicalStatus };
 }
 
 function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
@@ -5342,6 +5689,7 @@ function bumpSessionEventSignals(
   let mcp = 0;
   let extensions = 0;
   let artifacts = 0;
+  let sources = 0;
   let lastExtensionChange:
     | DaemonWorkspaceEventSignals['lastExtensionChange']
     | undefined;
@@ -5349,6 +5697,10 @@ function bumpSessionEventSignals(
   let auth = 0;
 
   for (const event of events) {
+    if (event.type === 'session.source.changed') {
+      if (includeArtifactEvents) sources += 1;
+      continue;
+    }
     if (event.type === 'session.artifact.changed') {
       if (includeArtifactEvents) artifacts += 1;
       continue;
@@ -5416,6 +5768,7 @@ function bumpSessionEventSignals(
       mcp +
       extensions +
       artifacts +
+      sources +
       init +
       auth ===
       0 &&
@@ -5439,6 +5792,7 @@ function bumpSessionEventSignals(
         mcp +
         extensions +
         artifacts +
+        sources +
         init +
         auth ===
         0 &&
@@ -5455,6 +5809,7 @@ function bumpSessionEventSignals(
       mcpVersion: current.mcpVersion + mcp,
       extensionsVersion: current.extensionsVersion + extensions,
       artifactsVersion: current.artifactsVersion + artifacts,
+      sourcesVersion: (current.sourcesVersion ?? 0) + sources,
       ...(newSkillMutations.length > 0
         ? { lastSkillMutation: newSkillMutations.at(-1) }
         : current.lastSkillMutation

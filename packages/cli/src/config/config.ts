@@ -100,12 +100,15 @@ import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
+  validateGoalCheckpointTimeoutSeconds,
+  validateGoalMaxActiveMinutes,
+  validateGoalMaxTurns,
   validateGoalTokenBudget,
   validateMaxToolCalls,
   validateMaxWallTimeSetting,
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
-import { resolveSkillSettings } from './skill-settings.js';
+import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -1102,6 +1105,38 @@ function resolveGoalTokenBudget(settings: Settings): number | undefined {
   }
 }
 
+function resolveGoalMaxTurns(settings: Settings): number | undefined {
+  const fromSettings: unknown = settings.model?.goalMaxTurns;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalMaxTurns(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
+function resolveGoalMaxActiveMinutes(settings: Settings): number | undefined {
+  const fromSettings: unknown = settings.model?.goalMaxActiveMinutes;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalMaxActiveMinutes(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
+function resolveGoalCheckpointTimeoutSeconds(
+  settings: Settings,
+): number | undefined {
+  const fromSettings: unknown = settings.model?.goalCheckpointTimeoutSeconds;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalCheckpointTimeoutSeconds(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
 /**
  * Resolves the tool-call budget for a run. Returns the validated count
  * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
@@ -1277,6 +1312,24 @@ export function buildEnabledSkillNamesProvider(
   loadedSettings: LoadedSettings,
 ): () => ReadonlySet<string> {
   return () => resolveSkillSettings(loadedSettings).enabledNames;
+}
+
+export function buildSkillSettingsListsProvider(merged: {
+  skills?: {
+    enabled?: unknown;
+    defaultDisabled?: unknown;
+    disabled?: unknown;
+  };
+}): () => {
+  enabled: ReadonlySet<string>;
+  defaultDisabled: ReadonlySet<string>;
+  hardDisabled: ReadonlySet<string>;
+} {
+  return () => ({
+    enabled: normalizeSkillNames(merged.skills?.enabled),
+    defaultDisabled: normalizeSkillNames(merged.skills?.defaultDisabled),
+    hardDisabled: normalizeSkillNames(merged.skills?.disabled),
+  });
 }
 
 /**
@@ -2161,6 +2214,10 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     enabledSkillNamesProvider:
       bareMode || safeMode ? undefined : enabledSkillNamesProvider,
+    skillSettingsListsProvider:
+      bareMode || safeMode
+        ? undefined
+        : buildSkillSettingsListsProvider(settings),
     terminalImageRenderSupportProvider: interactive
       ? async () => {
           const { getTerminalImageRenderSupport } = await import(
@@ -2187,6 +2244,8 @@ export async function loadCliConfig(
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     eagerTools,
+    codeModeOnly:
+      !bareMode && !safeMode && settings.tools?.codeModeOnly === true,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).
@@ -2270,6 +2329,9 @@ export async function loadCliConfig(
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     goalTokenBudget: resolveGoalTokenBudget(settings),
+    goalMaxTurns: resolveGoalMaxTurns(settings),
+    goalMaxActiveMinutes: resolveGoalMaxActiveMinutes(settings),
+    goalCheckpointTimeoutSeconds: resolveGoalCheckpointTimeoutSeconds(settings),
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
@@ -2391,8 +2453,12 @@ export async function loadCliConfig(
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
+    // Bare and safe mode must switch the tool off explicitly: `undefined`
+    // means "derive it" now that WebSearch is opt-out.
     webSearch:
-      bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
+      bareMode || safeMode
+        ? { enabled: false }
+        : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
     compactionModel: settings.compactionModel || undefined,
     imageModel: settings.imageModel || undefined,
@@ -2460,6 +2526,18 @@ export async function loadCliConfig(
   };
 
   const config = new Config(configParams);
+
+  // Load the selected transport only when an external subagent is requested.
+  config.setExternalAgentExecutor({
+    create: (params) =>
+      params.spec.kind === 'codex'
+        ? import('../external-agents/codex-subagent-executor.js').then(
+            (module) => module.codexExternalAgentExecutor.create(params),
+          )
+        : import('../external-agents/acp-subagent-executor.js').then((module) =>
+            module.acpExternalAgentExecutor.create(params),
+          ),
+  });
 
   if (lspEnabled) {
     try {

@@ -154,6 +154,94 @@ describe('ToolRegistry', () => {
     vi.restoreAllMocks();
   });
 
+  it('hides a loaded image tool while disabled and restores it when re-enabled', async () => {
+    const enabled = vi
+      .spyOn(config, 'isImageGenerationEnabled')
+      .mockReturnValue(true);
+    const tool = new MockTool({ name: 'image_gen', shouldDefer: true });
+    toolRegistry.registerTool(tool);
+    toolRegistry.revealDeferredTool('image_gen');
+    expect(toolRegistry.getFunctionDeclarations()).toContainEqual(tool.schema);
+    enabled.mockReturnValue(false);
+    expect(
+      toolRegistry.getFunctionDeclarations({ includeDeferred: true }),
+    ).not.toContainEqual(tool.schema);
+    expect(toolRegistry.getFunctionDeclarationsFiltered(['image_gen'])).toEqual(
+      [],
+    );
+    expect(toolRegistry.getAllTools()).not.toContain(tool);
+    expect(toolRegistry.getAllToolNames()).not.toContain('image_gen');
+    expect(
+      toolRegistry
+        .getDeferredToolSummary()
+        .some((entry) => entry.name === 'image_gen'),
+    ).toBe(false);
+    expect(toolRegistry.getTool('image_gen')).toBeUndefined();
+    expect(await toolRegistry.ensureTool('image_gen')).toBeUndefined();
+    enabled.mockReturnValue(true);
+    expect(await toolRegistry.ensureTool('image_gen')).toBe(tool);
+    expect(toolRegistry.getFunctionDeclarations()).toContainEqual(tool.schema);
+  });
+
+  it.each(['image_gen', 'propose_goal'] as const)(
+    'updates code mode bindings when %s availability changes',
+    async (name) => {
+      const baseUrl = 'https://images.example/v1';
+      const config = new Config({
+        ...baseConfigParams,
+        codeModeOnly: true,
+        experimentalZedIntegration: true,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              imageOnly: true,
+              envKey: 'TEST_IMAGE_API_KEY',
+            },
+          ],
+        },
+      });
+      config.setGoalProposalHostSupported(true);
+      const registry = new ToolRegistry(config);
+      const tool = new MockTool({ name });
+      registry.registerTool(tool);
+      registry.registerTool(new MockTool({ name: 'exec' }));
+      registry.registerTool(new MockTool({ name: 'other_tool' }));
+      for (const enabled of [true, false, true]) {
+        if (name === 'image_gen')
+          await config.setImageModel(
+            enabled ? `openai:qwen-image-2.0\0${baseUrl}` : '',
+          );
+        else config.setGoalProposalTurnKey(enabled ? 'user-turn' : undefined);
+        const bindings = registry
+          .getCodeModeBindingPlan()
+          .bindings.map((binding) => binding.name);
+        expect(bindings.includes(name)).toBe(enabled);
+        expect(bindings).toContain('other_tool');
+        for (const declarations of [
+          registry.getFunctionDeclarations(),
+          registry.getFunctionDeclarationsFiltered([name, 'other_tool']),
+        ]) {
+          const exec = declarations.find(
+            (declaration) => declaration.name === 'exec',
+          );
+          expect(exec?.description).toContain('tools.other_tool(args:');
+          expect(exec?.description?.includes(`tools.${name}(args:`)).toBe(
+            enabled,
+          );
+        }
+        if (name === 'image_gen') {
+          expect(config.isImageGenerationEnabled()).toBe(enabled);
+          expect(registry.getTool(name)).toBe(enabled ? tool : undefined);
+          expect(await registry.ensureTool(name)).toBe(
+            enabled ? tool : undefined,
+          );
+        } else expect(config.isGoalProposalAvailable()).toBe(enabled);
+      }
+    },
+  );
+
   describe('registerTool', () => {
     it('should register a new tool', () => {
       const tool = new MockTool({ name: 'mock-tool' });
@@ -394,6 +482,51 @@ describe('ToolRegistry', () => {
       const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
 
       expect(names).toEqual(['alpha', 'middle', 'zeta']);
+    });
+
+    it('only declares Goal proposals during an ACP turn with a responder', () => {
+      const acpConfig = new Config({
+        ...baseConfigParams,
+        experimentalZedIntegration: true,
+      });
+      acpConfig.setGoalProposalHostSupported(true);
+      const registry = new ToolRegistry(acpConfig);
+      registry.registerTool(new MockTool({ name: 'other_tool' }));
+      registry.registerTool(new MockTool({ name: 'propose_goal' }));
+      expect(
+        registry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toEqual(['other_tool']);
+      expect(
+        registry
+          .getFunctionDeclarationsFiltered(['other_tool', 'propose_goal'])
+          .map((tool) => tool.name),
+      ).toEqual(['other_tool']);
+      acpConfig.setGoalProposalTurnKey('user-turn');
+      expect(
+        registry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toEqual(['other_tool', 'propose_goal']);
+      expect(
+        registry
+          .getFunctionDeclarationsFiltered(['other_tool', 'propose_goal'])
+          .map((tool) => tool.name),
+      ).toEqual(['other_tool', 'propose_goal']);
+      acpConfig.setGoalProposalTurnKey(undefined);
+      expect(
+        registry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toEqual(['other_tool']);
+    });
+
+    it('keeps Goal proposals declared in an interactive terminal', () => {
+      const interactiveConfig = new Config({
+        ...baseConfigParams,
+        interactive: true,
+      });
+      const registry = new ToolRegistry(interactiveConfig);
+      registry.registerTool(new MockTool({ name: 'propose_goal' }));
+
+      expect(
+        registry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toEqual(['propose_goal']);
     });
 
     it('excludes shouldDefer tools from getFunctionDeclarations by default', () => {
@@ -735,6 +868,32 @@ describe('ToolRegistry', () => {
       ]);
     });
 
+    it('getDeferredToolSummary is empty in CodeModeOnly', () => {
+      // Both consumers of this summary — the startup deferred-tools reminder
+      // and the added-MCP-tools reminder — tell the model to reach the listed
+      // tools through ToolSearch, which CodeModeOnly hides. The MCP tool below
+      // is the one the previous test proves IS reported in Direct mode.
+      const codeModeConfig = new Config({
+        ...baseConfigParams,
+        codeModeOnly: true,
+      });
+      const registry = new ToolRegistry(codeModeConfig);
+      registry.registerTool(
+        new MockTool({ name: 'deferred', shouldDefer: true }),
+      );
+      registry.registerTool(
+        new DiscoveredMCPTool(
+          {} as CallableTool,
+          'schedule-server',
+          'cron_list',
+          'list scheduled jobs',
+          {},
+        ),
+      );
+
+      expect(registry.getDeferredToolSummary()).toEqual([]);
+    });
+
     it('removeMcpToolsByServer also drops revealedDeferred entries', async () => {
       // Pin the regression: a server-disconnect-then-reconnect cycle that
       // re-registers a tool of the same name must NOT inherit
@@ -795,6 +954,28 @@ describe('ToolRegistry', () => {
 
       const summary = registry.getDeferredToolSummary();
       expect(summary).toEqual([{ name: 'beta', description: 'b' }]);
+    });
+
+    it('excludes unavailable Goal proposals from the deferred summary', () => {
+      const acpConfig = new Config({
+        ...baseConfigParams,
+        experimentalZedIntegration: true,
+      });
+      acpConfig.setGoalProposalHostSupported(true);
+      const registry = new ToolRegistry(acpConfig);
+      registry.registerTool(
+        new MockTool({
+          name: 'propose_goal',
+          description: 'propose a Goal',
+          shouldDefer: true,
+        }),
+      );
+
+      expect(registry.getDeferredToolSummary()).toEqual([]);
+      acpConfig.setGoalProposalTurnKey('user-turn');
+      expect(registry.getDeferredToolSummary()).toEqual([
+        { name: 'propose_goal', description: 'propose a Goal' },
+      ]);
     });
 
     it('visibleTools has no effect on non-deferred tools', () => {

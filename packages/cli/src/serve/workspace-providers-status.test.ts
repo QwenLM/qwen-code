@@ -8,8 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
+import {
+  loadSettings,
+  resetHomeEnvBootstrapForTesting,
+} from '../config/settings.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
+import { listModelConfigurations } from './model-configuration.js';
 
 const coreMock = vi.hoisted(() => ({
   throwModelsConfigError: false,
@@ -81,6 +85,43 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     restoreEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', originalSystemDefaults);
     resetHomeEnvBootstrapForTesting();
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('aligns configuration keys for implicit and explicit default endpoints', async () => {
+    const endpoint = 'https://api.openai.com/v1';
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'shared' },
+      modelProviders: {
+        openai: [
+          { id: 'shared', name: 'Implicit default' },
+          { id: 'shared', name: 'Explicit default', baseUrl: endpoint },
+        ],
+      },
+    });
+    const configurations = listModelConfigurations(
+      loadSettings(workspace, { skipLoadEnvironment: true }),
+    );
+    expect(configurations).toHaveLength(2);
+    expect(new Set(configurations.map((model) => model.key)).size).toBe(2);
+    expect(configurations[0]?.baseUrl).toBeUndefined();
+    expect(configurations[1]?.baseUrl).toBe(endpoint);
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    const status = await provider(workspace, false);
+    const models = status.providers
+      .filter((entry) => entry.authType === 'openai')
+      .flatMap((entry) => entry.models)
+      .filter((model) => model.baseModelId === 'shared');
+    expect(models).toHaveLength(2);
+    for (const configuration of configurations) {
+      expect(
+        models.find((model) => model.name === configuration.name),
+      ).toMatchObject({
+        configurationKey: configuration.key,
+        baseUrl: endpoint,
+      });
+    }
   });
 
   it('reads fresh default model settings on every request', async () => {
@@ -399,6 +440,121 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       );
     },
   );
+
+  it.each([
+    {
+      name: 'saved off with a native nested override',
+      model: 'gpt-5.5',
+      persisted: 'none',
+      generationConfig: { extra_body: { reasoning: { effort: 'high' } } },
+      currentValue: 'none',
+      metadata: { enableValue: 'default' },
+    },
+    {
+      name: 'raw off without a saved preference',
+      model: 'gpt-5.5',
+      generationConfig: { samplingParams: { reasoning_effort: 'none' } },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'OpenRouter raw on without a saved preference',
+      model: 'gpt-5.4',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      generationConfig: { samplingParams: { reasoning_effort: 'high' } },
+      currentValue: 'high',
+      metadata: { enableValue: 'default' },
+    },
+    {
+      name: 'OpenRouter raw off with a saved tier',
+      model: 'gpt-5.5',
+      persisted: 'high',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      generationConfig: { extra_body: { reasoning: { enabled: false } } },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'provider default disables the raw reset',
+      model: 'gpt-5.5',
+      persisted: 'none',
+      generationConfig: {
+        reasoning: false,
+        extra_body: { reasoning: { effort: 'high' } },
+      },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'provider defaults ignore top-level raw restrictions',
+      model: 'gpt-5.5',
+      persisted: 'none',
+      generationConfig: {},
+      currentValue: 'none',
+      metadata: {},
+    },
+    {
+      name: 'provider disabled default without a saved preference',
+      model: 'gpt-5.5',
+      generationConfig: {
+        reasoning: false,
+        extra_body: { reasoning: { effort: 'high' } },
+      },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'mandatory model removes raw off and uses its default tier',
+      model: 'gpt-6-astra',
+      persisted: 'high',
+      generationConfig: { extra_body: { reasoning_effort: 'none' } },
+      currentValue: 'medium',
+      metadata: { enableValue: 'default', thinkingMandatory: true },
+    },
+  ])('projects cold reasoning controls: $name', async (testCase) => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: testCase.model,
+        reasoningEffort: testCase.persisted,
+        generationConfig: { extra_body: { reasoning_effort: 'none' } },
+      },
+      modelProviders: {
+        openai: [
+          {
+            id: testCase.model,
+            baseUrl: testCase.baseUrl ?? 'https://api.openai.com/v1',
+            generationConfig: testCase.generationConfig,
+          },
+        ],
+      },
+    });
+    const settingsBefore = await fs.readFile(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+    const result = await provider(workspace, false);
+    const options = result.providers
+      .flatMap((entry) => entry.models)
+      .find((model) => model.baseModelId === testCase.model)?.configOptions;
+    expect(options).toEqual([
+      expect.objectContaining({
+        id: 'reasoning_effort',
+        currentValue: testCase.currentValue,
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'medium',
+            ...testCase.metadata,
+          },
+        },
+      }),
+    ]);
+    expect(
+      await fs.readFile(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ).toBe(settingsBefore);
+  });
 
   it('does not project reasoning preview onto opaque route models', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });

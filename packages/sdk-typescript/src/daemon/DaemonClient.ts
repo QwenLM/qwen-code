@@ -26,6 +26,7 @@ import type {
   DaemonAuthProviderInstallRequest,
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
+  DaemonBrand,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
   DaemonArchiveSessionsResult,
@@ -37,6 +38,7 @@ import type {
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
   DaemonSessionContextStatus,
+  DaemonContinueSessionResult,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
@@ -200,6 +202,10 @@ import type {
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
   DaemonSessionArtifactsEnvelope,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   DaemonRewindSnapshotInfo,
   DaemonRewindResult,
   ForkSessionRequest,
@@ -229,6 +235,8 @@ import type {
   DaemonWorkspaceSettingsStatus,
   DaemonWorkspacePermissionsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelConfiguration,
+  DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
   DaemonVoiceAudioInput,
@@ -674,6 +682,21 @@ export interface RestoreSessionRequest {
    * timer and relies on the daemon's own restore deadline.
    */
   timeoutMs?: number;
+}
+
+export interface WorktreeResetSessionRequest {
+  /**
+   * Workspace path the daemon must have registered. Omit to let the daemon use
+   * its advertised primary workspace, mirroring restores — pass the session's
+   * workspace path for sessions on other workspaces.
+   */
+  workspaceCwd?: string;
+  modelServiceId?: string;
+  approvalMode?: string;
+  /** Attribution stamped on the replacement session. */
+  sourceType?: string;
+  /** Optional source-specific identifier. Requires `sourceType`. */
+  sourceId?: string;
 }
 
 export interface PromptRequest {
@@ -1191,6 +1214,29 @@ export class DaemonClient {
         ? restoreTimeoutMs
         : undefined;
     return capabilities;
+  }
+
+  /**
+   * The Web Shell's product name and logo, resolved by the daemon from the
+   * operator settings scopes (system defaults, user, system). Workspace
+   * settings never contribute. An empty object means the client should use its
+   * built-in brand.
+   *
+   * Separate from `capabilities()` because that envelope's contract is that
+   * clients probe by connecting rather than reading ambient settings into it.
+   * A daemon that supports it advertises the `web_shell_brand` feature tag, so
+   * callers can preflight instead of relying on the 404 an older daemon returns;
+   * either way, treat branding as optional and fall back rather than fail.
+   */
+  async brand(): Promise<DaemonBrand> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/brand`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /brand');
+        return (await res.json()) as DaemonBrand;
+      },
+    );
   }
 
   /**
@@ -3300,12 +3346,96 @@ export class DaemonClient {
     );
   }
 
+  /** Admit an interrupted turn without adding a user message. */
+  async continueSession(
+    sessionId: string,
+    opts: { clientId?: string; signal?: AbortSignal } = {},
+  ): Promise<DaemonContinueSessionResult> {
+    opts.signal?.throwIfAborted();
+    return await this.jsonRequest<DaemonContinueSessionResult>(
+      `/session/${urlEncode(sessionId)}/continue`,
+      'POST /session/:id/continue',
+      {
+        method: 'POST',
+        clientId: opts.clientId,
+        signal: opts.signal,
+        mode: 'rest',
+      },
+    );
+  }
+
   async resumeSession(
     sessionId: string,
     req: RestoreSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return this.restoreSession('resume', sessionId, req, clientId);
+  }
+
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session (`POST /session/:id/worktree-reset`, capability
+   * `session_worktree_reset_v1`). Resolves 200 with the replacement
+   * session's create-shape response. The route never reads a caller-supplied
+   * client id, so this method takes none — but the response is not
+   * registration-free: a fresh transfer mints an owner-style `clientId` for
+   * the spawn it performs, registers it on the replacement, and returns it in
+   * the body, while an idempotent resume of a committed transfer returns
+   * none. That registration is not an attachment (the replacement's attach
+   * count is unaffected), and nothing detaches it for you — pass a minted id
+   * you do not keep using to `detachSession`, or the replacement never
+   * reaches the daemon's idle cleanup. Typed 409 bodies carry the reset
+   * taxonomy: `worktree_reset_unsupported` (not a worktree session),
+   * `worktree_reset_active` (a session involved is busy), and
+   * `worktree_reset_invalid_state` (corrupt or ambiguous ownership state; a
+   * partial transfer this request started is rolled back, while a
+   * pre-existing interrupted state is left untouched for operator repair).
+   * A crashed transfer whose sidecar links agree is self-healed here: a
+   * pre-commit one (the marker still names this session, or is absent while
+   * the replacement is dormant) is rolled back and re-run in the same
+   * request, and a committed one (the marker names the replacement) is
+   * finished idempotently. Every other interrupted shape — disagreeing links,
+   * an invalid marker, a marker naming a third session, a replacement still
+   * live with no marker — is reported as `worktree_reset_invalid_state` (or
+   * `worktree_reset_active` when the committed replacement is busy) and left
+   * untouched: a retry re-reads the same state and returns the same 409, so
+   * it does not converge and needs operator repair rather than a retry loop.
+   * `worktree_reset_interrupted`, `worktree_session_superseded`, and
+   * `worktree_marker_missing` belong to the restore surface (`loadSession` /
+   * `resumeSession`) instead; for `worktree_reset_interrupted` — the
+   * agreeing-links shape — retrying this reset against the superseded session
+   * is the repair.
+   */
+  async resetWorktreeSession(
+    sessionId: string,
+    req: WorktreeResetSessionRequest = {},
+  ): Promise<DaemonSession> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-reset`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+          ...(req.modelServiceId !== undefined
+            ? { modelServiceId: req.modelServiceId }
+            : {}),
+          ...(req.approvalMode !== undefined
+            ? { approvalMode: req.approvalMode }
+            : {}),
+          ...(req.sourceType !== undefined
+            ? { sourceType: req.sourceType }
+            : {}),
+          ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/worktree-reset');
+        }
+        return (await res.json()) as DaemonSession;
+      },
+    );
   }
 
   async branchSession(
@@ -3791,7 +3921,7 @@ export class DaemonClient {
   async setSessionApprovalMode(
     sessionId: string,
     mode: DaemonApprovalMode,
-    opts?: { persist?: boolean; clientId?: string },
+    opts?: { persist?: boolean; clientId?: string; planMode?: boolean },
   ): Promise<DaemonApprovalModeResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/approval-mode`,
@@ -3803,6 +3933,7 @@ export class DaemonClient {
         ),
         body: JSON.stringify({
           mode,
+          ...(opts?.planMode !== undefined ? { planMode: opts.planMode } : {}),
           ...(opts?.persist === true ? { persist: true } : {}),
         }),
       },
@@ -3968,6 +4099,30 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/attachments');
         }
         return (await res.json()) as DaemonSessionAttachmentReference;
+      },
+    );
+  }
+
+  async readSessionArtifactContent(
+    sessionId: string,
+    artifactId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<string> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/artifacts/${urlEncode(artifactId)}/content`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/artifacts/:artifactId/content',
+          );
+        }
+        return await res.text();
       },
     );
   }
@@ -4444,6 +4599,32 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSettingUpdateResult;
       },
+    );
+  }
+
+  async modelConfigurations(): Promise<{ models: DaemonModelConfiguration[] }> {
+    return this.jsonRequest('/workspace/models', 'GET /workspace/models');
+  }
+
+  async updateModelContextWindow(
+    key: string,
+    contextWindowSize: number | null,
+  ): Promise<DaemonModelConfigurationUpdateResult> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/models`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ key, contextWindowSize }),
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'PATCH /workspace/models');
+        return (await res.json()) as DaemonModelConfigurationUpdateResult;
+      },
+      this.hasExplicitFetchTimeout
+        ? undefined
+        : DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS,
     );
   }
 
@@ -6037,6 +6218,41 @@ export class DaemonClient {
    */
   dispose(): void {
     this.transport.dispose();
+  }
+
+  listSessionSources(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<SessionSourcesResult> {
+    return this.jsonRequest(
+      `/session/${urlEncode(sessionId)}/sources`,
+      'GET /session/:id/sources',
+      { clientId, mode: 'rest' },
+    );
+  }
+
+  upsertSessionSource(
+    sessionId: string,
+    source: SessionSourceInput,
+    clientId?: string,
+  ): Promise<SessionSourceUpsertResult> {
+    return this.jsonRequest(
+      `/session/${urlEncode(sessionId)}/sources`,
+      'POST /session/:id/sources',
+      { method: 'POST', body: source, clientId, mode: 'rest' },
+    );
+  }
+
+  removeSessionSource(
+    sessionId: string,
+    sourceId: string,
+    clientId?: string,
+  ): Promise<SessionSourceRemoveResult> {
+    return this.jsonRequest(
+      `/session/${urlEncode(sessionId)}/sources/${urlEncode(sourceId)}`,
+      'DELETE /session/:id/sources/:sourceId',
+      { method: 'DELETE', clientId, mode: 'rest' },
+    );
   }
 
   // -- Session artifacts ---------------------------------------------------

@@ -151,6 +151,14 @@ export function createTerminalWsHandler(
         ws.close(4004, 'Terminal released');
         return;
       }
+      if (url.searchParams.get('replay') !== '1') {
+        sendControl(ws, {
+          type: 'error',
+          message: 'Terminal protocol changed; reload this page.',
+        });
+        ws.close(4002, 'Terminal protocol mismatch');
+        return;
+      }
       const workspaceSelector = selector;
 
       let created = false;
@@ -328,6 +336,11 @@ export function createTerminalWsHandler(
       ws.off('error', markClosed);
       ws.on('error', cleanup);
       if (!ensureWorkspaceAvailable()) return;
+      sendControl(ws, {
+        type: 'snapshot',
+        replay: !created,
+        handlesPrimaryDa: snapshot.handlesPrimaryDa === true,
+      });
       if (!sendOutput(ws, snapshot.output)) {
         cleanup();
         ws.close(1013, 'Terminal output backpressure');

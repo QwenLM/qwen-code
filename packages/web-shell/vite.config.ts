@@ -47,6 +47,12 @@ const daemonProxy: ProxyOptions = {
 export const QUALIFIED_VOICE_STREAM_PROXY =
   '^/workspaces/[^/]+/voice/stream/?$';
 
+// Exact-path on purpose. A bare `/brand` prefix would also match
+// `/brandContext.ts` — the client source module `main.tsx` and `App.tsx` import
+// for a value — and proxy it to the daemon, so the module graph never loads and
+// the dev page blanks. Same hazard the `/voice` and `/live` entries document.
+export const BRAND_ROUTE_PROXY = '^/brand/?$';
+
 // The local-files bridge upgrades here for secondary-workspace sessions;
 // without a ws-enabled entry the upgrade is never forwarded in dev and the
 // bridge hangs in `connecting`.
@@ -90,10 +96,33 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     cors: false,
+    // Mirrors buildWebShellCsp() in packages/cli/src/serve/web-shell-static.ts;
+    // dev intentionally permits same-origin ancestors instead of denying all.
+    headers: {
+      'Content-Security-Policy': [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+        "style-src 'self' 'unsafe-inline'",
+        "font-src 'self' data:",
+        "img-src 'self' data: blob:",
+        "media-src 'self' data:",
+        "connect-src 'self'",
+        "worker-src 'self' blob:",
+        "base-uri 'none'",
+        'frame-src http: https: blob:',
+        "frame-ancestors 'self'",
+      ].join('; '),
+      'Referrer-Policy': 'no-referrer',
+    },
     port: 5173,
     proxy: {
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
+      // Web Shell brand (`GET /brand`). Without it the SPA fallback answers with
+      // index.html in dev; the client swallows the parse failure and silently
+      // keeps the built-in name and logo, so a locally configured `ui.brand`
+      // would appear to do nothing.
+      [BRAND_ROUTE_PROXY]: daemonProxy,
       '/mcp-app-sandbox': { ...daemonProxy, bypass: undefined },
       // Daemon status report; scoped to the exact route the dashboard uses (a
       // bare `/daemon` prefix would proxy unrelated `/daemon/*` paths). Without

@@ -6,18 +6,18 @@
 
 import { randomUUID } from 'node:crypto';
 import { useCallback, useRef, useState } from 'react';
-import type { GoalTurnHost, GoalTurnPermit } from '@qwen-code/qwen-code-core';
+import type {
+  GoalContinuationTurn,
+  GoalTurnHost,
+  GoalTurnPermit,
+} from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
 import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
-export interface QueuedGoalTurn {
+export interface QueuedGoalTurn extends GoalContinuationTurn {
   kind: 'goal';
   permit: GoalTurnPermit;
   turnKey: string;
-  continuationContext: string;
-  objectiveUpdated?: boolean;
-  windDown?: boolean;
-  verifierFeedback?: string;
 }
 
 export interface QueuedUserSubmission {
@@ -191,18 +191,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
       ) {
         return;
       }
+      const { permit, ...continuation } = input;
       const entry: QueuedGoalTurn = {
         kind: 'goal',
-        permit: { ...input.permit },
-        turnKey: `goal-runtime:${input.permit.turnId}`,
-        continuationContext: input.continuationContext,
-        ...(input.objectiveUpdated
-          ? { objectiveUpdated: input.objectiveUpdated }
-          : {}),
-        ...(input.windDown ? { windDown: true } : {}),
-        ...(input.verifierFeedback
-          ? { verifierFeedback: input.verifierFeedback }
-          : {}),
+        permit: { ...permit },
+        turnKey: `goal-runtime:${permit.turnId}`,
+        ...continuation,
       };
       goalQueueRef.current = [...goalQueueRef.current, entry];
       setQueuedGoalTurns(goalQueueRef.current);
