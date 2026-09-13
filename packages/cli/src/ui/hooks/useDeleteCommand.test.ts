@@ -692,10 +692,10 @@ describe('useDeleteCommand', () => {
     // prompts in the project-shared `<tmp>/<project-hash>/logs.json`, so they
     // kept resurfacing in cross-session ↑-history.
     function createLogger() {
-      const removeSessionMessages = vi.fn().mockResolvedValue(true);
+      const removeSessionsMessages = vi.fn().mockResolvedValue(true);
       return {
-        logger: { removeSessionMessages } as unknown as Logger,
-        removeSessionMessages,
+        logger: { removeSessionsMessages } as unknown as Logger,
+        removeSessionsMessages,
       };
     }
 
@@ -704,7 +704,7 @@ describe('useDeleteCommand', () => {
         currentSessionId: 'current',
         removeSession: vi.fn().mockResolvedValue(true),
       });
-      const { logger, removeSessionMessages } = createLogger();
+      const { logger, removeSessionsMessages } = createLogger();
       const { result } = renderHook(() =>
         useDeleteCommand({ config, addItem: vi.fn(), logger }),
       );
@@ -714,7 +714,7 @@ describe('useDeleteCommand', () => {
         await flushAsync();
       });
 
-      expect(removeSessionMessages).toHaveBeenCalledWith('deleted-id');
+      expect(removeSessionsMessages).toHaveBeenCalledWith(['deleted-id']);
     });
 
     it('does not purge when the session was not removed', async () => {
@@ -723,7 +723,7 @@ describe('useDeleteCommand', () => {
         currentSessionId: 'current',
         removeSession: vi.fn().mockResolvedValue(false),
       });
-      const { logger, removeSessionMessages } = createLogger();
+      const { logger, removeSessionsMessages } = createLogger();
       const { result } = renderHook(() =>
         useDeleteCommand({ config, addItem: vi.fn(), logger }),
       );
@@ -733,7 +733,7 @@ describe('useDeleteCommand', () => {
         await flushAsync();
       });
 
-      expect(removeSessionMessages).not.toHaveBeenCalled();
+      expect(removeSessionsMessages).not.toHaveBeenCalled();
     });
 
     it('purges exactly the sessions a batch delete removed', async () => {
@@ -748,7 +748,7 @@ describe('useDeleteCommand', () => {
         currentSessionId: 'current',
         removeSessions,
       });
-      const { logger, removeSessionMessages } = createLogger();
+      const { logger, removeSessionsMessages } = createLogger();
       const { result } = renderHook(() =>
         useDeleteCommand({ config, addItem: vi.fn(), logger }),
       );
@@ -758,7 +758,10 @@ describe('useDeleteCommand', () => {
         await flushAsync();
       });
 
-      expect(removeSessionMessages.mock.calls.flat()).toEqual(['a', 'b']);
+      // One call for the whole batch, not one per id: `.flat()` alone cannot tell
+      // `[['a'],['b']]` from `[['a','b']]`, so the count is what pins the shape.
+      expect(removeSessionsMessages).toHaveBeenCalledTimes(1);
+      expect(removeSessionsMessages).toHaveBeenCalledWith(['a', 'b']);
     });
 
     it('still reports success when the purge rejects', async () => {
@@ -771,8 +774,8 @@ describe('useDeleteCommand', () => {
         currentSessionId: 'current',
         removeSession: vi.fn().mockResolvedValue(true),
       });
-      const { logger, removeSessionMessages } = createLogger();
-      removeSessionMessages.mockRejectedValue(new Error('disk full'));
+      const { logger, removeSessionsMessages } = createLogger();
+      removeSessionsMessages.mockRejectedValue(new Error('disk full'));
       const addItem = vi.fn();
       const { result } = renderHook(() =>
         useDeleteCommand({ config, addItem, logger }),

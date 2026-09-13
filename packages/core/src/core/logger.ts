@@ -85,6 +85,12 @@ export class Logger {
   // deleteCheckpoint / loadCheckpoint) write to *separate* files and are
   // intentionally not serialized on this queue.
   private writeQueue: Promise<unknown> = Promise.resolve();
+  // Sessions whose removal is decided but whose write has not landed yet. Every op
+  // assigns `this.logs` from its OWN disk snapshot, and that snapshot still holds the
+  // rows of any purge queued behind it — so without this an earlier op re-adopts rows
+  // a later optimistic removal already dropped, and a read inside that window returns
+  // a prompt from a session the user was just told was deleted.
+  private pendingPurgeSessions = new Set<string>();
   private debugLogger: DebugLogger;
 
   constructor(
@@ -515,11 +521,37 @@ export class Logger {
    * @returns true when rows were actually removed from the file.
    */
   async removeSessionMessages(sessionId: string): Promise<boolean> {
-    if (!this.initialized || !this.logFilePath) {
+    return this.removeSessionsMessages([sessionId]);
+  }
+
+  /**
+   * The batch form of {@link removeSessionMessages}, for a multi-session delete.
+   *
+   * One optimistic in-memory removal, one queued op, one file rewrite — not one of
+   * each per id. Per-id calls cost a full read → filter → write of the whole
+   * project-shared `logs.json` each, which the next `logMessage` then waits behind
+   * on the same queue; and each op assigns `this.logs` from its own disk snapshot,
+   * which still holds the rows of every purge queued behind it, so an earlier op
+   * re-adopts rows a later optimistic removal had already dropped. Both go away when
+   * the batch is one op.
+   *
+   * @param sessionIds the sessions to purge; duplicates and unknown ids are harmless
+   * @returns true when rows were actually removed from the file
+   */
+  /** A disk snapshot with every not-yet-written purge still applied. */
+  private withoutPendingPurges(rows: LogEntry[]): LogEntry[] {
+    if (this.pendingPurgeSessions.size === 0) return rows;
+    return rows.filter((row) => !this.pendingPurgeSessions.has(row.sessionId));
+  }
+
+  async removeSessionsMessages(
+    sessionIds: readonly string[],
+  ): Promise<boolean> {
+    if (!this.initialized || !this.logFilePath || sessionIds.length === 0) {
       return false;
     }
-    const belongsToSession = (e: LogEntry): boolean =>
-      e.sessionId === sessionId;
+    const doomed = new Set(sessionIds);
+    const belongsToSession = (e: LogEntry): boolean => doomed.has(e.sessionId);
     const isSameRow = (a: LogEntry, b: LogEntry): boolean =>
       a.sessionId === b.sessionId &&
       a.messageId === b.messageId &&
@@ -538,7 +570,8 @@ export class Logger {
     if (optimisticallyRemoved.length > 0) {
       this.logs = this.logs.filter((entry) => !belongsToSession(entry));
     }
-    // An undo target from the purged session died with it; leaving it would
+    for (const id of doomed) this.pendingPurgeSessions.add(id);
+    // An undo target from a purged session died with it; leaving it would
     // point removeLastUserMessage at a row that no longer exists.
     const droppedUndoTarget =
       this.lastLoggedUserEntry !== null &&
@@ -569,12 +602,27 @@ export class Logger {
 
     const logFilePath = this.logFilePath;
     return this.serialize(async () => {
+      try {
+        return await this.purgeFromDisk(logFilePath, belongsToSession, restoreOptimistic);
+      } finally {
+        for (const id of doomed) this.pendingPurgeSessions.delete(id);
+      }
+    });
+  }
+
+  /** The disk half of a purge: read, filter, write, with rollback on either failure. */
+  private async purgeFromDisk(
+    logFilePath: string,
+    belongsToSession: (entry: LogEntry) => boolean,
+    restoreOptimistic: () => void,
+  ): Promise<boolean> {
+    {
       let currentLogsOnDisk: LogEntry[];
       try {
         currentLogsOnDisk = await this._readLogFile();
       } catch (error) {
         this.debugLogger.debug(
-          'Failed to read log file while purging a deleted session:',
+          'Failed to read log file while purging deleted sessions:',
           error,
         );
         restoreOptimistic();
@@ -583,10 +631,10 @@ export class Logger {
 
       const kept = currentLogsOnDisk.filter((e) => !belongsToSession(e));
       if (kept.length === currentLogsOnDisk.length) {
-        // The session has nothing on disk (it never logged a prompt, or
-        // another instance already purged it). Adopt the disk snapshot so the
+        // None of the sessions has anything on disk (they never logged a prompt,
+        // or another instance already purged them). Adopt the disk snapshot so the
         // cache doesn't diverge from a file that moved on underneath us.
-        this.logs = currentLogsOnDisk;
+        this.logs = this.withoutPendingPurges(currentLogsOnDisk);
         return false;
       }
 
@@ -594,17 +642,17 @@ export class Logger {
         await atomicWriteFile(logFilePath, JSON.stringify(kept, null, 2), {
           encoding: 'utf-8',
         });
-        this.logs = kept;
+        this.logs = this.withoutPendingPurges(kept);
         return true;
       } catch (error) {
         this.debugLogger.debug(
-          'Failed to write log file while purging a deleted session:',
+          'Failed to write log file while purging deleted sessions:',
           error,
         );
         restoreOptimistic();
         return false;
       }
-    });
+    }
   }
 
   private _checkpointPath(tag: string): string {

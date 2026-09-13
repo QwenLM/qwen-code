@@ -1157,6 +1157,59 @@ describe('Logger', () => {
       current.close();
     });
 
+    it('purges a whole batch in ONE file rewrite', async () => {
+      // Per-id calls each read, filter and rewrite the entire project-shared file,
+      // and the next logMessage queues behind all of them.
+      await logPromptAs('doomed-a', 'ssh root@prod-db');
+      await logPromptAs('doomed-b', 'cat ~/.aws/credentials');
+      await logPromptAs('kept-session', 'what does this repo do?');
+      const current = await currentSessionLogger();
+      vi.mocked(atomicWriteFile).mockClear();
+
+      expect(
+        await current.removeSessionsMessages(['doomed-a', 'doomed-b']),
+      ).toBe(true);
+
+      expect(vi.mocked(atomicWriteFile)).toHaveBeenCalledTimes(1);
+      expect((await readLogFile()).map((e) => e.sessionId)).toEqual([
+        'kept-session',
+      ]);
+      current.close();
+    });
+
+    it('does not re-adopt rows a queued purge already dropped', async () => {
+      // Each queued op assigns the cache from its OWN disk snapshot, which still holds
+      // the rows of the purge behind it. Without the pending-purge filter the first op
+      // puts the second session's prompts back, and a read in that window returns a
+      // prompt from a session the user was just told was deleted.
+      await logPromptAs('doomed-a', 'ssh root@prod-db');
+      await logPromptAs('doomed-b', 'cat ~/.aws/credentials');
+      const current = await currentSessionLogger();
+
+      const first = current.removeSessionMessages('doomed-a');
+      const second = current.removeSessionMessages('doomed-b');
+
+      expect(await first).toBe(true);
+      // After only the FIRST has resolved, neither session may be observable.
+      expect(await current.getPreviousUserMessages()).toEqual([]);
+      expect(await second).toBe(true);
+      expect(await readLogFile()).toEqual([]);
+      current.close();
+    });
+
+    it('purges rows this logger has never seen on disk', async () => {
+      // The helper above initializes the purging logger AFTER the writes, so its cache
+      // is warm. The multi-instance shape is the one where the purge is the only thing
+      // that can clean the shared file: a logger that started BEFORE those rows existed.
+      const current = await currentSessionLogger(); // cache: empty
+      await logPromptAs('doomed-session', 'ssh root@prod-db');
+
+      expect(await current.removeSessionMessages('doomed-session')).toBe(true);
+
+      expect(await readLogFile()).toEqual([]);
+      current.close();
+    });
+
     it('clears a pending undo target that belonged to the purged session', async () => {
       // Otherwise removeLastUserMessage would still be pointing at a row the
       // purge deleted. Also covers purging the logger's own session.

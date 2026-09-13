@@ -53,11 +53,15 @@ export function useDeleteCommand(
   // Fire-and-forget: the Logger drops the rows from its in-memory cache
   // synchronously, so the ↑-history list the "Session deleted" history item
   // re-renders is already correct, and the delete flow never blocks on disk.
-  const purgeSessionLog = useCallback(
-    (sessionId: string) => {
-      void logger?.removeSessionMessages(sessionId).catch((error: unknown) => {
+  const purgeSessionLogs = useCallback(
+    (sessionIds: readonly string[]) => {
+      if (sessionIds.length === 0) return;
+      // One call for the whole batch: per-id purges each rewrite the entire
+      // project-shared `logs.json` and queue behind one another, and each would
+      // adopt a disk snapshot that still holds the rows the later ones dropped.
+      void logger?.removeSessionsMessages(sessionIds).catch((error: unknown) => {
         // eslint-disable-next-line no-console
-        console.error('Failed to purge deleted session from log:', error);
+        console.error('Failed to purge deleted sessions from log:', error);
       });
     },
     [logger],
@@ -99,7 +103,7 @@ export function useDeleteCommand(
         const success = await sessionService.removeSession(sessionId);
 
         if (success) {
-          purgeSessionLog(sessionId);
+          purgeSessionLogs([sessionId]);
           fireSessionDeleteHook(config, sessionId);
           addItem?.(
             {
@@ -129,7 +133,7 @@ export function useDeleteCommand(
         );
       }
     },
-    [closeDeleteDialog, config, addItem, purgeSessionLog],
+    [closeDeleteDialog, config, addItem, purgeSessionLogs],
   );
 
   const handleDeleteMany = useCallback(
@@ -188,8 +192,8 @@ export function useDeleteCommand(
         const sessionService = config.getSessionService();
         const result = await sessionService.removeSessions(filtered);
 
+        purgeSessionLogs(result.removed);
         for (const sessionId of result.removed) {
-          purgeSessionLog(sessionId);
           fireSessionDeleteHook(config, sessionId);
         }
 
@@ -267,7 +271,7 @@ export function useDeleteCommand(
         isDeletingManyRef.current = false;
       }
     },
-    [closeDeleteDialog, config, addItem, purgeSessionLog],
+    [closeDeleteDialog, config, addItem, purgeSessionLogs],
   );
 
   return {
