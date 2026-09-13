@@ -634,6 +634,7 @@ function DaemonStatusDialogInner({
   const [connectionAddress, setConnectionAddress] = useState(workspace.baseUrl);
   const [connectionToken, setConnectionToken] = useState('');
   const [connectionError, setConnectionError] = useState('');
+  const [connectBusy, setConnectBusy] = useState(false);
   const [activeTab, setActiveTab] = useState<DaemonTab>('overview');
   // WAI-ARIA tabs keyboard support: roving tabindex (only the active tab is in
   // the tab order) + Arrow/Home/End moving focus and selection across the
@@ -844,11 +845,49 @@ function DaemonStatusDialogInner({
                     setConnectionError(t('daemon.connection.invalid'));
                     return;
                   }
-                  setConnectionError('');
-                  onChangeTarget(
-                    daemonOrigin,
-                    connectionToken.trim() || getDaemonToken(daemonOrigin),
+                  const token =
+                    connectionToken.trim() || getDaemonToken(daemonOrigin);
+                  // A changed target keeps the write-then-navigate switch
+                  // (the boot gate probes there; a not-yet-allowed origin
+                  // would be CSP-blocked from here anyway). On the current
+                  // target the typed token would overwrite the stored
+                  // credential before the page reloads, so probe it first —
+                  // 'self' permits the probe, and a 401 is answered without
+                  // destroying the working token.
+                  if (daemonOrigin !== workspace.baseUrl) {
+                    setConnectionError('');
+                    onChangeTarget(daemonOrigin, token);
+                    return;
+                  }
+                  setConnectBusy(true);
+                  const controller = new AbortController();
+                  const timeout = window.setTimeout(
+                    () => controller.abort(),
+                    10_000,
                   );
+                  void fetch(`${daemonOrigin}/capabilities`, {
+                    headers: token ? { Authorization: `Bearer ${token}` } : {},
+                    signal: controller.signal,
+                  })
+                    .then((response) => {
+                      if (response.status === 401) {
+                        setConnectionError(t('daemon.connection.authFailed'));
+                        return;
+                      }
+                      setConnectionError('');
+                      onChangeTarget(daemonOrigin, token);
+                    })
+                    .catch(() => {
+                      // An inconclusive probe (daemon restarting, tunnel
+                      // flapping) keeps the previous write-then-navigate
+                      // behavior.
+                      setConnectionError('');
+                      onChangeTarget(daemonOrigin, token);
+                    })
+                    .finally(() => {
+                      window.clearTimeout(timeout);
+                      setConnectBusy(false);
+                    });
                 }}
               >
                 <Label htmlFor="daemon-connection-address">
@@ -890,8 +929,15 @@ function DaemonStatusDialogInner({
                   value={connectionToken}
                   onChange={(event) => setConnectionToken(event.target.value)}
                 />
-                <Button type="submit" size="sm" className="mt-1 w-full">
-                  {t('daemon.connection.connect')}
+                <Button
+                  type="submit"
+                  size="sm"
+                  className="mt-1 w-full"
+                  disabled={connectBusy}
+                >
+                  {connectBusy
+                    ? t('daemon.connection.status.connecting')
+                    : t('daemon.connection.connect')}
                 </Button>
               </form>
             )}

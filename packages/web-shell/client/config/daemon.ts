@@ -39,6 +39,27 @@ export function isLocalDaemon(): boolean {
   return isLoopbackHostname(window.location.hostname);
 }
 
+/**
+ * Whether the connected daemon is the page's own origin. This gates the
+ * browser-local file bridge: widening `?daemon=` past loopback made a
+ * cross-origin target reachable for every consumer, and handing a client
+ * directory to a remote daemon contradicts the bridge's "files stay on your
+ * computer" promise. Keyed on the daemon's identity relative to the page —
+ * never on loopback-ness — so the documented same-origin SSH-tunnel
+ * deployment keeps working.
+ */
+export function isPageOriginDaemon(baseUrl: string | undefined): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return (
+      new URL(baseUrl || window.location.origin, window.location.origin)
+        .origin === window.location.origin
+    );
+  } catch {
+    return false;
+  }
+}
+
 const cachedDaemonTokens = new Map<string, string>();
 const DAEMON_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 const DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS = 2500;
@@ -227,6 +248,19 @@ export function getAllowedDaemonOrigin(raw: string): string {
       parsed.search ||
       parsed.hash ||
       !/^[a-z0-9._\-[\]:]+$/iu.test(parsed.hostname)
+    ) {
+      return '';
+    }
+    // A bracketed IPv6 literal is not a valid CSP host-source (CSP3 host-part
+    // excludes '[', ']' and ':'), so a remote http://[::1]:4170 target would
+    // be served a connect-src every browser drops, and the gate would loop on
+    // "unreachable" with only a console violation as evidence. Exempt the
+    // page's own origin: 'self' covers it, and qwen serve --hostname '[::1]'
+    // is a documented deployment.
+    if (
+      parsed.hostname.startsWith('[') &&
+      typeof window !== 'undefined' &&
+      parsed.origin !== window.location.origin
     ) {
       return '';
     }

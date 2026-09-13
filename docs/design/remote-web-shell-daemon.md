@@ -41,7 +41,7 @@ Disconnecting or closing the browser only disposes the client connection. It doe
 ## Failure and Security Boundaries
 
 - An unfamiliar `?daemon=` target waits for explicit confirmation before any probe. Only the last confirmed origin in the current tab is remembered; there is no persistent host or project catalog.
-- Standalone cross-origin connections do not mount the browser-local file bridge. Remote workspace files remain available through the selected daemon. Existing embedded bridge consumers retain their behavior and origin-scoped grants.
+- The browser-local file bridge is offered only when the connected daemon is the page's own origin, in the standalone and embedded shells alike: a cross-origin target never mounts it, so a client directory cannot be handed to a remote daemon whose panel copy promises files stay on the computer. Remote workspace files remain available through the selected daemon. The same-origin SSH-tunnel deployment keeps its behavior and origin-scoped grants.
 - Switching hosts happens only through the connection gate or Daemon Status, before using the existing add-workspace form. There is no cross-host add continuation or duplicate directory browser.
 
 - Invalid remote addresses are reported by the connection gate and are not contacted.

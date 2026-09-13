@@ -369,6 +369,73 @@ describe('DaemonStatusDialog', () => {
     );
   });
 
+  function typeToken(value: string): HTMLInputElement {
+    const token = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-token',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(token, value);
+      token.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    return token;
+  }
+
+  async function submitConnect(token: HTMLInputElement): Promise<void> {
+    await act(async () => {
+      token
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+  }
+
+  // The address field is pre-filled with the current target, so submitting a
+  // typed token there must probe it before the stored credential is replaced:
+  // a 401 keeps the old token and reports the rejection instead of navigating.
+  it('probes a typed token on the current target and keeps the stored credential on a 401', async () => {
+    const onChangeTarget = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 401 });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      mount('en', onChangeTarget);
+      const token = typeToken('bad-token');
+      await submitConnect(token);
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://localhost:4170/capabilities',
+        expect.objectContaining({
+          headers: { Authorization: 'Bearer bad-token' },
+        }),
+      );
+      expect(onChangeTarget).not.toHaveBeenCalled();
+      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+        'rejected',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('switches the current target once the typed token probes green', async () => {
+    const onChangeTarget = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      mount('en', onChangeTarget);
+      const token = typeToken('good-token');
+      await submitConnect(token);
+      expect(onChangeTarget).toHaveBeenCalledWith(
+        'http://localhost:4170',
+        'good-token',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('renders live summary counters with the full-detail rollup badge', () => {
     mount();
     const text = container!.textContent ?? '';

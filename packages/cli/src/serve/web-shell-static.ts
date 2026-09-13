@@ -93,6 +93,12 @@ export function remoteDaemonConnectOrigins(raw: unknown): string[] {
     ) {
       return [];
     }
+    // A bracketed IPv6 host is not a valid CSP host-source (CSP3 host-part
+    // excludes '[', ']' and ':'), so emitting it produces a directive the
+    // browser drops. The client gate rejects a remote bracketed target for
+    // the same reason; when the page itself is served from that origin,
+    // 'self' already covers the connection.
+    if (url.hostname.startsWith('[')) return [];
     const websocket = new URL(url.origin);
     websocket.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     return [url.origin, websocket.origin];

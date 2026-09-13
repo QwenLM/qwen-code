@@ -94,10 +94,9 @@ describe('Web Shell sandbox framing', () => {
     expect(remoteDaemonConnectOrigins('http://evil.example%3Bsandbox')).toEqual(
       [],
     );
-    expect(remoteDaemonConnectOrigins('https://[::1]:4170')).toEqual([
-      'https://[::1]:4170',
-      'wss://[::1]:4170',
-    ]);
+    // A bracketed IPv6 host is not a valid CSP host-source, so it is never
+    // emitted; a page served from that origin is covered by 'self'.
+    expect(remoteDaemonConnectOrigins('https://[::1]:4170')).toEqual([]);
     expect(
       buildWebShellCsp(
         [],

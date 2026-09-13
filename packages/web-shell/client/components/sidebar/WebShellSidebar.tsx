@@ -1,7 +1,6 @@
 import {
   Fragment,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -101,7 +100,7 @@ import {
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
 import { isDesktopShell } from '../../utils/externalOpen';
-import { isLocalDaemon } from '../../config/daemon';
+import { isLocalDaemon, isPageOriginDaemon } from '../../config/daemon';
 import {
   mergeSessionContentHits,
   sessionMatchesGitQuery,
@@ -144,7 +143,6 @@ import {
 import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
-import { StandaloneContext } from '../../config/standalone';
 import { LocalFilesControl } from '../LocalFilesControl';
 import { workspaceLabelForCwd } from '../../utils/workspace';
 
@@ -977,7 +975,6 @@ export function WebShellSidebar({
   onLoadStandaloneSession,
   onStandaloneNotice,
 }: WebShellSidebarProps) {
-  const standalone = useContext(StandaloneContext);
   const { t } = useI18n();
   const brand = useBrand();
   const brandName = useBrandName();
@@ -6393,11 +6390,9 @@ export function WebShellSidebar({
                 </button>
               )}
               {footerItems.has('localFiles') &&
-                (!standalone ||
-                  new URL(
-                    workspace.baseUrl || window.location.origin,
-                    window.location.origin,
-                  ).origin === window.location.origin) && (
+                // The browser-local bridge is only offered when the connected
+                // daemon is the page's own origin (see isPageOriginDaemon).
+                isPageOriginDaemon(workspace.baseUrl) && (
                   <LocalFilesControl
                     triggerClassName={styles.collapseButton}
                     workspaces={workspaces}

@@ -889,6 +889,8 @@ const EN: Messages = {
   'daemon.connection.token': 'Bearer token (optional)',
   'daemon.connection.connect': 'Connect',
   'daemon.connection.invalid': 'Enter a valid HTTP or HTTPS origin.',
+  'daemon.connection.authFailed':
+    'The daemon rejected that token; the stored credential was left unchanged.',
   'daemon.connection.status.idle': 'Idle',
   'daemon.connection.status.connecting': 'Connecting',
   'daemon.connection.status.connected': 'Connected',
@@ -4591,6 +4593,8 @@ const ZH: Messages = {
   'daemon.connection.token': 'Bearer token（可选）',
   'daemon.connection.connect': '连接',
   'daemon.connection.invalid': '请输入有效的 HTTP 或 HTTPS origin。',
+  'daemon.connection.authFailed':
+    'Daemon 拒绝了该 token，已保存的凭据未被修改。',
   'daemon.connection.status.idle': '空闲',
   'daemon.connection.status.connecting': '连接中',
   'daemon.connection.status.connected': '已连接',

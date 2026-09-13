@@ -75,6 +75,25 @@ describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
     expect(result).toBe('http://localhost:4170');
   });
 
+  // A bracketed IPv6 literal is not a valid CSP host-source, so a remote
+  // bracketed target would loop the gate on "unreachable"; only the page's
+  // own origin is exempt, where 'self' already covers the connection.
+  it('rejects a bracketed IPv6 daemon on a different origin', async () => {
+    const result = await getDaemonBaseUrlWith(
+      'http://localhost:5173',
+      'http://[::1]:4170',
+    );
+    expect(result).toBe('');
+  });
+
+  it('accepts a bracketed IPv6 daemon that is the page origin', async () => {
+    const result = await getDaemonBaseUrlWith(
+      'http://[::1]:4170',
+      'http://[::1]:4170',
+    );
+    expect(result).toBe('http://[::1]:4170');
+  });
+
   it('accepts an external HTTP daemon', async () => {
     const result = await getDaemonBaseUrlWith(
       'http://localhost:5173',
@@ -153,6 +172,42 @@ describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
     setup('http://127.0.0.1:5173');
     const mod = await import('./daemon');
     expect(mod.isLocalDaemon()).toBe(true);
+  });
+});
+
+describe('isPageOriginDaemon', () => {
+  function setupPage(pageUrl: string) {
+    const url = new URL(pageUrl);
+    Object.defineProperty(window, 'location', {
+      value: {
+        origin: url.origin,
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        href: url.href,
+        search: url.search,
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  it('is true for the page origin, and for an unset baseUrl', async () => {
+    setupPage('http://127.0.0.1:4170');
+    const mod = await import('./daemon');
+    expect(mod.isPageOriginDaemon('http://127.0.0.1:4170')).toBe(true);
+    // No daemon selected yet: the page origin is the daemon.
+    expect(mod.isPageOriginDaemon('')).toBe(true);
+    expect(mod.isPageOriginDaemon(undefined)).toBe(true);
+  });
+
+  // The local-files bridge gate: a cross-origin daemon target must not mount
+  // the client-local bridge for any consumer, standalone or embedded.
+  it('is false for a cross-origin daemon, even a loopback one', async () => {
+    setupPage('http://127.0.0.1:4170');
+    const mod = await import('./daemon');
+    expect(mod.isPageOriginDaemon('http://dev-box:4170')).toBe(false);
+    expect(mod.isPageOriginDaemon('http://localhost:4170')).toBe(false);
   });
 });
 
