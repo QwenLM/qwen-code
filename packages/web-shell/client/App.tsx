@@ -102,6 +102,7 @@ import type {
 import { TranscriptViewport } from './components/TranscriptViewport';
 import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
+import { useModelConfigurations } from './hooks/useModelConfigurations';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
@@ -110,9 +111,9 @@ import {
   getTaskActivityKey,
   hasActiveTaskActivity,
 } from './utils/taskActivity';
-import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
+import type { VoiceModelOption } from './voice/voiceModels';
 import {
-  loadVoiceProviders,
+  loadVoiceStatus,
   resolveVoiceWorkspaceTarget,
   setVoiceModelSetting,
   supportsVoiceModelSettings,
@@ -603,6 +604,8 @@ const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
   main: 'model.select',
   fast: 'model.setFast',
   voice: 'model.setVoice',
+  advisor: 'model.setAdvisor',
+  image: 'model.setImage',
   vision: 'model.setVision',
 };
 
@@ -10961,6 +10964,8 @@ export function App({
     autoLoad: projectFeaturesAvailable,
     enabled: projectFeaturesAvailable,
   });
+  const modelConfigurations = useModelConfigurations(projectFeaturesAvailable);
+  const reloadModelConfigurations = modelConfigurations.reload;
   // useProviders returns a fresh object each render, but its `reload` identity is
   // stable — pull it out so callbacks can depend on the function alone without
   // re-creating on every render (and without an exhaustive-deps warning).
@@ -11152,6 +11157,72 @@ export function App({
     );
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
+  const currentAdvisorModel = readScopedModelSetting(
+    workspaceSettings,
+    modelSettingScope,
+    'advisorModel',
+  );
+  const currentImageModel = readScopedModelSetting(
+    workspaceSettings,
+    modelSettingScope,
+    'imageModel',
+  );
+  const roleModelsReady =
+    !modelConfigurations.loading &&
+    !modelConfigurations.error &&
+    modelConfigurations.data !== undefined;
+  const advisorModels: ModelDialogModel[] =
+    roleModelsReady && !providersState.loading && !providersState.error
+      ? [
+          { id: '', label: t('model.useMain') },
+          ...providersState.providers.flatMap((provider) =>
+            provider.models.flatMap((model) => {
+              if (
+                model.isRuntime ||
+                !isVisibleComposerModel({ id: model.modelId })
+              )
+                return [];
+              const configuration = modelConfigurations.models.find(
+                (entry) => entry.key === model.configurationKey,
+              );
+              const id =
+                configuration?.advisorModel ??
+                (provider.authType === 'qwen-oauth'
+                  ? `${provider.authType}:${model.baseModelId}`
+                  : undefined);
+              return id
+                ? [
+                    {
+                      id,
+                      baseModelId: model.baseModelId,
+                      label: model.name,
+                      authType: provider.authType,
+                      baseUrl: model.baseUrl,
+                      envKey: model.envKey,
+                      contextWindow: model.contextLimit,
+                      modalities: model.modalities,
+                    },
+                  ]
+                : [];
+            }),
+          ),
+        ]
+      : [];
+  const imageModels = modelConfigurations.models.flatMap((model) =>
+    model.imageModel
+      ? [
+          {
+            id: model.imageModel,
+            baseModelId: model.modelId,
+            label: model.name ?? model.modelId,
+            authType: model.authType,
+            baseUrl: model.baseUrl,
+            envKey: model.envKey,
+            contextWindow: model.contextWindowSize,
+          },
+        ]
+      : [],
+  );
   const currentModelFallbacks = useMemo(() => {
     const value = readScopedModelSetting(
       workspaceSettings,
@@ -11294,7 +11365,7 @@ export function App({
         !showFallbacksDialogRef.current &&
         !showAuthDialogRef.current;
       try {
-        const status = await loadVoiceProviders(workspace.client, target);
+        const status = await loadVoiceStatus(workspace.client, target);
         if (!intentIsCurrent()) {
           if (request === voicePickerRequestRef.current) {
             pendingVoicePickerSourceRef.current = undefined;
@@ -11303,7 +11374,16 @@ export function App({
         }
         pendingVoicePickerSourceRef.current = undefined;
         voicePickerTargetRef.current = target;
-        setVoiceModels(extractVoiceModels(status));
+        setVoiceModels(
+          status.availableVoiceModels.map((model) => ({
+            id: model.id,
+            label: model.name,
+            baseUrl: model.baseUrl,
+            contextWindow: model.contextWindow,
+            authType: 'openai',
+            modalities: { audio: true },
+          })),
+        );
         setModelSettingScope(scope);
         setModelDialogMode('voice');
       } catch (error) {
@@ -16399,6 +16479,12 @@ export function App({
           // A transient reload failure shouldn't surface as "delete failed" —
           // the model was already removed. Just log it. Reload settings too so a
           // cleared active model / scrubbed fallback isn't shown stale.
+          void reloadModelConfigurations().catch((error: unknown) =>
+            console.warn(
+              '[web-shell] failed to reload model configurations',
+              error,
+            ),
+          );
           reloadProviders().catch((err: unknown) => {
             console.warn(
               '[web-shell] failed to reload providers after delete',
@@ -16427,6 +16513,7 @@ export function App({
     [
       workspaceActions,
       reloadProviders,
+      reloadModelConfigurations,
       reloadWorkspaceSettings,
       reportError,
       sessionOwnerGuard,
@@ -16438,6 +16525,9 @@ export function App({
   const handleCloseAuthDialog = useCallback(() => {
     setShowAuthDialog(false);
     if (!projectFeaturesAvailable) return;
+    void reloadModelConfigurations().catch((error: unknown) =>
+      console.warn('[web-shell] failed to reload model configurations', error),
+    );
     // The provider install flow doesn't broadcast a settings change, so refresh
     // the model list on close to surface any newly added models. Log a failed
     // reload (leaves stale model data) rather than swallowing it.
@@ -16447,7 +16537,7 @@ export function App({
         err,
       );
     });
-  }, [reloadProviders, projectFeaturesAvailable]);
+  }, [reloadProviders, reloadModelConfigurations, projectFeaturesAvailable]);
 
   const handleFallbacksConfirm = useCallback(
     (baseIds: string[]) => {
@@ -16578,7 +16668,7 @@ export function App({
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
       // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
-      // not ACP format. extractVoiceModels() sets id to the baseModelId.
+      // not ACP format. The voice status API supplies the raw model id.
       const bareModelId = extractBareModelId(modelId);
       const target = voicePickerTargetRef.current;
       if (!target || target.ownerKey !== mainVoiceTargetRef.current?.ownerKey) {
@@ -16626,11 +16716,82 @@ export function App({
     ],
   );
 
+  const handleRoleModelSelect = (
+    key: 'advisorModel' | 'imageModel',
+    value: string,
+  ) => {
+    if (
+      !projectFeaturesAvailable ||
+      !roleModelsReady ||
+      !(
+        key === 'advisorModel' ? advisorModels : [{ id: '' }, ...imageModels]
+      ).some((model) => model.id === value)
+    )
+      return;
+    const owner = sessionOwnerGuard.capture();
+    void setWorkspaceSetting(modelSettingScope, key, value)
+      .then((result) => {
+        if (owner.isCurrent() && result?.requiresRestart) {
+          store.dispatch([
+            { type: 'status', text: t('settings.requiresRestart') },
+          ]);
+        }
+      })
+      .catch((error: unknown) => {
+        if (owner.isCurrent())
+          reportError(
+            error,
+            t(key === 'imageModel' ? 'model.setImage' : 'model.setAdvisor'),
+          );
+      });
+  };
+
+  const handleModelContextWindowUpdate = async (
+    key: string,
+    size: number | null,
+  ) => {
+    const token = ++modelActionTokenRef.current;
+    setModelActionBusy(true);
+    try {
+      const result = await workspace.client.updateModelContextWindow(key, size);
+      await Promise.allSettled([
+        reloadModelConfigurations(),
+        reloadProviders(),
+      ]);
+      return result;
+    } finally {
+      if (modelActionTokenRef.current === token) setModelActionBusy(false);
+    }
+  };
+  const modelDialogModels: Partial<
+    Record<ModelDialogMode, ModelDialogModel[]>
+  > = {
+    voice: voiceModels,
+    advisor: advisorModels,
+    image: roleModelsReady
+      ? [{ id: '', label: t('model.disabled') }, ...imageModels]
+      : [],
+  };
+  const modelDialogCurrent: Partial<Record<ModelDialogMode, string>> = {
+    voice: currentVoiceModel,
+    vision: currentVisionModel,
+    fast: currentFastModel,
+    advisor:
+      typeof currentAdvisorModel === 'string'
+        ? (advisorModels.find(
+            (model) => model.id === `${currentAdvisorModel}\0`,
+          )?.id ?? currentAdvisorModel)
+        : '',
+    image: typeof currentImageModel === 'string' ? currentImageModel : '',
+  };
+
   const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
     main: handleModelSelect,
     fast: handleFastModelSelect,
     voice: handleVoiceModelSelect,
     vision: handleVisionModelSelect,
+    advisor: (id) => handleRoleModelSelect('advisorModel', id),
+    image: (id) => handleRoleModelSelect('imageModel', id),
   };
 
   // Once every settings-launched model surface is closed (the model picker via
@@ -17188,19 +17349,23 @@ export function App({
             >
               <ModelDialog
                 mode={modelDialogMode}
-                models={modelDialogMode === 'voice' ? voiceModels : undefined}
+                models={modelDialogModels[modelDialogMode]}
+                loading={
+                  (modelDialogMode === 'advisor' && providersState.loading) ||
+                  ((modelDialogMode === 'advisor' || modelDialogMode === 'image') &&
+                    modelConfigurations.loading)
+                }
+                error={
+                  modelDialogMode === 'advisor'
+                    ? providersState.error ?? modelConfigurations.error
+                    : modelDialogMode === 'image'
+                      ? modelConfigurations.error
+                      : undefined
+                }
                 filterModel={
                   modelDialogMode === 'main' ? mainModelFilter : undefined
                 }
-                currentModelId={
-                  modelDialogMode === 'voice'
-                    ? currentVoiceModel
-                    : modelDialogMode === 'vision'
-                      ? currentVisionModel
-                      : modelDialogMode === 'fast'
-                        ? currentFastModel
-                        : undefined
-                }
+                currentModelId={modelDialogCurrent[modelDialogMode]}
                 onSelect={(modelId) => {
                   if (modelDialogMode) {
                     modelHandlers[modelDialogMode](modelId);
@@ -18073,10 +18238,15 @@ export function App({
                         onChatWidthModeChange={handleChatWidthModeChange}
                         modelManagement={{
                           providers: providersState.providers,
+                          configurations: modelConfigurations.models,
+                          onUpdateContextWindow: handleModelContextWindowUpdate,
                           currentModelId:
                             connection.currentModel ?? undefined,
-                          loading: providersState.loading,
-                          error: providersState.error,
+                          loading:
+                            providersState.loading ||
+                            modelConfigurations.loading,
+                          error:
+                            providersState.error ?? modelConfigurations.error,
                           busy: modelActionBusy,
                           onSelectModel: handleModelSelect,
                           onDeleteModel: handleDeleteModel,
@@ -18087,7 +18257,14 @@ export function App({
                           // the reset effect is gated on the dialog/fallback/auth
                           // flags, so it never runs for the approvalMode dialog
                           // and would leave a stale scope behind.
-                          if (key === 'fastModel') {
+                          if (key === 'advisorModel' || key === 'imageModel') {
+                            void reloadModelConfigurations();
+                            if (key === 'advisorModel') void reloadProviders();
+                            setModelSettingScope(scope);
+                            setModelDialogMode(
+                              key === 'advisorModel' ? 'advisor' : 'image',
+                            );
+                          } else if (key === 'fastModel') {
                             setModelSettingScope(scope);
                             setModelDialogMode('fast');
                           } else if (key === 'visionModel') {

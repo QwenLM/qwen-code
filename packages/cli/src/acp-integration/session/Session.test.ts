@@ -982,6 +982,7 @@ describe('Session', () => {
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       reloadModelProvidersConfig: vi.fn(),
+      setImageModel: vi.fn(),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
@@ -1142,16 +1143,20 @@ describe('Session', () => {
     expect(provider?.()).toBe(true);
   });
 
-  it('reloads model providers from the session-owned settings', () => {
+  it('reloads model providers from the session-owned settings', async () => {
     const modelProviders = {
       idealab: [{ id: 'qwen3', baseUrl: 'https://idealab.example/v1' }],
     };
     Object.assign(mockSettings.merged, {
       modelProviders,
       providerProtocol: { idealab: 'openai' },
+      imageModel: 'openai:image-01\0https://images.example/v1',
     });
 
-    session.reloadModelProvidersFromDisk();
+    await session.reloadModelProvidersFromDisk();
+    expect(mockConfig.setImageModel).toHaveBeenCalledWith(
+      'openai:image-01\0https://images.example/v1',
+    );
 
     expect(mockSettings.reloadScopesFromDiskAtomically).toHaveBeenCalledWith([
       SettingScope.User,
@@ -1163,12 +1168,12 @@ describe('Session', () => {
     );
   });
 
-  it('does not apply stale model providers when a settings scope cannot reload', () => {
+  it('does not apply stale model providers when a settings scope cannot reload', async () => {
     vi.mocked(mockSettings.reloadScopesFromDiskAtomically).mockReturnValueOnce(
       false,
     );
 
-    expect(() => session.reloadModelProvidersFromDisk()).toThrow(
+    await expect(session.reloadModelProvidersFromDisk()).rejects.toThrow(
       'Unable to reload model-provider settings from disk.',
     );
     expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
