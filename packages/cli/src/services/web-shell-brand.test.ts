@@ -999,9 +999,14 @@ describe('resolveWebShellBrand', () => {
       // lets a read-only FIFO open succeed.
       const logoPath = writeLogo(LOGO_SVG);
       vi.mocked(fs.fstatSync).mockImplementationOnce(((fd: number) => {
-        const stat = fsActual.fstatSync(fd);
-        const fake = Object.create(Object.getPrototypeOf(stat)) as fs.Stats;
-        Object.assign(fake, stat, { ino: stat.ino === 1 ? 2 : 1 });
+        // Production stats both sides as BigIntStats and compares with a bare
+        // `!==`, so a number-backed fake would trip `dev` first and never
+        // reach the inode this test perturbs.
+        const stat = fsActual.fstatSync(fd, { bigint: true });
+        const fake = Object.create(
+          Object.getPrototypeOf(stat),
+        ) as fs.BigIntStats;
+        Object.assign(fake, stat, { ino: stat.ino + 1n });
         return fake;
       }) as never);
       const { brand, warnings } = resolveWebShellBrand(
