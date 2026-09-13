@@ -1131,7 +1131,7 @@
             }
           },
           "429": {
-            "description": "The session prompt queue or rate limit is full.",
+            "description": "The daemon prompt rate limit was exceeded (`code: rate_limit_exceeded`); honor `Retry-After` before retrying.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1141,7 +1141,7 @@
             }
           },
           "503": {
-            "description": "The owning runtime is unavailable.",
+            "description": "The owning runtime is unavailable, or the session prompt queue is full (`code: prompt_queue_full`, with `Retry-After: 5`).",
             "content": {
               "application/json": {
                 "schema": {
