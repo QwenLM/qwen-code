@@ -2810,6 +2810,106 @@ describe('DiscoveredMCPTool', () => {
       expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
 
+    it('should not trigger background recovery when the manager holds no client for the server (R4-4 round 5)', async () => {
+      // A manager reporting DISCONNECTED only because it tracks NO
+      // client for the name is absence, not death evidence: a
+      // copied-in or restored tool stays callable while the manager
+      // legitimately holds no client. A user cancel must not arm a
+      // purge-and-respawn against it. `getMcpClientStatus` returning
+      // undefined (the presence-aware read) keeps the recovery dark.
+      const params = { param: 'test' };
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(abortError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+          getMcpClientManager: () => ({
+            getServerStatus: () => MCPServerStatus.DISCONNECTED,
+            getMcpClientStatus: () => undefined,
+          }),
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = tool.build(params);
+      const execution = invocation.execute(controller.signal);
+      controller.abort('qwen:user-cancel');
+      await expect(execution).rejects.toThrow('The operation was aborted');
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledOnce();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
+
+    it('arms background recovery when the manager tracks a client that is disconnected (R4-4 round 5)', async () => {
+      // The presence-aware read's positive half: a TRACKED client whose
+      // status is genuinely DISCONNECTED IS death evidence, and a user
+      // cancel against it must still arm the background recovery.
+      const params = { param: 'test' };
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(abortError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+          getMcpClientManager: () => ({
+            getServerStatus: () => MCPServerStatus.DISCONNECTED,
+            getMcpClientStatus: () => MCPServerStatus.DISCONNECTED,
+          }),
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = tool.build(params);
+      const execution = invocation.execute(controller.signal);
+      controller.abort('qwen:user-cancel');
+      await expect(execution).rejects.toThrow('The operation was aborted');
+
+      // The recovery fired: the dead tracked client is respawned in the
+      // background.
+      await vi.waitFor(() =>
+        expect(discoverToolsForServer).toHaveBeenCalledWith(serverName),
+      );
+    });
+
     it('should not reconnect for an MCP isError result', async () => {
       const initialClient: McpDirectClient = {
         callTool: vi.fn().mockResolvedValueOnce({

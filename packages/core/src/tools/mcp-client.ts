@@ -583,7 +583,24 @@ export class McpClient {
         debugLogger.error(
           `MCP ERROR (${this.serverName}): ${getErrorMessage(error)}`,
         );
-        this.updateStatus(MCPServerStatus.DISCONNECTED);
+        // A RECORDED DISCONNECTED is death evidence for abort recovery
+        // (mcp-tool's `hasAbortRecoveryEvidence`) and the pool's
+        // silent-drop listener, so it must not be written for errors
+        // that leave the transport usable. The SDK dispatches
+        // `Protocol._onerror` for at least eight NON-FATAL conditions
+        // (unknown message type, a throwing notification handler, a
+        // progress notification for an unknown token, a response for
+        // an unknown message ID, ...) none of which close the
+        // transport. `_onclose` is the only place the SDK clears its
+        // transport reference, so "the protocol's transport is gone"
+        // is the load-bearing death signal; gate the DISCONNECTED
+        // write on it. Genuine transport death still lands here: a
+        // dead transport rejects its next operation, the stdio child
+        // 'close' event fires `onclose`, and network transports error
+        // through their own close paths (R4-4 round 5).
+        if (this.client.transport === undefined) {
+          this.updateStatus(MCPServerStatus.DISCONNECTED);
+        }
       };
 
       this.client.registerCapabilities({

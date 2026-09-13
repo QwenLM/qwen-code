@@ -66,6 +66,7 @@ function mkManager(
     overrides.toolRegistry ??
     ({
       removeMcpToolsByServer: vi.fn(),
+      markMcpServerTornDown: vi.fn(),
     } as unknown as ToolRegistry);
   return new McpClientManager(config, toolRegistry, overrides.options ?? {});
 }
@@ -260,6 +261,7 @@ describe('McpClientManager', () => {
     const removePromptsByServer = vi.fn();
     const removeResourcesByServer = vi.fn();
     const removeMcpToolsByServer = vi.fn();
+    const markMcpServerTornDown = vi.fn();
     const mockConfig = {
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
@@ -276,7 +278,10 @@ describe('McpClientManager', () => {
     } as unknown as Config;
     const manager = mkManager({
       config: mockConfig,
-      toolRegistry: { removeMcpToolsByServer } as unknown as ToolRegistry,
+      toolRegistry: {
+        removeMcpToolsByServer,
+        markMcpServerTornDown,
+      } as unknown as ToolRegistry,
     });
 
     await manager.removeRuntimeMcpServer('srv', 'client-1');
@@ -290,6 +295,7 @@ describe('McpClientManager', () => {
     const removePromptsByServer = vi.fn();
     const removeResourcesByServer = vi.fn();
     const removeMcpToolsByServer = vi.fn();
+    const markMcpServerTornDown = vi.fn();
     const mockConfig = {
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
@@ -304,7 +310,10 @@ describe('McpClientManager', () => {
     } as unknown as Config;
     const manager = mkManager({
       config: mockConfig,
-      toolRegistry: { removeMcpToolsByServer } as unknown as ToolRegistry,
+      toolRegistry: {
+        removeMcpToolsByServer,
+        markMcpServerTornDown,
+      } as unknown as ToolRegistry,
     });
 
     // `removeServer` is private; exercised here directly (the incremental
@@ -929,6 +938,7 @@ describe('McpClientManager', () => {
       config: mockConfig,
       toolRegistry: {
         removeMcpToolsByServer: vi.fn(),
+        markMcpServerTornDown: vi.fn(),
       } as unknown as ToolRegistry,
       options: { pool: fakePool },
     });
@@ -1710,6 +1720,7 @@ describe('McpClientManager', () => {
       config: mockConfig,
       toolRegistry: {
         removeMcpToolsByServer: vi.fn(),
+        markMcpServerTornDown: vi.fn(),
       } as unknown as ToolRegistry,
     });
 
@@ -1859,8 +1870,10 @@ describe('McpClientManager', () => {
     );
 
     const removeMcpToolsByServer = vi.fn();
+    const markMcpServerTornDown = vi.fn();
     const toolRegistryStub = {
       removeMcpToolsByServer,
+      markMcpServerTornDown,
     } as unknown as ToolRegistry;
 
     let disabled = false;
@@ -1920,8 +1933,10 @@ describe('McpClientManager', () => {
     const removePromptsByServer = vi.fn();
     const removeResourcesByServer = vi.fn();
     const removeMcpToolsByServer = vi.fn();
+    const markMcpServerTornDown = vi.fn();
     const toolRegistryStub = {
       removeMcpToolsByServer,
+      markMcpServerTornDown,
     } as unknown as ToolRegistry;
     let args: string[] = [];
     const mockConfig = {
@@ -2127,8 +2142,10 @@ describe('McpClientManager', () => {
     const removePromptsByServer = vi.fn();
     const removeResourcesByServer = vi.fn();
     const removeMcpToolsByServer = vi.fn();
+    const markMcpServerTornDown = vi.fn();
     const toolRegistryStub = {
       removeMcpToolsByServer,
+      markMcpServerTornDown,
     } as unknown as ToolRegistry;
     let args: string[] = [];
     const mockConfig = {
@@ -2269,6 +2286,7 @@ describe('McpClientManager', () => {
       config: mockConfig,
       toolRegistry: {
         removeMcpToolsByServer: vi.fn(),
+        markMcpServerTornDown: vi.fn(),
       } as unknown as ToolRegistry,
     });
     await manager.discoverAllMcpToolsIncremental(mockConfig);
@@ -2327,6 +2345,7 @@ describe('McpClientManager', () => {
       config: mockConfig,
       toolRegistry: {
         removeMcpToolsByServer: vi.fn(),
+        markMcpServerTornDown: vi.fn(),
       } as unknown as ToolRegistry,
     });
     await manager.discoverAllMcpToolsIncremental(mockConfig);
@@ -2489,9 +2508,13 @@ describe('McpClientManager', () => {
       isMcpServerDisabled: () => false,
     } as unknown as Config;
     const removeMcpToolsByServer = vi.fn();
+    const markMcpServerTornDown = vi.fn();
     const manager = mkManager({
       config: mockConfig,
-      toolRegistry: { removeMcpToolsByServer } as unknown as ToolRegistry,
+      toolRegistry: {
+        removeMcpToolsByServer,
+        markMcpServerTornDown,
+      } as unknown as ToolRegistry,
     });
 
     await manager.discoverAllMcpToolsIncremental(mockConfig);
@@ -2549,6 +2572,7 @@ describe('McpClientManager', () => {
       config: mockConfig,
       toolRegistry: {
         removeMcpToolsByServer: vi.fn(),
+        markMcpServerTornDown: vi.fn(),
       } as unknown as ToolRegistry,
     });
 
@@ -3017,6 +3041,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
       config,
       toolRegistry: {
         removeMcpToolsByServer: () => undefined,
+        markMcpServerTornDown: () => undefined,
       } as unknown as ToolRegistry,
       options: { budgetConfig: { clientBudget: 2, budgetMode: 'enforce' } },
     });
@@ -3172,6 +3197,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
     const removePromptsByServer = vi.fn();
     const removeResourcesByServer = vi.fn();
     const removeMcpToolsByServer = vi.fn();
+    const markMcpServerTornDown = vi.fn();
     let args: string[] = [];
     const mockConfig = {
       isTrustedFolder: () => true,
@@ -3187,7 +3213,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
     } as unknown as Config;
     const manager = mkManager({
       config: mockConfig,
-      toolRegistry: { removeMcpToolsByServer } as unknown as ToolRegistry,
+      toolRegistry: {
+        removeMcpToolsByServer,
+        markMcpServerTornDown,
+      } as unknown as ToolRegistry,
     });
 
     // First bring the server up via a lazy resource read (not discovery).
@@ -3338,6 +3367,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
       config,
       toolRegistry: {
         removeMcpToolsByServer: () => undefined,
+        markMcpServerTornDown: () => undefined,
       } as unknown as ToolRegistry,
       options: {
         healthConfig: {
@@ -3378,6 +3408,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
       config,
       toolRegistry: {
         removeMcpToolsByServer: () => undefined,
+        markMcpServerTornDown: () => undefined,
       } as unknown as ToolRegistry,
       options: { budgetConfig: { clientBudget: 2, budgetMode: 'enforce' } },
     });
@@ -3512,20 +3543,92 @@ describe('McpClientManager — PR 14 guardrails', () => {
     expect(lateDisconnect).toHaveBeenCalled();
   });
 
-  it('disconnectServer must not evict a replacement client installed while its disconnect was in flight (R1-15)', async () => {
-    // R1-15: disconnectServer captures the client, awaits its disconnect
-    // (~2s for stdio with a request in flight), then deletes the map
-    // entry by NAME. A rediscovery for the same server can install a
-    // replacement client during that await; deleting by name would evict
-    // the replacement — a connected client with a live child no one ever
-    // disconnects. The identity check must keep the replacement in the
-    // map. Removing the identity check turns this red: the map loses the
-    // replacement while it reports CONNECTED.
+  it('disconnectServer must not evict a caller-side replacement it did not initiate (R1-15 / round 5 split)', async () => {
+    // R1-15 round 5 narrows the original protection: a replacement
+    // discovered inside the operator's OWN `disconnectServer` window is
+    // torn-down intent and must die with the operator's call (the
+    // tombstone test below). What must still be protected is a
+    // replacement installed by a rediscovery that raced PAST the
+    // tombstone check (it started before the operator's call) and
+    // landed its connect inside the window — the discovery success
+    // path clears the tombstone, so the operator's finally takes the
+    // identity-check branch. In that interleaving the operator grabbed
+    // the replacement itself (`clients.set` already ran), its own
+    // `await client.disconnect()` closed the transport, and the finally
+    // must still drop every record for the name.
     const { MCPServerStatus } = await import('./mcp-client.js');
-    // The operator's disconnect parks on a deferred (first call on the
-    // original client); the rediscovery's teardown of the SAME original
-    // client resolves immediately so the replacement is fully installed
-    // before the operator's finally runs.
+    let releaseOperatorDisconnect: (() => void) | undefined;
+    let call = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      call += 1;
+      if (call === 1) {
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
+        } as unknown as McpClient;
+      }
+      // The replacement parks the OPERATOR's disconnect call and only
+      // finishes it when the test releases it — after the replacement's
+      // own connect+discover landed and cleared the tombstone.
+      return {
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseOperatorDisconnect = resolve;
+            }),
+        ),
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      } as unknown as McpClient;
+    });
+    const config = configWithServers({ a: { command: 'node' } });
+    const manager = mkManager({ config });
+    await manager.discoverAllMcpTools(config);
+    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
+
+    // Start the rediscovery and let it get PAST the tombstone check
+    // (clients.set + connect landed) before the operator begins.
+    const rediscovery = manager.discoverMcpToolsForServer('a', config);
+    await rediscovery;
+    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
+    expect(
+      (
+        manager as unknown as { operatorTornDownServers: Set<string> }
+      ).operatorTornDownServers.has('a'),
+    ).toBe(false);
+
+    // The operator now tears 'a' down: it grabs the replacement, its
+    // disconnect parks, and while parked nothing re-installs anything.
+    const operatorDisconnect = manager.disconnectServer('a');
+    await vi.waitFor(() => expect(releaseOperatorDisconnect).toBeDefined());
+    releaseOperatorDisconnect?.();
+    await operatorDisconnect;
+
+    // The finally ran through the identity-check branch (tombstone was
+    // cleared by the successful rediscovery): the name is fully torn
+    // down even though the parked client was a live replacement.
+    expect(manager.getServerStatus('a')).not.toBe(MCPServerStatus.CONNECTED);
+    expect(manager.getMcpClientAccounting().total).toBe(0);
+  });
+
+  it('disconnectServer tears down a live replacement installed inside its own disconnect window (R1-15 round 5)', async () => {
+    // The round-5 Critical: the operator disables 'a' while a cancel-
+    // recovery rediscovery is installing a replacement. The old
+    // client's disconnect parks (~2s stdio teardown), the replacement
+    // finishes connecting inside that window, and the old keep-branch
+    // let it escape — 'a' stayed tracked + CONNECTED after the
+    // operator removed it, holding its budget slot, with a health
+    // timer armed and no path that clears them. The tombstone recorded
+    // at the top of disconnectServer must kill the replacement from
+    // BOTH sides: the discovery path refuses to install it (checked
+    // before clients.set), and the finally disconnects it if it landed
+    // anyway.
+    const { MCPServerStatus } = await import('./mcp-client.js');
     let releaseOperatorDisconnect: (() => void) | undefined;
     let originalDisconnectCalls = 0;
     let call = 0;
@@ -3563,41 +3666,54 @@ describe('McpClientManager — PR 14 guardrails', () => {
 
     const operatorDisconnect = manager.disconnectServer('a');
     await vi.waitFor(() => expect(releaseOperatorDisconnect).toBeDefined());
-    // Replacement discovery while the operator disconnect is still parked:
-    // the discovery tears the old client down (immediate mock), installs
-    // the replacement and finishes connecting.
+    // Replacement discovery inside the operator's window: the
+    // tombstone leg in discoverMcpToolsForServerInternal refuses to
+    // install it, so the server reads DISCONNECTED (the review's
+    // acceptance shape) — not merely "not connected".
     await manager.discoverMcpToolsForServer('a', config);
-    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
+    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.DISCONNECTED);
 
-    // Now the operator's long disconnect settles. Its finally must not
-    // evict the replacement that was installed during the await.
     releaseOperatorDisconnect?.();
     await operatorDisconnect;
-    // Without the identity check the by-name delete drops the entry and
-    // getServerStatus falls back to DISCONNECTED.
-    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
-    expect(manager.getMcpClientAccounting().total).toBe(1);
 
-    // --- R1-15 follow-up: the trailing release must not fire while the
-    // replacement still holds the reservation. Same interleaving, but
-    // under a real enforce-mode budget so `reservedSlots` is populated:
-    // the rediscovery inside the disconnect window re-uses the held slot
-    // ('already_held'), and an unconditional releaseSlotName would drop
-    // it, letting the enforce branch admit one server past the cap.
-    let releaseOperatorDisconnect2: (() => void) | undefined;
-    let originalDisconnectCalls2 = 0;
-    let call2 = 0;
+    // Final state: the name is fully torn down — no client tracked, no
+    // budget slot held, and no health timer armed against it. The
+    // round-4 keep-branch left all three behind.
+    const clients = (manager as unknown as { clients: Map<string, McpClient> })
+      .clients;
+    expect(clients.has('a')).toBe(false);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual([]);
+    const timers = (
+      manager as unknown as {
+        healthCheckTimers: Map<string, NodeJS.Timeout>;
+      }
+    ).healthCheckTimers;
+    expect(timers.has('a')).toBe(false);
+  });
+
+  it('disconnectServer reclaims the budget slot from a mid-window rediscovery and admits the next server (R1-15 round 5 budget)', async () => {
+    // Round-5 shape under a real enforce-mode budget (cap 1): the
+    // operator disables 'a' while a rediscovery for 'a' runs inside
+    // the disconnect window. The tombstone refuses the replacement and
+    // the trailing release must reclaim the slot, so the refused 'b'
+    // becomes admissible. The round-4 spec asserted the opposite —
+    // reservedSlots stayed ['a'] and 'b' was refused — protecting the
+    // leak this round's fix removes.
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    let releaseOperatorDisconnect: (() => void) | undefined;
+    let originalDisconnectCalls = 0;
+    let call = 0;
     vi.mocked(McpClient).mockImplementation(() => {
-      call2 += 1;
-      if (call2 === 1) {
+      call += 1;
+      if (call === 1) {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
           discover: vi.fn().mockResolvedValue(undefined),
           disconnect: vi.fn().mockImplementation(() => {
-            originalDisconnectCalls2 += 1;
-            if (originalDisconnectCalls2 === 1) {
+            originalDisconnectCalls += 1;
+            if (originalDisconnectCalls === 1) {
               return new Promise<void>((resolve) => {
-                releaseOperatorDisconnect2 = resolve;
+                releaseOperatorDisconnect = resolve;
               });
             }
             return Promise.resolve(undefined);
@@ -3626,28 +3742,23 @@ describe('McpClientManager — PR 14 guardrails', () => {
     // Budget of 1: 'b' was refused during the bulk pass.
     expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
 
-    const operatorDisconnect2 = budgetManager.disconnectServer('a');
-    await vi.waitFor(() => expect(releaseOperatorDisconnect2).toBeDefined());
-    // Replacement discovery re-uses the still-held slot.
+    const operatorDisconnect = budgetManager.disconnectServer('a');
+    await vi.waitFor(() => expect(releaseOperatorDisconnect).toBeDefined());
+    // Rediscovery inside the operator's window: the tombstone refuses
+    // to install the replacement (never CONNECTED again).
     await budgetManager.discoverMcpToolsForServer('a', budgeted);
-    releaseOperatorDisconnect2?.();
-    await operatorDisconnect2;
-
-    // The replacement survives AND keeps its reservation; the cap of 1
-    // still refuses 'b'. Without the `!clients.has` condition on the
-    // trailing release both assertions go red: the slot is dropped and
-    // 'b' is admitted.
-    expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
-    await budgetManager.discoverMcpToolsForServer('b', budgeted);
-    expect(budgetManager.getServerStatus('b')).not.toBe(
+    expect(budgetManager.getServerStatus('a')).not.toBe(
       MCPServerStatus.CONNECTED,
     );
-    // 'b' records a fresh refusal; the surviving replacement 'a' keeps
-    // the one slot.
-    expect(budgetManager.getMcpClientAccounting().refusedServerNames).toEqual([
-      'b',
-    ]);
-    expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+    releaseOperatorDisconnect?.();
+    await operatorDisconnect;
+
+    // The slot is reclaimed — not stranded against 'a' — and the
+    // previously refused 'b' is now admitted and reaches CONNECTED.
+    expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual([]);
+    await budgetManager.discoverMcpToolsForServer('b', budgeted);
+    expect(budgetManager.getServerStatus('b')).toBe(MCPServerStatus.CONNECTED);
+    expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual(['b']);
   });
 
   it('disconnectServer evicts a replacement whose connect failed and frees its slot (R1-15 liveness)', async () => {
@@ -4802,6 +4913,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     const sessionTools = [{ name: 'tool-b' }];
     const toolRegistry = {
       removeMcpToolsByServer: vi.fn(),
+      markMcpServerTornDown: vi.fn(),
       getToolsByServer: vi.fn().mockReturnValue(sessionTools),
     } as unknown as ToolRegistry;
     const manager = mkManager({

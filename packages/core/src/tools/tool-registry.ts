@@ -16,7 +16,10 @@ import { type Config, matchesAnyServerPattern } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
-import { removeMCPServerStatus } from './mcp-client.js';
+import {
+  removeMCPServerStatus,
+  populateMcpServerCommand,
+} from './mcp-client.js';
 import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
@@ -39,6 +42,7 @@ import {
   ToolMode,
   type CodeModeBindingPlan,
 } from './code-mode.js';
+import { coerceMcpFilterEntries } from './mcp-session-config.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -241,17 +245,35 @@ export class ToolRegistry {
   // observes the in-flight outcome instead of purging again.
   private serverDiscoveryInFlight = new Map<string, Promise<void>>();
 
-  // Monotonic per-server generation, bumped by every teardown-intent path
-  // (`removeMcpToolsByServer`, reached from `disconnectServer` /
-  // `disableMcpServer` / direct removal). A discovery pass captures the
-  // generation before awaiting the manager; if it moved by the time the
-  // pass settles, the server was deliberately torn down mid-pass and the
-  // snapshot restore must NOT run — it would re-expose a server the
-  // operator just removed, bound to a client that no longer exists
-  // (R3-7). The teardown paths also drop the in-flight dedup entry so a
-  // post-teardown reconnect starts a fresh pass instead of inheriting
-  // the pre-teardown promise (R2-1 round 4).
+  // Monotonic per-server generation, bumped by every operator teardown
+  // path (`markMcpServerTornDown`, reached from `disconnectServer` /
+  // `disableMcpServer` / the manager's operator-intent removals). A
+  // discovery pass captures the generation before awaiting the manager;
+  // if it moved by the time the pass settles, the server was
+  // deliberately torn down mid-pass and the snapshot restore must NOT
+  // run — it would re-expose a server the operator just removed, bound
+  // to a client that no longer exists (R3-7). The teardown paths also
+  // drop the in-flight dedup entry so a post-teardown reconnect starts
+  // a fresh pass instead of inheriting the pre-teardown promise
+  // (R2-1 round 4). The bump lives in `markMcpServerTornDown`, NOT in
+  // `removeMcpToolsByServer`: the manager's own in-pass
+  // `purgeServerRegistries` (the existing-client branch of a
+  // rediscovery) also calls `removeMcpToolsByServer`, and that call is
+  // not teardown intent — treating it as such suppressed the resolve
+  // restore on EVERY legacy reconnect of a tracked server (R3-7 round
+  // 5) and disarmed the R2-1 dedup for its duration.
   private serverTeardownGeneration = new Map<string, number>();
+
+  // Server names whose current `DiscoveredMCPTool` entries were copied
+  // in from ANOTHER registry by `copyDiscoveredToolsFrom` (per-agent
+  // registries are seeded this way — discovery is expensive). Those
+  // tool objects carry the PARENT's McpClient; this registry's own
+  // manager never produced them. A failed per-agent rediscovery must
+  // not "restore" the parent's live tool objects — that silently undoes
+  // the agent frontmatter's server override (the subagent's model would
+  // call the session-level server through the replaced connection) and
+  // must instead fail closed with no tools for the server (R4-3).
+  private copiedMcpServers = new Set<string>();
 
   constructor(
     config: Config,
@@ -515,16 +537,28 @@ export class ToolRegistry {
    * that were built with skipDiscovery.
    */
   copyDiscoveredToolsFrom(source: ToolRegistry): void {
+    const copiedServers = new Set<string>();
     for (const tool of source.tools.values()) {
       if (
         (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) &&
         !this.tools.has(tool.name)
       ) {
         this.tools.set(tool.name, tool);
+        if (tool instanceof DiscoveredMCPTool) {
+          copiedServers.add(tool.serverName);
+        }
         if (source.isPermissionDeferred(tool.name)) {
           this.permissionDeferred.add(tool.name);
         }
       }
+    }
+    // Provenance (R4-3): the copied MCP tools carry the source
+    // registry's clients. A later failed per-server rediscovery in THIS
+    // registry must not restore them — that would re-expose the parent
+    // connection the copy was only meant to pre-seed. Recorded per
+    // server, not per tool, so the snapshot/restore gate stays O(1).
+    for (const server of copiedServers) {
+      this.copiedMcpServers.add(server);
     }
   }
 
@@ -541,27 +575,44 @@ export class ToolRegistry {
   }
 
   /**
-   * Removes all tools from a specific MCP server.
-   * @param serverName The name of the server to remove tools from.
+   * Records operator teardown intent for a server: a discovery pass
+   * pending across this teardown must not restore its snapshot, and a
+   * reconnect issued after it starts a fresh pass rather than deduping
+   * onto the pre-teardown promise. Split from the pure purge in
+   * `removeMcpToolsByServer` (R3-7 round 5) because the manager's
+   * in-pass `purgeServerRegistries` — which must NOT invalidate a
+   * pending pass — reaches the registry only through that method.
    */
-  removeMcpToolsByServer(serverName: string): void {
-    // Teardown intent: bump the generation and drop the dedup entry so
-    // (a) a discovery pass pending across this teardown skips its
-    // restore, and (b) a reconnect issued AFTER this teardown starts a
-    // fresh manager pass rather than observing the pre-teardown pass's
-    // outcome.
+  markMcpServerTornDown(serverName: string): void {
     this.serverTeardownGeneration.set(
       serverName,
       (this.serverTeardownGeneration.get(serverName) ?? 0) + 1,
     );
     this.serverDiscoveryInFlight.delete(serverName);
+    // The operator removed the server; whatever produced its current
+    // registrations no longer applies to a future state of this
+    // registry. Clearing provenance lets a deliberately re-added
+    // server's OWN discovery pass restore normally afterwards.
+    this.copiedMcpServers.delete(serverName);
+  }
 
+  /**
+   * Removes all tools from a specific MCP server.
+   * @param serverName The name of the server to remove tools from.
+   */
+  removeMcpToolsByServer(serverName: string): void {
+    // Pure registry purge — no teardown intent. Operator teardown
+    // (disconnect / disable / config removal) routes through
+    // `markMcpServerTornDown` as well; the manager's in-pass purge of
+    // the old config's entries before a rediscovery deliberately does
+    // not, so it cannot invalidate a pending pass's restore (R3-7
+    // round 5).
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
         this.tools.delete(name);
         // Drop reveal state for the removed tool. Otherwise a server
-        // disconnect → reconnect cycle that re-registers a tool of
-        // the same name would inherit `revealed: true` from the prior
+        // disconnect → reconnect cycle that re-registers a tool of the
+        // same name would inherit `revealed: true` from the prior
         // session — `getFunctionDeclarations` would emit it (since it
         // checks reveal state) before the model has any way to know
         // the tool exists this session.
@@ -578,6 +629,7 @@ export class ToolRegistry {
   async disconnectServer(serverName: string): Promise<void> {
     // Remove tools from registry
     this.removeMcpToolsByServer(serverName);
+    this.markMcpServerTornDown(serverName);
 
     // Remove prompts
     this.config.getPromptRegistry().removePromptsByServer(serverName);
@@ -597,6 +649,7 @@ export class ToolRegistry {
   async disableMcpServer(serverName: string): Promise<void> {
     // Remove tools from registry
     this.removeMcpToolsByServer(serverName);
+    this.markMcpServerTornDown(serverName);
 
     // Remove prompts
     this.config.getPromptRegistry().removePromptsByServer(serverName);
@@ -758,9 +811,9 @@ export class ToolRegistry {
       // none — not only on a rejection.
       //
       // R3-3/R3-5/R1-3 (round 4): each registry is gated on ITS OWN
-      // emptiness, and only a deliberate teardown (R3-7 generation bump
-      // below) or an operator filter/policy removal (R1-3 round 4)
-      // suppresses the restore.
+      // emptiness, and only a deliberate teardown (the
+      // `markMcpServerTornDown` generation bump) or an operator
+      // filter/policy removal (R1-3 round 4) suppresses the restore.
       // - gating prompts on `previousTools.length` dropped a prompt-only
       //   server's registrations forever (R3-3);
       // - restoring prompts into a non-empty prompt registry hits
@@ -770,44 +823,19 @@ export class ToolRegistry {
       //   just filtered out re-exposes excluded tools (R1-3 entrance 1);
       // - restoring after the server was torn down mid-pass undoes the
       //   teardown (R3-7).
-      const generationNow = this.serverTeardownGeneration.get(serverName) ?? 0;
-      const tornDownWhilePending = generationNow !== discoveryGeneration;
-      const serverConfig =
-        this.config.getMcpServers()?.[serverName] ??
-        this.config.getRuntimeMcpServers?.()[serverName];
-      const policyRemoved =
-        !serverConfig ||
-        this.config.isMcpServerDisabled?.(serverName) === true ||
-        this.config.isMcpServerPendingApproval?.(serverName) === true;
-      const toolsEmpty = this.countMcpToolsForServer(serverName) === 0;
-      const promptsEmpty =
-        this.config.getPromptRegistry().getPromptsByServer(serverName)
-          .length === 0;
-      const resourcesEmpty =
-        this.config.getResourceRegistry().getResourcesByServer(serverName)
-          .length === 0;
-      const restoreTools =
-        !tornDownWhilePending &&
-        !policyRemoved &&
-        previousTools.length > 0 &&
-        toolsEmpty &&
-        this.snapshotPassesOperatorFilter(serverName, previousTools);
-      const restorePrompts =
-        !tornDownWhilePending &&
-        !policyRemoved &&
-        previousPrompts.length > 0 &&
-        promptsEmpty;
-      const restoreResources =
-        !tornDownWhilePending &&
-        !policyRemoved &&
-        previousResources.length > 0 &&
-        resourcesEmpty;
-      if (restoreTools || restorePrompts || restoreResources) {
+      const restoreCandidates = this.restoreEligibleSnapshot(
+        serverName,
+        previousTools,
+        previousPrompts,
+        previousResources,
+        discoveryGeneration,
+      );
+      if (restoreCandidates) {
         this.restoreServerRegistrations(
           serverName,
-          restoreTools ? previousTools : [],
-          restorePrompts ? previousPrompts : [],
-          restoreResources ? previousResources : [],
+          restoreCandidates.tools,
+          restoreCandidates.prompts,
+          restoreCandidates.resources,
           previousRevealed,
         );
       }
@@ -818,17 +846,87 @@ export class ToolRegistry {
       // connection-error paths (`shouldAttemptReconnect`) can repair on
       // the next call. An empty registry would leave the server's tools
       // uncallable instead, with no path back short of a full restart.
-      // Best-effort and deliberately silent about re-registration errors:
-      // the original discovery error is the one callers should see.
-      this.restoreServerRegistrations(
+      // The SAME gates as the resolve leg apply (R4-2 round 5): a
+      // rejection is not a licence to restore what a teardown or a
+      // policy removal just removed. Best-effort and deliberately
+      // silent about re-registration errors: the original discovery
+      // error is the one callers should see.
+      const restoreCandidates = this.restoreEligibleSnapshot(
         serverName,
         previousTools,
         previousPrompts,
         previousResources,
-        previousRevealed,
+        discoveryGeneration,
       );
+      if (restoreCandidates) {
+        this.restoreServerRegistrations(
+          serverName,
+          restoreCandidates.tools,
+          restoreCandidates.prompts,
+          restoreCandidates.resources,
+          previousRevealed,
+        );
+      }
       throw error;
     }
+  }
+
+  /**
+   * The gated snapshot both restore legs share (R4-2 round 5): returns
+   * the tools/prompts/resources a restore may put back, or undefined
+   * when every gate refuses. The legs used to diverge — the resolve leg
+   * checked teardown / policy / per-registry emptiness / operator
+   * filters while the reject leg restored the snapshot unconditionally
+   * — and the gate computation itself sat inside the `try`, so a
+   * malformed filter shape (`excludeTools: "x"` reaches settings
+   * uncoerced) threw the pass straight into the ungated leg.
+   */
+  private restoreEligibleSnapshot(
+    serverName: string,
+    previousTools: DiscoveredMCPTool[],
+    previousPrompts: ReturnType<PromptRegistry['getPromptsByServer']>,
+    previousResources: ReturnType<ResourceRegistry['getResourcesByServer']>,
+    discoveryGeneration: number,
+  ):
+    | {
+        tools: DiscoveredMCPTool[];
+        prompts: ReturnType<PromptRegistry['getPromptsByServer']>;
+        resources: ReturnType<ResourceRegistry['getResourcesByServer']>;
+      }
+    | undefined {
+    const generationNow = this.serverTeardownGeneration.get(serverName) ?? 0;
+    const tornDownWhilePending = generationNow !== discoveryGeneration;
+    if (tornDownWhilePending) {
+      return undefined;
+    }
+    // Copied-in registrations (per-agent registries seeded from the
+    // parent's) carry the PARENT's clients; this registry's manager
+    // never produced them. A failed override discovery must fail closed
+    // instead of re-exposing the session-level connection (R4-3).
+    if (this.copiedMcpServers.has(serverName)) {
+      return undefined;
+    }
+    if (this.isPolicyRemoved(serverName)) {
+      return undefined;
+    }
+    const tools =
+      this.countMcpToolsForServer(serverName) === 0
+        ? this.snapshotFilterPassingTools(serverName, previousTools)
+        : [];
+    const prompts =
+      this.config.getPromptRegistry().getPromptsByServer(serverName).length ===
+      0
+        ? previousPrompts
+        : [];
+    const resources =
+      this.config.getResourceRegistry().getResourcesByServer(serverName)
+        .length === 0
+        ? previousResources
+        : [];
+    if (tools.length === 0 && prompts.length === 0 && resources.length === 0) {
+      return undefined;
+    }
+    return { tools, prompts, resources };
   }
 
   private countMcpToolsForServer(serverName: string): number {
@@ -842,35 +940,80 @@ export class ToolRegistry {
   }
 
   /**
-   * Whether every snapshotted tool passes the operator's CURRENT
-   * includeTools/excludeTools filter. The filters are applied only at
-   * discovery (`McpClient`'s `isEnabled`); `registerTool` never consults
-   * them — so a snapshot taken before the operator excluded a tool must
-   * not be blindly restored after a reconnect that (correctly) registered
-   * nothing. Matching uses `serverToolName`, the raw declaration name the
-   * discovery path feeds `isEnabled`, not the normalized schema name.
+   * Whether the operator's CURRENT policy removes this server from the
+   * session entirely — a restore after such a removal would re-expose
+   * tools bound to a client the manager will never hand out again.
+   *
+   * Asks the authority instead of re-deriving it (R4-1 round 5): the
+   * config recipe is `getEffectiveMcpServers()` (settings plus the
+   * `mcpServerCommand`-derived `mcp` server), and the manager's own
+   * recorded budget refusal (`wasRefused`) plus its `stopped` state
+   * cover the deliberate refusals the config gates cannot see. A
+   * budget-refused server resolving without registering must NOT be
+   * mistaken for a dead server whose snapshot belongs back.
    */
-  private snapshotPassesOperatorFilter(
+  private isPolicyRemoved(serverName: string): boolean {
+    const effective = populateMcpServerCommand(
+      this.config.getMcpServers() || {},
+      this.config.getMcpServerCommand(),
+      this.config.getTargetDir(),
+    );
+    const serverConfig =
+      effective[serverName] ?? this.config.getRuntimeMcpServers?.()[serverName];
+    return (
+      !serverConfig ||
+      this.config.isMcpServerDisabled?.(serverName) === true ||
+      this.config.isMcpServerPendingApproval?.(serverName) === true ||
+      this.config.isTrustedFolder?.() === false ||
+      this.mcpClientManager.wasRefused(serverName) ||
+      this.mcpClientManager.isStopped()
+    );
+  }
+
+  /**
+   * The snapshot tools the operator's CURRENT includeTools/excludeTools
+   * still admit, filtered per tool with the SAME predicate discovery
+   * uses (`McpClient`'s `isEnabled`): exact-match exclude, exact-or-
+   * parenthesized-suffix include, `undefined` include = allow all and
+   * `[]` = allow none. Re-implementing that predicate with the server-
+   * name glob matcher diverged on all three axes (R1-3 round 5); a
+   * divergent restore filter would re-exclude tools discovery keeps or
+   * re-admit tools discovery excludes. Coercion keeps malformed filter
+   * shapes (settings files carry them uncoerced) from throwing into
+   * the restore leg.
+   */
+  private snapshotFilterPassingTools(
     serverName: string,
     tools: DiscoveredMCPTool[],
-  ): boolean {
+  ): DiscoveredMCPTool[] {
+    const effective = populateMcpServerCommand(
+      this.config.getMcpServers() || {},
+      this.config.getMcpServerCommand(),
+      this.config.getTargetDir(),
+    );
     const serverConfig =
-      this.config.getMcpServers()?.[serverName] ??
-      this.config.getRuntimeMcpServers?.()[serverName];
-    const include = serverConfig?.includeTools;
-    const exclude = serverConfig?.excludeTools;
-    if (!include?.length && !exclude?.length) {
-      return true;
+      effective[serverName] ?? this.config.getRuntimeMcpServers?.()[serverName];
+    if (!serverConfig) {
+      return [];
     }
-    return tools.every((tool) => {
+    const exclude = coerceMcpFilterEntries(serverConfig.excludeTools);
+    const include = coerceMcpFilterEntries(serverConfig.includeTools);
+    // `undefined` include = allow all, `[]` = allow none — the two must
+    // stay distinct (the same distinction `isEnabled` and
+    // `mcpSessionMetadataKey` document).
+    const includeIsAbsent = serverConfig.includeTools === undefined;
+    if (exclude.length === 0 && includeIsAbsent) {
+      return tools;
+    }
+    return tools.filter((tool) => {
       const raw = tool.serverToolName;
-      if (exclude?.length && matchesAnyServerPattern(raw, exclude)) {
+      if (exclude.includes(raw)) {
         return false;
       }
-      if (include?.length && !matchesAnyServerPattern(raw, include)) {
-        return false;
-      }
-      return true;
+      return (
+        includeIsAbsent ||
+        include.some((entry) => entry === raw || entry.startsWith(`${raw}(`))
+      );
     });
   }
 

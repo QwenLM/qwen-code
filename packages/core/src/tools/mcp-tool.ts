@@ -268,6 +268,8 @@ type ToolParams = Record<string, unknown>;
  */
 interface McpClientManagerLike {
   getServerStatus(serverName: string): MCPServerStatus;
+  /** Presence-aware variant: `undefined` when no client is tracked. */
+  getMcpClientStatus?(serverName: string): MCPServerStatus | undefined;
   /** True when this manager routes discovery through `McpTransportPool`. */
   isPooled?(): boolean;
 }
@@ -621,9 +623,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     if (!manager) {
       return true;
     }
-    return (
-      manager.getServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED
-    );
+    // Presence-aware read (R4-4 round 5): `getServerStatus` defaults a
+    // name the manager holds NO client for to DISCONNECTED, so that
+    // read counts absence as death. A copied-in or restored tool can
+    // be callable while the manager legitimately holds no client for
+    // the name; absence is not evidence THIS call's transport died.
+    const status = manager.getMcpClientStatus?.(this.serverName);
+    if (status === undefined) {
+      return false;
+    }
+    return status === MCPServerStatus.DISCONNECTED;
   }
 
   private isConnectionDeathError(error: unknown): boolean {
