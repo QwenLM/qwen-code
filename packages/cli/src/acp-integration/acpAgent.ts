@@ -5603,7 +5603,8 @@ class QwenAgent implements Agent {
           sessionSource,
           sessionId,
           true,
-          {},
+          // Restore token counts only after the model route is authenticated.
+          { skipLlmInitialization: true },
           undefined,
           restoreOptions,
         ),
@@ -5996,7 +5997,8 @@ class QwenAgent implements Agent {
           sessionSource,
           sessionId,
           true,
-          {},
+          // Restore token counts only after the model route is authenticated.
+          { skipLlmInitialization: true },
           undefined,
           RESUME_RESTORE_OPTIONS,
         ),
