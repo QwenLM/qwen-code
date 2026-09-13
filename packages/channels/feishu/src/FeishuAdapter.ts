@@ -2872,11 +2872,11 @@ export class FeishuChannel extends ChannelBase {
             }
 
             // Media-bearing or image-markdown text must not reach the ! shell
-            // path. In a group the bang branch refuses before any of this ran,
-            // so only Markdown-image syntax diverts there (a group `!cmd` gets
-            // the refusal and the audit line instead). In a private chat a
-            // `!cmd` with attachments belongs to the model turn — the bang
-            // return would drop the attachments.
+            // path. In a group, only Markdown-image syntax diverts — a group
+            // `!cmd` falls through to ChannelBase's refusal and audit line
+            // (which run after prepare returns). In a private chat a `!cmd`
+            // with attachments belongs to the model turn — the bang return
+            // would drop the attachments.
             const mdImageShaped = /!\[[^\]\n]{0,200}\]\(/u.test(envelope.text);
             if (
               envelope.text.trimStart().startsWith('!') &&
