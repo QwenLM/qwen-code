@@ -5931,6 +5931,24 @@ export abstract class ChannelBase {
   }
 
   /**
+   * Whether `text` is a slash command this channel handles locally and never
+   * forwards to the model (e.g. /approve, /clear, /btw when the bridge
+   * supports it). Agent commands forward as prompt text, so they return false
+   * here. Adapters use this to skip model-facing work (quote wrappers, media
+   * downloads) on turns the agent will never see. Synchronous and
+   * session-free like isSlashCommand.
+   */
+  protected isLocallyHandledCommand(text: string): boolean {
+    if (!this.isSlashCommand(text)) return false;
+    const parsed = this.parseCommand(text);
+    if (!parsed) return false;
+    // /btw is registered unconditionally but handled locally only when the
+    // bridge can answer it out of band (otherwise it forwards to the agent).
+    if (parsed.command === 'btw') return this.bridge.btw !== undefined;
+    return this.commands.has(parsed.command);
+  }
+
+  /**
    * Whether `text` names a command this channel can actually run: a locally
    * registered command (`this.commands`, e.g. /clear, /who) OR an agent command
    * THIS session exposes — by canonical name OR alias (e.g. `/summarize` for

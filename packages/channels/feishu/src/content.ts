@@ -8,6 +8,8 @@ export interface FeishuContent {
   text: string;
   resources: FeishuResource[];
   userAuthoredText: boolean;
+  /** Resource references dropped by the per-message cap, for reporting. */
+  droppedResourceCount: number;
 }
 
 /**
@@ -28,11 +30,20 @@ function string(value: unknown): string {
 }
 
 /**
- * Line-based code-fence scan (the CommonMark block rule): a fence opens on a
- * line starting with up to 3 spaces then 3+ backticks or tildes, and closes on
- * a line holding only the same character repeated at least as many times. An
- * unclosed fence consumes the rest of the input. Linear in the input — no
- * backreference rescans.
+ * Container prefixes before a block fence: blockquote `>` markers and the
+ * indentation of (nested) list items. For the harvest's purpose an
+ * over-indented "fence" is code either way — an indented code block is just
+ * as much not-a-resource-reference — so the prefix rule deliberately errs
+ * toward treating such a line as a fence opener.
+ */
+const FENCE_OPEN_RE = /^(?: {0,3}> ?)* {0,6}(`{3,}|~{3,})/;
+const FENCE_CLOSE_RE = /^(?: {0,3}> ?)* {0,6}(`{3,}|~{3,}) *$/;
+
+/**
+ * Line-based code-fence scan: a fence opens on a fence run after optional
+ * container prefixes, and closes on a line holding only the same character
+ * repeated at least as many times. An unclosed fence consumes the rest of the
+ * input. Linear in the input — no backreference rescans.
  *
  * Inline backtick runs are deliberately NOT stripped: a stray backtick is
  * common in chat text, and pairing it with a later one would silently delete
@@ -47,7 +58,7 @@ function scanFenceLines(
   let fenceLength = 0;
   for (const line of text.split('\n')) {
     if (fenceLength === 0) {
-      const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+      const open = FENCE_OPEN_RE.exec(line);
       if (open) {
         fenceChar = open[1]!.charAt(0);
         fenceLength = open[1]!.length;
@@ -55,7 +66,7 @@ function scanFenceLines(
       }
       onKeptLine?.(line);
     } else {
-      const close = /^ {0,3}(`{3,}|~{3,}) *$/.exec(line);
+      const close = FENCE_CLOSE_RE.exec(line);
       if (
         close &&
         close[1]!.charAt(0) === fenceChar &&
@@ -84,6 +95,21 @@ export function closeOpenFence(text: string): string {
   return open ? `${text}\n${open.fenceChar.repeat(open.fenceLength)}` : text;
 }
 
+/**
+ * Markdown inline image reference to a platform image key: `![alt](key)`,
+ * bare or angle-bracket destination, optional quoted title. Alt, key and
+ * title are length-bounded so an unbroken `![` run cannot backtrack
+ * superlinearly, and the key charset matches the platform id charset
+ * (FEISHU_ID_RE also admits `.` and `:`). Reference-style `![alt][ref]`
+ * images are not produced by the platform's Markdown export and resolving
+ * them would take a second definition pass — out of scope.
+ */
+const MD_IMAGE_SOURCE = String.raw`!\[[^\]\n]{0,200}\]\(\s*<?(img_[A-Za-z0-9_.:-]{1,200})>?(?:\s+["'][^"'\n]{0,200}["'])?\s*\)`;
+const mdImageRe = () => new RegExp(MD_IMAGE_SOURCE, 'g');
+
+/** At-mention markup in `md` text; bounded so truncated markup cannot stall. */
+export const MD_AT_TAG_SOURCE = String.raw`<at\s+user_id=["'][^"']{1,200}["']\s*>[\s\S]{0,200}?</at>`;
+
 export function parseFeishuContent(
   type: string,
   json: string,
@@ -93,6 +119,7 @@ export function parseFeishuContent(
     text: '',
     resources: [],
     userAuthoredText: false,
+    droppedResourceCount: 0,
   };
   let body: Record<string, unknown>;
   try {
@@ -108,7 +135,10 @@ export function parseFeishuContent(
   ) => {
     if (typeof key !== 'string' || !key) return;
     if (result.resources.some((r) => r.key === key && r.type === type)) return;
-    if (result.resources.length >= MAX_RESOURCES_PER_MESSAGE) return;
+    if (result.resources.length >= MAX_RESOURCES_PER_MESSAGE) {
+      result.droppedResourceCount += 1;
+      return;
+    }
     result.resources.push({
       type,
       key,
@@ -138,6 +168,29 @@ export function parseFeishuContent(
   }
   if (type !== 'post') return result;
 
+  // The render phase runs on unbounded remote text; a throw here must degrade
+  // to an empty result through the same sink a JSON failure uses rather than
+  // escape into the adapter's message-level catch, which would strand the
+  // dedupe entry and drop the message on every redelivery.
+  try {
+    return parsePostContent(body, result, add);
+  } catch (err) {
+    onParseError?.(err);
+    return {
+      text: '',
+      resources: [],
+      userAuthoredText: false,
+      droppedResourceCount: 0,
+    };
+  }
+}
+
+function parsePostContent(
+  bodyArg: Record<string, unknown>,
+  result: FeishuContent,
+  add: (type: FeishuResource['type'], key: unknown, fileName?: unknown) => void,
+): FeishuContent {
+  let body = bodyArg;
   if (!('content' in body) && !('content_v2' in body) && !('title' in body)) {
     body = record(body['zh_cn'] ?? body['en_us'] ?? Object.values(body)[0]);
   }
@@ -181,10 +234,13 @@ export function parseFeishuContent(
           .replace(/[\r\n`~]/g, '')
           .trim();
         if (text.trim() || language) result.userAuthoredText = true;
-        const fences = text.match(/`+/g) ?? [];
-        const fence = '`'.repeat(
-          Math.max(3, ...fences.map((f) => f.length + 1)),
-        );
+        // Reduce by hand, never spread: an input-sized backtick census
+        // overflows the call stack via Math.max(...runs).
+        let maxRun = 0;
+        for (const match of text.matchAll(/`+/g)) {
+          if (match[0].length > maxRun) maxRun = match[0].length;
+        }
+        const fence = '`'.repeat(Math.max(3, maxRun + 1));
         // Own-lined so a block sharing a row with sibling nodes still opens
         // and closes on its own lines.
         return `\n${fence}${language}\n${text}\n${fence}\n`;
@@ -193,16 +249,14 @@ export function parseFeishuContent(
         // Code examples are not resource references, so keys are harvested
         // from fence-stripped prose. Remote URLs are never fetched.
         const prose = stripFencedCode(text);
-        for (const match of prose.matchAll(
-          /!\[[^\]\n]*\]\((img_[A-Za-z0-9_-]+)\)/g,
-        )) {
+        for (const match of prose.matchAll(mdImageRe())) {
           add('image', match[1]);
         }
         // Authorship is judged on the RETURNED text (minus image references
         // and at-tags), not on the harvest-stripped variant.
         const visible = text
-          .replace(/<at\s+user_id=["'][^"']+["']\s*>[\s\S]*?<\/at>/g, '')
-          .replace(/!\[[^\]\n]*\]\((img_[A-Za-z0-9_-]+)\)/g, '');
+          .replace(new RegExp(MD_AT_TAG_SOURCE, 'g'), '')
+          .replace(mdImageRe(), '');
         if (visible.trim()) result.userAuthoredText = true;
         return text;
       }
@@ -258,7 +312,9 @@ export function parseFeishuContent(
       }
       // Keys only the v2 render carries (no legacy node) keep harvest order.
       for (const resource of harvested.values()) ordered.push(resource);
-      result.resources = ordered.slice(0, MAX_RESOURCES_PER_MESSAGE);
+      const kept = ordered.slice(0, MAX_RESOURCES_PER_MESSAGE);
+      result.droppedResourceCount += ordered.length - kept.length;
+      result.resources = kept;
     }
   }
   result.text = lines.join('\n').trim();

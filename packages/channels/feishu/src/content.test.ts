@@ -217,4 +217,218 @@ describe('parseFeishuContent (#11554)', () => {
     expect(closeOpenFence('~~~\nabc')).toBe('~~~\nabc\n~~~');
     expect(closeOpenFence('plain')).toBe('plain');
   });
+
+  it('treats a list-indented fence as a fence, not as harvestable text', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '- item\n    ```md\n    ![doc](img_fenced)\n    ```\nsee ![real](img_real)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
+  });
+
+  it('treats a blockquoted fence as a fence', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '> ```md\n> ![doc](img_fenced)\n> ```\nsee ![real](img_real)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
+  });
+
+  it('harvests the titled image form and stays media-only', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '<at user_id="ou_bot"></at> ![图1](img_AAA "标题")',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_AAA' }]);
+    expect(result.userAuthoredText).toBe(false);
+  });
+
+  it('harvests angle-bracket destinations and dotted keys', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [{ tag: 'md', text: 'first ![a](<img_BBB>) second ![b](img_c.d)' }],
+        ],
+      }),
+    );
+    expect(result.resources.map((r) => r.key)).toEqual(['img_BBB', 'img_c.d']);
+  });
+
+  it('reports cap-dropped resource references', () => {
+    const refs = Array.from(
+      { length: 12 },
+      (_, i) => `![a](img_${String(i).padStart(3, '0')})`,
+    ).join(' ');
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({ content_v2: [[{ tag: 'md', text: refs }]] }),
+    );
+    expect(result.resources).toHaveLength(8);
+    expect(result.droppedResourceCount).toBe(4);
+  });
+
+  it('handles an input-sized backtick census without a stack overflow', () => {
+    const errors: unknown[] = [];
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          [{ tag: 'code_block', language: 'text', text: '`'.repeat(130_000) }],
+        ],
+      }),
+      (err) => errors.push(err),
+    );
+    expect(errors).toEqual([]);
+    expect(result.text).toContain('```text');
+    expect(result.userAuthoredText).toBe(true);
+  });
+
+  it('parses an unbroken image-opener run within a linear-time budget', () => {
+    const start = performance.now();
+    parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [[{ tag: 'md', text: '!['.repeat(20_000) }]],
+      }),
+    );
+    expect(performance.now() - start).toBeLessThan(100);
+  });
+
+  it('parses an unterminated at-tag run within a linear-time budget', () => {
+    const start = performance.now();
+    parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [{ tag: 'md', text: '<at user_id="ou_x">'.repeat(5_000) }],
+        ],
+      }),
+    );
+    expect(performance.now() - start).toBeLessThan(100);
+  });
+
+  it('synthesizes the (media) placeholder when only resources survive', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [[{ tag: 'md', text: ' ' }]],
+        content: [[{ tag: 'img', image_key: 'img_x' }]],
+      }),
+    );
+    expect(result.text).toBe('(media)');
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_x' }]);
+  });
+
+  it('renders one (image) placeholder per img node', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          [{ tag: 'img', image_key: 'img_a' }],
+          [{ tag: 'img', image_key: 'img_b' }],
+        ],
+      }),
+    );
+    expect(result.text).toBe('(image)\n(image)');
+  });
+
+  it('merges a v2-only key after the legacy-document order', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          [{ tag: 'img', image_key: 'img_A' }],
+          [{ tag: 'img', image_key: 'img_B' }],
+        ],
+        content_v2: [[{ tag: 'md', text: '![x](img_C) and ![y](img_A)' }]],
+      }),
+    );
+    expect(result.resources.map((r) => r.key)).toEqual([
+      'img_A',
+      'img_B',
+      'img_C',
+    ]);
+  });
+
+  it('dedupes a key carried by both representations', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          [{ tag: 'img', image_key: 'img_A' }],
+          [{ tag: 'img', image_key: 'img_A' }],
+        ],
+        content_v2: [[{ tag: 'md', text: '![x](img_A)' }]],
+      }),
+    );
+    expect(result.resources.map((r) => r.key)).toEqual(['img_A']);
+  });
+
+  it('truncates the merge at the per-message cap in legacy-document order', () => {
+    // Eight keys harvested from md plus a ninth carried only by the legacy
+    // representation: the merge follows the legacy document order and the
+    // tail drops.
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: Array.from({ length: 9 }, (_, i) => [
+          { tag: 'img', image_key: `img_h_${i}` },
+        ]),
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: Array.from(
+                { length: 8 },
+                (_, i) => `![x](img_h_${i})`,
+              ).join(' '),
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources.map((r) => r.key)).toEqual(
+      Array.from({ length: 8 }, (_, i) => `img_h_${i}`),
+    );
+    expect(result.droppedResourceCount).toBe(1);
+  });
+
+  it('keeps a whitespace-only title from flipping the authorship flag', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        title: ' ',
+        content: [[{ tag: 'img', image_key: 'img_x' }]],
+      }),
+    );
+    expect(result.userAuthoredText).toBe(false);
+  });
 });
