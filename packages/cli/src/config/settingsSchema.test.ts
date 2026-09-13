@@ -260,6 +260,20 @@ describe('SettingsSchema', () => {
       });
     });
 
+    // Bounds mirror resolveWebSearchTimeoutMs (1..600_000): without them the
+    // write paths accept any number and the runtime silently falls back to
+    // the default.
+    it('should bound tools.webSearch.timeoutMs to the runtime contract', () => {
+      expect(
+        getSettingsSchema().tools.properties.webSearch.properties.timeoutMs,
+      ).toMatchObject({
+        type: 'number',
+        minimum: 1,
+        maximum: 600000,
+        showInDialog: true,
+      });
+    });
+
     it('should have top-level proxy setting in schema', () => {
       expect(getSettingsSchema().proxy).toBeDefined();
       expect(getSettingsSchema().proxy.type).toBe('string');
