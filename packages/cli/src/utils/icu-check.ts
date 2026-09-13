@@ -11,17 +11,21 @@ import { writeStderrLine } from './stdioHelpers.js';
 /**
  * The interactive UI creates an `Intl.Segmenter` at module load
  * (`ui/utils/textUtils.ts`). On a Node runtime built with small-icu and no
- * data package (RHEL ships one as `nodejs-full-i18n`), that V8 call segfaults
- * the process, and the relaunch loop turns it into a silent return to the
- * shell. Probe the runtime in a throwaway child before that import so a
- * broken host gets an actionable error instead of a SIGSEGV (#11747).
+ * data package (RHEL/Fedora ship it as `nodejs-full-i18n`), the constructor
+ * succeeds silently and the first `.segment()` call dereferences the missing
+ * break-iterator data: the coredump lands in
+ * `Builtin_SegmenterPrototypeSegment`, and the relaunch loop turns it into a
+ * silent return to the shell. Probe a real segmentation in a throwaway child
+ * before that import so a broken host gets an actionable error instead of a
+ * SIGSEGV (#11747).
  */
 
-const PROBE_SOURCE = 'new Intl.Segmenter("en");';
+const PROBE_SOURCE =
+  '[...new Intl.Segmenter("en", { granularity: "grapheme" }).segment("q")];';
 
 const ICU_ERROR_MESSAGE = [
   'Qwen Code cannot start the interactive UI: this Node.js runtime is missing',
-  'full ICU data, and creating an Intl.Segmenter crashes the process.',
+  'full ICU data, and segmenting text with Intl.Segmenter crashes the process.',
   'Install the full ICU package for your Node distribution',
   '(e.g. `sudo dnf install nodejs-full-i18n` on RHEL) or use a Node build',
   'with full-icu, then run qwen again.',
@@ -29,20 +33,31 @@ const ICU_ERROR_MESSAGE = [
 
 type Probe = (command: string, args: string[]) => { status: number | null };
 
-const defaultProbe: Probe = (command, args) =>
-  spawnSync(command, args, { stdio: 'ignore' });
+const defaultProbe: Probe = (command, args) => {
+  // An inherited NODE_OPTIONS with a failing --require/--import would crash
+  // the child for reasons unrelated to ICU and produce a wrong diagnosis.
+  const env = { ...process.env };
+  delete env['NODE_OPTIONS'];
+  return spawnSync(command, args, { stdio: 'ignore', env });
+};
+
+/** True when a recorded icu_small value means the runtime might lack full ICU. */
+export function icuSmallNeedsProbe(icuSmall: unknown): boolean {
+  // Official and full-icu builds report icu_small as false and skip the child
+  // entirely. Probe on any other value: small-icu builds (true, the RHEL
+  // failure case) and builds that don't record the key at all (unknown, probe
+  // to be safe).
+  return icuSmall !== false && icuSmall !== 'false';
+}
 
 /** True when the runtime might lack full ICU and needs the child probe. */
 function needsProbe(): boolean {
   if (typeof Intl.Segmenter === 'undefined') {
     return true;
   }
-  // Node records its build-time ICU shape in process.config; small-icu with
-  // no data package is the failing case, so only those hosts pay for a child.
-  // The typed config shape omits icu_small, but every real build reports it.
+  // Node records its build-time ICU shape in process.config.variables.
   const variables = process.config.variables as Record<string, unknown>;
-  const icuSmall = variables['icu_small'];
-  return icuSmall === true || icuSmall === 'true';
+  return icuSmallNeedsProbe(variables['icu_small']);
 }
 
 export function assertFullIcuAvailable(probe: Probe = defaultProbe): void {
