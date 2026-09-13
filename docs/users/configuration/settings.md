@@ -277,6 +277,11 @@ Allows you to add custom HTTP headers to all API requests. This is useful for re
 
 The `extra_body` field allows you to add custom parameters to the request body sent to the API. This is useful for provider-specific options that are not covered by the standard configuration fields. **Note: This field is supported for OpenAI-compatible providers (`openai`, `qwen-oauth`) and the OpenAI Responses API (`openai-responses`). It is ignored for Anthropic and Gemini providers.** On the `openai-responses` wire, the legacy `enable_thinking` key is translated into `reasoning.effort` rather than forwarded verbatim — use `reasoning.effort` directly for that provider instead. For provider models, define `extra_body` in `modelProviders[].generationConfig.extra_body`. For runtime models without a matching provider entry, define it in `model.generationConfig.extra_body`.
 
+**enableRequestMetadata notes:**
+
+- A side model (`fastModel`, compaction, title generation, a subagent on another model) that sets no `enableRequestMetadata` of its own falls back to the automatic qwen-family gate. It does not inherit the main model's explicit `true` or `false`, so a vendor-forwarded side model is never sent the tracing object because the main model asked for it. A side model that is not listed in `modelProviders` still inherits the main model's value.
+- Under Qwen OAuth the `model.generationConfig` block is not applied to requests, so this switch has no effect on that route.
+
 **model.openAILoggingDir examples:**
 
 - `"~/qwen-logs"` - Logs to `~/qwen-logs` directory
