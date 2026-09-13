@@ -125,6 +125,10 @@ function mount() {
       recovery++;
       render();
     },
+    replaceClient() {
+      generation++;
+      render();
+    },
     update(
       patch: Partial<DaemonConnectionState>,
       active = false,
@@ -182,6 +186,73 @@ describe('useContextUsageControls', () => {
       });
       expect(h.controls.result).toEqual({ kind: 'completed', usage: usage() });
       expect(h.controls.compressing).toBe(false);
+    },
+  );
+
+  it.each([
+    ['command', 'resolve'],
+    ['command', 'reject'],
+    ['reading', 'resolve'],
+    ['reading', 'reject'],
+  ] as const)(
+    'keeps compression pending across client replacement during the %s, then reports an unknown outcome on %s',
+    async (phase, settlement) => {
+      const h = mount();
+      let operation!: Promise<void>;
+      act(() => {
+        operation = h.controls.compress();
+      });
+      if (phase === 'reading') {
+        await act(async () => h.command.resolve({ stopReason: 'end_turn' }));
+      }
+      h.replaceClient();
+      expect(h.controls.compressing).toBe(true);
+      expect(h.controls.canCompress).toBe(false);
+      act(() => void h.controls.compress());
+      expect(h.sendPrompt).toHaveBeenCalledOnce();
+      await act(async () => {
+        if (settlement === 'reject') {
+          (phase === 'command' ? h.command : h.read).reject(
+            new Error('offline'),
+          );
+        } else if (phase === 'command') {
+          h.command.resolve({ stopReason: 'end_turn' });
+        } else h.read.resolve(usage());
+        await operation;
+      });
+      expect(h.controls.compressing).toBe(false);
+      expect(h.controls.canCompress).toBe(true);
+      expect(h.controls.result).toEqual({ kind: 'interrupted' });
+      expect(h.getContextUsage).toHaveBeenCalledTimes(
+        phase === 'command' ? 0 : 1,
+      );
+      h.sendPrompt.mockResolvedValueOnce({ stopReason: 'cancelled' });
+      await act(async () => h.controls.compress());
+      expect(h.sendPrompt).toHaveBeenCalledTimes(2);
+      expect(h.controls.result).toEqual({ kind: 'cancelled' });
+    },
+  );
+
+  it.each(['sessionId', 'workspaceCwd'] as const)(
+    'does not resurrect a pending operation or callback after leaving and returning to %s',
+    async (field) => {
+      const h = mount();
+      const original = h.controls.compress;
+      let operation!: Promise<void>;
+      act(() => {
+        operation = original();
+      });
+      h.update({ [field]: field === 'sessionId' ? 'session-b' : '/other' });
+      h.update({ [field]: field === 'sessionId' ? 'session-a' : '/workspace' });
+      expect(h.controls.compressing).toBe(false);
+      await act(async () => {
+        await original();
+        h.command.resolve({ stopReason: 'end_turn' });
+        await operation;
+      });
+      expect(h.sendPrompt).toHaveBeenCalledOnce();
+      expect(h.getContextUsage).not.toHaveBeenCalled();
+      expect(h.controls.result).toBeUndefined();
     },
   );
 

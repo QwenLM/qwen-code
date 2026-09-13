@@ -258,40 +258,45 @@ describe('ContextUsagePanel', () => {
     );
   });
 
-  it('acknowledges cancellation and reconciles late completion when refreshed', async () => {
-    const get = vi.fn().mockResolvedValue(fixture());
-    const controls: ContextUsageControls = {
-      sessionId: 's-1',
-      canCompress: true,
-      compressing: false,
-      compress: vi.fn(),
-      getContextUsage: get,
-    };
-    const { container, rerender } = renderPanel(get, controls);
-    await act(async () => {});
-    rerender(undefined, 's-1', {
-      ...controls,
-      result: { kind: 'cancelled' },
-    });
-    expect(container.querySelector('[role="status"]')?.textContent).toBe(
-      'Cancellation requested. Refresh to check current usage.',
-    );
-    expect(get).toHaveBeenCalledTimes(1);
-    const updated = fixture();
-    updated.usage.totalTokens = 30;
-    updated.usage.breakdown.freeSpace = 60;
-    get.mockResolvedValueOnce(updated);
-    await act(async () => refresh(container).click());
-    expect(get).toHaveBeenLastCalledWith({
-      detail: true,
-      silent: true,
-      syncCounters: true,
-    });
-    expect(container.querySelector('[class*="percentage"]')?.textContent).toBe(
-      '30.0%',
-    );
-    expect(controls.compress).not.toHaveBeenCalled();
-  });
+  it.each(['cancelled', 'interrupted'] as const)(
+    'acknowledges %s and reconciles usage when refreshed',
+    async (outcome) => {
+      const get = vi.fn().mockResolvedValue(fixture());
+      const controls: ContextUsageControls = {
+        sessionId: 's-1',
+        canCompress: true,
+        compressing: false,
+        compress: vi.fn(),
+        getContextUsage: get,
+      };
+      const { container, rerender } = renderPanel(get, controls);
+      await act(async () => {});
+      rerender(undefined, 's-1', {
+        ...controls,
+        result: { kind: outcome },
+      });
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        outcome === 'cancelled'
+          ? 'Cancellation requested. Refresh to check current usage.'
+          : 'Connection changed during compression. Refresh to check current usage.',
+      );
+      expect(get).toHaveBeenCalledTimes(1);
+      const updated = fixture();
+      updated.usage.totalTokens = 30;
+      updated.usage.breakdown.freeSpace = 60;
+      get.mockResolvedValueOnce(updated);
+      await act(async () => refresh(container).click());
+      expect(get).toHaveBeenLastCalledWith({
+        detail: true,
+        silent: true,
+        syncCounters: true,
+      });
+      expect(
+        container.querySelector('[class*="percentage"]')?.textContent,
+      ).toBe('30.0%');
+      expect(controls.compress).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['resolve', 'reject'] as const)(
     'keeps the completed compression reading when an older panel read %ss',

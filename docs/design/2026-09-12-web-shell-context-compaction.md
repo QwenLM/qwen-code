@@ -53,6 +53,11 @@ finish compression after cancellation. It must not claim that compression stoppe
 or succeeded. Manual Refresh after cancellation reconciles the current reading
 and composer counters.
 
+An in-flight operation stays pending when a snapshot reload replaces the client
+for the same session and workspace. Once it settles, report that the connection
+changed and offer Refresh; do not claim success or apply an old client's reading.
+A real session/workspace switch discards the operation, even if the user returns.
+
 Controls are supplied by the owning main view or split pane, including its live
 busy, connection, and write-block state. Recheck ownership and availability at
 invocation and after asynchronous work. In split view, sessions in the pane set
@@ -84,13 +89,16 @@ submitting, without clearing another session's retry.
 
 Only the advertised built-in `compress` command enables the action; an identically
 named custom command is not compression authority. Reuse the existing Goal gate
-and source view's busy/write guards. Compression output does not carry ordinary
+and source view's busy/write guards, including a pane's pending mode change when
+preparing a `/plan` prompt. Compression output does not carry ordinary
 usage metadata, so the completion read explicitly reconciles composer counters
 through `getContextUsage({ syncCounters: true })`. This opt-in updates neither
-billing usage nor history, and only applies to the same session/model if no newer
+billing usage, model-configured context window, nor history, and only applies to the same session/model if no newer
 usage arrived while reading. Unknown zero counts preserve the last known
 counters; positive estimates remain valid, including after compression. A refresh
 failure after successful compression has separate feedback and must not automatically repeat compression.
+Refreshing the usage ratio alone does not restart or withdraw a composer
+suggestion. The next input or other suggestion trigger uses the latest ratio.
 
 ## Implementation areas
 

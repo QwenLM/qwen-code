@@ -30330,6 +30330,16 @@ describe('App session callbacks', () => {
         'Compressing…',
       );
       await act(async () => retry.resolve({ stopReason: 'cancelled' }));
+      expect(panel.querySelector('[role="status"]')?.textContent).toBe(
+        'Cancellation requested. Refresh to check current usage.',
+      );
+      expect(panel.querySelector('[role="alert"]')).toBeNull();
+      expect(panel.querySelector('[class*="percentage"]')?.textContent).toBe(
+        '90.0%',
+      );
+      expect(mockSessionActions.getContextUsage).toHaveBeenCalledTimes(
+        outcome === 'failed' ? 3 : 4,
+      );
     },
   );
 
@@ -30373,14 +30383,16 @@ describe('App session callbacks', () => {
       expect.objectContaining({ retry: true, images }),
     );
   });
-  it.each([
-    ['session switch', false],
-    ['session switch', true],
-    ['same-session recovery', false],
-    ['same-session recovery', true],
-  ])(
-    'reconciles a reused reader after %s with the context panel closed (failed=%s)',
-    async (transition, failed) => {
+  it.each(
+    ['session switch', 'same-session recovery'].flatMap((transition) =>
+      ['completed', 'failed', 'cancelled'].map((outcome) => [
+        transition,
+        outcome,
+      ]),
+    ),
+  )(
+    'reconciles a reused reader after %s with the context panel closed (outcome=%s)',
+    async (transition, outcome) => {
       mockConnection.commands = [
         { name: 'compress', description: '', source: 'builtin-command' },
       ];
@@ -30401,9 +30413,9 @@ describe('App session callbacks', () => {
         .mockResolvedValueOnce(initial)
         .mockResolvedValue(updated);
       mockSessionActions.sendPrompt.mockResolvedValue({
-        stopReason: 'end_turn',
+        stopReason: outcome === 'cancelled' ? 'cancelled' : 'end_turn',
       });
-      if (failed)
+      if (outcome === 'failed')
         mockSessionActions.sendPrompt.mockRejectedValueOnce(
           new Error('compression failed'),
         );
@@ -30426,7 +30438,11 @@ describe('App session callbacks', () => {
           .click(),
       );
       expect(document.body.textContent).toContain(
-        failed ? 'Compression failed.' : '30.0%',
+        outcome === 'failed'
+          ? 'Compression failed.'
+          : outcome === 'cancelled'
+            ? 'Cancellation requested. Refresh to check current usage.'
+            : '30.0%',
       );
       await act(async () =>
         document.body
@@ -30454,7 +30470,7 @@ describe('App session callbacks', () => {
       mockConnection.loadingTranscript = false;
       rerender(props);
       await flush();
-      if (failed)
+      if (outcome === 'failed')
         expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
       else
         expect(
@@ -30469,8 +30485,24 @@ describe('App session callbacks', () => {
       rerender(props);
       await flush();
       expect(mockSessionActions.getContextUsage).toHaveBeenCalledTimes(
-        failed ? 0 : 1,
+        outcome === 'failed' ? 0 : 1,
       );
+      if (outcome === 'cancelled') {
+        await act(async () =>
+          container
+            .querySelector<HTMLButtonElement>(
+              '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+            )!
+            .click(),
+        );
+        await flush();
+        expect(mockSessionActions.getContextUsage).toHaveBeenLastCalledWith({
+          detail: true,
+          silent: true,
+          syncCounters: true,
+        });
+        expect(document.body.textContent).not.toContain('Compression failed.');
+      }
     },
   );
 
@@ -30569,9 +30601,6 @@ describe('App session callbacks', () => {
       });
       mockSessionActions.getContextUsage.mockClear();
       mockSessionActions.getContextUsage.mockResolvedValue(updated);
-      mockSessionActions.getContextUsage.mockRejectedValueOnce(
-        new TypeError('fetch failed'),
-      );
       mockConnection.commands = [];
       rerender(splitProps);
       await flush();

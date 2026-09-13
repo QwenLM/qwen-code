@@ -55,9 +55,14 @@ describe('context usage counter reconciliation', () => {
     };
   }
 
-  it.each([false, true])(
-    'updates only composer counters when explicitly requested (sync=%s)',
-    async (syncCounters) => {
+  it.each([
+    [false, undefined],
+    [true, undefined],
+    [false, 1_000_000],
+    [true, 1_000_000],
+  ] as const)(
+    'updates only the token count when requested (sync=%s, window=%s)',
+    async (syncCounters, contextWindow) => {
       const session = createMockSession('session-a');
       session.contextUsage.mockResolvedValue(snapshot());
       const tokenUsage = { inputTokens: 500, outputTokens: 100 };
@@ -69,7 +74,7 @@ describe('context usage counter reconciliation', () => {
           workspaceCwd: '/workspace',
           currentModel: 'model-a',
           tokenCount: 60,
-          contextWindow: undefined,
+          contextWindow,
           tokenUsage,
         },
       });
@@ -79,9 +84,7 @@ describe('context usage counter reconciliation', () => {
       });
       expect(result).toEqual(snapshot());
       expect(h.getConnection().tokenCount).toBe(syncCounters ? 40 : 60);
-      expect(h.getConnection().contextWindow).toBe(
-        syncCounters ? 100 : undefined,
-      );
+      expect(h.getConnection().contextWindow).toBe(contextWindow);
       expect(h.getConnection().tokenUsage).toBe(tokenUsage);
       expect(session.contextUsage).toHaveBeenCalledWith({ detail: true });
     },

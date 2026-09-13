@@ -3294,6 +3294,49 @@ describe('ChatPane', () => {
     },
   );
 
+  it.each(['success', 'failure', 'replacement'])(
+    'blocks compression while preparing a /plan prompt and releases the gate after %s',
+    async (outcome) => {
+      connectionState.commands = [
+        { name: 'compress', source: 'builtin-command' },
+      ];
+      const prepared = deferred<{ mode: string }>();
+      setApprovalMode.mockReturnValueOnce(prepared.promise);
+      let controls!: ContextUsageControls;
+      const registerContextUsageControls = (value: ContextUsageControls) => {
+        controls = value;
+        return () => {};
+      };
+      render({ registerContextUsageControls });
+      expect(controls.canCompress).toBe(true);
+      const staleCompress = controls.compress;
+      act(() => {
+        latestOnSubmit!('/plan explain the migration');
+      });
+      expect(setApprovalMode).toHaveBeenCalledOnce();
+      expect(controls.canCompress).toBe(false);
+      await act(async () => staleCompress());
+      expect(sendPrompt).not.toHaveBeenCalled();
+      if (outcome === 'replacement') {
+        ownerVersion++;
+        connectionState.sessionId = 'replacement';
+        rerender({ registerContextUsageControls });
+        expect(controls.canCompress).toBe(true);
+      }
+      await act(async () => {
+        if (outcome === 'failure') prepared.reject(new Error('mode failed'));
+        else prepared.resolve({ mode: 'plan' });
+      });
+      expect(controls.canCompress).toBe(true);
+      if (outcome === 'success') {
+        expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(
+          'explain the migration',
+          expect.any(Object),
+        );
+      } else expect(sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
   it('sends /plan prompts through normal admission callbacks after applying Plan', async () => {
     const firstPrompt = vi.fn();
     const commit = vi.fn();

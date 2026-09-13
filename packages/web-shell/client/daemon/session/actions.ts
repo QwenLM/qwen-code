@@ -2471,7 +2471,6 @@ export function createDaemonSessionActions({
               ? {
                   ...current,
                   tokenCount: snapshot.usage.totalTokens,
-                  contextWindow: snapshot.usage.contextWindowSize,
                 }
               : current,
           );

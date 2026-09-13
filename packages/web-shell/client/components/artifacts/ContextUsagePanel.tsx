@@ -186,9 +186,11 @@ export function ContextUsagePanel({
                 ? 'contextUsage.compressed'
                 : compressionResult?.kind === 'cancelled'
                   ? 'contextUsage.compressCancelled'
-                  : compressionResult?.kind === 'refreshFailed'
-                    ? 'contextUsage.compressRefreshFailed'
-                    : 'contextUsage.compressFailed',
+                  : compressionResult?.kind === 'interrupted'
+                    ? 'contextUsage.compressInterrupted'
+                    : compressionResult?.kind === 'refreshFailed'
+                      ? 'contextUsage.compressRefreshFailed'
+                      : 'contextUsage.compressFailed',
           )}
         </div>
       )}

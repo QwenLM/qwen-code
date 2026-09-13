@@ -1441,7 +1441,8 @@ export function ChatPane({
     writeBlocked:
       Boolean(connection.loadingTranscript) ||
       admissionPayloadLocked ||
-      approvalActive,
+      approvalActive ||
+      modeControlsBusy,
   });
   useEffect(() => {
     if (contextUsageControls)

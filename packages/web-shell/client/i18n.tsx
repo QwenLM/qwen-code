@@ -2831,6 +2831,8 @@ const EN: Messages = {
   'contextUsage.compressed': 'Compression completed. Context usage refreshed.',
   'contextUsage.compressCancelled':
     'Cancellation requested. Refresh to check current usage.',
+  'contextUsage.compressInterrupted':
+    'Connection changed during compression. Refresh to check current usage.',
   'contextUsage.compressFailed': 'Compression failed. You can try again.',
   'contextUsage.compressRefreshFailed':
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
@@ -6435,6 +6437,8 @@ const ZH: Messages = {
   'contextUsage.compressing': '正在压缩…',
   'contextUsage.compressed': '压缩完成，已刷新上下文用量。',
   'contextUsage.compressCancelled': '已请求取消压缩，请刷新确认当前用量。',
+  'contextUsage.compressInterrupted':
+    '压缩期间连接发生变化，请刷新查看当前使用量。',
   'contextUsage.compressFailed': '压缩失败，可以重试。',
   'contextUsage.compressRefreshFailed':
     '压缩已完成，但用量刷新失败。请点击刷新重试。',

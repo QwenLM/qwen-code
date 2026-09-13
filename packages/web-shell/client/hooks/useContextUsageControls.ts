@@ -10,7 +10,7 @@ import { isGoalGateBlocked } from '../utils/goalGate';
 
 type CompressionResult =
   | { kind: 'completed'; usage: DaemonSessionContextUsageStatus }
-  | { kind: 'failed' | 'cancelled' | 'refreshFailed' };
+  | { kind: 'failed' | 'cancelled' | 'refreshFailed' | 'interrupted' };
 
 export interface ContextUsageControls {
   sessionId: string;
@@ -53,8 +53,14 @@ export function useContextUsageControls({
       (command) =>
         command.name === 'compress' && command.source === 'builtin-command',
     ) === true;
-  const latest = useRef({ available, connection });
-  latest.current = { available, connection };
+  const sessionId = connection.sessionId;
+  const workspaceCwd = connection.workspaceCwd;
+  const scope = useMemo(
+    () => ({ sessionId, workspaceCwd }),
+    [sessionId, workspaceCwd],
+  );
+  const latest = useRef({ available, scope });
+  latest.current = { available, scope };
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -62,34 +68,43 @@ export function useContextUsageControls({
       mounted.current = false;
     };
   }, []);
-  const pending = useRef<DaemonSessionOwnerSnapshot | undefined>(undefined);
+  const pending = useRef<typeof scope | undefined>(undefined);
   const [operation, setOperation] = useState<{
-    owner: DaemonSessionOwnerSnapshot;
+    scope: typeof scope;
     result?: CompressionResult;
   }>();
-  const currentOperation = operation?.owner.isCurrent() ? operation : undefined;
-  const sessionId = connection.sessionId;
-  const workspaceCwd = connection.workspaceCwd;
+  const currentOperation = operation?.scope === scope ? operation : undefined;
   const compress = useCallback(async () => {
     if (
       !mounted.current ||
       !latest.current.available ||
-      latest.current.connection.sessionId !== sessionId ||
-      latest.current.connection.workspaceCwd !== workspaceCwd ||
-      pending.current?.isCurrent()
+      latest.current.scope !== scope ||
+      pending.current === scope
     ) {
       return;
     }
     const owner = ownerGuard.capture();
-    pending.current = owner;
-    setOperation({ owner });
-    const isCurrent = () => mounted.current && owner.isCurrent();
+    pending.current = scope;
+    setOperation({ scope });
+    const isCurrent = () => mounted.current && latest.current.scope === scope;
+    const settle = (result: CompressionResult) => {
+      if (isCurrent()) {
+        setOperation({
+          scope,
+          result: owner.isCurrent() ? result : { kind: 'interrupted' },
+        });
+      }
+    };
     try {
       onBeforeCompress();
       const result = await actions.sendPrompt('/compress');
       if (!isCurrent()) return;
+      if (!owner.isCurrent()) {
+        settle({ kind: 'interrupted' });
+        return;
+      }
       if (result.stopReason === 'cancelled') {
-        setOperation({ owner, result: { kind: 'cancelled' } });
+        settle({ kind: 'cancelled' });
         return;
       }
       try {
@@ -98,25 +113,20 @@ export function useContextUsageControls({
           silent: true,
           syncCounters: true,
         });
-        if (!isCurrent()) return;
-        setOperation({
-          owner,
-          result:
-            usage.sessionId === sessionId && usage.usage.contextWindowSize > 0
-              ? { kind: 'completed', usage }
-              : { kind: 'refreshFailed' },
-        });
+        settle(
+          usage.sessionId === sessionId && usage.usage.contextWindowSize > 0
+            ? { kind: 'completed', usage }
+            : { kind: 'refreshFailed' },
+        );
       } catch {
-        if (isCurrent()) {
-          setOperation({ owner, result: { kind: 'refreshFailed' } });
-        }
+        settle({ kind: 'refreshFailed' });
       }
     } catch {
-      if (isCurrent()) setOperation({ owner, result: { kind: 'failed' } });
+      settle({ kind: 'failed' });
     } finally {
-      if (pending.current === owner) pending.current = undefined;
+      if (pending.current === scope) pending.current = undefined;
     }
-  }, [actions, onBeforeCompress, ownerGuard, sessionId, workspaceCwd]);
+  }, [actions, onBeforeCompress, ownerGuard, sessionId, scope]);
 
   const compressing = Boolean(currentOperation && !currentOperation.result);
   const result = currentOperation?.result;
