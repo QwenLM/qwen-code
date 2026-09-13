@@ -1263,6 +1263,8 @@ export const ToolLine = memo(function ToolLine({
       .filter(Boolean)
       .join(' · ');
     const completeMeta = [
+      // SubAgentPanel's own badge sits in its header, which this path hides.
+      tool.backgroundResultPending ? t('background.pending') : '',
       info.subToolCount > 0
         ? t('subagent.toolsCount', { count: info.subToolCount })
         : '',

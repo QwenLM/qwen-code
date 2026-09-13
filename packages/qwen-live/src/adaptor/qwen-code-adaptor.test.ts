@@ -939,6 +939,170 @@ describe('QwenCodeAdaptor.events', () => {
     });
   });
 
+  it('does not stamp background activity with the unowned background jobRef', async () => {
+    // Production background chunks carry both the background turnId as the
+    // envelope promptId (bridgeClient attributes them to the background turn)
+    // and _meta.backgroundTurn. The activity must stay session-level: the
+    // turnId belongs to no orchestrator job, so jobByRef cannot resolve it
+    // and the event would be dropped or buffered into an unrelated pending
+    // submission.
+    const client = makeClient({
+      subscribeEvents: vi.fn(() =>
+        envelopeStream([
+          envelope(
+            'session_update',
+            {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'background reply' },
+                _meta: {
+                  source: 'background_notification_response',
+                  backgroundTurn: { turnId: 'background-1' },
+                  backgroundTask: { taskId: 'task-1' },
+                },
+              },
+            },
+            { promptId: 'background-1' },
+          ),
+          envelope(
+            'session_update',
+            {
+              update: {
+                sessionUpdate: 'tool_call',
+                title: 'Read file',
+                _meta: { backgroundTurn: { turnId: 'background-1' } },
+              },
+            },
+            { promptId: 'background-1' },
+          ),
+        ]),
+      ),
+    });
+    const adaptor = makeAdaptor(client);
+
+    const events = await collect(adaptor, handleFor());
+
+    expect(events).toContainEqual({
+      type: 'activity',
+      kind: 'message',
+      text: 'background reply',
+    });
+    const progress = events.filter((event) => event.type === 'progress');
+    expect(progress).toHaveLength(1);
+    expect(progress[0]).not.toHaveProperty('jobRef');
+    for (const event of events) {
+      expect(event).not.toHaveProperty('jobRef');
+    }
+  });
+
+  it('ignores a mid-turn drain consumed by a background execution', async () => {
+    const client = makeClient({
+      subscribeEvents: vi.fn(() =>
+        envelopeStream([
+          envelope(
+            'session_update',
+            {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'Working on it' },
+                _meta: {
+                  source: 'background_notification_turn_started',
+                  backgroundTurn: { turnId: 'background-1' },
+                },
+              },
+            },
+            { promptId: 'background-1' },
+          ),
+          envelope(
+            'mid_turn_message_injected',
+            { messageIds: ['m-1'], messages: ['keep going'] },
+            { promptId: 'background-1' },
+          ),
+          envelope(
+            'turn_complete',
+            {
+              promptId: 'background-1',
+              backgroundTurn: { turnId: 'background-1' },
+              stopReason: 'end_turn',
+            },
+            { promptId: 'background-1' },
+          ),
+        ]),
+      ),
+    });
+    const adaptor = makeAdaptor(client);
+    const handle = handleFor();
+
+    const events = await collect(adaptor, handle);
+
+    // The background turnId is no orchestrator job: no join event, and the
+    // dropped background terminal must not leave busy state behind.
+    expect(events.filter((event) => event.type === 'turn_joined')).toEqual([]);
+    expect(adaptor.isBusy(handle)).toBe(false);
+  });
+
+  it('releases attach-seeded busy state on a background terminal', async () => {
+    // Attaching while a background turn runs seeds busy from the widened
+    // hasActivePrompt; the start marker is already gone, so the terminal is
+    // the only frame that can release it.
+    const client = makeClient({
+      createOrAttachSession: vi.fn(async () => ({
+        sessionId: SESSION_ID,
+        clientId: ISSUED_CLIENT_ID,
+        hasActivePrompt: true,
+      })),
+      subscribeEvents: vi.fn(() =>
+        envelopeStream([
+          envelope(
+            'turn_complete',
+            {
+              promptId: 'background-1',
+              backgroundTurn: { turnId: 'background-1' },
+              stopReason: 'end_turn',
+            },
+            { promptId: 'background-1' },
+          ),
+        ]),
+      ),
+    });
+    const adaptor = makeAdaptor(client);
+    const handle = await adaptor.createSession();
+    expect(adaptor.isBusy(handle)).toBe(true);
+
+    const events = await collect(adaptor, handle);
+
+    expect(events.filter((event) => event.type === 'turn_complete')).toEqual(
+      [],
+    );
+    expect(adaptor.isBusy(handle)).toBe(false);
+  });
+
+  it('keeps a foreground job busy across a background terminal', async () => {
+    const client = makeClient({
+      subscribeEvents: vi.fn(() =>
+        envelopeStream([
+          envelope('pending_prompt_started', {}, { promptId: 'p1' }),
+          envelope(
+            'turn_complete',
+            {
+              promptId: 'background-1',
+              backgroundTurn: { turnId: 'background-1' },
+              stopReason: 'end_turn',
+            },
+            { promptId: 'background-1' },
+          ),
+        ]),
+      ),
+    });
+    const adaptor = makeAdaptor(client);
+    const handle = handleFor();
+
+    const events = await collect(adaptor, handle);
+
+    expect(events).toEqual([{ type: 'turn_started', jobRef: 'p1' }]);
+    expect(adaptor.isBusy(handle)).toBe(true);
+  });
+
   it('maps turn_error to a turn_error event carrying the message', async () => {
     const client = makeClient({
       subscribeEvents: vi.fn(() =>

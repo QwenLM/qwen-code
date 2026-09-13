@@ -59,6 +59,7 @@ import {
   extractErrorMessage,
   extractErrorCode,
 } from './bridge.js';
+import { SessionAttachmentStore } from './sessionAttachments.js';
 import { NdJsonQueueLimitError } from './ndJsonStream.js';
 import { BridgeClient } from './bridgeClient.js';
 import {
@@ -40549,6 +40550,110 @@ describe('background notification admission', () => {
     } finally {
       abort.abort();
       await collecting;
+      await bridge.shutdown();
+    }
+  });
+
+  it('rejects queueOnly steering during a background turn but queues ordinary input', async () => {
+    const handle = makeChannel({
+      promptImpl: async () => ({ stopReason: 'end_turn' }),
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      expect(
+        await handle.agentConnection.extMethod('_qwencode/start_turn', {
+          sessionId: session.sessionId,
+          source: 'background_notification',
+          ...backgroundTurn,
+        }),
+      ).toEqual({ accepted: true });
+      // A background turn has no coordinator collector: queueOnly steering
+      // must still be refused so the Live coordinator runs the next turn
+      // itself.
+      expect(
+        bridge.enqueueMidTurnMessage(
+          session.sessionId,
+          'live steering',
+          { clientId: session.clientId },
+          'queue-only-1',
+          { queueOnly: true },
+        ),
+      ).toEqual({ accepted: false });
+      // Ordinary input and the public rejectIfIdle route queue into the
+      // running automatic execution instead of promoting a new prompt.
+      expect(
+        bridge.enqueueMidTurnMessage(
+          session.sessionId,
+          'user input',
+          { clientId: session.clientId },
+          'plain-1',
+        ),
+      ).toEqual({ accepted: true, messageId: 'plain-1' });
+      expect(
+        bridge.enqueueMidTurnMessage(
+          session.sessionId,
+          'btw',
+          { clientId: session.clientId },
+          'idle-guard-1',
+          { rejectIfIdle: true },
+        ),
+      ).toEqual({ accepted: true, messageId: 'idle-guard-1' });
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('resolves the terminal record installed after the terminal was published', async () => {
+    const prompt = deferred<PromptResponse>();
+    const handle = makeChannel({ promptImpl: () => prompt.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const resolveSpy = vi.spyOn(
+      SessionAttachmentStore.prototype,
+      'resolveContent',
+    );
+    const gate =
+      deferred<Awaited<ReturnType<SessionAttachmentStore['resolveContent']>>>();
+    resolveSpy.mockReturnValueOnce(gate.promise);
+    try {
+      const running = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'work' }],
+        },
+        undefined,
+        { promptId: 'user-1', deadlineMs: 50 },
+      );
+      // The deadline fires while the dispatch is parked in attachment
+      // resolution, so the terminal is published before the
+      // activePromptTerminal record exists.
+      await vi.waitFor(() =>
+        expect(bridge.getSessionSummary(session.sessionId).hasTurnError).toBe(
+          true,
+        ),
+      );
+      gate.resolve([{ type: 'text', text: 'work' }]);
+      await expect(running).rejects.toBeInstanceOf(PromptDeadlineExceededError);
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      // A background admission ordering itself after that prompt must not
+      // hang on the record's never-resolved promise.
+      const start = await Promise.race([
+        handle.agentConnection.extMethod('_qwencode/start_turn', {
+          sessionId: session.sessionId,
+          source: 'background_notification',
+          afterPromptId: 'user-1',
+          ...backgroundTurn,
+        }),
+        new Promise((resolve) => setTimeout(() => resolve('timed out'), 2000)),
+      ]);
+      expect(start).toEqual({ accepted: true });
+    } finally {
+      resolveSpy.mockRestore();
+      prompt.resolve({ stopReason: 'end_turn' });
       await bridge.shutdown();
     }
   });

@@ -10780,6 +10780,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   }),
                   resolve: () => resolveTerminal(),
                 };
+                // The terminal can already be published bridge-side while
+                // this dispatch was resolving attachments (deadline expiry,
+                // teardown flush); the terminalPublished latch then
+                // suppresses the resolve in publishPromptTerminal, and a
+                // background admission awaiting this record would hang.
+                if (pendingEntry.terminalPublished) {
+                  entry.activePromptTerminal.resolve();
+                }
                 entry.promptActive = true;
                 // The child serializes Goal turns against RPC prompts, so a
                 // still-set flag here means the goal end_turn signal was
@@ -14016,11 +14024,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (
         entry.pendingPromptCount === 0 &&
         entry.goalTurnActive !== true &&
-        !entry.backgroundTurn
+        (!entry.backgroundTurn || options?.queueOnly)
       ) {
         // Both modes refuse new ownership once idle. `queueOnly` callers (live
         // steering) additionally drive the next turn themselves: a promoted
         // message would have no collector forwarding its response or deadline.
+        // An automatic background turn has no coordinator collector either, so
+        // `queueOnly` steering must still be rejected while one runs; ordinary
+        // input belongs in its mid-turn queue.
         if (options?.queueOnly || options?.rejectIfIdle) {
           writeStderrLine(
             `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(messageId)}: session idle`,

@@ -150,6 +150,8 @@ export interface QwenCodeAdaptorOptions {
 interface SessionState {
   busy: boolean;
   activeJobRef?: string;
+  /** Turn id of the admitted automatic background execution, if observed. */
+  backgroundTurnId?: string;
   /** Daemon-issued client id for this session; echoed on every call. */
   clientId?: string;
   /** Accumulated assistant text for the current turn. */
@@ -720,6 +722,10 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       case 'mid_turn_message_injected': {
         const jobRef = envelope.promptId;
         if (!jobRef || !Array.isArray(data['messageIds'])) return [];
+        // A background turn's drain names the background turnId, which no
+        // orchestrator job owns: adopting it would latch busy state that the
+        // (dropped) background terminal could never release.
+        if (jobRef === state.backgroundTurnId) return [];
         if (state.activeJobRef === undefined) {
           state.activeJobRef = jobRef;
           state.busy = true;
@@ -753,19 +759,28 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         // job: its stamped updates must not adopt the session's activeJobRef,
         // or its terminal would be reported as that job's completion.
         const updateMeta = isRecord(update['_meta']) ? update['_meta'] : {};
+        const backgroundUpdate = updateMeta['backgroundTurn'] !== undefined;
+        if (backgroundUpdate && envelope.promptId !== undefined) {
+          state.backgroundTurnId = envelope.promptId;
+        }
         if (
           state.activeJobRef === undefined &&
           envelope.promptId !== undefined &&
-          updateMeta['backgroundTurn'] === undefined
+          !backgroundUpdate
         ) {
           state.activeJobRef = envelope.promptId;
           state.busy = true;
           state.turnBuffer = '';
         }
         const kind = update['sessionUpdate'];
+        // Background activity is session-level: stamping the background
+        // turnId as jobRef would buffer the reply into an unrelated pending
+        // submission (or drop it), since no orchestrator job owns that ref.
         const activity = publicActivity(
           update,
-          envelope.promptId ?? state.activeJobRef,
+          backgroundUpdate
+            ? undefined
+            : (envelope.promptId ?? state.activeJobRef),
         );
         if (kind === 'agent_message_chunk') {
           const content = isRecord(update['content'])
@@ -792,7 +807,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
           return [
             {
               type: 'progress',
-              ...(envelope.promptId !== undefined
+              ...(envelope.promptId !== undefined && !backgroundUpdate
                 ? { jobRef: envelope.promptId }
                 : {}),
               summary: summary || 'running a tool',
@@ -803,7 +818,24 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       }
       case 'turn_complete': {
         const jobRef = envelope.promptId ?? state.activeJobRef;
-        if (data['backgroundTurn']) return [];
+        if (data['backgroundTurn']) {
+          // A background turn's terminal is the only frame that can release
+          // state the turn itself seeded (attach during the turn, or a
+          // mid-turn drain consumed before its start marker was observed).
+          // Never touch a foreground job's state.
+          if (
+            state.activeJobRef === undefined ||
+            state.activeJobRef === jobRef
+          ) {
+            state.busy = false;
+            state.activeJobRef = undefined;
+            state.turnBuffer = '';
+          }
+          if (state.backgroundTurnId === jobRef) {
+            state.backgroundTurnId = undefined;
+          }
+          return [];
+        }
         const active =
           envelope.promptId === undefined || jobRef === state.activeJobRef;
         const detail = active ? state.turnBuffer.trim() : '';

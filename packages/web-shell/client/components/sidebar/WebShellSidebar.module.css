@@ -2014,7 +2014,11 @@
   color: var(--warning-color, #d29922);
 }
 
-.sessionRow:has(.sessionBackgroundRunning:hover) .sessionActions {
-  opacity: 0;
-  pointer-events: none;
+/* Hover-gated: touch devices get no hover reveal, and a sticky tap-hover on
+   the background dot must not hide the always-visible row actions. */
+@media (hover: hover) {
+  .sessionRow:has(.sessionBackgroundRunning:hover) .sessionActions {
+    opacity: 0;
+    pointer-events: none;
+  }
 }
