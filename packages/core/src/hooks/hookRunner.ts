@@ -26,9 +26,8 @@ import type {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import {
-  escapeShellArg,
   getShellConfiguration,
-  type ShellType,
+  resolveCommandPath,
   type ShellConfiguration,
 } from '../utils/shell-utils.js';
 import { HttpHookRunner } from './httpHookRunner.js';
@@ -40,6 +39,34 @@ import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
+
+// PowerShell probe: pwsh preferred, powershell (5.1) fallback. Cached
+// per-process, negative cache included; throws when neither is on PATH.
+export let cachedPowerShell: string | null | undefined;
+export function __resetPowerShellCache(): void {
+  cachedPowerShell = undefined;
+}
+export function resolvePowerShellExecutable(): string {
+  if (cachedPowerShell !== undefined) {
+    if (cachedPowerShell === null) {
+      throw new Error(
+        'No PowerShell executable found on PATH (looked for pwsh, powershell)',
+      );
+    }
+    return cachedPowerShell;
+  }
+  for (const name of ['pwsh', 'powershell']) {
+    const { path } = resolveCommandPath(name);
+    if (path !== null) {
+      cachedPowerShell = name;
+      return name;
+    }
+  }
+  cachedPowerShell = null;
+  throw new Error(
+    'No PowerShell executable found on PATH (looked for pwsh, powershell)',
+  );
+}
 
 /**
  * Maximum length for stdout/stderr output (1MB)
@@ -783,18 +810,18 @@ export class HookRunner {
   ): ShellConfiguration {
     const globalConfig = getShellConfiguration();
 
+    // Shared by the explicit-shell and cmd-fallback branches so both stay in
+    // sync; the closure defers the PATH probe until powershell is needed.
+    const powershellConfig = (): ShellConfiguration => ({
+      shell: 'powershell',
+      executable: resolvePowerShellExecutable(),
+      argsPrefix: ['-NoProfile', '-Command'],
+    });
+
     // If hook specifies a shell, use it
     if (hookConfig.shell) {
-      const shellType: ShellType =
-        hookConfig.shell === 'powershell' ? 'powershell' : 'bash';
-
-      // Return configuration for the specified shell type
-      if (shellType === 'powershell') {
-        return {
-          shell: 'powershell',
-          executable: 'powershell',
-          argsPrefix: ['-Command'],
-        };
+      if (hookConfig.shell === 'powershell') {
+        return powershellConfig();
       }
 
       // For bash, use global config's executable path or fallback
@@ -806,7 +833,11 @@ export class HookRunner {
       };
     }
 
-    // Use global configuration
+    // On Windows cmd.exe /d /s /c keeps quotes in shell-prefix commands, so a
+    // quoted path fails; powershell strips them natively.
+    if (globalConfig.shell === 'cmd') {
+      return powershellConfig();
+    }
     return globalConfig;
   }
 
@@ -1194,11 +1225,25 @@ export class HookRunner {
 
       // Use hook-specific shell configuration if specified
       const shellConfig = this.getShellConfigForHook(hookConfig);
-      const command = this.expandCommand(
-        hookConfig.command,
-        input,
-        shellConfig.shell,
-      );
+      // Set-StrictMode makes undefined $VAR throw; ErrorActionPreference=Stop
+      // turns that non-terminating error into a script abort, so a later
+      // statement cannot mask the failure with exit 0.
+      if (
+        shellConfig.shell === 'powershell' &&
+        /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe)(?![\w.\n])(?![\s\S]*\n)/i.test(
+          hookConfig.command,
+        )
+      ) {
+        throw new Error(
+          `PowerShell command contains a bare-quoted Windows executable path; ` +
+            `if you intend to invoke it, prefix with the call operator '& '. ` +
+            `Example: & ${stripAnsiAndControl(hookConfig.command)}`,
+        );
+      }
+      const command =
+        shellConfig.shell === 'powershell'
+          ? `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; ${hookConfig.command}`
+          : hookConfig.command;
 
       const env: NodeJS.ProcessEnv = {
         // Hook commands are child processes launched on the agent's behalf,
@@ -1569,21 +1614,6 @@ export class HookRunner {
         });
       });
     });
-  }
-
-  /**
-   * Expand command with environment variables and input context
-   */
-  private expandCommand(
-    command: string,
-    input: HookInput,
-    shellType: ShellType,
-  ): string {
-    debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
-    const escapedCwd = escapeShellArg(input.cwd, shellType);
-    return command
-      .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility
   }
 
   /**

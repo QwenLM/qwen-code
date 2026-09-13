@@ -45,17 +45,17 @@ Command hooks execute commands via child processes. Input JSON is passed through
 
 **Configuration:**
 
-| Field           | Type                     | Required | Description                                 |
-| :-------------- | :----------------------- | :------- | :------------------------------------------ |
-| `type`          | `"command"`              | Yes      | Hook type                                   |
-| `command`       | `string`                 | Yes      | Command to execute                          |
-| `name`          | `string`                 | No       | Hook name (for logging)                     |
-| `description`   | `string`                 | No       | Hook description                            |
-| `timeout`       | `number`                 | No       | Timeout in seconds, default 60              |
-| `async`         | `boolean`                | No       | Whether to run asynchronously in background |
-| `env`           | `Record<string, string>` | No       | Environment variables                       |
-| `shell`         | `"bash" \| "powershell"` | No       | Shell to use                                |
-| `statusMessage` | `string`                 | No       | Status message displayed during execution   |
+| Field           | Type                     | Required | Description                                                                                               |
+| :-------------- | :----------------------- | :------- | :-------------------------------------------------------------------------------------------------------- |
+| `type`          | `"command"`              | Yes      | Hook type                                                                                                 |
+| `command`       | `string`                 | Yes      | Command to execute                                                                                        |
+| `name`          | `string`                 | No       | Hook name (for logging)                                                                                   |
+| `description`   | `string`                 | No       | Hook description                                                                                          |
+| `timeout`       | `number`                 | No       | Timeout in seconds, default 60                                                                            |
+| `async`         | `boolean`                | No       | Whether to run asynchronously in background                                                               |
+| `env`           | `Record<string, string>` | No       | Environment variables                                                                                     |
+| `shell`         | `"bash" \| "powershell"` | No       | Shell to use. Default: `powershell` on Windows (`bash` in Git Bash/MSYS2 environments); `bash` elsewhere. |
+| `statusMessage` | `string`                 | No       | Status message displayed during execution                                                                 |
 
 `timeout` is in seconds for command, HTTP and prompt hooks; SDK-registered function hooks keep milliseconds. Command hook timeouts used to be written in milliseconds, so for command hooks a value of `1000` or more is still read as milliseconds and existing settings keep working. To migrate, look for command hooks whose `timeout` is `1000` or more and rewrite the value in seconds, for example `10000` as `10`. To give a command hook a timeout of 1000 seconds or more, keep writing it in milliseconds, for example `1800000` for 30 minutes. A command hook `timeout` that is not a positive number, such as `"30s"`, is ignored and the 60 second default applies. With debug logging enabled (`QWEN_DEBUG_LOG_FILE=1`), each command hook with a millisecond or ignored `timeout` is named once per session in that session's debug log.
 
@@ -70,7 +70,8 @@ Command hooks execute commands via child processes. Input JSON is passed through
         "hooks": [
           {
             "type": "command",
-            "command": "$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh",
+            "command": "\"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh\"",
+            "shell": "bash",
             "name": "security-check",
             "timeout": 10
           }
@@ -80,6 +81,12 @@ Command hooks execute commands via child processes. Input JSON is passed through
   }
 }
 ```
+
+> **Shell-specific variable syntax:** For bash hooks, use `$CLAUDE_PROJECT_DIR`, `$GEMINI_PROJECT_DIR`, or `$QWEN_PROJECT_DIR`, wrapped in double quotes wherever one forms part of a path (e.g. `"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh"`). For PowerShell hooks (default on Windows), use the `$env:VAR` form (e.g. `& "$env:CLAUDE_PROJECT_DIR/scripts/setup.ps1"`) -- an undefined `$VAR` fails the hook with the variable name in the error.
+
+> **Migration:** hook commands are no longer pre-expanded before being passed to the shell, so the shell's own rules now apply. A bare `$CLAUDE_PROJECT_DIR` word-splits when the project path contains spaces, and a single-quoted `'$CLAUDE_PROJECT_DIR'` no longer expands at all. Both forms worked in earlier releases; double-quoting the reference is correct in every case.
+
+> **PowerShell command syntax:** A quoted Windows path used as a command must be prefixed with the call operator `& ` (e.g. `& "$env:CLAUDE_PROJECT_DIR/scripts/setup.ps1"`) -- otherwise PowerShell echoes it instead of executing it.
 
 ### HTTP Hooks
 
@@ -1380,7 +1387,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
         "hooks": [
           {
             "type": "command",
-            "command": "$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh",
+            "command": "\"$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh\"",
             "async": true,
             "timeout": 300
           }
