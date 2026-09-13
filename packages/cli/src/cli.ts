@@ -555,6 +555,10 @@ export async function runCliEntry(
     : undefined;
   acpStartupProfiler?.initializeAcpStartupProfiler();
   acpStartupProfiler?.markAcpStartup('geminiImportStart');
+  // llm.tsx statically imports textUtils, which constructs an Intl.Segmenter
+  // at module load; an ICU-less Node segfaults right there (#11747).
+  const { assertFullIcuAvailable } = await import('./utils/icu-check.js');
+  assertFullIcuAvailable();
   const { main } = await import('./llm.js');
   acpStartupProfiler?.markAcpStartup('geminiImportEnd');
   await main();
