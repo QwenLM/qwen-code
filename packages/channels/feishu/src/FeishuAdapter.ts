@@ -2805,7 +2805,7 @@ export class FeishuChannel extends ChannelBase {
             // return would drop the attachments.
             const mdImageShaped = /!\[[^\]\n]{0,200}\]\(/u.test(envelope.text);
             if (
-              bangShaped &&
+              envelope.text.trimStart().startsWith('!') &&
               (isGroup ? mdImageShaped : resources.length > 0 || mdImageShaped)
             ) {
               envelope.text = `(media)\n${envelope.text}`;
