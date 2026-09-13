@@ -30,7 +30,12 @@ import {
   SubagentExecutionEvent,
   type ToolCallEvent,
 } from '../types.js';
-import type { RumEvent, RumPayload, RumResourceEvent } from './event-types.js';
+import type {
+  RumEvent,
+  RumExceptionEvent,
+  RumPayload,
+  RumResourceEvent,
+} from './event-types.js';
 import { clearKnownSecretValuesForTest } from '../sanitize.js';
 
 const debugLoggerSpy = vi.hoisted(() => ({
@@ -300,16 +305,24 @@ describe('QwenLogger', () => {
           tool_name: 'run_shell_command',
           error_message:
             'Command: curl -H "Authorization: Bearer abc123" https://example.com',
+          // Not a blanket-covered key: the targeted pass must still mask
+          // credential shapes here (blanket handles only message /
+          // error_message / error_excerpt — #11649).
+          error:
+            'Hook failed: curl -H "Authorization: Bearer abc123" https://example.com',
         },
       };
       logger.enqueueLogEvent(event);
 
       const queued = logger['events'].toArray() as RumResourceEvent[];
-      expect(queued[queued.length - 1]?.message).toBe(
-        'Command: git clone https://***REDACTED***@github.com/o/r\nError: fatal: Authentication failed',
-      );
+      // message / error_message are blanket-replaced outright (#11649 on
+      // main); the targeted pass no longer sees partial text there.
+      expect(queued[queued.length - 1]?.message).toBe('***REDACTED***');
       expect(queued[queued.length - 1]?.properties?.['error_message']).toBe(
-        'Command: curl -H "Authorization: ***" https://example.com',
+        '***REDACTED***',
+      );
+      expect(queued[queued.length - 1]?.properties?.['error']).toBe(
+        'Hook failed: curl -H "Authorization: ***" https://example.com',
       );
     });
 
@@ -396,19 +409,26 @@ describe('QwenLogger', () => {
       });
       const logger = QwenLogger.getInstance(config)!;
 
-      const event: RumResourceEvent = {
+      const event = {
         timestamp: Date.now(),
-        event_type: 'resource',
+        event_type: 'exception',
         type: 'tool',
         name: 'tool_call',
+        // `message` is blanket-replaced (#11649), so the exact-value
+        // masking is observable end-to-end on `stack` — a field only the
+        // targeted pass covers.
         message: 'Request failed: Authorization sk-live-9f3ab207d18e rejected',
-      };
+        stack: 'Error: auth failed for sk-live-9f3ab207d18e in fetch',
+      } as RumResourceEvent & Pick<RumExceptionEvent, 'stack'>;
       logger.enqueueLogEvent(event);
 
       const queued = logger['events'].toArray() as RumResourceEvent[];
-      expect(queued[queued.length - 1]?.message).toBe(
-        'Request failed: Authorization *** rejected',
-      );
+      const queuedStack = (
+        queued[queued.length - 1] as RumResourceEvent &
+          Partial<Pick<RumExceptionEvent, 'stack'>>
+      )?.stack;
+      expect(queued[queued.length - 1]?.message).toBe('***REDACTED***');
+      expect(queuedStack).toBe('Error: auth failed for *** in fetch');
     });
 
     it('should register the credential half of a scheme-prefixed MCP header value', () => {
