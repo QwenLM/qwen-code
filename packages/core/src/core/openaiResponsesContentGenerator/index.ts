@@ -16,7 +16,10 @@ import type {
   GenerateContentResponse,
 } from '@google/genai';
 import type OpenAI from 'openai';
-import { ResponsesPipeline } from './responses-pipeline.js';
+import {
+  ResponsesPipeline,
+  normalizeOpenAiWireBaseUrl,
+} from './responses-pipeline.js';
 import {
   buildRuntimeFetchOptions,
   redactProxyError,
@@ -64,7 +67,7 @@ export class OpenAIResponsesContentGenerator implements ContentGenerator {
     // streaming pipeline does so a bare-origin baseUrl still resolves to
     // .../v1/embeddings instead of .../embeddings (404).
     const baseURL = this.contentGeneratorConfig.baseUrl
-      ? `${this.contentGeneratorConfig.baseUrl.replace(/\/v1\/?$/, '').replace(/\/$/, '')}/v1`
+      ? `${normalizeOpenAiWireBaseUrl(this.contentGeneratorConfig.baseUrl)}/v1`
       : undefined;
     this.openaiClient = new OpenAISDK({
       apiKey,

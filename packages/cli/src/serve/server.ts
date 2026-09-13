@@ -2886,6 +2886,7 @@ export function createServeApp(
   if (deps.persistSettings) {
     registerWorkspaceModelsRoutes(app, {
       boundWorkspace: primaryBoundWorkspace,
+      env: primaryRuntimeEffectiveEnv,
       isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
       captureGenerationAssertion: capturePrimaryGenerationAssertion,
       mutate,

@@ -9,6 +9,10 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
+  type ModelApi,
+  resolveModelProtocol,
+  tryResolveModelProtocol,
+  resolveModelSelectionAuthType,
   hasVertexProjectConfigured,
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
@@ -197,10 +201,7 @@ import type {
   SetSessionModeRequest,
   SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
-import {
-  buildAuthMethods,
-  pickAuthMethodsForAuthRequired,
-} from './authMethods.js';
+import { pickAuthMethodsForAuthRequired } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
@@ -1695,7 +1696,20 @@ function readExistingProviderConfig(
   const advancedConfig = readExistingAdvancedConfig(firstModel);
 
   return {
-    protocol,
+    protocol:
+      protocol === AuthType.USE_OPENAI_RESPONSES
+        ? AuthType.USE_OPENAI
+        : protocol,
+    ...(protocol === AuthType.USE_OPENAI ||
+    protocol === AuthType.USE_OPENAI_RESPONSES
+      ? {
+          api:
+            firstModel?.api ??
+            (protocol === AuthType.USE_OPENAI_RESPONSES
+              ? 'responses'
+              : 'chat-completions'),
+        }
+      : {}),
     baseUrl: sanitizeProviderBaseUrl(baseUrl),
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
@@ -1725,31 +1739,55 @@ function resolveExistingProviderApiKey(
   baseUrl: string,
   modelIds: string[],
 ): string | undefined {
-  const owns = resolveOwnsModel(config);
-  const models = (settings.merged.modelProviders?.[protocol] ?? []).filter(
-    (model) =>
-      owns?.(model) && model.baseUrl === baseUrl && modelIds.includes(model.id),
-  );
-  const conversation = models.filter(
+  const ownsModel = resolveOwnsModel(config);
+  const matched: ProviderModelConfig[] = [];
+  for (const [providerId, models] of Object.entries(
+    settings.merged.modelProviders ?? {},
+  )) {
+    if (!Array.isArray(models)) continue;
+    for (const model of models) {
+      if (model.baseUrl !== baseUrl || !model.envKey || !ownsModel?.(model))
+        continue;
+      if (!modelIds.includes(model.id)) continue;
+      // tryResolveModelProtocol: a hand-edited invalid `api` on one entry
+      // must not reject the whole providers/connect flow — skip that entry.
+      if (
+        tryResolveModelProtocol(
+          providerId,
+          model,
+          settings.merged.providerProtocol,
+        ) !== protocol
+      ) {
+        continue;
+      }
+      matched.push(model);
+    }
+  }
+  const canonicalProtocol =
+    protocol === AuthType.USE_OPENAI_RESPONSES ? AuthType.USE_OPENAI : protocol;
+  // Service-role models (imageOnly/voiceOnly) carry their own suffixed env key,
+  // so a reconnect reads the key of the conversation model being connected and
+  // only falls back to service entries when no conversation model matched.
+  const conversation = matched.filter(
     (model) => !model.imageOnly && !model.voiceOnly,
   );
   if (
     !conversation.length &&
-    modelIds.some((id) => !models.some((model) => model.id === id))
+    modelIds.some((id) => !matched.some((model) => model.id === id))
   ) {
     return readSettingsEnv(
       settings,
-      resolveProviderEnvKey(config, protocol, baseUrl),
+      resolveProviderEnvKey(config, canonicalProtocol, baseUrl),
     );
   }
   const keys = new Set(
-    (conversation.length ? conversation : models).map((model) => model.envKey),
+    (conversation.length ? conversation : matched).map((model) => model.envKey),
   );
   if (keys.size === 1) return readSettingsEnv(settings, [...keys][0]);
   if (keys.size > 1) return undefined;
   return readSettingsEnv(
     settings,
-    resolveProviderEnvKey(config, protocol, baseUrl),
+    resolveProviderEnvKey(config, canonicalProtocol, baseUrl),
   );
 }
 
@@ -1800,11 +1838,28 @@ function readProviderSetupInputs(
   if (
     protocol &&
     protocol !== config.protocol &&
-    !config.protocolOptions?.includes(protocol)
+    !config.protocolOptions?.includes(protocol) &&
+    !(
+      protocol === AuthType.USE_OPENAI_RESPONSES &&
+      config.protocolOptions?.includes(AuthType.USE_OPENAI)
+    )
   ) {
     throw RequestError.invalidParams(
       undefined,
       `Invalid protocol for provider "${config.id}"`,
+    );
+  }
+
+  const api = params['api'] as ModelApi | undefined;
+  let effectiveProtocol: AuthType;
+  try {
+    effectiveProtocol = resolveModelProtocol(protocol ?? config.protocol, {
+      api,
+    })!;
+  } catch (error) {
+    throw RequestError.invalidParams(
+      undefined,
+      error instanceof Error ? error.message : String(error),
     );
   }
 
@@ -1813,7 +1868,10 @@ function readProviderSetupInputs(
     readOptionalString(params['baseUrl'], 'baseUrl'),
   ).trim();
   if (!baseUrl && config.baseUrl === undefined) {
-    baseUrl = getDefaultBaseUrlForProtocol(protocol ?? config.protocol);
+    // Default to the EFFECTIVE route's endpoint: a Responses selection dials
+    // the /v1-less default, so deriving from the raw bucket protocol would
+    // persist the Chat Completions endpoint on the Responses wire.
+    baseUrl = getDefaultBaseUrlForProtocol(effectiveProtocol);
   }
   if (!baseUrl) {
     throw RequestError.invalidParams(
@@ -1836,11 +1894,7 @@ function readProviderSetupInputs(
   // received `hasApiKey` from the list response), fall back to the stored key.
   const apiKey =
     readOptionalString(params['apiKey'], 'apiKey') ??
-    resolveExistingApiKey?.(
-      protocol ?? config.protocol,
-      baseUrl,
-      resolvedModelIds,
-    );
+    resolveExistingApiKey?.(effectiveProtocol, baseUrl, resolvedModelIds);
   if (!apiKey) {
     throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
   }
@@ -1853,6 +1907,7 @@ function readProviderSetupInputs(
 
   return {
     ...(protocol ? { protocol } : {}),
+    ...(api ? { api } : {}),
     baseUrl,
     apiKey,
     modelIds: resolvedModelIds,
@@ -5044,7 +5099,9 @@ class QwenAgent implements Agent {
       }
     }
     this.clientCapabilities = args.clientCapabilities;
-    const authMethods = buildAuthMethods();
+    const authMethods = pickAuthMethodsForAuthRequired(
+      this.config.getCurrentAuthType?.() ?? this.config.getAuthType?.(),
+    );
     const version = process.env['CLI_VERSION'] || process.version;
 
     const response: InitializeResponse = {
@@ -5167,6 +5224,32 @@ class QwenAgent implements Agent {
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
     const method = z.nativeEnum(AuthType).parse(methodId);
+    const currentAuthType =
+      this.config.getCurrentAuthType?.() ?? this.config.getAuthType?.();
+    // The wire resolver throws on a hand-edited invalid `api` anywhere in
+    // modelProviders; re-authentication is the repair path, so tolerate the
+    // failure instead of rejecting it outright. The fallback must preserve
+    // the wire the session is actually on — falling back to the requested
+    // method would re-authenticate onto a wire that may hold no models and
+    // persist that downgrade to security.auth.selectedType.
+    let authType = method;
+    if (method === AuthType.USE_OPENAI) {
+      const seeded =
+        currentAuthType === AuthType.USE_OPENAI_RESPONSES
+          ? currentAuthType
+          : method;
+      try {
+        authType = resolveModelSelectionAuthType(
+          seeded,
+          this.config.getModel(),
+          this.settings.merged.modelProviders,
+          this.settings.merged.providerProtocol,
+          this.config.getCurrentModelRegistryBaseUrl?.(),
+        );
+      } catch {
+        authType = seeded;
+      }
+    }
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {
@@ -5185,12 +5268,12 @@ class QwenAgent implements Agent {
       await this.refreshAuthWithPersistedReasoning(
         this.config,
         this.settings,
-        method,
+        authType,
       );
       this.settings.setValue(
         SettingScope.User,
         'security.auth.selectedType',
-        method,
+        authType,
       );
     } finally {
       if (method === AuthType.QWEN_OAUTH) {

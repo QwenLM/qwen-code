@@ -106,6 +106,54 @@ describe('validateAuthMethod', () => {
     expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
   });
 
+  it('finds the canonical Responses entry during OpenAI preflight', () => {
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        model: { name: 'gpt-model' },
+        modelProviders: {
+          openai: [
+            { id: 'gpt-model', api: 'responses', envKey: 'CUSTOM_API_KEY' },
+          ],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+    vi.stubEnv('CUSTOM_API_KEY', 'responses-key');
+
+    expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
+    expect(validateAuthMethod(AuthType.USE_OPENAI_RESPONSES)).toBeNull();
+  });
+
+  it('checks the effective API credential when both API routes share an id and URL', () => {
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        model: { name: 'gpt-model', baseUrl: 'https://example.test/v1' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'gpt-model',
+              baseUrl: 'https://example.test/v1',
+              api: 'chat-completions',
+              envKey: 'CHAT_KEY',
+            },
+            {
+              id: 'gpt-model',
+              baseUrl: 'https://example.test/v1',
+              api: 'responses',
+              envKey: 'RESPONSES_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+    vi.stubEnv('CHAT_KEY', 'chat-key');
+    vi.stubEnv('RESPONSES_KEY', '');
+
+    expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
+    expect(validateAuthMethod(AuthType.USE_OPENAI_RESPONSES)).toContain(
+      "'RESPONSES_KEY'",
+    );
+  });
+
   it('disambiguates by settings.model.baseUrl when providers share a model id', () => {
     // Two providers with the same id; the persisted baseUrl selects the second.
     // Only the second provider's env key is set, so validation passes only if

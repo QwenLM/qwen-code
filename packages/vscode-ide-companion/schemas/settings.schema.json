@@ -40,7 +40,7 @@
       }
     },
     "modelProviders": {
-      "description": "Model providers configuration keyed by provider id (a built-in AuthType such as \"openai\" or \"gemini\", or a custom id mapped via providerProtocol). Each entry is an array of model configurations.",
+      "description": "Model providers configuration keyed by provider id (a built-in AuthType such as \"openai\" or \"gemini\", or a custom id mapped via providerProtocol). Each entry is an array of model configurations. OpenAI-compatible models can select api: \"chat-completions\" or \"responses\"; omitting api preserves the provider protocol.",
       "type": "object",
       "additionalProperties": true
     },

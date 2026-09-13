@@ -166,7 +166,7 @@ export const useAuthCommand = (
       // AuthEvent telemetry on pendingAuthType being defined) can record the
       // failure under the right AuthType bucket instead of silently dropping
       // it.
-      const protocol = inputs.protocol ?? providerConfig.protocol;
+      let protocol = inputs.protocol ?? providerConfig.protocol;
       try {
         setPendingAuthType(protocol);
         setIsAuthenticating(true);
@@ -179,6 +179,8 @@ export const useAuthCommand = (
             inputs.protocol ?? providerConfig.protocol
           ],
         );
+        protocol = plan.authType;
+        setPendingAuthType(protocol);
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),

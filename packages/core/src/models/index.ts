@@ -5,6 +5,7 @@
  */
 
 export {
+  type ModelApi,
   type ModelCapabilities,
   type ModelGenerationConfig,
   type ModelConfig,
@@ -20,6 +21,9 @@ export {
   ModelRegistry,
   modelRegistryKey,
   resolveProviderProtocol,
+  resolveModelProtocol,
+  tryResolveModelProtocol,
+  resolveModelSelectionAuthType,
 } from './modelRegistry.js';
 
 export { isImageGenerationCapable } from './image-generation-capability.js';

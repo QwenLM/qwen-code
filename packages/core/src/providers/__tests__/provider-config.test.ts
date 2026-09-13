@@ -206,6 +206,49 @@ describe('buildInstallPlan', () => {
     );
   });
 
+  it('retires version metadata when the install stamps an explicit API', () => {
+    const config = makeConfig();
+    const responsesPlan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+      api: 'responses',
+    });
+    // A version hashed from an `api`-stamped model list can never match the
+    // drift check's template rebuild (no `api`, and the default route's
+    // generationConfig shape), so the provider would prompt an "update" on
+    // every launch — and accepting it would duplicate every model. The install
+    // records no version and retires one an earlier default-route install left
+    // behind (adapters treat `undefined` as unset).
+    expect(responsesPlan.providerState).toEqual({
+      'providerMetadata.test': { version: undefined },
+    });
+
+    // The same holds for an explicit `api: 'chat-completions'` on a preset
+    // whose own protocol already is USE_OPENAI — the stamp alone makes the
+    // recorded hash irreproducible by buildProviderTemplate.
+    const chatStampedPlan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+      api: 'chat-completions',
+    });
+    expect(chatStampedPlan.providerState).toEqual({
+      'providerMetadata.test': { version: undefined },
+    });
+
+    const chatPlan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+    expect(chatPlan.providerState?.['providerMetadata.test']?.['version']).toBe(
+      computeModelListVersion(
+        buildProviderTemplate(config, 'https://api.test.com/v1'),
+      ),
+    );
+  });
+
   it('keeps an edited window when reconnecting a model with a preset default', () => {
     const config = makeConfig();
     const inputs = {
@@ -316,6 +359,35 @@ describe('buildInstallPlan', () => {
       reasoning: { effort: 'medium' },
     });
     expect(models?.[0]?.generationConfig?.extra_body).toBeUndefined();
+  });
+
+  it('uses the explicit model API for thinking and rejects incompatible setup inputs', () => {
+    const config = makeConfig({ models: undefined });
+    const inputs = {
+      baseUrl: 'https://custom.com/v1',
+      apiKey: 'sk-custom',
+      modelIds: ['m1'],
+      api: 'responses' as const,
+      advancedConfig: { enableThinking: true },
+    };
+    const plan = buildInstallPlan(config, inputs);
+    expect(plan.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
+    expect(plan.modelProviders?.[0]).toMatchObject({
+      authType: AuthType.USE_OPENAI,
+      models: [
+        {
+          id: 'm1',
+          api: 'responses',
+          generationConfig: { reasoning: { effort: 'medium' } },
+        },
+      ],
+    });
+    expect(() =>
+      buildInstallPlan(config, { ...inputs, protocol: AuthType.USE_ANTHROPIC }),
+    ).toThrow(/api/i);
+    expect(() =>
+      buildInstallPlan(config, { ...inputs, api: 'invalid' as 'responses' }),
+    ).toThrow(/api/i);
   });
 
   it('produces independent generationConfig objects per custom model', () => {
@@ -574,6 +646,33 @@ describe('findExistingProviderModels', () => {
     });
   });
 
+  it.each(['openai', 'openai-responses'])(
+    'finds saved Responses models in the %s bucket',
+    (bucket) => {
+      const model = {
+        id: 'responses-model',
+        api: 'responses',
+        envKey: 'TEST_API_KEY',
+      };
+      expect(findExistingProviderModels(config, { [bucket]: [model] })).toEqual(
+        {
+          protocol: AuthType.USE_OPENAI_RESPONSES,
+          models: [model],
+        },
+      );
+    },
+  );
+
+  it('inspects legacy Responses entries without rewriting their credential reference', () => {
+    const model = { id: 'legacy', envKey: 'TEST_API_KEY' };
+    expect(
+      findExistingProviderModels(config, { 'openai-responses': [model] }),
+    ).toEqual({
+      protocol: AuthType.USE_OPENAI_RESPONSES,
+      models: [model],
+    });
+  });
+
   it('returns undefined when no saved models are owned by the provider', () => {
     expect(
       findExistingProviderModels(config, {
@@ -597,6 +696,82 @@ describe('findExistingProviderModels', () => {
         [AuthType.USE_OPENAI]: [{ id: 'x', envKey: 'DYNAMIC_KEY' }],
       }),
     ).toBeUndefined();
+  });
+
+  it('reports the current wire after a switch left both APIs in the bucket', () => {
+    // A wire switch preserves the old route's entry and prepends the new one,
+    // so the canonical bucket holds both; the answer must come from the most
+    // recently installed entry, not a hard-coded chat-first preference.
+    const responses = {
+      id: 'same',
+      baseUrl: 'https://proxy.example/v1',
+      api: 'responses' as const,
+      envKey: 'TEST_API_KEY',
+    };
+    const chat = {
+      id: 'same',
+      baseUrl: 'https://proxy.example/v1',
+      envKey: 'TEST_API_KEY',
+    };
+    expect(
+      findExistingProviderModels(config, {
+        [AuthType.USE_OPENAI]: [responses, chat],
+      }),
+    ).toEqual({
+      protocol: AuthType.USE_OPENAI_RESPONSES,
+      models: [responses],
+    });
+  });
+
+  it('dedups a legacy entry that differs from the canonical one by a trailing slash', () => {
+    const canonical = {
+      id: 'm',
+      baseUrl: 'https://gw.example/v1',
+      api: 'responses' as const,
+      envKey: 'TEST_API_KEY',
+    };
+    const legacy = {
+      id: 'm',
+      baseUrl: 'https://gw.example/v1/',
+      envKey: 'TEST_API_KEY',
+    };
+    // The canonical bucket wins over Object.entries order: consumers derive
+    // baseUrl/envKey/prefill from the first model, so it must be the canonical
+    // `api`-stamped entry, not whichever bucket the settings file lists first.
+    expect(
+      findExistingProviderModels(config, {
+        'openai-responses': [legacy],
+        [AuthType.USE_OPENAI]: [canonical],
+      }),
+    ).toEqual({
+      protocol: AuthType.USE_OPENAI_RESPONSES,
+      models: [canonical],
+    });
+  });
+
+  it('skips entries whose api cannot be resolved instead of throwing', () => {
+    expect(
+      findExistingProviderModels(config, {
+        [AuthType.USE_OPENAI]: [
+          {
+            id: 'broken',
+            api: 'Responses' as 'responses',
+            envKey: 'TEST_API_KEY',
+          },
+          { id: 'good', envKey: 'TEST_API_KEY' },
+        ],
+        [AuthType.USE_GEMINI]: [
+          {
+            id: 'wrong-family',
+            api: 'responses' as const,
+            envKey: 'TEST_API_KEY',
+          },
+        ],
+      }),
+    ).toEqual({
+      protocol: AuthType.USE_OPENAI,
+      models: [{ id: 'good', envKey: 'TEST_API_KEY' }],
+    });
   });
 
   it('scans protocolOptions in order and picks the first with owned models', () => {

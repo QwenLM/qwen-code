@@ -6,7 +6,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '../../core/contentGenerator.js';
-import type { ModelProvidersConfig } from '../../models/types.js';
+import { ModelRegistry } from '../../models/modelRegistry.js';
+import type { ModelConfig, ModelProvidersConfig } from '../../models/types.js';
 import {
   applyProviderInstallPlan,
   buildInstallPlan,
@@ -14,6 +15,7 @@ import {
   generateCustomEnvKey,
   minimaxProvider,
   ProviderInstallError,
+  type ProviderConfig,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
 } from '../index.js';
@@ -971,6 +973,411 @@ describe('applyProviderInstallPlan', () => {
     ]);
   });
 
+  it.each([false, true])(
+    'preserves the other API sibling when installing Responses (ownsModel=%s)',
+    async (owned) => {
+      const baseUrl = 'https://gateway.test/v1';
+      const chat = { id: 'same', baseUrl, envKey: 'TEST_API_KEY' };
+      const responses = {
+        id: 'same',
+        baseUrl,
+        api: 'responses' as const,
+        envKey: 'TEST_API_KEY',
+      };
+      const adapter = createAdapter({
+        openai: [chat, { ...responses, name: 'old' }],
+      });
+      vi.mocked(adapter.getValue).mockImplementation(
+        (key) =>
+          (
+            ({
+              'security.auth.selectedType': AuthType.USE_OPENAI,
+              'model.name': 'same',
+              'model.baseUrl': baseUrl,
+            }) as Record<string, unknown>
+          )[key],
+      );
+      const syncAuthState = vi.fn();
+      await applyProviderInstallPlan(
+        {
+          providerId: 'test',
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          modelSelection: { modelId: 'same', baseUrl },
+          modelProviders: [
+            {
+              authType: AuthType.USE_OPENAI,
+              models: [responses],
+              mergeStrategy: 'prepend-and-remove-owned',
+              ...(owned ? { ownsModel: () => true } : {}),
+            },
+          ],
+        },
+        { settings: adapter, syncAuthState },
+      );
+      expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+        responses,
+        chat,
+      ]);
+      expect(syncAuthState).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI_RESPONSES,
+        'same',
+        baseUrl,
+      );
+    },
+  );
+
+  it('preserves a non-first canonical Responses selection across reinstall', async () => {
+    const baseUrl = 'https://gateway.test/v1';
+    const models = ['first', 'chosen'].map((id) => ({
+      id,
+      baseUrl,
+      api: 'responses' as const,
+    }));
+    const adapter = createAdapter({ openai: models });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'chosen',
+            'model.baseUrl': baseUrl,
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const syncAuthState = vi.fn();
+    await applyProviderInstallPlan(
+      {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        modelSelection: { modelId: 'first', baseUrl },
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models,
+            mergeStrategy: 'prepend-and-remove-owned',
+          },
+        ],
+      },
+      { settings: adapter, syncAuthState },
+    );
+    // The reinstall still persists the merged providers map — preserving the
+    // selection must not silently skip the install itself.
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'modelProviders.openai',
+      models,
+    );
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(syncAuthState).not.toHaveBeenCalled();
+  });
+
+  it('keeps a non-first current model when reinstalling across an API route change', async () => {
+    const baseUrl = 'https://gateway.test/v1';
+    const chatModels = ['glm-4.6', 'qwen3-max', 'deepseek-v3'].map((id) => ({
+      id,
+      baseUrl,
+      envKey: 'TEST_API_KEY',
+    }));
+    const responsesModels = chatModels.map((model) => ({
+      ...model,
+      api: 'responses' as const,
+    }));
+    const adapter = createAdapter({ openai: chatModels });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'qwen3-max',
+            'model.baseUrl': baseUrl,
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const syncAuthState = vi.fn();
+    await applyProviderInstallPlan(
+      {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        modelSelection: { modelId: 'glm-4.6', baseUrl },
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models: responsesModels,
+            mergeStrategy: 'prepend-and-remove-owned',
+          },
+        ],
+      },
+      { settings: adapter, syncAuthState },
+    );
+    // The plan still offers the user's chosen model on the new route: keep it
+    // instead of adopting the plan's first model, but still re-sync the live
+    // session onto the new wire.
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(syncAuthState).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+      'qwen3-max',
+      baseUrl,
+    );
+  });
+
+  it('keeps a legacy Responses route owned by another provider when the patch owns models', async () => {
+    const baseUrl = 'https://api.openai.com/v1';
+    const foreign = { id: 'gpt-5.1', baseUrl, envKey: 'WORK_KEY' };
+    const adapter = createAdapter({ 'openai-responses': [foreign] });
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const updated = {
+      id: 'gpt-5.1',
+      baseUrl,
+      api: 'responses' as const,
+      envKey: 'DEEPSEEK_API_KEY',
+    };
+    const result = await applyProviderInstallPlan(
+      {
+        providerId: 'deepseek',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models: [updated],
+            mergeStrategy: 'prepend-and-remove-owned',
+            ownsModel: (model) => model.envKey === 'DEEPSEEK_API_KEY',
+          },
+        ],
+      },
+      { settings: adapter },
+    );
+    // The legacy entry matches id+baseUrl+protocol but belongs to another
+    // provider's credentials — the ownership gate the canonical bucket applies
+    // must protect it from the legacy prune as well.
+    expect(result.updatedModelProviders['openai-responses']).toEqual([foreign]);
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'modelProviders.openai-responses',
+      expect.anything(),
+    );
+    // The preserved legacy entry is registry-indistinguishable from the
+    // freshly installed one (same id+baseUrl+effective protocol), and the
+    // registry resolves such a collision first-registration-wins — the install
+    // the user just performed must win the slot deterministically rather than
+    // losing to the JSON key order of the legacy bucket.
+    const registry = new ModelRegistry(result.updatedModelProviders);
+    expect(
+      registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'gpt-5.1', baseUrl)
+        ?.envKey,
+    ).toBe('DEEPSEEK_API_KEY');
+    // The collision is surfaced rather than silent: an install that reports
+    // success while another provider's entry shares the slot must say so.
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining('legacy "openai-responses" route'),
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining('gpt-5.1'),
+    );
+  });
+
+  it('does not let an invalid api elsewhere in settings abort a non-OpenAI install', async () => {
+    const adapter = createAdapter({
+      openai: [{ id: 'm', envKey: 'A', api: 'response' as ModelConfig['api'] }],
+    });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'm',
+          }) as Record<string, unknown>
+        )[key],
+    );
+    // The pre-install wire resolution scans every modelProviders entry, so an
+    // invalid `api` in an unrelated bucket would throw ahead of the plan's own
+    // error contract. A non-OpenAI plan never consults it.
+    const plan: ProviderInstallPlan = {
+      providerId: 'anthropic',
+      authType: AuthType.USE_ANTHROPIC,
+      modelSelection: { modelId: 'm' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_ANTHROPIC,
+          models: [{ id: 'm', envKey: 'ANTHROPIC_API_KEY' }],
+          mergeStrategy: 'prepend-and-remove-owned',
+        },
+      ],
+    };
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).resolves.toMatchObject({
+      updatedModelProviders: {
+        anthropic: [{ id: 'm', envKey: 'ANTHROPIC_API_KEY' }],
+      },
+    });
+  });
+
+  it('does not let a non-array legacy openai-responses bucket abort an install', async () => {
+    // A hand-edited (or reverted-V5-shaped) bucket is a present but non-array
+    // value; the registry skips such buckets, and the install path must leave
+    // the malformed bucket byte-identical instead of throwing TypeError.
+    const malformed = {
+      protocol: 'openai-responses',
+      models: [{ id: 'm' }],
+    } as unknown as ModelProvidersConfig[string];
+    const adapter = createAdapter({
+      'openai-responses': malformed,
+    });
+    const plan: ProviderInstallPlan = {
+      providerId: 'test',
+      authType: AuthType.USE_OPENAI,
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [{ id: 'gpt-5.1', envKey: 'TEST_API_KEY' }],
+          mergeStrategy: 'prepend-and-remove-owned',
+        },
+      ],
+    };
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).resolves.toMatchObject({
+      updatedModelProviders: {
+        'openai-responses': malformed,
+        openai: [{ id: 'gpt-5.1', envKey: 'TEST_API_KEY' }],
+      },
+    });
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'modelProviders.openai-responses',
+      expect.anything(),
+    );
+  });
+
+  it('does not let an invalid api elsewhere in settings abort an OpenAI-family install', async () => {
+    // The pre-install wire probe walks every bucket of the previous providers
+    // map with the throwing resolver; an invalid `api` in a bucket the plan
+    // never touches must skip the probe, not refuse the install.
+    const adapter = createAdapter({
+      idealab: [{ id: 'q1', envKey: 'A', api: 'resp' as ModelConfig['api'] }],
+    });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'q1',
+            providerProtocol: { idealab: 'openai' },
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const plan: ProviderInstallPlan = {
+      providerId: 'openai',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      modelSelection: { modelId: 'q1' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [
+            {
+              id: 'q1',
+              envKey: 'TEST_API_KEY',
+              api: 'responses' as const,
+            },
+          ],
+          mergeStrategy: 'prepend-and-remove-owned',
+        },
+      ],
+    };
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).resolves.toMatchObject({
+      updatedModelProviders: {
+        openai: [{ id: 'q1', envKey: 'TEST_API_KEY', api: 'responses' }],
+      },
+    });
+  });
+
+  it('retires a recorded model-list version when reinstalling on the Responses route', async () => {
+    const preset: ProviderConfig = {
+      id: 'test',
+      label: 'Test',
+      description: 'Test',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: 'https://api.test.com/v1',
+      envKey: 'TEST_API_KEY',
+      models: [{ id: 'model-a' }],
+      modelNamePrefix: 'Test',
+    };
+    const adapter = createAdapter();
+    const defaultPlan = buildInstallPlan(preset, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+    expect(
+      defaultPlan.providerState?.['providerMetadata.test']?.['version'],
+    ).toBeDefined();
+
+    const responsesPlan = buildInstallPlan(preset, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+      api: 'responses',
+    });
+    await applyProviderInstallPlan(responsesPlan, { settings: adapter });
+
+    // The drift check's template rebuild can never reproduce an api-stamped
+    // install's version, so the reinstall must retire the version the
+    // default-route install recorded — otherwise the next template change
+    // prompts a spurious update whose accept path duplicates every model.
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'providerMetadata.test.version',
+      undefined,
+    );
+  });
+
+  it('replaces a reinstalled legacy Responses route without deleting its other models', async () => {
+    const baseUrl = 'https://gateway.test/v1';
+    const keep = { id: 'keep', baseUrl };
+    const otherApi = { id: 'same', baseUrl, api: 'chat-completions' as const };
+    const adapter = createAdapter({
+      'openai-responses': [
+        { id: 'same', baseUrl, envKey: 'OLD' },
+        keep,
+        otherApi,
+      ],
+    });
+    const updated = {
+      id: 'same',
+      baseUrl,
+      api: 'responses' as const,
+      envKey: 'NEW',
+    };
+    const result = await applyProviderInstallPlan(
+      {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models: [updated],
+            mergeStrategy: 'prepend-and-remove-owned',
+          },
+        ],
+      },
+      { settings: adapter },
+    );
+    expect(result.updatedModelProviders).toEqual({
+      'openai-responses': [keep, otherApi],
+      openai: [updated],
+    });
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'modelProviders.openai-responses',
+      [keep, otherApi],
+    );
+  });
+
   it('preserves existing custom provider models and selects the installed endpoint', async () => {
     const baseUrl = 'http://new.example/v1';
     const otherBaseUrl = 'http://192.168.100.100:8000/v1';
@@ -1017,7 +1424,13 @@ describe('applyProviderInstallPlan', () => {
     }
 
     expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      { id: 'model-b', name: 'model-b', baseUrl, envKey },
+      {
+        id: 'model-b',
+        name: 'model-b',
+        baseUrl,
+        envKey,
+        api: 'chat-completions',
+      },
       {
         id: 'model-b',
         name: 'model-b',

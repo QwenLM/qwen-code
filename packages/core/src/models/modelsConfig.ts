@@ -10,6 +10,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { normalizeOpenAiWireBaseUrl } from '../core/openaiContentGenerator/constants.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import {
@@ -18,7 +19,10 @@ import {
 } from '../utils/runtimeModelPrefix.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
-import { ModelRegistry } from './modelRegistry.js';
+import {
+  ModelRegistry,
+  resolveModelSelectionAuthType,
+} from './modelRegistry.js';
 import {
   type ModelProvidersConfig,
   type ProviderProtocolConfig,
@@ -174,8 +178,16 @@ export class ModelsConfig {
     this.authTypeWasExplicitlyProvided = options.initialAuthType !== undefined;
 
     // Initialize selection state
-    this.currentAuthType = options.initialAuthType;
     const initialModelId = this._generationConfig.model;
+    this.currentAuthType = options.initialAuthType
+      ? resolveModelSelectionAuthType(
+          options.initialAuthType,
+          initialModelId,
+          options.modelProvidersConfig,
+          options.providerProtocolConfig,
+          options.initialRegistryBaseUrl,
+        )
+      : undefined;
     if (this.currentAuthType && initialModelId) {
       const initialModel = this.modelRegistry.getModel(
         this.currentAuthType,
@@ -409,6 +421,21 @@ export class ModelsConfig {
       return;
     }
 
+    // The registry buckets each model under the wire its `api` derives, which
+    // may be the sibling OpenAI wire of the session's currentAuthType — probe
+    // it before falling back to a raw override that would bind the model id to
+    // the current wire's credentials and defaults.
+    const siblingWire =
+      this.currentAuthType === AuthType.USE_OPENAI
+        ? AuthType.USE_OPENAI_RESPONSES
+        : this.currentAuthType === AuthType.USE_OPENAI_RESPONSES
+          ? AuthType.USE_OPENAI
+          : undefined;
+    if (siblingWire && this.modelRegistry.hasModel(siblingWire, newModel)) {
+      await this.switchModel(siblingWire, newModel);
+      return;
+    }
+
     // Raw model override: update generation config in-place
     const rollbackSnapshot = this.createStateSnapshotForRollback();
     try {
@@ -517,21 +544,37 @@ export class ModelsConfig {
       }
 
       const previousModelId = rollbackSnapshot.generationConfig.model || '';
+      const previousAuthType = rollbackSnapshot.currentAuthType;
       const previousModel =
-        !isAuthTypeChange && previousModelId
+        previousAuthType && previousModelId
           ? (this.modelRegistry.getModel(
-              authType,
+              previousAuthType,
               previousModelId,
               rollbackSnapshot.currentRegistryBaseUrl,
-            ) ?? this.modelRegistry.getModel(authType, previousModelId))
+            ) ?? this.modelRegistry.getModel(previousAuthType, previousModelId))
           : undefined;
+      const sharesOpenAICredentials =
+        (authType === AuthType.USE_OPENAI ||
+          authType === AuthType.USE_OPENAI_RESPONSES) &&
+        (previousAuthType === AuthType.USE_OPENAI ||
+          previousAuthType === AuthType.USE_OPENAI_RESPONSES);
+      const sameEndpoint = (a: string | undefined, b: string | undefined) =>
+        a === b ||
+        (sharesOpenAICredentials &&
+          normalizeOpenAiWireBaseUrl(a) === normalizeOpenAiWireBaseUrl(b));
       const canReusePreviousApiKey =
         authType !== AuthType.QWEN_OAUTH &&
-        !isAuthTypeChange &&
+        (!isAuthTypeChange ||
+          (sharesOpenAICredentials &&
+            sameEndpoint(
+              rollbackSnapshot.generationConfig.baseUrl,
+              model.baseUrl,
+            ))) &&
         !!rollbackSnapshot.generationConfig.apiKey &&
         !!model.envKey &&
-        previousModel?.envKey === model.envKey &&
-        previousModel.baseUrl === model.baseUrl;
+        previousModel !== undefined &&
+        previousModel.envKey === model.envKey &&
+        sameEndpoint(previousModel.baseUrl, model.baseUrl);
       const previousApiKey = canReusePreviousApiKey
         ? rollbackSnapshot.generationConfig.apiKey
         : undefined;
@@ -1037,10 +1080,53 @@ export class ModelsConfig {
         : this.generationConfigSources['baseUrl']?.kind === 'modelProviders'
           ? this._generationConfig.baseUrl
           : undefined);
-    const resolved = modelId
+    let resolved = modelId
       ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
         this.modelRegistry.getModel(authType, modelId))
       : undefined;
+    let effectiveAuthType = authType;
+    if (
+      !resolved &&
+      (authType === AuthType.USE_OPENAI ||
+        authType === AuthType.USE_OPENAI_RESPONSES) &&
+      previousAuthType === authType &&
+      this.currentRegistryBaseUrl !== undefined &&
+      modelId === this._generationConfig.model
+    ) {
+      // The selected model may merely have moved to the sibling OpenAI wire
+      // (a reinstall or settings edit that stamped `api` onto the same
+      // id+baseUrl). Adopt the sibling wire at the same endpoint instead of
+      // failing closed — throwing here wedges hot-reload refreshAuth retries
+      // for the rest of the session while a restart would follow the model.
+      // Only a genuinely-absent model throws.
+      const siblingAuthType =
+        authType === AuthType.USE_OPENAI
+          ? AuthType.USE_OPENAI_RESPONSES
+          : AuthType.USE_OPENAI;
+      const sibling = modelId
+        ? (this.modelRegistry.getModel(
+            siblingAuthType,
+            modelId,
+            providerBaseUrl,
+          ) ??
+          // Same tolerance as the primary lookup above, still gated on the
+          // same dialed origin so a sibling at a genuinely different endpoint
+          // falls through to the throw below.
+          [this.modelRegistry.getModel(siblingAuthType, modelId)].find(
+            (entry) =>
+              entry &&
+              normalizeOpenAiWireBaseUrl(entry.baseUrl) ===
+                normalizeOpenAiWireBaseUrl(providerBaseUrl ?? undefined),
+          ))
+        : undefined;
+      if (!sibling) {
+        throw new Error(
+          `Model '${modelId}' is no longer configured for authType '${authType}'. Select an available model.`,
+        );
+      }
+      resolved = sibling;
+      effectiveAuthType = siblingAuthType;
+    }
     if (resolved?.imageOnly || resolved?.voiceOnly) {
       throw new Error(
         `${resolved.imageOnly ? 'Image' : 'Voice'}-only model '${modelId}' cannot be used as the primary model`,
@@ -1048,7 +1134,7 @@ export class ModelsConfig {
     }
 
     this.strictModelProviderSelection = false;
-    this.currentAuthType = authType;
+    this.currentAuthType = effectiveAuthType;
     if (resolved) {
       // When authType and modelId haven't changed (startup/restart scenario),
       // the current apiKey was already correctly resolved by
@@ -1065,10 +1151,25 @@ export class ModelsConfig {
       // default. (See #3417)
       const hasBeenApplied =
         this.generationConfigSources['baseUrl']?.kind === 'modelProviders';
+      // The two OpenAI wires represent one endpoint differently (the Chat
+      // default is 'https://api.openai.com/v1', the Responses default ''); a
+      // raw string compare would read a sibling-wire adoption as "provider
+      // changed" and suppress the saved-apiKey restore below. Compare through
+      // the same wire normalizer switchModel uses — gated on both wires being
+      // OpenAI-family so other providers' defaults are never conflated.
+      const bothOpenAiFamily =
+        (previousAuthType === AuthType.USE_OPENAI ||
+          previousAuthType === AuthType.USE_OPENAI_RESPONSES) &&
+        (effectiveAuthType === AuthType.USE_OPENAI ||
+          effectiveAuthType === AuthType.USE_OPENAI_RESPONSES);
+      const sameBaseUrl = bothOpenAiFamily
+        ? normalizeOpenAiWireBaseUrl(this._generationConfig.baseUrl) ===
+          normalizeOpenAiWireBaseUrl(resolved.baseUrl)
+        : this._generationConfig.baseUrl === resolved.baseUrl;
       const isProviderChanged =
         hasBeenApplied &&
         (this._generationConfig.apiKeyEnvKey !== resolved.envKey ||
-          this._generationConfig.baseUrl !== resolved.baseUrl);
+          !sameBaseUrl);
       const isUnchanged =
         previousAuthType === authType &&
         this._generationConfig.model === modelId &&

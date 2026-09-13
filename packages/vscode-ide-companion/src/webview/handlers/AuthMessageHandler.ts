@@ -15,8 +15,10 @@ import {
   THIRD_PARTY_PROVIDERS,
   shouldShowStep,
   resolveBaseUrl,
+  resolveModelProtocol,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  type ModelApi,
   type ProviderConfig,
   type ProviderSetupInputs,
   type BaseUrlOption,
@@ -250,7 +252,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
       // implementation detail; QuickPick should show human-readable labels.
       const protocolLabels: Record<string, string> = {
         [AuthType.USE_OPENAI]: 'OpenAI Compatible',
-        [AuthType.USE_OPENAI_RESPONSES]: 'OpenAI Responses',
         [AuthType.USE_ANTHROPIC]: 'Anthropic',
         [AuthType.USE_GEMINI]: 'Gemini',
       };
@@ -264,6 +265,20 @@ export class AuthMessageHandler extends BaseMessageHandler {
       );
       if (!selected) return;
       protocol = selected as AuthType;
+    }
+
+    let api: ModelApi | undefined;
+    if (shouldShowStep(provider, 'api', protocol ?? provider.protocol)) {
+      const selected = await this.pick(
+        [
+          { label: 'Chat Completions', value: 'chat-completions' },
+          { label: 'Responses', value: 'responses' },
+        ],
+        `${flowTitle}: API`,
+        'Select OpenAI API',
+      );
+      if (!selected) return;
+      api = selected as ModelApi;
     }
 
     // Step 1: Base URL (if needed)
@@ -289,7 +304,14 @@ export class AuthMessageHandler extends BaseMessageHandler {
         // doesn't silently write the OpenAI endpoint when the user hits
         // Enter on the OpenAI default. Defaults come from core's shared
         // getDefaultBaseUrlForProtocol so CLI and VS Code stay in sync.
-        const effectiveProtocol = protocol ?? provider.protocol;
+        // The effective route includes the API step's pick: a Responses
+        // choice dials the /v1-less default endpoint, so deriving the
+        // fallback from the raw bucket protocol would persist the Chat
+        // Completions endpoint on the Responses wire.
+        const effectiveProtocol =
+          resolveModelProtocol(protocol ?? provider.protocol, { api }) ??
+          protocol ??
+          provider.protocol;
         // No local fallback: getDefaultBaseUrlForProtocol owns the defaults.
         // Adding an OpenAI fallback here would silently mask a new AuthType
         // that core hadn't been taught about, diverging from the CLI flow
@@ -423,6 +445,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     }
     await this.authInteractiveHandler(provider, {
       protocol,
+      ...(api ? { api } : {}),
       baseUrl,
       apiKey,
       modelIds,

@@ -4,13 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AuthType } from '../core/contentGenerator.js';
+import { AuthType } from '../core/contentGenerator.js';
 import { isImageGenerationCapable } from '../models/image-generation-capability.js';
+import {
+  resolveModelProtocol,
+  resolveModelSelectionAuthType,
+} from '../models/modelRegistry.js';
+import { ModelsConfig } from '../models/modelsConfig.js';
 import type {
+  ModelConfig,
   ModelProvidersConfig,
   ProviderProtocolConfig,
 } from '../models/types.js';
-import { ModelsConfig } from '../models/modelsConfig.js';
 import type {
   ProviderInstallPlan,
   ProviderModelProvidersPatch,
@@ -48,10 +53,21 @@ function isSameModelIdentity(
   return a.id === b.id && (a.baseUrl ?? '') === (b.baseUrl ?? '');
 }
 
+interface ModelProvidersPatchOutcome {
+  updated: ModelProvidersConfig;
+  /**
+   * Legacy `openai-responses` entries the ownership gate preserved even though
+   * they are registry-indistinguishable from a just-installed model (same id,
+   * baseUrl, and effective protocol). The registry resolves such a collision
+   * first-registration-wins, so the caller must make it loud.
+   */
+  collidingLegacy: ModelConfig[];
+}
+
 function applyModelProvidersPatch(
   existingModelProviders: ModelProvidersConfig,
   patch: ProviderModelProvidersPatch,
-): ModelProvidersConfig {
+): ModelProvidersPatchOutcome {
   const existingModels = existingModelProviders[patch.authType] ?? [];
 
   let updatedModels = patch.models;
@@ -61,10 +77,20 @@ function applyModelProvidersPatch(
     const ownsModel = patch.ownsModel;
     const preservedModels = existingModels.filter((model) => {
       if (ownsModel) {
-        return !ownsModel(model);
+        return (
+          !ownsModel(model) ||
+          !patch.models.some(
+            (newModel) =>
+              resolveModelProtocol(patch.authType, newModel) ===
+              resolveModelProtocol(patch.authType, model),
+          )
+        );
       }
-      return !patch.models.some((newModel) =>
-        isSameModelIdentity(newModel, model),
+      return !patch.models.some(
+        (newModel) =>
+          isSameModelIdentity(newModel, model) &&
+          resolveModelProtocol(patch.authType, newModel) ===
+            resolveModelProtocol(patch.authType, model),
       );
     });
 
@@ -74,10 +100,73 @@ function applyModelProvidersPatch(
         : [...patch.models, ...preservedModels];
   }
 
-  return {
+  const updated: ModelProvidersConfig = {
     ...existingModelProviders,
     [patch.authType]: updatedModels,
   };
+  let collidingLegacy: ModelConfig[] = [];
+  if (
+    patch.authType === AuthType.USE_OPENAI &&
+    patch.mergeStrategy !== 'append'
+  ) {
+    const ownsModel = patch.ownsModel;
+    // A hand-edited (or reverted-V5-shaped) bucket can be a present but
+    // non-array value; the registry skips such buckets with a warning, and
+    // the install path must not abort on them either.
+    const legacyRaw = existingModelProviders[AuthType.USE_OPENAI_RESPONSES];
+    const legacyModels = Array.isArray(legacyRaw) ? legacyRaw : undefined;
+    const preservedLegacy = legacyModels?.filter((model) => {
+      // The same ownership gate as the canonical bucket above: when the patch
+      // declares ownership, a legacy entry owned by another provider's
+      // credentials must survive even when it matches the install by identity
+      // and effective protocol.
+      if (ownsModel) {
+        return (
+          !ownsModel(model) ||
+          !patch.models.some(
+            (newModel) =>
+              resolveModelProtocol(patch.authType, newModel) ===
+              resolveModelProtocol(AuthType.USE_OPENAI_RESPONSES, model),
+          )
+        );
+      }
+      return !patch.models.some(
+        (newModel) =>
+          isSameModelIdentity(newModel, model) &&
+          resolveModelProtocol(patch.authType, newModel) ===
+            resolveModelProtocol(AuthType.USE_OPENAI_RESPONSES, model),
+      );
+    });
+    if (preservedLegacy && preservedLegacy.length !== legacyModels?.length) {
+      updated[AuthType.USE_OPENAI_RESPONSES] = preservedLegacy;
+    }
+    const survivingRaw = updated[AuthType.USE_OPENAI_RESPONSES];
+    const survivingLegacy = Array.isArray(survivingRaw) ? survivingRaw : [];
+    collidingLegacy = survivingLegacy.filter((legacy) =>
+      patch.models.some(
+        (newModel) =>
+          isSameModelIdentity(newModel, legacy) &&
+          resolveModelProtocol(patch.authType, newModel) ===
+            resolveModelProtocol(AuthType.USE_OPENAI_RESPONSES, legacy),
+      ),
+    );
+    if (collidingLegacy.length > 0) {
+      // A preserved foreign-owned entry must survive (re-pruning it is the
+      // data loss the ownership gate exists to stop), but the registry's
+      // first-registration-wins rule would otherwise hand the composite
+      // (id + baseUrl) slot to whichever bucket key sorts first in the
+      // settings JSON. Give the install the user just performed the
+      // deterministic win; the caller warns so the conflict is visible.
+      const reordered: ModelProvidersConfig = {
+        [patch.authType]: updated[patch.authType]!,
+      };
+      for (const [key, value] of Object.entries(updated)) {
+        if (key !== patch.authType) reordered[key] = value;
+      }
+      return { updated: reordered, collidingLegacy };
+    }
+  }
+  return { updated, collidingLegacy };
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +233,7 @@ export async function applyProviderInstallPlan(
     doRefreshAuth = true,
   } = options;
 
+  const selectedAuthType = settings.getValue('security.auth.selectedType');
   const serviceOnly = (plan.modelProviders ?? []).flatMap(
     (patch) => patch.models,
   );
@@ -225,7 +315,7 @@ export async function applyProviderInstallPlan(
   if (changedVoiceIds.length) {
     let prospective = previousRuntimeProviders;
     for (const patch of plan.modelProviders ?? []) {
-      prospective = applyModelProvidersPatch(prospective, patch);
+      prospective = applyModelProvidersPatch(prospective, patch).updated;
     }
     const configured = new ModelsConfig({
       modelProvidersConfig: prospective,
@@ -245,6 +335,9 @@ export async function applyProviderInstallPlan(
       );
     }
   }
+
+  const previousModelId = settings.getValue('model.name');
+  const previousBaseUrl = settings.getValue('model.baseUrl');
 
   // Track which step is in flight so a rethrow at the bottom can name it
   // (an EACCES from persist vs a refreshAuth rejection look identical
@@ -298,8 +391,11 @@ export async function applyProviderInstallPlan(
       ...previousRuntimeProviders,
     };
 
+    const collidingLegacyModels: ModelConfig[] = [];
     for (const patch of plan.modelProviders ?? []) {
-      updatedModelProviders = applyModelProvidersPatch(
+      const previousLegacy =
+        updatedModelProviders[AuthType.USE_OPENAI_RESPONSES];
+      const outcome = applyModelProvidersPatch(
         updatedModelProviders,
         preserveSelection
           ? {
@@ -313,6 +409,16 @@ export async function applyProviderInstallPlan(
             }
           : patch,
       );
+      updatedModelProviders = outcome.updated;
+      collidingLegacyModels.push(...outcome.collidingLegacy);
+      if (
+        previousLegacy !== updatedModelProviders[AuthType.USE_OPENAI_RESPONSES]
+      ) {
+        settings.setValue(
+          'modelProviders.openai-responses',
+          updatedModelProviders[AuthType.USE_OPENAI_RESPONSES],
+        );
+      }
       settings.setValue(
         `modelProviders.${patch.authType}`,
         updatedModelProviders[patch.authType] ?? [],
@@ -335,6 +441,22 @@ export async function applyProviderInstallPlan(
           plan.authType,
         );
       }
+    }
+
+    if (collidingLegacyModels.length > 0) {
+      // eslint-disable-next-line no-console -- user-facing install warning
+      console.error(
+        `[auth] Warning: ${collidingLegacyModels
+          .map(
+            (model) =>
+              `"${model.id}" (envKey ${model.envKey ?? 'none'}, baseUrl ${model.baseUrl ?? 'default'})`,
+          )
+          .join(
+            ', ',
+          )} remained on the legacy "openai-responses" route under another provider's credentials, ` +
+          `indistinguishable from the model(s) just installed. The new install takes precedence in this session; ` +
+          `remove the stale entry from settings.json to avoid ambiguity.`,
+      );
     }
 
     // Set auth type
@@ -364,6 +486,10 @@ export async function applyProviderInstallPlan(
     let effectiveModelSelection = preserveSelection
       ? undefined
       : plan.modelSelection;
+    // When the install moves the current model onto a different API route, the
+    // live session must still be re-synced below even though the model itself
+    // is kept.
+    let routeResyncSelection: { modelId: string; baseUrl?: string } | undefined;
     if (effectiveModelSelection?.modelId) {
       const currentModelId = settings.getValue('model.name');
       const currentBaseUrl = settings.getValue('model.baseUrl') as
@@ -373,17 +499,58 @@ export async function applyProviderInstallPlan(
         typeof currentModelId === 'string' &&
         currentModelId.length > 0 &&
         (plan.modelProviders ?? []).some((patch) =>
-          patch.models.some((model) =>
-            currentBaseUrl === '' || currentBaseUrl === undefined
-              ? model.id === currentModelId
-              : isSameModelIdentity(
-                  { id: currentModelId, baseUrl: currentBaseUrl },
-                  model,
-                ),
+          patch.models.some(
+            (model) =>
+              resolveModelProtocol(patch.authType, model) === plan.authType &&
+              (currentBaseUrl === '' || currentBaseUrl === undefined
+                ? model.id === currentModelId
+                : isSameModelIdentity(
+                    { id: currentModelId, baseUrl: currentBaseUrl },
+                    model,
+                  )),
           ),
         );
       if (planOffersCurrentModel) {
         effectiveModelSelection = undefined;
+        // Resolved lazily and only for OpenAI-family plans (the only ones a
+        // wire switch applies to). The selection resolver walks EVERY bucket
+        // of the pre-install providers map with the throwing per-model
+        // resolver, so a hand-edited invalid `api` sitting in an unrelated
+        // bucket must not abort this install: skip the route-resync probe
+        // instead. The plan's own write path still validates the buckets it
+        // writes with the throwing resolver.
+        let previousAuthType: AuthType | undefined;
+        if (
+          (plan.authType === AuthType.USE_OPENAI ||
+            plan.authType === AuthType.USE_OPENAI_RESPONSES) &&
+          typeof selectedAuthType === 'string'
+        ) {
+          try {
+            previousAuthType = resolveModelSelectionAuthType(
+              selectedAuthType as AuthType,
+              typeof previousModelId === 'string' ? previousModelId : undefined,
+              previousRuntimeProviders,
+              settings.getValue('providerProtocol') as
+                | ProviderProtocolConfig
+                | undefined,
+              typeof previousBaseUrl === 'string' ? previousBaseUrl : undefined,
+            );
+          } catch {
+            previousAuthType = undefined;
+          }
+        }
+        if (
+          previousAuthType !== undefined &&
+          previousAuthType !== plan.authType
+        ) {
+          // Keep the user's model, but re-sync onto the new wire for the SAME
+          // model rather than adopting the plan's default (whose modelId is
+          // always the plan's first model).
+          routeResyncSelection = {
+            modelId: currentModelId,
+            ...(currentBaseUrl ? { baseUrl: currentBaseUrl } : {}),
+          };
+        }
       }
     }
     if (effectiveModelSelection?.modelId) {
@@ -416,12 +583,15 @@ export async function applyProviderInstallPlan(
     currentStep = 'reloadModelProviders';
     updatedModelProviders = settings.getModelProviders();
     reloadModelProviders?.(updatedModelProviders);
-    if (effectiveModelSelection?.modelId) {
+    const syncSelection = effectiveModelSelection?.modelId
+      ? effectiveModelSelection
+      : routeResyncSelection;
+    if (syncSelection) {
       currentStep = 'syncAuthState';
       syncAuthState?.(
         plan.authType,
-        effectiveModelSelection.modelId,
-        effectiveModelSelection.baseUrl,
+        syncSelection.modelId,
+        syncSelection.baseUrl,
       );
     }
     if (!preserveSelection && doRefreshAuth && refreshAuth) {

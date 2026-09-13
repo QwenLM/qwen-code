@@ -366,6 +366,32 @@ describe('useAuthCommand', () => {
     expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 
+  it('uses the effective Responses auth state after OpenAI setup', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, vi.fn()),
+    );
+    await act(async () => {
+      await result.current.handleProviderSubmit(customProvider, {
+        protocol: AuthType.USE_OPENAI,
+        api: 'responses',
+        baseUrl: 'https://responses.test/v1',
+        apiKey: 'test',
+        modelIds: ['model'],
+      });
+    });
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+    expect(config.refreshAuth).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+    expect(result.current.pendingAuthType).toBeUndefined();
+  });
+
   it('cancelAuthentication resets dialog + flags + clears authError', async () => {
     const settings = createSettings();
     const config = createConfig();

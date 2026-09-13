@@ -15,8 +15,8 @@
  *  - the main menu renders the three top-level entries (ink AuthDialog
  *    parity) and Esc is blocked while unauthenticated;
  *  - main → sub-menu navigation and back follow the ink view stack;
- *  - the custom-provider wizard walks the full six-step flow
- *    (protocol → baseUrl → apiKey → models → advancedConfig → review) and
+ *  - the custom-provider wizard walks the full seven-step flow
+ *    (protocol → api → baseUrl → apiKey → models → advancedConfig → review) and
  *    the final Enter drives the same install-plan write path as ink's
  *    useAuth.handleProviderSubmit (buildInstallPlan → applyProviderInstall
  *    Plan → feedback + close);
@@ -225,7 +225,7 @@ function renderDialog(overrides?: {
   return { onClose, notify, config };
 }
 
-/** Drive main → Custom Provider → through the full six-step wizard. */
+/** Drive main → Custom Provider → through the full seven-step wizard. */
 async function runCustomProviderFlow(): Promise<{
   onClose: ReturnType<typeof vi.fn>;
   notify: ReturnType<typeof vi.fn>;
@@ -234,7 +234,8 @@ async function runCustomProviderFlow(): Promise<{
   await press('down');
   await press('down');
   await press('return'); // main: CUSTOM_PROVIDER → provider-setup (protocol)
-  await press('return'); // protocol: OpenAI-compatible → baseUrl input
+  await press('return'); // protocol: OpenAI-compatible → API selection
+  await press('return'); // API: Chat Completions → baseUrl input
   await typeText('https://api.example.com/v1');
   await press('return'); // baseUrl → apiKey
   await typeText('sk-test');
@@ -344,7 +345,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
   it('walks the custom-provider wizard and submits the install plan', async () => {
     const { onClose, notify } = await runCustomProviderFlow();
     // review: step title reflects the last step before saving
-    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(screen.getByText(/Step 7\/7 · Review/)).toBeTruthy();
     await press('return'); // save
 
     await vi.waitFor(() => {
@@ -360,15 +361,18 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('offers and saves OpenAI Responses through the custom-provider protocol filter', async () => {
+  it('offers and saves Responses within the OpenAI custom-provider choice', async () => {
     const { onClose } = renderDialog();
     await press('down');
     await press('down');
     await press('return');
     expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
-    expect(screen.getByText('OpenAI Responses')).toBeTruthy();
+    expect(screen.queryByText('OpenAI Responses')).toBeNull();
     expect(screen.getByText('Anthropic-compatible')).toBeTruthy();
     expect(screen.getByText('Gemini-compatible')).toBeTruthy();
+    await press('return');
+    expect(screen.getByText('Chat Completions')).toBeTruthy();
+    expect(screen.getByText('Responses')).toBeTruthy();
     await press('down');
     await press('return');
     await typeText('https://api.example.com/v1');
@@ -378,7 +382,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await typeText('responses-model');
     await press('return');
     await press('return');
-    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(screen.getByText(/Step 7\/7 · Review/)).toBeTruthy();
     await press('return');
     await vi.waitFor(() => {
       expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1);
@@ -395,7 +399,8 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
-    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+    await press('return'); // protocol: OpenAI-compatible → API selection
+    await press('return'); // API: Chat Completions → baseUrl input
     await typeText('https://api.example.com/v1');
     await press('return'); // baseUrl → apiKey
     await typeText('sk-test');
@@ -440,7 +445,8 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
-    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+    await press('return'); // protocol: OpenAI-compatible → API selection
+    await press('return'); // API: Chat Completions → baseUrl input
     await typeText('https://api.example.com/v1');
     await press('return'); // baseUrl → apiKey
   }
@@ -495,6 +501,6 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     expect(event.preventDefault).not.toHaveBeenCalled();
     expect(screen.getByText('auto')).toBeTruthy();
     await press('return'); // advancedConfig: skip → review
-    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(screen.getByText(/Step 7\/7 · Review/)).toBeTruthy();
   });
 });

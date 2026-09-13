@@ -20,6 +20,7 @@ import {
   AuthType,
   Storage,
   SessionIdCaseConflictError,
+  FatalConfigError,
 } from '@qwen-code/qwen-code-core';
 import { normalizeModelProposedGoals } from './config.js';
 import {
@@ -1209,6 +1210,116 @@ describe('loadCliConfig', () => {
       ServerConfig.DEFAULT_CONTEXT_FILENAME,
       ServerConfig.AGENT_CONTEXT_FILENAME,
     ]);
+  });
+
+  it('passes the effective model API to Config at startup', async () => {
+    process.argv = ['node', 'script.js'];
+    vi.stubEnv('RESPONSES_KEY', 'responses-key');
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        security: { auth: { selectedType: AuthType.USE_OPENAI } },
+        model: { name: 'gpt-model' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'gpt-model',
+              api: 'responses',
+              envKey: 'RESPONSES_KEY',
+              baseUrl: 'https://example.test/v1',
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        generationConfig: expect.objectContaining({
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          apiKey: 'responses-key',
+        }),
+      }),
+    );
+    expect(config.getModelsConfig().getCurrentAuthType()).toBe(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+  });
+
+  it('reports an invalid model api as a config error, not an unexpected crash', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      model: { name: 'gpt-model' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'gpt-model',
+            // A hand-editable typo. This resolves before the TUI starts, so an
+            // unwrapped throw leaves the user a stack trace and no way back.
+            api: 'resposnes' as 'responses',
+            envKey: 'RESPONSES_KEY',
+          },
+        ],
+      },
+    };
+
+    const err = await loadCliConfig(settings, argv).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(FatalConfigError);
+    expect((err as Error).message).toMatch(
+      /Invalid api "resposnes" for provider "openai"/,
+    );
+  });
+
+  it('reports an invalid model api as a config error even with no model selected', async () => {
+    process.argv = ['node', 'script.js'];
+    // Clear every auth env var getAuthTypeFromEnv can read so no selectedType
+    // is inferred from the runner environment.
+    for (const key of [
+      'QWEN_OAUTH',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'QWEN_MODEL',
+      'OPENAI_BASE_URL',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'GOOGLE_CLOUD_PROJECT',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_BASE_URL',
+    ]) {
+      vi.stubEnv(key, undefined);
+    }
+    const argv = await parseArguments();
+    const settings: Settings = {
+      // No security.auth.selectedType and no model.name: generation-config
+      // resolution never touches the model, so the invalid `api` is caught by
+      // the up-front validation loop in loadCliConfig — still a config error,
+      // not an unexpected crash with a stack trace.
+      modelProviders: {
+        openai: [
+          {
+            id: 'gpt-model',
+            api: 'resposnes' as 'responses',
+            envKey: 'RESPONSES_KEY',
+          },
+        ],
+      },
+    };
+
+    const err = await loadCliConfig(settings, argv).catch((e: unknown) => e);
+    vi.unstubAllEnvs();
+
+    expect(err).toBeInstanceOf(FatalConfigError);
+    expect((err as Error).message).toMatch(
+      /Invalid api "resposnes" for provider "openai"/,
+    );
   });
 
   it('registers the external agent executor factory so executor definitions dispatch (R1-7)', async () => {

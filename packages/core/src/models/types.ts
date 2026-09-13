@@ -67,12 +67,16 @@ export type ModelGenerationConfig = Pick<
   | 'toolResultContentFormat'
 >;
 
+export type ModelApi = 'chat-completions' | 'responses';
+
 /**
  * Model configuration for a single model within an authType
  */
 export interface ModelConfig {
   /** Unique model ID within authType (e.g., "qwen-coder", "gpt-4-turbo") */
   id: string;
+  /** OpenAI-compatible request API; omitted inherits the provider protocol. */
+  api?: ModelApi;
   /** Display name (defaults to id) */
   name?: string;
   /** Model description */

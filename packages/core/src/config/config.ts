@@ -2557,6 +2557,7 @@ export class Config {
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
   private contentGenerator!: ContentGenerator;
+  private readonly initialAuthType?: AuthType;
   private readonly embeddingModel: string;
 
   private modelsConfig!: ModelsConfig;
@@ -3309,8 +3310,9 @@ export class Config {
     // Prefer params.authType over generationConfig.authType because:
     // - params.authType preserves undefined (user hasn't selected yet)
     // - generationConfig.authType may have a default value from resolvers
+    this.initialAuthType = params.authType ?? params.generationConfig?.authType;
     this.modelsConfig = new ModelsConfig({
-      initialAuthType: params.authType ?? params.generationConfig?.authType,
+      initialAuthType: this.initialAuthType,
       modelProvidersConfig: this.modelProvidersConfig,
       providerProtocolConfig: this.providerProtocolConfig,
       generationConfig: {
@@ -4824,6 +4826,9 @@ export class Config {
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    if (!this.contentGenerator && authMethod === this.initialAuthType) {
+      authMethod = this.modelsConfig.getCurrentAuthType() ?? authMethod;
+    }
     // The global reasoning effort (settings.model.reasoningEffort, seeded into
     // the generation config by the CLI) is NOT a provider field, but
     // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
@@ -4838,9 +4843,13 @@ export class Config {
       ? priorReasoning.effort
       : undefined;
 
-    // Sync modelsConfig state for this auth refresh
+    // Sync modelsConfig state for this auth refresh. The sync may have
+    // followed the selected model onto the sibling OpenAI wire (a reload that
+    // stamped `api` onto the same id+baseUrl), so build the generator for the
+    // wire it actually landed on.
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
+    authMethod = this.modelsConfig.getCurrentAuthType() ?? authMethod;
 
     // Check and consume cached credentials flag
     const requireCached =

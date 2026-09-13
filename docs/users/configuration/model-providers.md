@@ -16,11 +16,11 @@ Use `modelProviders` to declare models per provider id that the `/model` picker 
 
 > [!note]
 >
-> **Model uniqueness:** Models within the same `authType` are uniquely identified by the combination of `id` + `baseUrl`. This means you can define the same model ID (e.g., `"gpt-4o"`) multiple times under a single `authType` as long as each entry has a different `baseUrl` — for example, one pointing to OpenAI directly and another to a proxy endpoint. If two entries share both the same `id` and the same `baseUrl` (or both omit `baseUrl`), the first occurrence wins and subsequent duplicates are skipped with a warning.
+> **Model uniqueness:** Models are identified by their effective API protocol, `id`, and configured `baseUrl`. You can define the same model and URL with both `api: "chat-completions"` and `api: "responses"`, or use different URLs for the same model and API. If entries share all three values, the first occurrence wins and subsequent duplicates are skipped with a warning.
 
 > [!note]
 >
-> **Hot reload vs. restart:** `modelProviders` edits in `settings.json` are picked up by a running interactive session without a restart (the file watcher debounces ~300ms; reopen `/model` to see new entries, the current selection is kept). `providerProtocol` is read once at startup and **requires a restart**.
+> **Hot reload vs. restart:** `modelProviders` edits in `settings.json` are picked up by a running interactive session without a restart (the file watcher debounces ~300ms; reopen `/model` to see new entries, the current selection is kept). Changing the active model's `api` creates a different route; select that route explicitly or restart to use it. Invalid API edits leave the prior registry usable. `providerProtocol` is read once at startup and **requires a restart**.
 
 ### Image generation routes
 
@@ -75,12 +75,12 @@ Below are comprehensive configuration examples for different authentication type
 
 ### Supported Auth Types
 
-The `modelProviders` object keys must be valid `authType` values. Currently supported auth types are:
+Use one of the built-in provider ids below, or map a custom id with `providerProtocol`:
 
 | Auth Type          | Description                                                                                                                                     |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `openai`           | OpenAI-compatible APIs (OpenAI, Azure OpenAI, local inference servers like vLLM/Ollama)                                                         |
-| `openai-responses` | OpenAI's `/v1/responses` API (native reasoning replay via `reasoning.encrypted_content`, not the Chat Completions format used by `openai`)      |
+| `openai`           | OpenAI-compatible APIs. Defaults to Chat Completions; set a model's `api` to `responses` for the Responses API.                                 |
+| `openai-responses` | Legacy Responses provider id. Existing configurations remain supported; new configurations can use `openai` with `api: "responses"`.            |
 | `anthropic`        | Anthropic Claude API                                                                                                                            |
 | `gemini`           | Google Gemini API                                                                                                                               |
 | `qwen-oauth`       | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                                                                               |
@@ -114,6 +114,33 @@ Built-in provider ids (`openai`, `openai-responses`, `gemini`, `anthropic`, `ver
 ```
 
 Without a matching `providerProtocol` entry, a custom provider id is skipped (see the warning above).
+
+### Selecting the OpenAI API
+
+Set `api` beside `id`, `envKey`, and `baseUrl` on an OpenAI-compatible model:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "my-model",
+        "api": "responses",
+        "envKey": "OPENAI_API_KEY",
+        "baseUrl": "https://api.openai.com/v1"
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "my-model" }
+}
+```
+
+The supported values are `chat-completions` and `responses`. Omitting `api` preserves the inherited protocol: `openai` uses Chat Completions and legacy `openai-responses` uses Responses. An explicit value overrides either OpenAI protocol, including custom providers mapped to one of them. Other values, or `api` on an Anthropic, Gemini, Vertex AI, or Qwen OAuth model, are configuration errors.
+
+`api` is local routing metadata; it does not belong in `generationConfig` or `extra_body` and is not sent in the request body. Both APIs use OpenAI credentials, and existing explicit `envKey` values retain their meaning. In `/auth` → Custom Provider, select OpenAI-compatible and then the API format.
+
+At startup, `selectedType: "openai"` can resolve a model explicitly configured with `api: "responses"` when there is no matching Chat route. The model picker and recorded sessions retain the effective protocol (`openai` or `openai-responses`) so both routes can be selected and resumed independently. No endpoint detection or automatic fallback occurs when an API request fails.
 
 ### Transports Used for API Requests
 
@@ -219,7 +246,7 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 
 ### OpenAI Responses API (`openai-responses`)
 
-This auth type targets OpenAI's `/v1/responses` endpoint rather than Chat Completions. When the endpoint returns encrypted reasoning with visible thought text, it replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`. Compatible endpoints that stream `response.reasoning_text.delta` also display their reasoning, but endpoints without `encrypted_content` cannot replay the opaque reasoning state. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.
+Use `openai` with `api: "responses"` to target OpenAI's `/v1/responses` endpoint. The legacy `openai-responses` provider id remains supported with the same behavior. When the endpoint returns encrypted reasoning with visible thought text, it replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`. Compatible endpoints that stream `response.reasoning_text.delta` also display their reasoning, but endpoints without `encrypted_content` cannot replay the opaque reasoning state. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.
 
 ```json
 {
@@ -227,9 +254,10 @@ This auth type targets OpenAI's `/v1/responses` endpoint rather than Chat Comple
     "OPENAI_API_KEY": "sk-your-actual-openai-key-here"
   },
   "modelProviders": {
-    "openai-responses": [
+    "openai": [
       {
         "id": "gpt-5.1",
+        "api": "responses",
         "name": "GPT-5.1 (Responses API)",
         "envKey": "OPENAI_API_KEY",
         "baseUrl": "https://api.openai.com/v1",

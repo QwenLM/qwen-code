@@ -36,6 +36,7 @@ import {
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
 import {
+  normalizeOpenAiWireBaseUrl,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_MAX_LIFETIME_MS,
   DISABLED_REQUEST_TIMEOUT_MS,
@@ -50,6 +51,11 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ResponsesHttpError } from '../../utils/responses-http-error.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
+
+// Re-exported for existing consumers; the definition lives in the
+// dependency-free constants leaf so config/model modules can import it
+// without this module's SDK closure.
+export { normalizeOpenAiWireBaseUrl };
 
 /**
  * Thrown when the SSE read loop goes silent past the inactivity timeout.
@@ -567,9 +573,7 @@ export class ResponsesPipeline {
     apiRequest: ResponsesApiRequest,
     signal?: AbortSignal,
   ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
-    const baseUrl = (this.config.baseUrl || 'https://api.openai.com')
-      .replace(/\/v1\/?$/, '')
-      .replace(/\/$/, '');
+    const baseUrl = normalizeOpenAiWireBaseUrl(this.config.baseUrl);
     const url = `${baseUrl}/v1/responses`;
 
     const headers: Record<string, string> = {

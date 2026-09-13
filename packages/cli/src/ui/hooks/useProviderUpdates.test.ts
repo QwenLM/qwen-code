@@ -278,6 +278,11 @@ describe('useProviderUpdates', () => {
         samplingParams: { temperature: 0.2 },
       },
     };
+    const responsesModel = {
+      ...customModel,
+      id: 'responses-only',
+      api: 'responses' as const,
+    };
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
@@ -292,6 +297,7 @@ describe('useProviderUpdates', () => {
           generationConfig: { contextWindowSize: 262144 },
         })),
         customModel,
+        responsesModel,
       ],
     };
     mockConfig.refreshAuth.mockResolvedValue(undefined);
@@ -319,6 +325,11 @@ describe('useProviderUpdates', () => {
     });
 
     const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
+    expect(
+      reloaded[AuthType.USE_OPENAI].filter(
+        (model: { id: string }) => model.id === 'responses-only',
+      ),
+    ).toEqual([responsesModel]);
     expect(reloaded[AuthType.USE_OPENAI]).toEqual(
       expect.arrayContaining([customModel, ...chinaTemplate]),
     );

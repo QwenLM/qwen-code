@@ -66,6 +66,97 @@ export function resolveProviderProtocol(
   return validateAuthTypeKey(providerId);
 }
 
+export function resolveModelProtocol(
+  providerId: string,
+  model: Pick<ModelConfig, 'api'>,
+  providerProtocol?: ProviderProtocolConfig,
+): AuthType | undefined {
+  const protocol = resolveProviderProtocol(providerId, providerProtocol);
+  if (!protocol || model.api === undefined) return protocol;
+  if (model.api !== 'chat-completions' && model.api !== 'responses') {
+    throw new Error(
+      `Invalid api "${model.api}" for provider "${providerId}". Expected "chat-completions" or "responses".`,
+    );
+  }
+  if (
+    protocol !== AuthType.USE_OPENAI &&
+    protocol !== AuthType.USE_OPENAI_RESPONSES
+  ) {
+    throw new Error(
+      `Provider "${providerId}" uses protocol "${protocol}"; api is only supported for OpenAI-compatible models.`,
+    );
+  }
+  return model.api === 'responses'
+    ? AuthType.USE_OPENAI_RESPONSES
+    : AuthType.USE_OPENAI;
+}
+
+/**
+ * {@link resolveModelProtocol} for read paths: returns `undefined` instead of
+ * throwing when an entry's `api` is invalid, so one hand-edited entry cannot
+ * take down a whole listing or an unrelated install. Write and startup paths
+ * keep using the throwing resolver — an invalid value stays a config error
+ * there.
+ */
+export function tryResolveModelProtocol(
+  providerId: string,
+  model: Pick<ModelConfig, 'api'>,
+  providerProtocol?: ProviderProtocolConfig,
+): AuthType | undefined {
+  try {
+    return resolveModelProtocol(providerId, model, providerProtocol);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve raw startup settings, never an explicit switch or saved route. */
+export function resolveModelSelectionAuthType(
+  authType: AuthType,
+  modelId: string | undefined,
+  modelProviders?: ModelProvidersConfig,
+  providerProtocol?: ProviderProtocolConfig,
+  baseUrl?: string | null,
+): AuthType {
+  if (
+    authType !== AuthType.USE_OPENAI &&
+    authType !== AuthType.USE_OPENAI_RESPONSES
+  ) {
+    return authType;
+  }
+  const candidates: Array<{ model: ModelConfig; authType: AuthType }> = [];
+  for (const [providerId, models] of Object.entries(modelProviders ?? {})) {
+    if (!Array.isArray(models)) continue;
+    for (const model of models) {
+      const protocol = resolveModelProtocol(
+        providerId,
+        model,
+        providerProtocol,
+      );
+      if (
+        (modelId ? model.id === modelId : !model.imageOnly) &&
+        (protocol === authType ||
+          (model.api !== undefined &&
+            (protocol === AuthType.USE_OPENAI ||
+              protocol === AuthType.USE_OPENAI_RESPONSES)))
+      ) {
+        candidates.push({ model, authType: protocol });
+      }
+    }
+  }
+  const preferred = (entries: typeof candidates) =>
+    entries.find((entry) => entry.authType === authType) ?? entries[0];
+  const exact =
+    baseUrl === undefined
+      ? undefined
+      : preferred(
+          candidates.filter(
+            (entry) => (entry.model.baseUrl ?? null) === baseUrl,
+          ),
+        );
+  return (exact ?? preferred(candidates))?.authType ?? authType;
+}
+
 function shouldUseCanonicalModalities(modelId: string): boolean {
   return /^minimax-m3/i.test(modelId.trim().toLowerCase());
 }
@@ -153,6 +244,15 @@ export class ModelRegistry {
 
       // qwen-oauth uses hard-coded models and cannot be overridden
       if (protocol === AuthType.QWEN_OAUTH) {
+        if (Array.isArray(models)) {
+          for (const model of models) {
+            resolveModelProtocol(
+              providerId,
+              model,
+              this.providerProtocolConfig,
+            );
+          }
+        }
         continue;
       }
 
@@ -189,27 +289,31 @@ export class ModelRegistry {
     // resolve to the same protocol (e.g. `openai` and a custom `idealab` both
     // routing to the openai protocol). First registration of a composite
     // (id + baseUrl) key wins.
-    const modelMap =
-      this.modelsByAuthType.get(authType) ??
-      new Map<string, ResolvedModelConfig>();
     const providerLabel =
       providerId && providerId !== authType
         ? ` (provider "${providerId}")`
         : '';
 
     for (const config of models) {
+      const modelAuthType = resolveModelProtocol(
+        providerId ?? authType,
+        config,
+        providerId ? this.providerProtocolConfig : undefined,
+      )!;
+      const modelMap =
+        this.modelsByAuthType.get(modelAuthType) ??
+        new Map<string, ResolvedModelConfig>();
       const key = modelRegistryKey(config.id, config.baseUrl);
       if (modelMap.has(key)) {
         debugLogger.warn(
-          `Duplicate model id "${config.id}"${config.baseUrl ? ` with baseUrl "${config.baseUrl}"` : ''} for protocol "${authType}"${providerLabel}. Using the first registered config.`,
+          `Duplicate model id "${config.id}"${config.baseUrl ? ` with baseUrl "${config.baseUrl}"` : ''} for protocol "${modelAuthType}"${providerLabel}. Using the first registered config.`,
         );
         continue;
       }
-      const resolved = this.resolveModelConfig(config, authType);
+      const resolved = this.resolveModelConfig(config, modelAuthType);
       modelMap.set(key, resolved);
+      this.modelsByAuthType.set(modelAuthType, modelMap);
     }
-
-    this.modelsByAuthType.set(authType, modelMap);
   }
 
   /**
