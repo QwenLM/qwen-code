@@ -856,7 +856,7 @@ const EN: Messages = {
   'contextUsage.builtinTools': 'Built-in tools',
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
-  'contextUsage.estimatedOverhead': 'Estimated pre-conversation overhead',
+  'contextUsage.estimatedOverhead': 'Estimated base overhead',
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
@@ -866,8 +866,8 @@ const EN: Messages = {
   'contextUsage.model': 'Model',
   'contextUsage.noSession':
     'No active session yet. Send your first message before viewing context usage.',
-  'contextUsage.noApiResponse':
-    'No API response yet. Send a message to see actual usage.',
+  'contextUsage.usageUnavailable':
+    'Current context usage is unavailable. The estimates below cover base overhead only, excluding conversation messages.',
   'contextUsage.overLimit':
     'Context exceeds limit! Use /compress or /clear to reduce.',
   'contextUsage.skills': 'Skills',
@@ -4610,7 +4610,7 @@ const ZH: Messages = {
   'contextUsage.builtinTools': '内置工具',
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
-  'contextUsage.estimatedOverhead': '预估的对话前开销',
+  'contextUsage.estimatedOverhead': '基础开销估算',
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
@@ -4620,8 +4620,8 @@ const ZH: Messages = {
   'contextUsage.model': '模型',
   'contextUsage.noSession':
     '当前还没有会话。请先发送第一条消息，再查看上下文使用情况。',
-  'contextUsage.noApiResponse':
-    '尚无 API 响应。发送一条消息后可查看实际使用量。',
+  'contextUsage.usageUnavailable':
+    '当前上下文用量暂不可用。下方仅为基础开销估算，不含对话消息。',
   'contextUsage.overLimit':
     '上下文已超过限制！请使用 /compress 或 /clear 减少占用。',
   'contextUsage.skills': 'Skills',

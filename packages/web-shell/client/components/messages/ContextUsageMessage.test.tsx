@@ -53,13 +53,14 @@ function render(
   status: DaemonSessionContextUsageStatus,
   compact?: boolean,
   onShowDetail?: () => void,
+  language: 'en' | 'zh-CN' = 'en',
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <ContextUsageMessage
           status={status}
           onShowDetail={onShowDetail}
@@ -275,17 +276,30 @@ describe('ContextUsageMessage', () => {
     );
   });
 
-  it('uses the pre-conversation view before any token count is available', () => {
-    const container = render(makeStatus(0, true));
-
-    expect(container.textContent).toContain('No API response yet.');
-    expect(container.textContent).toContain(
-      'Estimated pre-conversation overhead',
-    );
-    expect(container.textContent).not.toContain('Messages');
-    expect(container.textContent).not.toContain('Used');
-    expect(
-      container.querySelector('[data-web-shell-context-meter]'),
-    ).toBeNull();
-  });
+  it.each(['en', 'zh-CN'] as const)(
+    'explains unknown usage without assuming an empty conversation (%s)',
+    (language) => {
+      for (const compact of [false, true]) {
+        const container = render(
+          makeStatus(0, true),
+          compact,
+          undefined,
+          language,
+        );
+        expect(container.textContent).toContain(
+          language === 'en'
+            ? 'Current context usage is unavailable. The estimates below cover base overhead only, excluding conversation messages.'
+            : '当前上下文用量暂不可用。下方仅为基础开销估算，不含对话消息。',
+        );
+        expect(
+          container.querySelector('[class*="sectionTitle"]')?.textContent,
+        ).toBe(language === 'en' ? 'Estimated base overhead' : '基础开销估算');
+        expect(container.querySelector('[class*="total"]')).toBeNull();
+        expect(container.querySelector('[class*="remaining"]')).toBeNull();
+        expect(
+          container.querySelector('[data-web-shell-context-meter]'),
+        ).toBeNull();
+      }
+    },
+  );
 });

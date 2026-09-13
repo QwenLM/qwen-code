@@ -304,7 +304,7 @@ export function ContextUsageMessage({
       {!hasTokenCount ? (
         <>
           <div className={styles.estimateHint}>
-            {t('contextUsage.noApiResponse')}
+            {t('contextUsage.usageUnavailable')}
           </div>
           <div className={styles.sectionTitle}>
             {t('contextUsage.estimatedOverhead')}

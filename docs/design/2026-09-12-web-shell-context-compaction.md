@@ -33,8 +33,14 @@ details start expanded. Disclosure state lasts for the current mount.
 
 Transcript readings are explicitly labeled as snapshots. Detailed snapshots
 offer the existing current-context read action when available. Refreshes and
-compression never rewrite previous snapshots. Before the first usage reading,
-retain the estimated-overhead view instead of implying measured zero usage.
+compression never rewrite previous snapshots. When no usage count is available,
+label the total as unavailable and the breakdown as estimated base overhead,
+excluding conversation messages. Do not infer an empty conversation or absent
+API responses. Cold load and resume authenticate the restored model before
+initializing chat, so saved token counts bind to the authenticated route and
+remain readable without sending a new message. A restored conversation without
+saved usage retains an unknown count; it must never borrow another session's
+process-wide telemetry count.
 
 ## Manual compression and ownership
 

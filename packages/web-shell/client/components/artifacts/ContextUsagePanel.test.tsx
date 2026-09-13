@@ -739,15 +739,15 @@ describe('ContextUsagePanel', () => {
     },
   );
 
-  it('preserves no-provider wording', async () => {
+  it('explains unavailable usage without assuming no API responses', async () => {
     const snapshot = fixture();
     snapshot.usage.totalTokens = 0;
     const { container } = renderPanel(vi.fn().mockResolvedValue(snapshot));
     await act(async () => {});
-    expect(container.textContent).toContain('No API response yet.');
     expect(container.textContent).toContain(
-      'Estimated pre-conversation overhead',
+      'Current context usage is unavailable.',
     );
+    expect(container.textContent).toContain('Estimated base overhead');
   });
 
   it.each(['session', 'actions'])(
