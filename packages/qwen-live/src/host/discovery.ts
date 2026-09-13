@@ -244,6 +244,10 @@ async function inspectDirectory(
   if (
     !stat.isDirectory() ||
     stat.isSymbolicLink() ||
+    // Windows stat modes are synthetic, so the POSIX privacy check applies
+    // only where the bits are real. Kept in step by hand with
+    // privateDirectory() in ../proactive/monitor-debug-store.ts, which
+    // carries the same carve-out at a looser setting (any owner-only mode).
     (process.platform !== 'win32' &&
       ((requirePrivateMode && (stat.mode & 0o777) !== 0o700) ||
         (typeof process.getuid === 'function' &&

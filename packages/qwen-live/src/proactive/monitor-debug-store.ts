@@ -43,7 +43,9 @@ async function privateDirectory(path: string): Promise<void> {
     !stat.isDirectory() ||
     stat.isSymbolicLink() ||
     // Windows stat modes are synthetic (directories report 0o777), so the
-    // POSIX privacy check applies only where the bits are real.
+    // POSIX privacy check applies only where the bits are real. Kept in step
+    // by hand with inspectDirectory() in ../host/discovery.ts, which carries
+    // the same carve-out at a stricter setting (exact 0o700).
     (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
     (process.getuid && stat.uid !== process.getuid())
   )
