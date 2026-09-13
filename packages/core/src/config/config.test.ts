@@ -6619,6 +6619,48 @@ describe('Server Config (config.ts)', () => {
       ).toBeUndefined();
     });
 
+    it('retains an image selection while the tool registry is still initializing', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      let release!: (registry: ToolRegistry) => void;
+      const createRegistry = vi
+        .spyOn(config, 'createToolRegistry')
+        .mockReturnValue(
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+        );
+      const initializing = config.initialize();
+      await vi.waitFor(() => expect(createRegistry).toHaveBeenCalled());
+      const selection = `openai:qwen-image-2.0\0${baseUrl}`;
+      try {
+        await expect(config.setImageModel(selection)).resolves.toBeUndefined();
+      } finally {
+        release(new ToolRegistry(config));
+        await initializing;
+      }
+      expect(config.getImageGenerationConfig()).toMatchObject({
+        model: 'qwen-image-2.0',
+        baseUrl,
+      });
+      await config.setImageModel(selection);
+      expect(ToolRegistry.prototype.ensureTool).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+      );
+    });
+
     it('registers image_gen immediately when the image model changes at runtime', async () => {
       const baseUrl = 'https://images.example.com/api/v1';
       const config = new Config({
@@ -6637,6 +6679,9 @@ describe('Server Config (config.ts)', () => {
       await config.initialize();
       vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
 
+      const refreshTools = vi
+        .spyOn(config.getLlmClient(), 'setTools')
+        .mockResolvedValue(undefined);
       await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
 
       expect(ToolRegistry.prototype.registerFactory).toHaveBeenCalledWith(
@@ -6646,6 +6691,10 @@ describe('Server Config (config.ts)', () => {
       expect(ToolRegistry.prototype.ensureTool).toHaveBeenCalledWith(
         ToolNames.IMAGE_GEN,
       );
+      expect(refreshTools).toHaveBeenCalledOnce();
+      await config.setImageModel('');
+      expect(config.isImageGenerationEnabled()).toBe(false);
+      expect(refreshTools).toHaveBeenCalledTimes(2);
     });
 
     it('does not register image_gen when the permission manager disables it', async () => {
@@ -13554,6 +13603,24 @@ describe('BaseLlmClient Lifecycle', () => {
     );
   });
 
+  it('reads current provider protocols through the reloaded model registry', () => {
+    const providers = { alternate: [{ id: 'test-model' }] };
+    const config = new Config({
+      ...baseParams,
+      modelProvidersConfig: providers,
+      providerProtocolConfig: { alternate: 'openai' },
+    });
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'openai' });
+    config.reloadModelProvidersConfig(providers, { alternate: 'gemini' });
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'gemini' });
+    config.reloadModelProvidersConfig({});
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'gemini' });
+    expect(config.getModelProvidersConfig()).toEqual({});
+    config.reloadModelProvidersConfig(providers, {});
+    expect(config.getProviderProtocolConfig()).toEqual({});
+    expect(config.getModelProvidersConfig()).toEqual(providers);
+  });
+
   it('clears per-model generators when provider config is reloaded', async () => {
     const config = new Config(baseParams);
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -14767,5 +14834,122 @@ describe('Model Switching and Config Updates', () => {
 
     expect(config.getActiveTodoReminder('old-prompt')).toBeUndefined();
     expect(config.getActiveTodoWorkChainOwner('old-retry')).toBe('old-retry');
+  });
+
+  it('keeps live related automatic-turn mappings when continuing a chain', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'R');
+    config.startAutomaticActiveTodoWorkChain('prompt-auto', 'prompt-user');
+
+    // The branch an ordinary turn now routes through when a reminder is
+    // registered (#10953). It must re-point the chain without orphaning the
+    // live automatic turn's mapping.
+    config.startActiveTodoWorkChain('prompt-user-2', 'prompt-user');
+
+    // The automatic turn completes the whole plan: its todo_write must reach
+    // the shared owner and delete the finished plan's reminder.
+    config.setActiveTodoReminder('prompt-auto', undefined);
+
+    expect(config.getActiveTodoReminder('prompt-user-2')).toBeUndefined();
+  });
+
+  it('keeps a live related automatic-turn mapping for a non-completing plan update', () => {
+    // A related automatic turn whose todo_write is a NON-completing update
+    // (still unfinished items) must resolve to the shared owner, so the
+    // updated plan lands under the foreground chain instead of stranding a
+    // stale copy under the orphaned automatic prompt id. The completing
+    // write in the sibling test clears session-wide regardless of ownership,
+    // so it cannot discriminate the retention loop; a non-completing write
+    // only lands on the shared owner when the loop keeps `prompt-auto ->
+    // prompt-user` alive — `owners.clear()` would orphan it to itself and
+    // leave the superseded plan re-injected.
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'R1');
+    config.startAutomaticActiveTodoWorkChain('prompt-auto', 'prompt-user');
+
+    config.startActiveTodoWorkChain('prompt-user-2', 'prompt-user');
+
+    config.setActiveTodoReminder('prompt-auto', 'R2');
+
+    expect(config.getActiveTodoReminder('prompt-user-2')).toBe('R2');
+  });
+
+  it('clears the foreground reminder when an unrelated automatic turn completes the shared plan', () => {
+    // An isolated cron/notification turn has no `continuedFrom`, so its
+    // completion todo_write resolves to its own prompt id and, before the
+    // session-wide clear, would leave the foreground reminder behind. The
+    // plan file is session-scoped, so completion must clear every reminder.
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('p1');
+    config.setActiveTodoReminder('p1', 'R');
+    config.startAutomaticActiveTodoWorkChain('p-cron');
+
+    config.setActiveTodoReminder('p-cron', undefined);
+
+    expect(config.getActiveTodoReminder('p1')).toBeUndefined();
+  });
+
+  it('does not carry the foreground reminder when the plan was last written by a foreign owner', () => {
+    // The continuation guard carries a registered reminder only when the
+    // foreground head still owns the session plan file. A real write from the
+    // foreground records that ownership; an isolated cron/notification turn
+    // that rewrites the plan under its own owner must flip the predicate off.
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('p1');
+    config.setActiveTodoReminder('p1', 'R1');
+    config.recordActiveTodoPlanWriter('p1');
+
+    expect(
+      config.getActiveTodoReminder('p1') !== undefined &&
+        config.getActiveTodoWorkChainOwner('p1') ===
+          config.getActiveTodoPlanWriterOwner(),
+    ).toBe(true);
+
+    config.startAutomaticActiveTodoWorkChain('p-cron');
+    config.recordActiveTodoPlanWriter('p-cron');
+    config.setActiveTodoReminder('p-cron', 'R2');
+
+    expect(
+      config.getActiveTodoReminder('p1') !== undefined &&
+        config.getActiveTodoWorkChainOwner('p1') ===
+          config.getActiveTodoPlanWriterOwner(),
+    ).toBe(false);
+  });
+
+  it('prunes the superseded foreground head when continuing a chain', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user-1');
+    config.setActiveTodoReminder('prompt-user-1', 'R');
+
+    config.startActiveTodoWorkChain('prompt-user-2', 'prompt-user-1');
+
+    // The old head must no longer resolve to the shared owner; it falls back
+    // to itself so the owners map does not grow one entry per continuation.
+    expect(config.getActiveTodoWorkChainOwner('prompt-user-2', 'stale')).toBe(
+      'prompt-user-1',
+    );
+    expect(config.getActiveTodoWorkChainOwner('prompt-user-1', 'stale')).toBe(
+      'stale',
+    );
+  });
+
+  it('clearActiveTodoReminders clears reminders, owners, and cadence counters', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'R');
+    config.startAutomaticActiveTodoWorkChain('prompt-auto', 'prompt-user');
+
+    config.clearActiveTodoReminders();
+
+    expect(config.getActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.getActiveTodoWorkChainOwner('prompt-user')).toBe(
+      'prompt-user',
+    );
+    expect(config.getActiveTodoWorkChainOwner('prompt-auto')).toBe(
+      'prompt-auto',
+    );
+    expect(config.takeActiveTodoReminder('prompt-user', true)).toBeUndefined();
   });
 });

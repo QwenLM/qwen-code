@@ -154,6 +154,94 @@ describe('ToolRegistry', () => {
     vi.restoreAllMocks();
   });
 
+  it('hides a loaded image tool while disabled and restores it when re-enabled', async () => {
+    const enabled = vi
+      .spyOn(config, 'isImageGenerationEnabled')
+      .mockReturnValue(true);
+    const tool = new MockTool({ name: 'image_gen', shouldDefer: true });
+    toolRegistry.registerTool(tool);
+    toolRegistry.revealDeferredTool('image_gen');
+    expect(toolRegistry.getFunctionDeclarations()).toContainEqual(tool.schema);
+    enabled.mockReturnValue(false);
+    expect(
+      toolRegistry.getFunctionDeclarations({ includeDeferred: true }),
+    ).not.toContainEqual(tool.schema);
+    expect(toolRegistry.getFunctionDeclarationsFiltered(['image_gen'])).toEqual(
+      [],
+    );
+    expect(toolRegistry.getAllTools()).not.toContain(tool);
+    expect(toolRegistry.getAllToolNames()).not.toContain('image_gen');
+    expect(
+      toolRegistry
+        .getDeferredToolSummary()
+        .some((entry) => entry.name === 'image_gen'),
+    ).toBe(false);
+    expect(toolRegistry.getTool('image_gen')).toBeUndefined();
+    expect(await toolRegistry.ensureTool('image_gen')).toBeUndefined();
+    enabled.mockReturnValue(true);
+    expect(await toolRegistry.ensureTool('image_gen')).toBe(tool);
+    expect(toolRegistry.getFunctionDeclarations()).toContainEqual(tool.schema);
+  });
+
+  it.each(['image_gen', 'propose_goal'] as const)(
+    'updates code mode bindings when %s availability changes',
+    async (name) => {
+      const baseUrl = 'https://images.example/v1';
+      const config = new Config({
+        ...baseConfigParams,
+        codeModeOnly: true,
+        experimentalZedIntegration: true,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              imageOnly: true,
+              envKey: 'TEST_IMAGE_API_KEY',
+            },
+          ],
+        },
+      });
+      config.setGoalProposalHostSupported(true);
+      const registry = new ToolRegistry(config);
+      const tool = new MockTool({ name });
+      registry.registerTool(tool);
+      registry.registerTool(new MockTool({ name: 'exec' }));
+      registry.registerTool(new MockTool({ name: 'other_tool' }));
+      for (const enabled of [true, false, true]) {
+        if (name === 'image_gen')
+          await config.setImageModel(
+            enabled ? `openai:qwen-image-2.0\0${baseUrl}` : '',
+          );
+        else config.setGoalProposalTurnKey(enabled ? 'user-turn' : undefined);
+        const bindings = registry
+          .getCodeModeBindingPlan()
+          .bindings.map((binding) => binding.name);
+        expect(bindings.includes(name)).toBe(enabled);
+        expect(bindings).toContain('other_tool');
+        for (const declarations of [
+          registry.getFunctionDeclarations(),
+          registry.getFunctionDeclarationsFiltered([name, 'other_tool']),
+        ]) {
+          const exec = declarations.find(
+            (declaration) => declaration.name === 'exec',
+          );
+          expect(exec?.description).toContain('tools.other_tool(args:');
+          expect(exec?.description?.includes(`tools.${name}(args:`)).toBe(
+            enabled,
+          );
+        }
+        if (name === 'image_gen') {
+          expect(config.isImageGenerationEnabled()).toBe(enabled);
+          expect(registry.getTool(name)).toBe(enabled ? tool : undefined);
+          expect(await registry.ensureTool(name)).toBe(
+            enabled ? tool : undefined,
+          );
+        } else expect(config.isGoalProposalAvailable()).toBe(enabled);
+      }
+    },
+  );
+
   describe('registerTool', () => {
     it('should register a new tool', () => {
       const tool = new MockTool({ name: 'mock-tool' });

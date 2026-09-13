@@ -8,7 +8,6 @@ import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { spawn, type ChildProcess } from 'node:child_process';
-import * as fs from 'node:fs';
 import * as path from 'path';
 import { pathToFileURL } from 'url';
 import { globSync } from 'glob';
@@ -22,6 +21,7 @@ import {
   DEFAULT_LSP_STARTUP_TIMEOUT_MS,
   DEFAULT_LSP_WARMUP_DELAY_MS,
 } from './constants.js';
+import { resolveTextDocumentSync } from './types.js';
 import type {
   LspConnectionResult,
   LspProcessDiagnostics,
@@ -30,6 +30,7 @@ import type {
   LspServerHandle,
   LspServerStatus,
   LspSocketOptions,
+  LspTextDocumentSync,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { lspServerConfigHash } from './configHash.js';
@@ -202,7 +203,9 @@ export class LspServerManager {
       }
 
       const nextHash = desiredHashes.get(name);
-      if (this.serverConfigHashes.get(name) !== nextHash) {
+      if (this.serverConfigHashes.get(name) === nextHash) {
+        result.unchanged.push(name);
+      } else {
         await this.abortAndWaitForStartup(handle);
         await this.stopServer(name, handle);
         const nextHandle: LspServerHandle = {
@@ -220,8 +223,6 @@ export class LspServerManager {
           }
           result.restarted.push(name);
         }
-      } else {
-        result.unchanged.push(name);
       }
     }
 
@@ -263,26 +264,32 @@ export class LspServerManager {
 
   /**
    * Ensure tsserver has at least one file open so navto/navtree requests succeed.
-   * Sets warmedUp flag only after successful warm-up to allow retry on failure.
+   * Latches unsupported attempts to avoid repeated discovery; delivery failures retry.
    *
    * @param handle - The LSP server handle
    * @param force - Force re-warmup even if already warmed up
-   * @returns The URI of the file opened during warmup, or undefined if no file was opened
+   * @param synchronizeDocument - Service-owned synchronization of the warmup file
    */
   async warmupTypescriptServer(
     handle: LspServerHandle,
+    synchronizeDocument: (uri: string, languageId: string) => boolean,
     force = false,
-  ): Promise<string | undefined> {
+  ): Promise<void> {
     if (!handle.connection || !this.isTypescriptServer(handle)) {
-      return undefined;
+      return;
     }
     if (handle.warmedUp && !force) {
-      return undefined;
+      return;
     }
+    const connection = handle.connection;
     const tsFile = this.findFirstTypescriptFile();
     if (!tsFile) {
-      return undefined;
+      return;
     }
+    // A failed forced attempt must stay retryable instead of latching warm. Kept
+    // below the discovery guard so a forced attempt that never reaches delivery
+    // (no TypeScript file found) cannot permanently destroy an established latch.
+    if (force) handle.warmedUp = false;
 
     const uri = pathToFileURL(tsFile).toString();
     const languageId = tsFile.endsWith('.tsx')
@@ -293,30 +300,27 @@ export class LspServerManager {
           ? 'javascript'
           : 'typescript';
     try {
-      const text = fs.readFileSync(tsFile, 'utf-8');
-      handle.connection.send({
-        jsonrpc: '2.0',
-        method: 'textDocument/didOpen',
-        params: {
-          textDocument: {
-            uri,
-            languageId,
-            version: 1,
-            text,
-          },
-        },
-      });
+      const sent = synchronizeDocument(uri, languageId);
+      const { change, openClose } = resolveTextDocumentSync(
+        handle.textDocumentSync,
+      );
+      if (!sent && (!openClose || (force && change !== 1 && change !== 2))) {
+        debugLogger.warn(
+          `TypeScript server ${handle.config.name} warm-up delivered no notification (textDocumentSync=${JSON.stringify(handle.textDocumentSync)})`,
+        );
+        handle.warmedUp = true;
+        return;
+      }
       // Give tsserver a moment to build the project.
       await new Promise((resolve) =>
         setTimeout(resolve, DEFAULT_LSP_WARMUP_DELAY_MS),
       );
-      // Only mark as warmed up after successful completion
-      handle.warmedUp = true;
-      return uri;
+      // Only mark the connection whose warmup has actually settled.
+      if (handle.connection === connection) handle.warmedUp = true;
     } catch (error) {
       // Do not set warmedUp to true on failure, allowing retry
       debugLogger.warn('TypeScript server warm-up failed:', error);
-      return undefined;
+      return;
     }
   }
 
@@ -443,6 +447,7 @@ export class LspServerManager {
       handle.error = undefined;
       handle.processDiagnostics = undefined;
       handle.warmedUp = false;
+      handle.textDocumentSync = undefined;
       handle.status = 'IN_PROGRESS';
       debugLogger.info(
         `Starting LSP server ${name}: command=${
@@ -464,7 +469,7 @@ export class LspServerManager {
       const startupExit = this.createStartupExitWatcher(name, handle);
       try {
         // Initialize LSP server
-        await this.raceStartupAbort(
+        handle.textDocumentSync = await this.raceStartupAbort(
           this.initializeLspServer(connection, handle.config),
           startupAbortController.signal,
           undefined,
@@ -1152,7 +1157,7 @@ export class LspServerManager {
   private async initializeLspServer(
     connection: LspConnectionResult,
     config: LspServerConfig,
-  ): Promise<void> {
+  ): Promise<LspTextDocumentSync | undefined> {
     const workspaceFolderPath = config.workspaceFolder ?? this.workspaceRoot;
     const workspaceFolder = {
       name: path.basename(workspaceFolderPath) || workspaceFolderPath,
@@ -1180,7 +1185,9 @@ export class LspServerManager {
       initializationOptions: config.initializationOptions,
     };
 
-    await connection.initialize(initializeParams);
+    const result = (await connection.initialize(initializeParams)) as
+      | { capabilities?: { textDocumentSync?: LspTextDocumentSync } }
+      | undefined;
 
     // Send initialized notification and workspace folders change to help servers (e.g. tsserver)
     // create projects in the correct workspace.
@@ -1210,9 +1217,7 @@ export class LspServerManager {
       });
     }
 
-    // Note: TypeScript server warm-up is handled by warmupTypescriptServer()
-    // which is called before every LSP request. This avoids duplicate
-    // textDocument/didOpen notifications that aren't tracked in openedDocuments.
+    return result?.capabilities?.textDocumentSync;
   }
 
   /**

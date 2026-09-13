@@ -1031,6 +1031,35 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('model configuration', () => {
+    it('loads configured models and patches a window reset as null', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { updated: true, requiresRestart: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.modelConfigurations();
+      await expect(
+        client.updateModelContextWindow('model-key', null),
+      ).resolves.toEqual({ updated: true, requiresRestart: true });
+      expect(calls[0]?.url).toBe('http://daemon/workspace/models');
+      expect(calls[0]?.method).toBe('GET');
+      expect(calls[1]?.method).toBe('PATCH');
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        key: 'model-key',
+        contextWindowSize: null,
+      });
+    });
+    it('surfaces conflicts without reporting a saved window', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(409, { error: 'Model configuration changed' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.updateModelContextWindow('stale-key', 100),
+      ).rejects.toMatchObject({ status: 409 });
+    });
+  });
+
   describe('deleteModel', () => {
     it.each([undefined, 'applied', 'deferred', 'failed'] as const)(
       'DELETEs /workspace/models and accepts runtime sync status %s',

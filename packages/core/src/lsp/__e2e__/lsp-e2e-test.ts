@@ -23,7 +23,7 @@
  * Usage: npx tsx packages/core/src/lsp/__e2e__/lsp-e2e-test.ts
  */
 
-import { NativeLspService } from '../NativeLspService.js';
+import { NativeLspService } from '../native-lsp-service.js';
 import { EventEmitter } from 'events';
 import { pathToFileURL } from 'url';
 import * as path from 'path';

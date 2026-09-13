@@ -10,7 +10,11 @@ import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { Hunk } from 'diff';
-import { findGitRoot, readFirstLineNoFollow } from './gitUtils.js';
+import {
+  findGitRoot,
+  NO_EXEC_CONFIG,
+  readFirstLineNoFollow,
+} from './gitUtils.js';
 import { isUnverifiableIdentityError, openNoFollow } from './no-follow-open.js';
 
 /** Re-export so consumers don't need to depend on `diff` directly. */
@@ -1132,8 +1136,12 @@ async function mapWithConcurrency<T, R>(
 async function runGit(args: string[], cwd: string): Promise<string | null> {
   // `core.quotepath=false` keeps non-ASCII filenames as UTF-8 in git's output
   // instead of octal-escaping them (`\346\226\207.txt`), which would otherwise
-  // end up as literal keys in `perFileStats`.
-  const fullArgs = ['-c', 'core.quotepath=false', ...args];
+  // end up as literal keys in `perFileStats`. The guard rides along here because
+  // every git call in this file goes through this one helper: the `status`,
+  // `ls-files`, `diff` and `diff-tree` ones refresh the index, which is what
+  // runs a planted `core.fsmonitor` helper, and a call site added later inherits
+  // the guard instead of having to remember it.
+  const fullArgs = ['-c', 'core.quotepath=false', ...NO_EXEC_CONFIG, ...args];
   try {
     const { stdout } = await execFileAsync('git', fullArgs, {
       cwd,
