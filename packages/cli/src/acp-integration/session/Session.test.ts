@@ -4965,7 +4965,10 @@ describe('Session', () => {
     expect(fallbackPayload).toContain('review the next PR');
     // The fallback runs in the controller conversation, so it carries the same
     // run envelope and instruction guard as every other fire that lands there.
-    expect(fallbackPayload).toContain('Scheduled task: task-1');
+    // The unnamed task's heading falls back to its prompt-derived label, and
+    // the opaque id rides the Task ID line.
+    expect(fallbackPayload).toContain('Scheduled task: review the next PR');
+    expect(fallbackPayload).toContain('Task ID: task-1');
     expect(fallbackPayload).toContain(
       'This is a scheduled task run. Execute the instructions below now.',
     );
@@ -4976,6 +4979,14 @@ describe('Session', () => {
     // The drain re-detects a /loop sentinel by whole-string match on the
     // enqueued prompt — enveloping it would hide the marker and the loop
     // would never tick, so the fallback must leave it bare.
+    // Resolve loop.md deterministically: the project candidate is consulted
+    // (isTrustedFolder is mocked true), so point the working dir at an empty
+    // tmp dir, and fake $HOME so a real ~/.qwen/loop.md on the machine can't
+    // change the resolved tick text.
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loop-md-empty-'));
+    const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'loop-md-home-'));
+    mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+    const restoreHome = setFakeHome(fakeHome);
     const annotateRunSession = vi.fn().mockResolvedValue(undefined);
     const scheduler = {
       hasPendingWork: true,
@@ -5009,24 +5020,32 @@ describe('Session', () => {
       new Error('Method not found'),
     );
 
-    session.startCronScheduler();
+    try {
+      session.startCronScheduler();
 
-    await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-loop', 123, {
-        sessionId: 'test-session-id',
-        dispatchFailed: true,
+      await vi.waitFor(() => {
+        expect(annotateRunSession).toHaveBeenCalledWith('task-loop', 123, {
+          sessionId: 'test-session-id',
+          dispatchFailed: true,
+        });
       });
-    });
-    await vi.waitFor(() => {
-      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-    });
-    const payload = JSON.stringify(
-      vi.mocked(mockChat.sendMessageStream).mock.calls[0],
-    );
-    // The bare sentinel reached the drain and was expanded into the loop tick
-    // (an enveloped sentinel would never match and the loop would not tick).
-    expect(payload).toContain('# /loop tick');
-    expect(payload).not.toContain('Scheduled task:');
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      const payload = JSON.stringify(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[0],
+      );
+      // The bare sentinel reached the drain and was expanded into the loop
+      // tick (an enveloped sentinel would never match and the loop would not
+      // tick). With no loop.md in either candidate, the resolution is
+      // deterministically the absent tick.
+      expect(payload).toContain('# /loop tick — loop.md absent');
+      expect(payload).not.toContain('Scheduled task:');
+    } finally {
+      restoreHome();
+      await fs.rm(tmpDir, { recursive: true, force: true });
+      await fs.rm(fakeHome, { recursive: true, force: true });
+    }
   });
 
   it('does not fall back to the task session when a routed dispatch fails', async () => {

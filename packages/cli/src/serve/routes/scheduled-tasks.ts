@@ -178,6 +178,22 @@ export function scheduledTaskSessionName(label: string): string {
   return short;
 }
 
+/** The effective label a task's session is named after: the task's name when
+ * it survives sanitizing, else its prompt. A stored name can be nothing but
+ * bidi/control marks (both `parseNameField` and `isValidTask` accept them, and
+ * `scheduledTaskSessionName` strips them), which would otherwise yield an empty
+ * displayName the bridge rejects — leaving the session unnamed and retried on
+ * every keepalive tick. */
+export function scheduledTaskEffectiveLabel(task: {
+  name?: string;
+  prompt: string;
+}): string {
+  return (
+    scheduledTaskSessionName(task.name ?? '') ||
+    scheduledTaskSessionName(task.prompt)
+  );
+}
+
 /**
  * The workspace a scheduled-task request operates on: the cron file lives under
  * `workspaceCwd`, and `bridge` mints/tears down the task's bound session. A
@@ -1189,9 +1205,10 @@ function registerScheduledTaskCrudRoutes(
           try {
             await runWithScheduledTaskTarget(target, async () =>
               bridge.updateSessionMetadata(boundSessionId!, {
-                displayName: scheduledTaskSessionName(
-                  nameResult.value ?? prompt,
-                ),
+                displayName: scheduledTaskEffectiveLabel({
+                  name: nameResult.value ?? undefined,
+                  prompt,
+                }),
                 titleSource: 'auto',
               }),
             );
@@ -1756,9 +1773,7 @@ function registerScheduledTaskCrudRoutes(
       ) {
         try {
           bridge.updateSessionMetadata(updated.sessionId, {
-            displayName: scheduledTaskSessionName(
-              updated.name ?? updated.prompt,
-            ),
+            displayName: scheduledTaskEffectiveLabel(updated),
             titleSource: 'auto',
           });
         } catch {
@@ -1975,7 +1990,6 @@ function registerScheduledTaskCrudRoutes(
               // stop that fire). The response still returns the recorded run.
               if (
                 !current.recurring &&
-                current.sessionMode !== 'per_run' &&
                 typeof current.sessionId === 'string' &&
                 current.sessionId.length > 0
               ) {
@@ -2121,9 +2135,9 @@ function registerScheduledTaskCrudRoutes(
         // The manual run consumed this one-shot, so its fixed controller is
         // now orphaned exactly as at DELETE: stop a task-owned session (its
         // transcript stays on disk as history) — a caller-owned session
-        // survives — and bump the catalog revision, since membership in the
-        // default catalog ended with the store entry even when the session
-        // was not resident and closeSession threw before the bridge's mark.
+        // survives. Closing the controller cannot hurt a just-dispatched
+        // per-run child: closeSession removes the one entry and only tears
+        // the shared channel down once no sessions remain on it.
         if (consumedSessionOwnedByTask && bridge) {
           try {
             await runWithScheduledTaskTarget(target, () =>
@@ -2133,7 +2147,14 @@ function registerScheduledTaskCrudRoutes(
             if (sendActivityGateError(res, error)) return;
           }
         }
-        bridge?.markSessionCatalogChanged?.();
+        // Bump the catalog revision: a persistent controller's membership in
+        // the default catalog ended with the store entry even when the session
+        // was not resident and closeSession threw before the bridge's mark. A
+        // per-run controller was never admitted (session-list keeps it out),
+        // so its consumption owes no bump.
+        if (updated.sessionMode !== 'per_run') {
+          bridge?.markSessionCatalogChanged?.();
+        }
       }
       if (!updated.recurring && updated.sessionId) {
         channelDeliveryAuthorizations?.revokeScheduledTask(

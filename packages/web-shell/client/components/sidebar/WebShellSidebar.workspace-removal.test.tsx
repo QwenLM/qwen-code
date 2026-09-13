@@ -4734,6 +4734,10 @@ describe('WebShellSidebar session source switch', () => {
       click(taskCancel!);
       await Promise.resolve();
     });
+    // Cancelling a destructive confirm must be a no-op — the session and its
+    // task both survive.
+    expect(active.deleteSession).not.toHaveBeenCalled();
+    expect(deleteSessionsData).not.toHaveBeenCalled();
 
     await selectSessionMenuItem('Ordinary chat', 'Delete');
     const ordinaryDialog = document.querySelector('[role="dialog"]');
@@ -4770,7 +4774,7 @@ describe('WebShellSidebar session source switch', () => {
     await selectSessionMenuItem('Archived digest', 'Restore');
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog?.textContent).toContain(
-      'Its scheduled task will start running again.',
+      'If its scheduled task was paused with the archive, it will start running again.',
     );
     expect(archived.unarchiveSession).not.toHaveBeenCalled();
 

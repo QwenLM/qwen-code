@@ -794,17 +794,30 @@ describe('scheduled-task keepalive', () => {
 
   it('never reverts a session the user renamed (manual title)', async () => {
     await updateCronTasks(workspace, () => [
-      task({ id: 'bound-manual', sessionId: 'sess-manual', prompt: 'lint' }),
+      task({
+        id: 'bound-manual',
+        sessionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee01',
+        prompt: 'lint',
+      }),
     ]);
+    // Persist the rename the way a sidebar rename lands: a custom_title record
+    // in the transcript. The bridge's live summary never carries titleSource
+    // (and a restarted bridge holds no title state at all), so the guard must
+    // read the persisted record.
+    const service = new SessionService(workspace);
+    const transcript = service.getSessionTranscriptPath(
+      'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee01',
+    );
+    await fsp.mkdir(path.dirname(transcript), { recursive: true });
+    await fsp.writeFile(
+      transcript,
+      '{"subtype":"custom_title","customTitle":"My own title","titleSource":"manual"}\n',
+    );
     const names: Array<
       [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
     > = [];
     const naming = {
       ...bridge,
-      getSessionSummary: (id: string) => ({
-        displayName: id === 'sess-manual' ? 'My own title' : undefined,
-        titleSource: 'manual' as const,
-      }),
       updateSessionMetadata: (
         id: string,
         m: { displayName?: string; titleSource?: 'manual' | 'auto' },
@@ -821,6 +834,92 @@ describe('scheduled-task keepalive', () => {
     await ka.tick();
     ka.stop();
     expect(names).toHaveLength(0);
+  });
+
+  it('falls back to the prompt when the stored name sanitizes to empty', async () => {
+    // A lone bidi mark survives parseNameField/isValidTask but strips to '',
+    // and the bridge rejects an empty displayName — without the fallback the
+    // session would stay unnamed and be retried on every tick.
+    await updateCronTasks(workspace, () => [
+      task({
+        id: 'bidi-name',
+        sessionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee03',
+        name: '\u202e',
+        prompt: 'lint',
+      }),
+    ]);
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
+    const naming = {
+      ...bridge,
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
+        names.push([id, m]);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: naming,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(names).toEqual([
+      [
+        'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee03',
+        { displayName: 'lint', titleSource: 'auto' },
+      ],
+    ]);
+  });
+
+  it('renames a session whose persisted title is auto (not user-owned)', async () => {
+    await updateCronTasks(workspace, () => [
+      task({
+        id: 'bound-auto',
+        sessionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee02',
+        name: 'Daily digest',
+        prompt: 'lint',
+      }),
+    ]);
+    // A prior auto-naming pass (or a restarted daemon, whose `renamed` set is
+    // empty) must still re-sync the session title to the task's label.
+    const service = new SessionService(workspace);
+    const transcript = service.getSessionTranscriptPath(
+      'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee02',
+    );
+    await fsp.mkdir(path.dirname(transcript), { recursive: true });
+    await fsp.writeFile(
+      transcript,
+      '{"subtype":"custom_title","customTitle":"stale auto title","titleSource":"auto"}\n',
+    );
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
+    const naming = {
+      ...bridge,
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
+        names.push([id, m]);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: naming,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(names).toEqual([
+      [
+        'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee02',
+        { displayName: 'Daily digest', titleSource: 'auto' },
+      ],
+    ]);
   });
 
   it('does not bind disabled unbound tasks', async () => {

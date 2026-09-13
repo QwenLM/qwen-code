@@ -3390,6 +3390,12 @@ export function WebShellSidebar({
   }, [canDeleteSession, deleteCandidate]);
 
   useEffect(() => {
+    if (unarchiveCandidate && !canUnarchiveSession(unarchiveCandidate)) {
+      setUnarchiveCandidate(null);
+    }
+  }, [canUnarchiveSession, unarchiveCandidate]);
+
+  useEffect(() => {
     if (groupMenu && !canOrganizeSession(groupMenu.session, 'group')) {
       setGroupMenu(null);
     }

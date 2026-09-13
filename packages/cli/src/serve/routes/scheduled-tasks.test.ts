@@ -2435,6 +2435,35 @@ describe('scheduled-tasks routes', () => {
     expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
+  it("closes a consumed per-run one-shot's controller without bumping the catalog", async () => {
+    // A per-run one-shot's manual run dispatches a fresh child and consumes
+    // the task; its controller is orphaned exactly as at DELETE and must be
+    // torn down — but it was never a default-catalog member, so no revision
+    // bump is owed.
+    const created = await create({
+      cron: '0 9 1 1 *',
+      prompt: 'p',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.id as string;
+    const controllerId = created.body.sessionId as string;
+    h.bridge.markSessionCatalogChanged.mockClear();
+
+    const res = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+
+    expect(res.status).toBe(200);
+    // The run dispatched to a fresh child, then the orphaned controller was
+    // closed; the child itself stays open.
+    expect(h.bridge.spawned).toHaveLength(2);
+    const childId = h.bridge.spawned[1]!;
+    expect(h.bridge.closed).toEqual([controllerId]);
+    expect(h.bridge.closed).not.toContain(childId);
+    expect(h.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
   it('marks but does not close a caller-owned session when a manual run consumes a one-shot', async () => {
     addLiveSession(h.bridge, CALLER_SESSION_ID, h.workspace);
     const created = await create({

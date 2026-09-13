@@ -37,6 +37,19 @@ const SESSION_LINE_BY_MODE = {
   per_run: 'Session: new chat for this run',
 } as const;
 
+/** Truncate a label on a code-point boundary so slicing can't leave a lone
+ * surrogate rendered as a replacement char. Shared ceiling with the session
+ * namers. */
+const MAX_RUN_LABEL_LENGTH = 60;
+
+function truncateRunLabel(value: string): string {
+  if (value.length <= MAX_RUN_LABEL_LENGTH) return value;
+  let cut = MAX_RUN_LABEL_LENGTH - 1;
+  const boundary = value.charCodeAt(cut - 1);
+  if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
+  return `${value.slice(0, cut)}…`;
+}
+
 export function buildScheduledTaskRunContent(input: {
   id: string;
   name: string | null;
@@ -46,7 +59,12 @@ export function buildScheduledTaskRunContent(input: {
   sessionMode: 'persistent' | 'per_run';
   prompt: string;
 }): string {
-  const name = cleanMetadataLine(input.name ?? input.id) || input.id;
+  // Mirrors the CLI builder: head with the task's name, then a prompt-derived
+  // label, so an unnamed task's card is not headed by its own opaque id.
+  const name =
+    cleanMetadataLine(input.name ?? '') ||
+    truncateRunLabel(cleanMetadataLine(input.prompt)) ||
+    input.id;
   const cron = cleanMetadataLine(input.cron);
   return [
     `Scheduled task: ${name}`,

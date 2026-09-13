@@ -63,6 +63,34 @@ describe('scheduled task run metadata', () => {
     expect(prompt).toMatch(/\n\nrestart the server$/);
   });
 
+  it("heads an unnamed task's card with a prompt-derived label, not its id", () => {
+    const prompt = buildScheduledTaskRunPrompt({
+      id: 'k3j9x0ab',
+      cron: '0 9 * * *',
+      prompt: 'Summarize the overnight alerts and post to #ops',
+      triggeredAt: 0,
+      trigger: 'scheduled',
+    });
+    expect(prompt).toContain(
+      'Scheduled task: Summarize the overnight alerts and post to #ops\n',
+    );
+    expect(prompt).toContain('Task ID: k3j9x0ab\n');
+    expect(prompt).not.toContain('Scheduled task: k3j9x0ab');
+  });
+
+  it('cuts a long prompt-derived heading on a code-point boundary', () => {
+    const prompt = buildScheduledTaskRunPrompt({
+      id: 'k3j9x0ab',
+      cron: '0 9 * * *',
+      prompt: 'x'.repeat(59) + '\u{1F600}tail',
+      triggeredAt: 0,
+      trigger: 'scheduled',
+    });
+    const heading = prompt.split('\n', 1)[0]!;
+    expect(heading).toBe(`Scheduled task: ${'x'.repeat(59)}…`);
+    expect(heading).not.toContain('\uFFFD');
+  });
+
   it('titles a run session with the task label and local trigger time', () => {
     const at = new Date(2026, 7, 26, 16, 0);
     expect(

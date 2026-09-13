@@ -55,10 +55,19 @@ export function DeleteSessionDialog({
     if (sessionsError) setMessage(sessionsError.message);
   }, [sessionsError]);
 
+  // A scheduled task's controller session is task-coupled: the daemon
+  // deletes the recurring task together with the session, and this bulk
+  // dialog has no task-naming confirm — so controllers are managed from the
+  // sidebar (which carries that confirm), not offered here.
+  const deletable = useMemo(
+    () => sessions.filter((s) => s.sourceType !== 'scheduled_task'),
+    [sessions],
+  );
+
   const filtered = useMemo(
     () =>
       filterQuery
-        ? sessions.filter((s) => {
+        ? deletable.filter((s) => {
             const q = filterQuery.toLowerCase();
             return (
               (s.displayName || '').toLowerCase().includes(q) ||
@@ -66,8 +75,8 @@ export function DeleteSessionDialog({
               sessionMatchesGitQuery(s, q)
             );
           })
-        : sessions,
-    [sessions, filterQuery],
+        : deletable,
+    [deletable, filterQuery],
   );
 
   const toggleSelection = useCallback(

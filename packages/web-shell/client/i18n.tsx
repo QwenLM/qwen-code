@@ -1693,7 +1693,7 @@ const EN: Messages = {
   'sidebar.deleteScheduledTaskConfirmDescription': (v) =>
     `Delete "${v?.name ?? ''}"? Its scheduled task will also be deleted and stop running. This cannot be undone.`,
   'sidebar.unarchiveScheduledTaskConfirmDescription': (v) =>
-    `Restore "${v?.name ?? ''}"? Its scheduled task will start running again.`,
+    `Restore "${v?.name ?? ''}"? If its scheduled task was paused with the archive, it will start running again.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.activeWork': 'Active work',
@@ -5365,7 +5365,7 @@ const ZH: Messages = {
   'sidebar.deleteScheduledTaskConfirmDescription': (v) =>
     `确定删除“${v?.name ?? ''}”吗？其定时任务也会被删除并停止运行，删除后不可恢复。`,
   'sidebar.unarchiveScheduledTaskConfirmDescription': (v) =>
-    `确定恢复“${v?.name ?? ''}”吗？其定时任务将重新开始运行。`,
+    `确定恢复“${v?.name ?? ''}”吗？若其定时任务已随归档暂停，将重新开始运行。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.activeWork': '有活动任务',

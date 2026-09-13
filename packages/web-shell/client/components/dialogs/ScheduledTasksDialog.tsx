@@ -41,6 +41,7 @@ import { useI18n } from '../../i18n';
 import { useWebShellPortalRoot } from '../../portalRoot';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
+import { cleanDialogLabel } from '../../utils/dialogLabels';
 import { getModelDisplayName } from '../../utils/modelDisplay';
 import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
@@ -1394,15 +1395,23 @@ export function ScheduledTasksDialog({
         )
       : null;
 
+  // Strip control/bidi marks BEFORE the fallback chain: a stored name that is
+  // truthy yet invisible (a lone bidi mark passes the daemon's name checks)
+  // must fall through to the prompt, or the destructive confirm names nothing.
   const deleteTargetRawLabel = deleteTarget
-    ? (deleteTarget.name || deleteTarget.prompt || deleteTarget.id)
-        .replace(/\s+/g, ' ')
-        .trim()
+    ? cleanDialogLabel(deleteTarget.name ?? '') ||
+      cleanDialogLabel(deleteTarget.prompt) ||
+      deleteTarget.id
     : '';
   const deleteTargetLabel =
     deleteTargetRawLabel.length > 80
       ? `${deleteTargetRawLabel.slice(0, 77)}…`
       : deleteTargetRawLabel;
+  // Dismissibility keys on the DELETE's own busy state, not the dialog-global
+  // busyId: an unrelated in-flight mutation (another row's toggle) must not
+  // trap the user in an unclosable modal.
+  const deletingTarget =
+    deleteTarget !== null && busyId === taskKey(deleteTarget);
 
   return (
     <div className={styles.root}>
@@ -2104,7 +2113,7 @@ export function ScheduledTasksDialog({
       <AlertDialog
         open={deleteTarget !== null}
         onOpenChange={(open) => {
-          if (!open && busyId === null) setDeleteTarget(null);
+          if (!open && !deletingTarget) setDeleteTarget(null);
         }}
       >
         <AlertDialogContent>
@@ -2122,18 +2131,23 @@ export function ScheduledTasksDialog({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={busyId !== null}>
+            <AlertDialogCancel disabled={deletingTarget}>
               {t('scheduledTasks.cancel')}
             </AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
+              // Stays serialized on the dialog-global busyId: a second
+              // mutation must not start while one is in flight (the first
+              // one's `finally` would clear the second's busy state). Only the
+              // spinner keys on the target — no delete is running just because
+              // an unrelated row is busy.
               disabled={busyId !== null}
               onClick={(event) => {
                 event.preventDefault();
                 if (deleteTarget) void handleDelete(deleteTarget);
               }}
             >
-              {busyId !== null ? <Spinner data-icon="inline-start" /> : null}
+              {deletingTarget ? <Spinner data-icon="inline-start" /> : null}
               {t('scheduledTasks.delete')}
             </AlertDialogAction>
           </AlertDialogFooter>

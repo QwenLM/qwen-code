@@ -852,7 +852,9 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     // The task-coupled confirm is up; it portals outside the flyout.
     expect(
       document.querySelector('[data-slot="dialog-content"]')?.textContent,
-    ).toContain('Its scheduled task will start running again.');
+    ).toContain(
+      'If its scheduled task was paused with the archive, it will start running again.',
+    );
 
     // The pointer leaving the flyout must not unmount the surface under the
     // open confirm — the same guard the delete confirm already had.
@@ -872,6 +874,75 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(
       document.querySelector('[data-slot="dialog-content"]'),
     ).not.toBeNull();
+  });
+
+  it('closes the restore confirm when the archive capability disappears', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_archive'],
+    };
+    workspace.capabilities = connection.capabilities;
+    archived.sessions = [
+      makeSession('archived-controller', {
+        displayName: 'Archived digest',
+        isArchived: true,
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      }),
+    ];
+    archived.data = archived.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    const archivedHeader = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((btn) => btn.textContent?.includes('Archived'));
+    act(() => click(archivedHeader!));
+    await flushSidebar();
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-web-shell-session-title]'),
+    )
+      .find((title) => title.textContent === 'Archived digest')
+      ?.closest<HTMLElement>('[class*="archivedRow"]');
+    const moreActions = row?.querySelector<HTMLButtonElement>(
+      'button[aria-label="More actions"]',
+    );
+    expect(moreActions).not.toBeNull();
+    act(() => {
+      moreActions!.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    await flushSidebar();
+
+    const restoreItem = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.trim() === 'Restore');
+    expect(restoreItem).not.toBeUndefined();
+    act(() => click(restoreItem!));
+    await flushSidebar();
+
+    expect(
+      document.querySelector('[data-slot="dialog-content"]')?.textContent,
+    ).toContain(
+      'If its scheduled task was paused with the archive, it will start running again.',
+    );
+
+    // A capabilities reload flipping the daemon mode (multi-workspace daemons
+    // lack session_archive) must retire the open confirm: the unarchive
+    // affordance it guards is gone, and the archived reload that would flip
+    // the row never comes.
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    workspace.capabilities = connection.capabilities;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(document.querySelector('[data-slot="dialog-content"]')).toBeNull();
+    expect(archived.unarchiveSession).not.toHaveBeenCalled();
   });
 
   it('renders the complete session name', async () => {

@@ -172,13 +172,18 @@ function findRunDestination(
 }
 
 // The option div's data-selected is the component-owned styling hook; the
-// radio's data-state is Radix-internal.
+// radio's aria-checked is the accessible state a screen reader (or a CSS
+// regression that strands the visual layer) actually sees. Assert the two
+// agree rather than trusting either alone.
 function runDestinationSelected(value: 'per_run' | 'dedicated'): boolean {
-  return (
+  const selected =
     findRunDestination(value)
       ?.closest('[data-selected]')
-      ?.getAttribute('data-selected') === 'true'
-  );
+      ?.getAttribute('data-selected') === 'true';
+  const checked =
+    findRunDestination(value)?.getAttribute('aria-checked') === 'true';
+  expect(selected).toBe(checked);
+  return selected;
 }
 
 function deferred<T = unknown>() {
@@ -1935,6 +1940,69 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     );
     await flush();
     expect(actions.deleteScheduledTask).toHaveBeenCalledWith('s1', 'id-other');
+  });
+
+  it('names the prompt in the delete confirm when the stored name is invisible', async () => {
+    // A lone bidi mark survives the daemon's name checks (trim/length only)
+    // and renders as nothing — the destructive confirm must fall back to the
+    // prompt rather than name an empty pair of quotes.
+    await mount([
+      baseTask({ id: 'bidi', name: '\u200f', prompt: 'summarize the day' }),
+    ]);
+    click(document.querySelector('[aria-label="Delete"]'));
+    const dialog = document.querySelector('[role="alertdialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain('summarize the day');
+    expect(dialog?.textContent).not.toContain('\u200f');
+    // The quoted label must not be empty.
+    expect(dialog?.textContent).not.toMatch(/[“"]\s*[”"] will stop running/);
+  });
+
+  it('keeps the delete confirm dismissible while another task mutates', async () => {
+    // busyId is one dialog-global slot shared by every mutating handler; the
+    // confirm's dismissibility must key on the DELETE's own busy state, or an
+    // unrelated in-flight toggle traps the user in an unclosable modal.
+    const gate = deferred();
+    await mount([
+      baseTask({ id: 'a', name: 'Alpha', enabled: true }),
+      baseTask({ id: 'b', name: 'Beta', enabled: true }),
+    ]);
+    actions.updateScheduledTask.mockReturnValueOnce(gate.promise);
+
+    // Start task A's toggle (stays in flight), then open B's delete confirm.
+    click(document.querySelector('[role="switch"]'));
+    click(document.querySelectorAll('[aria-label="Delete"]')[1]);
+    const dialog = document.querySelector('[role="alertdialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain('Beta');
+    const cancel = Array.from(dialog?.querySelectorAll('button') ?? []).find(
+      (button) => button.textContent?.trim() === 'Cancel',
+    );
+    const confirm = Array.from(dialog?.querySelectorAll('button') ?? []).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    expect(cancel?.disabled).toBe(false);
+    // The confirm stays serialized while ANY mutation is in flight…
+    expect(confirm?.disabled).toBe(true);
+    // …but Cancel must dismiss the dialog.
+    click(cancel);
+    await flush();
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(actions.deleteScheduledTask).not.toHaveBeenCalled();
+
+    // After A settles, the confirm is usable again and the delete runs.
+    gate.resolve(baseTask({ id: 'a' }));
+    await flush();
+    click(document.querySelectorAll('[aria-label="Delete"]')[1]);
+    const reopened = document.querySelector('[role="alertdialog"]');
+    expect(reopened).not.toBeNull();
+    click(
+      Array.from(reopened?.querySelectorAll('button') ?? []).find(
+        (button) => button.textContent?.trim() === 'Delete',
+      ),
+    );
+    await flush();
+    expect(actions.deleteScheduledTask).toHaveBeenCalledWith('b', undefined);
   });
 
   it('pins the workspace picker read-only while editing', async () => {

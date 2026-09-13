@@ -78,6 +78,17 @@ export function scheduledTaskRunSessionName(
   return `${short}${suffix}`;
 }
 
+/** Truncate a label on a code-point boundary so slicing can't leave a lone
+ * surrogate rendered as a replacement char. Shared ceiling with the session
+ * namers. */
+function truncateRunLabel(value: string): string {
+  if (value.length <= MAX_RUN_SESSION_NAME_LENGTH) return value;
+  let cut = MAX_RUN_SESSION_NAME_LENGTH - 1;
+  const boundary = value.charCodeAt(cut - 1);
+  if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
+  return `${value.slice(0, cut)}…`;
+}
+
 export function buildScheduledTaskRunPrompt(input: {
   id: string;
   name?: string;
@@ -87,7 +98,14 @@ export function buildScheduledTaskRunPrompt(input: {
   trigger: 'scheduled' | 'manual';
   sessionMode?: 'persistent' | 'per_run';
 }): string {
-  const name = cleanMetadataLine(input.name ?? input.id) || input.id;
+  // Head with the task's name, then a prompt-derived label — every other
+  // surface (dialog row, session namers) labels the task from its prompt, so
+  // falling straight to the opaque id would head the card with the same 8-char
+  // id its Task ID line already prints.
+  const name =
+    cleanMetadataLine(input.name ?? '') ||
+    truncateRunLabel(cleanMetadataLine(input.prompt)) ||
+    input.id;
   const cron = cleanMetadataLine(input.cron);
   return [
     `Scheduled task: ${name}`,

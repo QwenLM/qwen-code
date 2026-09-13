@@ -275,6 +275,52 @@ describe('DeleteSessionDialog selection', () => {
     expect(dangerButton().disabled).toBe(true);
   });
 
+  it('never offers a scheduled-task controller for bulk deletion', async () => {
+    // A controller's session is task-coupled: deleting it removes the
+    // recurring task with it, and this dialog's copy names only
+    // conversations. The row must not be listed, ticked, or sent.
+    sessions = [
+      {
+        sessionId: 'ctrl-1',
+        workspaceCwd: '/work/repo',
+        displayName: 'Daily digest',
+        clientCount: 0,
+        updatedAt: '2026-01-01T00:00:00Z',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      },
+      {
+        sessionId: 's-plain',
+        workspaceCwd: '/work/repo',
+        displayName: 'Ordinary chat',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+    ];
+    deleteSessionsMock.mockResolvedValue({
+      removed: ['s-plain'],
+      notFound: [],
+      errors: [],
+    });
+    mount();
+
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].textContent).toContain('Ordinary chat');
+
+    // Even a filter matching the controller must not surface it.
+    typeFilter('digest');
+    expect(rows()).toHaveLength(0);
+    typeFilter('');
+
+    clickRow(0);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(deleteSessionsMock).toHaveBeenCalledWith(['s-plain']);
+    expect(onDeleted).toHaveBeenCalledWith(['s-plain']);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('deletes the checked sessions via the batch API and closes', async () => {
     deleteSessionsMock.mockResolvedValue({
       removed: ['s0', 's1'],
