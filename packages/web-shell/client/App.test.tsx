@@ -29,6 +29,7 @@ import {
   type DaemonSkillToggleMutation,
   type DaemonWorkspaceMcpServerStatus,
   type DaemonWorkspaceGitStatus,
+  type DaemonWorkspaceVoiceStatus,
   type GoalSnapshotV2,
   type SessionSource,
   type SessionSourcesResult,
@@ -124,6 +125,10 @@ function activeGoalSnapshot(
 }
 
 type ChatEditorTestProps = {
+  onSkillsOpenChange?: (open: boolean) => void;
+  skillsLoading?: boolean;
+  skillsLoadError?: boolean;
+  skillsLoaded?: boolean;
   currentMode?: string;
   planMode?: boolean;
   modeControlsDisabled?: boolean;
@@ -224,6 +229,22 @@ function voiceSetting(effective: string): DaemonSettingDescriptor {
   };
 }
 
+function voiceWorkspaceStatus(
+  workspaceCwd: string,
+): DaemonWorkspaceVoiceStatus {
+  return {
+    v: 1,
+    workspaceCwd,
+    enabled: true,
+    mode: 'hold',
+    language: 'auto',
+    voiceModel: null,
+    availableVoiceModels: [
+      { id: 'qwen3-asr-flash', transport: 'qwen-asr-chat' },
+    ],
+  };
+}
+
 function sessionWorkflowSetting(): DaemonSettingDescriptor {
   return {
     key: 'experimental.sessionWorkflow',
@@ -256,12 +277,14 @@ const {
   editorCommit,
   editorFocus,
   editorInsertText,
+  editorRestoreImages,
+  editorRestoreFiles,
   editorRestoreInputAnnotations,
   settingsReload,
   settingsSetValue,
   qualifiedWorkspaceSettings,
-  rootWorkspaceProviders,
-  qualifiedWorkspaceProviders,
+  rootWorkspaceVoice,
+  qualifiedWorkspaceVoice,
   qualifiedSetWorkspaceSetting,
   sessionCatalogController,
   mockReleaseDetachedWebTerminal,
@@ -286,10 +309,14 @@ const {
   };
   const loadSkillsStatus = vi.fn().mockResolvedValue({ skills: [] });
   const qualifiedWorkspaceSettings = vi.fn();
-  const rootWorkspaceProviders = vi.fn();
-  const qualifiedWorkspaceProviders = vi.fn();
+  const rootWorkspaceVoice = vi.fn();
+  const qualifiedWorkspaceVoice = vi.fn();
   const qualifiedSetWorkspaceSetting = vi.fn();
   const workspaceClient = {
+    liveSetupStatus: vi
+      .fn()
+      .mockResolvedValue({ enabled: false, install: { state: 'missing' } }),
+    workspaceAcpPreheat: vi.fn().mockResolvedValue({ ready: true }),
     workspaceByCwd: vi.fn(() => ({
       workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
       workspaceSkills: loadSkillsStatus,
@@ -300,10 +327,10 @@ const {
         pullRequests: [],
       }),
     })),
-    workspaceProviders: rootWorkspaceProviders,
+    workspaceVoice: rootWorkspaceVoice,
     workspaceById: vi.fn(() => ({
       workspaceSettings: qualifiedWorkspaceSettings,
-      workspaceProviders: qualifiedWorkspaceProviders,
+      workspaceVoice: qualifiedWorkspaceVoice,
       setWorkspaceSetting: qualifiedSetWorkspaceSetting,
     })),
     sessionStatus: vi.fn(() =>
@@ -743,12 +770,14 @@ const {
     editorCommit: vi.fn(),
     editorFocus: vi.fn(),
     editorInsertText: vi.fn(),
+    editorRestoreImages: vi.fn(),
+    editorRestoreFiles: vi.fn(),
     editorRestoreInputAnnotations: vi.fn(),
     settingsReload: vi.fn().mockResolvedValue(undefined),
     settingsSetValue,
     qualifiedWorkspaceSettings,
-    rootWorkspaceProviders,
-    qualifiedWorkspaceProviders,
+    rootWorkspaceVoice,
+    qualifiedWorkspaceVoice,
     qualifiedSetWorkspaceSetting,
     sessionCatalogController: {
       invalidateWorkspace: vi.fn(),
@@ -1009,8 +1038,8 @@ vi.mock('./components/ChatEditor', async () => {
           setText: (text) => {
             testState.prompt = text;
           },
-          restoreImages: () => undefined,
-          restoreFiles: () => undefined,
+          restoreImages: editorRestoreImages,
+          restoreFiles: editorRestoreFiles,
           restoreInputAnnotations: editorRestoreInputAnnotations,
           submit: (input) => {
             const accepted = props.onSubmit(
@@ -1298,13 +1327,21 @@ vi.mock('./components/LocalControlQrButton', async () => {
 vi.mock('./components/dialogs/ModelDialog', async () => {
   const React = await import('react');
   return {
-    ModelDialog: (props: { onSelect?: (id: string) => void }) =>
+    ModelDialog: (props: {
+      mode?: string;
+      models?: Array<{ id: string }>;
+      onSelect?: (id: string) => void;
+    }) =>
       React.createElement(
         'button',
         {
           'data-testid': 'model-select',
           type: 'button',
-          onClick: () => props.onSelect?.('fast-model-x'),
+          onClick: () => {
+            const id =
+              props.mode === 'voice' ? props.models?.[0]?.id : 'fast-model-x';
+            if (id !== undefined) props.onSelect?.(id);
+          },
         },
         'select model',
       ),
@@ -6558,7 +6595,12 @@ describe('task activity key', () => {
       tasks: [task],
     });
     mockConnection.capabilities.features = ['session_monitor_tool_correlation'];
-    const { container } = renderApp();
+    const workspaceGit = vi.fn().mockResolvedValue({ branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container } = renderApp({ composerToolbarActions: ['gitBranch'] });
     await flush();
     expect(testState.latestMonitorDetailsOnOpen).toBeTypeOf('function');
 
@@ -6591,6 +6633,12 @@ describe('task activity key', () => {
       enterFullscreen?.click();
       await Promise.resolve();
     });
+
+    workspaceGit.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    expect(workspaceGit).not.toHaveBeenCalled();
 
     const fullscreenOverlay = document.querySelector(
       '[class*="artifactPanelFullscreen"]',
@@ -10335,6 +10383,12 @@ beforeEach(() => {
     mockWorkspace.capabilities,
   );
   mockWorkspace.refreshBrand.mockReset();
+  mockWorkspace.client.workspaceAcpPreheat
+    .mockReset()
+    .mockResolvedValue({ ready: true });
+  mockWorkspace.client.liveSetupStatus
+    .mockReset()
+    .mockResolvedValue({ enabled: false, install: { state: 'missing' } });
   mockWorkspace.client.workspaceByCwd.mockReset();
   mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
     workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
@@ -10497,6 +10551,8 @@ beforeEach(() => {
   editorClear.mockClear();
   editorCommit.mockClear();
   editorFocus.mockClear();
+  editorRestoreImages.mockClear();
+  editorRestoreFiles.mockClear();
   editorRestoreInputAnnotations.mockClear();
   editorInsertText.mockClear();
   mockStore.appendLocalUserMessage.mockReset();
@@ -10509,25 +10565,17 @@ beforeEach(() => {
     v: 1,
     settings: [],
   });
-  rootWorkspaceProviders.mockReset();
-  rootWorkspaceProviders.mockResolvedValue({
-    v: 1,
-    workspaceCwd: '/work/primary',
-    initialized: true,
-    providers: [],
-  });
-  qualifiedWorkspaceProviders.mockReset();
-  qualifiedWorkspaceProviders.mockResolvedValue({
-    v: 1,
-    workspaceCwd: '/work/secondary',
-    initialized: true,
-    providers: [],
-  });
+  rootWorkspaceVoice.mockReset();
+  rootWorkspaceVoice.mockResolvedValue(voiceWorkspaceStatus('/work/primary'));
+  qualifiedWorkspaceVoice.mockReset();
+  qualifiedWorkspaceVoice.mockResolvedValue(
+    voiceWorkspaceStatus('/work/secondary'),
+  );
   qualifiedSetWorkspaceSetting.mockReset();
   qualifiedSetWorkspaceSetting.mockResolvedValue({
     key: 'voiceModel',
     scope: 'workspace',
-    value: 'fast-model-x',
+    value: 'qwen3-asr-flash',
     requiresRestart: false,
   });
   mockFollowup.clear.mockClear();
@@ -13942,8 +13990,8 @@ describe('App session callbacks', () => {
     });
     await flush();
 
-    expect(rootWorkspaceProviders).toHaveBeenCalledOnce();
-    expect(qualifiedWorkspaceProviders).not.toHaveBeenCalled();
+    expect(rootWorkspaceVoice).toHaveBeenCalledOnce();
+    expect(qualifiedWorkspaceVoice).not.toHaveBeenCalled();
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="model-select"]')
@@ -13954,7 +14002,7 @@ describe('App session callbacks', () => {
     expect(settingsSetValue).toHaveBeenCalledWith(
       'workspace',
       'voiceModel',
-      'fast-model-x',
+      'qwen3-asr-flash',
     );
     expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
   });
@@ -13982,7 +14030,7 @@ describe('App session callbacks', () => {
     expect(workspaceGit).not.toHaveBeenCalled();
   });
 
-  it('uses qualified providers and workspace settings for secondary Voice models', async () => {
+  it('uses qualified voice status and workspace settings for secondary Voice models', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
       workspaceCwd: '/work/primary',
@@ -14014,7 +14062,11 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(qualifiedWorkspaceProviders).toHaveBeenCalledOnce();
+    expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
+    expect(mockWorkspace.client.workspaceById).toHaveBeenCalledWith(
+      'secondary',
+    );
+    expect(rootWorkspaceVoice).not.toHaveBeenCalled();
     expect(mockWorkspaceActions.loadProviders).not.toHaveBeenCalled();
     const select = container.querySelector<HTMLButtonElement>(
       '[data-testid="model-select"]',
@@ -14028,7 +14080,7 @@ describe('App session callbacks', () => {
     expect(qualifiedSetWorkspaceSetting).toHaveBeenCalledWith(
       'workspace',
       'voiceModel',
-      'fast-model-x',
+      'qwen3-asr-flash',
     );
     expect(settingsSetValue).not.toHaveBeenCalled();
   });
@@ -14095,7 +14147,7 @@ describe('App session callbacks', () => {
     ).toBe('secondary-voice');
   });
 
-  it('drops a provider failure after the Voice workspace changes', async () => {
+  it('drops a Voice status failure after the Voice workspace changes', async () => {
     mockConnection.workspaceCwd = '/work/secondary-a';
     mockWorkspace.capabilities = {
       workspaceCwd: '/work/primary',
@@ -14125,8 +14177,8 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const providersResult = deferred();
-    qualifiedWorkspaceProviders.mockReturnValue(providersResult.promise);
+    const voiceResult = deferred();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
     const onToast = vi.fn();
     const { container, rerender } = renderApp({ onToast });
     await flush();
@@ -14135,13 +14187,13 @@ describe('App session callbacks', () => {
       testState.latestChatEditorProps?.onSubmit('/model --voice');
       await Promise.resolve();
     });
-    expect(qualifiedWorkspaceProviders).toHaveBeenCalledOnce();
+    expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
 
     mockConnection.workspaceCwd = '/work/secondary-b';
     rerender();
     await flush();
     await act(async () => {
-      providersResult.reject(new Error('old workspace failed'));
+      voiceResult.reject(new Error('old workspace failed'));
       await Promise.resolve();
     });
 
@@ -14149,7 +14201,7 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
   });
 
-  it('drops a stale provider success after an A to B to A workspace change', async () => {
+  it('drops a stale Voice status success after an A to B to A workspace change', async () => {
     mockConnection.workspaceCwd = '/work/secondary-a';
     mockWorkspace.capabilities = {
       workspaceCwd: '/work/primary',
@@ -14179,13 +14231,8 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const providersResult = deferred<{
-      v: 1;
-      workspaceCwd: string;
-      initialized: boolean;
-      providers: never[];
-    }>();
-    qualifiedWorkspaceProviders.mockReturnValue(providersResult.promise);
+    const voiceResult = deferred<DaemonWorkspaceVoiceStatus>();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
     const { container, rerender } = renderApp();
     await flush();
 
@@ -14200,12 +14247,7 @@ describe('App session callbacks', () => {
     await flush();
 
     await act(async () => {
-      providersResult.resolve({
-        v: 1,
-        workspaceCwd: '/work/secondary-a',
-        initialized: true,
-        providers: [],
-      });
+      voiceResult.resolve(voiceWorkspaceStatus('/work/secondary-a'));
       await Promise.resolve();
     });
     await flush();
@@ -14213,7 +14255,7 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
   });
 
-  it('drops a provider failure after the Web Shell unmounts', async () => {
+  it('drops a Voice status failure after the Web Shell unmounts', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
       workspaceCwd: '/work/primary',
@@ -14237,8 +14279,8 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const providersResult = deferred();
-    qualifiedWorkspaceProviders.mockReturnValue(providersResult.promise);
+    const voiceResult = deferred();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
     const onToast = vi.fn();
     const { unmount } = renderApp({ onToast });
     await flush();
@@ -14248,7 +14290,7 @@ describe('App session callbacks', () => {
     });
     unmount();
     await act(async () => {
-      providersResult.reject(new Error('late provider failure'));
+      voiceResult.reject(new Error('late Voice status failure'));
       await Promise.resolve();
     });
 
@@ -14324,14 +14366,9 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const providerStatus = {
-      v: 1 as const,
-      workspaceCwd: '/work/secondary',
-      initialized: true,
-      providers: [],
-    };
-    const providersResult = deferred<typeof providerStatus>();
-    qualifiedWorkspaceProviders.mockReturnValue(providersResult.promise);
+    const voiceStatus = voiceWorkspaceStatus('/work/secondary');
+    const voiceResult = deferred<typeof voiceStatus>();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
     const { container } = renderApp();
     await flush();
 
@@ -14345,7 +14382,7 @@ describe('App session callbacks', () => {
         ?.click();
     });
     await act(async () => {
-      providersResult.resolve(providerStatus);
+      voiceResult.resolve(voiceStatus);
       await Promise.resolve();
     });
     await flush();
@@ -14377,14 +14414,9 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const providerStatus = {
-      v: 1 as const,
-      workspaceCwd: '/work/secondary',
-      initialized: true,
-      providers: [],
-    };
-    const providersResult = deferred<typeof providerStatus>();
-    qualifiedWorkspaceProviders.mockReturnValue(providersResult.promise);
+    const voiceStatus = voiceWorkspaceStatus('/work/secondary');
+    const voiceResult = deferred<typeof voiceStatus>();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
     const { container } = renderApp();
     await flush();
 
@@ -14392,13 +14424,13 @@ describe('App session callbacks', () => {
       testState.latestChatEditorProps?.onSubmit('/model --voice');
       testState.latestChatEditorProps?.onSubmit('/settings');
     });
-    expect(qualifiedWorkspaceProviders).toHaveBeenCalledOnce();
+    expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
     expect(
       container.querySelector('[data-testid="inline-panel"]'),
     ).not.toBeNull();
 
     await act(async () => {
-      providersResult.resolve(providerStatus);
+      voiceResult.resolve(voiceStatus);
       await Promise.resolve();
     });
     await flush();
@@ -16843,8 +16875,8 @@ describe('App session callbacks', () => {
       true,
     );
     const sidebar = container.querySelector('[data-testid="sidebar"]');
-    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('true');
-    expect(sidebar?.getAttribute('data-has-commit')).toBe('true');
+    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('false');
+    expect(sidebar?.getAttribute('data-has-commit')).toBe('false');
     expect(sidebar?.getAttribute('data-can-open-sessions-overview')).toBe(
       'true',
     );
@@ -17241,7 +17273,7 @@ describe('App session callbacks', () => {
       ],
     };
     mockWorkspace.refreshCapabilities.mockResolvedValue(accepted);
-    renderApp();
+    renderApp({ composerToolbarActions: ['gitBranch'] });
     await flush();
 
     act(() => {
@@ -18256,8 +18288,8 @@ describe('App session callbacks', () => {
     await flush();
 
     const sidebar = container.querySelector('[data-testid="sidebar"]');
-    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('true');
-    expect(sidebar?.getAttribute('data-has-commit')).toBe('true');
+    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('false');
+    expect(sidebar?.getAttribute('data-has-commit')).toBe('false');
     expect(testState.latestChatEditorProps?.onOpenGitDiff).toBeUndefined();
     expect(workspaceGit).not.toHaveBeenCalled();
 
@@ -18297,7 +18329,7 @@ describe('App session callbacks', () => {
       workspaceGit,
       workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
     }));
-    renderApp();
+    renderApp({ composerToolbarActions: ['gitBranch'] });
     await vi.waitFor(() => {
       expect(testState.latestChatEditorProps?.gitStatus?.computedAt).toBe(1);
     });
@@ -18440,6 +18472,127 @@ describe('App session callbacks', () => {
     ).toBeUndefined();
   });
 
+  it('loads Git only while a configured UI consumer needs it', async () => {
+    vi.useFakeTimers();
+    const workspaceGit = vi.fn().mockResolvedValue({ branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const hidden = {
+      composerToolbarActions: [] as const,
+      header: undefined,
+      sidebar: { enabled: false },
+    };
+    const { container, rerender } = renderApp(hidden);
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(workspaceGit).not.toHaveBeenCalled();
+
+    rerender({ ...hidden, composerToolbarActions: ['gitBranch'] });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(2);
+    expect(testState.latestChatEditorProps?.gitStatus?.branch).toBe('main');
+
+    rerender(hidden);
+    await flush();
+    workspaceGit.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(workspaceGit).not.toHaveBeenCalled();
+
+    const withEnvironment = {
+      ...hidden,
+      header: { items: ['environment'] as const },
+    };
+    rerender(withEnvironment);
+    await flush();
+    expect(workspaceGit).not.toHaveBeenCalled();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click(),
+    );
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(2);
+    rerender({
+      ...withEnvironment,
+      environmentPanel: { items: ['backgroundTasks'] },
+    });
+    await flush();
+    workspaceGit.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(workspaceGit).not.toHaveBeenCalled();
+    rerender(withEnvironment);
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(2);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click(),
+    );
+    await flush();
+    workspaceGit.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(workspaceGit).not.toHaveBeenCalled();
+  });
+
+  it('uses fetched Git status for an attached session before its first branch event', async () => {
+    mockConnection.gitBranch = undefined;
+    mockConnection.gitStatus = undefined;
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp({ composerToolbarActions: ['gitBranch'], header: undefined });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitBranch).toBe('main');
+  });
+
+  it('retains the current workspace Git snapshot while its consumer is hidden', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.gitBranch = undefined;
+    const workspaceGit = vi
+      .fn()
+      .mockResolvedValue({ branch: 'retained-branch' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { rerender } = renderApp({ composerToolbarActions: ['gitBranch'] });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitBranch).toBe('retained-branch');
+    rerender({ composerToolbarActions: [] });
+    await flush();
+    workspaceGit.mockReturnValue(new Promise(() => {}));
+    rerender({ composerToolbarActions: ['gitBranch'] });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitBranch).toBe('retained-branch');
+    rerender({ composerToolbarActions: [] });
+    mockConnection.workspaceCwd = '/other-workspace';
+    mockConnection.sessionId = 'other-session';
+    rerender({ composerToolbarActions: ['gitBranch'] });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitBranch).not.toBe(
+      'retained-branch',
+    );
+  });
+
   it('fetches the composer git status on both the fast and the wait:true fresh path', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {
@@ -18531,7 +18684,7 @@ describe('App session callbacks', () => {
       workspaceGit,
       workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
     }));
-    renderApp();
+    renderApp({ composerToolbarActions: ['gitBranch'] });
     await flush();
     await flush();
 
@@ -19057,7 +19210,7 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
-  it('reloads skills from the target workspace when starting a new session', async () => {
+  it('does not preload Skills when starting a chat in another workspace', async () => {
     const { container } = renderApp({
       lockedWorkspaceCwd: '/work/secondary',
     });
@@ -19071,9 +19224,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
-      '/work/secondary',
-    );
+    expect(mockWorkspaceActions.loadSkillsStatus).not.toHaveBeenCalled();
   });
 
   it('uses a registered capability fallback while the workspace list is stale', async () => {
@@ -19203,6 +19354,364 @@ describe('App session callbacks', () => {
     );
   });
 
+  async function openComposerSkills(open = true) {
+    await act(async () =>
+      testState.latestChatEditorProps?.onSkillsOpenChange?.(open),
+    );
+    await flush();
+  }
+
+  it('loads composer Skills only on demand and reuses pending and completed reads', async () => {
+    mockConnection.sessionId = undefined;
+    const pending = deferred<{
+      skills: Array<{ name: string; description: string; status: 'ok' }>;
+    }>();
+    mockWorkspaceActions.loadSkillsStatus.mockReturnValue(pending.promise);
+    renderApp();
+    await flush();
+    testState.latestChatEditorProps?.onInputTextChange?.('ordinary message');
+    expect(mockWorkspaceActions.loadSkillsStatus).not.toHaveBeenCalled();
+    await openComposerSkills();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledOnce();
+    expect(testState.latestChatEditorProps?.skillsLoading).toBe(true);
+    await openComposerSkills(false);
+    await openComposerSkills();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledOnce();
+    await act(async () => {
+      pending.resolve({
+        skills: [{ name: 'review', description: 'Review', status: 'ok' }],
+      });
+      await pending.promise;
+    });
+    expect(testState.latestChatEditorProps?.skillsLoading).toBe(false);
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'review', description: 'Review' },
+    ]);
+    await openComposerSkills(false);
+    await openComposerSkills();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledOnce();
+  });
+
+  it('retains the Skills catalog across equivalent capability refreshes', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      features: ['session_source_metadata'],
+      workspaceCwd: mockConnection.workspaceCwd,
+    };
+    const skills = [{ name: 'review', description: 'Review' }];
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: skills.map((skill) => ({ ...skill, status: 'ok' })),
+    });
+    const { rerender } = renderApp();
+    await flush();
+    await openComposerSkills();
+    for (const open of [true, false]) {
+      await openComposerSkills(open);
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        features: [...mockWorkspace.capabilities.features],
+      };
+      rerender();
+      await flush();
+      expect(testState.latestChatEditorProps?.skills).toEqual(skills);
+      expect(testState.latestChatEditorProps?.skillsLoaded).toBe(true);
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledOnce();
+    }
+    await openComposerSkills();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledOnce();
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: [
+        ...mockWorkspace.capabilities.features,
+        'workspace_acp_preheat',
+      ],
+    };
+    rerender();
+    await flush();
+    expect(mockWorkspace.client.workspaceAcpPreheat).toHaveBeenCalledWith(
+      5_000,
+    );
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(3);
+  });
+
+  it('shows command refresh failures and clears them on retry', async () => {
+    mockConnection.skills = [];
+    const retry = deferred<void>();
+    mockSessionActions.refreshCommands
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockReturnValueOnce(retry.promise);
+    const { rerender } = renderApp();
+    await flush();
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      extensionsVersion: 1,
+    };
+    rerender();
+    await openComposerSkills();
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(true);
+    expect(testState.latestChatEditorProps?.skillsLoading).toBe(false);
+    expect(testState.latestChatEditorProps?.skillsLoaded).toBe(false);
+    await openComposerSkills(false);
+    const sessionId = mockConnection.sessionId;
+    mockConnection.sessionId = 'another-session';
+    testState.ownerVersion += 1;
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(false);
+    mockConnection.sessionId = sessionId;
+    testState.ownerVersion += 1;
+    rerender();
+    await openComposerSkills();
+    expect(mockSessionActions.refreshCommands).toHaveBeenCalledTimes(2);
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(false);
+    expect(testState.latestChatEditorProps?.skillsLoading).toBe(true);
+    await act(async () => {
+      retry.resolve(undefined);
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(false);
+    expect(testState.latestChatEditorProps?.skillsLoaded).toBe(true);
+  });
+
+  it('defers hidden Skill changes until reopening the catalog', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
+    const { rerender } = renderApp();
+    await flush();
+    await openComposerSkills();
+    await openComposerSkills(false);
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [{ name: 'new-skill', description: 'New', status: 'ok' }],
+    });
+    emitSkillMutation(
+      'new-catalog-revision',
+      [{ name: 'new-skill', enabled: true }],
+      'deferred',
+      0,
+    );
+    rerender();
+    await flush();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledOnce();
+    await openComposerSkills();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'new-skill', description: 'New' },
+    ]);
+  });
+
+  it('retries a failed catalog load on the next opening', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspaceActions.loadSkillsStatus
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue({ skills: [] });
+    renderApp();
+    await flush();
+    await openComposerSkills();
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(true);
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledOnce();
+    await openComposerSkills(false);
+    await openComposerSkills();
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(false);
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps invalidated attached suggestions open until command refresh finishes', async () => {
+    mockConnection.skills = [];
+    let finishRefresh!: () => void;
+    mockSessionActions.refreshCommands.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRefresh = resolve;
+        }),
+    );
+    const { rerender } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.skillsLoaded).toBe(true);
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      extensionsVersion: 1,
+    };
+    rerender();
+    await flush();
+    expect(mockSessionActions.refreshCommands).not.toHaveBeenCalled();
+    expect(testState.latestChatEditorProps?.skillsLoaded).toBe(false);
+    await openComposerSkills();
+    expect(mockSessionActions.refreshCommands).toHaveBeenCalledOnce();
+    expect(testState.latestChatEditorProps?.skillsLoading).toBe(true);
+    expect(testState.latestChatEditorProps?.skillsLoaded).toBe(false);
+    let finishNewerRefresh!: () => void;
+    mockSessionActions.refreshCommands.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishNewerRefresh = resolve;
+        }),
+    );
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      extensionsVersion: 2,
+    };
+    rerender();
+    await flush();
+    expect(mockSessionActions.refreshCommands).toHaveBeenCalledTimes(2);
+    await act(async () => finishRefresh());
+    await flush();
+    expect(testState.latestChatEditorProps?.skillsLoading).toBe(true);
+    expect(testState.latestChatEditorProps?.skillsLoaded).toBe(false);
+    await act(async () => finishNewerRefresh());
+    await flush();
+    expect(testState.latestChatEditorProps?.skillsLoaded).toBe(true);
+    expect(testState.latestChatEditorProps?.skillsLoading).toBe(false);
+    await openComposerSkills(false);
+    await openComposerSkills();
+    expect(mockSessionActions.refreshCommands).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a resolved runtime Skill preparation error on reopening', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      features: ['workspace_skills_config_runtime'],
+    };
+    const workspaceConfigSkills = vi.fn().mockResolvedValue({
+      initialized: true,
+      skills: [{ name: 'configured', description: 'Config', status: 'ok' }],
+    });
+    const ensureRuntime = vi.fn().mockResolvedValue({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 4,
+      capabilities: {
+        skills: {
+          state: 'error',
+          revision: 0,
+          runtimeEpoch: 4,
+          error: {
+            code: 'skills_prepare_failed',
+            message: 'temporary preparation failure',
+          },
+        },
+      },
+    });
+    const runtimeStatus = vi.fn();
+    const workspaceRuntimeSkills = vi.fn().mockResolvedValue({
+      initialized: true,
+      runtimeEpoch: 4,
+      skills: [
+        { name: 'extension-review', description: 'Extension', status: 'ok' },
+      ],
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceConfigSkills,
+      ensureRuntime,
+      runtimeStatus,
+      workspaceRuntimeSkills,
+    }));
+    renderApp();
+    await flush();
+    await openComposerSkills();
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(true);
+    expect(testState.latestChatEditorProps?.skillsLoading).toBe(false);
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'configured', description: 'Config' },
+    ]);
+    ensureRuntime.mockResolvedValue({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 4,
+      capabilities: {
+        skills: { state: 'ready', revision: 0, runtimeEpoch: 4 },
+      },
+    });
+    await openComposerSkills(false);
+    await openComposerSkills();
+    expect(ensureRuntime).toHaveBeenCalledTimes(2);
+    expect(workspaceRuntimeSkills).toHaveBeenCalledOnce();
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'extension-review', description: 'Extension' },
+    ]);
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(false);
+  });
+
+  it('surfaces the daemon cause when the Skills catalog is unavailable', async () => {
+    const onToast = vi.fn();
+    mockConnection.sessionId = undefined;
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      initialized: false,
+      skills: [],
+      errors: [
+        { kind: 'skills', status: 'error', error: 'settings parse failed' },
+      ],
+    });
+    const { rerender } = renderApp({ onToast });
+    await flush();
+    await openComposerSkills();
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(true);
+    // The on-demand path stays quiet; the mutation path notifies.
+    expect(onToast).not.toHaveBeenCalled();
+
+    emitSkillMutation(
+      'toggle-after-unavailable-catalog',
+      [{ name: 'review', enabled: true }],
+      'deferred',
+    );
+    rerender();
+    await flush();
+    await vi.waitFor(() => {
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        expect.stringContaining('settings parse failed'),
+      );
+    });
+  });
+
+  it('preheats legacy primary Skills on first demand and reuses the complete catalog', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaceCwd: mockConnection.workspaceCwd,
+      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+    };
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        initialized: true,
+        skills: [{ name: 'review', description: 'Bundled', status: 'ok' }],
+      })
+      .mockResolvedValue({
+        initialized: true,
+        skills: [
+          { name: 'review', description: 'Bundled', status: 'ok' },
+          { name: 'extension-review', description: 'Extension', status: 'ok' },
+        ],
+      });
+    mockWorkspace.client.workspaceAcpPreheat.mockClear();
+    renderApp();
+    await flush();
+    expect(mockWorkspace.client.workspaceAcpPreheat).not.toHaveBeenCalled();
+    await openComposerSkills();
+    await openComposerSkills(false);
+    await openComposerSkills();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+    expect(mockWorkspace.client.workspaceAcpPreheat).toHaveBeenCalledWith(5000);
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'extension-review', description: 'Extension' },
+      { name: 'review', description: 'Bundled' },
+    ]);
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(false);
+  });
+
+  it('does not preheat the primary runtime while reading another workspace catalog', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/different-primary',
+      features: ['workspace_acp_preheat'],
+    };
+    mockWorkspace.client.workspaceAcpPreheat.mockClear();
+    renderApp();
+    await flush();
+    await openComposerSkills();
+    expect(mockWorkspace.client.workspaceAcpPreheat).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledOnce();
+  });
+
   it('filters disabled skills from the web-shell skills list', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
@@ -19222,6 +19731,7 @@ describe('App session callbacks', () => {
 
     renderApp();
     await flush();
+    await openComposerSkills();
 
     expect(testState.latestChatEditorProps?.skills).toEqual([
       { name: 'enabled-skill', description: 'Enabled' },
@@ -19279,6 +19789,7 @@ describe('App session callbacks', () => {
 
     renderApp();
     await flush();
+    await openComposerSkills();
     expect(testState.latestChatEditorProps?.skills).toEqual([
       { name: 'configured', description: 'Config' },
     ]);
@@ -19307,7 +19818,50 @@ describe('App session callbacks', () => {
     expect(mockWorkspaceActions.loadSkillsStatus).not.toHaveBeenCalled();
   });
 
-  it('reloads skills when starting a new session', async () => {
+  it('reloads the Skill catalog when an attached session becomes a draft', async () => {
+    mockConnection.skills = undefined;
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [{ name: 'session-skill', status: 'ok' }],
+      })
+      .mockResolvedValueOnce({
+        skills: [{ name: 'draft-skill', status: 'ok' }],
+      });
+    const { rerender } = renderApp();
+    await flush();
+    await openComposerSkills();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      testState.latestChatEditorProps?.onSkillsOpenChange?.(false),
+    );
+    mockConnection.sessionId = undefined;
+    rerender();
+    await flush();
+    await openComposerSkills();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      expect.objectContaining({ name: 'draft-skill' }),
+    ]);
+  });
+
+  it('loads Skills for a custom footer without opening the composer menu', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [{ name: 'review', status: 'ok' }],
+    });
+    let footerSkills: unknown;
+    renderApp({
+      renderFooter: (props) => {
+        footerSkills = props.skills;
+        return null;
+      },
+    });
+    await flush();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledOnce();
+    expect(footerSkills).toEqual([expect.objectContaining({ name: 'review' })]);
+  });
+
+  it('defers Skill refresh until the first menu opening after starting a chat', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.commands = [
       {
@@ -19343,15 +19897,17 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
+    expect(mockWorkspaceActions.loadSkillsStatus).not.toHaveBeenCalled();
+    await openComposerSkills();
 
     expect(testState.latestChatEditorProps?.skills).toEqual([]);
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
     );
-    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
   });
 
-  it('adds an enabled skill command when starting a new session', async () => {
+  it('loads enabled Skill commands on demand after starting a chat', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
       skills: [{ name: 'review', description: 'Review', status: 'disabled' }],
@@ -19378,6 +19934,8 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
+    expect(mockWorkspaceActions.loadSkillsStatus).not.toHaveBeenCalled();
+    await openComposerSkills();
 
     expect(testState.latestChatEditorProps?.commands).toEqual(
       expect.arrayContaining([
@@ -19402,6 +19960,7 @@ describe('App session callbacks', () => {
     });
     const { rerender } = renderApp();
     await flush();
+    await openComposerSkills();
 
     expect(testState.latestChatEditorProps?.skills).toEqual([]);
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
@@ -19467,7 +20026,7 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
     );
-    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(0);
     expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
   });
 
@@ -19478,6 +20037,7 @@ describe('App session callbacks', () => {
     mockConnection.skills = ['web-search'];
     const { rerender } = renderApp();
     await flush();
+    await openComposerSkills();
     expect(testState.latestChatEditorProps?.skills).toEqual([
       { name: 'web-search', description: 'Search the web' },
     ]);
@@ -19492,7 +20052,7 @@ describe('App session callbacks', () => {
     await flush();
 
     await vi.waitFor(() => {
-      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
       expect(testState.latestChatEditorProps?.skills).toEqual([]);
     });
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
@@ -19523,6 +20083,7 @@ describe('App session callbacks', () => {
       });
     const { rerender } = renderApp();
     await flush();
+    await openComposerSkills();
     expect(testState.latestChatEditorProps?.skills).toEqual([]);
 
     testState.workspaceEventSignals = {
@@ -19551,32 +20112,24 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
   });
 
-  it('uses a refreshed workspace Skill snapshot after partial activation', async () => {
-    mockConnection.commands = [
-      {
-        name: 'web-search',
-        description: 'Search the web',
-        source: 'skill',
-        raw: {
+  it.each([false, true])(
+    'uses a refreshed workspace Skill snapshot after partial activation (close during refresh: %s)',
+    async (closeDuringRefresh) => {
+      mockConnection.commands = [
+        {
           name: 'web-search',
           description: 'Search the web',
-          input: null,
-          _meta: { source: 'skill' },
-        },
-      },
-    ];
-    mockConnection.skills = ['web-search'];
-    mockWorkspaceActions.loadSkillsStatus
-      .mockResolvedValueOnce({
-        skills: [
-          {
+          source: 'skill',
+          raw: {
             name: 'web-search',
             description: 'Search the web',
-            status: 'ok',
+            input: null,
+            _meta: { source: 'skill' },
           },
-        ],
-      })
-      .mockResolvedValue({
+        },
+      ];
+      mockConnection.skills = ['web-search'];
+      mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
         skills: [
           {
             name: 'web-search',
@@ -19585,55 +20138,73 @@ describe('App session callbacks', () => {
           },
         ],
       });
-    const { rerender } = renderApp();
-    await flush();
-    expect(testState.latestChatEditorProps?.skills).toHaveLength(1);
+      const { rerender } = renderApp();
+      await flush();
+      await openComposerSkills();
+      expect(testState.latestChatEditorProps?.skills).toHaveLength(1);
 
-    testState.workspaceEventSignals = {
-      ...testState.workspaceEventSignals,
-      skillsVersion: 1,
-      lastSkillMutation: {
-        id: 'partial-web-search',
-        kind: 'skill_toggle',
-        skills: [{ name: 'web-search', enabled: false }],
-        activation: 'partial',
-        sessionsRefreshed: 0,
-        sessionsFailed: 1,
-      },
-    };
-    rerender();
-    await flush();
-    await vi.waitFor(() => {
-      expect(testState.latestChatEditorProps?.skills).toEqual([]);
-    });
+      testState.workspaceEventSignals = {
+        ...testState.workspaceEventSignals,
+        skillsVersion: 1,
+        lastSkillMutation: {
+          id: 'partial-web-search',
+          kind: 'skill_toggle',
+          skills: [{ name: 'web-search', enabled: false }],
+          activation: 'partial',
+          sessionsRefreshed: 0,
+          sessionsFailed: 1,
+        },
+      };
+      let resolveRefresh!: (value: { skills: [] }) => void;
+      if (closeDuringRefresh)
+        mockWorkspaceActions.loadSkillsStatus.mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveRefresh = resolve;
+          }),
+        );
+      rerender();
+      await flush();
+      if (closeDuringRefresh) {
+        await act(async () =>
+          testState.latestChatEditorProps?.onSkillsOpenChange?.(false),
+        );
+        await act(async () => resolveRefresh({ skills: [] }));
+        await openComposerSkills();
+      }
+      await vi.waitFor(() => {
+        expect(testState.latestChatEditorProps?.skills).toEqual([]);
+      });
 
-    expect(testState.latestChatEditorProps?.commands).not.toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
-    );
-    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+      expect(testState.latestChatEditorProps?.commands).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'web-search' }),
+        ]),
+      );
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
 
-    mockConnection.commands = [
-      {
-        name: 'review',
-        description: 'Review changes',
-        source: 'skill',
-        raw: {
+      mockConnection.commands = [
+        {
           name: 'review',
           description: 'Review changes',
-          input: null,
-          _meta: { source: 'skill' },
+          source: 'skill',
+          raw: {
+            name: 'review',
+            description: 'Review changes',
+            input: null,
+            _meta: { source: 'skill' },
+          },
         },
-      },
-    ];
-    mockConnection.skills = ['review'];
-    rerender();
-    await flush();
-    await flush();
+      ];
+      mockConnection.skills = ['review'];
+      rerender();
+      await flush();
+      await flush();
 
-    expect(testState.latestChatEditorProps?.skills).toEqual([
-      { name: 'review', description: 'Review changes' },
-    ]);
-  });
+      expect(testState.latestChatEditorProps?.skills).toEqual([
+        { name: 'review', description: 'Review changes' },
+      ]);
+    },
+  );
 
   it('removes declaration-only enables from a mixed pending mutation', async () => {
     const lockedStatus = {
@@ -19668,6 +20239,7 @@ describe('App session callbacks', () => {
     mockConnection.skills = ['other'];
     const { rerender } = renderApp();
     await flush();
+    await openComposerSkills();
 
     emitPartialSkillMutation('enable-mixed-declarations', [
       { name: 'locked', enabled: true },
@@ -19675,7 +20247,7 @@ describe('App session callbacks', () => {
     ]);
     rerender();
     await vi.waitFor(() => {
-      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
     });
     await vi.waitFor(() => {
       expect(testState.latestChatEditorProps?.skills).toEqual([
@@ -19706,19 +20278,10 @@ describe('App session callbacks', () => {
     );
     rerender();
     await flush();
-    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
   });
 
   it('revalidates a partial Skill mutation only within its workspace', async () => {
-    const enabledStatus = {
-      skills: [
-        {
-          name: 'web-search',
-          description: 'Search the web',
-          status: 'ok' as const,
-        },
-      ],
-    };
     const disabledStatus = {
       skills: [
         {
@@ -19734,11 +20297,11 @@ describe('App session callbacks', () => {
     ];
     mockConnection.skills = ['web-search'];
     mockWorkspaceActions.loadSkillsStatus
-      .mockResolvedValueOnce(enabledStatus)
       .mockResolvedValueOnce(disabledStatus)
       .mockReturnValue(switchedSessionRefresh.promise);
     const { rerender } = renderApp();
     await flush();
+    await openComposerSkills();
 
     emitPartialSkillMutation('partial-web-search-session-switch', [
       { name: 'web-search', enabled: false },
@@ -19751,7 +20314,7 @@ describe('App session callbacks', () => {
     mockConnection.sessionId = 'session-2';
     rerender();
     await vi.waitFor(() => {
-      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(3);
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
     });
     mockConnection.skills = ['web-search'];
     rerender();
@@ -19765,21 +20328,21 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
     );
-    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(3);
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
 
     emitPartialSkillMutation('partial-web-search-session-switch', [
       { name: 'web-search', enabled: false },
     ]);
     rerender();
     await flush();
-    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(3);
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
 
     mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
     mockConnection.sessionId = 'session-3';
     mockConnection.workspaceCwd = '/tmp/other-project';
     rerender();
     await vi.waitFor(() => {
-      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(4);
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
     });
     expect(testState.latestChatEditorProps?.skills).toEqual([
       { name: 'web-search', description: 'Search the web' },
@@ -19791,7 +20354,7 @@ describe('App session callbacks', () => {
     await vi.waitFor(() => {
       expect(testState.latestChatEditorProps?.skills).toEqual([]);
     });
-    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(6);
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(3);
 
     mockConnection.status = 'connecting';
     mockConnection.sessionId = undefined;
@@ -19803,7 +20366,7 @@ describe('App session callbacks', () => {
     await vi.waitFor(() => {
       expect(testState.latestChatEditorProps?.skills).toEqual([]);
     });
-    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(8);
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(4);
   });
 
   it('keeps an in-flight partial Skill mutation when a later mutation is applied', async () => {
@@ -19828,26 +20391,18 @@ describe('App session callbacks', () => {
     ];
     mockConnection.skills = ['web-search'];
     mockWorkspaceActions.loadSkillsStatus
-      .mockResolvedValueOnce({
-        skills: [
-          {
-            name: 'web-search',
-            description: 'Search the web',
-            status: 'ok',
-          },
-        ],
-      })
       .mockReturnValueOnce(pendingPartialRefresh.promise)
       .mockResolvedValue(disabledStatus);
     const { rerender } = renderApp();
     await flush();
+    await openComposerSkills();
 
     emitPartialSkillMutation('partial-web-search-batch', [
       { name: 'web-search', enabled: false },
     ]);
     rerender();
     await vi.waitFor(() => {
-      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
     });
 
     emitSkillMutation(
@@ -19859,7 +20414,7 @@ describe('App session callbacks', () => {
     await flush();
 
     await vi.waitFor(() => {
-      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(3);
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
       expect(testState.latestChatEditorProps?.skills).toEqual([]);
     });
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
@@ -19895,27 +20450,18 @@ describe('App session callbacks', () => {
       skillCommandFixture('web-search', 'Search the web'),
     ];
     mockConnection.skills = ['web-search'];
-    mockWorkspaceActions.loadSkillsStatus
-      .mockResolvedValueOnce({
-        skills: [
-          {
-            name: 'web-search',
-            description: 'Search the web',
-            status: 'ok',
-          },
-        ],
-      })
-      .mockResolvedValue({
-        skills: [
-          {
-            name: 'web-search',
-            description: 'Search the web',
-            status: 'disabled',
-          },
-        ],
-      });
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          name: 'web-search',
+          description: 'Search the web',
+          status: 'disabled',
+        },
+      ],
+    });
     const { rerender } = renderApp();
     await flush();
+    await openComposerSkills();
 
     testState.workspaceEventSignals = {
       ...testState.workspaceEventSignals,
@@ -19929,7 +20475,7 @@ describe('App session callbacks', () => {
     await flush();
 
     await vi.waitFor(() => {
-      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
       expect(testState.latestChatEditorProps?.skills).toEqual([]);
     });
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
@@ -19945,15 +20491,6 @@ describe('App session callbacks', () => {
         status: 'disabled';
       }>;
     }>();
-    const enabledStatus = {
-      skills: [
-        {
-          name: 'web-search',
-          description: 'Search the web',
-          status: 'ok' as const,
-        },
-      ],
-    };
     const disabledStatus = {
       skills: [
         {
@@ -19968,18 +20505,18 @@ describe('App session callbacks', () => {
     ];
     mockConnection.skills = ['web-search'];
     mockWorkspaceActions.loadSkillsStatus
-      .mockResolvedValueOnce(enabledStatus)
       .mockReturnValueOnce(pendingWorkspaceARefresh.promise)
       .mockResolvedValue(disabledStatus);
     const { rerender } = renderApp();
     await flush();
+    await openComposerSkills();
 
     emitPartialSkillMutation('partial-web-search-workspace-a', [
       { name: 'web-search', enabled: false },
     ]);
     rerender();
     await vi.waitFor(() => {
-      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
     });
 
     mockConnection.workspaceCwd = '/tmp/other-project';
@@ -20009,7 +20546,7 @@ describe('App session callbacks', () => {
 
     await vi.waitFor(() => {
       expect(mockWorkspaceActions.loadSkillsStatus.mock.calls.length).toBe(
-        callsBeforeReturning + 2,
+        callsBeforeReturning + 1,
       );
       expect(testState.latestChatEditorProps?.skills).toEqual([]);
     });
@@ -20033,6 +20570,7 @@ describe('App session callbacks', () => {
     const onToast = vi.fn();
     const { rerender } = renderApp({ onToast });
     await flush();
+    await openComposerSkills();
 
     testState.workspaceEventSignals = {
       ...testState.workspaceEventSignals,
@@ -20079,6 +20617,7 @@ describe('App session callbacks', () => {
 
     const { rerender } = renderApp();
     await flush();
+    await openComposerSkills();
     await vi.waitFor(() => {
       expect(testState.latestChatEditorProps?.skills).toEqual([
         { name: 'web-search', description: 'Search the web' },
@@ -20116,6 +20655,7 @@ describe('App session callbacks', () => {
 
     renderApp();
     await flush();
+    await openComposerSkills();
     await vi.waitFor(() => {
       expect(testState.latestChatEditorProps?.skills).toEqual([
         { name: 'web-search', description: 'Search the web' },
@@ -20150,6 +20690,7 @@ describe('App session callbacks', () => {
 
     const { rerender } = renderApp();
     await flush();
+    await openComposerSkills();
     emitPartialSkillMutation('partial-web-search-unknown-skills', [
       { name: 'web-search', enabled: false },
     ]);
@@ -32829,6 +33370,60 @@ describe('App session callbacks', () => {
     expect(editorFocus).toHaveBeenCalled();
   });
 
+  it('reads Live setup only in Settings even when the host hides the Live sidebar group', async () => {
+    testState.settings = [
+      {
+        ...sessionWorkflowSetting(),
+        key: 'experimental.liveVoice.enabled',
+        values: { effective: false },
+      },
+    ];
+    mockWorkspace.client.liveSetupStatus.mockClear();
+    const { container } = renderApp({ sidebar: { showLive: false } });
+    await flush();
+    expect(mockWorkspace.client.liveSetupStatus).not.toHaveBeenCalled();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspace.client.liveSetupStatus).toHaveBeenCalledOnce();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')!
+        .click(),
+    );
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    expect(mockWorkspace.client.liveSetupStatus).toHaveBeenCalledOnce();
+  });
+
+  it('enables providers only while Settings is open', async () => {
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestProvidersHookOptions).toEqual({
+      autoLoad: false,
+      enabled: false,
+    });
+
+    for (let opening = 0; opening < 2; opening += 1) {
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+      expect(testState.latestProvidersHookOptions).toEqual({
+        autoLoad: true,
+        enabled: true,
+      });
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')!
+          .click();
+      });
+      expect(testState.latestProvidersHookOptions).toEqual({
+        autoLoad: false,
+        enabled: false,
+      });
+    }
+  });
+
   it('closes the panel, sends /model --fast, and reloads settings on fast-model pick', async () => {
     const { container } = renderApp();
     await flush();
@@ -33249,7 +33844,7 @@ describe('App session callbacks', () => {
     expect(settingsSetValue).toHaveBeenCalledWith(
       'user',
       'voiceModel',
-      'fast-model-x',
+      'qwen3-asr-flash',
     );
     expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
   });
@@ -33561,8 +34156,8 @@ describe('App session callbacks', () => {
       enabled: true,
     });
     expect(testState.latestProvidersHookOptions).toEqual({
-      autoLoad: true,
-      enabled: true,
+      autoLoad: false,
+      enabled: false,
     });
     expect(testState.latestChatEditorProps).toMatchObject({
       builtinAtProviders: false,
@@ -33703,8 +34298,8 @@ describe('App session callbacks', () => {
       enabled: true,
     });
     expect(testState.latestProvidersHookOptions).toEqual({
-      autoLoad: true,
-      enabled: true,
+      autoLoad: false,
+      enabled: false,
     });
   });
 
@@ -34471,6 +35066,59 @@ describe('App prompt send failure retry', () => {
       }),
     );
   });
+
+  it.each([false, true])(
+    'preserves an unadmitted slash prompt after failure (new input: %s)',
+    async (hasNewInput) => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const firstSend = deferred<void>();
+      mockSessionActions.sendPrompt.mockImplementationOnce(
+        () => firstSend.promise,
+      );
+      const images = [{ data: 'AQID', mimeType: 'image/png' }];
+      const files = [
+        {
+          name: 'review.txt',
+          media_type: 'text/plain',
+          text: 'review context',
+        },
+      ];
+      const onToast = vi.fn();
+      testState.prompt = '/review this image';
+      renderApp({ onToast });
+      await flush();
+      act(() => {
+        const accepted = testState.latestChatEditorProps?.onSubmit(
+          '/review this image',
+          images,
+          files,
+        );
+        expect(accepted).toBe(true);
+        testState.prompt = '';
+      });
+      await flush();
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+      if (hasNewInput) testState.prompt = 'a newer message';
+      await act(async () => {
+        firstSend.reject(new Error('Loading commands timed out after 5000ms'));
+        await Promise.resolve();
+      });
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        expect.stringContaining('Loading commands timed out'),
+      );
+      expect(testState.prompt).toBe(
+        hasNewInput ? 'a newer message' : '/review this image',
+      );
+      if (hasNewInput) {
+        expect(editorRestoreImages).not.toHaveBeenCalled();
+        expect(editorRestoreFiles).not.toHaveBeenCalled();
+      } else {
+        expect(editorRestoreImages).toHaveBeenCalledWith(images);
+        expect(editorRestoreFiles).toHaveBeenCalledWith(files);
+      }
+    },
+  );
 
   it('retries a rejected failed prompt with its file attachment intact', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});

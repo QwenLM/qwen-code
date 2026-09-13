@@ -20,6 +20,7 @@ import {
   computeModelListVersion,
   PROVIDER_METADATA_NS,
 } from '@qwen-code/qwen-code-core';
+import { setNestedPropertySafe } from '../../config/settingsUtils.js';
 import { useProviderUpdates } from './useProviderUpdates.js';
 
 vi.mock('../../config/settingsUtils.js', async (importOriginal) => {
@@ -56,7 +57,18 @@ describe('useProviderUpdates', () => {
     } as Record<string, unknown>,
     setValue: vi.fn(),
     setValues: vi.fn(),
-    forScope: vi.fn(() => ({ path: '/tmp/settings.json' })),
+    forScope: vi.fn(
+      (): {
+        path: string;
+        settings: Record<string, unknown>;
+        originalSettings: Record<string, unknown>;
+      } => ({
+        path: '/tmp/settings.json',
+        settings: mockSettings.merged,
+        originalSettings: structuredClone(mockSettings.merged),
+      }),
+    ),
+    recomputeMerged: vi.fn(),
     isTrusted: true,
     workspace: { settings: {} },
     user: { settings: {} },
@@ -82,6 +94,11 @@ describe('useProviderUpdates', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSettings.setValue.mockImplementation(
+      (_scope: unknown, key: string, value: unknown) => {
+        setNestedPropertySafe(mockSettings.merged, key, value);
+      },
+    );
     mockSettings.merged['modelProviders'] = {};
     mockSettings.merged[PROVIDER_METADATA_NS] = {};
     mockConfig.getContentGeneratorConfig.mockReturnValue({
@@ -250,12 +267,16 @@ describe('useProviderUpdates', () => {
     expect(entry?.diff.added).toContain(addedModelId);
   });
 
-  it('persists the template version and preserves custom models', async () => {
+  it('refreshes template fields and version while preserving custom model settings', async () => {
     const customModel = {
       id: 'my-custom-model',
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       envKey: CODING_PLAN_ENV_KEY,
       name: '[Coding Plan] my-custom-model',
+      generationConfig: {
+        contextWindowSize: 65536,
+        samplingParams: { temperature: 0.2 },
+      },
     };
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
@@ -264,7 +285,14 @@ describe('useProviderUpdates', () => {
       version: 'old-version-hash',
     };
     mockSettings.merged['modelProviders'] = {
-      [AuthType.USE_OPENAI]: [...chinaTemplate, customModel],
+      [AuthType.USE_OPENAI]: [
+        ...chinaTemplate.map((model) => ({
+          ...model,
+          name: '[OLD LABEL] ' + model.id,
+          generationConfig: { contextWindowSize: 262144 },
+        })),
+        customModel,
+      ],
     };
     mockConfig.refreshAuth.mockResolvedValue(undefined);
 
@@ -292,9 +320,7 @@ describe('useProviderUpdates', () => {
 
     const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
     expect(reloaded[AuthType.USE_OPENAI]).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ id: 'my-custom-model' }),
-      ]),
+      expect.arrayContaining([customModel, ...chinaTemplate]),
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
