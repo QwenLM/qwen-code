@@ -5404,6 +5404,71 @@ describe('LlmChat', async () => {
   });
 
   describe('auto-compression integration', () => {
+    it('keeps compressed history and token counts consistent if worker invalidation fails', async () => {
+      chat.setLastPromptTokenCount(1000);
+      mockConfig.getExecutionEnvironment = () =>
+        ({
+          invalidateReadCache: vi
+            .fn()
+            .mockRejectedValue(new Error('executor closed')),
+        }) as unknown as ReturnType<Config['getExecutionEnvironment']>;
+      const newHistory = [{ role: 'user', parts: [{ text: 'summary' }] }];
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory,
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      expect(
+        (await chat.tryCompress('failed-invalidation', true)).compressionStatus,
+      ).toBe(CompressionStatus.COMPRESSED);
+      expect(chat.getHistory()).toEqual(newHistory);
+      expect(chat.getLastPromptTokenCount()).toBe(200);
+    });
+
+    it('clears the execution environment cache before finishing compression', async () => {
+      let completeInvalidation!: () => void;
+      const invalidateReadCache = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            completeInvalidation = resolve;
+          }),
+      );
+      mockConfig.getExecutionEnvironment = () =>
+        ({ invalidateReadCache }) as unknown as ReturnType<
+          Config['getExecutionEnvironment']
+        >;
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      let finished = false;
+      const compression = chat
+        .tryCompress('container-compression', true)
+        .then(() => {
+          finished = true;
+        });
+      await vi.waitFor(() =>
+        expect(invalidateReadCache).toHaveBeenCalledOnce(),
+      );
+      expect(finished).toBe(false);
+      completeInvalidation();
+      await compression;
+      expect(finished).toBe(true);
+    });
+
     function makeStreamResponse(
       text = 'ok',
       usageMetadata?: GenerateContentResponse['usageMetadata'],

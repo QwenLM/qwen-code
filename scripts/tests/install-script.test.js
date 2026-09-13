@@ -1847,6 +1847,11 @@ describe('standalone release packaging', () => {
         existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
       ).toBe(true);
       expect(
+        existsSync(
+          path.join(extractDir, 'qwen-code', 'lib', 'execution-worker.js'),
+        ),
+      ).toBe(true);
+      expect(
         existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
       ).toBe(true);
       const shim = readScript(
@@ -4621,6 +4626,7 @@ function ensureMinimalDist({
   writeFileSync(path.join(distPath, 'codeModeHost.js'), 'export {};\n');
   if (includeCliEntry) {
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');
+    writeFileSync(path.join(distPath, 'execution-worker.js'), '');
   }
   if (includeNpmPackageArtifacts) {
     writeFileSync(

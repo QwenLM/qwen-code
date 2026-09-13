@@ -23,6 +23,13 @@ import {
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
+import {
+  SubagentManager,
+  loadSubagentFromDir,
+} from '../subagents/subagent-manager.js';
+import type { SubagentError } from '../subagents/types.js';
+import type { Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 
 // The git-subdir source clones a repo; stub the network clone so the security
 // guards around the cloned subdirectory can be exercised against a real fs.
@@ -664,6 +671,86 @@ describe('convertClaudePluginPackage', () => {
     // Clean up
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
+
+  it.each([
+    ['executionBackend: container', true],
+    ['executionBackend: null', false],
+    ['executionBackend: local', false],
+    ['executionBackend: container\nexecutionBackend: local', false],
+    ['executionBackend: container\nbroken: [', false],
+  ] as const)(
+    'preserves backend intent through plugin conversion and actual extension loading: %s',
+    async (declaration, valid) => {
+      const pluginSourceDir = path.join(testDir, 'backend-plugin');
+      const agentsDir = path.join(pluginSourceDir, 'agents');
+      const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+      fs.mkdirSync(agentsDir, { recursive: true });
+      fs.mkdirSync(marketplaceDir, { recursive: true });
+      const source = `---\nname: Explore\ndescription: Review files\n${declaration}\n---\nComplete the requested task.\n`;
+      const sourceFile = path.join(agentsDir, 'agent.md');
+      fs.writeFileSync(sourceFile, source);
+      fs.writeFileSync(
+        path.join(marketplaceDir, 'marketplace.json'),
+        JSON.stringify({
+          name: 'marketplace',
+          owner: { name: 'Test' },
+          plugins: [
+            {
+              name: 'backend-plugin',
+              version: '1.0.0',
+              source: './',
+              strict: false,
+              agents: ['./agents/agent.md'],
+            },
+          ],
+        }),
+      );
+      const result = await convertClaudePluginPackage(
+        pluginSourceDir,
+        'backend-plugin',
+      );
+      const homeSpy = vi
+        .spyOn(Storage, 'getGlobalQwenDir')
+        .mockReturnValue(path.join(testDir, 'global'));
+      try {
+        const installedDir = path.join(result.convertedDir, 'agents');
+        const installed = fs.readFileSync(
+          path.join(installedDir, 'agent.md'),
+          'utf8',
+        );
+        expect(fs.readFileSync(sourceFile, 'utf8')).toBe(source);
+        if (!valid) expect(installed).toBe(source);
+        const refusals = new Map<string, SubagentError>();
+        const agents = await loadSubagentFromDir(installedDir, refusals);
+        const manager = new SubagentManager({
+          getProjectRoot: () => path.join(testDir, 'workspace'),
+          getActiveExtensions: () => [
+            { agents, agentExecutorRefusals: refusals },
+          ],
+          getAgentsSettings: () => ({}),
+          getSdkMode: () => false,
+          isSafeMode: () => false,
+        } as unknown as Config);
+        if (valid) {
+          expect(installed).toContain('executionBackend: container');
+          expect(refusals.size).toBe(0);
+          expect(await manager.loadSubagent('Explore')).toMatchObject({
+            level: 'extension',
+            executionBackend: 'container',
+          });
+        } else {
+          expect(agents).toEqual([]);
+          expect(refusals.has('explore')).toBe(true);
+          await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+            'invalid executionBackend declaration',
+          );
+        }
+      } finally {
+        homeSpy.mockRestore();
+        fs.rmSync(result.convertedDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('should populate commands/skills/agents when marketplace references the whole folder (deep-wiki shape)', async () => {
     // Regression test for https://github.com/QwenLM/qwen-code/issues/4452.

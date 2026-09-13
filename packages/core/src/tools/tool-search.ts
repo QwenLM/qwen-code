@@ -349,7 +349,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // null/uninitialised client would surface as a fake error for
     // what is just a schema-inspection request).
     let setToolsError: string | undefined;
-    if (newlyRevealed.length > 0) {
+    // Container agents refresh private declarations in AgentCore, not the parent client.
+    if (newlyRevealed.length > 0 && !this.config.getExecutionEnvironment?.()) {
       const llmClient = this.config.getLlmClient();
       if (!llmClient) {
         // Optional chaining (`?.setTools()`) used to silently no-op here,

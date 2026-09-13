@@ -77,6 +77,7 @@ export async function truncateAndSaveToFile(
   truncateLines: number,
   keep: 'head' | 'tail' | 'both' = 'both',
   previewChars = threshold,
+  exclusive = false,
 ): Promise<{ content: string; outputFile?: string }> {
   // Fast path: when no line cap applies (per-tool char budgets pass
   // truncateLines = Infinity) and content is within the char threshold, return
@@ -216,7 +217,10 @@ ${truncatedContent}`;
     // with the logger/checkpoints and is normally created earlier without one,
     // and mkdir would not tighten an already-existing directory anyway.
     await fs.mkdir(projectTempDir, { recursive: true });
-    await fs.writeFile(outputFile, content, { mode: 0o600 });
+    await fs.writeFile(outputFile, content, {
+      mode: 0o600,
+      ...(exclusive ? { flag: 'wx' } : {}),
+    });
 
     return {
       content: wrappedMessage,
@@ -278,14 +282,16 @@ export async function truncateToolOutput(
 
   const originalLength = content.length;
   const fileName = `${toolName}_${crypto.randomBytes(6).toString('hex')}`;
+  const outputDirectory = config.getExecutionEnvironment?.()?.outputDirectory;
   const result = await truncateAndSaveToFile(
     content,
     fileName,
-    config.storage.getProjectTempDir(),
+    outputDirectory ?? config.storage.getProjectTempDir(),
     threshold,
     lines,
     keep,
     previewChars,
+    outputDirectory !== undefined,
   );
 
   if (result.outputFile) {
@@ -471,16 +477,23 @@ export async function persistAndTruncateToolResult(
       bytesWritten: 0,
     };
   }
+  const outputDirectory = config.getExecutionEnvironment?.()?.outputDirectory;
   try {
-    const toolResultsDir = config.storage.getToolResultsDir();
+    const toolResultsDir =
+      outputDirectory ?? config.storage.getToolResultsDir();
     const outputFile = path.join(toolResultsDir, `${safeCallId}.txt`);
     await fs.mkdir(toolResultsDir, { recursive: true });
-    await atomicWriteFile(outputFile, content, {
-      mode: 0o600,
-      forceMode: true,
-      noFollow: true,
-      flush: false,
-    });
+    if (outputDirectory !== undefined) {
+      // The worker can replace shared entries; never chmod or reopen them by path.
+      await fs.writeFile(outputFile, content, { mode: 0o600, flag: 'wx' });
+    } else {
+      await atomicWriteFile(outputFile, content, {
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+        flush: false,
+      });
+    }
 
     return {
       content: buildStub(content, byteSize, outputFile),
@@ -493,9 +506,12 @@ export async function persistAndTruncateToolResult(
       const fallback = await truncateAndSaveToFile(
         content,
         `${toolName}_${crypto.randomBytes(6).toString('hex')}`,
-        config.storage.getProjectTempDir(),
+        outputDirectory ?? config.storage.getProjectTempDir(),
         config.getTruncateToolOutputThreshold(),
         config.getTruncateToolOutputLines(),
+        'both',
+        undefined,
+        outputDirectory !== undefined,
       );
       if (fallback.outputFile) {
         return {

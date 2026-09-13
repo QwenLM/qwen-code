@@ -2442,6 +2442,28 @@ describe('createProductionDispatch', () => {
     nextExecuteHook.value = undefined;
   });
 
+  it.each([
+    {},
+    { model: 'other-model' },
+    { schema: { type: 'object' } },
+    { isolation: 'worktree' as const },
+  ])(
+    'refuses an operator container requirement before dispatch: %j',
+    async (options) => {
+      const config = {
+        getAgentExecutionBackend: () => 'container' as const,
+      } as Config;
+      const worktreesBefore = worktreeStubs.instances.length;
+
+      await expect(
+        createProductionDispatch(config)('do work', options),
+      ).rejects.toThrow('workflow agents are unsupported');
+
+      expect(created).toHaveLength(0);
+      expect(worktreeStubs.instances).toHaveLength(worktreesBefore);
+    },
+  );
+
   it('routes calls through AgentHeadless and returns getFinalText', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     const result = await dispatch('hello', { label: 'h1' });
@@ -3674,6 +3696,39 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       disposed: number;
     };
   }
+
+  it('refuses a container definition before workflow worktree or runtime creation', async () => {
+    const onCreate = vi.fn(async () => ({
+      finalText: 'host execution must not start',
+      terminateMode: 'GOAL',
+    }));
+    const lookup = vi.fn(async () => ({
+      name: 'contained-reviewer',
+      description: 'Container reviewer',
+      systemPrompt: 'Review the work.',
+      level: 'user',
+      executionBackend: 'container' as const,
+    }));
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: lookup,
+      onCreate,
+    });
+    const createRegistry = vi.spyOn(config, 'createToolRegistry');
+
+    await expect(
+      createProductionDispatch(config)('review work', {
+        agentType: 'contained-reviewer',
+        isolation: 'worktree',
+        schema: { type: 'object' },
+      }),
+    ).rejects.toThrow('workflow agents are unsupported');
+
+    expect(lookup).toHaveBeenCalledOnce();
+    expect(calls).toHaveLength(0);
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(createRegistry).not.toHaveBeenCalled();
+    expect(worktreeStubs.instances).toHaveLength(0);
+  });
 
   it.each([
     { label: 'plain', options: {}, tokenLimit: null },

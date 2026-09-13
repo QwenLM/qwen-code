@@ -2666,6 +2666,14 @@ export class LlmChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
+      try {
+        await this.config.getExecutionEnvironment?.()?.invalidateReadCache();
+      } catch (error) {
+        debugLogger.warn(
+          'Execution cache invalidation after compression failed',
+          error,
+        );
+      }
       // Compression rewrote the shared history every retained entry sizes,
       // so ALL retained counts are stale — not just the current route's.
       // Drop them, or a later keyed read adopts a pre-compression count and

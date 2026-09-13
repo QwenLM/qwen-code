@@ -236,6 +236,8 @@ function createPreSpawnAbortedHandle(): ShellExecutionHandle {
 }
 
 export interface ShellExecutionConfig {
+  /** Emit buffered output snapshots while a non-PTY command is running. */
+  streamBufferedOutput?: boolean;
   terminalWidth?: number;
   terminalHeight?: number;
   pager?: string;
@@ -774,6 +776,7 @@ export class ShellExecutionService {
       getMaxBufferedOutputBytes(shellExecutionConfig),
       shellExecutionConfig.pager,
       options.postPromote,
+      shellExecutionConfig.streamBufferedOutput,
     );
   }
 
@@ -786,6 +789,7 @@ export class ShellExecutionService {
     maxBufferedOutputBytes: number,
     pager: string | undefined,
     postPromote?: ShellPostPromoteHandlers,
+    streamBufferedOutput = false,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
@@ -824,6 +828,8 @@ export class ShellExecutionService {
 
         let stdout = '';
         let stderr = '';
+        let stdoutPreview = '';
+        let stderrPreview = '';
         const outputChunks: Buffer[] = [];
         const sniffChunks: Buffer[] = [];
         let error: Error | null = null;
@@ -951,6 +957,27 @@ export class ShellExecutionService {
             stdout += decodedChunk;
           } else {
             stderr += decodedChunk;
+          }
+          if (streamBufferedOutput) {
+            if (stream === 'stdout') {
+              stdoutPreview = (
+                stdoutPreview + decodedChunk.slice(-65536)
+              ).slice(-65536);
+            } else {
+              stderrPreview = (
+                stderrPreview + decodedChunk.slice(-65536)
+              ).slice(-65536);
+            }
+            const separator = stdoutPreview.endsWith('\n') ? '' : '\n';
+            const snapshot =
+              stdoutPreview +
+              (stderrPreview
+                ? (stdoutPreview ? separator : '') + stderrPreview
+                : '');
+            onOutputEvent({
+              type: 'data',
+              chunk: stripAnsi(snapshot).slice(-65536),
+            });
           }
         };
 

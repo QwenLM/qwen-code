@@ -26,6 +26,18 @@ function makeStats(overrides: Partial<Stats> = {}): Stats {
 }
 
 describe('FileReadCache', () => {
+  it('drops local entries without advancing history invalidation generation', () => {
+    const cache = new FileReadCache();
+    const stats = makeStats();
+    cache.recordRead('/file', stats, { full: true, cacheable: true });
+    const generation = cache.getClearGeneration();
+    cache.dropEntries();
+    expect(cache.check(stats).state).toBe('unknown');
+    expect(cache.getClearGeneration()).toBe(generation);
+    cache.clear();
+    expect(cache.getClearGeneration()).toBe(generation + 1);
+  });
+
   describe('inodeKey', () => {
     it('combines dev and ino into a stable string', () => {
       expect(FileReadCache.inodeKey(makeStats({ dev: 7, ino: 99 }))).toBe(

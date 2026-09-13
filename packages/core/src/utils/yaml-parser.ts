@@ -57,7 +57,7 @@ export function parse(yamlString: string): Record<string, unknown> {
  * - Wraps nested objects in null-prototype containers to prevent
  *   prototype pollution via `__proto__` keys
  */
-function sanitizeValue(value: unknown): unknown {
+export function sanitizeValue(value: unknown): unknown {
   if (value === null) {
     return undefined;
   }

@@ -53,7 +53,7 @@ export interface ToolInvocation<
    * The coreToolScheduler uses this as the *default* permission which may be
    * overridden by PermissionManager rules at L4.
    */
-  getDefaultPermission(): Promise<PermissionDecision>;
+  getDefaultPermission(signal?: AbortSignal): Promise<PermissionDecision>;
 
   /**
    * Whether this invocation must be approved through an explicit host/user
@@ -92,6 +92,9 @@ export interface ToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<TResult>;
+
+  /** Release prepared resources when the scheduler finalizes the call. */
+  release?(): Promise<void>;
 }
 
 /**

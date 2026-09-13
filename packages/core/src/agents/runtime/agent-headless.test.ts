@@ -21,7 +21,15 @@ import {
   vi,
   type Mock,
 } from 'vitest';
-import { Config, type ConfigParameters } from '../../config/config.js';
+import {
+  ApprovalMode,
+  Config,
+  deriveApprovalModeConfig,
+  deriveConfig,
+  deriveWorktreeConfig,
+  type ConfigParameters,
+} from '../../config/config.js';
+import type { ExecutionEnvironment } from '../../services/execution-environment.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import {
   createContentGenerator,
@@ -394,6 +402,59 @@ describe('subagent.ts', () => {
 
     describe('create (Tool Validation)', () => {
       const promptConfig: PromptConfig = { systemPrompt: 'Test prompt' };
+
+      it('rejects a container requirement through real worktree and approval overlays', async () => {
+        const config = new Config({
+          model: DEFAULT_QWEN_MODEL,
+          targetDir: process.cwd(),
+          cwd: process.cwd(),
+          debugMode: false,
+          agentExecutionBackend: 'container',
+        });
+        const scoped = deriveApprovalModeConfig(
+          deriveWorktreeConfig(config, process.cwd()),
+          ApprovalMode.DEFAULT,
+        );
+        try {
+          await expect(
+            AgentHeadless.create(
+              'unsupported-direct-agent',
+              scoped.config,
+              promptConfig,
+              defaultModelConfig,
+              defaultRunConfig,
+            ),
+          ).rejects.toThrow('has no execution environment');
+          expect(LlmChat).not.toHaveBeenCalled();
+          expect(executeToolCall).not.toHaveBeenCalled();
+        } finally {
+          scoped.cleanup();
+        }
+      });
+
+      it('allows a required container with its injected environment and no factory', async () => {
+        const config = new Config({
+          model: DEFAULT_QWEN_MODEL,
+          targetDir: process.cwd(),
+          cwd: process.cwd(),
+          debugMode: false,
+          agentExecutionBackend: 'container',
+        });
+        const environment = {} as ExecutionEnvironment;
+        const scoped = deriveConfig(config, {
+          getExecutionEnvironment: () => environment,
+        });
+        expect(scoped.getExecutionEnvironmentFactory()).toBeUndefined();
+        await expect(
+          AgentHeadless.create(
+            'contained-agent',
+            scoped,
+            promptConfig,
+            defaultModelConfig,
+            defaultRunConfig,
+          ),
+        ).resolves.toBeInstanceOf(AgentHeadless);
+      });
 
       it('should create a AgentHeadless successfully with minimal config', async () => {
         const { config } = await createMockConfig();

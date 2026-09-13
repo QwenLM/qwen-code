@@ -167,6 +167,7 @@ describe('BackgroundAgentResumeService', () => {
         getProjectDir: () => tempDir,
       },
       getBackgroundTaskRegistry: () => registry,
+      getAgentExecutionBackend: () => undefined,
       getMonitorRegistry: () => monitorRegistry,
       getSubagentManager: () => subagentManager,
       getHookSystem: () => hookSystem,
@@ -387,6 +388,95 @@ describe('BackgroundAgentResumeService', () => {
     expect(await service.loadPausedBackgroundAgents(sessionId)).toEqual([]);
     expect(subagentManager.loadSubagent).not.toHaveBeenCalled();
   });
+
+  it.each(
+    (['metadata', 'operator', 'definition'] as const).flatMap((source) =>
+      (['discovery', 'resume', 'revive'] as const).map((operation) => ({
+        source,
+        operation,
+      })),
+    ),
+  )(
+    'refuses $source container task $operation without creating a local runtime',
+    async ({ source, operation }) => {
+      const agentId = `container-${operation}`;
+      const sessionId = 'session-container';
+      const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+      const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+      writeAgentMeta(metaPath, {
+        agentId,
+        agentType: 'researcher',
+        subagentName: 'researcher',
+        description: 'Container task',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: operation === 'resume' ? 'paused' : 'completed',
+        isBackgrounded: true,
+        ...(source === 'metadata'
+          ? {
+              isolation: 'container' as const,
+              executionBackend: 'container' as const,
+              workspaceIsolation: 'worktree' as const,
+            }
+          : {}),
+      });
+      fs.writeFileSync(
+        outputFile,
+        JSON.stringify({
+          uuid: 'container-message',
+          parentUuid: null,
+          sessionId,
+          agentId,
+          cwd: tempDir,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Continue contained work' }],
+          },
+        }) + '\n',
+      );
+      const { service, subagentManager, config, hookSystem } = createService();
+      if (source === 'operator') {
+        vi.spyOn(config, 'getAgentExecutionBackend').mockReturnValue(
+          'container',
+        );
+      } else if (source === 'definition') {
+        const definition = {
+          ...(await subagentManager.loadSubagent('researcher'))!,
+          executionBackend: 'container' as const,
+        };
+        subagentManager.loadSubagent.mockResolvedValue(definition);
+      }
+      if (operation === 'discovery') {
+        await service.loadPausedBackgroundAgents(sessionId);
+      } else {
+        registry.register({
+          agentId,
+          description: 'Container task',
+          subagentType: 'researcher',
+          isBackgrounded: true,
+          status: operation === 'resume' ? 'paused' : 'completed',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+          outputFile,
+          metaPath,
+        });
+        const result =
+          operation === 'resume'
+            ? await service.resumeBackgroundAgent(agentId, 'Continue')
+            : await service.reviveCompletedBackgroundAgent(agentId, 'Continue');
+        expect(result).toBeUndefined();
+      }
+      expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+        'Container background tasks cannot be resumed',
+      );
+      expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      expect(config.createToolRegistry).not.toHaveBeenCalled();
+      expect(hookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps damaged and unsafe retained entries visible but non-continuable', async () => {
     const sessionId = 'session-unsafe';
@@ -2845,6 +2935,33 @@ describe('BackgroundAgentResumeService', () => {
 
     return { metaPath, outputFile };
   }
+
+  it('refuses an old local fork under the operator container policy before warming host tools', async () => {
+    const agentId = 'local-fork-now-contained';
+    seedResumableForkTask('session-1', agentId);
+    const { service, config, stubToolRegistry } = createService({
+      currentForkRuntime: {
+        systemInstruction: 'Current parent instructions',
+        advertisedTools: [{ name: ToolNames.READ_FILE }],
+      },
+    });
+    vi.spyOn(config, 'getAgentExecutionBackend').mockReturnValue('container');
+    const createSpy = vi.spyOn(AgentHeadless, 'create');
+    try {
+      expect(
+        await service.resumeBackgroundAgent(agentId, 'continue'),
+      ).toBeUndefined();
+      expect(registry.get(agentId)).toMatchObject({
+        status: 'paused',
+        resumeBlockedReason: expect.stringContaining('cannot be resumed'),
+      });
+      expect(stubToolRegistry.warmAll).not.toHaveBeenCalled();
+      expect(config.createToolRegistry).not.toHaveBeenCalled();
+      expect(createSpy).not.toHaveBeenCalled();
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
 
   it('keeps fork tasks paused when every advertised parent tool is excluded from subagents', async () => {
     const sessionId = 'session-fork-cap-excluded';
