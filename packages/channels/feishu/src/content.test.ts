@@ -301,7 +301,15 @@ describe('parseFeishuContent (#11554)', () => {
       'post',
       JSON.stringify({
         content: [
-          [{ tag: 'code_block', language: 'text', text: '`'.repeat(130_000) }],
+          [
+            {
+              tag: 'code_block',
+              language: 'text',
+              // An input-sized array of one-char runs is what overflows the
+              // call stack when the census is spread into Math.max.
+              text: '`x'.repeat(130_000),
+            },
+          ],
         ],
       }),
       (err) => errors.push(err),
