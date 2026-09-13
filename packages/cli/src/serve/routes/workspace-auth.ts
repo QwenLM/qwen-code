@@ -8,6 +8,7 @@ import type { Application, RequestHandler } from 'express';
 import {
   ALL_PROVIDERS,
   AuthType,
+  ProviderInstallError,
   resolveModelProtocol,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -389,6 +390,15 @@ export function registerWorkspaceAuthRoutes(
           ...(runtimeSync ? { runtimeSync } : {}),
         });
       } catch (err) {
+        if (
+          err instanceof ProviderInstallError &&
+          err.step === 'modelPurpose'
+        ) {
+          res
+            .status(400)
+            .json({ error: err.message, code: 'model_purpose_conflict' });
+          return;
+        }
         sendBridgeError(res, err, {
           route: 'POST /workspace/auth/provider',
           providerId: installRequest.providerId,

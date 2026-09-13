@@ -109,6 +109,8 @@ export interface SettingsMessageSettingsState {
 }
 
 const SUB_DIALOG_KEYS = new Set([
+  'advisorModel',
+  'imageModel',
   'fastModel',
   'visionModel',
   'voiceModel',
@@ -191,6 +193,10 @@ function formatValue(
 ): string {
   const effective = resolveValue(setting, scope);
   if (effective === undefined || effective === null) return '';
+  if (setting.key === 'advisorModel' && effective === '')
+    return t('model.useMain');
+  if (setting.key === 'imageModel' && effective === '')
+    return t('model.disabled');
   if (setting.key === THEME_SETTING_KEY) {
     const theme = themeSettingToWebShellTheme(effective, WebShellThemeId.Dark);
     return t(`theme.${theme}`);
@@ -209,7 +215,7 @@ function formatValue(
       ? formatSettingOption(setting, opt.value, opt.label, t)
       : String(effective);
   }
-  const s = String(effective);
+  const s = String(effective).replaceAll('\0', ' · ');
   return s.length > 24 ? `${s.slice(0, 21)}…` : s;
 }
 

@@ -1,4 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
+import type {
+  DaemonModelConfiguration,
+  DaemonModelConfigurationUpdateResult,
+} from '@qwen-code/sdk/daemon';
+import { Button } from '../ui/button';
+import { Input } from '../ui/input';
+import { Field, FieldLabel, FieldDescription } from '../ui/field';
 import type {
   DaemonWorkspaceProviderModel,
   DaemonWorkspaceProviderStatus,
@@ -7,6 +14,7 @@ import { useI18n } from '../../i18n';
 import styles from './ModelManagementSection.module.css';
 
 export interface ModelDeleteTarget {
+  key?: string;
   authType: string;
   modelId: string;
   baseUrl?: string;
@@ -14,6 +22,11 @@ export interface ModelDeleteTarget {
 
 export interface ModelManagementProps {
   providers: DaemonWorkspaceProviderStatus[];
+  configurations?: DaemonModelConfiguration[];
+  onUpdateContextWindow?: (
+    key: string,
+    size: number | null,
+  ) => Promise<DaemonModelConfigurationUpdateResult>;
   /** Effective current model id (ACP or base form), for the "current" badge. */
   currentModelId: string | undefined;
   loading: boolean;
@@ -61,6 +74,8 @@ function findCurrentRowKey(
 
 export function ModelManagementSection({
   providers,
+  configurations = [],
+  onUpdateContextWindow,
   currentModelId,
   loading,
   error,
@@ -83,7 +98,46 @@ export function ModelManagementSection({
     return () => document.removeEventListener('keydown', onKey);
   }, [confirmKey]);
 
-  const hasModels = providers.some((p) => p.models.length > 0);
+  const displayProviders = providers.map((provider) => ({
+    ...provider,
+    models: [...provider.models],
+  }));
+  const uniqueConfigurations = [
+    ...new Map(configurations.map((config) => [config.key, config])).values(),
+  ];
+  const missing = uniqueConfigurations.filter(
+    (config) =>
+      !providers.some((provider) =>
+        provider.models.some((model) => model.configurationKey === config.key),
+      ),
+  );
+  for (const config of missing) {
+    let provider = displayProviders.find(
+      (item) => item.authType === config.authType,
+    );
+    if (!provider) {
+      provider = {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: config.authType,
+        current: false,
+        models: [],
+      };
+      displayProviders.push(provider);
+    }
+    provider.models.push({
+      configurationKey: config.key,
+      modelId: config.key,
+      baseModelId: config.modelId,
+      name: config.name || config.modelId,
+      baseUrl: config.baseUrl,
+      envKey: config.envKey,
+      contextLimit: config.contextWindowSize,
+      isCurrent: false,
+      isRuntime: false,
+    });
+  }
+  const hasModels = displayProviders.some((p) => p.models.length > 0);
   const currentRowKey = findCurrentRowKey(providers, currentModelId);
 
   return (
@@ -108,7 +162,7 @@ export function ModelManagementSection({
         <div className={styles.empty}>{t('settings.models.empty')}</div>
       )}
 
-      {providers.map((provider, providerIndex) =>
+      {displayProviders.map((provider, providerIndex) =>
         provider.models.length === 0 ? null : (
           // Include the index: two providers can share an authType (e.g. two
           // OpenAI-compatible endpoints), which would collide on authType alone.
@@ -118,6 +172,14 @@ export function ModelManagementSection({
           >
             <div className={styles.providerName}>{provider.authType}</div>
             {provider.models.map((model) => {
+              const candidates = configurations.filter(
+                (config) => config.key === model.configurationKey,
+              );
+              const configuration =
+                candidates.length === 1 ? candidates[0] : undefined;
+              const canSelect = providers.some((source) =>
+                source.models.includes(model),
+              );
               const rowKey = rowKeyFor(provider, model);
               const current = rowKey === currentRowKey;
               const confirming = confirmKey === rowKey;
@@ -140,14 +202,85 @@ export function ModelManagementSection({
                         {t('settings.models.runtime')}
                       </span>
                     )}
+                    {!canSelect && (
+                      <span className={styles.runtimeBadge}>
+                        {t('settings.models.savedConfiguration')}
+                      </span>
+                    )}
+                    {model.name && model.name !== model.baseModelId && (
+                      <span className={styles.modelId}>
+                        {model.baseModelId}
+                      </span>
+                    )}
+                    {model.description && (
+                      <div className={styles.modelDescription}>
+                        {model.description}
+                      </div>
+                    )}
                     {model.baseUrl && (
                       <span className={styles.modelBaseUrl}>
-                        {model.baseUrl}
+                        {model.baseUrl.split(/[?#]/)[0]}
                       </span>
+                    )}
+                    {(model.contextLimit ||
+                      model.modalities ||
+                      model.envKey) && (
+                      <div className={styles.modelDetails}>
+                        {model.contextLimit !== undefined &&
+                          model.contextLimit > 0 && (
+                            <span>
+                              {t('settings.models.context', {
+                                tokens: model.contextLimit.toLocaleString(),
+                              })}
+                            </span>
+                          )}
+                        {(
+                          [
+                            ['image', 'auth.advanced.modalityImage'],
+                            ['video', 'auth.advanced.modalityVideo'],
+                            ['audio', 'auth.advanced.modalityAudio'],
+                            ['pdf', 'auth.advanced.modalityPdf'],
+                          ] as const
+                        ).map(([key, label]) =>
+                          model.modalities?.[key] ? (
+                            <span className={styles.capability} key={key}>
+                              {t(label)}
+                            </span>
+                          ) : null,
+                        )}
+                        {model.envKey && (
+                          <span>
+                            {t('settings.models.credentialEnv')}:{' '}
+                            <code>{model.envKey}</code>
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {configuration && (
+                      <>
+                        {configuration.purpose !== 'chat' && (
+                          <span className={styles.capability}>
+                            {t(`auth.purpose.${configuration.purpose}`)}
+                          </span>
+                        )}
+                        {configuration.canEditContextWindow === false && (
+                          <div className={styles.modelDescription}>
+                            {t('settings.models.ambiguousWindow')}
+                          </div>
+                        )}
+                        {onUpdateContextWindow &&
+                          configuration.canEditContextWindow !== false && (
+                            <ModelWindowEditor
+                              configuration={configuration}
+                              busy={busy}
+                              onSave={onUpdateContextWindow}
+                            />
+                          )}
+                      </>
                     )}
                   </div>
                   <div className={styles.modelActions}>
-                    {!current && (
+                    {!current && canSelect && (
                       <button
                         type="button"
                         className={styles.actionButton}
@@ -169,6 +302,9 @@ export function ModelManagementSection({
                             onClick={() => {
                               setConfirmKey(null);
                               onDeleteModel({
+                                ...(model.configurationKey
+                                  ? { key: model.configurationKey }
+                                  : {}),
                                 authType: provider.authType,
                                 modelId: model.baseModelId,
                                 ...(model.baseUrl
@@ -208,5 +344,124 @@ export function ModelManagementSection({
         ),
       )}
     </div>
+  );
+}
+
+function ModelWindowEditor({
+  configuration,
+  busy,
+  onSave,
+}: {
+  configuration: DaemonModelConfiguration;
+  busy: boolean;
+  onSave: NonNullable<ModelManagementProps['onUpdateContextWindow']>;
+}) {
+  const { t } = useI18n();
+  const id = useId();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const valid =
+    !value.trim() ||
+    (/^\d+$/.test(value.trim()) &&
+      Number(value) >= 1 &&
+      Number(value) <= 10_000_000);
+  if (!editing)
+    return (
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          aria-label={`${t('settings.models.editWindow')} ${configuration.name || configuration.modelId}`}
+          onClick={() => {
+            setValue(configuration.contextWindowSize?.toString() ?? '');
+            setError('');
+            setNotice('');
+            setEditing(true);
+          }}
+        >
+          {t('settings.models.editWindow')}
+        </Button>
+        {notice && (
+          <span role="status" className="text-xs text-muted-foreground">
+            {notice}
+          </span>
+        )}
+      </div>
+    );
+  return (
+    <form
+      className="mt-3 flex max-w-md flex-col gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!valid || saving || busy) return;
+        setSaving(true);
+        setError('');
+        onSave(configuration.key, value.trim() ? Number(value) : null)
+          .then((result) => {
+            setEditing(false);
+            setNotice(
+              result.runtimeSync?.status === 'failed'
+                ? t('settings.models.runtimeSyncFailed')
+                : result.requiresRestart
+                  ? t('settings.models.windowSaved')
+                  : t('settings.models.saved'),
+            );
+          })
+          .catch((err: unknown) =>
+            setError(err instanceof Error ? err.message : String(err)),
+          )
+          .finally(() => setSaving(false));
+      }}
+    >
+      <Field>
+        <FieldLabel htmlFor={id}>{t('auth.advanced.contextWindow')}</FieldLabel>
+        <Input
+          id={id}
+          value={value}
+          inputMode="numeric"
+          placeholder={t('common.auto')}
+          disabled={saving || busy}
+          aria-invalid={!valid}
+          aria-describedby={`${id}-hint`}
+          onChange={(event) => setValue(event.target.value)}
+        />
+        <FieldDescription id={`${id}-hint`}>
+          {valid
+            ? t('settings.models.windowHint')
+            : t('auth.advanced.tokenLimitInvalid', {
+                field: t('auth.advanced.contextWindow'),
+              })}
+        </FieldDescription>
+      </Field>
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
+      <div className="flex gap-2">
+        <Button
+          type="submit"
+          size="sm"
+          aria-label={`${t('common.save')} ${configuration.name || configuration.modelId}`}
+          disabled={!valid || saving || busy}
+        >
+          {t('common.save')}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={saving || busy}
+          aria-label={`${t('settings.models.cancel')} ${configuration.name || configuration.modelId}`}
+          onClick={() => setEditing(false)}
+        >
+          {t('settings.models.cancel')}
+        </Button>
+      </div>
+    </form>
   );
 }

@@ -1100,6 +1100,89 @@ describe('HookPlanner', () => {
       expect(result).not.toBeNull();
     });
 
+    it('matches a pipe-separated list of notification types', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.Notification,
+        matcher: 'permission_prompt|idle_prompt',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      expect(
+        planner.createExecutionPlan(HookEventName.Notification, {
+          notificationType: 'idle_prompt',
+        }),
+      ).not.toBeNull();
+      expect(
+        planner.createExecutionPlan(HookEventName.Notification, {
+          notificationType: 'auth_success',
+        }),
+      ).toBeNull();
+    });
+
+    it('matches notification types with a regex', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.Notification,
+        matcher: '^elicitation_',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      expect(
+        planner.createExecutionPlan(HookEventName.Notification, {
+          notificationType: 'elicitation_dialog',
+        }),
+      ).not.toBeNull();
+      expect(
+        planner.createExecutionPlan(HookEventName.Notification, {
+          notificationType: 'idle_prompt',
+        }),
+      ).toBeNull();
+    });
+
+    it('matches a pipe-separated list of compact triggers', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreCompact,
+        matcher: 'manual|auto',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      expect(
+        planner.createExecutionPlan(HookEventName.PreCompact, {
+          trigger: 'auto',
+        }),
+      ).not.toBeNull();
+    });
+
+    it('matches a pipe-separated list of stop failure error types', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.StopFailure,
+        matcher: 'rate_limit|server_error',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      expect(
+        planner.createExecutionPlan(HookEventName.StopFailure, {
+          error: 'server_error',
+        }),
+      ).not.toBeNull();
+      expect(
+        planner.createExecutionPlan(HookEventName.StopFailure, {
+          error: 'unknown',
+        }),
+      ).toBeNull();
+    });
+
     // PostCompact matcher tests
     it('should match trigger with exact string for PostCompact', () => {
       const entry: HookRegistryEntry = {

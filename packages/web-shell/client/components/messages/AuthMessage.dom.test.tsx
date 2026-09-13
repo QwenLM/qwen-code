@@ -35,6 +35,13 @@ let container: HTMLDivElement | undefined;
 
 beforeEach(() => {
   ownerState.version = 0;
+  actions.installAuthProvider.mockReset().mockResolvedValue({
+    v: 1,
+    providerId: 'custom',
+    providerLabel: 'Custom provider',
+    authType: 'openai',
+    message: 'Provider saved.',
+  });
   actions.getAuthProviders.mockResolvedValue({
     v: 1,
     workspaceCwd: '/workspace',
@@ -190,6 +197,14 @@ describe('AuthMessage runtime provider sync', () => {
 });
 
 describe('AuthMessage API selection', () => {
+  const reviewRows = () => {
+    const rows = Array.from(container?.querySelectorAll('dl > div') ?? []);
+    return rows.map((row) => [
+      row.querySelector('dt')?.textContent ?? '',
+      row.querySelector('dd')?.textContent ?? '',
+    ]);
+  };
+
   beforeEach(() => {
     actions.getAuthProviders.mockResolvedValue({
       v: 1,
@@ -230,11 +245,8 @@ describe('AuthMessage API selection', () => {
       await click('previous');
       await click('next');
       await click('next');
-      expect(container?.textContent).toContain('"api": "responses"');
-      expect(container?.textContent).toContain(
-        '"selectedType": "openai-responses"',
-      );
-      expect(container?.textContent).toContain('"openai": [');
+      expect(reviewRows()).toContainEqual(['Protocol', 'OpenAI-compatible']);
+      expect(reviewRows()).toContainEqual(['API', 'Responses']);
     });
     expect(actions.installAuthProvider).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -282,9 +294,10 @@ describe('AuthMessage API selection', () => {
       expect(input?.value).toBe('https://api.openai.com');
       await click('next');
       await click('next');
-      expect(container?.textContent).toContain(
-        '"baseUrl": "https://api.openai.com"',
-      );
+      expect(reviewRows()).toContainEqual([
+        'Base URL',
+        'https://api.openai.com',
+      ]);
       expect(container?.textContent).not.toContain('https://api.openai.com/v1');
     });
     expect(actions.installAuthProvider).toHaveBeenCalledWith(
@@ -300,14 +313,172 @@ describe('AuthMessage API selection', () => {
     await openAndSave(async (click) => {
       await click('Anthropic');
       await click('next');
-      expect(container?.textContent).toContain('"selectedType": "anthropic"');
-      expect(container?.textContent).not.toContain('"api":');
+      expect(reviewRows()).toContainEqual(['Protocol', 'Anthropic-compatible']);
+      expect(reviewRows().map(([label]) => label)).not.toContain('API');
     });
     expect(actions.installAuthProvider).toHaveBeenCalledWith(
       expect.objectContaining({ protocol: 'anthropic' }),
     );
     expect(actions.installAuthProvider.mock.calls[0][0]).not.toHaveProperty(
       'api',
+    );
+  });
+});
+
+async function clickButton(text: string) {
+  const button = Array.from(container!.querySelectorAll('button')).find(
+    (item) => item.textContent?.trim().toLowerCase() === text.toLowerCase(),
+  );
+  if (!button) throw new Error(`Missing button: ${text}`);
+  await act(async () => button.click());
+}
+
+function fillInput(label: string, value: string) {
+  const input =
+    container!.querySelector<HTMLInputElement>(
+      `input[aria-label="${label}"]`,
+    ) ??
+    Array.from(container!.querySelectorAll<HTMLInputElement>('input')).find(
+      (item) =>
+        container!.querySelector(`label[for="${item.id}"]`)?.textContent ===
+        label,
+    );
+  if (!input) throw new Error(`Missing input: ${label}`);
+  act(() => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  return input;
+}
+
+async function openAdvanced() {
+  actions.getAuthProviders.mockResolvedValue({
+    v: 1,
+    workspaceCwd: '/workspace',
+    providers: [
+      {
+        id: 'custom',
+        label: 'Custom provider',
+        description: '',
+        protocol: 'openai',
+        showAdvancedConfig: true,
+        steps: ['baseUrl', 'apiKey', 'models', 'advancedConfig'],
+      },
+    ],
+    groups: [
+      {
+        id: 'custom',
+        label: 'Custom',
+        description: '',
+        providerIds: ['custom'],
+      },
+    ],
+  });
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const onClose = vi.fn();
+  await act(async () =>
+    root!.render(
+      <I18nProvider language="en">
+        <AuthMessage onMessage={vi.fn()} onClose={onClose} />
+      </I18nProvider>,
+    ),
+  );
+  await clickButton('Custom');
+  fillInput('Base URL', 'https://models.example/v1');
+  await clickButton('Next');
+  fillInput('API Key', 'test-secret-do-not-display');
+  await clickButton('Next');
+  fillInput('Model IDs', 'model-a, model-b, model-a');
+  await clickButton('Next');
+  return { onClose };
+}
+
+describe('AuthMessage model configuration', () => {
+  it('reviews and saves token limits without exposing credentials or inventing settings', async () => {
+    await openAdvanced();
+    fillInput('Context window', '131072');
+    fillInput('Maximum output tokens', '8192');
+    await clickButton('Next');
+    expect(container!.textContent).toContain('131072');
+    expect(container!.textContent).toContain('8192');
+    expect(container!.textContent).toContain('https://models.example/v1');
+    expect(container!.textContent).not.toContain('test-secret');
+    expect(container!.textContent).toContain('Set (hidden)');
+    expect(container!.textContent).not.toContain('OPENAI_API_KEY');
+    await clickButton('Save');
+    expect(actions.installAuthProvider).toHaveBeenCalledWith({
+      providerId: 'custom',
+      protocol: 'openai',
+      baseUrl: 'https://models.example/v1',
+      apiKey: 'test-secret-do-not-display',
+      modelIds: ['model-a', 'model-b'],
+      advancedConfig: {
+        replaceExisting: true,
+        contextWindowSize: 131072,
+        maxTokens: 8192,
+      },
+    });
+  });
+
+  it('submits explicit empty advanced configuration when controls are cleared', async () => {
+    await openAdvanced();
+    fillInput('Context window', '131072');
+    fillInput('Maximum output tokens', '8192');
+    fillInput('Context window', '');
+    fillInput('Maximum output tokens', '');
+    await clickButton('Next');
+    await clickButton('Save');
+    expect(actions.installAuthProvider.mock.calls[0][0].advancedConfig).toEqual(
+      { replaceExisting: true },
+    );
+  });
+
+  it.each(['0', '-1', '1.5', '10000001', '1e3', 'abc'])(
+    'rejects invalid token limit %s without changing the input',
+    async (value) => {
+      await openAdvanced();
+      const input = fillInput('Maximum output tokens', value);
+      await clickButton('Next');
+      expect(input.value).toBe(value);
+      expect(input.getAttribute('aria-invalid')).toBe('true');
+      expect(container!.querySelector('[role="alert"]')?.textContent).toContain(
+        'whole number',
+      );
+      expect(actions.installAuthProvider).not.toHaveBeenCalled();
+      expect(
+        Array.from(container!.querySelectorAll('button')).some(
+          (b) => b.textContent === 'Save',
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it('preserves limits across Back and Next and excludes disabled modalities', async () => {
+    await openAdvanced();
+    fillInput('Context window', '10000000');
+    fillInput('Maximum output tokens', '1');
+    const modality = container!.querySelector<HTMLButtonElement>(
+      '[role="switch"][aria-label="Enable modality"]',
+    )!;
+    await act(async () => modality.click());
+    expect(container!.querySelectorAll('[role="checkbox"]')).toHaveLength(4);
+    await act(async () => modality.click());
+    await clickButton('Next');
+    await clickButton('Previous');
+    expect(
+      container!.querySelector<HTMLInputElement>(
+        'input[aria-label="Context window"]',
+      )?.value,
+    ).toBe('10000000');
+    await clickButton('Next');
+    await clickButton('Save');
+    expect(actions.installAuthProvider.mock.calls[0][0].advancedConfig).toEqual(
+      { replaceExisting: true, contextWindowSize: 10000000, maxTokens: 1 },
     );
   });
 });
