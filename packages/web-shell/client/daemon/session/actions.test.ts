@@ -25,6 +25,157 @@ import type {
   SettledPrompt,
 } from './types';
 
+describe('context usage counter reconciliation', () => {
+  function snapshot() {
+    return {
+      v: 1,
+      sessionId: 'session-a',
+      workspaceCwd: '/workspace',
+      formattedText: '',
+      usage: {
+        modelName: 'model-a',
+        isEstimated: true,
+        totalTokens: 40,
+        contextWindowSize: 100,
+        breakdown: {
+          systemPrompt: 10,
+          builtinTools: 0,
+          mcpTools: 0,
+          memoryFiles: 0,
+          skills: 0,
+          messages: 30,
+          freeSpace: 50,
+          autocompactBuffer: 10,
+        },
+        builtinTools: [],
+        mcpTools: [],
+        memoryFiles: [],
+        skills: [],
+      },
+    };
+  }
+
+  it.each([
+    [false, undefined],
+    [true, undefined],
+    [false, 1_000_000],
+    [true, 1_000_000],
+  ] as const)(
+    'updates only the token count when requested (sync=%s, window=%s)',
+    async (syncCounters, contextWindow) => {
+      const session = createMockSession('session-a');
+      session.contextUsage.mockResolvedValue(snapshot());
+      const tokenUsage = { inputTokens: 500, outputTokens: 100 };
+      const h = createActionsHarness({
+        session,
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          workspaceCwd: '/workspace',
+          currentModel: 'model-a',
+          tokenCount: 60,
+          contextWindow,
+          tokenUsage,
+        },
+      });
+      const result = await h.actions.getContextUsage({
+        detail: true,
+        syncCounters,
+      });
+      expect(result).toEqual(snapshot());
+      expect(h.getConnection().tokenCount).toBe(syncCounters ? 40 : 60);
+      expect(h.getConnection().contextWindow).toBe(contextWindow);
+      expect(h.getConnection().tokenUsage).toBe(tokenUsage);
+      expect(session.contextUsage).toHaveBeenCalledWith({ detail: true });
+    },
+  );
+
+  it.each([
+    'usage',
+    'equal-count-usage',
+    'model',
+    'client',
+    'disconnect',
+    'wrong-snapshot',
+    'loadingTranscript',
+    'catchingUp',
+    'workspace',
+    'unavailable-snapshot',
+    'unknown-count',
+    'context-window',
+    'model-round-trip',
+    'connection-session',
+    'zero-window',
+  ] as const)(
+    'does not overwrite a newer or different owner: %s',
+    async (change) => {
+      const session = createMockSession('session-a');
+      let resolve!: (value: ReturnType<typeof snapshot>) => void;
+      session.contextUsage.mockReturnValue(
+        new Promise<ReturnType<typeof snapshot>>((done) => {
+          resolve = done;
+        }),
+      );
+      const connection: DaemonConnectionState = {
+        status: 'connected',
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace',
+        currentModel: 'model-a',
+        tokenCount: 60,
+        contextWindow: 100,
+        tokenUsage: { inputTokens: 60 },
+      };
+      const h = createActionsHarness({ session, connection });
+      const request = h.actions.getContextUsage({ syncCounters: true });
+      if (change === 'usage')
+        h.replaceConnection({ ...connection, tokenCount: 70 });
+      if (change === 'equal-count-usage')
+        h.replaceConnection({ ...connection, tokenUsage: { inputTokens: 60 } });
+      if (change === 'model')
+        h.replaceConnection({ ...connection, currentModel: 'model-b' });
+      if (change === 'client')
+        h.sessionRef.current = createMockSession(
+          'session-a',
+          'new-client',
+        ) as unknown as DaemonSessionClient;
+      if (change === 'disconnect')
+        h.replaceConnection({ ...connection, status: 'error' });
+      if (change === 'loadingTranscript' || change === 'catchingUp')
+        h.replaceConnection({ ...connection, [change]: true });
+      if (change === 'workspace')
+        h.replaceConnection({ ...connection, workspaceCwd: '/other' });
+      if (change === 'connection-session')
+        h.replaceConnection({ ...connection, sessionId: 'session-b' });
+      if (change === 'context-window')
+        h.replaceConnection({ ...connection, contextWindow: 32_000 });
+      if (change === 'model-round-trip') {
+        await h.actions.setModel('model-b');
+        expect(h.getConnection().currentModel).toBe('model-b');
+        await h.actions.setModel('model-a');
+        expect(h.getConnection().currentModel).toBe('model-a');
+      }
+      const value = snapshot();
+      if (change === 'wrong-snapshot') value.sessionId = 'session-b';
+      if (change === 'unavailable-snapshot') {
+        value.usage.totalTokens = 0;
+        value.usage.contextWindowSize = 0;
+      }
+      if (change === 'unknown-count') {
+        value.usage.totalTokens = 0;
+        value.usage.breakdown.messages = 0;
+        value.usage.breakdown.freeSpace = 80;
+      }
+      if (change === 'zero-window') value.usage.contextWindowSize = 0;
+      resolve(value);
+      await request;
+      expect(h.getConnection().tokenCount).toBe(change === 'usage' ? 70 : 60);
+      expect(h.getConnection().contextWindow).toBe(
+        change === 'context-window' ? 32_000 : 100,
+      );
+    },
+  );
+});
+
 describe('getConnectionAfterSessionClear', () => {
   it.each(['sendPrompt', 'submitPrompt'] as const)(
     'preserves declared text before host and attachment expansion through %s',
@@ -3361,6 +3512,201 @@ describe('createDaemonSessionActions', () => {
     expect(session.uploadAttachment).toHaveBeenCalledOnce();
   });
 
+  it.each(['known', 'empty', 'unknown'] as const)(
+    'skill attachments survive %s catalog',
+    async (catalog) => {
+      const session = createMockSession('session-a');
+      Object.assign(session, {
+        supportedCommands: vi.fn(async () => ({
+          v: 1,
+          sessionId: 'session-a',
+          availableCommands: [
+            {
+              name: 'review',
+              description: 'Review',
+              input: null,
+              _meta: { source: 'skill-dir-command' },
+            },
+          ],
+          availableSkills: ['review'],
+        })),
+      });
+      const { actions } = createActionsHarness({
+        session,
+        connection: {
+          status: 'connected',
+          workspaceCwd: '/workspace',
+          commands:
+            catalog === 'known'
+              ? [commandInfo('review', 'skill-dir-command')]
+              : catalog === 'empty'
+                ? []
+                : undefined,
+          capabilities: {
+            v: 1,
+            mode: 'http-bridge',
+            features: ['session_attachments'],
+            modelServices: [],
+          },
+        },
+      });
+      await actions.submitPrompt('/review this diff', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      });
+      expect(session.supportedCommands).toHaveBeenCalledTimes(
+        catalog === 'known' ? 0 : 1,
+      );
+      expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'appends ordinary text synchronously before %s yields',
+    async (method) => {
+      const session = createMockSession('session-a');
+      session.submitPrompt.mockRejectedValueOnce(
+        new Error('stop after optimistic append'),
+      );
+      const { actions, store } = createActionsHarness({ session });
+      const submission = actions[method]('ordinary message');
+      const outcome = submission.catch((error: unknown) => error);
+      expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(session.supportedCommands).not.toHaveBeenCalled();
+      expect(await outcome).toMatchObject({
+        message: 'stop after optimistic append',
+      });
+    },
+  );
+
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'rejects %s if the session changes after command classification resolves',
+    async (method) => {
+      const session = createMockSession('session-a');
+      const replacement = createMockSession('session-b');
+      const pendingCommands =
+        createDeferred<ReturnType<typeof supportedCommandsStatus>>();
+      session.supportedCommands.mockReturnValueOnce(pendingCommands.promise);
+      const { actions, store, sessionRef, getConnection } =
+        createActionsHarness({ session });
+      const submission = actions[method]('/review this diff', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      });
+      const outcome = submission.catch((error: unknown) => error);
+      pendingCommands.resolve(supportedCommandsStatus('session-a', 'review'));
+      for (
+        let tick = 0;
+        tick < 20 && !getConnection().supportedCommands;
+        tick++
+      )
+        await Promise.resolve();
+      expect(getConnection().supportedCommands).toBeDefined();
+      sessionRef.current = replacement as unknown as DaemonSessionClient;
+      expect(await outcome).toMatchObject({
+        message: 'Session changed before prompt submission',
+      });
+      expect(session.uploadAttachment).not.toHaveBeenCalled();
+      expect(session.submitPrompt).not.toHaveBeenCalled();
+      expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'does not upload or submit when %s cannot classify attachments',
+    async (method) => {
+      const session = createMockSession('session-a');
+      session.supportedCommands.mockRejectedValueOnce(
+        new Error('commands unavailable'),
+      );
+      const { actions, store } = createActionsHarness({ session });
+      await expect(
+        actions[method]('/review this diff', {
+          images: [{ data: 'AQID', mimeType: 'image/png' }],
+        }),
+      ).rejects.toThrow('commands unavailable');
+      expect(session.uploadAttachment).not.toHaveBeenCalled();
+      expect(session.submitPrompt).not.toHaveBeenCalled();
+      expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'cancelling %s settles a pending command classification immediately',
+    async (method) => {
+      const session = createMockSession('session-a');
+      const pendingCommands =
+        createDeferred<ReturnType<typeof supportedCommandsStatus>>();
+      session.supportedCommands.mockReturnValueOnce(pendingCommands.promise);
+      const { actions } = createActionsHarness({ session });
+      const controller = new AbortController();
+      const submission = actions[method]('/review this diff', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+        ...(method === 'submitPrompt' ? { signal: controller.signal } : {}),
+      });
+      let settled = false;
+      void submission.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      // Let the submission reach the pending classification read.
+      for (let tick = 0; tick < 5; tick++) await Promise.resolve();
+      if (method === 'sendPrompt') {
+        await actions.cancel();
+      } else {
+        controller.abort();
+      }
+      for (let tick = 0; tick < 20; tick++) await Promise.resolve();
+      // The read never settles, so only the abort race can end the wait.
+      expect(settled).toBe(true);
+      const outcome = await submission.catch((error: unknown) => error);
+      if (method === 'sendPrompt') {
+        expect(outcome).toMatchObject({ stopReason: 'cancelled' });
+      } else {
+        expect(outcome).toMatchObject({ name: 'AbortError' });
+      }
+    },
+  );
+
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'rejects %s when attachment classification belongs to a replaced session',
+    async (method) => {
+      const session = createMockSession('session-a');
+      const replacement = createMockSession('session-b');
+      const pendingCommands =
+        createDeferred<ReturnType<typeof supportedCommandsStatus>>();
+      session.supportedCommands.mockReturnValueOnce(pendingCommands.promise);
+      const { actions, store, sessionRef, replaceConnection, getConnection } =
+        createActionsHarness({ session });
+      const submission = actions[method]('/review this diff', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      });
+      const outcome = submission.catch((error: unknown) => error);
+      sessionRef.current = replacement as unknown as DaemonSessionClient;
+      replaceConnection({
+        status: 'connected',
+        sessionId: 'session-b',
+        workspaceCwd: '/other-workspace',
+        commands: [commandInfo('other-command', 'skill-dir-command')],
+      });
+      pendingCommands.resolve(supportedCommandsStatus('session-a', 'review'));
+      expect(await outcome).toMatchObject({
+        message: 'Session changed before prompt submission',
+      });
+      expect(session.uploadAttachment).not.toHaveBeenCalled();
+      expect(session.submitPrompt).not.toHaveBeenCalled();
+      expect(replacement.submitPrompt).not.toHaveBeenCalled();
+      expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(getConnection()).toMatchObject({
+        sessionId: 'session-b',
+        workspaceCwd: '/other-workspace',
+        commands: [commandInfo('other-command', 'skill-dir-command')],
+      });
+    },
+  );
+
   it('uploads attachments used by skill slash commands', async () => {
     const session = createMockSession('session-a');
     const { actions, store } = createActionsHarness({
@@ -4494,6 +4840,23 @@ describe('createDaemonSessionActions', () => {
     expect(session.enqueueMidTurnMessage).toHaveBeenCalledWith('follow up', {
       messageId: 'stable-id',
     });
+  });
+
+  it('forwards the daemon idle rejection reason across the actions hop', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      enqueueMidTurnMessage: vi
+        .fn()
+        .mockResolvedValueOnce({ accepted: false, reason: 'session_idle' }),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    // The hook decides whether to resubmit on this field alone, and a
+    // narrowing at this hop type-checks because the field is optional — it
+    // would silently restore the race the reason exists to end.
+    await expect(
+      actions.enqueueMidTurnMessage('follow up', { messageId: 'stable-id' }),
+    ).resolves.toEqual({ accepted: false, reason: 'session_idle' });
   });
 
   it('does not mark a stable-id admission started without a session', async () => {
