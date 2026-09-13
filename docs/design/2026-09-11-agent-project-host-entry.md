@@ -1,0 +1,23 @@
+# Agent project and existing Host entry
+
+[English](2026-09-11-agent-project-host-entry.md) | [简体中文](2026-09-11-agent-project-host-entry.zh-CN.md)
+
+## Behavior
+
+Execution reports cumulative reply text and activity snapshots during the turn, not only on completion. Codex reuses the existing App Server transport and its `item/agentMessage/delta` events; it does not create a subagent executor. Qwen subscribes to the existing ACP stream, filtering the bound prompt ID, for both local dispatch and managed Host execution. Thinking and tool activity are status signals, not inferred private reasoning. Snapshots are persisted at most every 500 ms and the existing chat polls every second. Host writes still require the current Host, lease and attempt; out-of-order snapshots cannot replace newer text. Reload reads the persisted snapshot. Final review messages replace the live preview by source run ID; failed or cancelled runs retain partial output. Intermediate output remains available in run details.
+
+The live preview is capped at 262,144 characters; the final result is not shortened by that preview cap. This is a latest snapshot, not a durable log of every token event or a promise to recover unsent output after a Host crash. Codex still starts an ephemeral App Server thread per assignment: token streaming does not implement native session continuation. Fifteen seconds without activity shows waiting for output; twenty seconds without telemetry shows an unconfirmed interruption. Older records explicitly show unavailable telemetry.
+
+The Agent belongs to the existing sidebar project, not a separate Team. Creation displays its project name and path. Execution location is an explicit selection of the coordinator's local Qwen Code or a registered Host, with provider and execution directory. Local and remote files are not synchronized automatically. The task project selector displays a short project name and the full selected path beneath it.
+
+The separate collaboration conversation group is superseded by one project conversation list. Root collaboration threads are adapted into view-only rows alongside ordinary sessions in their owning project, including title search. Clicking them opens shared Chat; they do not receive ordinary-session mutation actions. Storage and transcripts are not migrated. The sidebar Agent entry expands into roster, task board and execution hosts, navigating directly without a second tab strip inside the page.
+
+## Existing service connection
+
+The primary Host entry accepts an existing remote Qwen Serve URL, bearer credential, registered/trusted remote workspace directory, provider, and coordinator callback URL. The authenticated coordinator probes the remote workspace's `/agent/hosts/service` before issuing a short-lived enrollment token and calling `/agent/hosts/connect`. The remote reuses its selected runtime bridge and the existing Host pickup loop. Both local proxy and remote routes require a resolved trusted workspace and mutation authorization. Redirects are refused; HTTPS remains default outside loopback, with explicit HTTP demo opt-in. The remote bearer credential is not persisted by this feature. Initial heartbeat must succeed before connection is reported. Repeated connections in one process share one worker; provider changes are rejected.
+
+## Limits and acceptance
+
+Observed on 2026-09-13 with real Codex and an isolated Host/store: ten disk-read snapshots grew from 28 characters at 30.569 seconds to 1,564 at 34.963 seconds while the run was still running and had no final summary. Result submission produced exactly one final summary. A fresh process retained the text; older sequence and attempt writes did not overwrite it. The ACP observer was checked with synthetic events, not a real Qwen model. Chrome automation was unavailable, so visual acceptance remains pending. The local demo API still returned all 38 existing threads after restart.
+
+This is process-lifetime attachment, not an OS service installer or automatic reconnect configuration after daemon restart. Older daemons must upgrade and enable collaboration. Provider detection confirms the Codex executable, not login or model availability. Host execution retains the current sequential pickup behavior; this change does not promise parallel execution or adoption of open desktop sessions. Remote directory registration/trust is not created implicitly. Verify collapse persistence and explicit project/location UI in Chrome, then connect two running daemons without Host CLI startup flags and observe confirmation and heartbeat. Cross-machine reachability requires a separately verified callback URL; loopback checks alone do not prove cross-machine acceptance.

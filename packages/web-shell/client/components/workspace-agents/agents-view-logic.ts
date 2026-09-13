@@ -187,6 +187,13 @@ export function needsAttention(thread: ThreadSummaryView): boolean {
 
 /** Wire shape of one run, as the REST layer returns it. */
 export interface RunView {
+  progress?: {
+    receivedAt: number;
+    activityAt: number;
+    stage: string;
+    detail: string;
+    outputText?: string;
+  };
   id: string;
   agentId: string;
   agentName: string;
@@ -407,12 +414,12 @@ export function summarizePreview(
   targets: readonly RoutingPreviewTarget[],
 ): string {
   const waking = targets.filter((target) => target.willWake);
-  if (waking.length === 0) return 'Nobody will be woken by this reply.';
+  if (waking.length === 0) return '这条消息不会启动任何智能体。';
   return waking
     .map((target) =>
       target.kind === 'coalesce'
-        ? `${target.agentName} will receive this in ${target.into === 'running' ? 'the running task' : 'queued work'}.`
-        : `${target.agentName} will start working.`,
+        ? `${target.agentName} 会在${target.into === 'running' ? '当前执行' : '排队任务'}中收到这条消息。`
+        : `将为 ${target.agentName} 安排执行。`,
     )
     .join(' ');
 }

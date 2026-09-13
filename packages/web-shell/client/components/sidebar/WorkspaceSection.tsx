@@ -104,6 +104,7 @@ export interface WorkspaceHeaderActionsContext {
 }
 
 interface WorkspaceSectionProps {
+  additionalSessions?: readonly DaemonSessionSummary[];
   workspace: DaemonWorkspaceCapability;
   renderHeader?: (expanded: boolean) => ReactNode;
   client: DaemonClient;
@@ -201,6 +202,7 @@ interface WorkspaceSectionProps {
 }
 
 export function WorkspaceSection({
+  additionalSessions,
   workspace,
   renderHeader,
   client,
@@ -621,7 +623,14 @@ export function WorkspaceSection({
   );
   const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const scoped = sessions.map((session) => mapSession?.(session) ?? session);
+    const scoped = [
+      ...sessions.map((session) => mapSession?.(session) ?? session),
+      ...(additionalSessions ?? []),
+    ].sort(
+      (a, b) =>
+        Date.parse(b.updatedAt ?? b.createdAt ?? '') -
+        Date.parse(a.updatedAt ?? a.createdAt ?? ''),
+    );
     if (!query) return scoped;
     const localMatches = scoped.filter((session) => {
       const label = (session.displayName || '').toLowerCase();
@@ -640,7 +649,14 @@ export function WorkspaceSection({
       sourceType,
       mapSession,
     );
-  }, [contentSearchHits, mapSession, searchQuery, sessions, sourceType]);
+  }, [
+    additionalSessions,
+    contentSearchHits,
+    mapSession,
+    searchQuery,
+    sessions,
+    sourceType,
+  ]);
   const renderSessionWithSnippet = (session: DaemonSessionSummary) =>
     renderSession(session, {
       // Explicit options override renderSessionRow's guarded default, so

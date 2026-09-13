@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeftIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
@@ -21,6 +21,7 @@ import {
 import styles from './ThreadView.module.css';
 
 export interface ThreadPostView {
+  sourceRunId?: string;
   id: string;
   sequence: number;
   authorKind: 'human' | 'agent' | 'system';
@@ -105,7 +106,7 @@ function formatTime(at: number): string {
   });
 }
 
-function RunRowView({
+export function RunRowView({
   row,
   onOpenAgentSession,
   onCancelRun,
@@ -115,6 +116,32 @@ function RunRowView({
   onCancelRun?: (runId: string) => void;
 }) {
   const sessionId = row.run.sessionId;
+  const progress = row.run.progress;
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!row.live) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [row.live]);
+  const stale = progress && now - progress.receivedAt > 20000;
+  const quiet = progress && now - progress.activityAt > 15000;
+  const stages: Record<string, string> = {
+    starting: '正在启动',
+    waiting: '等待模型',
+    thinking: '思考中',
+    tool: '调用工具中',
+    responding: '正在回复',
+  };
+  const state =
+    row.run.status === 'running'
+      ? progress
+        ? stale
+          ? '连接中断待确认'
+          : quiet
+            ? '等待新输出'
+            : (stages[progress.stage] ?? '执行中')
+        : '执行中 · 暂无过程上报'
+      : row.state;
   const stateClass = row.outstanding
     ? `${styles.runState} ${styles.runStateOutstanding}`
     : row.live
@@ -131,17 +158,66 @@ function RunRowView({
     >
       <span className={styles.runAgent}>{row.run.agentName}</span>
       <span className={stateClass}>
-        {row.state}
+        {state}
         {row.live && row.run.status !== 'cancelling' && onCancelRun ? (
           <button
             type="button"
             className={styles.runCancel}
             onClick={() => onCancelRun(row.run.id)}
           >
-            Cancel
+            取消
           </button>
         ) : null}
       </span>
+      {row.live && (
+        <div className={styles.runProgress} role="status">
+          {row.run.startedAt && (
+            <div>
+              已等待 {Math.max(0, Math.floor((now - row.run.startedAt) / 1000))}{' '}
+              秒
+            </div>
+          )}
+          {progress ? (
+            <>
+              <div>
+                {stale
+                  ? '执行端超过 20 秒未响应，不能确认仍在工作'
+                  : '执行端连接正常'}{' '}
+                · {Math.max(0, Math.floor((now - progress.receivedAt) / 1000))}{' '}
+                秒前响应
+              </div>
+              <div>
+                最近活动：
+                {Math.max(
+                  0,
+                  Math.floor((now - progress.activityAt) / 1000),
+                )}{' '}
+                秒前
+              </div>
+            </>
+          ) : (
+            <div>尚未收到执行过程；不能仅凭“执行中”判断模型仍在工作。</div>
+          )}
+        </div>
+      )}
+      {progress?.detail && (
+        <details className={styles.runProgress}>
+          <summary>最近执行活动</summary>
+          <div>{progress.detail}</div>
+        </details>
+      )}
+      {progress?.outputText && (
+        <details className={styles.runProgress}>
+          <summary>执行输出（含中间回复）</summary>
+          <Markdown
+            content={progress.outputText}
+            isStreaming={row.run.status === 'running'}
+          />
+          {progress.outputText.length >= 262144 && (
+            <p>实时预览已达长度上限；完整最终回复见对话正文。</p>
+          )}
+        </details>
+      )}
       <span className={styles.runTrigger}>
         {row.run.trigger}
         {sessionId && onOpenAgentSession ? (

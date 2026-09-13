@@ -23,6 +23,7 @@ import {
   getErrorMessage,
   LOCAL_AGENT_RUNTIME_ID,
   SessionService,
+  withAgentStoreTransaction,
 } from '@qwen-code/qwen-code-core';
 import { setTimeout as delay } from 'node:timers/promises';
 import type {
@@ -33,6 +34,7 @@ import type {
   WorkspaceAgent,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import { streamAgentTurn } from './stream-agent-turn.js';
 import {
   AGENT_SESSION_SOURCE_TYPE,
   agentThreadSessionId,
@@ -50,7 +52,10 @@ export type AgentSessionBridge = Pick<
   | 'getSessionStatsStatus'
 > &
   Partial<
-    Pick<AcpSessionBridge, 'updateSessionMetadata' | 'getSessionTurnStatus'>
+    Pick<
+      AcpSessionBridge,
+      'updateSessionMetadata' | 'getSessionTurnStatus' | 'subscribeEvents'
+    >
   >;
 
 export interface CreateSessionDispatchPortInput {
@@ -133,29 +138,100 @@ export function createSessionDispatchPort(
     deliveryId: string,
     agentRun: AgentRunContext,
   ): Promise<void> => {
-    await bridge.sendPrompt(
-      sessionId,
-      {
+    const controller = new AbortController();
+    let progress = {
+      attempt: agentRun.attempt,
+      sequence: 1,
+      stage: 'starting',
+      detail: '正在启动',
+      outputText: '',
+    };
+    let saving: Promise<unknown> | undefined;
+    const flush = () => {
+      if (!bridge.subscribeEvents) return Promise.resolve();
+      if (saving) return saving;
+      const snapshot = { ...progress };
+      saving = withAgentStoreTransaction(workspaceCwd, async (transaction) => {
+        const thread = await transaction.readThread(agentRun.threadId);
+        const run = thread?.runs.find((r) => r.id === agentRun.runId);
+        if (
+          !thread ||
+          !run ||
+          run.status !== 'running' ||
+          run.attempts !== agentRun.attempt ||
+          run.agentId !== agentRun.agentId ||
+          run.sessionId !== sessionId
+        )
+          return;
+        const previous = run.progress;
+        const now = Date.now();
+        run.progress = {
+          ...snapshot,
+          receivedAt: now,
+          activityAt:
+            previous?.sequence === snapshot.sequence
+              ? previous.activityAt
+              : now,
+        };
+        await transaction.writeThread(thread);
+      }).finally(() => {
+        saving = undefined;
+      });
+      return saving;
+    };
+    const stream = bridge.subscribeEvents
+      ? streamAgentTurn(
+          { subscribeEvents: bridge.subscribeEvents },
+          sessionId,
+          deliveryId,
+          controller.signal,
+          (stage, detail, outputText = progress.outputText) => {
+            progress = {
+              ...progress,
+              sequence: progress.sequence + 1,
+              stage,
+              detail: detail.slice(0, 1200),
+              outputText: outputText.slice(0, 262144),
+            };
+          },
+        ).catch(() => {
+          progress.detail = '实时输出连接中断；最终结果仍将显示';
+        })
+      : undefined;
+    const timer = setInterval(() => {
+      void flush().catch(() => {});
+    }, 500);
+    try {
+      await bridge.sendPrompt(
         sessionId,
-        prompt: [{ type: 'text', text: prompt }],
-      } as Parameters<AgentSessionBridge['sendPrompt']>[1],
-      undefined,
-      {
-        promptId: deliveryId,
-        agentRun: {
-          workspaceId: agentRun.workspaceId,
-          agentId: agentRun.agentId,
-          runId: agentRun.runId,
-          threadId: agentRun.threadId,
-          rootThreadId: agentRun.rootThreadId,
-          attempt: agentRun.attempt,
-          ...(agentRun.contextThroughSequence !== undefined
-            ? { contextThroughSequence: agentRun.contextThroughSequence }
-            : {}),
+        {
+          sessionId,
+          prompt: [{ type: 'text', text: prompt }],
+        } as Parameters<AgentSessionBridge['sendPrompt']>[1],
+        undefined,
+        {
+          promptId: deliveryId,
+          agentRun: {
+            workspaceId: agentRun.workspaceId,
+            agentId: agentRun.agentId,
+            runId: agentRun.runId,
+            threadId: agentRun.threadId,
+            rootThreadId: agentRun.rootThreadId,
+            attempt: agentRun.attempt,
+            ...(agentRun.contextThroughSequence !== undefined
+              ? { contextThroughSequence: agentRun.contextThroughSequence }
+              : {}),
+          },
         },
-      },
-    );
-    await waitForTurn(sessionId, deliveryId);
+      );
+      await waitForTurn(sessionId, deliveryId);
+    } finally {
+      clearInterval(timer);
+      controller.abort();
+      await stream;
+      await saving?.catch(() => {});
+      await flush().catch(() => {});
+    }
   };
 
   return {

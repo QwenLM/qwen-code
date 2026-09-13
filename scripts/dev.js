@@ -26,6 +26,7 @@ import {
   symlinkSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
 } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
 
@@ -115,6 +116,16 @@ for (const [subpath, conditions] of Object.entries(bridgeExports)) {
       ? '@qwen-code/acp-bridge'
       : `@qwen-code/acp-bridge/${subpath.slice(2)}`;
   coreSubpathSourceUrls[specifier] = pathToFileURL(sourcePath).href;
+}
+
+// Keep shared worktree installs from mixing another checkout's channel build.
+for (const name of readdirSync(join(root, 'packages', 'channels'))) {
+  const directory = join(root, 'packages', 'channels', name);
+  const manifest = join(directory, 'package.json');
+  const entry = join(directory, 'src', 'index.ts');
+  if (!existsSync(manifest) || !existsSync(entry)) continue;
+  const channel = JSON.parse(readFileSync(manifest, 'utf8'));
+  coreSubpathSourceUrls[channel.name] = pathToFileURL(entry).href;
 }
 
 const loaderCode = `

@@ -22,6 +22,7 @@ import {
   type AgentCapabilitiesView,
 } from './ThreadsPage';
 import { ThreadView, type ThreadDetailView } from './ThreadView';
+import { ThreadChat } from './ThreadChat';
 import { AgentCreatePage } from '../agents/AgentCreatePage';
 import type {
   RoutingPreviewTarget,
@@ -33,13 +34,25 @@ interface CreateThreadResult {
 }
 
 export interface ThreadsApi {
+  connectRemoteHost?(input: {
+    remoteUrl: string;
+    remoteToken: string;
+    remoteCwd: string;
+    serverUrl: string;
+    provider: 'qwen' | 'codex';
+    allowHttp: boolean;
+  }): Promise<unknown>;
   listAgents(): Promise<{
     agents: WorkspaceAgentSummaryView[];
     runtime?: WorkspaceAgentRuntimeView;
     runtimes?: WorkspaceAgentRuntimeView[];
     capabilities?: AgentCapabilitiesView;
   }>;
-  createHostEnrollment?(): Promise<AgentHostEnrollmentView>;
+  createHostEnrollment?(
+    targetUrl: string,
+    provider: 'qwen' | 'codex',
+    allowHttp?: boolean,
+  ): Promise<AgentHostEnrollmentView>;
   listThreads(): Promise<{ threads: ThreadSummaryView[] }>;
   getThread(id: string): Promise<ThreadDetailView>;
   createAgent(input: NewWorkspaceAgent): Promise<unknown>;
@@ -60,7 +73,7 @@ export interface ThreadsApi {
   cancelRun(threadId: string, runId: string): Promise<unknown>;
 }
 
-function createThreadsHttpApi(
+export function createThreadsHttpApi(
   baseUrl: string,
   token: string | undefined,
   workspaceCwd: string,
@@ -87,8 +100,28 @@ function createThreadsHttpApi(
     request<T>(path, { method: 'POST', body: JSON.stringify(body) });
 
   return {
+    connectRemoteHost: (input) => post('/hosts/remote-connect', input),
     listAgents: () => request('/agents'),
-    createHostEnrollment: async () => {
+    createHostEnrollment: async (targetUrl, provider, allowHttp = false) => {
+      const target = new URL(targetUrl);
+      if (
+        target.username ||
+        target.password ||
+        target.search ||
+        target.hash ||
+        (target.protocol !== 'https:' &&
+          !(
+            target.protocol === 'http:' &&
+            (allowHttp ||
+              ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname))
+          ))
+      ) {
+        throw new Error(
+          '请使用 HTTPS，或显式开启「允许 HTTP（仅演示）」。地址不能携带账号、查询参数或片段。',
+        );
+      }
+      const quote = (value: string) =>
+        "'" + value.replaceAll("'", "'\\''") + "'";
       const result = await post<{
         token: string;
         workspaceId: string;
@@ -97,10 +130,14 @@ function createThreadsHttpApi(
       return {
         expiresAt: result.expiresAt,
         command:
-          `QWEN_AGENT_HOST_ENROLLMENT_TOKEN=${JSON.stringify(result.token)} ` +
+          `QWEN_AGENT_HOST_ENROLLMENT_TOKEN=${quote(result.token)} ` +
           `qwen serve --no-web --port 0 ` +
-          `--agent-host-server ${JSON.stringify(serverUrl)} ` +
-          `--agent-host-workspace-id ${JSON.stringify(result.workspaceId)}`,
+          `--agent-host-server ${quote(target.toString().replace(/\/$/, ''))} ` +
+          `--agent-host-provider ${provider} ` +
+          (allowHttp && target.protocol === 'http:'
+            ? '--agent-host-allow-http '
+            : '') +
+          `--agent-host-workspace-id ${quote(result.workspaceId)}`,
       };
     },
     listThreads: () => request('/threads'),
@@ -142,6 +179,13 @@ const PREVIEW_DEBOUNCE_MS = 250;
 const REFRESH_MS = 1_000;
 
 export interface ThreadsRouteProps {
+  initialCreateTask?: boolean;
+  initialView?: AgentWorkspaceView;
+  initialThreadId?: string;
+  workspaceCwd?: string;
+  chat?: boolean;
+  hideNavigation?: boolean;
+  onOpenThreadChat?: (threadId: string, workspaceCwd: string) => void;
   api?: ThreadsApi;
   /** Switches the shell to an agent's own session. Absent when embedded
    * somewhere with no session view to switch to. */
@@ -150,13 +194,23 @@ export interface ThreadsRouteProps {
 }
 
 export function ThreadsRoute({
+  initialCreateTask,
+  initialView,
+  initialThreadId,
+  workspaceCwd: boundWorkspaceCwd,
+  chat = false,
+  hideNavigation = false,
+  onOpenThreadChat,
   api,
   onOpenAgentSession,
   onOpenDefinitions,
 }: ThreadsRouteProps) {
   const workspace = useWorkspace();
   const connection = useConnection();
+  const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState<string>();
   const workspaceCwd =
+    boundWorkspaceCwd ??
+    selectedWorkspaceCwd ??
     connection.workspaceCwd ??
     workspace.capabilities?.workspaces?.find((entry) => entry.primary)?.cwd;
   const client = useMemo(
@@ -172,10 +226,13 @@ export function ThreadsRoute({
   const [runtimes, setRuntimes] = useState<WorkspaceAgentRuntimeView[]>([]);
   const [hostEnrollment, setHostEnrollment] =
     useState<AgentHostEnrollmentView>();
-  const [view, setView] = useState<AgentWorkspaceView>('agents');
+  const [view, setView] = useState<AgentWorkspaceView>(
+    initialView ?? (initialCreateTask ? 'tasks' : 'agents'),
+  );
   const [capabilities, setCapabilities] = useState<AgentCapabilitiesView>();
   const [threads, setThreads] = useState<ThreadSummaryView[]>([]);
-  const [openId, setOpenId] = useState<string | undefined>();
+  const [openId, setOpenId] = useState<string | undefined>(initialThreadId);
+  const [showDetails, setShowDetails] = useState(false);
   const [detail, setDetail] = useState<ThreadDetailView | undefined>();
   const [draft, setDraft] = useState('');
   const [preview, setPreview] = useState<RoutingPreviewTarget[] | undefined>();
@@ -195,6 +252,10 @@ export function ThreadsRoute({
   activeScope.current = scope;
   const refreshSequence = useRef(0);
   const appliedRefresh = useRef(0);
+
+  useEffect(() => {
+    if (initialView) setView(initialView);
+  }, [initialView]);
 
   const openThread = (id?: string) => {
     setOpenId(id);
@@ -306,9 +367,11 @@ export function ThreadsRoute({
         }
       } catch (cause) {
         setActionError(cause instanceof Error ? cause.message : String(cause));
+        return false;
       } finally {
         setPending(false);
       }
+      return true;
     },
     [refresh],
   );
@@ -321,6 +384,7 @@ export function ThreadsRoute({
     return (
       <AgentCreatePage
         initialScope="workspace"
+        workspaceCwd={workspaceCwd}
         executionHosts={runtimes.filter((entry) => entry.kind === 'external')}
         onCancel={() => setCreatingAgent(false)}
         onCreated={() => setCreatingAgent(false)}
@@ -344,8 +408,57 @@ export function ThreadsRoute({
   }
 
   if (openId && detail) {
+    if (chat && !showDetails) {
+      return (
+        <>
+          {error && (
+            <p role="alert" className="text-destructive">
+              {error}
+            </p>
+          )}
+          <ThreadChat
+            key={detail.id}
+            thread={detail}
+            agents={agents}
+            preview={preview}
+            pending={pending}
+            onDraftChange={setDraft}
+            onDetails={() => setShowDetails(true)}
+            onOpenAgentSession={onOpenAgentSession}
+            onCancelRun={(runId) =>
+              void mutate(() => client.cancelRun(openId, runId))
+            }
+            onMarkDone={() => void mutate(() => client.markDone(openId))}
+            onOpenThread={(id) => {
+              if (workspaceCwd && onOpenThreadChat)
+                onOpenThreadChat(id, workspaceCwd);
+              else openThread(id);
+            }}
+            onSend={(text) =>
+              mutate(async () => {
+                const result = await client.postReply(openId, text);
+                setDraft('');
+                setPreview(undefined);
+                return result;
+              })
+            }
+          />
+        </>
+      );
+    }
     return (
       <>
+        {(chat || onOpenThreadChat) && (
+          <button
+            type="button"
+            onClick={() => {
+              if (chat) setShowDetails(false);
+              else if (workspaceCwd) onOpenThreadChat?.(openId, workspaceCwd);
+            }}
+          >
+            Open conversation
+          </button>
+        )}
         {error ? (
           <p role="alert" className="mb-3 text-sm text-destructive">
             {error}
@@ -402,8 +515,14 @@ export function ThreadsRoute({
         threads={threads}
         view={view}
         onViewChange={setView}
+        hideNavigation={hideNavigation}
         {...(runtime ? { runtime } : {})}
         runtimes={runtimes}
+        onConnectRemoteHost={
+          client.connectRemoteHost
+            ? (input) => mutate(() => client.connectRemoteHost!(input))
+            : undefined
+        }
         {...(hostEnrollment ? { hostEnrollment } : {})}
         createPreview={createPreview}
         pending={pending}
@@ -418,9 +537,18 @@ export function ThreadsRoute({
         onOpenAgentBuilder={() => setCreatingAgent(true)}
         {...(client.createHostEnrollment
           ? {
-              onCreateHostEnrollment: () =>
+              onCreateHostEnrollment: (
+                targetUrl: string,
+                provider: 'qwen' | 'codex',
+                allowHttp?: boolean,
+              ) =>
                 void mutate(async () => {
-                  const enrollment = await client.createHostEnrollment?.();
+                  setHostEnrollment(undefined);
+                  const enrollment = await client.createHostEnrollment?.(
+                    targetUrl,
+                    provider,
+                    allowHttp,
+                  );
                   if (enrollment) setHostEnrollment(enrollment);
                   return enrollment;
                 }),
@@ -428,11 +556,23 @@ export function ThreadsRoute({
           : {})}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
         {...(capabilities ? { capabilities } : {})}
+        workspaceCwd={workspaceCwd}
+        hostServerUrl={workspace.baseUrl}
+        workspaces={workspace.capabilities?.workspaces ?? []}
+        onWorkspaceChange={(cwd) => {
+          setSelectedWorkspaceCwd(cwd);
+          setAgents([]);
+          setCreatePreview(undefined);
+          createAssigneeRef.current = undefined;
+        }}
+        initialCreateTask={initialCreateTask}
+        createError={error}
         onCreateThread={(input) =>
-          void mutate(async () => {
+          mutate(async () => {
             const created = await client.createThread(input);
             setCreatePreview(undefined);
             openThread(created.id);
+            if (workspaceCwd) onOpenThreadChat?.(created.id, workspaceCwd);
             return created;
           })
         }

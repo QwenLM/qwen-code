@@ -302,6 +302,14 @@
   background: var(--secondary);
 }
 
+.runProgress {
+  grid-column: 1 / -1;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .runAgent {
   min-width: 0;
   overflow: hidden;

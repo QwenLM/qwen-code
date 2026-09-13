@@ -121,7 +121,7 @@ export interface WorkspaceAgent {
    * coin flip.
    */
   name: string;
-  /** Free-text description. Display only; never enters a prompt. */
+  /** Display and peer-discovery summary; never grants execution authority. */
   description?: string;
   /** Hex colour (`#rrggbb`) for UI attribution. */
   color?: string;
@@ -344,6 +344,15 @@ export interface RunUsageRound {
  * runs on the same thread resume that session; work on another thread cannot.
  */
 export interface ThreadRun {
+  progress?: {
+    attempt: number;
+    sequence: number;
+    receivedAt: number;
+    activityAt: number;
+    stage: string;
+    detail: string;
+    outputText?: string;
+  };
   id: string;
   agentId: string;
   /** Bound task session. Absent until the dispatcher starts it. */

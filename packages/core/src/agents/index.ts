@@ -116,6 +116,7 @@ export {
   releaseRunLease,
   DEFAULT_RUN_LEASE_MS,
 } from './workspace-agents/host-lease.js';
+export { reportHostRunProgress } from './workspace-agents/host-lease.js';
 export type {
   HostRunAssignment,
   HostRunResult,

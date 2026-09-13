@@ -174,6 +174,8 @@ import {
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
 import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
+import { ThreadsRoute } from './components/workspace-agents/ThreadsRoute';
+import { useAgentChatEntry } from './components/workspace-agents/useAgentChatEntry';
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
@@ -8553,6 +8555,43 @@ export function App({
     | null
   >(null);
   const activePanelRef = useRef(activePanel);
+  const [collaborationThread, setCollaborationThread] = useState<
+    { id: string; cwd: string; server: string } | undefined
+  >(() => {
+    try {
+      const saved = JSON.parse(
+        sessionStorage.getItem('qwen:team-conversation') ?? 'null',
+      );
+      return saved &&
+        typeof saved.id === 'string' &&
+        typeof saved.cwd === 'string' &&
+        typeof saved.server === 'string'
+        ? saved
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  });
+  const collaborationThreadId =
+    collaborationThread?.server === workspace.baseUrl
+      ? collaborationThread.id
+      : undefined;
+  const [agentsNav, setAgentsNav] = useState<{
+    view: 'agents' | 'tasks' | 'runtime';
+    request: number;
+  }>({ view: 'agents', request: 0 });
+  useEffect(() => {
+    try {
+      if (collaborationThread)
+        sessionStorage.setItem(
+          'qwen:team-conversation',
+          JSON.stringify(collaborationThread),
+        );
+      else sessionStorage.removeItem('qwen:team-conversation');
+    } catch {
+      /* Storage may be unavailable in embedded hosts. */
+    }
+  }, [collaborationThread]);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
   // Control QR popover). Cleared on any panel close/switch, not just
   // closePanel — several paths call setActivePanel directly (approval
@@ -12598,6 +12637,7 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
+      setCollaborationThread(undefined);
       pendingManualTitleRef.current = opts?.carryManualTitle
         ? { displayName: opts.carryManualTitle }
         : undefined;
@@ -13365,6 +13405,7 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
     ) => {
+      setCollaborationThread(undefined);
       pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
@@ -17048,6 +17089,23 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  const agentChatEntry = useAgentChatEntry({
+    enabled:
+      isChatEmptyState &&
+      Boolean(
+        workspace.capabilities?.features.includes('agent_collaboration_v1'),
+      ),
+    cwd: legacyWorkspaceContextCwd,
+    baseUrl: workspace.baseUrl,
+    token: workspace.token,
+    onSubmit: handleEditorSubmit,
+    onOpen: (id, cwd) => {
+      setCollaborationThread({ id, cwd, server: workspace.baseUrl });
+      setMainView('chat');
+      setActivePanel(null);
+    },
+    onError: (message) => pushToast('error', message),
+  });
   const visibleComposerToolbarActions = useMemo<
     readonly ComposerToolbarAction[]
   >(() => {
@@ -17283,7 +17341,9 @@ export function App({
   const appClassName = [
     styles.app,
     styles.appChat,
-    isChatEmptyState ? styles.appChatEmpty : undefined,
+    isChatEmptyState && !collaborationThreadId
+      ? styles.appChatEmpty
+      : undefined,
     sidebarOptions.enabled ? styles.appWithSidebar : undefined,
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
@@ -17874,6 +17934,12 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
+                  selectedCollaborationId={collaborationThreadId}
+                  onOpenCollaboration={(id, cwd) => {
+                    setCollaborationThread({ id, cwd, server: workspace.baseUrl });
+                    setMainView('chat');
+                    closePanel();
+                  }}
                   collapsed={
                     (sidebarCollapsed ||
                       (mainView === 'split' && !splitSidebarHasRoom)) &&
@@ -17884,7 +17950,8 @@ export function App({
                     closeMobileDrawer();
                     openPanel('settings');
                   }}
-                  onOpenAgents={() => {
+                  onOpenAgents={(view = 'agents') => {
+                    setAgentsNav(current => ({view, request: current.request + 1}));
                     closeMobileDrawer();
                     setAgentsCreateScope(null);
                     openPanel('agents');
@@ -18473,6 +18540,13 @@ export function App({
                       />
                     ) : activePanel === 'agents' ? (
                       <AgentsManagerPage
+                        key={agentsNav.request}
+                        initialAgentView={agentsNav.view}
+                        onOpenThreadChat={(threadId, cwd) => {
+                          setCollaborationThread({ id: threadId, cwd, server: workspace.baseUrl });
+                          setMainView('chat');
+                          closePanel();
+                        }}
                         onClose={() => {
                           setAgentsCreateScope(null);
                           closePanel();
@@ -18965,7 +19039,13 @@ export function App({
                     : undefined
                 }
               >
-                {showMissingSessionState && (
+                {collaborationThreadId && (
+                  <ThreadsRoute key={`${collaborationThread?.cwd}:${collaborationThreadId}`} chat initialThreadId={collaborationThreadId}
+                    workspaceCwd={collaborationThread?.cwd}
+                    onOpenThreadChat={(id, cwd) => setCollaborationThread({ id, cwd, server: workspace.baseUrl })}
+                    onOpenAgentSession={(sessionId) => void loadSidebarSession(sessionId, collaborationThread?.cwd)} />
+                )}
+                {!collaborationThreadId && showMissingSessionState && (
                   <div className={styles.missingSessionState}>
                     <div className={styles.missingSessionMessage}>
                       {t('session.missing')}
@@ -18982,7 +19062,7 @@ export function App({
                 )}
                 <div
                   className={
-                    showMissingSessionState
+                    showMissingSessionState || collaborationThreadId
                       ? styles.chatSubtreeHidden
                       : styles.chatSubtree
                   }
@@ -19602,7 +19682,7 @@ export function App({
                         <ChatEditor
                           ref={setEditorHandle}
                           compactOverlays={compactComposerOverlays}
-                          onSubmit={handleEditorSubmit}
+                          onSubmit={agentChatEntry.submit}
                           onInputTextChange={handleComposerTextChange}
                           onAttachmentsChange={
                             handleComposerAttachmentsChange
@@ -19623,7 +19703,7 @@ export function App({
                           }
                           cancelArmed={cancelArmed}
                           disabled={
-                            isDisabled ||
+                            agentChatEntry.pending || isDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
                             approvalOverlayActive ||
@@ -19661,7 +19741,7 @@ export function App({
                           builtinAtProviders={
                             workspaceContextActive ? builtinAtProviders : false
                           }
-                          atProviders={atProviders}
+                          atProviders={[...(atProviders ?? []), ...agentChatEntry.providers]}
                           composerTagIcons={composerTagIcons}
                           voiceTarget={
                             activePanel !== null || mainView !== 'chat'

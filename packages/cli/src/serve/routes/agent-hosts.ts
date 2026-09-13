@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Application, Request, Response } from 'express';
 import {
   applyHostRunResult,
+  reportHostRunProgress,
   authenticateAgentHost,
   enrollAgentHost,
   heartbeatAgentHost,
@@ -108,6 +109,71 @@ export function registerAgentHostTransportRoutes(
   workspaceRegistry: WorkspaceRegistry,
 ): void {
   const json = express.json({ limit: '16kb' });
+
+  app.post(
+    '/agent-hosts/:workspaceId/:hostId/progress',
+    express.json({ limit: '2mb' }),
+    async (req, res) => {
+      const { workspaceId, hostId } = req.params;
+      const secret = hostSecret(req);
+      const runtime = runtimeFor(workspaceRegistry, workspaceId);
+      if (!runtime || (!runtime.primary && !runtime.trusted)) {
+        res.status(404).json({ error: 'Workspace not found.' });
+        return;
+      }
+      if (
+        !secret ||
+        !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
+      ) {
+        res.status(401).json({ error: 'Invalid Agent Host credential.' });
+        return;
+      }
+      const {
+        threadId,
+        runId,
+        leaseId,
+        attempt,
+        sequence,
+        stage,
+        detail,
+        outputText,
+      } = body(req);
+      if (
+        typeof threadId !== 'string' ||
+        typeof runId !== 'string' ||
+        typeof leaseId !== 'string' ||
+        typeof attempt !== 'number' ||
+        !Number.isSafeInteger(attempt) ||
+        attempt < 1 ||
+        typeof sequence !== 'number' ||
+        !Number.isSafeInteger(sequence) ||
+        sequence < 1 ||
+        typeof stage !== 'string' ||
+        !['starting', 'waiting', 'thinking', 'tool', 'responding'].includes(
+          stage,
+        ) ||
+        typeof detail !== 'string' ||
+        detail.length > 1200 ||
+        (outputText !== undefined &&
+          (typeof outputText !== 'string' || outputText.length > 262144))
+      ) {
+        res.status(400).json({ error: 'Invalid progress.' });
+        return;
+      }
+      const result = await reportHostRunProgress(runtime.workspaceCwd, {
+        threadId,
+        runId,
+        hostId,
+        leaseId,
+        attempt,
+        sequence,
+        stage,
+        detail,
+        outputText,
+      });
+      res.status(result.ok ? 200 : 409).json(result);
+    },
+  );
 
   app.post('/agent-hosts/enroll', json, async (req: Request, res: Response) => {
     const input = body(req);

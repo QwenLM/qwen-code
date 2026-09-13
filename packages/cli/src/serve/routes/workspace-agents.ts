@@ -73,6 +73,7 @@ import {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';
+import { registerAgentHostConnectionRoutes } from './agent-host-connection.js';
 import type { ChannelDeliveryRequest } from '../../runtime/channel-delivery-ipc.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -267,6 +268,9 @@ function runView(
     agentName: agent?.name ?? run.agentId,
     ...(agent?.color ? { agentColor: agent.color } : {}),
     status: run.status,
+    ...(run.progress?.attempt === run.attempts
+      ? { progress: run.progress }
+      : {}),
     ...(run.closeKind ? { closeKind: run.closeKind } : {}),
     closeAcknowledged: run.closeAcknowledgedAtSequence !== undefined,
     ...(run.failureStage ? { failureStage: run.failureStage } : {}),
@@ -321,6 +325,8 @@ export function registerWorkspaceAgentRoutes(
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     return runtime;
   };
+
+  registerAgentHostConnectionRoutes(app, prefix, runtimeFor, deps.mutate);
 
   const dispatch = async (runtime: WorkspaceRuntime): Promise<void> => {
     runtime.generationGuard?.assertOpen();
@@ -818,6 +824,7 @@ export function registerWorkspaceAgentRoutes(
           sequence: message.sequence,
           authorKind: message.authorKind,
           authorName: message.authorNameSnapshot,
+          sourceRunId: message.sourceRunId,
           authorDeleted:
             message.authorKind === 'agent' &&
             !agents.some((agent) => agent.id === message.from),

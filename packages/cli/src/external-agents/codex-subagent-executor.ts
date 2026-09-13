@@ -56,8 +56,16 @@ function id(value: unknown): string {
   return value;
 }
 
-async function runCodex(
-  params: ExternalAgentExecutorParams,
+export async function runCodexAppServer(
+  params: {
+    command: string;
+    args?: string[];
+    cwd: string;
+    maxTimeMinutes?: number;
+    onMessage?: (itemId: string, text: string) => void;
+    onActivity?: (stage: string, detail: string) => void;
+    onCleanupWarning?: (detail: string) => void;
+  },
   prompt: string,
   sandbox: string,
   signal: AbortSignal,
@@ -68,10 +76,10 @@ async function runCodex(
   delete env['CLAUDECODE'];
   delete env['NODE_OPTIONS'];
   const child = spawn(
-    params.spec.command,
-    params.spec.args ?? ['app-server', '--stdio'],
+    params.command,
+    params.args ?? ['app-server', '--stdio'],
     {
-      cwd: params.runtimeContext.getTargetDir(),
+      cwd: params.cwd,
       env,
       stdio: 'pipe',
       detached: process.platform !== 'win32',
@@ -91,6 +99,7 @@ async function runCodex(
   let threadId: string | undefined;
   let turnId: string | undefined;
   let finalAnswer: string | undefined;
+  const messageText = new Map<string, string>();
   let unphasedAnswer: string | undefined;
   let terminal = false;
   let exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
@@ -126,7 +135,7 @@ async function runCodex(
     fail(
       new Error(
         error.code === 'ENOENT'
-          ? `Cannot start ${params.spec.command}. Install Codex and make it available on PATH.`
+          ? `Cannot start ${params.command}. Install Codex and make it available on PATH.`
           : `Cannot start Codex: ${error.code ?? 'process error'}`,
       ),
     );
@@ -224,12 +233,35 @@ async function runCodex(
           terminal = true;
           complete(turn);
         }
+      } else if (method === 'item/agentMessage/delta') {
+        associateTurn(parameters['turnId']);
+        const itemId = id(parameters['itemId']);
+        if (typeof parameters['delta'] !== 'string')
+          throw new Error('Codex returned an invalid text delta.');
+        const text = (messageText.get(itemId) ?? '') + parameters['delta'];
+        messageText.set(itemId, text);
+        params.onMessage?.(itemId, text);
+      } else if (method === 'item/started') {
+        associateTurn(parameters['turnId']);
+        const item = object(parameters['item']);
+        if (item['type'] === 'reasoning')
+          params.onActivity?.('thinking', 'Codex 正在思考');
+        else if (
+          [
+            'commandExecution',
+            'mcpToolCall',
+            'webSearch',
+            'fileChange',
+          ].includes(String(item['type']))
+        )
+          params.onActivity?.('tool', 'Codex 正在执行工具');
       } else if (method === 'item/completed') {
         associateTurn(parameters['turnId']);
         const item = object(parameters['item']);
         if (item['type'] !== 'agentMessage') return;
         if (typeof item['text'] !== 'string')
           throw new Error('Codex returned an invalid message.');
+        if (params.onMessage) params.onMessage(id(item['id']), item['text']);
         if (item['phase'] === 'final_answer') finalAnswer = item['text'];
         else if (item['phase'] == null) unphasedAnswer = item['text'];
       }
@@ -249,7 +281,7 @@ async function runCodex(
     () => fail(new Error('Codex initialization timed out.')),
     10_000,
   );
-  const minutes = params.runConfig.max_time_minutes;
+  const minutes = params.maxTimeMinutes;
   const executionTimer =
     minutes === undefined
       ? undefined
@@ -264,7 +296,7 @@ async function runCodex(
     });
     write({ method: 'initialized' });
     const started = await request('thread/start', {
-      cwd: params.runtimeContext.getTargetDir(),
+      cwd: params.cwd,
       ephemeral: true,
       approvalPolicy: 'never',
       sandbox,
@@ -314,13 +346,7 @@ async function runCodex(
         if (isUnprovenExternalAgentTreeExit(error)) {
           const diagnostic = `Codex process tree not proven gone after cleanup: ${detail}`;
           debugLogger.warn(diagnostic);
-          if (params.eventEmitter?.rawListeners(AgentEventType.ERROR).length) {
-            params.eventEmitter.emit(AgentEventType.ERROR, {
-              subagentId: params.subagentId ?? params.name,
-              error: diagnostic,
-              timestamp: Date.now(),
-            });
-          }
+          params.onCleanupWarning?.(diagnostic);
         } else if (!isExpectedExternalAgentCleanupExit(error)) {
           if (interruption) {
             interruption.message += `\n\nCodex cleanup failed: ${detail}`;
@@ -430,8 +456,22 @@ class CodexSubagentExecutor implements SubagentExecutor {
         this.params.runtimeContext,
       );
       const task = String(context.get('task_prompt') ?? 'Get Started!');
-      this.finalText = await runCodex(
-        { ...this.params, eventEmitter: this.emitter },
+      this.finalText = await runCodexAppServer(
+        {
+          command: this.params.spec.command,
+          args: this.params.spec.args,
+          cwd: this.params.runtimeContext.getTargetDir(),
+          maxTimeMinutes: this.params.runConfig.max_time_minutes,
+          onCleanupWarning: (error) => {
+            if (this.emitter.rawListeners(AgentEventType.ERROR).length) {
+              this.emitter.emit(AgentEventType.ERROR, {
+                subagentId,
+                error,
+                timestamp: Date.now(),
+              });
+            }
+          },
+        },
         [system, task].filter(Boolean).join('\n\n'),
         this.sandbox,
         this.controller.signal,

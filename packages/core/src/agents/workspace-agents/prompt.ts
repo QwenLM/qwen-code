@@ -100,12 +100,17 @@ function renderPost(message: ThreadMessage, charBudget: number): string {
 function renderPeers(input: AssembleAgentPromptInput): string[] {
   const peers = input.roster.filter(
     (candidate) =>
-      candidate.id !== input.agent.id && candidate.enabled !== false,
+      candidate.id !== input.agent.id &&
+      candidate.enabled !== false &&
+      !candidate.retiredAt,
   );
   if (peers.length === 0) {
     return ['  (none — no other enabled agent in this workspace)'];
   }
-  return peers.map((peer) => `  ${mentionToken(peer)}`);
+  return peers.map(
+    (peer) =>
+      `  ${mentionToken(peer)} — ${peer.description?.trim() || '(role not specified; ask before assuming expertise)'}`,
+  );
 }
 
 /**

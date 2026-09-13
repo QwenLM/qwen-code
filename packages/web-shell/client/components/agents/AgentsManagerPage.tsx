@@ -82,11 +82,14 @@ import type { EmbeddedManagerPage } from '../plugins/manager-page';
 import styles from './AgentsManagerPage.module.css';
 
 interface AgentsManagerPageProps {
+  initialAgentView?: 'agents' | 'tasks' | 'runtime';
+  initialCreateTask?: boolean;
   onClose: () => void;
   embedded?: EmbeddedManagerPage;
   initialCreateScope?: 'workspace' | 'global' | null;
   /** Opens an agent's own session in the shell's session view. */
   onOpenAgentSession?: (sessionId: string) => void;
+  onOpenThreadChat?: (threadId: string, workspaceCwd: string) => void;
 }
 
 function levelLabel(level: string, t: ReturnType<typeof useI18n>['t']): string {
@@ -134,10 +137,13 @@ function unwrapPlainText(value: string): string {
 }
 
 export function AgentsManagerPage({
+  initialAgentView,
+  initialCreateTask,
   onClose,
   embedded,
   initialCreateScope,
   onOpenAgentSession,
+  onOpenThreadChat,
 }: AgentsManagerPageProps) {
   const { t } = useI18n();
   const {
@@ -347,6 +353,10 @@ export function AgentsManagerPage({
       <div className="flex w-full flex-col gap-6 pb-8">
         {navigation}
         <ThreadsRoute
+          initialView={initialAgentView}
+          hideNavigation={initialAgentView !== undefined}
+          initialCreateTask={initialCreateTask}
+          onOpenThreadChat={onOpenThreadChat}
           {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
           onOpenDefinitions={() => setAgentsOpen(false)}
         />

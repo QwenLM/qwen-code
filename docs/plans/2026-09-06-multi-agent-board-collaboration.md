@@ -1,5 +1,23 @@
 # Multi-agent collaboration on a shared thread
 
+## Chat-first entry clarification (2026-09-10)
+
+A new ordinary Chat may start collaboration by mentioning existing workspace
+agents. Sending creates the backing thread and posts the first message through
+the normal dispatch rules; the task-creation form is optional. Existing ordinary
+session histories are not silently converted or copied. This initial entry does
+not yet support attachments. Failed admission must remain visible.
+
+Peers are discovered from the workspace roster, not a separate Team object.
+The turn prompt lists enabled, non-retired peers with exact mention tokens and
+their description as a role-discovery hint, not as authorization or a promise
+of expertise. This changes the previous display-only description contract.
+
+中文：新聊天可通过 @已有工作区智能体直接发起协作；发送时建立底层线程，
+首条消息仍经过正常派发规则，不强制填写建任务表。已有普通会话不自动转换或复制，
+本入口暂不支持附件。成员关系来自工作区名单，不要求额外建立 Team；
+提示词中的成员职责简介只帮助选择协作者，不授予权限，也不保证其能力。
+
 > **Development handoff (2026-09-09):** Read the [Agent service architecture](../design/2026-09-09-agent-service-collaboration.md) and [successor implementation plan](./2026-09-09-agent-service-collaboration-plan.md) before continuing. Start at P0: independent default-off experimental gates. The successor architecture §8 explicitly identifies superseded decisions; other storage and safety contracts below remain applicable. Historical runtime observations are not evidence that the new service boundary is implemented. Do not resume the old §5.2 sequence by default.
 
 > Current session-adapter caveat (2026-09-08): the earlier live demo below does

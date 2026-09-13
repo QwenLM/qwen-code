@@ -162,7 +162,7 @@
   display: grid;
   grid-template-columns:
     10px minmax(80px, 0.5fr) minmax(120px, 1fr) minmax(120px, 1fr)
-    auto auto auto auto;
+    auto auto auto auto auto;
   gap: 10px;
   align-items: center;
   min-height: 34px;
@@ -228,6 +228,7 @@
 }
 
 .agentAction {
+  white-space: nowrap;
   padding: 2px 4px;
   border: 0;
   background: none;
@@ -257,7 +258,12 @@
 
 @media (max-width: 720px) {
   .agentRow {
-    grid-template-columns: 10px minmax(80px, 1fr) auto auto auto;
+    grid-template-columns: 10px minmax(80px, 1fr) auto;
+  }
+
+  .agentAction {
+    grid-column: 2 / -1;
+    justify-self: end;
   }
 
   .agentDescription,

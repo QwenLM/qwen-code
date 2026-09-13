@@ -46,6 +46,7 @@ import {
 } from './agent-tool-options';
 
 interface AgentCreatePageProps {
+  workspaceCwd?: string;
   initialScope?: 'workspace' | 'global';
   agent?: DaemonWorkspaceAgentDetail;
   onCancel: () => void;
@@ -54,6 +55,8 @@ interface AgentCreatePageProps {
     id: string;
     label: string;
     status: 'online' | 'offline';
+    provider?: string;
+    workspaceCwd?: string;
   }[];
   onSaveWorkspaceAgent?: (input: {
     name: string;
@@ -108,6 +111,7 @@ export function AgentCreatePage({
   onCancel,
   onCreated,
   executionHosts = [],
+  workspaceCwd,
   onSaveWorkspaceAgent,
 }: AgentCreatePageProps) {
   const { t } = useI18n();
@@ -159,7 +163,7 @@ export function AgentCreatePage({
   );
   const [workspaceCreateMethod, setWorkspaceCreateMethod] = useState<
     'model' | 'manual'
-  >();
+  >('manual');
   const [generationOpen, setGenerationOpen] = useState(false);
   const [generationPrompt, setGenerationPrompt] = useState('');
   const [generatedDescription, setGeneratedDescription] = useState('');
@@ -489,7 +493,7 @@ export function AgentCreatePage({
           concurrency < 1 ||
           concurrency > 8
         ) {
-          throw new Error('Concurrent tasks must be between 1 and 8');
+          throw new Error('同时执行的任务数必须在 1 到 8 之间');
         }
         const trimmedName = name.trim();
         await onSaveWorkspaceAgent({
@@ -631,7 +635,7 @@ export function AgentCreatePage({
       <div className="flex items-start justify-between gap-4">
         <h1 className="text-xl font-semibold text-balance">
           {workspaceAgentMode
-            ? 'Create persistent Agent'
+            ? '新建协作智能体'
             : agent
               ? t('agent.edit')
               : t('agent.create')}
@@ -653,22 +657,45 @@ export function AgentCreatePage({
         </ManagementNotice>
       ) : null}
 
+      {workspaceAgentMode && (
+        <div className="rounded-lg border border-border p-4 text-sm">
+          <p>
+            所属项目 ·{' '}
+            <strong>
+              {workspaceCwd?.split(/[\\/]/).filter(Boolean).at(-1) ??
+                '当前项目'}
+            </strong>
+          </p>
+          <p className="break-all text-xs text-muted-foreground">
+            {workspaceCwd}
+          </p>
+          <p className="mt-2 text-muted-foreground">
+            与侧边栏的项目工作区相同。此智能体加入该项目的协作名单；运行位置在下方单独选择。
+          </p>
+        </div>
+      )}
       <Tabs defaultValue="overview">
-        <TabsList className="max-w-full overflow-x-auto">
-          <TabsTrigger value="overview">
-            {t('agent.detail.overview')}
-          </TabsTrigger>
-          <TabsTrigger value="prompt">
-            {t('agent.detail.systemPrompt')}
-          </TabsTrigger>
-          {!workspaceAgentMode ? (
-            <>
-              <TabsTrigger value="tools">{t('agent.detail.tools')}</TabsTrigger>
-              <TabsTrigger value="mcp">{t('agent.detail.mcp')}</TabsTrigger>
-              <TabsTrigger value="hooks">{t('agent.detail.hooks')}</TabsTrigger>
-            </>
-          ) : null}
-        </TabsList>
+        {!workspaceAgentMode && (
+          <TabsList className="max-w-full overflow-x-auto">
+            <TabsTrigger value="overview">
+              {t('agent.detail.overview')}
+            </TabsTrigger>
+            <TabsTrigger value="prompt">
+              {t('agent.detail.systemPrompt')}
+            </TabsTrigger>
+            {!workspaceAgentMode ? (
+              <>
+                <TabsTrigger value="tools">
+                  {t('agent.detail.tools')}
+                </TabsTrigger>
+                <TabsTrigger value="mcp">{t('agent.detail.mcp')}</TabsTrigger>
+                <TabsTrigger value="hooks">
+                  {t('agent.detail.hooks')}
+                </TabsTrigger>
+              </>
+            ) : null}
+          </TabsList>
+        )}
 
         <TabsContent value="overview" className="pt-4">
           <FieldGroup className="grid grid-cols-1 gap-5 lg:grid-cols-2">
@@ -712,14 +739,33 @@ export function AgentCreatePage({
               />
               <FieldDescription>
                 {workspaceAgentMode
-                  ? 'Name the durable identity shown in shared tasks.'
+                  ? '这个名字会显示在共享对话中，之后可以通过 @名字 分配任务。'
                   : t('agent.create.nameHelp')}
               </FieldDescription>
             </Field>
 
+            {workspaceAgentMode && (
+              <Field className="lg:col-span-2">
+                <FieldLabel htmlFor="agent-workspace-prompt">
+                  系统提示词 · 职责与协作方式
+                </FieldLabel>
+                <Textarea
+                  id="agent-workspace-prompt"
+                  value={systemPrompt}
+                  onChange={(event) => setSystemPrompt(event.target.value)}
+                  rows={8}
+                  placeholder="定义它负责什么、如何与其他智能体协作，以及结果应该如何交付。"
+                />
+                <FieldDescription>
+                  这是智能体的核心工作指令。下方职责简介用于同伴发现，不能代替系统提示词。
+                </FieldDescription>
+              </Field>
+            )}
             <Field className="lg:col-span-2">
               <FieldLabel htmlFor="agent-description">
-                {t('agent.create.description')}
+                {workspaceAgentMode
+                  ? '职责简介 · 同伴什么时候应该找你'
+                  : t('agent.create.description')}
               </FieldLabel>
               <Textarea
                 id="agent-description"
@@ -746,7 +792,7 @@ export function AgentCreatePage({
               <>
                 <Field>
                   <FieldLabel htmlFor="agent-concurrency">
-                    Concurrent tasks
+                    同时执行的任务数
                   </FieldLabel>
                   <Input
                     id="agent-concurrency"
@@ -760,44 +806,61 @@ export function AgentCreatePage({
                     }
                   />
                 </Field>
-                {executionHosts.length > 0 ? (
+                {
                   <Field className="lg:col-span-2">
-                    <FieldLabel>Run on</FieldLabel>
+                    <FieldLabel>在哪里运行</FieldLabel>
                     <div className="grid gap-2 sm:grid-cols-2">
+                      <label className="flex items-start gap-2 rounded-md border border-border p-3 text-sm">
+                        <input
+                          type="radio"
+                          name="agent-execution-location"
+                          checked={executionHostIds.size === 0}
+                          onChange={() => setExecutionHostIds(new Set())}
+                        />
+                        <span>
+                          本机 · Qwen Code
+                          <span className="block break-all text-xs text-muted-foreground">
+                            {workspaceCwd}
+                          </span>
+                        </span>
+                      </label>
                       {executionHosts.map((host) => (
                         <div
                           key={host.id}
-                          className="flex items-center gap-2 text-sm"
+                          className="flex items-start gap-2 rounded-md border border-border p-3 text-sm"
                         >
-                          <Checkbox
+                          <input
+                            type="radio"
+                            name="agent-execution-location"
                             id={`agent-host-${host.id}`}
                             checked={executionHostIds.has(host.id)}
-                            onCheckedChange={(checked) =>
-                              setExecutionHostIds((current) =>
-                                toggleSelection(
-                                  current,
-                                  host.id,
-                                  checked === true,
-                                ),
-                              )
+                            onChange={() =>
+                              setExecutionHostIds(new Set([host.id]))
                             }
                           />
                           <label htmlFor={`agent-host-${host.id}`}>
-                            {host.label} · {host.status}
+                            {host.label} ·{' '}
+                            {host.status === 'online' ? '在线' : '离线'}
+                            <span className="block text-xs text-muted-foreground">
+                              {host.provider}
+                            </span>
+                            <span className="block break-all text-xs text-muted-foreground">
+                              执行目录：{host.workspaceCwd ?? '尚未上报'}
+                            </span>
                           </label>
                         </div>
                       ))}
                     </div>
                     <FieldDescription>
-                      Select every Host allowed to run this Agent. Select none
-                      to use this daemon.
+                      选择实际执行任务的机器和程序，不改变所属项目。远程机器使用上面显示的执行目录，不会自动同步本地文件。多个智能体可以共用同一台机器。
                     </FieldDescription>
                   </Field>
-                ) : null}
+                }
                 <Field className="lg:col-span-2">
                   <FieldDescription>
-                    Tools are limited to the workspace-agent read-only boundary
-                    on every selected runtime.
+                    当前 demo
+                    以只读任务为主。创建后不会立即执行；请分配任务或在共享对话中
+                    @它。
                   </FieldDescription>
                 </Field>
               </>
@@ -880,24 +943,31 @@ export function AgentCreatePage({
           </FieldGroup>
         </TabsContent>
 
-        <TabsContent value="prompt" className="pt-4">
-          <Field>
-            <Textarea
-              id="agent-prompt"
-              aria-label={t('agent.create.prompt')}
-              value={systemPrompt}
-              onChange={(event) => setSystemPrompt(event.target.value)}
-              placeholder={t('agent.create.promptPlaceholder.cli')}
-              rows={16}
-              className="min-h-80 max-h-[60vh] overflow-y-auto"
-            />
-            <FieldDescription>
-              {workspaceAgentMode
-                ? "Define this Agent's durable role and collaboration behavior."
-                : t('agent.create.promptHelp')}
-            </FieldDescription>
-          </Field>
-        </TabsContent>
+        {!workspaceAgentMode && (
+          <TabsContent value="prompt" className="pt-4">
+            <Field>
+              {workspaceAgentMode && (
+                <FieldLabel htmlFor="agent-prompt">
+                  系统提示词 · 职责与协作方式
+                </FieldLabel>
+              )}
+              <Textarea
+                id="agent-prompt"
+                aria-label={t('agent.create.prompt')}
+                value={systemPrompt}
+                onChange={(event) => setSystemPrompt(event.target.value)}
+                placeholder={t('agent.create.promptPlaceholder.cli')}
+                rows={16}
+                className="min-h-80 max-h-[60vh] overflow-y-auto"
+              />
+              <FieldDescription>
+                {workspaceAgentMode
+                  ? '这是智能体的核心工作指令：定义它的职责、如何协作和输出什么。上面的描述只是列表简介，不能代替这里的指令。'
+                  : t('agent.create.promptHelp')}
+              </FieldDescription>
+            </Field>
+          </TabsContent>
+        )}
 
         <TabsContent value="tools" className="pt-4">
           <FieldGroup>

@@ -128,6 +128,10 @@ P2/P3 已有最小可见入口；此步只收束体验：原有新建对话、�
 
 当前仍不能称为完整的多 Agent 协作：受管 Host 只接活并回传 review，尚不能使用 `thread_*` 主动交接；Codex 仍是 `exec --ephemeral`，没有原生会话续跑；同一 Host 连接串行执行。§3b 的跨机器与双向调用缺口不能由这次故障复现覆盖。本地尚未提交的聊天入口 / 进度显示改动也不计入远程交付。
 
+## 3d. 实时正文接线（2026-09-13）
+
+替代 §3c 的 Codex `exec --ephemeral` 描述：Host 现在复用仓库已有 App Server 传输，消费正文 delta；仍使用临时 thread，未实现跨接单原生续跑。Qwen 本地与 Host 接入 ACP 正文流，输出以 run 快照进入原共享 Chat；设计与限制见[实时输出说明](../design/2026-09-11-agent-project-host-entry.zh-CN.md)。真实 Codex transport 已观测到首正文 25.48 秒、完成 28.84 秒、245 次正文回调；这只是 transport 观测，不替代页面和跨机器验收。
+
 ## 4. 接力清单
 
 下一棒先读架构 §6、§7，然后执行 P0，不直接接着旧 ten-step 或 H2 开始写远程派发。

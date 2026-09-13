@@ -224,6 +224,55 @@ export async function checkRunLease(
   );
 }
 
+export async function reportHostRunProgress(
+  projectRoot: string,
+  input: {
+    threadId: string;
+    runId: string;
+    hostId: string;
+    leaseId: string;
+    attempt: number;
+    sequence: number;
+    stage: string;
+    detail: string;
+    outputText?: string;
+  },
+) {
+  return withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const now = Date.now();
+    const checked = await checkRunLeaseInTransaction(transaction, input, now);
+    if (!checked.ok) return checked;
+    if (checked.value.hostId !== input.hostId) {
+      return { ok: false, reason: 'stale_lease' as const };
+    }
+    const thread = await transaction.readThread(input.threadId);
+    const run = thread?.runs.find((candidate) => candidate.id === input.runId);
+    if (!thread || !run || run.status !== 'running') {
+      return { ok: false, reason: 'not_leasable' as const };
+    }
+    const previous =
+      run.progress?.attempt === input.attempt ? run.progress : undefined;
+    if (previous && previous.sequence > input.sequence) return { ok: true };
+    run.progress = {
+      attempt: input.attempt,
+      sequence: input.sequence,
+      receivedAt: now,
+      activityAt:
+        previous?.sequence === input.sequence ? previous.activityAt : now,
+      stage:
+        previous?.sequence === input.sequence ? previous.stage : input.stage,
+      detail:
+        previous?.sequence === input.sequence ? previous.detail : input.detail,
+      outputText:
+        previous?.sequence === input.sequence
+          ? previous.outputText
+          : (input.outputText ?? previous?.outputText),
+    };
+    await transaction.writeThread(thread);
+    return { ok: true };
+  });
+}
+
 export async function checkRunLeaseInTransaction(
   transaction: AgentStoreTransaction,
   input: {

@@ -5,7 +5,6 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +18,8 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
+import { runCodexAppServer } from '../external-agents/codex-subagent-executor.js';
+import { streamAgentTurn } from './workspace-agents/stream-agent-turn.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
@@ -48,10 +49,11 @@ export interface AgentHostConnectionOptions {
   workspaceCwd: string;
   provider: keyof typeof PROVIDER_LABELS;
   enrollmentToken?: string;
+  allowHttp?: boolean;
   name?: string;
 }
 
-function normalizeServerUrl(value: string): string {
+function normalizeServerUrl(value: string, allowHttp = false): string {
   const url = new URL(value);
   if (
     (url.protocol !== 'http:' && url.protocol !== 'https:') ||
@@ -60,9 +62,9 @@ function normalizeServerUrl(value: string): string {
   ) {
     throw new Error('--agent-host-server must be an HTTP(S) URL.');
   }
-  if (url.protocol === 'http:' && !isLoopbackBind(url.hostname)) {
+  if (url.protocol === 'http:' && !isLoopbackBind(url.hostname) && !allowHttp) {
     throw new Error(
-      '--agent-host-server requires HTTPS unless the primary daemon is on loopback.',
+      '--agent-host-server requires HTTPS outside loopback. For a trusted demo network only, explicitly pass --agent-host-allow-http.',
     );
   }
   return url.toString().replace(/\/$/, '');
@@ -169,75 +171,6 @@ function modelPrompt(assignment: HostRunAssignment): string {
     .join('\n\n');
 }
 
-async function executeCodexPrompt(
-  workspaceCwd: string,
-  prompt: string,
-  signal: AbortSignal,
-): Promise<string> {
-  // ponytail: one-shot CLI is enough for the demo; persist Codex thread ids
-  // only when same-task continuation is required.
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      'codex',
-      [
-        'exec',
-        '--json',
-        '--ephemeral',
-        '--sandbox',
-        'read-only',
-        '--cd',
-        workspaceCwd,
-        prompt,
-      ],
-      { cwd: workspaceCwd, stdio: ['ignore', 'pipe', 'pipe'], signal },
-    );
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on('data', (chunk: string) => {
-      stderr += chunk;
-    });
-    child.once('error', reject);
-    child.once('close', (code) => {
-      if (code !== 0) {
-        reject(
-          new Error(
-            stderr.trim() || `Codex CLI exited with status ${String(code)}.`,
-          ),
-        );
-        return;
-      }
-      let summary = '';
-      for (const line of stdout.split('\n')) {
-        try {
-          const event = JSON.parse(line) as {
-            type?: string;
-            item?: { type?: string; text?: string };
-          };
-          if (
-            event.type === 'item.completed' &&
-            event.item?.type === 'agent_message' &&
-            typeof event.item.text === 'string'
-          ) {
-            summary = event.item.text.trim();
-          }
-        } catch {
-          // Codex warnings are not result events.
-        }
-      }
-      if (!summary) {
-        reject(new Error('Codex CLI finished without a final answer.'));
-        return;
-      }
-      resolve(summary);
-    });
-  });
-}
-
 async function executeAssignment(
   options: AgentHostConnectionOptions,
   credential: AgentHostCredential,
@@ -281,13 +214,80 @@ async function executeAssignment(
   await renewLease();
   execution.signal.throwIfAborted();
   const renew = setInterval(() => void renewLease(), LEASE_RENEW_MS);
+  const updates = new AbortController();
+  let stream: Promise<void> | undefined;
+  let progress = {
+    sequence: 1,
+    stage: 'starting',
+    detail: '执行器已接单，正在启动',
+    outputText: '',
+  };
+  let sending = false;
+  const flush = async () => {
+    if (sending) return;
+    sending = true;
+    try {
+      await requestJson(
+        `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/progress`,
+        {
+          method: 'POST',
+          signal: AbortSignal.timeout(4000),
+          headers: {
+            authorization: `AgentHost ${credential.secret}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...progress,
+            threadId: assignment.threadId,
+            runId: assignment.runId,
+            leaseId: assignment.lease.leaseId,
+            attempt: assignment.attempt,
+          }),
+        },
+      );
+    } catch {
+      // Telemetry is retried by the next heartbeat, never blocks execution.
+    } finally {
+      sending = false;
+    }
+  };
+  const report = (
+    stage: string,
+    detail: string,
+    outputText = progress.outputText,
+  ) => {
+    // ponytail: bounded live preview; the final result retains the full answer.
+    progress = {
+      sequence: progress.sequence + 1,
+      stage,
+      detail: detail.slice(0, 1200),
+      outputText: outputText.slice(0, 262144),
+    };
+  };
+  void flush();
+  const progressHeartbeat = setInterval(() => void flush(), 500);
+  progressHeartbeat.unref?.();
   renew.unref?.();
   let summary: string | undefined;
   try {
     if (options.provider === 'codex') {
-      summary = await executeCodexPrompt(
-        options.workspaceCwd,
+      const messages = new Map<string, string>();
+      summary = await runCodexAppServer(
+        {
+          command: 'codex',
+          cwd: options.workspaceCwd,
+          onMessage: (id, text) => {
+            messages.set(id, text);
+            report(
+              'responding',
+              '正在回复',
+              [...messages.values()].join('\n\n'),
+            );
+          },
+          onActivity: report,
+        },
         modelPrompt(assignment),
+        'read-only',
         execution.signal,
       );
     } else {
@@ -317,6 +317,16 @@ async function executeAssignment(
           });
         }
       }
+      stream = streamAgentTurn(
+        options.bridge,
+        sessionId,
+        promptId,
+        AbortSignal.any([updates.signal, execution.signal]),
+        report,
+      ).catch((error: unknown) => {
+        if (!updates.signal.aborted) execution.abort(error);
+      });
+      report('waiting', 'Qwen Code 已接单，等待模型回复');
       await options.bridge.sendPrompt(
         sessionId,
         {
@@ -351,6 +361,10 @@ async function executeAssignment(
   } finally {
     finished = true;
     clearInterval(renew);
+    clearInterval(progressHeartbeat);
+    updates.abort();
+    await stream;
+    await flush();
   }
   if (!summary) {
     throw new Error('Managed Agent finished without a final answer.');
@@ -401,11 +415,50 @@ async function returnResult(
   }
 }
 
+const activeConnections = new Map<
+  string,
+  { provider: string; start: Promise<void> }
+>();
+
 export async function startAgentHostConnection(
   options: AgentHostConnectionOptions,
 ): Promise<void> {
+  const key = JSON.stringify([
+    normalizeServerUrl(options.serverUrl, options.allowHttp),
+    options.workspaceId,
+    options.workspaceCwd,
+  ]);
+  const existing = activeConnections.get(key);
+  if (existing) {
+    if (existing.provider !== options.provider)
+      throw new Error(
+        'This workspace already has a Host connection using another provider.',
+      );
+    return existing.start;
+  }
+  const start = connectAgentHost(options);
+  activeConnections.set(key, { provider: options.provider, start });
+  try {
+    await start;
+  } catch (error) {
+    activeConnections.delete(key);
+    throw error;
+  }
+}
+
+async function connectAgentHost(
+  options: AgentHostConnectionOptions,
+): Promise<void> {
   const providers = [PROVIDER_LABELS[options.provider]];
-  const serverUrl = normalizeServerUrl(options.serverUrl);
+  const serverUrl = normalizeServerUrl(options.serverUrl, options.allowHttp);
+  if (
+    new URL(serverUrl).protocol === 'http:' &&
+    !isLoopbackBind(new URL(serverUrl).hostname)
+  ) {
+    writeStderrLine(
+      'WARNING: Agent Host HTTP demo mode sends credentials, task content and results without encryption. Use only on a trusted network.',
+    );
+  }
   const filePath = credentialPath(
     serverUrl,
     options.workspaceId,
@@ -477,6 +530,11 @@ export async function startAgentHostConnection(
   };
 
   await heartbeat();
+  if (offline) {
+    throw new Error(
+      'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential.',
+    );
+  }
   const timer = setInterval(() => void heartbeat(), HEARTBEAT_MS);
   timer.unref?.();
   writeStderrLine(
