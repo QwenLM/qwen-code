@@ -80,12 +80,23 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             calls.map((c) => ({
               status: 'awaiting_approval',
               request: c,
-              confirmationDetails: {
-                type: 'ask_user_question',
-                title,
-                questions: [],
-                onConfirm: async () => {},
-              },
+              confirmationDetails:
+                title === 'original'
+                  ? {
+                      type: 'exec',
+                      title,
+                      command: 'echo hi',
+                      rootCommand: 'echo',
+                      onConfirm: async () => {},
+                    }
+                  : {
+                      // The PreToolUse 'ask' bounce replaces the tool's own
+                      // details with the hook's reason (coreToolScheduler).
+                      type: 'info',
+                      title,
+                      prompt: 'hook says hi',
+                      onConfirm: async () => {},
+                    },
             }));
           const executing = calls.map((c) => ({
             status: 'executing',
@@ -1844,12 +1855,16 @@ describe('livePromptEvents', () => {
     const confirms = events.filter(
       (e) => e.type === 'confirm' || e.type === 'confirm-resolved',
     );
+    // The confirm event carries the dialog's payload body (confirmBody):
+    // the exec command for the tool's own confirmation, the hook's reason
+    // after the bounce replaces the details.
     expect(confirms).toEqual([
       {
         type: 'confirm',
         id: 'b2',
         tool: 'run_shell_command',
         title: 'original',
+        confirmBody: 'echo hi',
       },
       { type: 'confirm-resolved', id: 'b2', outcome: 'approved' },
       {
@@ -1857,6 +1872,7 @@ describe('livePromptEvents', () => {
         id: 'b2',
         tool: 'run_shell_command',
         title: 'Hook requested confirmation to run',
+        confirmBody: 'hook says hi',
       },
     ]);
   });

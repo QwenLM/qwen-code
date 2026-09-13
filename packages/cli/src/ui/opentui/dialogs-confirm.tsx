@@ -62,6 +62,8 @@ import {
 } from './dialogs-shared.js';
 import { renderDiffBody } from './diff-render.js';
 import {
+  CONFIRMATION_BODY_MAX_ROWS,
+  DIALOG_EXPANDED_BODY_RESERVE_ROWS,
   headWindowPhysical,
   hiddenLinesLabel,
   hiddenTailLinesLabel,
@@ -80,18 +82,6 @@ export interface PendingToolConfirmation {
   name: string;
   confirmationDetails: ToolCallConfirmationDetails;
 }
-
-/** Max body rows before the tail window truncates (keeps dialogs bounded). */
-const MAX_BODY_ROWS = 20;
-
-/**
- * Rows reserved above/below an EXPANDED body: dialog chrome (frame, title,
- * options, footer) plus the transcript region that keeps its place above the
- * dialog. The expanded tail window is budgeted as terminal height minus this
- * reserve, so the end of the content — where the options still are — stays on
- * screen (ink reaches the same visible outcome through terminal scrollback).
- */
-const EXPANDED_BODY_RESERVE_ROWS = 20;
 
 interface OutcomeOption {
   label: string;
@@ -276,7 +266,7 @@ export function buildConfirmationPrompt(
 /** Renders a colored diff body within a bounded row window. */
 function DiffBody({ fileDiff }: { fileDiff: string }) {
   const lines = useMemo(() => renderDiffBody(fileDiff), [fileDiff]);
-  const window = tailWindow(lines, MAX_BODY_ROWS);
+  const window = tailWindow(lines, CONFIRMATION_BODY_MAX_ROWS);
   return (
     <box flexDirection="column">
       {window.hiddenCount > 0 ? (
@@ -298,6 +288,47 @@ function DiffBody({ fileDiff }: { fileDiff: string }) {
 }
 
 /**
+ * Exec confirmation body: the command in accent, windowed to the same
+ * reserve the expanded text body uses — an uncapped command (a 50-line
+ * heredoc) painted the question row and outcome list off the viewport
+ * (R5-1). The tail window keeps the end of the command, nearest the outcome
+ * list, and labels the hidden head.
+ */
+function ExecBody({ details }: { details: ToolExecuteConfirmationDetails }) {
+  const { width, height } = useTerminalDimensions();
+  const rows = useMemo(
+    () => sanitizeTerminalText(details.command).split('\n'),
+    [details.command],
+  );
+  const window = useMemo(
+    () =>
+      tailWindowPhysical(
+        rows,
+        width,
+        Math.max(height - DIALOG_EXPANDED_BODY_RESERVE_ROWS, 1),
+      ),
+    [rows, width, height],
+  );
+  return (
+    <box flexDirection="column">
+      {window.visible.map((row, i) => (
+        <text key={`${i}`} fg={C.accent} attributes={1}>
+          {row}
+        </text>
+      ))}
+      {window.hiddenRows > 0 ? (
+        <text fg={C.dim}>{hiddenLinesLabel(window.hiddenRows)}</text>
+      ) : null}
+      {details.warnings?.map((warning, i) => (
+        <text key={`${i}`} fg={C.yellow}>
+          {sanitizeTerminalText(`⚠ ${warning}`)}
+        </text>
+      ))}
+    </box>
+  );
+}
+
+/**
  * Plain, sanitized text body. Long bodies keep their head (ink MaxSizedBox
  * overflowDirection 'bottom' parity) with a hidden-tail indicator plus the
  * ink ShowMoreLines hint; ctrl-s expands the full text. The cap counts
@@ -309,7 +340,7 @@ function TextBody({ text }: { text: string }) {
   const { width, height } = useTerminalDimensions();
   const rows = useMemo(() => sanitizeTerminalText(text).split('\n'), [text]);
   const window = useMemo(
-    () => headWindowPhysical(rows, width, MAX_BODY_ROWS),
+    () => headWindowPhysical(rows, width, CONFIRMATION_BODY_MAX_ROWS),
     [rows, width],
   );
   const expandedWindow = useMemo(
@@ -317,7 +348,7 @@ function TextBody({ text }: { text: string }) {
       tailWindowPhysical(
         rows,
         width,
-        Math.max(height - EXPANDED_BODY_RESERVE_ROWS, 1),
+        Math.max(height - DIALOG_EXPANDED_BODY_RESERVE_ROWS, 1),
       ),
     [rows, width, height],
   );
@@ -402,18 +433,7 @@ function ConfirmationBody({
         </box>
       );
     case 'exec':
-      return (
-        <box flexDirection="column">
-          <text fg={C.accent} attributes={1}>
-            {sanitizeTerminalText(details.command)}
-          </text>
-          {details.warnings?.map((warning, i) => (
-            <text key={`${i}`} fg={C.yellow}>
-              {sanitizeTerminalText(`⚠ ${warning}`)}
-            </text>
-          ))}
-        </box>
-      );
+      return <ExecBody details={details} />;
     case 'mcp':
       return (
         <box flexDirection="column">

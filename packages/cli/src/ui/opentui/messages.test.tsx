@@ -23,6 +23,7 @@ vi.mock('@opentui/core', () => ({
 import {
   GENERIC_TOOL_SUMMARIES,
   MAX_RESULT_DISPLAY_CHARACTERS,
+  PENDING_CARD_VIEWPORT_RESERVE_ROWS,
   TOOL_CARD_DESCRIPTION_ROWS,
   assistantMessageMeta,
   capToolCardDescription,
@@ -30,6 +31,7 @@ import {
   hiddenLinesLabel,
   hiddenTailLinesLabel,
   maxHistoryItemRows,
+  pendingCardBudgets,
   pendingCardMaxRows,
   tailWindow,
   tailWindowPhysical,
@@ -170,23 +172,81 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
 
   it('budgets a pending card below the confirmation dialog footprint', () => {
     // At 80 rows the ink-parity cap is 320 — 4x past the viewport. The
-    // pending budget is bounded by the collapsed dialog footprint, and by
-    // the payload the dialog renders expanded: a hook-forced confirmation
-    // duplicates the card's description in its body, so a wide payload
-    // shrinks the card or ctrl-s expansion pushes the dialog off screen
-    // (mem0 e2e regression).
+    // pending budget is bounded by the collapsed dialog footprint and by
+    // the painted rows the dialog needs below the card — its reserve plus
+    // its payload body — converted into budget rows at the card's wrap
+    // ratio: a hook-forced confirmation renders its reason in the dialog
+    // body and an exec dialog renders the command uncapped, so those rows
+    // must shrink the card or the dialog pushes off screen (mem0 e2e
+    // regression). Width 106 is the card's production basis on a 110-column
+    // terminal; the dialog body
+    // measures two columns wider (headWindowPhysical reads the raw terminal
+    // width), so the boundary bodies below are calibrated at 108 columns.
     expect(maxHistoryItemRows(80)).toBe(320);
-    // No payload: the collapsed-dialog bound (80 - 46) is the tight one.
-    expect(pendingCardMaxRows(80, 0, 110)).toBe(34);
-    expect(pendingCardMaxRows(100, 0, 110)).toBe(51);
-    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns; the
-    // expanded-dialog bound leaves (80 - 26 - 37) * 0.7 = 11 card rows.
-    expect(pendingCardMaxRows(80, 3900, 110)).toBe(11);
+    // No payload body (an mcp dialog shows only the server and tool names):
+    // the collapsed-dialog bound (80 - 46) is the tight one at 80 rows —
+    // the card is the only surface carrying the arguments (R5-9). At 100
+    // rows the converted empty-body bound floor((100 - 27) * 0.7) = 51
+    // undercuts the collapsed bound (54).
+    expect(pendingCardMaxRows(80, undefined, 106)).toBe(34);
+    expect(pendingCardMaxRows(100, undefined, 106)).toBe(51);
+    // A 14-row hook reason fits the dialog's collapsed window, yet the
+    // collapsed bound alone would budget 34 rows that paint ~49: the dialog
+    // bound charges the body too — floor((80 - 27 - 14) * 0.7) — or the
+    // outcome list falls off an 80-row viewport (R1-3).
+    expect(pendingCardMaxRows(80, 'x'.repeat(14 * 108), 106)).toBe(27);
+    // A body that fills the collapsed window (20 rows at 108 columns) is
+    // charged the same way: floor((80 - 27 - 20) * 0.7). Measured at the
+    // card's own text width (104) this body would be 21 rows — one row
+    // overcharged.
+    expect(pendingCardMaxRows(80, 'x'.repeat(20 * 108), 106)).toBe(23);
+    // One row past the window: floor((80 - 27 - 21) * 0.7).
+    expect(pendingCardMaxRows(80, 'x'.repeat(21 * 108), 106)).toBe(22);
+    // A ~3.9k-column hook reason wraps to 37 dialog rows; the card yields
+    // enough rows for the expanded body plus the dialog chrome and the rows
+    // that stay on screen above it (banner, notices, prompt echo).
+    expect(pendingCardMaxRows(80, 'x'.repeat(3900), 106)).toBe(11);
+    // An exec body keeps its LFs: forty short lines measure 40 rows — the
+    // card's folded one-line text would measure ~4 and never engage.
+    const heredoc = Array.from({ length: 40 }, () => 'echo hi').join('\n');
+    expect(pendingCardMaxRows(80, heredoc, 106)).toBe(9);
+  });
+
+  it('splits the collapsed allowance across pending siblings (R3-1)', () => {
+    // The scheduler parks every confirmation in a batch before anything
+    // executes, and one dialog renders below the whole transcript: two
+    // wide-payload mcp cards granted the full per-card budget each paint
+    // ~1.5x their budget rows and push that dialog off an 80-row viewport.
+    // The collapsed allowance is divided across the pending siblings; at
+    // one pending card the split is a no-op.
+    expect(pendingCardMaxRows(80, undefined, 106, 1)).toBe(34);
+    expect(pendingCardMaxRows(80, undefined, 106, 2)).toBe(17);
+    expect(pendingCardMaxRows(80, undefined, 106, 3)).toBe(11);
+    // The dialog bound divides by the same count, or the split is inert
+    // exactly where it matters: at 200 rows the unconverted collapsed
+    // operand (77) binds under an undivided converted one (121), granting
+    // each sibling more than a lone card's budget; divided, 60.
+    expect(pendingCardMaxRows(200, undefined, 106, 2)).toBe(60);
+    // Same inertness at 80 rows with a 40-row exec body: undivided, the
+    // dialog bound grants each sibling the lone-card 9; divided it falls
+    // past the settled floor.
+    const heredoc = Array.from({ length: 40 }, () => 'echo hi').join('\n');
+    expect(pendingCardMaxRows(80, heredoc, 106, 2)).toBeLessThan(9);
+    // A sibling's share still bottoms out at the settled floor, and the
+    // first parked card's remainder never goes below it either
+    // (pendingCardBudgets), so this floor is every pending card's minimum.
+    expect(pendingCardMaxRows(80, undefined, 106, 8)).toBe(
+      TOOL_CARD_DESCRIPTION_ROWS,
+    );
   });
 
   it('falls back to the settled cap on short terminals', () => {
-    expect(pendingCardMaxRows(24, 3900, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
-    expect(pendingCardMaxRows(46, 0, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
+    expect(pendingCardMaxRows(24, 'x'.repeat(3900), 110)).toBe(
+      TOOL_CARD_DESCRIPTION_ROWS,
+    );
+    expect(pendingCardMaxRows(46, undefined, 110)).toBe(
+      TOOL_CARD_DESCRIPTION_ROWS,
+    );
   });
 
   it('keeps everything when the content fits', () => {
@@ -300,6 +360,99 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     const truncated = truncateResultDisplayChars(long);
     expect(truncated.length).toBe(MAX_RESULT_DISPLAY_CHARACTERS + 3);
     expect(truncated.startsWith('...')).toBe(true);
+  });
+});
+
+describe('pendingCardBudgets (pending sibling budget distribution)', () => {
+  // The scheduler parks every confirmation in a batch before anything
+  // executes, and one confirmation dialog renders below the whole
+  // transcript, belonging to the FIRST parked call.
+  const pendingCard = (
+    id: string,
+    overrides: Partial<LiveToolItem> = {},
+  ): LiveToolItem => ({
+    kind: 'tool',
+    id,
+    tool: 'mcp__fs__write_file',
+    title: 'mcp__fs__write_file',
+    output: '',
+    done: false,
+    confirm: 'pending',
+    description: `{"path":"/x","content":"${'x'.repeat(3000)}TAIL"}`,
+    ...overrides,
+  });
+
+  it('bounds the pending cards’ budget sum inside the collapsed allowance (R3-1)', () => {
+    // Granting the first parked card the whole lone-card allowance ON TOP
+    // of the siblings' divided shares gave two wide mcp cards 34 + 17 = 51
+    // budget rows against the 34 the reserve leaves for the cards plus the
+    // one rendered dialog — its outcome list painted off an 80-row
+    // viewport while Enter still activated the first option. The active
+    // card now takes only the remainder after the siblings' charges, and
+    // the sum stays inside the allowance.
+    const two = pendingCardBudgets(
+      [pendingCard('t1'), pendingCard('t2')],
+      80,
+      106,
+    );
+    expect(two.get('t1')).toBe(17);
+    expect(two.get('t2')).toBe(17);
+    expect(
+      [...two.values()].reduce((sum, rows) => sum + rows, 0),
+    ).toBeLessThanOrEqual(80 - PENDING_CARD_VIEWPORT_RESERVE_ROWS);
+    // A lone pending card keeps the full allowance (R4-1), and the
+    // allowance rotates to the next sibling as each call settles.
+    expect(pendingCardBudgets([pendingCard('t1')], 80, 106).get('t1')).toBe(34);
+    expect(pendingCardBudgets([pendingCard('t2')], 80, 106).get('t2')).toBe(34);
+  });
+
+  it('charges the active card only for rows a sibling actually paints (R4-1)', () => {
+    // A one-line `ls` parked beside a wide mcp payload must not cost the
+    // active card a divided share the sibling never renders: the sibling
+    // keeps its granted share as a cap but is CHARGED the one row it
+    // paints, so the active card keeps its payload.
+    const budgets = pendingCardBudgets(
+      [
+        pendingCard('t1'),
+        pendingCard('t2', { tool: 'run_shell_command', description: 'ls' }),
+      ],
+      80,
+      106,
+    );
+    expect(budgets.get('t2')).toBe(17);
+    expect(budgets.get('t1')).toBe(33);
+  });
+
+  it('keeps the active card’s own dialog bound under the remainder (R3-1)', () => {
+    // The active card's own payload dialog still binds it below the
+    // remainder: a 40-row heredoc command leaves it the 9 its dialog needs.
+    const heredoc = Array.from({ length: 40 }, () => 'echo hi').join('\n');
+    const budgets = pendingCardBudgets(
+      [
+        pendingCard('t1', {
+          tool: 'run_shell_command',
+          confirmBody: heredoc,
+        }),
+        pendingCard('t2'),
+      ],
+      80,
+      106,
+    );
+    expect(budgets.get('t1')).toBe(9);
+  });
+
+  it('lets the settled floor win once the allowance is exhausted (R3-1)', () => {
+    // Seven siblings charged the 5-row floor each already exhaust the
+    // 34-row allowance, so the active card rides the floor too — the
+    // documented degenerate case; the sum bound cannot hold past it.
+    const budgets = pendingCardBudgets(
+      Array.from({ length: 8 }, (_, i) => pendingCard(`t${i}`)),
+      80,
+      106,
+    );
+    expect([...budgets.values()]).toEqual(
+      Array.from({ length: 8 }, () => TOOL_CARD_DESCRIPTION_ROWS),
+    );
   });
 });
 

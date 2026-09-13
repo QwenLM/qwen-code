@@ -146,6 +146,61 @@ describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {
   });
 });
 
+describe('foldLiveEvent confirm (dialog body hand-off, R2-1)', () => {
+  it('replaces the card body a bounce supersedes', () => {
+    // An exec command gives way to the hook's reason: the new confirmation
+    // details replace the old, and the body the card yields rows for goes
+    // with them — a stale exec body would shrink the card past what the
+    // hook's short reason needs and hide the arguments being approved.
+    const items = foldLiveEvent(
+      [{ ...waitingTool(), confirmBody: 'echo hi' }],
+      {
+        type: 'confirm',
+        id: 'tool1',
+        tool: 'run_shell_command',
+        title: 'Hook requested confirmation to run',
+        confirmBody: 'hook says hi',
+      },
+    );
+    expect(items[0]).toMatchObject({
+      confirm: 'pending',
+      confirmBody: 'hook says hi',
+    });
+  });
+
+  it('clears the body when the new confirmation carries no payload text', () => {
+    // A bounce to a payload-less dialog (an mcp confirmation shows only the
+    // server and tool names) must not leave the previous body behind — the
+    // card would keep yielding rows to a dialog that no longer renders them.
+    const items = foldLiveEvent(
+      [{ ...waitingTool(), confirmBody: 'echo hi' }],
+      {
+        type: 'confirm',
+        id: 'tool1',
+        tool: 'mcp__fs__write_file',
+        title: 'Confirm MCP Tool Execution',
+      },
+    );
+    expect(items[0]).toMatchObject({ confirm: 'pending' });
+    expect((items[0] as LiveToolItem).confirmBody).toBeUndefined();
+  });
+
+  it('sets the body on the card pushed for a fresh confirmation', () => {
+    const items = foldLiveEvent([], {
+      type: 'confirm',
+      id: 'tool1',
+      tool: 'run_shell_command',
+      title: 'Run command',
+      confirmBody: 'a plan',
+    });
+    expect(items[0]).toMatchObject({
+      kind: 'tool',
+      confirm: 'pending',
+      confirmBody: 'a plan',
+    });
+  });
+});
+
 describe('foldLiveEvent user (promptId/sentToModel parity)', () => {
   it('carries promptId and sentToModel onto the user item (R1-16)', () => {
     const items = foldLiveEvent([assistant('hi')], {

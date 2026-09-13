@@ -30,6 +30,13 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
    * mapToDisplay parity) — takes precedence over the args-based fallback. */
   description?: string;
   confirm?: ToolConfirmState;
+  /** The payload text the pending confirmation dialog renders in its body
+   * (a hook confirmation's reason, a plan, or an exec command) — undefined
+   * for the dialog types that carry no payload text (mcp shows only the
+   * server and tool names, edit windows its diff, ask_user_question runs its
+   * own flow). pendingCardMaxRows measures it on the dialog's own basis so
+   * the card yields rows only when the dialog actually hides them. */
+  confirmBody?: string;
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */
   diff?: { fileDiff: string; fileName: string };
@@ -352,7 +359,15 @@ export function foldLiveEvent(
       const i = findToolIndex(items, ev.id);
       if (i >= 0) {
         const t = items[i] as LiveToolItem;
-        items[i] = { ...t, title: ev.title, confirm: 'pending' };
+        // A bounce replaces the confirmation details, so the dialog body the
+        // card yields for is replaced with them (an exec command gives way
+        // to the hook's reason).
+        items[i] = {
+          ...t,
+          title: ev.title,
+          confirm: 'pending',
+          confirmBody: ev.confirmBody,
+        };
         return items;
       }
       if (last?.kind === 'assistant' && last.streaming)
@@ -365,6 +380,7 @@ export function foldLiveEvent(
         output: '',
         done: false,
         confirm: 'pending',
+        confirmBody: ev.confirmBody,
       });
       return items;
     }
