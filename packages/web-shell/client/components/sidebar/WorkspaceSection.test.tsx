@@ -9,9 +9,7 @@ import type {
   DaemonSessionSearchResult,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
-  DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
-import gitStyles from '../ChatEditor.module.css';
 import type { WorkspaceSessionStats } from './workspaceOverviewModel';
 
 const {
@@ -127,7 +125,6 @@ let container: HTMLDivElement;
 function renderSection(
   overrides: Partial<{
     workspace: DaemonWorkspaceCapability;
-    onOpenGitDiff: (cwd: string) => void;
     client: DaemonClient;
     reloadToken: number;
     expanded: boolean;
@@ -138,6 +135,7 @@ function renderSection(
     sessionGroupCatalog: DaemonSessionGroupCatalog;
     sessionLiveStateEnabled: boolean;
     overviewEnabled: boolean;
+    overviewMenuOpen: boolean;
     renderHeader: (expanded: boolean) => ReactNode;
     headerActions: (
       visible: boolean,
@@ -186,8 +184,8 @@ function renderSection(
               <div key={session.sessionId}>{session.displayName}</div>
             ))
           }
-          onOpenGitDiff={overrides.onOpenGitDiff}
           overviewEnabled={overrides.overviewEnabled}
+          overviewMenuOpen={overrides.overviewMenuOpen}
           renderHeader={overrides.renderHeader}
           headerActions={overrides.headerActions}
           sessionStats={overrides.sessionStats}
@@ -237,7 +235,7 @@ function gitChip(): HTMLElement | null {
 }
 
 /** Open the workspace hover popover (300 ms delay) and return its dialog. */
-async function openDetailsDialog(): Promise<HTMLElement> {
+async function openDetailsDialog(keepFakeTimers = false): Promise<HTMLElement> {
   vi.useFakeTimers();
   const headerRow = container.querySelector<HTMLElement>(
     '[class*="headerRow"]',
@@ -247,7 +245,7 @@ async function openDetailsDialog(): Promise<HTMLElement> {
     vi.advanceTimersByTime(300);
     await Promise.resolve();
   });
-  vi.useRealTimers();
+  if (!keepFakeTimers) vi.useRealTimers();
   const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
   expect(dialog).not.toBeNull();
   return dialog!;
@@ -1201,197 +1199,124 @@ describe('WorkspaceSection session loading', () => {
   });
 });
 
-describe('WorkspaceSection git chip', () => {
-  it('renders a clickable git chip for a trusted repo', async () => {
-    const status: DaemonWorkspaceGitStatus = {
-      v: 2,
-      workspaceCwd: '/tmp/project',
-      branch: 'main',
-      unstaged: 1,
-    };
-    workspaceGit.mockResolvedValue(status);
-    const onOpenGitDiff = vi.fn();
-
-    renderSection({ onOpenGitDiff });
-    await flush();
-
-    const chip = gitChip();
-    expect(chip).not.toBeNull();
-    // The chip is a read-only OUTPUT inside a button that opens the changes
-    // view on click.
-    expect(chip?.tagName).toBe('OUTPUT');
-    expect(chip?.getAttribute('data-dirty')).toBe('true');
-    expect(chip?.className).toContain(gitStyles.gitBranchChipCompact);
-    expect(chip?.getAttribute('aria-label')).toContain('main');
-
-    // The chip itself is a read-only OUTPUT; the wrapping button opens the
-    // branch picker popover on click (which contains a "View Changes" action
-    // that calls onOpenGitDiff). Verify the button is wired and clickable.
-    const button = chip?.closest('button');
-    expect(button).not.toBeNull();
-    act(() => {
-      button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    // Clicking the chip opens the branch picker popover, not the diff dialog
-    // directly. The diff dialog is accessible via "View Changes" inside the
-    // popover.
-    expect(button?.getAttribute('aria-expanded')).toBe('true');
-  });
-
-  it('re-fetches git status right after a picker checkout instead of waiting for the poll', async () => {
-    // The sidebar chip only polls every 60s, so without the onBranchChanged
-    // wiring it would keep showing the old branch for up to a minute after a
-    // checkout made through the branch picker.
+describe('WorkspaceSection Git summary', () => {
+  it('reads Git only while hover details are visible and shows plain summary text', async () => {
+    const client = makeOverviewClient();
     workspaceGit.mockResolvedValue({
       v: 2,
       workspaceCwd: '/tmp/project',
-      branch: 'feat/demo',
+      branch: 'main',
+      unstaged: 6,
+      stashCount: 11,
+      computedAt: 1,
     });
-    workspaceGitBranches.mockResolvedValue({
-      v: 1,
-      workspaceCwd: '/tmp/project',
-      available: true,
-      local: [
-        { name: 'feat/demo', isHead: true },
-        { name: 'main', isHead: false },
-      ],
-      remote: [],
-      tags: [],
-      recent: [],
-      head: 'feat/demo',
-      detached: false,
-    });
-    const client = makeClient();
-
-    renderSection({ client, onOpenGitDiff: vi.fn() });
+    renderSection({ client, overviewEnabled: true });
     await flush();
-    expect(workspaceGit).toHaveBeenCalledTimes(1);
-
-    const chipButton = gitChip()?.closest('button');
-    expect(chipButton).not.toBeNull();
-    act(() => {
-      chipButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    vi.useFakeTimers();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
     });
-    await flush();
-    // Opening the picker fetches a fresh status for its action hints and
-    // hands it back to the chip.
-    expect(workspaceGit).toHaveBeenCalledTimes(2);
-
-    // The picker content is portaled outside the section container.
-    const mainItem = Array.from(document.body.querySelectorAll('button')).find(
-      (button) => button.textContent === 'main',
+    expect(workspaceGit).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    const dialog = await openDetailsDialog(true);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(workspaceGit).toHaveBeenCalledOnce();
+    expect(dialog.textContent).toContain('6 modified · 11 stashed');
+    expect(
+      dialog.querySelector('[title="6 modified · 11 stashed"]'),
+    ).not.toBeNull();
+    const branchRow = Array.from(dialog.querySelectorAll('div')).find(
+      (row) => row.textContent === 'main6 modified · 11 stashed',
     );
-    expect(mainItem).toBeTruthy();
-    act(() => {
-      mainItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(branchRow).toBeDefined();
+    expect(branchRow?.querySelector('button')).toBeNull();
+    expect(gitChip()).toBeNull();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
     });
-    await flush();
-
-    expect(workspaceGitCheckout).toHaveBeenCalledWith('main', undefined);
     expect(workspaceGit).toHaveBeenCalledTimes(3);
-  });
-
-  it('hides the chip for an untrusted workspace and never queries git', async () => {
-    workspaceGit.mockResolvedValue({
-      v: 2,
-      workspaceCwd: '/tmp/danger',
-      branch: 'main',
+    await act(async () => {
+      dialog.dispatchEvent(new Event('pointerout', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
     });
-
-    renderSection({
-      workspace: untrustedWorkspace,
-      onOpenGitDiff: vi.fn(),
+    workspaceGit.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
     });
-    await flush();
-
-    expect(gitChip()).toBeNull();
     expect(workspaceGit).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
-  it('skips the git poll when the workspace cwd is not a real path', async () => {
-    // A synthetic fallback workspace carries a display name in `cwd`; polling
-    // would qualify the route with it and 400, so no request fires and the chip
-    // stays hidden.
-    workspaceGit.mockResolvedValue({
-      v: 2,
-      workspaceCwd: 'Project',
-      branch: 'main',
+  it('keeps a Git read that settles after the hover details close', async () => {
+    let resolveRead!: (status: { branch: string }) => void;
+    workspaceGit.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    renderSection({ client: makeOverviewClient(), overviewEnabled: true });
+    const dialog = await openDetailsDialog(true);
+    // Close before the blocking read settles.
+    await act(async () => {
+      dialog.dispatchEvent(new Event('pointerout', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
     });
-
-    renderSection({
-      workspace: { ...trustedWorkspace, cwd: 'Project' },
-      onOpenGitDiff: vi.fn(),
+    await act(async () => {
+      resolveRead({ branch: 'late-branch' });
     });
-    await flush();
-
-    expect(workspaceGit).not.toHaveBeenCalled();
-    expect(gitChip()).toBeNull();
+    // The next open repaints the retained snapshot while its own read is
+    // still in flight.
+    workspaceGit.mockReturnValueOnce(new Promise(() => {}));
+    const headerRow = container.querySelector<HTMLElement>(
+      '[class*="headerRow"]',
+    );
+    await act(async () => {
+      headerRow?.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+      await Promise.resolve();
+    });
+    const reopened = document.querySelector<HTMLElement>('[role="dialog"]');
+    expect(reopened).not.toBeNull();
+    expect(reopened!.textContent).toContain('late-branch');
+    vi.useRealTimers();
   });
 
-  it('re-fetches git status when reloadToken changes', async () => {
-    // reloadToken is in the polling effect's dependency array so agent activity
-    // (which bumps it) refreshes the chip immediately instead of waiting for the
-    // next 60s tick. A stable client isolates the re-fetch to the token change.
-    workspaceGit.mockResolvedValue({
-      v: 2,
-      workspaceCwd: '/tmp/project',
-      branch: 'main',
-    });
-    const client = makeClient();
-    const onOpenGitDiff = vi.fn();
-
-    renderSection({ client, reloadToken: 0, onOpenGitDiff });
-    await flush();
-    expect(workspaceGit).toHaveBeenCalledTimes(1);
-
-    renderSection({ client, reloadToken: 1, onOpenGitDiff });
-    await flush();
+  it('keeps the newer Git snapshot when hover and focus reads overlap', async () => {
+    let resolveOlder!: (status: { branch: string }) => void;
+    workspaceGit
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveOlder = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({ branch: 'newer-branch' });
+    renderSection({ client: makeOverviewClient(), overviewEnabled: true });
+    const dialog = await openDetailsDialog(true);
+    await act(async () => window.dispatchEvent(new Event('focus')));
     expect(workspaceGit).toHaveBeenCalledTimes(2);
+    await act(async () => resolveOlder({ branch: 'older-branch' }));
+    expect(dialog.textContent).toContain('newer-branch');
+    expect(dialog.textContent).not.toContain('older-branch');
   });
 
-  it('does not re-fetch git status when only the diff handler changes', async () => {
-    workspaceGit.mockResolvedValue({
-      v: 2,
-      workspaceCwd: '/tmp/project',
-      branch: 'main',
-    });
-    const client = makeClient();
-
-    renderSection({ client, onOpenGitDiff: vi.fn() });
-    await flush();
-    expect(workspaceGit).toHaveBeenCalledTimes(1);
-
-    renderSection({ client, onOpenGitDiff: vi.fn() });
-    await flush();
-    expect(workspaceGit).toHaveBeenCalledTimes(1);
-  });
-
-  it('hides the chip when the workspace is not a git repo (null branch)', async () => {
-    workspaceGit.mockResolvedValue({
-      v: 2,
-      workspaceCwd: '/tmp/project',
-      branch: null,
-    });
-
-    renderSection({ onOpenGitDiff: vi.fn() });
-    await flush();
-
-    expect(workspaceGit).toHaveBeenCalled();
-    expect(gitChip()).toBeNull();
-  });
-
-  it('omits the chip when no diff handler is provided', async () => {
-    workspaceGit.mockResolvedValue({
-      v: 2,
-      workspaceCwd: '/tmp/project',
-      branch: 'main',
-    });
-
-    renderSection({ onOpenGitDiff: undefined });
-    await flush();
-
-    expect(gitChip()).toBeNull();
-  });
+  it.each([untrustedWorkspace, { ...trustedWorkspace, cwd: 'Project' }])(
+    'does not query untrusted or synthetic workspaces: $cwd',
+    async (workspace) => {
+      renderSection({
+        workspace,
+        overviewEnabled: true,
+        overviewMenuOpen: true,
+        gitBranchWanted: true,
+      });
+      await flush();
+      expect(workspaceGit).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('isAbsolutePath', () => {
@@ -1423,8 +1348,9 @@ describe('WorkspaceSection overview', () => {
       document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
 
-    // Control arm: the default header consumes the snapshot and fetches.
+    // The default header fetches once its details are opened.
     renderSection({ client, expanded: true, overviewEnabled: true });
+    await openDetailsDialog();
     await flush();
     expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
   });
@@ -1630,7 +1556,7 @@ describe('WorkspaceSection overview gates', () => {
     ).toBeNull();
   });
 
-  it('polls git for the header actions even without a diff handler', async () => {
+  it('reads git for header actions only after the menu opens', async () => {
     workspaceGit.mockResolvedValue({
       v: 2,
       workspaceCwd: '/tmp/project',
@@ -1643,12 +1569,20 @@ describe('WorkspaceSection overview gates', () => {
       gitBranchWanted: true,
     });
     await flush();
+    expect(workspaceGit).not.toHaveBeenCalled();
+    renderSection({
+      client: makeOverviewClient(),
+      headerActions,
+      gitBranchWanted: true,
+      overviewMenuOpen: true,
+    });
+    await flush();
     expect(workspaceGit).toHaveBeenCalled();
     const branches = headerActions.mock.calls.map(
       ([, context]) => context.gitBranch,
     );
     expect(branches).toContain('main');
-    // The chip itself still needs the diff handler.
+    // Git metadata is rendered in the hover summary, not in the header.
     expect(gitChip()).toBeNull();
   });
 
@@ -1705,7 +1639,7 @@ describe('WorkspaceSection overview gates', () => {
       overviewEnabled: true,
       headerActions,
     });
-    await flush();
+    await openDetailsDialog();
     await flush();
     expect(
       headerActions.mock.calls.some(([, context]) => Boolean(context.overview)),
@@ -2213,7 +2147,54 @@ describe('WorkspaceSection content search', () => {
 });
 
 describe('WorkspaceSection overview plumbing', () => {
-  it('still fetches for a custom header when header actions consume the snapshot', async () => {
+  it('loads details after hover or focus and stops refreshing when closed', async () => {
+    vi.useFakeTimers();
+    const client = makeOverviewClient();
+    renderSection({ client, expanded: true, overviewEnabled: true });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    const header = container.querySelector<HTMLElement>(
+      '[class*="headerRow"]',
+    )!;
+    await act(async () => {
+      header.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(299);
+    });
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      header.dispatchEvent(new MouseEvent('pointerout', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    renderSection({
+      client,
+      expanded: false,
+      overviewEnabled: true,
+      reloadToken: 1,
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      header.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(3);
+  });
+
+  it('fetches for a custom header when its menu opens', async () => {
     const client = makeOverviewClient();
     const headerActions = vi.fn(() => null);
     renderSection({
@@ -2222,6 +2203,7 @@ describe('WorkspaceSection overview plumbing', () => {
       overviewEnabled: true,
       renderHeader: () => <span>custom header</span>,
       headerActions,
+      overviewMenuOpen: true,
     });
     await flush();
     await flush();
@@ -2244,11 +2226,20 @@ describe('WorkspaceSection overview plumbing', () => {
       overviewEnabled: true,
       headerActions,
     });
-    await flush();
-    await flush();
+    const dialog = await openDetailsDialog(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
     expect(
       headerActions.mock.calls.some(([, context]) => Boolean(context.overview)),
     ).toBe(true);
+    // Close the hover details so only the retained snapshot — not the live
+    // hook state — can feed the collapsed header actions.
+    await act(async () => {
+      dialog.dispatchEvent(new Event('pointerout', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    vi.useRealTimers();
     headerActions.mockClear();
     renderSection({
       client,
@@ -2259,11 +2250,11 @@ describe('WorkspaceSection overview plumbing', () => {
     await flush();
     const lastCall = headerActions.mock.calls.at(-1);
     expect(lastCall?.[1].overview).toBeDefined();
-    // Collapsed rows do not refetch.
+    // Collapsing with closed consumers does not restart the overview.
     expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
   });
 
-  it('refetches the facets when the reload token changes', async () => {
+  it('refetches the visible facets when the reload token changes', async () => {
     const client = makeOverviewClient();
     renderSection({
       client,
@@ -2271,6 +2262,7 @@ describe('WorkspaceSection overview plumbing', () => {
       overviewEnabled: true,
       reloadToken: 0,
     });
+    await openDetailsDialog();
     await flush();
     expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
     renderSection({
