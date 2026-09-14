@@ -20,6 +20,7 @@ import {
   type TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
+  GOAL_PAUSE_REASON_COMMAND,
   isGoalCheckpointBookkeepingRecord,
   parseGoalSnapshotV2,
   parseGoalStateCause,
@@ -643,20 +644,25 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    const userMeta: UpdateMetaOptions =
+      typeof record.daemonPromptId === 'string' &&
+      record.daemonPromptId.trim().length > 0
+        ? { ...meta, extra: { ...meta.extra, promptId: record.daemonPromptId } }
+        : meta;
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
       : undefined;
     const replayMeta: UpdateMetaOptions =
       record.subtype === 'mid_turn_user_message'
         ? {
-            ...meta,
+            ...userMeta,
             extra: {
-              ...meta.extra,
+              ...userMeta.extra,
               source: 'mid_turn_message_injected',
               qwenDiscreteMessage: true,
             },
           }
-        : meta;
+        : userMeta;
     if (
       record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
@@ -975,6 +981,75 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    if (record.subtype === 'turn_result') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      const cancelledAt = finiteNumber(payload?.['cancelledAt']);
+      const startedAt = finiteNumber(payload?.['startedAt']);
+      const promptId = payload?.['promptId'];
+      if (
+        payload?.['state'] !== 'cancelled' ||
+        cancelledAt === undefined ||
+        typeof promptId !== 'string' ||
+        !promptId ||
+        (payload['startedAt'] !== undefined && startedAt === undefined)
+      )
+        return;
+      const elapsedMs = Math.max(0, cancelledAt - (startedAt ?? cancelledAt));
+      if (!Number.isFinite(elapsedMs)) return;
+      yield emit(
+        createTranscriptMessageUpdate({
+          role: 'assistant',
+          text: '',
+          ...meta,
+          extra: {
+            qwenDiscreteMessage: true,
+            promptCancelled: { promptId, cancelledAt, elapsedMs },
+          },
+        }),
+      );
+      return;
+    }
+    if (record.subtype === 'agent_session_ready') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      if (
+        typeof payload?.['callId'] !== 'string' ||
+        payload['callId'].length === 0 ||
+        typeof payload['subagentSessionReady'] !== 'boolean'
+      ) {
+        this.report(
+          'malformed_agent_session_ready',
+          'Skipped a malformed subagent session readiness record.',
+          record.uuid,
+          'systemPayload',
+        );
+        return;
+      }
+      const callId = payload['callId'];
+      if (!this.pendingToolCalls.has(callId)) {
+        this.report(
+          'orphan_agent_session_ready',
+          'Skipped subagent readiness without a matching pending tool call.',
+          record.uuid,
+          'systemPayload.callId',
+        );
+        return;
+      }
+      yield emit({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: callId,
+        _meta: buildUpdateMeta({
+          ...meta,
+          extra: {
+            subagentSessionReady: payload['subagentSessionReady'],
+          },
+        }),
+      });
+      return;
+    }
     if (record.subtype === 'goal_state') {
       const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
       if (!payload) {
@@ -1282,6 +1357,17 @@ function projectGoalControlCommand(
         ? `/goal edit ${snapshot.goal.objective}`
         : undefined;
     case 'pause':
+      // Only a pause the user typed replays as the user typing it. The
+      // runtime writes `pause` records of its own -- the no-progress bound
+      // stops an idle Goal with no one at the keyboard -- and attributing
+      // those to the user would assert the opposite of what happened. The
+      // paused card that follows carries `lastReason` either way. A record
+      // written before pauses carried reasons keeps the historical
+      // projection.
+      return snapshot.goal?.lastReason === undefined ||
+        snapshot.goal.lastReason === GOAL_PAUSE_REASON_COMMAND
+        ? `/goal ${cause}`
+        : undefined;
     case 'resume':
     case 'clear':
       return `/goal ${cause}`;
@@ -1562,9 +1648,11 @@ function extractDiffContent(resultDisplay: unknown): ToolCallContent | null {
   return {
     type: 'diff',
     path:
-      typeof resultDisplay['fileName'] === 'string'
-        ? resultDisplay['fileName']
-        : '',
+      typeof resultDisplay['filePath'] === 'string'
+        ? resultDisplay['filePath']
+        : typeof resultDisplay['fileName'] === 'string'
+          ? resultDisplay['fileName']
+          : '',
     oldText:
       typeof resultDisplay['originalContent'] === 'string'
         ? resultDisplay['originalContent']

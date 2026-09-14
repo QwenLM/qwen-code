@@ -169,6 +169,22 @@ describe('buildPlanReport', () => {
     expect(report.generatedDiffLines).toBe(plan.generatedDiffLines);
     expect(report.chunks).toBe(plan.chunks);
   });
+
+  it('records the low-effort candidate floor from changed-file count', () => {
+    const fiveFiles = Array.from({ length: 5 }, (_, i) =>
+      makeDiff(`src/file-${i}.ts`, 2),
+    ).join('');
+    const report = buildPlanReport(buildDiffPlan(fiveFiles, 400), () => 2, {});
+    expect(report.files).toHaveLength(5);
+    expect(report.budget.candidateFloor).toBe(4);
+
+    const oneFile = buildPlanReport(
+      buildDiffPlan(makeDiff('src/only.ts', 2), 400),
+      () => 2,
+      {},
+    );
+    expect(oneFile.budget.candidateFloor).toBe(1);
+  });
 });
 
 describe('stringifyPlanReport', () => {

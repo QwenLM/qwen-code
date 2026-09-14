@@ -24,7 +24,6 @@ import { C } from './theme.js';
 import type { SlashCommand } from '../commands/types.js';
 import { t } from '../../i18n/index.js';
 import {
-  HELP_COMMAND_LIST_VISIBLE_LINES,
   HELP_DOCS_URL,
   HELP_KEY_COL_WIDTH,
   HELP_TABS,
@@ -32,6 +31,8 @@ import {
   buildHelpCustomCommandLines,
   computeHelpWidthLayout,
   getHelpShortcuts,
+  helpCommandWindowRows,
+  helpScrollMax,
   truncateHelpText,
   type HelpLine,
   type HelpTab,
@@ -122,18 +123,15 @@ function CommandListLine(props: { line: HelpLine }) {
   );
 }
 
-/** Scrollable command listing with the original 18-line window. */
-export function helpScrollMax(lines: readonly HelpLine[]): number {
-  return Math.max(0, lines.length - HELP_COMMAND_LIST_VISIBLE_LINES);
-}
-
+/** Scrollable command listing, windowed to whatever the body budget leaves. */
 function CommandsHelp(props: {
   commands: readonly SlashCommand[];
   customOnly: boolean;
   scroll: number;
   width: number;
+  bodyRows: number;
 }) {
-  const { commands, customOnly, scroll, width } = props;
+  const { commands, customOnly, scroll, width, bodyRows } = props;
   const lines = customOnly
     ? buildHelpCustomCommandLines(commands, width)
     : buildHelpCommandsLines(commands, width);
@@ -146,9 +144,10 @@ function CommandsHelp(props: {
       </text>
     );
   }
-  const maxScroll = helpScrollMax(lines);
+  const windowRows = helpCommandWindowRows(bodyRows);
+  const maxScroll = helpScrollMax(lines, windowRows);
   const offset = Math.max(0, Math.min(scroll, maxScroll));
-  const visible = lines.slice(offset, offset + HELP_COMMAND_LIST_VISIBLE_LINES);
+  const visible = lines.slice(offset, offset + windowRows);
   const signatures = lines.filter(
     (l): l is SignatureLine => l.type === 'signature',
   );
@@ -172,7 +171,7 @@ function CommandsHelp(props: {
             : t('Browse built-in commands:')}
         </text>
       </box>
-      <box flexDirection="column" height={HELP_COMMAND_LIST_VISIBLE_LINES}>
+      <box flexDirection="column" height={windowRows}>
         {visible.map((line, index) => (
           <CommandListLine key={`${line.type}:${index}`} line={line} />
         ))}
@@ -199,16 +198,17 @@ export function HelpOverlay(props: {
    */
   bodyRows: number;
   /**
-   * Available terminal width (the live main-area width in ink terms). Drives
-   * the border-box width and the two fixed-width shortcut columns so narrow
-   * terminals truncate with an ellipsis instead of overlapping.
+   * Width of the popup area the shell gives this dialog: the terminal minus
+   * the wrapper's two-column margins, capped at 100 (ink's `mainAreaWidth`).
+   * Drives the border-box width and the two fixed-width shortcut columns so
+   * narrow terminals truncate with an ellipsis instead of overlapping.
    */
   width: number;
 }) {
   const { commands, tab, scroll, bodyRows } = props;
   const layout = computeHelpWidthLayout(props.width);
   return (
-    <box flexShrink={1} flexGrow={1} paddingLeft={1} paddingRight={1}>
+    <box flexShrink={1} flexGrow={1}>
       <box
         flexDirection="column"
         borderStyle="single"
@@ -253,6 +253,7 @@ export function HelpOverlay(props: {
                 customOnly={false}
                 scroll={scroll}
                 width={layout.safeWidth}
+                bodyRows={bodyRows}
               />
             )}
             {tab === 'custom-commands' && (
@@ -261,6 +262,7 @@ export function HelpOverlay(props: {
                 customOnly={true}
                 scroll={scroll}
                 width={layout.safeWidth}
+                bodyRows={bodyRows}
               />
             )}
           </box>

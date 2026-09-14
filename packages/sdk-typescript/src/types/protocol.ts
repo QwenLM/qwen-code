@@ -239,6 +239,7 @@ export interface SDKPartialAssistantMessage {
  */
 export type AuthType =
   | 'openai'
+  | 'openai-responses'
   | 'anthropic'
   | 'qwen-oauth'
   | 'gemini'

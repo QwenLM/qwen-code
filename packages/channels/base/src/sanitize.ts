@@ -233,17 +233,17 @@ export function sanitizePromptText(text: string): string {
  * (session-bus display projections, transcripts, session-list previews):
  * strip the Unicode line/bidi/zero-width controls that can reorder or hide
  * rendered text, plus C0/DEL controls EXCEPT newline — multi-line user text
- * keeps its line structure in the transcript. Capped by CODE POINT so a cap
- * landing mid-surrogate-pair cannot leave a lone surrogate. Unlike
- * sanitizePromptText it preserves newlines and brackets: display text is
- * rendered to a human, not parsed as prompt structure.
+ * keeps its line structure in the transcript. An optional cap is applied by
+ * CODE POINT so it cannot leave a lone surrogate. Unlike sanitizePromptText
+ * it preserves newlines and brackets: display text is rendered to a human,
+ * not parsed as prompt structure.
  */
-export function sanitizeDisplayText(text: string, maxLen: number): string {
+export function sanitizeDisplayText(text: string, maxLen?: number): string {
   const cleaned = text
     .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ');
-  return truncateCodePoints(cleaned, maxLen);
+  return maxLen === undefined ? cleaned : truncateCodePoints(cleaned, maxLen);
 }
 
 /**

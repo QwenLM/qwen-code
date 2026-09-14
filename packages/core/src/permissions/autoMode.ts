@@ -20,6 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Content } from '@google/genai';
+import type { TrustedUserAnswerSnapshot } from './trusted-user-answers.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
   getAllMemoryFilenames,
@@ -772,6 +773,8 @@ export interface EvaluateAutoModeInput {
   toolParams: Record<string, unknown>;
   /** Main session message history. */
   messages: readonly Content[];
+  /** Session-scoped host-confirmed answers aligned to the same history read. */
+  trustedUserAnswers?: TrustedUserAnswerSnapshot;
   config: Config;
   signal: AbortSignal;
   /**
@@ -867,6 +870,7 @@ export async function evaluateAutoMode(
     toolName: input.ctx.toolName,
     toolParams: input.toolParams,
     messages: input.messages,
+    trustedUserAnswers: input.trustedUserAnswers,
     config: input.config,
     signal: input.signal,
   });

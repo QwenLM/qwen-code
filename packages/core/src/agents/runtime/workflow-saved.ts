@@ -28,6 +28,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
+import { atomicWriteFile } from '../../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SAVED');
@@ -377,4 +378,90 @@ export async function saveWorkflowScript(
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(filePath, script, 'utf8');
   return { status: 'saved', name, scope, path: filePath };
+}
+
+/**
+ * Run-id shape accepted for a persisted inline script. Mirrors the tool's
+ * `resumeFromRunId` guard (`workflow.ts`) and the snapshot pruner: the id is
+ * a path segment here, so anything but the generated `wf_<hex>` shape is
+ * refused rather than joined into a path.
+ */
+const INLINE_RUN_ID_PATTERN = /^wf_[0-9a-f]+$/;
+
+/**
+ * Persist the source of an inline `Workflow({script})` run to
+ * `<generated>/inline/<runId>.js` and return that path.
+ *
+ * The run is what matters, not the copy: this never throws and never blocks
+ * a launch. A missing `storage`, a symlinked root, a full disk — each degrades
+ * to `null`, which the caller reports by simply omitting the script path from
+ * the result. Writing it is what lets a model resume a run (and edit the
+ * script first) without re-sending the whole source, and lets a user read
+ * what actually ran.
+ *
+ * `atomicWriteFile` does the write: temp-and-rename with `renameWithRetry`
+ * (a transient Windows EPERM must not silently cost the result its script
+ * path), `forceMode` so a resume heals a copy some earlier state left more
+ * permissive than 0600, and `noFollow` so a symlink planted at the target is
+ * replaced rather than written through.
+ */
+export async function persistInlineWorkflowScript(
+  config: Config,
+  runId: string,
+  script: string,
+): Promise<string | null> {
+  if (!INLINE_RUN_ID_PATTERN.test(runId)) {
+    debugLogger.warn(`refusing to persist a script for run id: ${runId}`);
+    return null;
+  }
+  const storage = config.storage;
+  if (!storage) return null;
+  try {
+    const filePath = storage.getInlineWorkflowScriptPath(runId);
+    const dir = path.dirname(filePath);
+    // Same refusal the loader makes: a symlinked generated root (or a
+    // symlinked `inline/` inside it) would carry the write outside the
+    // trusted root, and the loader would refuse to read back what we wrote.
+    if (
+      (await isSymlinkedRoot(storage.getGeneratedWorkflowsDir())) ||
+      (await isSymlinkedRoot(dir))
+    ) {
+      debugLogger.warn(
+        `refusing to persist an inline workflow script into a symlinked root: '${dir}'.`,
+      );
+      return null;
+    }
+    await fs.mkdir(dir, { recursive: true });
+    await atomicWriteFile(filePath, script, {
+      encoding: 'utf8',
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+    return filePath;
+  } catch (error) {
+    debugLogger.warn(
+      `failed to persist inline workflow script for ${runId}: ${error}`,
+    );
+    return null;
+  }
+}
+
+/** Best-effort cleanup for a persisted inline workflow script. */
+export async function deleteInlineWorkflowScript(
+  config: Config,
+  runId: string,
+): Promise<boolean> {
+  if (!INLINE_RUN_ID_PATTERN.test(runId)) return false;
+  const storage = config.storage;
+  if (!storage) return false;
+  try {
+    await fs.rm(storage.getInlineWorkflowScriptPath(runId), { force: true });
+    return true;
+  } catch (error) {
+    debugLogger.warn(
+      `failed to delete inline workflow script for ${runId}: ${error}`,
+    );
+    return false;
+  }
 }

@@ -112,6 +112,7 @@ import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
 import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import { getToolExposure, ToolMode } from '../../tools/code-mode.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
 import { getResponseText } from '../../utils/partUtils.js';
@@ -221,9 +222,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
-  // V1 session artifacts are owned by the parent daemon session.
+  // V1 session artifacts and sources are owned by the parent daemon session.
   ToolNames.ARTIFACT,
   ToolNames.RECORD_ARTIFACT,
+  ToolNames.RECORD_SOURCE,
   // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
@@ -283,6 +285,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // Worktree management belongs to the parent session.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
+  ToolNames.RECORD_SOURCE,
   // Same recursion guard as EXCLUDED_TOOLS_FOR_SUBAGENTS: the teammate
   // identity propagates through AsyncLocalStorage into anything it
   // spawns, so prepareTools() would keep choosing THIS exclusion set
@@ -391,6 +394,37 @@ export interface ExecutionStats {
   totalTokens?: number;
 }
 
+export function renderSubagentSystemPrompt(
+  promptConfig: PromptConfig,
+  context: ContextState,
+  runtimeContext: Config,
+  interactive?: boolean,
+): string {
+  if (!promptConfig.systemPrompt) {
+    return '';
+  }
+
+  let finalPrompt = templateString(promptConfig.systemPrompt, context);
+
+  // Only add non-interactive instructions when NOT in interactive mode
+  if (!interactive) {
+    finalPrompt += `
+
+Important Rules:
+ - You operate in non-interactive mode: do not ask the user questions; proceed with available context.
+ - Use tools only when necessary to obtain facts or make changes.
+ - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
+  }
+
+  // Context files (QWEN.md + output-language.md) keep the subagent aligned
+  // with project conventions; the volatile auto-memory section stays last.
+  return assembleSystemPrompt({
+    base: finalPrompt,
+    contextFiles: runtimeContext.getUserMemory(),
+    autoMemory: runtimeContext.getAutoMemoryPrompt(),
+  });
+}
+
 /**
  * AgentCore — shared execution engine for model reasoning and tool scheduling.
  *
@@ -419,6 +453,7 @@ export class AgentCore {
   private readonly executionAllowedExactTools?: ReadonlySet<string>;
   private readonly executionAllowedMcpPatterns?: readonly string[];
   private readonly executionAllowlistErrorSummary?: string;
+  private codeModeAllowedToolNames?: readonly string[];
   /**
    * Event emitter for this agent. Always present — if the caller doesn't
    * pass one, AgentCore allocates its own so the observable state below
@@ -680,6 +715,66 @@ export class AgentCore {
       !!name &&
       toolRegistry.isPermissionDeferred?.(name) === true &&
       toolRegistry.isDeferredAndHidden?.(name) === true;
+
+    const isDisallowed = (name: string): boolean =>
+      this.toolConfig?.disallowedTools?.some((pattern) =>
+        name.startsWith('mcp__')
+          ? matchesMcpPattern(pattern, name)
+          : pattern === name,
+      ) === true;
+
+    if (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly) {
+      const stringTools =
+        this.toolConfig?.tools.filter(
+          (tool): tool is string => typeof tool === 'string',
+        ) ?? [];
+      const inlineTools =
+        this.toolConfig?.tools.filter(
+          (tool): tool is FunctionDeclaration => typeof tool !== 'string',
+        ) ?? [];
+      const inheritsRegistry =
+        !this.toolConfig ||
+        stringTools.includes('*') ||
+        (stringTools.length === 0 && inlineTools.length === 0);
+      const configuredNames = inheritsRegistry
+        ? undefined
+        : new Set(stringTools);
+      const inheritsCodeModeBindings =
+        configuredNames?.has(ToolNames.EXEC) === true;
+      const allowedNames = toolRegistry
+        .getAllToolNames()
+        .filter(
+          (name) =>
+            (!configuredNames ||
+              configuredNames.has(name) ||
+              (inheritsCodeModeBindings &&
+                getToolExposure(name) === 'code-mode-callable')) &&
+            !isExcluded(name) &&
+            !isHiddenByEagerAllowList(name) &&
+            !isDisallowed(name) &&
+            this.isToolExecutionAllowed(name),
+        );
+      this.codeModeAllowedToolNames = Object.freeze(
+        allowedNames.filter(
+          (name) => getToolExposure(name) === 'code-mode-callable',
+        ),
+      );
+      const declarations =
+        toolRegistry.getFunctionDeclarationsFiltered(allowedNames);
+      declarations.push(
+        ...inlineTools.filter(
+          (tool) =>
+            !isExcluded(tool.name) &&
+            !isHiddenByEagerAllowList(tool.name) &&
+            (!tool.name || !isDisallowed(tool.name)),
+        ),
+      );
+      return declarations.filter(
+        (declaration) => !declaration.name || !isDisallowed(declaration.name),
+      );
+    }
+
+    this.codeModeAllowedToolNames = undefined;
 
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
@@ -1590,13 +1685,30 @@ export class AgentCore {
     declaredToolNames: ReadonlySet<string | undefined>,
   ): boolean {
     return (
-      declaredToolNames.has(ToolNames.SKILL) &&
+      (declaredToolNames.has(ToolNames.SKILL) ||
+        (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
+          declaredToolNames.has(ToolNames.EXEC) &&
+          !!this.runtimeContext.getToolRegistry().getTool(ToolNames.SKILL) &&
+          this.codeModeAllowedToolNames?.includes(ToolNames.SKILL) === true)) &&
       this.isToolExecutionAllowed(ToolNames.SKILL)
     );
   }
 
   private isToolExecutionAllowed(toolName: string): boolean {
     if (this.executionAllowedTools === undefined) {
+      return true;
+    }
+    if (
+      toolName === ToolNames.EXEC &&
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+    ) {
+      return true;
+    }
+    if (
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
+      this.executionAllowedExactTools?.has(ToolNames.EXEC) &&
+      getToolExposure(toolName) === 'code-mode-callable'
+    ) {
       return true;
     }
     if (this.executionAllowedExactTools?.has(toolName)) {
@@ -1681,6 +1793,12 @@ export class AgentCore {
       responseParts: Part[];
     }>;
   }> {
+    if (
+      this.codeModeAllowedToolNames === undefined &&
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+    ) {
+      await this.prepareTools();
+    }
     const responseByCallId = new Map<
       string,
       {
@@ -2167,6 +2285,12 @@ export class AgentCore {
         prompt_id: promptId,
         response_id: responseId,
         wasOutputTruncated,
+        ...(toolName === ToolNames.EXEC &&
+        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+          ? {
+              codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],
+            }
+          : {}),
       };
 
       const description = this.getToolDescription(toolName, args);
@@ -2623,29 +2747,12 @@ export class AgentCore {
     context: ContextState,
     options?: CreateChatOptions,
   ): string {
-    if (!this.promptConfig.systemPrompt) {
-      return '';
-    }
-
-    let finalPrompt = templateString(this.promptConfig.systemPrompt, context);
-
-    // Only add non-interactive instructions when NOT in interactive mode
-    if (!options?.interactive) {
-      finalPrompt += `
-
-Important Rules:
- - You operate in non-interactive mode: do not ask the user questions; proceed with available context.
- - Use tools only when necessary to obtain facts or make changes.
- - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
-    }
-
-    // Context files (QWEN.md + output-language.md) keep the subagent aligned
-    // with project conventions; the volatile auto-memory section stays last.
-    return assembleSystemPrompt({
-      base: finalPrompt,
-      contextFiles: this.runtimeContext.getUserMemory(),
-      autoMemory: this.runtimeContext.getAutoMemoryPrompt(),
-    });
+    return renderSubagentSystemPrompt(
+      this.promptConfig,
+      context,
+      this.runtimeContext,
+      options?.interactive,
+    );
   }
 
   /**

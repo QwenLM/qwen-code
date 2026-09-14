@@ -110,7 +110,6 @@ function createObservedContactChannel(
   const channel = new ObservedContactFeishuChannel(
     'test',
     createConfig({
-      blockStreaming: 'on',
       groupPolicy: 'open',
       groups: { '*': { requireMention: false } },
     }),
@@ -723,18 +722,9 @@ describe('FeishuChannel', () => {
     }
   });
 
-  it('keeps media messages running when a prefix is configured', async () => {
-    // Feishu delivers media as its own message type with no caption
-    // field, so an image carries only the adapter's `(image)`
-    // placeholder. Gating that would drop every media message with no
-    // action the user could take to get past it -- while text with no
-    // prefix must still be gated.
+  it('dispatches both media and ordinary text', async () => {
     const bridge = createMockBridge();
-    const channel = new FeishuChannel(
-      'test',
-      createConfig({ messagePrefix: '/review' }),
-      bridge,
-    );
+    const channel = new FeishuChannel('test', createConfig(), bridge);
     const onMessage = getPrivateMethod<(data: unknown) => void>(
       channel,
       'onMessage',
@@ -757,19 +747,13 @@ describe('FeishuChannel', () => {
     onMessage(event('media-image', 'image', { image_key: 'img_1' }));
     await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
 
-    // The control: ordinary text with no prefix stays gated.
-    onMessage(event('plain-text', 'text', { text: 'no prefix here' }));
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    onMessage(event('plain-text', 'text', { text: 'inspect this' }));
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
   });
 
-  it('matches prefixes after platform-normalized mentions with spaced names', async () => {
+  it('preserves text after platform-normalized mentions with spaced names', async () => {
     const bridge = createMockBridge();
-    const channel = new FeishuChannel(
-      'test',
-      createConfig({ messagePrefix: '/review' }),
-      bridge,
-    );
+    const channel = new FeishuChannel('test', createConfig(), bridge);
     Object.assign(channel as unknown as Record<string, unknown>, {
       botOpenId: 'ou_bot',
     });
@@ -815,8 +799,8 @@ describe('FeishuChannel', () => {
       expect.stringContaining('inspect this'),
       expect.anything(),
     );
-    expect(vi.mocked(bridge.prompt).mock.calls[0]?.[1]).not.toContain(
-      '/review',
+    expect(vi.mocked(bridge.prompt).mock.calls[0]?.[1]).toContain(
+      '@Alice Smith /review inspect this',
     );
 
     onMessage(
@@ -825,17 +809,12 @@ describe('FeishuChannel', () => {
         '@_user_1 @_user_2 inspect without prefix',
       ),
     );
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
   });
 
-  it('matches after a mentioned member whose name extends the bot name', async () => {
+  it('preserves a mentioned member whose name extends the bot name', async () => {
     const bridge = createMockBridge();
-    const channel = new FeishuChannel(
-      'test',
-      createConfig({ messagePrefix: '/review' }),
-      bridge,
-    );
+    const channel = new FeishuChannel('test', createConfig(), bridge);
     Object.assign(channel as unknown as Record<string, unknown>, {
       botOpenId: 'ou_bot',
     });
@@ -867,16 +846,12 @@ describe('FeishuChannel', () => {
     await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
     const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
     expect(prompt).toContain('inspect this');
-    expect(prompt).not.toContain('/review');
+    expect(prompt).toContain('/review');
   });
 
   it('removes the structured bot mention without corrupting a longer member name', async () => {
     const bridge = createMockBridge();
-    const channel = new FeishuChannel(
-      'test',
-      createConfig({ messagePrefix: '/review' }),
-      bridge,
-    );
+    const channel = new FeishuChannel('test', createConfig(), bridge);
     Object.assign(channel as unknown as Record<string, unknown>, {
       botOpenId: 'ou_bot',
     });
@@ -908,16 +883,12 @@ describe('FeishuChannel', () => {
     await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
     const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
     expect(prompt).toContain('inspect this');
-    expect(prompt).not.toContain('/review');
+    expect(prompt).toContain('/review');
   });
 
-  it('does not mistake an extending mention name for an at-sign prefix', async () => {
+  it('preserves a mentioned member alongside literal at-sign text', async () => {
     const bridge = createMockBridge();
-    const channel = new FeishuChannel(
-      'test',
-      createConfig({ messagePrefix: '@bot' }),
-      bridge,
-    );
+    const channel = new FeishuChannel('test', createConfig(), bridge);
     Object.assign(channel as unknown as Record<string, unknown>, {
       botOpenId: 'ou_bot',
     });
@@ -949,19 +920,12 @@ describe('FeishuChannel', () => {
     await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
     const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
     expect(prompt).toContain('do X');
-    expect(prompt).not.toContain('@bot');
+    expect(prompt).toContain('@botswana @bot do X');
   });
 
-  it('keeps a mention the user typed after the prefix', async () => {
-    // The matching text consumes only the leading mention run, so a
-    // mention inside the payload reaches the agent exactly as it does
-    // with no prefix configured.
+  it('keeps a member mention within slash-prefixed text', async () => {
     const bridge = createMockBridge();
-    const channel = new FeishuChannel(
-      'test',
-      createConfig({ messagePrefix: '/review' }),
-      bridge,
-    );
+    const channel = new FeishuChannel('test', createConfig(), bridge);
     Object.assign(channel as unknown as Record<string, unknown>, {
       botOpenId: 'ou_bot',
     });
@@ -990,20 +954,12 @@ describe('FeishuChannel', () => {
     await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
     const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
     expect(prompt).toContain('please talk to @Alice Smith');
-    expect(prompt).not.toContain('/review');
+    expect(prompt).toContain('/review');
   });
 
-  it('matches the prefix on a rich-text post behind a spaced mention', async () => {
-    // A post carries its mentions as at-nodes, so the message-level keys
-    // never appear in the text: without normalizing the rendered name, a
-    // display name with a space leaves a token the shared mention skip
-    // cannot consume and the message is dropped.
+  it('preserves a rich-text post behind a spaced mention', async () => {
     const bridge = createMockBridge();
-    const channel = new FeishuChannel(
-      'test',
-      createConfig({ messagePrefix: '/review' }),
-      bridge,
-    );
+    const channel = new FeishuChannel('test', createConfig(), bridge);
     Object.assign(channel as unknown as Record<string, unknown>, {
       botOpenId: 'ou_bot',
     });
@@ -1039,9 +995,7 @@ describe('FeishuChannel', () => {
   });
 
   it('keeps a media placeholder out of the next prompt as group history', async () => {
-    // The placeholder bypasses the prefix gate, so without the synthetic
-    // marking it would be recorded as unmentioned group traffic and quoted
-    // back to the model as if a member had typed `(image)`.
+    // Synthetic media placeholders must not be quoted as user-authored history.
     const previousQwenHome = process.env['QWEN_HOME'];
     const qwenHome = mkdtempSync(join(tmpdir(), 'feishu-history-'));
     process.env['QWEN_HOME'] = qwenHome;
@@ -1049,7 +1003,6 @@ describe('FeishuChannel', () => {
     const channel = new FeishuChannel(
       'test',
       createConfig({
-        messagePrefix: '/review',
         groupHistoryLimit: 10,
         groups: { '*': { requireMention: true } },
       }),

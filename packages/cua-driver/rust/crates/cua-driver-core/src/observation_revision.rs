@@ -10,6 +10,7 @@ const REVISION_TOKEN_PREFIX: &str = "rv1:";
 pub const OBSERVATION_REVISION_VERSION: u32 = 1;
 pub const ACCESSIBILITY_SERIALIZER_VERSION: &str = "accessibility-render-v1";
 pub const ACCESSIBILITY_PROJECTION_VERSION: &str = "full-tree-v1";
+pub const APP_ACCESSIBILITY_PROJECTION_VERSION: &str = "app-tree-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -183,6 +184,36 @@ pub struct ObservationRevisionResult {
     pub nodes: Vec<RevisionNode>,
     pub serializer_duration_us: u64,
     pub cache_estimate_bytes: usize,
+}
+
+impl ObservationRevisionResult {
+    pub fn render_full_with_action_tokens(
+        &self,
+        mut token_for: impl FnMut(usize) -> String,
+    ) -> String {
+        if self.nodes.is_empty() {
+            return "Full accessibility state: no elements.".to_owned();
+        }
+        let lines = self
+            .nodes
+            .iter()
+            .map(|node| {
+                let mut rendered = format!(
+                    " {}[{}] {}",
+                    "  ".repeat(node.depth),
+                    node.element_id,
+                    node.body
+                );
+                if let Some(index) = node.actionable_index {
+                    rendered.push_str(" element_token=");
+                    rendered.push_str(&token_for(index));
+                }
+                rendered
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("Full accessibility state:\n{lines}")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,6 +467,7 @@ pub struct ObservationLineage<I> {
     next_revision_id: u64,
     next_element_id: u64,
     revisions: VecDeque<StoredRevision<I>>,
+    app_rendering: bool,
 }
 
 impl<I> ObservationLineage<I>
@@ -459,7 +491,13 @@ where
             next_revision_id: 1,
             next_element_id: 0,
             revisions: VecDeque::new(),
+            app_rendering: false,
         })
+    }
+
+    pub fn for_app(mut self) -> Self {
+        self.app_rendering = true;
+        self
     }
 
     pub fn observe(
@@ -484,6 +522,24 @@ where
         force_full_reason: Option<FullResyncReason>,
     ) -> Result<ObservationRevisionResult, ObservationRevisionError> {
         self.observe_inner(captured, base_revision_id, force_full_reason, true, true)
+    }
+
+    /// A budget omission cannot prove deletion. Only identical bounded captures
+    /// may omit their full state; changed captures replace the captured view.
+    pub fn observe_bounded(
+        &mut self,
+        captured: Vec<CapturedNode<I>>,
+        base_revision_id: Option<&str>,
+        force_full_reason: Option<FullResyncReason>,
+    ) -> Result<ObservationRevisionResult, ObservationRevisionError> {
+        let mut result = self.observe_with_reason(captured, base_revision_id, force_full_reason)?;
+        if result.mode == ObservationMode::Diff {
+            result.mode = ObservationMode::Full;
+            result.base_revision_id = None;
+            result.full_resync_reason = Some(FullResyncReason::CaptureIncomplete);
+            result.text.clone_from(&result.full_text);
+        }
+        Ok(result)
     }
 
     pub fn observe_unretained_full(
@@ -555,7 +611,8 @@ where
             revision_id: revision_id.clone(),
             nodes: stored_nodes,
         };
-        let full_text = render_full(&current.nodes, &self.lineage_id, stable_element_ids);
+        let render_tokens = stable_element_ids && !self.app_rendering;
+        let full_text = render_full(&current.nodes, &self.lineage_id, render_tokens);
 
         let requested_base = base_revision_id.and_then(|id| {
             self.revisions
@@ -579,7 +636,11 @@ where
             let base = requested_base.expect("checked above");
             let changes = ChangeSet::between(base, &current);
             if changes.is_empty() {
-                let candidate = render_no_change(&base.revision_id);
+                let candidate = if self.app_rendering {
+                    "No accessibility changes.".to_owned()
+                } else {
+                    render_no_change(&base.revision_id)
+                };
                 if candidate.len() >= full_text.len() {
                     (
                         ObservationMode::Full,
@@ -596,8 +657,7 @@ where
                     )
                 }
             } else {
-                let candidate =
-                    changes.render(base, &current, &self.lineage_id, stable_element_ids);
+                let candidate = changes.render(base, &current, &self.lineage_id, render_tokens);
                 if !changes.replays_to(base, &current) {
                     (
                         ObservationMode::Full,
@@ -1066,6 +1126,24 @@ fn render_node(
 mod tests {
     use super::*;
 
+    #[test]
+    fn app_lineage_keeps_stable_action_identity_without_rendering_private_tokens() {
+        let mut lineage = ObservationLineage::new("app", 8).unwrap().for_app();
+        let captured = vec![
+            node("window", 0, "Window \"Document\"", None),
+            node("button", 1, "Button \"Save\"", Some(0)),
+        ];
+        let full = lineage.observe(captured.clone(), None, false).unwrap();
+        assert!(full.stable_element_ids);
+        assert!(!full.text.contains("element_token="));
+        let unchanged = lineage
+            .observe(captured, Some(&full.revision_id), false)
+            .unwrap();
+        assert_eq!(unchanged.text, "No accessibility changes.");
+        assert_eq!(unchanged.nodes[1].element_id, full.nodes[1].element_id);
+        assert_eq!(unchanged.nodes[1].actionable_index, Some(0));
+    }
+
     fn node(
         identity: &'static str,
         depth: usize,
@@ -1222,6 +1300,78 @@ mod tests {
             Some(FullResyncReason::DiffNotSmaller)
         );
         assert_eq!(second.text, second.full_text);
+    }
+
+    #[test]
+    fn bounded_captures_only_omit_identical_state() {
+        let mut lineage = lineage(4);
+        let initial = padded(vec![node("field", 1, "text value=one", Some(0))]);
+        let first = lineage
+            .observe_bounded(initial.clone(), None, None)
+            .unwrap();
+        let same = lineage
+            .observe_bounded(initial, Some(&first.revision_id), None)
+            .unwrap();
+        assert_eq!(same.mode, ObservationMode::NoChange);
+        assert_eq!(same.nodes, first.nodes);
+        assert!(same.stable_element_ids);
+
+        let changed = lineage
+            .observe_bounded(
+                padded(vec![node("field", 1, "text value=two", Some(0))]),
+                Some(&same.revision_id),
+                None,
+            )
+            .unwrap();
+        assert_eq!(changed.mode, ObservationMode::Full);
+        assert_eq!(changed.text, changed.full_text);
+        assert!(changed.base_revision_id.is_none());
+        assert_eq!(changed.nodes[1].element_id, first.nodes[1].element_id);
+
+        let omitted = lineage
+            .observe_bounded(padded(Vec::new()), Some(&changed.revision_id), None)
+            .unwrap();
+        assert_eq!(omitted.mode, ObservationMode::Full);
+        assert!(!omitted.text.contains("REMOVED"));
+        assert!(lineage.resolve_current(first.nodes[1].element_id).is_none());
+        let forced = lineage
+            .observe_bounded(
+                padded(Vec::new()),
+                Some(&omitted.revision_id),
+                Some(FullResyncReason::Requested),
+            )
+            .unwrap();
+        assert_eq!(forced.mode, ObservationMode::Full);
+        assert_eq!(forced.full_resync_reason, Some(FullResyncReason::Requested));
+    }
+
+    #[test]
+    fn bounded_app_captures_preserve_short_ids_without_private_tokens() {
+        let mut lineage = lineage(4).for_app();
+        let initial = padded(vec![node("field", 1, "TextField value=one", Some(0))]);
+        let first = lineage
+            .observe_bounded(initial.clone(), None, None)
+            .unwrap();
+        let same = lineage
+            .observe_bounded(initial, Some(&first.revision_id), None)
+            .unwrap();
+        assert_eq!(same.mode, ObservationMode::NoChange);
+        assert_eq!(same.text, "No accessibility changes.");
+        assert_eq!(same.nodes, first.nodes);
+        let changed = lineage
+            .observe_bounded(
+                padded(vec![node("field", 1, "TextField value=two", Some(0))]),
+                Some(&same.revision_id),
+                None,
+            )
+            .unwrap();
+        assert_eq!(changed.mode, ObservationMode::Full);
+        assert_eq!(changed.nodes[1].element_id, first.nodes[1].element_id);
+        assert_eq!(changed.nodes[1].actionable_index, Some(0));
+        for observation in [first, same, changed] {
+            assert!(observation.stable_element_ids);
+            assert!(!observation.text.contains("element_token="));
+        }
     }
 
     #[test]
@@ -1554,6 +1704,22 @@ mod tests {
         assert_eq!(result.cache_estimate_bytes, 0);
         assert!(!result.text.contains("element_token="));
         assert_eq!(lineage.retained_revision_count(), 0);
+    }
+
+    #[test]
+    fn unretained_full_can_render_current_snapshot_tokens() {
+        let mut lineage = lineage(4);
+        let result = lineage
+            .observe_unretained_full(
+                vec![node("button", 0, "button", Some(7))],
+                FullResyncReason::IdentityUnavailable,
+            )
+            .unwrap();
+
+        let rendered = result.render_full_with_action_tokens(|index| format!("snapshot:{index}"));
+
+        assert!(!result.text.contains("element_token="));
+        assert!(rendered.contains("[0] button element_token=snapshot:7"));
     }
 
     #[test]

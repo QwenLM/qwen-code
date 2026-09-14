@@ -21,6 +21,9 @@ import {
   flattenPeerLabel,
   getLastPeerInboxFailure,
   type HeldMessage,
+  listPeerControllers,
+  type PeerControllerRecord,
+  removePeerController,
 } from '@qwen-code/qwen-code-core';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { t } from '../../i18n/index.js';
@@ -105,12 +108,22 @@ export function formatHeldList(
     // Every field below is peer-controlled, and this is the screen where
     // the user decides untrusted messages: a forged listing line or a
     // terminal-rewriting ESC sequence here spoofs the review itself.
-    const peerLabel = flattenPeerLabel(
-      entry.frame.fromName ??
-        entry.frame.from ??
-        (entry.selfSent ? 'this session' : 'unknown session'),
-    );
-    const who = `${entry.selfSent ? '[own process]' : '[peer]'} ${peerLabel}`;
+    // A controller is named by the label its user gave it, never by the
+    // frame's `fromName`: this is the screen where a grant is judged, and
+    // a sender that could choose that string could dress itself as one.
+    const peerLabel = entry.controller
+      ? flattenPeerLabel(entry.controller.label)
+      : flattenPeerLabel(
+          entry.frame.fromName ??
+            entry.frame.from ??
+            (entry.selfSent ? 'this session' : 'unknown session'),
+        );
+    const origin = entry.controller
+      ? '[controller]'
+      : entry.selfSent
+        ? '[own process]'
+        : '[peer]';
+    const who = `${origin} ${peerLabel}`;
     const handle = flattenPeerLabel(displayHandle(entry, held));
     return (
       `  ${handle}  ${who}\n` +
@@ -162,15 +175,127 @@ export function resolveHeld(
   return { kind: 'one', msgId: matches[0]!.frame.msgId };
 }
 
+/**
+ * Read the grants, reporting a failure as a line rather than throwing:
+ * a listing that cannot be produced is information, and `/peers` has
+ * nowhere to throw to.
+ */
+async function listControllers(): Promise<
+  PeerControllerRecord[] | { error: string }
+> {
+  try {
+    return await listPeerControllers();
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export function formatControllerList(
+  controllers: PeerControllerRecord[] | { error: string },
+): string {
+  if (!Array.isArray(controllers)) {
+    return `Could not read the trusted controllers: ${controllers.error}`;
+  }
+  if (controllers.length === 0) {
+    return (
+      'No trusted controllers. Without an explicit "accept" setting, a message that asserts no review class is held for your review, except one from a process this session started, which is always accepted. A sender\'s own review-class claim is not authenticated; set agents.crossSessionInbound to "hold" to review every inbound message.\n' +
+      'Add one with: qwen sessions controllers add --label <name>'
+    );
+  }
+  const lines = controllers.map(
+    (record) =>
+      `  ${record.id}  ${flattenPeerLabel(record.label)}  added ${formatCreated(
+        record.createdAt,
+      )}`,
+  );
+  return [
+    `${controllers.length} trusted controller${
+      controllers.length === 1 ? '' : 's'
+    }. Messages presenting one of these tokens are delivered without per-message review unless crossSessionInbound is "hold" or "refuse". A process this session started is always accepted; other senders' review-class claims are not authenticated, so set crossSessionInbound to "hold" to review every inbound message:`,
+    ...lines,
+    '',
+    'Revoke with /peers revoke <id>.',
+  ].join('\n');
+}
+
+function formatCreated(createdAt: number): string {
+  const date = new Date(createdAt);
+  return Number.isNaN(date.getTime())
+    ? 'unknown'
+    : date.toISOString().replace('T', ' ').slice(0, 16);
+}
+
 export const peersCommand: SlashCommand = {
   name: 'peers',
   kind: CommandKind.BUILT_IN,
   get description() {
     return t(
-      'Review messages held from other Qwen Code sessions (accept | deny)',
+      'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
     );
   },
   action: async (context, args): Promise<SlashCommandActionReturn> => {
+    const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+
+    // Controller grants live in the Qwen home, independently of whether
+    // this session managed to start a peer inbox.
+    if (verb === 'controllers') {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: formatControllerList(await listControllers()),
+      };
+    }
+
+    if (verb === 'revoke') {
+      const id = rest[0];
+      if (id === undefined) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content:
+            'Which controller? Use /peers revoke <id> — /peers controllers lists the ids.',
+        };
+      }
+      let removed: PeerControllerRecord | null;
+      try {
+        removed = await removePeerController(id);
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `Could not revoke that controller: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+      if (!removed) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `No controller has the id "${flattenPeerLabel(id)}". Run /peers controllers to see them.`,
+        };
+      }
+      const forgotten =
+        context.services.peerMessaging?.forgetController(removed.id) ?? 0;
+      const backlog =
+        forgotten === 0
+          ? 'No held messages in this session used that grant.'
+          : `${forgotten} held message${forgotten === 1 ? '' : 's'} from it ${
+              forgotten === 1 ? 'remains' : 'remain'
+            } parked for review as ${
+              forgotten === 1
+                ? 'an ordinary peer message'
+                : 'ordinary peer messages'
+            }.`;
+      return {
+        type: 'message',
+        messageType: 'info',
+        content:
+          `Revoked the controller "${flattenPeerLabel(removed.label)}" (${removed.id}). ` +
+          `Running sessions revalidate active connections, and new connections can no longer use its token. ${backlog}`,
+      };
+    }
+
     const peerMessaging = context.services.peerMessaging;
     if (!peerMessaging) {
       // Absent for two different reasons, and telling a user to enable a
@@ -193,7 +318,6 @@ export const peersCommand: SlashCommand = {
     }
 
     const held = peerMessaging.getHeld();
-    const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 
     if (verb === undefined || verb === 'list') {
       // Decisions bind to this listing: record exactly which messages
@@ -211,7 +335,7 @@ export const peersCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: `Unknown subcommand "${verb}". Use /peers, /peers accept <id|all>, or /peers deny <id|all>.`,
+        content: `Unknown subcommand "${verb}". Use /peers, /peers accept <id|all>, /peers deny <id|all>, /peers controllers, or /peers revoke <id>.`,
       };
     }
 

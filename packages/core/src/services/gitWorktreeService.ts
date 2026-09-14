@@ -18,8 +18,10 @@ import { isCommandAvailable } from '../utils/shell-utils.js';
 import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
+import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
 
@@ -35,16 +37,42 @@ export function worktreeBranchForSlug(slug: string): string {
  * Filename of the in-worktree session marker. Created at worktree
  * provisioning time and consulted by `exit_worktree` to decide
  * whether the current session is allowed to drop the worktree. The
- * file lives outside the working tree (it is .gitignored as part of
- * `.qwen/worktrees/.gitignore`) so it cannot leak into commits.
+ * file is kept out of commits via the repository's common
+ * `.git/info/exclude` (see `addWorktreeSessionMarkerExclude`).
  */
 export const WORKTREE_SESSION_FILE = '.qwen-session';
 
 const WORKTREE_SESSION_MARKER_MAX_BYTES = 512;
 
+/**
+ * Diff flags that stop the tree being diffed from choosing the program that
+ * renders it.
+ *
+ * A `.gitattributes` binding a `diff=<name>` driver travels with a tree
+ * obtained as files, and the `diff.<name>.textconv` or `diff.external` that
+ * goes with it was measured running through these very calls. They also keep
+ * the patch appliable, since a converted blob is no longer the pre-image
+ * `git apply` expects. `core.fsmonitor` is handled for every client in
+ * `loadSimpleGit`.
+ */
+const NO_EXEC_DIFF_FLAGS = ['--no-ext-diff', '--no-textconv'] as const;
+
 export type StrictWorktreeSessionMarker =
   | { state: 'missing' }
-  | { state: 'valid'; sessionId: string }
+  | {
+      state: 'valid';
+      sessionId: string;
+      /**
+       * Owning uid of the marker inode, or null when the process cannot
+       * compare uids (no `geteuid`, e.g. Windows). Ownership-transfer
+       * flows refuse a foreign-uid marker where the identity is available
+       * instead of riding the ownership-preserving in-place write path.
+       */
+      uid: number | null;
+      /** Inode identity pinned across the no-follow read. */
+      dev: number;
+      ino: number;
+    }
   | { state: 'invalid'; reason: string };
 
 async function addWorktreeSessionMarkerExclude(
@@ -64,10 +92,20 @@ async function addWorktreeSessionMarkerExclude(
     } catch {
       // File missing — fall through to fresh write.
     }
-    const rule = WORKTREE_SESSION_FILE;
-    if (!existing.split(/\r?\n/).includes(rule)) {
-      const sep = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
-      await fs.writeFile(excludePath, `${existing}${sep}${rule}\n`, 'utf8');
+    // The second rule covers the sibling temp file `atomicWriteFile` stages
+    // next to the marker during an ownership transfer
+    // (`<worktree>/.qwen-session.<hex>.tmp`). It lands in the main checkout's
+    // shared exclude too — accepted: the pattern is name-scoped.
+    const rules = [WORKTREE_SESSION_FILE, `${WORKTREE_SESSION_FILE}.*.tmp`];
+    let next = existing;
+    for (const rule of rules) {
+      if (!next.split(/\r?\n/).includes(rule)) {
+        const sep = next.length === 0 || next.endsWith('\n') ? '' : '\n';
+        next = `${next}${sep}${rule}\n`;
+      }
+    }
+    if (next !== existing) {
+      await fs.writeFile(excludePath, next, 'utf8');
     }
   } catch {
     // The marker remains authoritative when the ignore rule cannot be added.
@@ -95,6 +133,26 @@ export async function writeWorktreeSessionMarker(
 }
 
 /**
+ * The marker is durably committed — staged, fsync'd, identity-verified and
+ * linked into place — but this primitive's own post-commit tail failed. The
+ * commit stands: a caller that compensates on failure must classify this as
+ * "the flip happened" rather than roll back a transfer the marker already
+ * records, and must not clean up a valid marker file. `committedOwner` is the
+ * session id the marker now names.
+ */
+export class WorktreeMarkerCommittedError extends Error {
+  readonly committedOwner: string;
+  constructor(committedOwner: string, options?: { cause?: unknown }) {
+    super(
+      `Worktree session marker committed for ${committedOwner}; the post-commit close failed`,
+      options,
+    );
+    this.name = 'WorktreeMarkerCommittedError';
+    this.committedOwner = committedOwner;
+  }
+}
+
+/**
  * Creates the daemon-owned marker without replacing any existing path.
  * This is intentionally separate from {@link writeWorktreeSessionMarker},
  * whose overwrite semantics are required by interactive worktree tools.
@@ -103,22 +161,28 @@ export async function createWorktreeSessionMarkerExclusive(
   worktreePath: string,
   sessionId: string,
 ): Promise<void> {
-  if (
-    sessionId.length === 0 ||
-    Buffer.byteLength(sessionId, 'utf8') > WORKTREE_SESSION_MARKER_MAX_BYTES ||
-    sessionId.trim() !== sessionId
-  ) {
-    throw new Error('Invalid worktree session marker owner');
-  }
+  assertValidWorktreeSessionMarkerOwner(sessionId);
   const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+  // Staged beside the marker so the publishing link stays on one device, and
+  // named for the `.qwen-session.*.tmp` git-exclude rule.
+  const stagedPath = `${markerPath}.${randomBytes(6).toString('hex')}.tmp`;
   const flags =
     nodeFs.constants.O_WRONLY |
     nodeFs.constants.O_CREAT |
     nodeFs.constants.O_EXCL |
     (nodeFs.constants.O_NOFOLLOW ?? 0);
-  const handle = await fs.open(markerPath, flags, 0o600);
+  // `fs.open` with O_EXCL throws before anything is created when a path
+  // already exists, so it stays outside the try: only a failure past this
+  // point has a file of ours to remove.
+  const handle = await fs.open(stagedPath, flags, 0o600);
+  // Captured from the opened handle so the cleanup below can verify the path
+  // still refers to the file this call created before removing it.
+  let stagedDev = 0;
+  let stagedIno = 0;
   try {
     const before = await handle.stat();
+    stagedDev = before.dev;
+    stagedIno = before.ino;
     if (!before.isFile() || before.nlink !== 1 || before.ino === 0) {
       throw new Error('Worktree session marker has an unsafe identity');
     }
@@ -126,7 +190,7 @@ export async function createWorktreeSessionMarkerExclusive(
     await handle.sync();
     const [after, pathStats] = await Promise.all([
       handle.stat(),
-      fs.lstat(markerPath),
+      fs.lstat(stagedPath),
     ]);
     if (
       !after.isFile() ||
@@ -139,10 +203,58 @@ export async function createWorktreeSessionMarkerExclusive(
     ) {
       throw new Error('Worktree session marker identity changed');
     }
-  } finally {
+    // Publish with a hard link so the marker path first exists once its inode
+    // already holds the owner and is fsync'd. Creating the marker path itself
+    // with O_EXCL and filling it afterwards leaves a crash window holding a
+    // 0-byte marker, which strict reads report as `invalid` — the one state no
+    // recovery path repairs. `link` fails EEXIST when the marker path is
+    // taken, so it is the same compare-and-swap O_EXCL was: a concurrent
+    // create still loses instead of overwriting.
+    await fs.link(stagedPath, markerPath);
+  } catch (error) {
+    await handle.close().catch(() => {});
+    // Remove only the file this call created: on the identity-changed branch
+    // the path already refers to someone else's inode, and unlinking it would
+    // turn a fail-closed detection into a destructive action against the
+    // detected file. Without a captured identity there is nothing to match,
+    // so the rare residue is left for operator cleanup instead. This catch is
+    // reachable only before the publish, so the marker path is never unlinked.
+    if (stagedIno !== 0) {
+      try {
+        const current = await fs.lstat(stagedPath);
+        if (current.dev === stagedDev && current.ino === stagedIno) {
+          await fs.unlink(stagedPath);
+        }
+      } catch {
+        // Path already gone — nothing of ours to remove.
+      }
+    }
+    throw error;
+  }
+  // Post-commit tail: the marker already names `sessionId`, so a failure here
+  // must propagate with the marker intact rather than trigger cleanup of a
+  // valid file. Classified so a caller that compensates on failure cannot read
+  // the committed flip as a pre-flip error and dismantle what the marker now
+  // names. Dropping the staged name belongs to the commit — until it lands the
+  // marker carries nlink 2 and strict reads reject it.
+  try {
+    await fs.unlink(stagedPath);
     await handle.close();
+  } catch (error) {
+    await handle.close().catch(() => {});
+    throw new WorktreeMarkerCommittedError(sessionId, { cause: error });
   }
   await addWorktreeSessionMarkerExclude(worktreePath);
+}
+
+function assertValidWorktreeSessionMarkerOwner(sessionId: string): void {
+  if (
+    sessionId.length === 0 ||
+    Buffer.byteLength(sessionId, 'utf8') > WORKTREE_SESSION_MARKER_MAX_BYTES ||
+    sessionId.trim() !== sessionId
+  ) {
+    throw new Error('Invalid worktree session marker owner');
+  }
 }
 
 /** Strict daemon-only marker read that never collapses corruption into absence. */
@@ -221,7 +333,13 @@ export async function readWorktreeSessionMarkerStrict(
     ) {
       return { state: 'invalid', reason: 'invalid marker owner' };
     }
-    return { state: 'valid', sessionId };
+    return {
+      state: 'valid',
+      sessionId,
+      uid: process.geteuid === undefined ? null : after.uid,
+      dev: after.dev,
+      ino: after.ino,
+    };
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') {
       return observedMarker
@@ -235,6 +353,186 @@ export async function readWorktreeSessionMarkerStrict(
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+/**
+ * Synchronous twin of {@link readWorktreeSessionMarkerStrict}. Exists for the
+ * `atomicWriteFile` assertCanCommit hook, which must re-verify the marker
+ * synchronously in the same tick as the rename commit.
+ */
+export function readWorktreeSessionMarkerStrictSync(
+  worktreePath: string,
+): StrictWorktreeSessionMarker {
+  const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+  let fd: number | undefined;
+  let observedMarker = false;
+  try {
+    const flags =
+      nodeFs.constants.O_RDONLY |
+      (nodeFs.constants.O_NOFOLLOW ?? 0) |
+      (nodeFs.constants.O_NONBLOCK ?? 0);
+    const before = nodeFs.lstatSync(markerPath);
+    observedMarker = true;
+    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1) {
+      return { state: 'invalid', reason: 'unsafe marker file type' };
+    }
+    if (before.ino === 0 || before.size > WORKTREE_SESSION_MARKER_MAX_BYTES) {
+      return { state: 'invalid', reason: 'unsafe marker size or identity' };
+    }
+    fd = nodeFs.openSync(markerPath, flags);
+    const opened = nodeFs.fstatSync(fd);
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino
+    ) {
+      return {
+        state: 'invalid',
+        reason: 'marker identity changed before read',
+      };
+    }
+    const markerBuffer = Buffer.alloc(WORKTREE_SESSION_MARKER_MAX_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead < markerBuffer.length) {
+      const chunk = nodeFs.readSync(
+        fd,
+        markerBuffer,
+        bytesRead,
+        markerBuffer.length - bytesRead,
+        bytesRead,
+      );
+      if (chunk === 0) break;
+      bytesRead += chunk;
+    }
+    if (bytesRead > WORKTREE_SESSION_MARKER_MAX_BYTES) {
+      return { state: 'invalid', reason: 'unsafe marker size or identity' };
+    }
+    const raw = markerBuffer.subarray(0, bytesRead).toString('utf8');
+    const after = nodeFs.fstatSync(fd);
+    const pathStats = nodeFs.lstatSync(markerPath);
+    if (
+      !after.isFile() ||
+      after.nlink !== 1 ||
+      after.size !== bytesRead ||
+      after.size > WORKTREE_SESSION_MARKER_MAX_BYTES ||
+      after.dev !== opened.dev ||
+      after.ino !== opened.ino ||
+      !pathStats.isFile() ||
+      pathStats.nlink !== 1 ||
+      pathStats.dev !== after.dev ||
+      pathStats.ino !== after.ino
+    ) {
+      return {
+        state: 'invalid',
+        reason: 'marker identity changed during read',
+      };
+    }
+    const sessionId = raw.trim();
+    if (
+      sessionId.length === 0 ||
+      sessionId !== raw ||
+      Buffer.byteLength(sessionId, 'utf8') > WORKTREE_SESSION_MARKER_MAX_BYTES
+    ) {
+      return { state: 'invalid', reason: 'invalid marker owner' };
+    }
+    return {
+      state: 'valid',
+      sessionId,
+      uid: process.geteuid === undefined ? null : after.uid,
+      dev: after.dev,
+      ino: after.ino,
+    };
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return observedMarker
+        ? { state: 'invalid', reason: 'marker disappeared during read' }
+        : { state: 'missing' };
+    }
+    return {
+      state: 'invalid',
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        nodeFs.closeSync(fd);
+      } catch {
+        // Best-effort close; the read result above stands.
+      }
+    }
+  }
+}
+
+/**
+ * Transfer the worktree marker's ownership to a replacement session.
+ *
+ * `expectedOwner` is the session id the opening strict read must find, or
+ * `null` for the missing-marker hatch (caller already proved the sidecar
+ * valid; the marker is re-created by linking a fully staged file into the
+ * path, which fails when a concurrently created marker already occupies it
+ * instead of overwriting it).
+ *
+ * An owned marker is rewritten through `atomicWriteFile` (sibling temp +
+ * fsync + rename) with an `assertCanCommit` hook that re-reads the marker
+ * synchronously and compares owner, dev/ino, and uid against the opening
+ * read — a marker swapped between the read and the commit aborts the write.
+ * Where uid identity is available, a foreign-owned marker is refused outright
+ * rather than rewritten through the ownership-preserving in-place path.
+ *
+ * The missing-marker hatch delegates to
+ * {@link createWorktreeSessionMarkerExclusive}, so a failure after that
+ * create committed surfaces as {@link WorktreeMarkerCommittedError}: the
+ * marker already names `newOwner` and must not be compensated backwards.
+ */
+export async function transferWorktreeSessionMarkerOwner(
+  worktreePath: string,
+  expectedOwner: string | null,
+  newOwner: string,
+): Promise<void> {
+  assertValidWorktreeSessionMarkerOwner(newOwner);
+  if (expectedOwner !== null) {
+    assertValidWorktreeSessionMarkerOwner(expectedOwner);
+    if (expectedOwner === newOwner) {
+      throw new Error('Worktree marker transfer needs a distinct new owner');
+    }
+  }
+  const opening = await readWorktreeSessionMarkerStrict(worktreePath);
+  if (opening.state === 'invalid') {
+    throw new Error(`Worktree marker is invalid: ${opening.reason}`);
+  }
+  if (opening.state === 'missing') {
+    if (expectedOwner !== null) {
+      throw new Error('Worktree marker owner does not match the expectation');
+    }
+    await createWorktreeSessionMarkerExclusive(worktreePath, newOwner);
+    return;
+  }
+  if (opening.sessionId !== expectedOwner) {
+    throw new Error('Worktree marker owner does not match the expectation');
+  }
+  const euid = process.geteuid?.();
+  if (euid !== undefined && opening.uid !== null && opening.uid !== euid) {
+    throw new Error('Worktree marker is owned by a different uid');
+  }
+  const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+  await atomicWriteFile(markerPath, newOwner, {
+    mode: 0o600,
+    noFollow: true,
+    assertCanCommit: () => {
+      const current = readWorktreeSessionMarkerStrictSync(worktreePath);
+      if (
+        current.state !== 'valid' ||
+        current.sessionId !== opening.sessionId ||
+        current.dev !== opening.dev ||
+        current.ino !== opening.ino ||
+        current.uid !== opening.uid
+      ) {
+        throw new Error('Worktree marker changed during ownership transfer');
+      }
+    },
+  });
+  await addWorktreeSessionMarkerExclude(worktreePath);
 }
 
 /**
@@ -1087,7 +1385,7 @@ export class GitWorktreeService {
         baseBranch ??
         (await this.getCurrentBranch());
       return await this.withStagedChanges(worktreeGit, () =>
-        worktreeGit.diff(['--binary', '--cached', base]),
+        worktreeGit.diff([...NO_EXEC_DIFF_FLAGS, '--binary', '--cached', base]),
       );
     } catch (error) {
       return `Error getting diff: ${error instanceof Error ? error.message : 'Unknown error'}`;
@@ -1125,7 +1423,7 @@ export class GitWorktreeService {
       }
 
       const patch = await this.withStagedChanges(worktreeGit, () =>
-        worktreeGit.diff(['--binary', '--cached', base]),
+        worktreeGit.diff([...NO_EXEC_DIFF_FLAGS, '--binary', '--cached', base]),
       );
 
       if (!patch.trim()) {
@@ -2456,17 +2754,31 @@ export class GitWorktreeService {
    */
   async hasWorktreeChanges(worktreePath: string): Promise<boolean> {
     try {
-      const { simpleGit } = await loadSimpleGit();
-      const wtGit = simpleGit(worktreePath);
-      const status = await wtGit.status();
-      // Defensive: `status.isClean()` reads several status arrays, but
-      // we OR with `conflicted.length` explicitly so future simple-git
-      // versions that change the bookkeeping cannot silently let a
-      // mid-merge worktree appear clean to the agent cleanup path
-      // (which would then delete it and lose the resolution work).
-      // `not_added` covers untracked; `staged`/`modified`/etc. cover
-      // the rest.
-      return !status.isClean() || status.conflicted.length > 0;
+      // `--no-optional-locks` keeps the read from refreshing and writing the
+      // index, so a tree-shipped `.git/hooks/post-index-change` never runs and
+      // the probe stays a pure read. The flag is carried in argv — not via
+      // simple-git's `.env('GIT_OPTIONAL_LOCKS', '0')`, whose two-arg form
+      // *replaces* the child environment (dropping PATH/HOME and hiding the
+      // global `core.excludesFile` / `safe.directory`).
+      const { stdout } = await execFileAsync(
+        'git',
+        [
+          ...NO_EXEC_CONFIG,
+          '--no-optional-locks',
+          'status',
+          '--porcelain',
+          '--untracked-files=all',
+        ],
+        {
+          cwd: worktreePath,
+          encoding: 'utf8',
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      );
+      // Porcelain v1 emits one line per change (`XY path`); any line — tracked
+      // (` M`), untracked (`??`), or conflicted (`UU`) — means the worktree is
+      // not clean.
+      return stdout.trim().length > 0;
     } catch {
       return true;
     }
@@ -2480,22 +2792,36 @@ export class GitWorktreeService {
     worktreePath: string,
   ): Promise<{ tracked: number; untracked: number } | null> {
     try {
-      const { simpleGit } = await loadSimpleGit();
-      const wtGit = simpleGit(worktreePath);
-      const status = await wtGit.status();
-      // `conflicted` is mutually exclusive with the other arrays in
-      // simple-git's status — a worktree mid-merge with no other
-      // edits would otherwise read as `{tracked: 0, untracked: 0}`
-      // and slip past the dirty-state guard in `exit_worktree`,
-      // discarding the merge resolution. Treat as tracked changes.
-      const tracked =
-        status.staged.length +
-        status.modified.length +
-        status.deleted.length +
-        status.renamed.length +
-        status.created.length +
-        status.conflicted.length;
-      const untracked = status.not_added.length;
+      const { stdout } = await execFileAsync(
+        'git',
+        [
+          ...NO_EXEC_CONFIG,
+          '--no-optional-locks',
+          'status',
+          '--porcelain',
+          '--untracked-files=all',
+        ],
+        {
+          cwd: worktreePath,
+          encoding: 'utf8',
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      );
+      let tracked = 0;
+      let untracked = 0;
+      // Porcelain v1: each change line begins with a two-char status code.
+      // `??` is untracked; every other code is a tracked change — staged,
+      // unstaged, renamed, or conflicted (`UU` and friends, which porcelain v1
+      // emits as ordinary lines, so the mid-merge case the previous simple-git
+      // enumeration already covered stays covered).
+      for (const line of stdout.split('\n')) {
+        if (line.length === 0) continue;
+        if (line.startsWith('??')) {
+          untracked += 1;
+        } else {
+          tracked += 1;
+        }
+      }
       return { tracked, untracked };
     } catch {
       return null;

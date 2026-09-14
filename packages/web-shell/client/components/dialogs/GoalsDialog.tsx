@@ -5,8 +5,13 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { GOAL_CHECKPOINT_STALL_LIMIT } from '@qwen-code/sdk/daemon';
+import { sanitizeControlChars } from '../messages/toolFormatting';
 import { buildGoalControlRequest } from '../../utils/goalControlRequest';
-import { canResumeGoal } from '../../utils/goalGate';
+import {
+  canResumeGoal,
+  goalCheckpointHealthVisible,
+} from '../../utils/goalGate';
 import {
   useWorkspaceActions,
   type DaemonGoal,
@@ -15,7 +20,7 @@ import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import { formatRuntime } from '../../utils/formatRuntime';
-import { getGoalActiveTimeMs } from '../GoalStatusStrip';
+import { getGoalActiveTimeMs, getGoalTokenLabel } from '../GoalStatusStrip';
 import styles from './GoalsDialog.module.css';
 
 /**
@@ -369,6 +374,29 @@ export function GoalsDialog({
           const canPause = goal.status === 'active';
           // Shared with `GoalStatusStrip` so the two gates cannot drift apart.
           const canResume = canResumeGoal(goal);
+          const tokenLabel = getGoalTokenLabel(goal, t);
+          // Checkpoint health, before the stall breaker has to stop the Goal,
+          // under the terminal cards' visibility rule (goalGate pins its copy
+          // to core's). The gate reads the raw value, as core does; sanitizing
+          // escapes control characters rather than removing them, so it is
+          // applied only to the text shown.
+          const checkpointStalls = goal.checkpointStalls ?? 0;
+          const checkpointFailure = sanitizeControlChars(
+            goal.lastCheckpointFailure ?? '',
+          ).trim();
+          const checkpointLine = goalCheckpointHealthVisible(goal)
+            ? [
+                checkpointStalls > 0
+                  ? t('goal.checkpointStalled', {
+                      count: checkpointStalls,
+                      limit: GOAL_CHECKPOINT_STALL_LIMIT,
+                    })
+                  : t('goal.checkpointFailed'),
+                checkpointFailure,
+              ]
+                .filter(Boolean)
+                .join(' · ')
+            : undefined;
           return (
             <div key={item.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
@@ -438,6 +466,19 @@ export function GoalsDialog({
                 </div>
               )}
 
+              {checkpointLine && (
+                <div
+                  className={styles.cardReason}
+                  data-testid="goal-checkpoint"
+                  title={checkpointLine}
+                >
+                  <span className={styles.reasonLabel}>
+                    {t('goal.checkpoint')}:
+                  </span>{' '}
+                  {checkpointLine}
+                </div>
+              )}
+
               <div className={styles.cardFooter}>
                 <span className={styles.statusPill}>
                   {t(`goal.status.${goal.status}`)}
@@ -452,6 +493,11 @@ export function GoalsDialog({
                       })
                     : t('goals.notYetEvaluated')}
                 </span>
+                {tokenLabel ? (
+                  <span className={styles.meta} data-testid="goal-tokens">
+                    {tokenLabel}
+                  </span>
+                ) : null}
                 <span className={styles.meta} data-testid="goal-elapsed">
                   {formatRuntime(getGoalActiveTimeMs(item.snapshot, now))}
                 </span>

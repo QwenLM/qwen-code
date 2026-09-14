@@ -26,7 +26,6 @@
 //      LLM reads to drive the rest of Step 1.
 
 import type { CommandModule } from 'yargs';
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -34,15 +33,22 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
-  readReviewWorktreeLease,
+  readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
-  reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { sanitizedGitEnv } from './lib/worktree.js';
+import {
+  redirectedAncestor,
+  untrustedGitfile,
+  untrustedRepositoryFrom,
+} from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
-import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
+import {
+  deadlineOption,
+  EFFORT_OPTION,
+  type ReviewEffort,
+} from './parse-args.js';
 import {
   git,
   gitOpt,
@@ -68,6 +74,11 @@ import {
 } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import {
+  automaticReviewRequested,
+  DOCS_NAV_PROFILE,
+  isStaticDocsNavDiff,
+} from './lib/docs-nav-profile.js';
+import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
   READ_FILE_CHAR_CAP,
@@ -88,6 +99,7 @@ import {
   recordResume,
   recordRestart,
   RESUME_MAX,
+  currentSessionEntry,
 } from './lib/run-ledger.js';
 import {
   assessResume,
@@ -95,7 +107,13 @@ import {
   type ResumeRefusal,
 } from './lib/resume.js';
 import {
-  hasReviewDeadline,
+  captureDeadline,
+  describeResumedWall,
+  envDeadlineInForce,
+  minutesText,
+  parseDeadlineOption,
+  recordedPlanDeadline,
+  validateDeadlineFlag,
   readBudgetStop,
   clearBudgetStop,
   clearRoundStamps,
@@ -131,6 +149,8 @@ interface FetchPrArgs {
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
   effort?: ReviewEffort;
+  /** `--deadline`: minutes, or `none`; omitted for the tier's default wall. */
+  deadline?: string;
   /**
    * The incremental anchor — the head the last clean round reviewed. Typed
    * as possibly-repeated because yargs collapses a repeated flag into an
@@ -639,17 +659,11 @@ function cleanStale(prNumber: string): void {
     );
   }
   const ref = reviewBranch(prNumber);
-  if (refExists(ref)) {
-    tryRemove(() =>
-      execFileSync('git', ['branch', '-D', ref], {
-        stdio: 'pipe',
-        // Same reason as every other git spawn in this pipeline: a delete must
-        // land in the repository the caller named, not the one the shell's
-        // `GIT_DIR` points at.
-        env: sanitizedGitEnv(),
-      }),
-    );
-  }
+  // Through `lib/git`'s wrapper, not a direct spawn: `branch -D` finds its
+  // repository from `process.cwd()` and is a reference-transaction hook
+  // channel, so an ungated one runs whatever hooks a planted pointer
+  // configures. `gitOpt` never throws, which is what `tryRemove` was for.
+  if (refExists(ref)) gitOpt('branch', '-D', ref);
 }
 
 /** sha256 of a file's raw bytes, or null when it cannot be read. */
@@ -709,11 +723,35 @@ function tryResume(
   const markerResumes = marker.resumes.filter(
     (r) => r.sessionId.toLowerCase() !== currentKey,
   ).length;
+  // Before reading anything through this tree's own pointer: `--resume`
+  // coexists with the sandbox on the very lane it polices, and the tree it
+  // reads is the one the previous run's containerized commands could write.
+  // `status` REFRESHES THE INDEX, so a planted `core.fsmonitor` runs on the
+  // host inside the very command that collects the ruling's evidence — the
+  // attack does not need the resume to succeed. See `untrustedGitfile`.
+  // REFUSE TO FRESH, not refuse to crash. Throwing here propagates out of
+  // `runFetchPr`, the enclosing catch rolls the lease back and re-throws, and
+  // `cleanStale` — the thing that would REMOVE the planted tree — is never
+  // reached. That contradicts what this file, the `--resume` describe and the
+  // docs all promise: the flag never fails a run that could start over. So
+  // this returns a refusal like every other one, the fresh path runs, and the
+  // planted tree is swept on the way.
+  if (untrustedGitfile(wt) !== null) {
+    return {
+      resumed: false,
+      reason: 'worktree-untrusted',
+      priorFetchedSha: null,
+    };
+  }
   // `--porcelain` prints nothing on a clean tree; a null (the command could
   // not run) is treated as dirty. `--untracked-files=normal` explicitly, so
   // a `status.showUntrackedFiles=no` tuning cannot hide residue that is not
-  // in the PR.
+  // in the PR. `core.fsmonitor` inert here too: the gate above proves the
+  // pointer, this proves the command cannot be turned into an execution even
+  // if some future path reaches it ungated.
   const status = gitOpt(
+    '-c',
+    'core.fsmonitor=',
     '-C',
     wt,
     'status',
@@ -740,14 +778,19 @@ function tryResume(
     };
   }
 
-  // Budget hygiene: the continuation runs under a fresh deadline, so a
-  // time-budget stop is the dead attempt's, not this run's, and is cleared.
+  // Budget hygiene: the continuation runs under a fresh deadline (CI
+  // recomputes its epoch per attempt; a plan-recorded wall restarts from the
+  // new session's ledger entry), so a time-budget stop is the dead attempt's,
+  // not this run's, and is cleared.
   // A round-cap stop is about rounds, not time — it is the trusted CLI's own
   // record that the audit reached its round cap, so it stands, and the round
-  // stamps stay with it. Any other stop is cleared with the stamps: the span
-  // from the dead attempt's last stamp to the continuation's first admission
-  // spans the death gap and would price a round at hours; without the stamps
-  // the gate falls back to its conservative constant.
+  // stamps stay with it (the pricers read only this attempt's stamps, so a
+  // new session never prices the death gap from them). Any other stop is
+  // cleared with the stamps: a SAME-session resume continues the attempt,
+  // and there the span from the dead attempt's last stamp to the
+  // continuation's first admission would still cross the death gap and
+  // price a round at hours; without the stamps the gate falls back to its
+  // conservative constant.
   const stop = readBudgetStop(out);
   const roundCapStands = stop !== null && stop.cause === 'round-cap';
   if (stop !== null && !roundCapStands) {
@@ -758,6 +801,56 @@ function tryResume(
   }
   appendRunSession(out);
   recordResume(out);
+  // The wall a continuation runs under dates from THIS session's ledger
+  // entry; `appendRunSession` is bookkeeping that never throws, so say when
+  // it did not land — the wall then dates from the first attempt, and the
+  // note below says how much of it is left, or that it has run out, before
+  // the fan-out is spent on a round the builder will refuse. (A session id
+  // is always set here: the lease identity check above refuses to run
+  // without one, so a missing entry is a ledger that did not take, never
+  // a shell that keeps none.) Only where a plan wall would date from the
+  // entry: a plan without one, or a run the environment's epoch bounds,
+  // has no wall to date, and the note would contradict the one after it.
+  if (
+    recordedPlanDeadline(out) !== null &&
+    !envDeadlineInForce(process.env) &&
+    currentSessionEntry(out, process.env) === null
+  ) {
+    writeStderrLine(
+      'fetch-pr: the run-session ledger did not record this attempt, so ' +
+        "the plan's wall dates from the first attempt, not from now.",
+    );
+  }
+  const inherited = describeResumedWall(process.env, out);
+  if (inherited !== null) writeStderrLine(`fetch-pr: ${inherited}`);
+  // The plan is not rewritten on resume, so a `--deadline` passed now cannot
+  // land in it; say so — and say what the plan actually holds, read from the
+  // plan alone, rather than assert a wall it may never have recorded.
+  if (parseDeadlineOption(args.deadline) !== 'default') {
+    const recorded = recordedPlanDeadline(out);
+    const minutes = recorded === null ? '' : minutesText(recorded.seconds);
+    // "In force" the way the gates decide it — a finite, positive epoch —
+    // not the presence of a string: a malformed value is no clock at all.
+    const epochInForce = envDeadlineInForce(process.env);
+    writeStderrLine(
+      'fetch-pr: --deadline is ignored on a resumed run — ' +
+        (recorded === null
+          ? epochInForce
+            ? "the plan recorded no wall; the environment's epoch bounds " +
+              'this continuation.'
+            : 'the plan recorded no wall, so this continuation is bounded ' +
+              'by the round cap alone.'
+          : (recorded.source === 'flag'
+              ? `the plan keeps the ${minutes}-minute wall its own ` +
+                '--deadline recorded at capture.'
+              : `the plan keeps the ${minutes}-minute default wall it ` +
+                'recorded at capture.') +
+            (epochInForce
+              ? ' The environment exports an epoch, which takes precedence ' +
+                'while it stands.'
+              : '')),
+    );
+  }
   // Read the marker back: `recordResume` deduplicates by session, so a
   // second `--resume` in the SAME session is the same resume, and deriving
   // the number from the pre-write count would announce attempt 2 for it.
@@ -810,6 +903,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
   }
+  // A malformed or too-short --deadline is a usage error, and it must fail
+  // here with the other argument checks — before detection, auth, and the
+  // worktree lease — not at the plan write after all of that: both bars,
+  // the env-free floor and this shell's pricing. The same validation runs
+  // again inside `captureDeadline`; it is pure given the environment. A
+  // `--resume` skips the shell bar here: the flag is ignored on a resumed
+  // plan, and a resume that falls through to a fresh capture meets that bar
+  // right after the fallthrough is ruled, before anything is destroyed.
+  validateDeadlineFlag(process.env, args.deadline, {
+    shellPriced: !args.resume,
+  });
   // Validate before coercing: Number('1e3') is 1000, so an unvalidated token
   // would fetch a DIFFERENT PR's head while the ref/worktree/report all carry
   // the caller's label. `[1-9]` also rejects `0` (no PR zero — the message
@@ -825,6 +929,46 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
   const ref = reviewBranch(prNumber);
   const wt = worktreePath(prNumber);
+
+  // BEFORE the first git command of the run, not at step 4. Every git
+  // invocation this command makes without an explicit `-C` — `cleanStale`'s
+  // `worktree remove --force`, step 2's `git fetch`, the branch rollbacks —
+  // discovers its repository from `process.cwd()`, and in the nested geometry
+  // `mountRootFor` documents (a review running inside another review's
+  // worktree) that launch directory sits inside the outer review's read-write
+  // mount: the outer PR's containerized build can rewrite the pointer git
+  // resolves here. `git fetch` through a rewritten pointer loads the planted
+  // repository's transport config — `core.sshCommand`, `remote.*.uploadpack`,
+  // a `url.*.insteadOf` rewrite — and runs it on the host. Gating only the
+  // `worktree add` at step 4 left every command before it resolving through
+  // exactly the pointer the gate exists to distrust.
+  //
+  // Kept at this call site even though `lib/git`'s wrappers now ask the same
+  // question (see `assertTrustedLaunchDir`), because this command changes
+  // state that is NOT a git call before it makes one: the lease read and the
+  // lease write both land before `cleanStale`, and a run that registers a
+  // lease and then dies at the first git command has taken the lock for
+  // nothing. The ordering test pins exactly that — no lease read, no sweep,
+  // no git call.
+  //
+  // A throw, not a refusal-to-fresh like the `--resume` gate's: that one can
+  // fall back because the fresh path is the safe one, and here the fresh path
+  // is what has been poisoned. There is no command left to run in a
+  // repository this process cannot locate honestly — `cleanStale` would sweep
+  // through the same pointer.
+  //
+  // Says nothing outside a mount (`mountRootFor` answers null), so an ordinary
+  // `qwen review` from a normal checkout never reaches the question.
+  const launchUntrusted = untrustedRepositoryFrom(process.cwd());
+  if (launchUntrusted !== null) {
+    throw new Error(
+      `refusing to review PR #${prNumber} from this directory: ` +
+        `${launchUntrusted}. Every git command below — the stale-worktree ` +
+        `sweep, the PR fetch, the worktree creation — would resolve through ` +
+        `that pointer and run whatever the repository it names configures. ` +
+        `Run the review from a checkout outside the review temp dir.`,
+    );
+  }
 
   // The lease is also a lock. The worktree path is fixed per PR number, so
   // the stale-clean below would remove a worktree ANOTHER session is actively
@@ -851,15 +995,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `concurrent session.`,
     );
   }
-  const holder = readReviewWorktreeLease(process.cwd(), leaseTarget);
-  if (reviewLeaseHeldByAnotherSession(holder)) {
+  const holder = readReviewWorktreeLeaseAt(process.cwd(), leaseTarget);
+  if (holder && reviewLeaseHeldByAnotherSession(holder.lease)) {
     throw new Error(
       `PR #${prNumber} is already being reviewed by another session ` +
-        `(session ${holder.sessionId}). Same-PR reviews share one worktree ` +
+        `(session ${holder.lease.sessionId}). Same-PR reviews share one worktree ` +
         `path and cannot run concurrently, so this run refuses rather than ` +
         `destroy the other session's state. Wait for that session to finish ` +
         `— its cleanup releases the lease — or, only if that session is ` +
-        `gone, delete ${reviewLeasePath(process.cwd(), leaseTarget)} and ` +
+        `gone, delete ${holder.path} and ` +
         `re-run.`,
     );
   }
@@ -912,6 +1056,19 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     if (args.resume) {
       const outcome = tryResume(args, wt, platform);
       if (outcome.resumed) return;
+      // The fresh review that follows WILL record the flag, so the shell bar
+      // the resume check skipped is owed now — before the stale worktree is
+      // destroyed and the head fetched, not at the plan write after them —
+      // and before the two lines below, which promise a fresh review (the
+      // stdout one is a machine contract: "the report at --out is new").
+      try {
+        validateDeadlineFlag(process.env, args.deadline);
+      } catch (err) {
+        throw new TypeError(
+          `Cannot resume PR #${prNumber} (${outcome.reason}); the fresh ` +
+            `review it falls through to refuses --deadline: ${(err as Error).message}`,
+        );
+      }
       resumeRefusal = outcome.reason;
       priorFetchedSha = outcome.priorFetchedSha;
       writeStdoutLine(
@@ -978,16 +1135,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         );
       }
     } catch (err) {
-      // Roll back the fetched ref so the next run starts clean.
-      tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], {
-          stdio: 'pipe',
-          // Same reason as every other git spawn in this pipeline: a delete must
-          // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at.
-          env: sanitizedGitEnv(),
-        }),
-      );
+      // Roll back the fetched ref so the next run starts clean — through the
+      // gated wrapper, for the reason `cleanStale` gives.
+      gitOpt('branch', '-D', ref);
       throw new Error(
         `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
       );
@@ -997,19 +1147,68 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     const needsLocalStats = platform.kind !== 'github';
 
     // 4. Create the ephemeral worktree.
+    //
+    // Asked a SECOND time, immediately before the write. The hoisted gate at
+    // the top of this function is what keeps the fetch and the sweep from
+    // running through a poisoned pointer; this one narrows the window between
+    // that answer and the checkout `worktree add` performs, which is the step
+    // that executes a planted filter. Neither closes the TOCTOU window a
+    // same-user writer has — `scratch-tree` documents the same residual — and
+    // one spawn is a cheap price for making the window one function long
+    // instead of one command long.
+    //
+    // The pointer it judges is the LAUNCH directory's, not the new tree's:
+    // `git()` sets no cwd, so `worktree add` finds the repository from
+    // `process.cwd()`. Gating `wt`'s OWN pointer would be a no-op — a tree
+    // that does not exist yet has no pointer to distrust.
+    //
+    // OUTSIDE the try, because the catch below is a rollback. Thrown from
+    // inside, the refusal was caught by the path that deletes the fetched ref,
+    // and `branch -D` is a reference-transaction hook channel: the gate said
+    // "do not resolve through this pointer" and its own refusal immediately
+    // did, running the plant's hooks and then reporting the run as `Failed to
+    // create worktree at …` — indistinguishable from an infrastructure
+    // failure. Outside, it propagates to the lease rollback, which spawns no
+    // git at all, and reaches the user unmangled.
+    const freshUntrusted = untrustedRepositoryFrom(process.cwd());
+    if (freshUntrusted !== null) {
+      throw new Error(
+        `refusing to create a review worktree: ${freshUntrusted}`,
+      );
+    }
+    // The DESTINATION itself, and its ancestors (R27-9): `cleanStale` is not
+    // proof the path of `wt` is real — `releaseWorktree` DECLINES the sweep
+    // when a symlink sits at an ancestor (`git.ts`), prints a line, and
+    // leaves the link standing. `mkdirSync(dirname(wt))` would then create
+    // THROUGH the link and `git worktree add wt ref` would create and check
+    // out the PR's code at the link's target — outside the review temp dir,
+    // where `mountRootFor` answers null and the build/test phase runs
+    // unsandboxed in a directory the planter chose. Outside the rollback try
+    // for the same reason as the gate above.
+    //
+    // The walk starts AT `wt`, not at its parent. A link at the leaf is the
+    // cheaper plant of the two: `releaseWorktree` unlinks one it can reach,
+    // but `cleanStale` only WARNS when that release reports `freed: false`
+    // (an EACCES on `.qwen/tmp` is enough) and runs on to here, and `git
+    // worktree add` through a leaf link creates and checks out at the link's
+    // target — measured on git 2.43, exit 0 with the tree in the external
+    // directory. `redirectedAncestor` lstats its first component before any
+    // stop test, so asking at the leaf adds it to the same walk at no cost:
+    // a real directory or an absent path there is not a link, and the walk
+    // proceeds to the ancestors exactly as before.
+    const wtRedirected = redirectedAncestor(resolve(wt));
+    if (wtRedirected !== null) {
+      throw new Error(
+        `refusing to create a review worktree at ${wt}: ${wtRedirected} is ` +
+          `a symlink, so the create and checkout would land wherever it ` +
+          `points — outside the review temp dir. Remove the link and re-run.`,
+      );
+    }
     try {
       mkdirSync(dirname(wt), { recursive: true });
       git('worktree', 'add', wt, ref);
     } catch (err) {
-      tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], {
-          stdio: 'pipe',
-          // Same reason as every other git spawn in this pipeline: a delete must
-          // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at.
-          env: sanitizedGitEnv(),
-        }),
-      );
+      gitOpt('branch', '-D', ref);
       throw new Error(
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,
       );
@@ -1627,6 +1826,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       baseFetchFailed,
       diffText: fullText ?? '',
     });
+    const wall = captureDeadline(process.env, args.deadline, plan);
     const result: FetchPrResult = {
       prNumber,
       ownerRepo,
@@ -1715,9 +1915,24 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       ...(anchor ? { incremental: anchor.incremental } : {}),
       ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
         operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-        hasDeadline: hasReviewDeadline(process.env),
+        hasDeadline: wall.explicit,
       }),
+      ...wall.fields,
       ...planEffortField(args.effort),
+      ...(automaticReviewRequested() &&
+      !args.resume &&
+      !anchor?.incremental.effective &&
+      !baseFetchFailed &&
+      mergeBaseSha !== null &&
+      fullText !== null &&
+      isStaticDocsNavDiff(fullText, (side, path) =>
+        gitRaw(
+          'show',
+          `${side === 'base' ? mergeBaseSha : fetchedSha}:${path}`,
+        ).toString('utf8'),
+      )
+        ? { reviewProfile: DOCS_NAV_PROFILE }
+        : {}),
     };
 
     writeFileSync(out, stringifyPlanReport(result), 'utf8');
@@ -1733,7 +1948,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    Best-effort by contract — the prebuild records a reason instead of
     //    throwing — and absent from the report entirely when not asked for,
     //    so every local review reads the plan it always did.
-    if (prebuildRequested() && !emptyDiff) {
+    if (
+      prebuildRequested() &&
+      !emptyDiff &&
+      result.reviewProfile !== DOCS_NAV_PROFILE
+    ) {
       if (!prebuildCovered()) {
         // CI welds the opt-in together with a session-shell default that
         // carries the budget; a local opt-in has only the built-in 120s
@@ -1988,6 +2207,7 @@ export const fetchPrCommand: CommandModule = {
           'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
       .option('effort', EFFORT_OPTION)
+      .option('deadline', deadlineOption({ resumes: true }))
       .option('since', {
         type: 'string',
         describe:

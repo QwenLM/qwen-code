@@ -15,8 +15,7 @@
   padding: 3px 9px;
   border-radius: 20px;
   cursor: pointer;
-  border: 1px solid
-    color-mix(in srgb, var(--git-mode-current) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--git-mode-current) 20%, transparent);
   background: color-mix(in srgb, var(--git-mode-current) 10%, transparent);
   color: var(--git-mode-current);
   transition:

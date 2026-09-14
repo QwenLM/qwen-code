@@ -264,10 +264,7 @@ export interface CreateChannelWorkerSupervisorOptions {
 }
 
 function selectionChannelArgs(selection: ServeChannelSelection): string[] {
-  return channelSelectionNames(selection).flatMap((name) => [
-    '--channel',
-    name,
-  ]);
+  return channelSelectionNames(selection).map((name) => `--channel=${name}`);
 }
 
 function defaultSpawnWorker(

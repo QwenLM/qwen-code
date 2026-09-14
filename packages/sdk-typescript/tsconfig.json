@@ -34,7 +34,19 @@
 
     /* Module Resolution */
     "resolveJsonModule": true,
-    "types": ["node"]
+    "types": ["node"],
+    "baseUrl": ".",
+    // The cli bundle pulls these sources in through the cli tsconfig
+    // `@qwen-code/sdk/*` mapping, and mainBuild discovers this file per
+    // importing file (it passes no `tsconfig` option). Without a named entry
+    // here, core subpath imports fall back to the `exports` map and bundle a
+    // packages/core/dist copy next to the packages/core/src copy every
+    // package-root import loads. Mirrors packages/acp-bridge/tsconfig.json.
+    "paths": {
+      "@qwen-code/qwen-code-core/transcriptRecords": [
+        "../core/src/utils/transcript-records.ts"
+      ]
+    }
   },
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist", "test", ".integration-tests"]

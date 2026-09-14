@@ -19,6 +19,7 @@ import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { formatRuntime } from '../../utils/formatRuntime';
 import {
   getAgentDescription,
+  getSubagentDetailsUnavailableReason,
   getAgentDisplayStatus,
   isAgentCancelled,
   sanitizeControlChars,
@@ -61,6 +62,12 @@ const EMPTY_GRAPH_LAYOUT: PlanGraphLayout = {
 const EDGE_LANE_HEIGHT = 9;
 /** Corner radius where an orthogonal edge turns. */
 const EDGE_CORNER = 6;
+/**
+ * Widest horizontal shoulder a layer-spanning edge runs before turning down
+ * into its return lane. It is a ceiling, never a floor: a narrow gutter takes
+ * half of its own run instead. See the router for why.
+ */
+const EDGE_SHOULDER = 24;
 
 const MAX_RENDERED_PLAN_EDGES = 500;
 
@@ -559,6 +566,7 @@ export function PlanExecutionView({
   // rather than defeating itself on fresh array identities.
   const {
     todosById,
+    stepNumberByTodo,
     toolsByTodo,
     unassigned,
     statesByTodo,
@@ -578,6 +586,12 @@ export function PlanExecutionView({
   } = useMemo(() => {
     const knownIds = new Set(todos.map((todo) => todo.id));
     const todosById = new Map(todos.map((todo) => [todo.id, todo]));
+    // The step number addresses a step in the inspector list and in the
+    // dependency chips, so the graph shows the same number or the three
+    // surfaces name the same step differently.
+    const stepNumberByTodo = new Map(
+      todos.map((todo, index) => [todo.id, index + 1]),
+    );
     const toolsByTodo = new Map<string, ACPToolCall[]>();
     const unassigned: ACPToolCall[] = [];
     for (const tool of tools) {
@@ -654,6 +668,7 @@ export function PlanExecutionView({
     }
     return {
       todosById,
+      stepNumberByTodo,
       toolsByTodo,
       unassigned,
       statesByTodo,
@@ -782,6 +797,9 @@ export function PlanExecutionView({
           ? graphRect.height / graphElement.offsetHeight
           : 1;
       const measuredNodes = new Map<string, DOMRect>();
+      // Horizontal extent of every topological layer, so an edge that skips
+      // a layer can size its shoulders from the gutter it really crosses.
+      const layerBounds = new Map<number, { left: number; right: number }>();
       let maxNodeBottom = 0;
       for (const [todoId, node] of nodeRefs.current) {
         const rect = node.getBoundingClientRect();
@@ -796,6 +814,17 @@ export function PlanExecutionView({
         } as DOMRect;
         measuredNodes.set(todoId, normalizedRect);
         maxNodeBottom = Math.max(maxNodeBottom, normalizedRect.bottom);
+        const layer = layerByTodoRef.current.get(todoId) ?? 0;
+        const bounds = layerBounds.get(layer);
+        if (bounds) {
+          bounds.left = Math.min(bounds.left, normalizedRect.left);
+          bounds.right = Math.max(bounds.right, normalizedRect.right);
+        } else {
+          layerBounds.set(layer, {
+            left: normalizedRect.left,
+            right: normalizedRect.right,
+          });
+        }
       }
       const edges: PlanEdgePath[] = [];
       const spanning: Array<{
@@ -832,7 +861,16 @@ export function PlanExecutionView({
             });
             continue;
           }
-          const controlX = startX + Math.max(24, (endX - startX) / 2);
+          // Half the run, not the old fixed 24px floor. The ≤720px gutter
+          // leaves a 24px run and the ≤480px gutter a 10px one, so a 24px
+          // shoulder put the control point exactly on the end point (zero
+          // tangent) or past it (negative tangent) — and `orient="auto"` then
+          // flips the arrowhead back at its source, which is the only
+          // direction cue left now that the input port is gone. Every gutter
+          // wide enough to afford the floor already resolved to run / 2, so
+          // wide lanes keep their exact curve while the end tangent's x stays
+          // strictly positive at every tier.
+          const controlX = startX + (endX - startX) / 2;
           edges.push({
             from: dependencyId,
             to: todoId,
@@ -850,8 +888,40 @@ export function PlanExecutionView({
           maxNodeBottom + 14 + lane * EDGE_LANE_HEIGHT,
           Math.max(graphHeight - 6, maxNodeBottom + 14),
         );
-        const dropX = edge.startX + 24;
-        const riseX = edge.endX - 24;
+        // Shoulders derived from the gutter each side actually has, the same
+        // way the adjacent-layer edge already does it — not a fixed 24px. The
+        // ≤480px gutter is 18px, so a 24px shoulder left a 10px run and put
+        // the vertical segment inside the intervening lane: a dependency from
+        // step 3 to step 5 looked like it entered step 4, and the SVG paints
+        // under the nodes so the lane just vanished into it. Halving the run
+        // centres the segment in its own gutter. EDGE_SHOULDER still wins
+        // wherever the gutter can afford it (the 64px desktop tier has a 56px
+        // run), so wide lanes keep the exact curve they had.
+        const sourceLayer = layerByTodoRef.current.get(edge.from) ?? 0;
+        const targetLayer = layerByTodoRef.current.get(edge.to) ?? 0;
+        // An unmeasured neighbouring layer falls back to the full shoulder.
+        const nextLayerLeft =
+          layerBounds.get(sourceLayer + 1)?.left ?? Number.POSITIVE_INFINITY;
+        const prevLayerRight =
+          layerBounds.get(targetLayer - 1)?.right ?? Number.NEGATIVE_INFINITY;
+        const dropShoulder = Math.min(
+          EDGE_SHOULDER,
+          (nextLayerLeft - 4 - edge.startX) / 2,
+        );
+        const riseShoulder = Math.min(
+          EDGE_SHOULDER,
+          (edge.endX - prevLayerRight - 4) / 2,
+        );
+        // The corner has to fit inside both shoulders. At 18px the shoulder
+        // is 5, so the unhalved 6px radius left a zero-length final segment
+        // and the arrowhead lost its direction again.
+        const corner = Math.min(
+          EDGE_CORNER,
+          dropShoulder / 2,
+          riseShoulder / 2,
+        );
+        const dropX = edge.startX + dropShoulder;
+        const riseX = edge.endX - riseShoulder;
         const down = routeY > edge.startY ? 1 : -1;
         const up = edge.endY > routeY ? 1 : -1;
         edges.push({
@@ -859,14 +929,14 @@ export function PlanExecutionView({
           to: edge.to,
           d:
             `M ${edge.startX} ${edge.startY} ` +
-            `H ${dropX - EDGE_CORNER} ` +
-            `Q ${dropX} ${edge.startY} ${dropX} ${edge.startY + EDGE_CORNER * down} ` +
-            `V ${routeY - EDGE_CORNER * down} ` +
-            `Q ${dropX} ${routeY} ${dropX + EDGE_CORNER} ${routeY} ` +
-            `H ${riseX - EDGE_CORNER} ` +
-            `Q ${riseX} ${routeY} ${riseX} ${routeY + EDGE_CORNER * up} ` +
-            `V ${edge.endY - EDGE_CORNER * up} ` +
-            `Q ${riseX} ${edge.endY} ${riseX + EDGE_CORNER} ${edge.endY} ` +
+            `H ${dropX - corner} ` +
+            `Q ${dropX} ${edge.startY} ${dropX} ${edge.startY + corner * down} ` +
+            `V ${routeY - corner * down} ` +
+            `Q ${dropX} ${routeY} ${dropX + corner} ${routeY} ` +
+            `H ${riseX - corner} ` +
+            `Q ${riseX} ${routeY} ${riseX} ${routeY + corner * up} ` +
+            `V ${edge.endY - corner * up} ` +
+            `Q ${riseX} ${edge.endY} ${riseX + corner} ${edge.endY} ` +
             `H ${edge.endX}`,
         });
       });
@@ -919,6 +989,10 @@ export function PlanExecutionView({
     };
   }, [drawsDependencyEdges, topologyKey]);
 
+  const openSubagentDetails = (tool: ACPToolCall) => {
+    if (!getSubagentDetailsUnavailableReason(tool)) onOpenSubagent?.(tool);
+  };
+
   if (todos.length === 0) return null;
 
   const selectedTodo = todosById.get(selectedTodoId ?? '');
@@ -930,6 +1004,12 @@ export function PlanExecutionView({
     : undefined;
   const selectedDependents = selectedTodo
     ? (dependentsByTodo.get(selectedTodo.id) ?? [])
+    : [];
+  // The same filtered projection the edges draw from: the topology builder
+  // drops ids that name no step (and self-references), so no control here
+  // can select a ghost id and hide this panel mid-navigation.
+  const selectedDependencies = selectedTodo
+    ? (dependencyIdsByTodo.get(selectedTodo.id) ?? [])
     : [];
   const detailsId = `plan-step-details-${graphId}`;
   const overallProgressId = `plan-overall-progress-${graphId}`;
@@ -979,9 +1059,15 @@ export function PlanExecutionView({
             expanded ? ` ${styles.executionExpanded}` : ''
           }`}
           data-plan-interactive
-          onClick={() => onOpenSubagent?.(tool)}
+          onClick={() => openSubagentDetails(tool)}
           disabled={!onOpenSubagent}
-          title={t('planExecution.openDetails')}
+          aria-disabled={
+            !!getSubagentDetailsUnavailableReason(tool) || undefined
+          }
+          title={t(
+            getSubagentDetailsUnavailableReason(tool) ??
+              'planExecution.openDetails',
+          )}
         >
           <span className={styles.executionHeading}>
             <span className={styles.executionLabel}>{label}</span>
@@ -1031,9 +1117,15 @@ export function PlanExecutionView({
               data-plan-interactive
               key={task.id}
               style={{ paddingLeft: `${Math.min(depth, 3) * 12}px` }}
-              onClick={() => onOpenSubagent?.(nestedTool)}
+              onClick={() => openSubagentDetails(nestedTool)}
               disabled={!onOpenSubagent}
-              title={t('planExecution.openDetails')}
+              aria-disabled={
+                !!getSubagentDetailsUnavailableReason(nestedTool) || undefined
+              }
+              title={t(
+                getSubagentDetailsUnavailableReason(nestedTool) ??
+                  'planExecution.openDetails',
+              )}
             >
               {content}
             </button>
@@ -1054,9 +1146,15 @@ export function PlanExecutionView({
             data-plan-interactive
             key={nestedTool.callId}
             style={{ paddingLeft: `${Math.min(depth, 3) * 12}px` }}
-            onClick={() => onOpenSubagent?.(nestedTool)}
+            onClick={() => openSubagentDetails(nestedTool)}
             disabled={!onOpenSubagent}
-            title={t('planExecution.openDetails')}
+            aria-disabled={
+              !!getSubagentDetailsUnavailableReason(nestedTool) || undefined
+            }
+            title={t(
+              getSubagentDetailsUnavailableReason(nestedTool) ??
+                'planExecution.openDetails',
+            )}
           >
             <span className={styles.executionLabel}>
               ↳{' '}
@@ -1160,7 +1258,12 @@ export function PlanExecutionView({
           ref={hasDependencies ? graphRef : undefined}
           style={
             hasDependencies
-              ? ({ '--plan-edge-lanes': graph.lanes } as CSSProperties)
+              ? ({
+                  '--plan-edge-lanes': graph.lanes,
+                  // Publish the lane pitch so .dagCanvas reserves bottom
+                  // padding from the same constant that places the lanes.
+                  '--plan-edge-lane-height': `${EDGE_LANE_HEIGHT}px`,
+                } as CSSProperties)
               : undefined
           }
         >
@@ -1231,10 +1334,63 @@ export function PlanExecutionView({
               {layer.map((todo) => {
                 const executions = toolsByTodo.get(todo.id) ?? [];
                 const state = statesByTodo.get(todo.id)!;
+                // Agent time this step has taken, summed across its root
+                // agent tasks. It is the node's "is this alive" signal, so it
+                // is on the face rather than only in the inspector.
+                const nodeRuntimeMs = executions.reduce(
+                  (total, tool) =>
+                    total + (taskForTool(tool, taskIndex)?.runtimeMs ?? 0),
+                  0,
+                );
+                // Agents, not bare executions: a nested subagent counts too,
+                // matching the rows this node renders and the inspector's
+                // Subagents list for the same step. The runtime above stays
+                // on roots, so nested time is not summed twice. Count from
+                // the same two sources renderExecution draws the rows from —
+                // live child tasks from the task index plus transcript
+                // subTools, deduped by toolUseId exactly as the rows are —
+                // otherwise a live child task with no transcript entry
+                // renders a row the count never sees.
+                const agentCount = executions.reduce((count, tool) => {
+                  const liveNested = nestedTasksFromIndex(tool, taskIndex);
+                  const liveCallIds = new Set(
+                    liveNested.flatMap(({ task }) =>
+                      task.toolUseId ? [task.toolUseId] : [],
+                    ),
+                  );
+                  const transcriptOnly = nestedAgentToolsForTool(tool).filter(
+                    ({ tool: nested }) => !liveCallIds.has(nested.callId),
+                  );
+                  return (
+                    count +
+                    (isSubAgentToolCall(tool) ? 1 : 0) +
+                    liveNested.length +
+                    transcriptOnly.length
+                  );
+                }, 0);
+                // blockedBy is model-authored and can repeat an id — or name
+                // the todo itself. Dedup and drop self-references like the
+                // topology builder; ghost ids stay, because above the edge
+                // budget this row is the dependency's only statement.
+                const faceDependencies = [
+                  ...new Set(todo.blockedBy ?? []),
+                ].filter((id) => id !== todo.id);
+                // Whether the visible chip row carries the dependency. It is
+                // rendered whenever nothing else can: drawn edges are
+                // aria-hidden, so they state it only visually; above
+                // MAX_RENDERED_PLAN_EDGES no edges draw at all; and with the
+                // details panel off (the cockpit) or selection disabled
+                // (document mode) the panel never states it either. When this
+                // is false the sr-only summary below carries the same fact to
+                // assistive tech instead, so the dependency is stated exactly
+                // once either way.
+                const statesDependenciesVisibly =
+                  !drawsDependencyEdges || !showStepDetails || documentMode;
                 return (
                   <article
                     className={styles.node}
                     data-status={state.status}
+                    data-attention={state.attention || undefined}
                     onPointerEnter={() => setHoveredTodoId(todo.id)}
                     onPointerLeave={() =>
                       setHoveredTodoId((current) =>
@@ -1249,11 +1405,11 @@ export function PlanExecutionView({
                         current === todo.id ? undefined : current,
                       )
                     }
-                    data-plan-input={
-                      (drawsDependencyEdges &&
-                        (dependencyIdsByTodo.get(todo.id)?.length ?? 0) > 0) ||
-                      undefined
-                    }
+                    // No input port: the left edge now carries the status
+                    // rule, and an incoming edge already terminates in an
+                    // arrowhead at the node — that arrowhead is the input
+                    // marker. Outgoing edges leave their source unmarked, so
+                    // the output port stays.
                     data-plan-output={
                       (drawsDependencyEdges &&
                         (dependentsByTodo.get(todo.id)?.length ?? 0) > 0) ||
@@ -1294,29 +1450,96 @@ export function PlanExecutionView({
                       }
                       disabled={documentMode}
                     >
+                      {/* Status reaches assistive tech as words; the left
+                          rule that carries it visually is colour only.
+                          Attention is announced beside the status word,
+                          never instead of it. */}
+                      <span className={styles.nodeStatusText}>
+                        {t(statusKey(state.status))}
+                        {state.attention
+                          ? `, ${t('planExecution.attention')}`
+                          : ''}
+                      </span>
                       <div className={styles.nodeTop}>
+                        <span className={styles.nodeNumber}>
+                          {(stepNumberByTodo.get(todo.id) ?? 0) || ''}
+                        </span>
+                        <span className={styles.nodeContent}>
+                          {todo.content}
+                        </span>
+                      </div>
+                      <div className={styles.nodeMeta}>
+                        {/* The glyph is the non-colour status channel, kept
+                            for every status so the graph still survives
+                            colour-blindness, high-contrast mode and a
+                            greyscale screenshot. It moved off the first line
+                            so the step's content leads, and it is muted so
+                            the left rule remains the only carrier of the
+                            status *colour*. */}
                         <i aria-hidden="true" className={styles.nodeGlyph}>
                           {PLAN_STATUS_GLYPH[state.status]}
                         </i>
-                        <span className={styles.nodeId}>{todo.id}</span>
-                        <span
-                          className={`${styles.nodeStatus} ${styles[state.status]}`}
-                        >
-                          {t(statusKey(state.status))}
-                        </span>
+                        {/* Attention's shape channel: on a paused node the
+                            data-attention rule re-declares the token paused
+                            already wears, so colour alone cannot tell it
+                            apart from healthy. */}
                         {state.attention && (
-                          <span className={styles.attention}>
-                            {t('planExecution.attention')}
+                          <i
+                            aria-hidden="true"
+                            className={styles.nodeAttentionMark}
+                          >
+                            !
+                          </i>
+                        )}
+                        {agentCount > 0 && (
+                          <span>
+                            {t('planExecution.agentCount', {
+                              count: agentCount,
+                            })}
                           </span>
                         )}
+                        {nodeRuntimeMs > 0 && (
+                          <span>{formatRuntime(nodeRuntimeMs)}</span>
+                        )}
                       </div>
-                      <div className={styles.nodeContent}>{todo.content}</div>
-                      {(todo.blockedBy?.length ?? 0) > 0 && (
-                        <div className={styles.dependencies}>
-                          {t('planExecution.dependsOn')}{' '}
-                          {todo.blockedBy!.join(', ')}
-                        </div>
-                      )}
+                      {statesDependenciesVisibly &&
+                        faceDependencies.length > 0 && (
+                          <div className={styles.dependencies}>
+                            <span>{t('planExecution.dependsOn')}</span>
+                            {faceDependencies.map((id) => (
+                              <span className={styles.dependencyChip} key={id}>
+                                <span>
+                                  {(stepNumberByTodo.get(id) ?? 0) || '?'}
+                                </span>
+                                <span className={styles.dependencyTitle}>
+                                  {todosById.get(id)?.content ?? id}
+                                </span>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      {/* The interactive graph draws the dependency instead
+                          of stating it, and drawn edges are aria-hidden — so
+                          without this the node's accessible name stops
+                          naming its blockers and a screen-reader user has to
+                          activate every node to find out what blocks it.
+                          Same sr-only channel as the status word, same
+                          step-number-plus-title labels as the chips, and it
+                          never brings the visible row back. */}
+                      {!statesDependenciesVisibly &&
+                        faceDependencies.length > 0 && (
+                          <span className={styles.nodeDependencyText}>
+                            {t('planExecution.dependsOn')}{' '}
+                            {faceDependencies
+                              .map(
+                                (id) =>
+                                  `${(stepNumberByTodo.get(id) ?? 0) || '?'} ${
+                                    todosById.get(id)?.content ?? id
+                                  }`,
+                              )
+                              .join(', ')}
+                          </span>
+                        )}
                     </button>
                     {executions.length > 0 && (
                       <div className={styles.executions}>
@@ -1352,15 +1575,50 @@ export function PlanExecutionView({
             )}
           </div>
           <div className={styles.nodeContent}>{selectedTodo.content}</div>
-          {(selectedTodo.blockedBy?.length ?? 0) > 0 && (
+          {/* This panel is outside the node's own button, so unlike the
+              chips on the node face these references can be controls: each
+              one selects the step it names, which is what makes the
+              dependency list the graph's navigation. */}
+          {selectedDependencies.length > 0 && (
             <div className={styles.dependencies}>
-              {t('planExecution.dependsOn')}{' '}
-              {selectedTodo.blockedBy!.join(', ')}
+              <span>{t('planExecution.dependsOn')}</span>
+              {selectedDependencies.map((id) => (
+                <button
+                  className={styles.dependencyLink}
+                  data-plan-interactive
+                  data-plan-dependency={id}
+                  key={id}
+                  onClick={() => updateSelectedTodoId(id)}
+                  title={todosById.get(id)?.content}
+                  type="button"
+                >
+                  <span>{(stepNumberByTodo.get(id) ?? 0) || '?'}</span>
+                  <span className={styles.dependencyTitle}>
+                    {todosById.get(id)?.content ?? id}
+                  </span>
+                </button>
+              ))}
             </div>
           )}
           {selectedDependents.length > 0 && (
             <div className={styles.dependencies}>
-              {t('planExecution.unblocks')} {selectedDependents.join(', ')}
+              <span>{t('planExecution.unblocks')}</span>
+              {selectedDependents.map((id) => (
+                <button
+                  className={styles.dependencyLink}
+                  data-plan-interactive
+                  data-plan-dependency={id}
+                  key={id}
+                  onClick={() => updateSelectedTodoId(id)}
+                  title={todosById.get(id)?.content}
+                  type="button"
+                >
+                  <span>{(stepNumberByTodo.get(id) ?? 0) || '?'}</span>
+                  <span className={styles.dependencyTitle}>
+                    {todosById.get(id)?.content ?? id}
+                  </span>
+                </button>
+              ))}
             </div>
           )}
           {selectedExecutions.length > 0 && (

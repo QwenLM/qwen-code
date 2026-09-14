@@ -249,6 +249,37 @@ export function buildHelpCustomCommandLines(
   return buildCommandLines(groupHelpCommands(commands, true), bodyWidth);
 }
 
+/**
+ * Rows the commands tabs spend on their own chrome inside the body budget:
+ * the intro line, the gap under it, the gap above the scroll hint, and the
+ * hint itself.
+ */
+export const HELP_COMMANDS_TAB_CHROME_ROWS = 4;
+
+/**
+ * Command-list rows that fit beside that chrome. The body box clips at
+ * `bodyRows`, and yoga resolves the overflow by dropping the intro line's
+ * bottom margin and clipping the hint away, so the window must not claim rows
+ * the chrome also needs.
+ */
+export function helpCommandWindowRows(bodyRows: number): number {
+  return Math.max(
+    1,
+    Math.min(
+      HELP_COMMAND_LIST_VISIBLE_LINES,
+      bodyRows - HELP_COMMANDS_TAB_CHROME_ROWS,
+    ),
+  );
+}
+
+/** Largest scroll offset that still moves the visible window. */
+export function helpScrollMax(
+  lines: readonly HelpLine[],
+  windowRows: number,
+): number {
+  return Math.max(0, lines.length - windowRows);
+}
+
 function shortcutLine(shortcut: HelpShortcut): string {
   const key = shortcut.key.padEnd(HELP_KEY_COL_WIDTH);
   return `${key}${shortcut.description}`;

@@ -231,6 +231,112 @@ describe('React performance measure guard', () => {
   });
 });
 
+describe('brand pre-paint script', () => {
+  const BUILT_IN_TITLE = 'Qwen Code Web chat';
+  const BUILT_IN_ICON = 'data:image/svg+xml,BUILT-IN';
+
+  function runBrandScript(stored: string | null): {
+    title: string;
+    iconHref: string;
+  } {
+    const script = extractInlineScript('qwen-code-web-shell-brand');
+    const icon = { href: BUILT_IN_ICON };
+    const document = {
+      title: BUILT_IN_TITLE,
+      querySelector: (selector: string) =>
+        selector === 'link[rel="icon"]' ? icon : null,
+    };
+    const localStorage = {
+      getItem: (key: string) => {
+        // The inline script must ask for exactly this key — a drift between
+        // index.html's literal and main.tsx's BRAND_STORAGE_KEY silently
+        // disables the pre-paint cache, and an argument-ignoring stub would
+        // never catch it.
+        if (key !== 'qwen-code-web-shell-brand') return null;
+        return stored;
+      },
+    };
+    Function('localStorage', 'document', script)(localStorage, document);
+    return { title: document.title, iconHref: icon.href };
+  }
+
+  it('applies a cached title and logo before first paint', () => {
+    const result = runBrandScript(
+      JSON.stringify({
+        title: 'QiuQiu Code Web chat',
+        logo: 'data:image/svg+xml,CACHED',
+      }),
+    );
+
+    expect(result.title).toBe('QiuQiu Code Web chat');
+    expect(result.iconHref).toBe('data:image/svg+xml,CACHED');
+  });
+
+  it('applies the title alone when the cache holds no logo', () => {
+    const result = runBrandScript(
+      JSON.stringify({ title: 'QiuQiu Code Web chat' }),
+    );
+
+    expect(result.title).toBe('QiuQiu Code Web chat');
+    expect(result.iconHref).toBe(BUILT_IN_ICON);
+  });
+
+  it('leaves the built-in title and logo alone on a first-ever load', () => {
+    expect(runBrandScript(null)).toEqual({
+      title: BUILT_IN_TITLE,
+      iconHref: BUILT_IN_ICON,
+    });
+  });
+
+  it('leaves the built-in title and logo alone when the cache is corrupt', () => {
+    expect(runBrandScript('{not json')).toEqual({
+      title: BUILT_IN_TITLE,
+      iconHref: BUILT_IN_ICON,
+    });
+  });
+});
+
+describe('built-in brand document contract', () => {
+  // A deployment that configures no brand must get exactly the shell it got
+  // before branding was configurable. These two literals are what the
+  // pre-paint script and main.tsx fall back to, so they are pinned here rather
+  // than left to a visual diff.
+  it('ships the built-in document title', () => {
+    expect(readIndexHtml()).toContain('<title>Qwen Code Web chat</title>');
+  });
+
+  it('ships the built-in favicon as an inline data URI', () => {
+    const html = readIndexHtml();
+    const href = /rel="icon"[^>]*href="([^"]+)"/s.exec(html)?.[1];
+
+    expect(href?.startsWith('data:image/svg+xml,')).toBe(true);
+    // The Qwen mark's purple, percent-encoded.
+    expect(href).toContain('%236D44E8');
+  });
+
+  // The brand script swaps the icon link's href, so it must run after that
+  // element is parsed — earlier and querySelector finds nothing to swap, which
+  // silently degrades to "the favicon updates one load late". The script's own
+  // unit tests cannot catch this: they hand it a document that already has the
+  // link. Pinned against the real file for the same reason the watchdog order
+  // below is.
+  it('applies the cached brand after the icon link is parsed', () => {
+    const html = readIndexHtml();
+
+    expect(html.indexOf('qwen-code-web-shell-brand')).toBeGreaterThan(
+      html.indexOf('rel="icon"'),
+    );
+  });
+
+  it('applies the cached brand after the title is parsed', () => {
+    const html = readIndexHtml();
+
+    expect(html.indexOf('qwen-code-web-shell-brand')).toBeGreaterThan(
+      html.indexOf('<title>'),
+    );
+  });
+});
+
 describe('boot watchdog document contract', () => {
   // The watchdog detects a mount as "#root has a first element child that is
   // not the fallback box". A static child shipped in the HTML — a boot

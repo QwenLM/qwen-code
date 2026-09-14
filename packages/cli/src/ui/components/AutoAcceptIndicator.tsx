@@ -7,7 +7,7 @@
 import type React from 'react';
 import { Text } from 'ink';
 import { theme } from '../semantic-colors.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { t } from '../../i18n/index.js';
 import { getApprovalModeIndicatorColor } from './approvalModeVisuals.js';
 

@@ -259,6 +259,25 @@ export class BackgroundShellRegistry {
     cb: BackgroundShellNotificationCallback | undefined,
   ): void {
     this.notificationCallback = cb;
+    // Best-effort replay for a transient unbind of THIS instance. No in-tree
+    // caller rebinds a registry that already holds entries — Session and the
+    // TUI hook each bind once against their own Config's fresh registry — so
+    // this serves out-of-tree consumers of the exported class. The terminal
+    // retention cap bounds what can be replayed.
+    if (!cb) return;
+    const replayableEntries = Array.from(this.entries.values())
+      .filter((entry) => entry.status !== 'running' && !entry.notified)
+      .sort(
+        (a, b) =>
+          (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) ||
+          a.startTime - b.startTime,
+      );
+    for (const entry of replayableEntries) {
+      debugLogger.debug(
+        `Redelivering retained terminal notification for shell ${entry.shellId}`,
+      );
+      this.emitNotification(entry);
+    }
   }
 
   /**
@@ -476,14 +495,15 @@ export class BackgroundShellRegistry {
 
   private emitNotification(entry: ShellTask): void {
     if (entry.notified) return;
-    entry.notified = true;
 
     if (!this.notificationCallback) {
       debugLogger.debug(
-        `Notification dropped for shell ${entry.shellId}: no callback registered`,
+        `Notification left eligible for shell ${entry.shellId}: no callback registered`,
       );
       return;
     }
+
+    entry.notified = true;
 
     const statusText =
       entry.status === 'completed'
@@ -542,7 +562,10 @@ export class BackgroundShellRegistry {
     try {
       this.notificationCallback(displayText, xmlParts.join('\n'), meta);
     } catch (error) {
-      debugLogger.error('Failed to emit shell notification:', error);
+      debugLogger.error(
+        `Failed to emit shell notification for shell ${entry.shellId}:`,
+        error,
+      );
     }
   }
 
@@ -603,6 +626,10 @@ export class BackgroundShellRegistry {
     for (const entry of Array.from(this.entries.values())) {
       if (entry.status !== 'running') continue;
       this.settleAsCancelled(entry, endTime);
+      // Suppressed, not deferred: marking the entry notified is what keeps a
+      // later rebind from replaying a shutdown cancellation, and matches the
+      // sibling registries' `abortAll({ notify: false })` handling.
+      entry.notified = true;
       lastCancelled = entry;
     }
     if (!lastCancelled) return;

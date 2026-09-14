@@ -24,6 +24,7 @@ export interface TranscriptRecordInput {
   readonly uuid: string;
   readonly parentUuid: string | null;
   readonly sessionId: string;
+  readonly daemonPromptId?: string;
   readonly timestamp?: string;
   readonly type: TranscriptRecordType;
   readonly subtype?: string;
@@ -124,9 +125,11 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'agent_bootstrap',
   'agent_launch_prompt',
   'agent_retry',
+  'agent_session_ready',
   'file_history_snapshot',
   'session_source',
   'session_model',
+  'session_sources_snapshot',
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',
@@ -255,7 +258,10 @@ function diagnostic(
 export function isTranscriptConversationRecord(
   record: Pick<TranscriptRecordInput, 'type' | 'subtype'>,
 ): boolean {
-  return !isTranscriptArtifactRecord(record);
+  return (
+    !isTranscriptArtifactRecord(record) &&
+    !(record.type === 'system' && record.subtype === 'session_sources_snapshot')
+  );
 }
 
 export function isTranscriptArtifactRecord(record: {
@@ -395,6 +401,11 @@ export function validateTranscriptRecord(
       uuid,
       parentUuid,
       sessionId,
+      daemonPromptId:
+        typeof value['daemonPromptId'] === 'string' &&
+        value['daemonPromptId'].trim().length > 0
+          ? value['daemonPromptId']
+          : undefined,
       type: type as TranscriptRecordType,
       ...(typeof subtype === 'string' ? { subtype } : { subtype: undefined }),
       ...(typeof timestamp === 'string' &&

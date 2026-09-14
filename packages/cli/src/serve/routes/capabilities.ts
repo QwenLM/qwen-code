@@ -31,6 +31,8 @@ interface RegisterCapabilitiesRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   permissionPolicy: AcpSessionBridge['permissionPolicy'];
   maxSessionsPerWorkspace: ServeOptions['maxSessions'];
+  maxRegisteredWorkspaces: number;
+  maxChannelControlWorkspaces?: number;
   maxTotalSessions: ServeOptions['maxTotalSessions'];
   maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
   sessionRestoreTimeoutMs: number;
@@ -58,6 +60,15 @@ export function registerCapabilitiesRoutes(
   app: Application,
   deps: RegisterCapabilitiesRoutesDeps,
 ): void {
+  const configuredPollIntervalMs = Number(
+    deps.daemonEnv['QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS'],
+  );
+  const sessionLiveStatePollIntervalMs =
+    Number.isSafeInteger(configuredPollIntervalMs) &&
+    configuredPollIntervalMs >= 1_000 &&
+    configuredPollIntervalMs <= 2_147_483_647
+      ? configuredPollIntervalMs
+      : 5_000;
   app.get('/capabilities', (_req, res) => {
     const entries = deps.workspaceRegistry
       .listAllEntries()
@@ -80,6 +91,7 @@ export function registerCapabilitiesRoutes(
         : {}),
       mode: deps.mode,
       features,
+      sessionLiveStatePollIntervalMs,
       modelServices: [],
       // Surface the primary workspace so clients can omit `cwd` on
       // `POST /session`; multi-workspace clients use `workspaces[]`.
@@ -93,6 +105,10 @@ export function registerCapabilitiesRoutes(
           activePrimary?.bridge.permissionPolicy ?? deps.permissionPolicy,
       },
       limits: {
+        maxRegisteredWorkspaces: deps.maxRegisteredWorkspaces,
+        ...(deps.maxChannelControlWorkspaces !== undefined
+          ? { maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces }
+          : {}),
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           deps.maxPendingPromptsPerSession,
         ),
@@ -100,7 +116,7 @@ export function registerCapabilitiesRoutes(
         ...(features.includes('workspace_file_upload')
           ? { maxWorkspaceFileUploadBytes: MAX_UPLOAD_BYTES }
           : {}),
-        ...(multipleAdmissionPools
+        ...(multipleAdmissionPools || deps.maxTotalSessions !== undefined
           ? {
               maxSessionsPerWorkspace: advertisedMaxSessions(
                 deps.maxSessionsPerWorkspace,

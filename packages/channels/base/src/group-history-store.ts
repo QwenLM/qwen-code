@@ -76,6 +76,12 @@ export class GroupHistoryStore {
     const state = loaded.entries;
     const limits = loaded.limits;
     const current = state.get(key) ?? [];
+    if (
+      entry.messageId !== undefined &&
+      current.some((item) => item.messageId === entry.messageId)
+    ) {
+      return;
+    }
     current.push(entry);
     if (current.length > normalizedLimit) {
       current.splice(0, current.length - normalizedLimit);
@@ -116,6 +122,22 @@ export class GroupHistoryStore {
     }
 
     return entries;
+  }
+
+  forget(key: string, messageId: string): void {
+    const loaded = this.loadState();
+    const current = loaded.entries.get(key);
+    if (!current) return;
+    const remaining = current.filter((entry) => entry.messageId !== messageId);
+    if (remaining.length === current.length) return;
+
+    if (remaining.length === 0) {
+      loaded.entries.delete(key);
+      loaded.limits.delete(key);
+    } else {
+      loaded.entries.set(key, remaining);
+    }
+    this.compact(loaded.entries, loaded.limits);
   }
 
   clear(key: string): void {
@@ -165,6 +187,12 @@ export class GroupHistoryStore {
       }
 
       const current = state.get(record.key) ?? [];
+      if (
+        record.entry.messageId !== undefined &&
+        current.some((item) => item.messageId === record.entry.messageId)
+      ) {
+        continue;
+      }
       current.push(record.entry);
       if (current.length > record.limit) {
         current.splice(0, current.length - record.limit);

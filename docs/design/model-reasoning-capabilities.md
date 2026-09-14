@@ -1,5 +1,10 @@
 # Model reasoning capabilities
 
+> **GPT extension:** [GPT reasoning effort](gpt-5-reasoning-effort.md) adds
+> known GPT model capabilities from the shared core definition, ahead of
+> this exact-id manifest. The manifest remains the source for curated Qwen
+> models; GPT tiers must stay consistent with the provider's capabilities.
+
 ## Goal
 
 Expose accurate reasoning controls for common Alibaba Cloud Coding Plan and

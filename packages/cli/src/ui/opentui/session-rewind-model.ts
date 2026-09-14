@@ -14,7 +14,7 @@
 import { t } from '../../i18n/index.js';
 import { isSlashCommand } from '../utils/commandUtils.js';
 import { isUserTextContent } from '../utils/historyMapping.js';
-import { getStartupContextLength } from '@qwen-code/qwen-code-core';
+import { getStartupContextLength } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import type { Content } from '@google/genai';
 
 export const REWIND_MAX_VISIBLE_ITEMS = 7;
@@ -45,6 +45,16 @@ export function rewindableTurns(turns: readonly RewindTurn[]): RewindTurn[] {
  * decorations (attachment suffixes, compression) cannot break the match.
  * Returns -1 when the history holds fewer real user prompts than
  * requested (e.g. the turn was absorbed by chat compression).
+ *
+ * Near-twin of core's `findApiRewindCutPoint`, with a deliberately different
+ * degenerate contract: this walk is 1-based and returns -1 for
+ * `occurrence <= 0`, where the core walk is 0-based and returns the end of
+ * the startup context for `turnIndex <= 0`. The two agree on the first turn
+ * only because nothing sits between the startup prelude and the first user
+ * prompt today. Any change to the walk semantics — `includeCompressed`, a
+ * new structural entry kind to skip, the -1 convention — must be made in
+ * both, or OpenTUI rewind computes a different boundary than ACP for the
+ * same history.
  */
 export function rewindApiCutPoint(
   apiHistory: Content[],

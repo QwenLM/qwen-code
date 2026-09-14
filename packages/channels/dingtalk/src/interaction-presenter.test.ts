@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   ChannelOutputSegmentContext,
+  ChannelPermissionRequestContext,
   ChannelUserInputRequestContext,
   UserInputSettlementReason,
 } from '@qwen-code/channel-base';
@@ -11,6 +12,7 @@ import {
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
+import { PermissionCardController } from './permission-card-controller.js';
 import { QuestionCardController } from './question-card-controller.js';
 import { StatusCardController } from './status-card-controller.js';
 
@@ -100,7 +102,29 @@ function questionContext(
   };
 }
 
-function createHarness() {
+function permissionContext(): ChannelPermissionRequestContext {
+  return {
+    requestId: 'permission-1',
+    sessionId: 'session-1',
+    runId: 'run-1',
+    owner: { kind: 'channel_user', id: 'owner-1' },
+    target: {
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      senderId: 'owner-1',
+      isGroup: true,
+    },
+    title: 'Run tests',
+    decisions: [
+      { kind: 'allow_once', label: 'Allow once' },
+      { kind: 'deny', label: 'Deny' },
+    ],
+    onSettled: () => () => {},
+    respond: vi.fn().mockResolvedValue(true),
+  };
+}
+
+function createHarness(options: { language?: string } = {}) {
   const projectionOrder: string[] = [];
   const client = {
     createAndDeliver: vi.fn().mockImplementation(async (request) => {
@@ -137,9 +161,17 @@ function createHarness() {
     reserveRunProjection: (runId) =>
       presenterRef.current?.reserveProjection(runId),
   });
+  const permissionCards = new PermissionCardController({
+    client,
+    timeoutMs: 300_000,
+    reserveRunProjection: (runId) =>
+      presenterRef.current?.reserveProjection(runId),
+  });
   const presenter = new DingtalkInteractionPresenter({
     statusCards,
     questionCards,
+    permissionCards,
+    ...(options.language ? { language: options.language } : {}),
     sendFallback,
   });
   presenterRef.current = presenter;
@@ -149,6 +181,7 @@ function createHarness() {
     presenter,
     projectionOrder,
     questionCards,
+    permissionCards,
     statusCards,
     cancelRun,
     sendFallback,
@@ -170,12 +203,29 @@ describe('DingtalkInteractionPresenter', () => {
         expect.objectContaining({
           templateId: STATUS_CARD_TEMPLATE_ID,
           cardParamMap: expect.objectContaining({
-            content: '',
+            content: '🤔 Thinking',
             flowStatus: 2,
           }),
         }),
       );
     });
+  });
+
+  it('serializes lifecycle phases into the status card before output', async () => {
+    const { client, presenter } = createHarness();
+
+    presenter.startStatusCard('run-1');
+    presenter.updateStatusCardPhase('run-1', 'searching');
+
+    await vi.waitFor(() => {
+      expect(client.openOrUpdateStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: '🔎 Searching',
+          finalize: false,
+        }),
+      );
+    });
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
   });
 
   it('renders one escaped source label through running, streaming, and terminal cards', async () => {
@@ -196,13 +246,13 @@ describe('DingtalkInteractionPresenter', () => {
       expect(client.createAndDeliver).toHaveBeenCalledWith(
         expect.objectContaining({
           cardParamMap: expect.objectContaining({
-            content: '\\[IMAGE\\: x · review\\_\\*\\]',
+            content: '🤔 Thinking\n\n\\[IMAGE\\: x · review\\_\\*\\]',
           }),
         }),
       );
       expect(client.openOrUpdateStream).toHaveBeenCalledWith(
         expect.objectContaining({
-          content: '\\[IMAGE\\: x · review\\_\\*\\]\n\nanalysis',
+          content: '🤔 Thinking\n\n\\[IMAGE\\: x · review\\_\\*\\]\n\nanalysis',
         }),
       );
     });
@@ -254,7 +304,7 @@ describe('DingtalkInteractionPresenter', () => {
       expect(client.createAndDeliver).toHaveBeenCalledWith(
         expect.objectContaining({
           cardParamMap: expect.objectContaining({
-            content: '',
+            content: '🤔 Thinking',
           }),
         }),
       );
@@ -263,7 +313,7 @@ describe('DingtalkInteractionPresenter', () => {
         .mock.calls.map(([request]) => request.content)
         .filter(Boolean)
         .at(-1);
-      expect(streamed).toBe('正在分析');
+      expect(streamed).toBe('🤔 Thinking\n\n正在分析');
     });
 
     await presenter.closeOutput(
@@ -429,6 +479,41 @@ describe('DingtalkInteractionPresenter', () => {
         .mocked(client.createAndDeliver)
         .mock.calls.map(([request]) => request.templateId),
     ).toEqual([QUESTION_CARD_TEMPLATE_ID]);
+  });
+
+  it('presents a permission card through the matching attended run', async () => {
+    const { client, presenter } = createHarness();
+
+    await expect(
+      presenter.presentPermission(permissionContext()),
+    ).resolves.toEqual({ kind: 'presented' });
+
+    expect(client.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateId: QUESTION_CARD_TEMPLATE_ID,
+        outTrackId: expect.stringMatching(/^qwen-permission-/),
+      }),
+    );
+  });
+
+  it('rejects permission presentation outside the owning run target', async () => {
+    const { client, presenter } = createHarness();
+    const context = permissionContext();
+    context.target = { ...context.target, chatId: 'another-chat' };
+
+    await expect(presenter.presentPermission(context)).resolves.toEqual({
+      kind: 'unsupported',
+    });
+    expect(client.createAndDeliver).not.toHaveBeenCalled();
+  });
+
+  it('cancels permission cards when their run terminalizes', () => {
+    const { presenter, permissionCards } = createHarness();
+    const cancelRun = vi.spyOn(permissionCards, 'cancelRun');
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+
+    expect(cancelRun).toHaveBeenCalledWith('run-1');
   });
 
   it('correlates direct runs by conversation and delivers cards to the user', async () => {
@@ -640,7 +725,7 @@ describe('DingtalkInteractionPresenter', () => {
       vi
         .mocked(client.openOrUpdateStream)
         .mock.calls.map(([request]) => request.content),
-    ).toContain('segment one');
+    ).toContain('🤔 Thinking\n\nsegment one');
 
     presenter.appendOutput(segment('segment-2'), 'segment two');
     await presenter.closeOutput('segment-2', '', 'completed');
@@ -662,7 +747,9 @@ describe('DingtalkInteractionPresenter', () => {
       expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
     );
     expect(client.openOrUpdateStream).toHaveBeenCalledWith(
-      expect.objectContaining({ content: 'intermediate result' }),
+      expect.objectContaining({
+        content: '🤔 Thinking\n\nintermediate result',
+      }),
     );
     vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
       new Error('stream blip'),
@@ -679,7 +766,7 @@ describe('DingtalkInteractionPresenter', () => {
     expect(sendFallback).not.toHaveBeenCalled();
     expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        content: 'intermediate result updated',
+        content: '🤔 Thinking\n\nintermediate result updated',
         finalize: false,
       }),
     );
@@ -761,6 +848,31 @@ describe('DingtalkInteractionPresenter', () => {
         expect(terminalPayload).toMatchObject({
           content: `@衍\\*星\n\n${expectedBody}`,
           copy_content: `@衍\\*星\n\n${expectedBody}`,
+        });
+      });
+    },
+  );
+
+  it.each([
+    ['failed', 'boom', 'Processing failed, please try again later.'],
+    ['cancelled', 'cancel_command', 'Task stopped'],
+    ['cancelled', 'steer', 'Task cancelled'],
+  ] as const)(
+    'renders English terminal card copy for a non-Chinese display language when the run is %s',
+    async (terminal, detail, expectedBody) => {
+      const { client, presenter } = createHarness({ language: 'en' });
+      presenter.appendOutput(segment('segment-1'), 'Explanation');
+
+      presenter.terminalizeRun('run-1', terminal, detail);
+
+      await vi.waitFor(() => {
+        const terminalPayload = vi
+          .mocked(client.updateInstance)
+          .mock.calls.map(([request]) => request.cardParamMap)
+          .find((payload) => payload.flowStatus === 3);
+        expect(terminalPayload).toMatchObject({
+          content: expectedBody,
+          copy_content: expectedBody,
         });
       });
     },
@@ -959,7 +1071,7 @@ describe('DingtalkInteractionPresenter', () => {
       vi
         .mocked(client.openOrUpdateStream)
         .mock.calls.map(([request]) => request.content),
-    ).toContain('segment one');
+    ).toContain('🤔 Thinking\n\nsegment one');
   });
 
   it('falls back at a boundary when the in-flight card creation fails', async () => {

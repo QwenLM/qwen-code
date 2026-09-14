@@ -3,163 +3,84 @@ name: computer-use
 description: Control local desktop applications through Computer Use for tasks that require reading or operating app UI. Prefer purpose-built connectors, APIs, or CLIs when available.
 ---
 
-# Computer Use with the CUA SDK
+## node_repl + @qwen-code/cua-sdk (Computer Use)
 
-- Prefer a dedicated connector or API. Use Computer Use only for UI state or
-  interactions the dedicated interface does not expose.
-- Perform Computer Use through `node_repl` and the typed `ComputerUse` API.
-  Do not use generic `callTool`, direct driver imports, AppleScript, JXA, or
-  synthesized-input utilities.
-- Observe the exact current window before acting. Prefer current element tokens
-  over screenshot coordinates; use coordinates only when accessibility is
-  incomplete and the screenshot provides the target.
-- Treat an action result as delivery evidence, not task completion. Decide from
-  fresh state and require stable postcondition evidence.
+- Use `node_repl` (JavaScript) for all Computer Use actions.
+- Do not use other technologies besides `node_repl` for computer interactions, unless specifically requested by the user (e.g. AppleScript, `osascript`, JXA, System Events, synthesized input).
+- Prefer a dedicated plugin or skill when it can complete the task; use Computer Use for app interactions that are not exposed through a more specific interface.
+- `node_repl` state is persistent across calls.
+- For text output, use `nodeRepl.write(...)`. `nodeRepl.write(...)` takes a string. If you would like to read a whole object, wrap it with `JSON.stringify(...)`.
 
-## Setup
+## Bootstrap
 
-If `node_repl` is unavailable, run these commands yourself:
+If `node_repl` is unavailable, run:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.2
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.3
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.4
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.6
 ```
 
-Tell the user to restart Qwen Code, then stop. If only the SDK import is
-missing, run the second command and retry.
+Tell the user to restart Qwen Code, then stop. If only the SDK import is missing,
+run the second command and retry.
 
-Create one persistent client per REPL kernel:
+Reuse an existing `computer` connected to the intended desktop. Otherwise import
+the `ComputerUse` API once per fresh `node_repl` session. Combine initialization,
+connected-platform discovery and the selected resource read in one call. Set
+`skillBase` to the absolute Skill base directory of this `SKILL.md`, as shown by
+the skill loader or the file you just read:
 
 ```js
 globalThis.computer = await (
   await import('@qwen-code/cua-sdk/computer-use')
 ).ComputerUse.create();
-globalThis.cuaRevisions ??= new Map();
+var platform = await computer.getPlatform();
+var reference = {
+  macos: 'macos.md',
+  windows: 'windows-linux.md',
+  linux: 'windows-linux.md',
+}[platform];
+if (!reference) throw new Error('Unsupported connected platform');
+var skillBase = '/absolute/path/to/computer-use';
+nodeRepl.write(`Connected platform: ${platform}`);
+nodeRepl.write(
+  await (
+    await import('node:fs/promises')
+  ).readFile(`${skillBase}/references/${reference}`, 'utf8'),
+);
 ```
 
-## Target and observe
-
-Use `listApps({signal:nodeRepl.signal})` and filter in JavaScript; print only
-likely matches. After selecting a real PID, call
-`listWindows({pid,signal:nodeRepl.signal})` and choose from returned
-metadata. Never guess a PID, window ID, element token, or coordinate. If the
-app is not running, start it with ordinary Node.js process APIs and refresh the
-lists.
-
-Maintain one revision cursor per window surface. The first observation has no
-base; later observations use only the last revision actually consumed for that
-same surface:
+If the returned platform is `macos` and the task already identifies an
+unambiguous app, append its initial observation to that same initialization
+call, after printing the resource:
 
 ```js
-globalThis.observeCuaWindow = async (target, options = {}) => {
-  const key = `${target.pid}:${target.windowId}`;
-  const state = await computer.observeWindow({
-    ...target,
-    ...options,
-    baseRevisionId: cuaRevisions.get(key),
-    signal: nodeRepl.signal,
-  });
-  if (state.revisionId) cuaRevisions.set(key, state.revisionId);
-  return state;
-};
-```
-
-Use accessibility text for efficient decisions. Request a screenshot when the
-tree is incomplete, visual layout matters, or action evidence conflicts with
-the tree. Emit only decision-relevant images:
-
-```js
-for (const image of state.screenshot?.images ?? []) {
-  if (image?.dataBase64 && image?.mimeType) {
-    await nodeRepl.emitImage(
-      `data:${image.mimeType};base64,${image.dataBase64}`,
-    );
-  }
+if (platform === 'macos') {
+  var app = await computer.getApp('App named by the task');
+  nodeRepl.write((await app.getState()).text);
 }
 ```
 
-If the SDK explicitly reports a missing/invalid base or a stale lineage,
-perform one observation with `forceFull: true`, replace that surface's cursor,
-then resume the normal helper. Do not make full observations the default.
+Replace the example app name with the task's app. This only binds the app and
+reads its current state; `getState()` can open that app if stopped. Read both
+the returned platform workflow and initial state before any editing or input.
+If the app is unknown or ambiguous, omit this block and follow the selected
+resource's discovery steps. Do not guess an app or use the host platform.
 
-## Act and verify
+## Select the target platform workflow
 
-Choose the narrowest action supported by current state. Pass an observed
-`element_token` as `elementToken`. Use `performSecondaryAction` only when that
-exact action appears in the element's current `actions` list.
+Use this returned platform, not the CLI or Node host operating system. A connected
+driver may control a different machine. If the platform cannot be determined,
+resolve the reported driver/SDK error before continuing; do not guess a platform.
 
-Before acting, state a concrete observable postcondition. For postconditions
-expressible as window or element state, use `actAndVerify` with `verifyState`:
+The initialization call above reads exactly one resource. If filesystem imports
+are unavailable, use the following fallback before any UI work.
+Read exactly one resource with `read_file`, resolving its absolute path from the
+Skill base directory shown above:
 
-```js
-try {
-  globalThis.lastCuaOutcome = await computer.actAndVerify({
-    action: () =>
-      computer.setValue({
-        ...target,
-        elementToken,
-        value: expectedValue,
-        signal: nodeRepl.signal,
-      }),
-    verify: () =>
-      computer.verifyState({
-        ...target,
-        expect: [
-          {
-            element: {
-              selector: { role: expectedRole, label_contains: expectedLabel },
-              value_equals: expectedValue,
-            },
-          },
-        ],
-        stableSamples: 2,
-        signal: nodeRepl.signal,
-      }),
-  });
-  nodeRepl.write(JSON.stringify(lastCuaOutcome));
-} catch (error) {
-  nodeRepl.write(JSON.stringify(error?.details ?? { message: String(error) }));
-  throw error;
-}
-```
+- `macos`: read `references/macos.md` for the App workflow and text operations.
+- `windows` or `linux`: read `references/windows-linux.md` for the exact-window workflow.
 
-`verifyState.expect` accepts one to eight AND-combined predicates:
-
-- `{window:{exists, bounds?}}`
-- `{element:{selector:{role?, label_contains?}, exists:true?,
-value_equals?, enabled?, selected?}}`
-
-Element absence is not provable. `unknown` and `stable:false` are not success.
-When the postcondition is visual or unsupported, observe the exact window
-again with a screenshot and inspect the fresh result before deciding. If state
-is unexpected, observe again rather than repeating the action blindly.
-
-Read every action result. `effect` is `confirmed`, `partial`, `unverifiable`,
-`suspected_noop`, or `refused`; `route`, `delivery`, `evidence`, `escalation`,
-and `operation` explain what actually happened. A committed operation can
-still have `cancellationRequested:true`, so it still requires verification.
-Follow an advertised escalation only after fresh state shows it is needed.
-
-## Interaction details
-
-- After navigation, dialogs, menus, or other surface changes, refresh the
-  relevant window list and observe the new exact surface.
-- Use returned state to determine text-field behavior; do not assume typing
-  replaces existing text. Use the platform-appropriate select-all action when
-  replacement is required.
-- Prefer background delivery. Use `deliveryMode:'foreground'` only when the
-  action result or fresh state shows the background route is unavailable or
-  ineffective.
-- Stop as soon as the requested postcondition is stably satisfied. Do not add
-  extra cleanup actions that could undo the result.
-
-## Finish
-
-```js
-await computer.close();
-globalThis.computer = undefined;
-globalThis.cuaRevisions = undefined;
-globalThis.observeCuaWindow = undefined;
-```
-
-Reset the REPL only when no other persistent state is needed.
+Read the selected resource before taking actions. Once it has been printed in the
+initialization result, do not read it again. After changing the connected desktop,
+query its platform again and read the matching resource. Resource files remain on
+the machine hosting this Skill; do not look for them on the controlled desktop.

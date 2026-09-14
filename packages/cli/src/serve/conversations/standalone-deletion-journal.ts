@@ -16,7 +16,6 @@ import {
   normalizedInode,
   type ConversationRootIdentity,
 } from '../../utils/conversation-directory-identity.js';
-import { getConversationRuntimeOwnerPath } from './conversation-runtime-ownership.js';
 
 const JOURNAL_DIRECTORY = 'deletions';
 const MAX_RECORD_BYTES = 8 * 1024;
@@ -309,24 +308,24 @@ function sameImmutableRecord(
 }
 
 export class StandaloneDeletionJournal {
-  private readonly ownerDirectory: string;
+  private readonly stateDirectory: string;
   private readonly journalDirectory: string;
+  private readonly directoryIdentities = new Map<string, DirectoryIdentity>();
+  private canonicalBaseDir?: string;
   private readonly pendingClears = new Map<string, PendingJournalClear>();
 
-  constructor(stableBaseDir: string) {
+  constructor(private readonly stableBaseDir: string) {
     if (!path.isAbsolute(stableBaseDir)) {
       throw new TypeError('Standalone deletion journal base must be absolute.');
     }
-    this.ownerDirectory = path.dirname(
-      getConversationRuntimeOwnerPath(stableBaseDir),
-    );
-    this.journalDirectory = path.join(this.ownerDirectory, JOURNAL_DIRECTORY);
+    this.stateDirectory = path.join(stableBaseDir, 'conversations');
+    this.journalDirectory = path.join(this.stateDirectory, JOURNAL_DIRECTORY);
   }
 
   async hasRecord(rawSessionId: string): Promise<boolean> {
     const sessionId = parseSessionId(rawSessionId);
-    if (this.pendingClears.has(sessionId)) return true;
     const identity = await this.inspectJournalDirectory();
+    if (this.pendingClears.has(sessionId)) return true;
     if (!identity) return false;
     const exists =
       (await this.pathExists(this.recordPath(sessionId, 'prepared'))) ||
@@ -363,11 +362,11 @@ export class StandaloneDeletionJournal {
     currentRoot: ConversationRootIdentity,
   ): Promise<StandaloneDeletionJournalEntry | undefined> {
     const sessionId = parseSessionId(rawSessionId);
+    const identity = await this.inspectJournalDirectory();
     const pending = this.pendingClears.get(sessionId);
     if (pending) {
       return this.validatePendingEntry(pending.entry, currentRoot);
     }
-    const identity = await this.inspectJournalDirectory();
     if (!identity) return undefined;
     const prepared = await this.readPhase(sessionId, 'prepared', currentRoot);
     const staged = await this.readPhase(sessionId, 'staged', currentRoot);
@@ -422,6 +421,7 @@ export class StandaloneDeletionJournal {
     currentRoot: ConversationRootIdentity,
   ): Promise<void> {
     const sessionId = parseSessionId(rawSessionId);
+    await this.inspectJournalDirectory();
     const pending = this.pendingClears.get(sessionId);
     if (pending) {
       this.validatePendingEntry(pending.entry, currentRoot);
@@ -585,9 +585,10 @@ export class StandaloneDeletionJournal {
   }
 
   private async ensureJournalDirectory(): Promise<DirectoryIdentity> {
-    const owner = await this.inspectPrivateDirectory(this.ownerDirectory);
+    await this.ensureStateDirectory(this.stableBaseDir, false);
+    const owner = await this.ensureStateDirectory(this.stateDirectory, true);
     const ownerHandle = await this.openDurableDirectory(
-      this.ownerDirectory,
+      this.stateDirectory,
       owner,
     );
     try {
@@ -605,13 +606,62 @@ export class StandaloneDeletionJournal {
     } finally {
       await ownerHandle.handle.close().catch(() => undefined);
     }
-    return this.inspectPrivateDirectory(this.journalDirectory);
+    return (await this.inspectJournalDirectory())!;
+  }
+
+  private async ensureStateDirectory(
+    directory: string,
+    requirePrivate: boolean,
+  ): Promise<DirectoryIdentity> {
+    try {
+      return await this.inspectPrivateDirectory(directory, requirePrivate);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory)
+      throw new StandaloneDeletionJournalError('compromised');
+    const before = await this.ensureStateDirectory(parent, false);
+    let created = false;
+    try {
+      await fs.mkdir(directory, { mode: 0o700 });
+      created = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    if (created && process.platform !== 'win32')
+      await fs.chmod(directory, 0o700);
+    const after = await this.inspectPrivateDirectory(parent, false);
+    if (!sameDirectoryIdentity(before, after)) {
+      throw new StandaloneDeletionJournalError('compromised');
+    }
+    const handle = await fs.open(parent, fsConstants.O_RDONLY);
+    try {
+      if (process.platform !== 'win32') await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    return this.inspectPrivateDirectory(directory, requirePrivate);
+  }
+
+  private async inspectStateParent(): Promise<void> {
+    await this.inspectPrivateDirectory(this.stableBaseDir, false);
+    const canonical = await fs.realpath(this.stableBaseDir);
+    if (
+      this.canonicalBaseDir !== undefined &&
+      this.canonicalBaseDir !== canonical
+    ) {
+      throw new StandaloneDeletionJournalError('compromised');
+    }
+    this.canonicalBaseDir = canonical;
+    await this.inspectPrivateDirectory(this.stateDirectory);
   }
 
   private async inspectJournalDirectory(): Promise<
     DirectoryIdentity | undefined
   > {
     try {
+      await this.inspectStateParent();
       return await this.inspectPrivateDirectory(this.journalDirectory);
     } catch (error) {
       if (isMissing(error)) return undefined;
@@ -621,29 +671,51 @@ export class StandaloneDeletionJournal {
 
   private async inspectPrivateDirectory(
     directory: string,
+    requirePrivate = true,
   ): Promise<DirectoryIdentity> {
-    const stat = await fs.lstat(directory);
+    let stat: Awaited<ReturnType<typeof fs.lstat>>;
+    try {
+      stat = await fs.lstat(directory);
+    } catch (error) {
+      if (isMissing(error) && this.directoryIdentities.has(directory)) {
+        throw new StandaloneDeletionJournalError('compromised');
+      }
+      throw error;
+    }
     if (
       !stat.isDirectory() ||
       stat.isSymbolicLink() ||
       (process.platform !== 'win32' &&
-        ((stat.mode & 0o777) !== 0o700 ||
+        ((requirePrivate && (stat.mode & 0o777) !== 0o700) ||
           (typeof process.getuid === 'function' &&
             stat.uid !== process.getuid())))
     ) {
       throw new StandaloneDeletionJournalError('compromised');
     }
-    return {
+    const identity = {
       device: stat.dev,
       inode: normalizedInode(stat.ino),
       inodeVerifiable: hasVerifiableInode(stat.ino),
     };
+    if (
+      directory === this.stableBaseDir ||
+      directory === this.stateDirectory ||
+      directory === this.journalDirectory
+    ) {
+      const expected = this.directoryIdentities.get(directory);
+      if (expected && !sameDirectoryIdentity(identity, expected)) {
+        throw new StandaloneDeletionJournalError('compromised');
+      }
+      this.directoryIdentities.set(directory, identity);
+    }
+    return identity;
   }
 
   private async assertDirectoryIdentity(
     directory: string,
     expected: DirectoryIdentity,
   ): Promise<void> {
+    await this.inspectStateParent();
     const current = await this.inspectPrivateDirectory(directory);
     if (!sameDirectoryIdentity(current, expected)) {
       throw new StandaloneDeletionJournalError('compromised');

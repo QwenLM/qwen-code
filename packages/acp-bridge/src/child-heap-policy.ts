@@ -8,7 +8,8 @@ import {
   MIN_CHILD_HEAP_MB,
   type DaemonMemoryBudget,
 } from './daemon-memory-budget.js';
-import { MAX_DAEMON_WORKSPACES } from './channel-control-timeouts.js';
+
+const MAX_MODELED_ACP_CHILDREN = 25;
 
 /**
  * Whether the daemon models a per-child heap partition.
@@ -73,7 +74,7 @@ export interface ChildHeapPolicySnapshot {
    *   `committedProcessCount`, which counts a terminating child until it
    *   actually exits — deliberately, since its memory is still resident. So a
    *   replacement spawned before the old child exits transiently makes the
-   *   count one higher than steady state. Where `MAX_DAEMON_WORKSPACES` is the
+   *   count one higher than steady state. Where `MAX_MODELED_ACP_CHILDREN` is the
    *   binding term (`childPoolMb >= 12800`, i.e. a ~32 GB host and up), a
    *   daemon at 25 live children books a refusal on every channel replacement,
    *   with no memory pressure involved. Do not net this out by giving the
@@ -116,7 +117,7 @@ export function createChildHeapPolicy(options: {
   // reads as its *default* heap, roughly 4 GB, against a pool of nothing.
   const admissible = Math.min(
     Math.floor(budget.childPoolMb / MIN_CHILD_HEAP_MB),
-    MAX_DAEMON_WORKSPACES,
+    MAX_MODELED_ACP_CHILDREN,
   );
   // `floor(pool / admissible) >= MIN_CHILD_HEAP_MB` by construction, but the
   // legacy cap is `floor(available / 2)` and is under the floor whenever

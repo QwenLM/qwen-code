@@ -187,7 +187,13 @@ describe('DialogShell', () => {
     // stays full-width and never tracks the content.
     expect(panel.className).toContain('w-max');
     expect(panel.className).not.toContain('w-full');
-    expect(panel.className).toContain('min-w-[min(100%,560px)]');
+    // The floor has to subtract the same gutter the surviving base ceiling
+    // (`max-w-[calc(100%-2rem)]`) reserves. twMerge keeps both classes, and
+    // below `sm:` a bare `min(100%,560px)` floor outranks that ceiling, so the
+    // panel would render flush to both screen edges on a phone.
+    expect(panel.className).toContain('min-w-[min(calc(100%-2rem),560px)]');
+    expect(panel.className).not.toContain('min-w-[min(100%,560px)]');
+    expect(panel.className).toContain('max-w-[calc(100%-2rem)]');
     expect(panel.className).toContain(
       'sm:max-w-[min(calc(100vw-2rem),1120px)]',
     );
@@ -217,5 +223,36 @@ describe('DialogShell', () => {
     expect(panel.className).toContain('w-full');
     expect(panel.className).toContain('sm:max-w-[720px]');
     expect(panel.className).not.toContain('w-max');
+  });
+
+  it('uses expand and shrink icons for fullscreen', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ThemeProvider value="dark">
+            <DialogShell title="Fullscreen" allowFullscreen onClose={vi.fn()}>
+              body
+            </DialogShell>
+          </ThemeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      '[aria-label="Fullscreen"]',
+    )!;
+    expect(toggle.querySelector('.lucide-expand')).not.toBeNull();
+
+    act(() => toggle.click());
+
+    expect(
+      document
+        .querySelector('[aria-label="Exit fullscreen"]')
+        ?.querySelector('.lucide-shrink'),
+    ).not.toBeNull();
   });
 });

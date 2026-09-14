@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import * as tar from 'tar';
 import {
   acquireLock,
   rollbackStandaloneUpdate,
@@ -20,15 +22,24 @@ import {
   isSafeTarLinkTarget,
 } from './standalone-update.js';
 
+const mockFetch = vi.hoisted(() => vi.fn());
+vi.mock('../utils/load-undici.js', () => ({
+  loadUndici: async () => ({ fetch: mockFetch }),
+}));
+
 describe('standalone-update', () => {
   let tempDir: string;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-update-test-'));
+    vi.stubEnv('QWEN_UPDATE_BASE_URL', undefined);
+    vi.stubEnv('QWEN_REQUIRE_SIGNATURE', undefined);
+    mockFetch.mockReset();
   });
 
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
+    vi.unstubAllEnvs();
   });
 
   describe('rollbackStandaloneUpdate', () => {
@@ -371,6 +382,194 @@ describe('standalone-update', () => {
       expect(fs.existsSync(lockPath)).toBe(true);
       expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
     });
+  });
+
+  describe('download sources', () => {
+    const baseUrl = 'https://downloads.example.com/qwen-code';
+    const filename = 'qwen-code-linux-x64.tar.gz';
+    let standaloneDir: string;
+    let originalManifest: string;
+
+    beforeEach(() => {
+      standaloneDir = path.join(tempDir, 'installed');
+      originalManifest = JSON.stringify({
+        target: 'linux-x64',
+        version: '0.1.0',
+      });
+      fs.mkdirSync(standaloneDir);
+      fs.writeFileSync(
+        path.join(standaloneDir, 'manifest.json'),
+        originalManifest,
+      );
+    });
+
+    function expectInstallationPreserved() {
+      expect(
+        fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+      ).toBe(originalManifest);
+      expect(fs.existsSync(`${standaloneDir}.old`)).toBe(false);
+      expect(fs.existsSync(path.join(tempDir, '.qwen-update.lock'))).toBe(
+        false,
+      );
+      expect(
+        fs
+          .readdirSync(tempDir)
+          .some((entry) => entry.startsWith('.qwen-code-update-')),
+      ).toBe(false);
+    }
+
+    async function serveArchive(options: { badChecksum?: boolean } = {}) {
+      const fixture = path.join(tempDir, 'fixture');
+      fs.mkdirSync(path.join(fixture, 'qwen-code'), { recursive: true });
+      fs.writeFileSync(path.join(fixture, 'qwen-code', 'manifest.json'), '{}');
+      const archivePath = path.join(tempDir, 'release.tar.gz');
+      await tar.c({ gzip: true, cwd: fixture, file: archivePath }, [
+        'qwen-code',
+      ]);
+      const archive = fs.readFileSync(archivePath);
+      const checksum = options.badChecksum
+        ? '0'.repeat(64)
+        : createHash('sha256').update(archive).digest('hex');
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url.endsWith(`/${filename}`)) {
+          return new Response(new Uint8Array(archive));
+        }
+        if (url.endsWith('/SHA256SUMS')) {
+          return new Response(`${checksum}  ${filename}\n`);
+        }
+        return new Response('', { status: 404 });
+      });
+    }
+
+    it.each([baseUrl, `${baseUrl}/`, `  ${baseUrl}///  `])(
+      'downloads and verifies every resource from the configured root %s',
+      async (configured) => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', configured);
+        await serveArchive();
+
+        // The verified archive deliberately has no runtime, so it cannot replace
+        // the fixture installation even if the download and checksum succeed.
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow('Smoke test failed: node binary not found');
+
+        expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+          `${baseUrl}/v1.2.3/${filename}`,
+          `${baseUrl}/v1.2.3/SHA256SUMS`,
+          `${baseUrl}/v1.2.3/SHA256SUMS.sig`,
+        ]);
+        expectInstallationPreserved();
+      },
+    );
+
+    it('keeps one configured source for the whole update', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      await serveArchive();
+      const fetchResource = mockFetch.getMockImplementation()!;
+      mockFetch.mockImplementation(async (url: string) => {
+        vi.stubEnv(
+          'QWEN_UPDATE_BASE_URL',
+          'https://other.example.com/releases',
+        );
+        return fetchResource(url);
+      });
+
+      await expect(
+        performStandaloneUpdate(standaloneDir, 'v1.2.3'),
+      ).rejects.toThrow('Smoke test failed: node binary not found');
+      expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+        `${baseUrl}/v1.2.3/${filename}`,
+        `${baseUrl}/v1.2.3/SHA256SUMS`,
+        `${baseUrl}/v1.2.3/SHA256SUMS.sig`,
+      ]);
+    });
+
+    it.each([undefined, '', '  '])(
+      'preserves default fallback when unset (%s)',
+      async (value) => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', value);
+        mockFetch.mockImplementation(
+          async () => new Response('', { status: 503 }),
+        );
+
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow('OSS (HTTP 503');
+        expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+          `https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/v1.2.3/${filename}`,
+          `https://github.com/QwenLM/qwen-code/releases/download/v1.2.3/${filename}`,
+        ]);
+        expectInstallationPreserved();
+      },
+    );
+
+    it('reports a custom-source failure without trying default sources', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      mockFetch.mockImplementation(
+        async () => new Response('', { status: 503 }),
+      );
+
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        `Failed to download ${filename} from QWEN_UPDATE_BASE_URL: HTTP 503`,
+      );
+      expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+        `${baseUrl}/v1.2.3/${filename}`,
+      ]);
+      expectInstallationPreserved();
+    });
+
+    it('preserves the installation when the custom source serves a bad checksum', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      await serveArchive({ badChecksum: true });
+
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow('Checksum mismatch');
+      expectInstallationPreserved();
+    });
+
+    it('still requires a signature when explicitly enabled', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      vi.stubEnv('QWEN_REQUIRE_SIGNATURE', '1');
+      await serveArchive();
+
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'SHA256SUMS.sig not found and QWEN_REQUIRE_SIGNATURE=1 is set',
+      );
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expectInstallationPreserved();
+    });
+
+    it.each([
+      'not-a-url',
+      '/releases',
+      'http://downloads.example.com/releases',
+      'file:///releases',
+      'https:downloads.example.com/releases',
+      'https://example:example@downloads.example.com/releases',
+      `${baseUrl}?channel=latest`,
+      `${baseUrl}?`,
+      `${baseUrl}#fragment`,
+      `${baseUrl}#`,
+      'https://downloads.example.com/rele\nases',
+    ])(
+      'rejects invalid configuration before filesystem or network changes: %s',
+      async (value) => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', value);
+        const parent = path.join(tempDir, 'not-created');
+        await expect(
+          performStandaloneUpdate(path.join(parent, 'qwen-code'), '1.2.3'),
+        ).rejects.toThrow(
+          'QWEN_UPDATE_BASE_URL must be an absolute HTTPS URL without credentials, query parameters, or a fragment.',
+        );
+        expect(mockFetch).not.toHaveBeenCalled();
+        expect(fs.existsSync(parent)).toBe(false);
+      },
+    );
   });
 
   describe('isSafeTarEntryPath', () => {

@@ -1,3 +1,4 @@
+import { useBrandName } from '../brandContext';
 import { useI18n } from '../i18n';
 import styles from './WelcomeHeader.module.css';
 
@@ -12,12 +13,13 @@ export interface WelcomeHeaderProps {
 export function WelcomeHeader(props: WelcomeHeaderProps) {
   void props;
   const { t } = useI18n();
+  const brandName = useBrandName();
 
   return (
     <div className={styles.header}>
       <div className={styles.titleRow}>
         <span>{t('welcome.titlePrefix')}</span>
-        <span className={styles.title}>Qwen Code</span>
+        <span className={styles.title}>{brandName}</span>
       </div>
       <div className={styles.subtitle}>{t('welcome.prompt')}</div>
     </div>

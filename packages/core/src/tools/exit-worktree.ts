@@ -240,8 +240,14 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     const currentSessionId = this.config.getSessionId();
     if (owner !== null && owner !== currentSessionId) {
       currentWorktreeSession ??= await this.readCurrentWorktreeSession();
+      // A sidecar carrying `supersededBy` is proof the marker is *not* stale:
+      // the worktree-reset transfer deliberately retains the superseded
+      // sidecar with the same slug and path, so without this term the hatch
+      // below collapses to `ownerActive` and a resumed superseded session
+      // drops the checkout (and branch) the replacement now owns.
       const currentSessionOwnsPath =
         currentWorktreeSession?.slug === this.params.name &&
+        currentWorktreeSession.supersededBy === undefined &&
         samePath(currentWorktreeSession.worktreePath, worktreePath);
       const ownerActive = await isSessionRuntimeActive(
         owner,

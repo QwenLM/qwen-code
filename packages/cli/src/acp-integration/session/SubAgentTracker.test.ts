@@ -8,9 +8,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import type { SessionContext } from './types.js';
 import type {
+  AgentEventEmitter,
   Config,
   ToolRegistry,
-  AgentEventEmitter,
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentApprovalRequestEvent,
@@ -262,10 +262,48 @@ describe('SubAgentTracker', () => {
 
       eventEmitter.emit(AgentEventType.TOOL_CALL, event);
 
-      // Give time for any async operation
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('should emit progress update to parent on TOOL_CALL event', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const event = createToolCallEvent({
+        name: 'read_file',
+        callId: 'call-123',
+        args: { path: 'test.ts' },
+        description: 'Reading file',
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_CALL, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'parent-call-123',
+          status: 'in_progress',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: expect.stringContaining('read_file'),
+              },
+            },
+          ],
+          _meta: expect.objectContaining({
+            subagentType: 'test-subagent',
+            subagentProgress: true,
+            provenance: 'subagent',
+          }),
+        }),
+      );
     });
 
     it('should not emit when aborted', async () => {
@@ -283,6 +321,60 @@ describe('SubAgentTracker', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('uses enriched message when tool description is available', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+      const mockToolRegistry =
+        mockContext.config.getToolRegistry() as unknown as {
+          getTool: ReturnType<typeof vi.fn>;
+        };
+      mockToolRegistry.getTool = vi.fn().mockReturnValue({
+        displayName: 'ReadFile',
+        getDescription: () => 'Reading file',
+      });
+      eventEmitter.emit(
+        AgentEventType.TOOL_CALL,
+        createToolCallEvent({
+          name: 'read_file',
+          callId: 'call-enriched',
+          args: { path: 'test.ts' },
+          description: 'Reading file',
+        }),
+      );
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+      const text = sendUpdateSpy.mock.calls[0][0].content[0].content.text;
+      expect(text).toBe('ReadFile: Reading file');
+    });
+
+    it('falls back to Running tool: <name> when tool description throws', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+      const mockToolRegistry =
+        mockContext.config.getToolRegistry() as unknown as {
+          getTool: ReturnType<typeof vi.fn>;
+        };
+      mockToolRegistry.getTool = vi.fn().mockReturnValue({
+        displayName: 'ReadFile',
+        getDescription: () => {
+          throw new Error('boom');
+        },
+      });
+      eventEmitter.emit(
+        AgentEventType.TOOL_CALL,
+        createToolCallEvent({
+          name: 'read_file',
+          callId: 'call-fallback',
+          args: { path: 'test.ts' },
+          description: undefined, // force fallback path
+        }),
+      );
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+      const text = sendUpdateSpy.mock.calls[0][0].content[0].content.text;
+      expect(text).toBe('Running tool: ReadFile');
     });
   });
 
@@ -376,7 +468,7 @@ describe('SubAgentTracker', () => {
       );
 
       await vi.waitFor(() => {
-        expect(sendUpdateSpy).toHaveBeenCalledTimes(2);
+        expect(sendUpdateSpy).toHaveBeenCalledTimes(3);
       });
       await Promise.resolve();
     });
@@ -385,6 +477,7 @@ describe('SubAgentTracker', () => {
     // subagent's TodoWrite result must not promote into a session-level
     // plan update. The guard lives in ToolCallEmitter.emitResult, keyed on
     // the subagentMeta this tracker stamps onto every emit.
+
     it('does not promote a subagent TodoWrite as the session plan', async () => {
       tracker.setup(eventEmitter, abortController.signal);
 
@@ -504,6 +597,81 @@ describe('SubAgentTracker', () => {
           }),
         }),
       );
+    });
+
+    it('should emit progress update to parent on TOOL_WAITING_APPROVAL Event', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-edit',
+        description: 'Editing file',
+        confirmationDetails: createEditConfirmation({
+          fileName: '/test.ts',
+          originalContent: 'old',
+          newContent: 'new',
+        }),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'parent-call-123',
+          status: 'in_progress',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: expect.stringContaining(
+                  'Waiting for permission: edit_file',
+                ),
+              },
+            },
+          ],
+          _meta: expect.objectContaining({
+            subagentType: 'test-subagent',
+            subagentProgress: true,
+            provenance: 'subagent',
+          }),
+        }),
+      );
+    });
+
+    it('should deduplicate progress updates for the same approval callId', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-eidt-dedup',
+        description: 'Editing file',
+        confirmationDetails: createEditConfirmation({
+          fileName: '/test.ts',
+          originalContent: 'old',
+          newContent: 'new',
+        }),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      const progressCalls = sendUpdateSpy.mock.calls.filter(
+        (call) => call[0]?._meta?.subagentProgress === true,
+      );
+      expect(progressCalls).toHaveLength(1);
     });
 
     it('should respond to subagent with permission outcome', async () => {

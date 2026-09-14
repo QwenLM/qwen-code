@@ -27,6 +27,7 @@ import {
   setPendingSettingValueAny,
   getNestedValue,
   getEffectiveValue,
+  nextBooleanSettingValue,
   validateSettingValue,
 } from '../../config/settingsUtils.js';
 import {
@@ -37,7 +38,8 @@ import {
   useVimModeState,
   useVimModeActions,
 } from '../contexts/VimModeContext.js';
-import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import {
   isDeletionKey,
@@ -181,7 +183,7 @@ export function SettingsDialog({
   );
 
   // Preserve pending changes across scope switches
-  type PendingValue = boolean | number | string;
+  type PendingValue = boolean | number | string | undefined;
   const [globalPendingChanges, setGlobalPendingChanges] = useState<
     Map<string, PendingValue>
   >(new Map());
@@ -200,7 +202,9 @@ export function SettingsDialog({
     const newModified = new Set<string>();
     for (const [key, value] of globalPendingChanges.entries()) {
       const def = getSettingDefinition(key);
-      if (def?.type === 'boolean' && typeof value === 'boolean') {
+      if (value === undefined) {
+        updated = setPendingSettingValueAny(key, value, updated);
+      } else if (def?.type === 'boolean' && typeof value === 'boolean') {
         updated = setPendingSettingValue(key, value, updated);
       } else if (
         (def?.type === 'number' && typeof value === 'number') ||
@@ -246,7 +250,10 @@ export function SettingsDialog({
           const currentValue = getEffectiveValue(key, pendingSettings, {});
           let newValue: SettingsValue;
           if (definition?.type === 'boolean') {
-            newValue = !(currentValue as boolean);
+            newValue = nextBooleanSettingValue(
+              currentValue,
+              definition.default,
+            );
             setPendingSettings((prev) =>
               setPendingSettingValue(key, newValue as boolean, prev),
             );
@@ -978,13 +985,11 @@ export function SettingsDialog({
           if (currentSetting) {
             const defaultValue = getDefaultValue(currentSetting.value);
             const defType = currentSetting.type;
-            if (defType === 'boolean') {
-              const booleanDefaultValue =
-                typeof defaultValue === 'boolean' ? defaultValue : false;
+            if (defType === 'boolean' || defaultValue === undefined) {
               setPendingSettings((prev) =>
-                setPendingSettingValue(
+                setPendingSettingValueAny(
                   currentSetting.value,
-                  booleanDefaultValue,
+                  defaultValue,
                   prev,
                 ),
               );
@@ -1007,28 +1012,34 @@ export function SettingsDialog({
               }
             }
 
-            // Remove from modified settings since it's now at default
+            const scopeSettings = settings.forScope(selectedScope).settings;
+            const resetChangesValue =
+              !isDefaultValue(currentSetting.value, scopeSettings) &&
+              getEffectiveValue(currentSetting.value, scopeSettings, {}) !==
+                defaultValue;
             setModifiedSettings((prev) => {
               const updated = new Set(prev);
-              updated.delete(currentSetting.value);
+              if (resetChangesValue) updated.add(currentSetting.value);
+              else updated.delete(currentSetting.value);
               return updated;
             });
 
-            // Remove from restart-required settings if it was there
             setRestartRequiredSettings((prev) => {
               const updated = new Set(prev);
-              updated.delete(currentSetting.value);
+              if (resetChangesValue && requiresRestart(currentSetting.value)) {
+                updated.add(currentSetting.value);
+              } else {
+                updated.delete(currentSetting.value);
+              }
               return updated;
             });
 
             // If this setting doesn't require restart, save it immediately
-            if (!requiresRestart(currentSetting.value)) {
+            if (resetChangesValue && !requiresRestart(currentSetting.value)) {
               const immediateSettings = new Set([currentSetting.value]);
               const toSaveValue =
                 currentSetting.type === 'boolean'
-                  ? typeof defaultValue === 'boolean'
-                    ? defaultValue
-                    : false
+                  ? defaultValue
                   : typeof defaultValue === 'number' ||
                       typeof defaultValue === 'string'
                     ? defaultValue
@@ -1071,25 +1082,23 @@ export function SettingsDialog({
                 next.delete(currentSetting.value);
                 return next;
               });
-            } else {
+            } else if (
+              resetChangesValue &&
+              requiresRestart(currentSetting.value)
+            ) {
               // Track default reset as a pending change if restart required
-              if (
-                (currentSetting.type === 'boolean' &&
-                  typeof defaultValue === 'boolean') ||
-                (currentSetting.type === 'number' &&
-                  typeof defaultValue === 'number') ||
-                (currentSetting.type === 'string' &&
-                  typeof defaultValue === 'string')
-              ) {
-                setGlobalPendingChanges((prev) => {
-                  const next = new Map(prev);
-                  next.set(currentSetting.value, defaultValue as PendingValue);
-                  return next;
-                });
-              }
-              setRestartRequiredSettings((prev) =>
-                new Set(prev).add(currentSetting.value),
-              );
+              setGlobalPendingChanges((prev) => {
+                const next = new Map(prev);
+                next.set(currentSetting.value, defaultValue as PendingValue);
+                return next;
+              });
+            } else {
+              setGlobalPendingChanges((prev) => {
+                if (!prev.has(currentSetting.value)) return prev;
+                const next = new Map(prev);
+                next.delete(currentSetting.value);
+                return next;
+              });
             }
           }
         } else if (isDeletionKey(key) && searchQuery.length > 0) {

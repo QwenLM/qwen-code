@@ -62,6 +62,7 @@ import {
   EXTENSION_RELOAD_FAILED_REASON,
 } from '../../config/extension-refresh-state.js';
 import { AppEvent } from '../../utils/events.js';
+import { t } from '../../i18n/index.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
 import {
@@ -193,6 +194,8 @@ const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
 const STARTUP_REGISTRY_WAIT_MS = 15_000;
 const STARTUP_REGISTRY_POLL_MS = 100;
 
+const replayedExtensionRefresh = new WeakSet<ExtensionRefreshState>();
+
 export class OpenTuiSlashDispatcher {
   private activeAbortController: AbortController | null = null;
   private recentCommands = new Map<string, RecentSlashCommand>();
@@ -226,8 +229,12 @@ export class OpenTuiSlashDispatcher {
           type: MessageType.INFO,
           text:
             reason === EXTENSION_RELOAD_FAILED_REASON
-              ? 'Extension reload did not complete. Run /reload-plugins to try again.'
-              : 'Extensions changed on disk. Run /reload-plugins to apply updates.',
+              ? t(
+                  'Extension reload did not complete. Run /reload-plugins to try again.',
+                )
+              : t(
+                  'Extensions changed on disk. Run /reload-plugins to apply updates.',
+                ),
         },
         Date.now(),
       );
@@ -242,6 +249,21 @@ export class OpenTuiSlashDispatcher {
         refreshNeededListener,
       );
     });
+    // The watcher starts during CLI startup, before this renderer mounts, and
+    // markExtensionsChanged() latches instead of re-emitting — so subscribing
+    // alone drops the one notice that tells the user to run /reload-plugins.
+    // The latch outlives this dispatcher (only /reload-plugins clears it) and
+    // the shell rebuilds the dispatcher whenever its host identity changes, so
+    // the replay is keyed on the latch owner rather than the construction.
+    // The latch keeps no reason, so a replay always reads as a plain change —
+    // both wordings send the user to /reload-plugins either way.
+    if (
+      this.extensionRefreshState.needsExtensionRefresh() &&
+      !replayedExtensionRefresh.has(this.extensionRefreshState)
+    ) {
+      replayedExtensionRefresh.add(this.extensionRefreshState);
+      refreshNeededListener();
+    }
 
     // ink's processor debounce ExtensionContentChanged by 250ms and then
     // re-runs the runtime refresh (command registry + extension content).
@@ -340,14 +362,14 @@ export class OpenTuiSlashDispatcher {
   }
 
   /**
-   * Startup-window self-heal: the first dispatcher can attach a registry
-   * built while config.initialize() was still in flight — the second
-   * initialize() call throws "already initialized", the catch proceeds, and
-   * the skill loaders run before the skill manager exists, so builtin
-   * commands resolve but every skill (e.g. /qc-helper) reports "Unknown
-   * command" until the config-ready dispatcher replaces this one. One
-   * bounded retry per dispatcher lifetime: wait for the skill manager, then
-   * reload the registry so the re-parse sees the complete list.
+   * Startup-window self-heal: the dispatcher can be attached with a registry
+   * snapshot taken before config.initialize() finished — the skill manager
+   * does not exist yet, so builtin commands resolve but every skill (e.g.
+   * /qc-helper) reports "Unknown command". A concurrent initialize() call
+   * now joins the in-flight run instead of throwing, so only a failed first
+   * flight still lands the loader in its partial-commands catch. One bounded
+   * retry per dispatcher lifetime: wait for the skill manager, then reload
+   * the registry so the re-parse sees the complete list.
    */
   private async ensureCommandsLoaded(): Promise<boolean> {
     if (this.startupRetryUsed || !this.services.config) {
@@ -399,7 +421,7 @@ export class OpenTuiSlashDispatcher {
   }
 
   /** Whether {@link handle} processes this input instead of handing it back. */
-  private takesAsSlashCommand(trimmed: string): boolean {
+  takesAsSlashCommand(trimmed: string): boolean {
     if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
       return false;
     }

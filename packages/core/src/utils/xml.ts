@@ -28,6 +28,14 @@ export function escapeXml(text: string): string {
     .replace(/'/g, '&apos;');
 }
 
+/** Escape text for an XML element body while preserving copyable quotes. */
+export function escapeXmlElementText(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 // Excludes '<' from the tag body so a run of '<' characters cannot trigger
 // quadratic re-scanning (js/polynomial-redos). This also tightens detection:
 // `foo < </system-reminder>` now yields the real `</system-reminder>`

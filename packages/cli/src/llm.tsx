@@ -6,6 +6,8 @@
 
 import {
   AuthType,
+  type ChatRecord,
+  computeInitialTurnFromHistory,
   type Config,
   InputFormat,
   isDebugLogFileEnabled,
@@ -221,8 +223,9 @@ export function setupUncaughtExceptionHandler(config: Config) {
     // debugLogger.error() uses async fs.appendFile — the write would be
     // abandoned by the process.exit() below. Write synchronously instead.
     let logged = false;
+    let logPath: string | undefined;
     try {
-      const logPath = Storage.getDebugLogPath(config.getSessionId());
+      logPath = Storage.getDebugLogPath(config.getSessionId());
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.appendFileSync(logPath, line, 'utf8');
       logged = true;
@@ -245,6 +248,57 @@ export function setupUncaughtExceptionHandler(config: Config) {
     writeStderrLineSafe(
       `\nFatal: uncaught exception${logged ? ' (logged to debug file)' : ''}\n${sanitizeTerminalText(error.stack ?? error.message)}`,
     );
+    // Monitors are spawned `detached` (their own process group) so the tool
+    // can group-kill them; a side effect is that they outlive this process
+    // unless something kills them first. Reap whatever is still running on
+    // the registry of the Config this handler was installed with — each ACP
+    // session builds its own Config with its own MonitorRegistry, and those
+    // per-session registries are not covered here (a daemon-wide reap needs
+    // process-wide registry tracking; deliberately follow-up work). The
+    // crashed session can never consume their terminal events, and the
+    // in-memory registry gives a resumed session no way to reattach. The
+    // SIGKILL escalation timer in the abort path cannot survive the exit
+    // below, so children ignoring SIGTERM may still leak — best-effort, and
+    // a crash handler must never throw. (On Windows the taskkill spawn is
+    // fire-and-forget for the same reason.)
+    // Snapshot the running count before abortAll: the abort path settles and
+    // prunes entries, and this summary — written synchronously, since
+    // debugLogger is async and abandoned by the exit below — is the only
+    // record distinguishing "the reap skipped it" from "signalled but the
+    // child ignored SIGTERM".
+    const monitorRegistry = config.getMonitorRegistry();
+    const reapCount = monitorRegistry.getRunning().length;
+    try {
+      monitorRegistry.abortAll({ notify: false });
+      try {
+        if (logPath) {
+          fs.appendFileSync(
+            logPath,
+            `${new Date().toISOString()} [ERROR] [STARTUP] [MONITOR_REAP] reaped=${reapCount}\n`,
+            'utf8',
+          );
+        }
+      } catch {
+        // Nothing safe left to do.
+      }
+    } catch (reapError) {
+      // A failed reap means monitors still leak — the one distinguishing
+      // fact this path can produce. The crash lines above were written
+      // before the reap ran, so record the failure separately.
+      try {
+        if (logPath) {
+          const detail =
+            reapError instanceof Error ? reapError.stack : String(reapError);
+          fs.appendFileSync(
+            logPath,
+            `${new Date().toISOString()} [ERROR] [STARTUP] [MONITOR_REAP_FAILED] ${detail ?? ''}\n`,
+            'utf8',
+          );
+        }
+      } catch {
+        // Nothing safe left to do.
+      }
+    }
     process.exit(1);
   };
   process.on('uncaughtException', uncaughtExceptionHandler);
@@ -1419,7 +1473,10 @@ export async function main() {
       settings,
     );
 
-    const prompt_id = createNonInteractivePromptId(config.getSessionId());
+    const prompt_id = createNonInteractivePromptId(
+      config.getSessionId(),
+      config.getResumedSessionData?.()?.conversation.messages,
+    );
 
     if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
@@ -1493,8 +1550,33 @@ export async function main() {
   }
 }
 
-export function createNonInteractivePromptId(sessionId: string): string {
-  return `${sessionId}########0`;
+/**
+ * Mints the single promptId a headless `-p` run uses for its one turn.
+ *
+ * A run that resumes nothing keeps the historical `########0`. A resumed one
+ * (`--resume` / `--continue`) reuses the previous session's id, so without a
+ * seed every process mints `########0` again and one transcript ends up with
+ * several turns under a single promptId — the key #9466's rewind mapping
+ * anchors on, and the `prompt_id` persisted on `ui_telemetry` records, which
+ * is itself what the next resume reads back to seed from.
+ *
+ * Seed from the highest turn the transcript claims and continue past it, the
+ * same rule `Session.getNextPromptId` applies, so the two headless paths
+ * cannot drift.
+ */
+export function createNonInteractivePromptId(
+  sessionId: string,
+  resumedRecords?: readonly ChatRecord[],
+): string {
+  // -1 for a run that resumes nothing, so the shared `+ 1` still yields the
+  // historical `########0`. Seeding from the helper's own 0 instead would
+  // re-mint a turn the transcript already claims in the case where it returns
+  // 0 for a non-empty transcript: highest claimed turn 0, and no record with
+  // non-blank user text for its fallback to count.
+  const lastTurn = resumedRecords?.length
+    ? computeInitialTurnFromHistory(resumedRecords, sessionId)
+    : -1;
+  return `${sessionId}########${lastTurn + 1}`;
 }
 
 /**

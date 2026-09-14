@@ -143,6 +143,24 @@ describe('ChatContextHeader', () => {
     ).toBeNull();
   });
 
+  it('opens context usage independently of token usage', () => {
+    const onOpenContextUsage = vi.fn();
+    const onOpenTokenUsage = vi.fn();
+    const view = mount({ onOpenContextUsage, onOpenTokenUsage });
+    act(() => {
+      view
+        .querySelector<HTMLButtonElement>('[aria-label="Context Usage"]')!
+        .click();
+    });
+    expect(onOpenContextUsage).toHaveBeenCalledOnce();
+    expect(onOpenTokenUsage).not.toHaveBeenCalled();
+  });
+
+  it('hides context usage when its callback is omitted', () => {
+    const view = mount({ onOpenTokenUsage: vi.fn() });
+    expect(view.querySelector('[aria-label="Context Usage"]')).toBeNull();
+  });
+
   it('shows the Local Control QR entry ahead of the other actions', () => {
     const view = mount({
       rightPanelAvailable: true,

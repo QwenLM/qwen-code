@@ -10,7 +10,7 @@ import type {
 } from '../config/config.js';
 import { Config } from '../config/config.js';
 import { validateSkillName, type SkillConfig } from '../skills/types.js';
-import type { SubagentConfig } from '../subagents/types.js';
+import type { SubagentConfig, SubagentError } from '../subagents/types.js';
 import type { ClaudeMarketplaceConfig } from './claude-converter.js';
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import { Storage } from '../config/storage.js';
@@ -178,6 +178,10 @@ export interface Extension {
   commands?: string[];
   skills?: SkillConfig[];
   agents?: SubagentConfig[];
+  // R10-2: executor-block refusals for this extension's agent files, keyed by
+  // lowercased declared name, recorded at load so a by-name dispatch can refuse
+  // instead of falling through to a builtin of the same name.
+  agentExecutorRefusals?: Map<string, SubagentError>;
   hooks?: { [K in HookEventName]?: HookDefinition[] };
   channels?: Record<string, ExtensionChannelConfig>;
 }
@@ -1711,9 +1715,12 @@ export class ExtensionManager {
         extension.skills = await loadSkillsFromDir(
           `${effectiveExtensionPath}/skills`,
         );
+        const agentExecutorRefusals = new Map<string, SubagentError>();
         extension.agents = await loadSubagentFromDir(
           `${effectiveExtensionPath}/agents`,
+          agentExecutorRefusals,
         );
+        extension.agentExecutorRefusals = agentExecutorRefusals;
       }
 
       if (

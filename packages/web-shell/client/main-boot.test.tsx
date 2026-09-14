@@ -33,6 +33,7 @@ vi.mock('./config/daemon', () => ({
   // No token in the URL, so boot blocks on the postMessage handshake — the
   // window in which the watchdog's grace period can expire.
   getDaemonToken: () => null,
+  persistDaemonToken: vi.fn(),
   removeDaemonTokenFromUrl: vi.fn(),
   waitForDaemonTokenMessage: () =>
     new Promise<string>((resolve) => {

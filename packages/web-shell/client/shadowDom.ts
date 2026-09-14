@@ -47,10 +47,20 @@ const packageStyleSheetCache = new WeakMap<
 >();
 
 function getWebShellStyleText(document: Document): string {
-  const injectedStyle = document.querySelector<HTMLStyleElement>(
-    'style[data-qwen-web-shell="component"]',
-  );
-  if (injectedStyle?.textContent) return injectedStyle.textContent;
+  // The lib build injects one tag per component entry (`index` and
+  // `transcript`, see vite.lib.config.ts). A host that imports both gets two
+  // tags whose rules overlap byte-for-byte, so concatenate every match
+  // instead of taking the first — picking one would drop the editor/dialog
+  // rules whenever the transcript entry happened to load first.
+  const injected = Array.from(
+    document.querySelectorAll<HTMLStyleElement>(
+      'style[data-qwen-web-shell="component"]',
+    ),
+  )
+    .map((style) => style.textContent ?? '')
+    .filter(Boolean)
+    .join('\n');
+  if (injected) return injected;
 
   return Array.from(
     document.querySelectorAll<HTMLStyleElement>('style[data-vite-dev-id]'),

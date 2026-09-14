@@ -5,6 +5,7 @@
  */
 
 export {
+  GOAL_PAUSE_REASON_COMMAND,
   GOAL_STATE_VERSION,
   goalRequiresExactPermit,
   type GoalActivity,

@@ -62,7 +62,7 @@ const NODE_REPL_DESCRIPTION = [
   'declarations prefer assignment, var, a fresh name, or block scope.',
 ].join('\n');
 
-export const NODE_REPL_INSTRUCTIONS = [
+const NODE_REPL_RUNTIME_RULES = [
   'This server is one session-persistent JavaScript kernel. Reuse imported',
   'objects and helpers across cells. Top-level const, let, function, and class',
   'bindings persist and cannot be redeclared; update persistent state with',
@@ -80,6 +80,9 @@ export const NODE_REPL_INSTRUCTIONS = [
   'crash discard state. Runtime errors retain completed statement state;',
   'cancellation does not roll back effects already performed before it.',
 ].join('\n');
+
+export const NODE_REPL_INSTRUCTIONS =
+  "One persistent JavaScript kernel. Follow node_repl's runtime rules.";
 
 /**
  * Read the package version at runtime so it cannot drift from package.json.
@@ -176,7 +179,7 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
     'node_repl',
     {
       title: 'Node REPL',
-      description: NODE_REPL_DESCRIPTION,
+      description: `${NODE_REPL_RUNTIME_RULES}\n\n${NODE_REPL_DESCRIPTION}`,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,

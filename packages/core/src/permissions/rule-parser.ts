@@ -47,6 +47,11 @@ import type {
  * Covers all built-in tools plus common aliases (including Claude Code's "Bash").
  */
 export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
+  // Exec tool
+  exec: 'exec',
+  Exec: 'exec',
+  ExecTool: 'exec',
+
   // Shell tool
   run_shell_command: 'run_shell_command',
   Shell: 'run_shell_command',
@@ -249,6 +254,8 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   artifact: 'artifact',
   Artifact: 'artifact',
   record_artifact: 'record_artifact',
+  record_source: 'record_source',
+  RecordSource: 'record_source',
   RecordArtifact: 'record_artifact',
 
   // Report Findings tool

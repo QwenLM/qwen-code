@@ -25,7 +25,8 @@ import { useKeyboard } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
-import { isPathWithinRoot, parseRule } from '@qwen-code/qwen-code-core';
+import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
+import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 import { toOriginalKey } from './key-map.js';
 import { matchesSearchQuery } from './dialogs-core.js';
 import {
@@ -588,10 +589,12 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
               'Permission rules are a tool name, optionally followed by a specifier in parentheses.',
             )}
           </text>
-          <text fg={C.text}>
-            {t('e.g.,')} <text attributes={1}>WebFetch</text> {t('or')}{' '}
+          <box flexDirection="row">
+            <text fg={C.text}>{`${t('e.g.,')} `}</text>
+            <text attributes={1}>WebFetch</text>
+            <text fg={C.text}>{` ${t('or')} `}</text>
             <text attributes={1}>Bash(ls:*)</text>
-          </text>
+          </box>
           <box height={1} />
           <box borderStyle="rounded" borderColor={C.dim} paddingX={1}>
             <text fg={newRuleInput ? C.text : C.dim}>
@@ -636,9 +639,9 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             onHover={scopeList.setActiveIndex}
             onSelectIndex={scopeList.selectIndex}
             renderLabel={(item, { titleColor }) => (
-              <text fg={titleColor}>
-                {item.label} <text fg={C.dim}>{item.description}</text>
-              </text>
+              <text
+                fg={titleColor}
+              >{`${item.label}    ${item.description}`}</text>
             )}
           />
         </DialogFrame>
