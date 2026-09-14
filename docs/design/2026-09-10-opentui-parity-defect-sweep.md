@@ -953,9 +953,13 @@ cap with its overflow row, the hint that stops after the fourth fill, a row cut
 to the terminal width minus ink's indent), the hook's assertions on the queued
 texts at each of those sites plus the reset, and a shell test that fixes the
 placement — rows in the persistent chrome between the loading indicator and the
-composer, not in the scroll region. Nine mutations, one at each of the four
-component behaviours, four of the five mirror sites and the mount, each fail
-their own test and no other.
+composer, not in the scroll region. Eleven mutations — one at each component
+behaviour, one at each mirror site and one at the mount — each fail at least one
+test. The five component rows and the mount fail their own and no other; the
+mirror sites do not map one to one, because a list never given its first entry,
+or never emptied, is still being asserted turns later: draining without
+mirroring fails one assertion, pushing without it fails four, popping for
+editing two.
 
 ## Coverage boundary
 
