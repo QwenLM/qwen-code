@@ -8541,9 +8541,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       JSON.parse(String((init as RequestInit).body)),
     ) as Array<{ markdown: { text: string } }>;
     expect(bodies).toHaveLength(2);
-    expect(bodies[1]!.markdown.text).toBe(
-      '## 🤖 Agent · 后台任务\n\nBackground notification',
-    );
+    expect(bodies[1]!.markdown.text).toBe('Background notification');
   });
 
   it('preserves the resolved source label on a DM background reply', async () => {
@@ -8572,9 +8570,7 @@ describe('DingtalkChannel outbound file delivery', () => {
 
     expect(fetchSpy).toHaveBeenCalledOnce();
     const body = JSON.parse(String(fetchSpy.mock.calls[0]![1]?.body));
-    expect(body.markdown.text).toBe(
-      '\\[review\\]\n\n## 🤖 Agent · 后台任务\n\nReview complete.',
-    );
+    expect(body.markdown.text).toBe('\\[review\\]\n\nReview complete.');
   });
 
   it('delivers group background responses proactively', async () => {
@@ -8608,7 +8604,7 @@ describe('DingtalkChannel outbound file delivery', () => {
 
     expect(pushProactive).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 'cidGroup==' }),
-      '## 🤖 Agent · 后台任务\n\nBackground notification',
+      'Background notification',
     );
     expect(fetchSpy).toHaveBeenCalledOnce();
   });
@@ -8674,7 +8670,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('immediately sends every labeled Agent response segment by default', async () => {
+  it('immediately sends every Agent response segment unchanged', async () => {
     const channel = createChannel();
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -8728,10 +8724,10 @@ describe('DingtalkChannel outbound file delivery', () => {
     await channel.dispatchBackgroundResponse('session-1', 'Legacy result.');
 
     expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-      '## 🤖 Agent · Review \\#10807\n\nFirst result.',
-      '## 🤖 Agent · Review \\#10807\n\nSecond result.',
-      '## 🤖 Agent · Transitional Agent\n\nTransitional result.',
-      '## 🤖 Agent · 后台任务\n\nLegacy result.',
+      'First result.',
+      'Second result.',
+      'Transitional result.',
+      'Legacy result.',
     ]);
   });
 

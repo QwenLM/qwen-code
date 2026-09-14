@@ -242,7 +242,7 @@ impl Tool for ListAppsTool {
             description:
                 "List Linux apps — both currently running and installed-but-not-running — \
                 with per-app state flags:\n\n\
-                - running: is a process for this app live? (pid is 0 when false)\n\
+                - running: does a live process own a top-level window? (pid is 0 when false)\n\
                 - active: reserved (Linux X11/Wayland focus model differs from frontmost-app); \
                 always false.\n\
                 - kind: `\"desktop\"` for XDG `.desktop` launcher entries.\n\
@@ -253,15 +253,17 @@ impl Tool for ListAppsTool {
                 stripped and path separators replaced with `-` \
                 (e.g. `kde4/konqbrowser.desktop` → `kde4-konqbrowser`).\n\
                 - last_used: RFC3339 mtime of the `.desktop` file, when readable.\n\n\
-                Running apps come from `/proc`. Installed apps come from XDG Desktop Entry \
+                Running apps are window-owning processes from `/proc`; helpers and services are excluded. Installed apps come from XDG Desktop Entry \
                 files in $XDG_DATA_HOME/applications and each $XDG_DATA_DIRS entry's \
                 applications/ subdir. Entries with `NoDisplay=true` or `Hidden=true` are \
                 filtered. A `.desktop` file whose launcher matches a running process \
                 (by basename) is merged into a single entry with `running: true`.\n\n\
                 Use this for \"is X installed?\" as well as \"is X running?\". For per-window \
-                state — visibility, geometry, titles — call list_windows instead."
+                state — visibility, geometry, titles — inspect each app’s windows."
                     .into(),
-            input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
+            input_schema: json!({"type":"object","properties":{
+                "running_only":{"type":"boolean","description":"Only return apps with top-level windows. Default false."}
+            },"additionalProperties":false}),
             read_only: true,
             destructive: false,
             idempotent: true,
@@ -269,99 +271,21 @@ impl Tool for ListAppsTool {
         })
     }
 
-    async fn invoke(&self, _args: Value) -> ToolResult {
-        let apps = tokio::task::spawn_blocking(|| -> Vec<serde_json::Value> {
+    async fn invoke(&self, args: Value) -> ToolResult {
+        use cua_driver_core::tool_args::ArgsExt;
+        let running_only = args.bool_or("running_only", false);
+        let apps = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Value>> {
+            let windows = discovery_windows(None)?;
             let procs = crate::proc_fs::list_processes();
             let installed = crate::installed_apps::list_installed_apps();
-
-            // Match running processes to installed apps by executable
-            // basename (Exec=firefox %u → "firefox"; cmdline /usr/bin/firefox
-            // → "firefox"). Many distros register multiple .desktop entries
-            // sharing the same basename (e.g. several `firefox` profiles, a
-            // `code` and a `code-insiders` both shelling `code`), so the
-            // bucket is `Vec<usize>` — we pick a winner per running process
-            // via `disambiguate_installed_match` instead of overwriting.
-            let mut by_exe: std::collections::HashMap<String, Vec<usize>> =
-                std::collections::HashMap::new();
-            for (i, app) in installed.iter().enumerate() {
-                let basename = exec_basename(&app.launch_path);
-                if !basename.is_empty() {
-                    by_exe.entry(basename).or_default().push(i);
-                }
-            }
-
-            let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
-            let mut out = Vec::new();
-            for p in &procs {
-                let key_source = if !p.cmdline.is_empty() {
-                    &p.cmdline
-                } else {
-                    &p.name
-                };
-                let basename = exec_basename(key_source);
-                if basename.is_empty() {
-                    continue;
-                }
-                let candidates = by_exe.get(&basename).map(|v| v.as_slice()).unwrap_or(&[]);
-                let merged = disambiguate_installed_match(candidates, &installed, key_source);
-                if let Some(idx) = merged {
-                    consumed.insert(idx);
-                }
-                let (name, bundle_id, launch_path, kind, last_used) = match merged {
-                    Some(idx) => {
-                        let a = &installed[idx];
-                        (
-                            a.name.clone(),
-                            Some(a.bundle_id.clone()),
-                            Some(a.launch_path.clone()),
-                            Some("desktop".to_owned()),
-                            a.last_used.clone(),
-                        )
-                    }
-                    None => (
-                        if !p.name.is_empty() {
-                            p.name.clone()
-                        } else {
-                            basename.clone()
-                        },
-                        None,
-                        None,
-                        None,
-                        None,
-                    ),
-                };
-                out.push(json!({
-                    "pid":         p.pid,
-                    "bundle_id":   bundle_id,
-                    "name":        name,
-                    "running":     true,
-                    "active":      false,
-                    "kind":        kind,
-                    "launch_path": launch_path,
-                    "last_used":   last_used,
-                    "windows":     Vec::<serde_json::Value>::new(),
-                }));
-            }
-            for (i, app) in installed.iter().enumerate() {
-                if consumed.contains(&i) {
-                    continue;
-                }
-                out.push(json!({
-                    "pid":         0,
-                    "bundle_id":   app.bundle_id.clone(),
-                    "name":        app.name.clone(),
-                    "running":     false,
-                    "active":      false,
-                    "kind":        "desktop",
-                    "launch_path": app.launch_path.clone(),
-                    "last_used":   app.last_used.clone(),
-                    "windows":     Vec::<serde_json::Value>::new(),
-                }));
-            }
-            out
+            Ok(app_records(&procs, &installed, &windows, running_only))
         })
-        .await
-        .unwrap_or_default();
+        .await;
+        let apps = match apps {
+            Ok(Ok(apps)) => apps,
+            Ok(Err(error)) => return desktop_discovery_error(error),
+            Err(error) => return ToolResult::error(error.to_string()),
+        };
 
         let running_count = apps
             .iter()
@@ -390,6 +314,107 @@ impl Tool for ListAppsTool {
         });
         ToolResult::text(lines.join("\n")).with_structured(structured)
     }
+}
+
+fn app_records(
+    procs: &[crate::proc_fs::ProcessInfo],
+    installed: &[crate::installed_apps::InstalledApp],
+    windows: &[crate::x11::WindowInfo],
+    running_only: bool,
+) -> Vec<Value> {
+    // Match running processes to installed apps by executable
+    // basename (Exec=firefox %u → "firefox"; cmdline /usr/bin/firefox
+    // → "firefox"). Many distros register multiple .desktop entries
+    // sharing the same basename (e.g. several `firefox` profiles, a
+    // `code` and a `code-insiders` both shelling `code`), so the
+    // bucket is `Vec<usize>` — we pick a winner per running process
+    // via `disambiguate_installed_match` instead of overwriting.
+    let mut by_exe: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, app) in installed.iter().enumerate() {
+        let basename = exec_basename(&app.launch_path);
+        if !basename.is_empty() {
+            by_exe.entry(basename).or_default().push(i);
+        }
+    }
+
+    let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for p in procs {
+        let app_windows: Vec<_> = windows
+            .iter()
+            .filter(|window| window.pid == Some(p.pid))
+            .map(window_record_json)
+            .collect();
+        if app_windows.is_empty() {
+            continue;
+        }
+        let key_source = if !p.cmdline.is_empty() {
+            &p.cmdline
+        } else {
+            &p.name
+        };
+        let basename = exec_basename(key_source);
+        if basename.is_empty() {
+            continue;
+        }
+        let candidates = by_exe.get(&basename).map(|v| v.as_slice()).unwrap_or(&[]);
+        let merged = disambiguate_installed_match(candidates, installed, key_source);
+        if let Some(idx) = merged {
+            consumed.insert(idx);
+        }
+        let (name, bundle_id, launch_path, kind, last_used) = match merged {
+            Some(idx) => {
+                let a = &installed[idx];
+                (
+                    a.name.clone(),
+                    Some(a.bundle_id.clone()),
+                    Some(a.launch_path.clone()),
+                    Some("desktop".to_owned()),
+                    a.last_used.clone(),
+                )
+            }
+            None => (
+                if !p.name.is_empty() {
+                    p.name.clone()
+                } else {
+                    basename.clone()
+                },
+                None,
+                None,
+                None,
+                None,
+            ),
+        };
+        out.push(json!({
+            "pid":         p.pid,
+            "bundle_id":   bundle_id,
+            "name":        name,
+            "running":     true,
+            "active":      false,
+            "kind":        kind,
+            "launch_path": launch_path,
+            "last_used":   last_used,
+            "windows":     app_windows,
+        }));
+    }
+    for (i, app) in installed.iter().enumerate() {
+        if running_only || consumed.contains(&i) {
+            continue;
+        }
+        out.push(json!({
+            "pid":         0,
+            "bundle_id":   app.bundle_id.clone(),
+            "name":        app.name.clone(),
+            "running":     false,
+            "active":      false,
+            "kind":        "desktop",
+            "launch_path": app.launch_path.clone(),
+            "last_used":   app.last_used.clone(),
+            "windows":     Vec::<serde_json::Value>::new(),
+        }));
+    }
+    out
 }
 
 /// Pick which of several `.desktop`-derived installed apps best matches a
@@ -460,6 +485,26 @@ fn exec_basename(s: &str) -> String {
     String::new()
 }
 
+fn discovery_windows(filter_pid: Option<u32>) -> anyhow::Result<Vec<crate::x11::WindowInfo>> {
+    let mut windows = if crate::wayland::is_wayland() {
+        crate::wayland::list_windows_dispatch(filter_pid)
+    } else {
+        crate::x11::try_list_windows(filter_pid)?
+    };
+    windows.retain(|window| window.pid.map_or(true, crate::proc_fs::is_process_live));
+    if crate::wayland::is_wayland() {
+        crate::wayland::remember_observed_window_origins(&windows);
+    }
+    Ok(windows)
+}
+
+fn desktop_discovery_error(error: impl std::fmt::Display) -> ToolResult {
+    ToolResult::error(format!(
+        "Cannot enumerate desktop windows: {error}. Pass the desktop session's DISPLAY, XAUTHORITY, DBUS_SESSION_BUS_ADDRESS, and XDG_RUNTIME_DIR into the MCP server environment, then restart it.{}",
+        crate::no_display_hint()
+    )).with_structured(json!({ "code": "desktop_unavailable" }))
+}
+
 // ── list_windows ─────────────────────────────────────────────────────────────
 
 pub struct ListWindowsTool;
@@ -488,17 +533,13 @@ impl Tool for ListWindowsTool {
         let filter_pid = args.opt_u64("pid").map(|v| v as u32);
         let on_screen_only = args.bool_or("on_screen_only", false);
         let mut windows =
-            tokio::task::spawn_blocking(move || crate::wayland::list_windows_dispatch(filter_pid))
-                .await
-                .unwrap_or_default();
-        // Exited applications can remain visible in AT-SPI/X11 as zombies;
-        // never return those stale targets to callers.
-        windows.retain(|window| window.pid.map_or(true, crate::proc_fs::is_process_live));
+            match tokio::task::spawn_blocking(move || discovery_windows(filter_pid)).await {
+                Ok(Ok(windows)) => windows,
+                Ok(Err(error)) => return desktop_discovery_error(error),
+                Err(error) => return ToolResult::error(error.to_string()),
+            };
         if on_screen_only {
             windows.retain(|window| window.is_on_screen);
-        }
-        if crate::wayland::is_wayland() {
-            crate::wayland::remember_observed_window_origins(&windows);
         }
         let mut lines = vec![format!("Found {} windows:", windows.len())];
         for w in &windows {
@@ -904,8 +945,11 @@ impl Tool for GetWindowStateTool {
                     // its existing integer `element_index`. The integer
                     // surface stays unchanged — the token is additive.
                     let snapshot_id = (!observation_only).then(|| {
-                        cua_driver_core::element_token::global()
-                            .register_snapshot(pid as i32, xid as u32, count)
+                        cua_driver_core::element_token::global().register_snapshot_indices(
+                            pid as i32,
+                            xid as u32,
+                            tr.nodes.iter().filter_map(|node| node.element_index),
+                        )
                     });
                     if observation_revision.is_some() && !observation_only {
                         state.watch_target(pid, xid);
@@ -913,7 +957,7 @@ impl Tool for GetWindowStateTool {
                     let revision_capture_complete = observation_revision
                         .as_ref()
                         .is_some_and(|revision| revision.stable_element_ids)
-                        && tr.complete
+                        && tr.read_complete()
                         && tr.backend == crate::atspi::AtspiBackend::Atspi;
                     if let (Some(revision), Some(snapshot_id)) = (
                         observation_revision
@@ -1037,6 +1081,7 @@ impl Tool for GetWindowStateTool {
                     structured["returned_element_count"] = json!(elements.len());
                     structured["elements"] = json!(elements);
                     structured["capture_complete"] = json!(tr.complete);
+                    structured["capture_read_complete"] = json!(tr.read_complete());
                     structured["capture_truncated"] = json!(tr.truncated);
                     if !tr.incomplete_notes.is_empty() {
                         structured["capture_incomplete_details"] = json!(tr.incomplete_notes);
@@ -8763,5 +8808,94 @@ mod pid_window_target_tests {
             PidWindowTargetResolution::Ambiguous(windows)
                 if windows.iter().map(|window| window.window_id).collect::<Vec<_>>() == [7, 8]
         ));
+    }
+}
+
+#[cfg(test)]
+mod app_discovery_tests {
+    use super::*;
+    use crate::{installed_apps::InstalledApp, proc_fs::ProcessInfo, x11::WindowInfo};
+
+    #[test]
+    fn discovery_excludes_helpers_and_services_but_keeps_windows_and_launchers() {
+        let procs = vec![
+            ProcessInfo {
+                pid: 10,
+                name: "browser".into(),
+                cmdline: "/usr/bin/browser".into(),
+            },
+            ProcessInfo {
+                pid: 11,
+                name: "browser".into(),
+                cmdline: "/usr/bin/browser --type=renderer".into(),
+            },
+            ProcessInfo {
+                pid: 12,
+                name: "kworker".into(),
+                cmdline: String::new(),
+            },
+            ProcessInfo {
+                pid: 13,
+                name: "editor".into(),
+                cmdline: "/opt/editor".into(),
+            },
+        ];
+        let installed = vec![
+            InstalledApp {
+                name: "Browser".into(),
+                bundle_id: "browser".into(),
+                launch_path: "/usr/bin/browser".into(),
+                last_used: None,
+            },
+            InstalledApp {
+                name: "Calculator".into(),
+                bundle_id: "calc".into(),
+                launch_path: "/usr/bin/calc".into(),
+                last_used: None,
+            },
+        ];
+        let window = |xid, pid, visible| WindowInfo {
+            xid,
+            pid: Some(pid),
+            app_name: "App".into(),
+            title: format!("Window {xid}"),
+            is_on_screen: visible,
+            z_index: Some(0),
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        let windows = vec![
+            window(1, 10, true),
+            window(2, 10, false),
+            window(3, 13, false),
+        ];
+        let apps = app_records(&procs, &installed, &windows, false);
+        assert_eq!(apps.len(), 3);
+        assert_eq!(apps[0]["pid"], 10);
+        assert_eq!(apps[0]["bundle_id"], "browser");
+        assert_eq!(apps[0]["launch_path"], "/usr/bin/browser");
+        assert_eq!(apps[0]["windows"].as_array().unwrap().len(), 2);
+        assert_eq!(apps[1]["pid"], 13);
+        assert_eq!(apps[1]["windows"][0]["is_on_screen"], false);
+        assert_eq!(apps[2]["bundle_id"], "calc");
+        assert_eq!(apps[2]["running"], false);
+        assert_eq!(app_records(&procs, &installed, &windows, true), apps[..2]);
+    }
+
+    #[test]
+    fn unavailable_desktop_is_an_error_with_startup_guidance() {
+        let error = desktop_discovery_error("Connection refused");
+        let serialized = serde_json::to_value(error).unwrap();
+        assert_eq!(serialized["isError"], true);
+        assert_eq!(
+            serialized["structuredContent"]["code"],
+            "desktop_unavailable"
+        );
+        let message = serialized["content"][0]["text"].as_str().unwrap();
+        assert!(message.contains("DISPLAY"));
+        assert!(message.contains("MCP server environment"));
+        assert!(message.contains("restart"));
     }
 }
