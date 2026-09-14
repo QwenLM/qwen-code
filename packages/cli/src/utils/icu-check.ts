@@ -52,12 +52,35 @@ export function icuSmallNeedsProbe(icuSmall: unknown): boolean {
 
 /** True when the runtime might lack full ICU and needs the child probe. */
 function needsProbe(): boolean {
-  if (typeof Intl.Segmenter === 'undefined') {
+  // Guard the Intl binding itself first: on a no-icu build the namespace may
+  // not exist at all, and `typeof Intl.Segmenter` would throw ReferenceError
+  // instead of reporting the missing segmenter.
+  if (typeof Intl === 'undefined' || typeof Intl.Segmenter === 'undefined') {
     return true;
   }
   // Node records its build-time ICU shape in process.config.variables.
   const variables = process.config.variables as Record<string, unknown>;
   return icuSmallNeedsProbe(variables['icu_small']);
+}
+
+/** Launch args for the probe child: forward an --icu-data-dir the user passed. */
+function probeArgs(): string[] {
+  // A user who repairs ICU with Node's own --icu-data-dir has a working
+  // parent; the child must see the same data directory or it faults and
+  // misdiagnoses the host as ICU-less. Both the space and = forms occur.
+  const execArgv = process.execArgv;
+  const icuArgs: string[] = [];
+  for (let i = 0; i < execArgv.length; i++) {
+    const arg = execArgv[i];
+    if (arg === undefined) continue;
+    if (arg === '--icu-data-dir' && execArgv[i + 1] !== undefined) {
+      icuArgs.push(arg, execArgv[i + 1]!);
+      i++;
+    } else if (arg.startsWith('--icu-data-dir=')) {
+      icuArgs.push(arg);
+    }
+  }
+  return [...icuArgs, '-e', PROBE_SOURCE];
 }
 
 export function assertFullIcuAvailable(probe: Probe = defaultProbe): void {
@@ -66,7 +89,7 @@ export function assertFullIcuAvailable(probe: Probe = defaultProbe): void {
   }
   let status: number | null;
   try {
-    status = probe(process.execPath, ['-e', PROBE_SOURCE]).status;
+    status = probe(process.execPath, probeArgs()).status;
   } catch {
     status = null;
   }

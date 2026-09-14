@@ -99,6 +99,60 @@ describe('assertFullIcuAvailable', () => {
     });
   });
 
+  it('probes when the Intl binding itself is absent', () => {
+    // no-icu builds can strip the Intl namespace entirely; the check must
+    // report instead of throwing ReferenceError on `typeof Intl.Segmenter`
+    const original = (globalThis as Record<string, unknown>)['Intl'];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any)['Intl'] = undefined;
+    try {
+      const probe = vi.fn(okProbe);
+      assertFullIcuAvailable(probe);
+      expect(probe).toHaveBeenCalledTimes(1);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any)['Intl'] = original;
+    }
+  });
+
+  it('forwards a parent --icu-data-dir to the probe child', () => {
+    // a user who repairs ICU with Node's own flag has a working parent; the
+    // child must get the same flag or it faults and misdiagnoses the host
+    const original = process.execArgv;
+    try {
+      process.execArgv = ['--icu-data-dir=/tmp/fake-icu'];
+      let captured: string[] = [];
+      withoutSegmenter(() => {
+        assertFullIcuAvailable((command, args) => {
+          captured = args;
+          return { status: 0 };
+        });
+      });
+      expect(captured).toEqual([
+        '--icu-data-dir=/tmp/fake-icu',
+        '-e',
+        expect.any(String),
+      ]);
+
+      process.execArgv = ['--icu-data-dir', '/tmp/fake-icu'];
+      captured = [];
+      withoutSegmenter(() => {
+        assertFullIcuAvailable((command, args) => {
+          captured = args;
+          return { status: 0 };
+        });
+      });
+      expect(captured).toEqual([
+        '--icu-data-dir',
+        '/tmp/fake-icu',
+        '-e',
+        expect.any(String),
+      ]);
+    } finally {
+      process.execArgv = original;
+    }
+  });
+
   it('runs the real child probe successfully on a healthy runtime', () => {
     // exercises defaultProbe and the real PROBE_SOURCE: a child Node process
     // iterates an Intl.Segmenter segmentation and must exit 0 here
