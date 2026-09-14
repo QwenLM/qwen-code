@@ -993,6 +993,7 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          QWEN_PR_REVIEW_EFFORT: '${{ vars.QWEN_PR_REVIEW_EFFORT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           AUTO_REVIEW: '${{ steps.context.outputs.auto_review }}'
@@ -1672,6 +1673,23 @@ jobs:
             mkdir -p "$QWEN_HOME"
             printf '%s\n' '{"tools":{"shell":{"defaultTimeoutMs":2400000}}}' \
               > "$QWEN_HOME/settings.json"
+          fi
+          # vars.QWEN_PR_REVIEW_EFFORT is to model.reasoningEffort what
+          # vars.QWEN_PR_REVIEW_MODEL is to --model (low|medium|high|xhigh|
+          # max); the CLI has no flag for it, so it goes in the same per-run
+          # settings file, merged so it composes with the cover above. Unset
+          # keeps the provider's default. This is the model's thinking depth,
+          # not /review's own --effort (which --comment pins to high).
+          if [ -n "${QWEN_PR_REVIEW_EFFORT:-}" ]; then
+            mkdir -p "$QWEN_HOME"
+            node -e '
+              const fs = require("node:fs");
+              const [file, effort] = process.argv.slice(1);
+              let s = {};
+              try { s = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+              s.model = { ...s.model, reasoningEffort: effort };
+              fs.writeFileSync(file, JSON.stringify(s) + "\n");
+            ' "$QWEN_HOME/settings.json" "$QWEN_PR_REVIEW_EFFORT"
           fi
 
           # One attempt of the qwen review. Sets OUTCOME (success | retryable |

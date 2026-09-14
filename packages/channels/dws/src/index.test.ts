@@ -16,6 +16,7 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.fields.map((field) => field.key)).toEqual([
       'profile',
       'groupPolicy',
+      'dmPolicy',
       'senderPolicy',
       'allowedUsers',
       'watchTodos',
@@ -26,6 +27,19 @@ describe('DWS channel plugin', () => {
 
   it('accepts the default @ message source', () => {
     expect(plugin.management?.validateConfig?.({})).toBeUndefined();
+  });
+
+  it('exposes independent direct-message access with the existing open default', () => {
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'dmPolicy'),
+    ).toMatchObject({
+      kind: 'enum',
+      default: 'open',
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    });
   });
 
   it('defaults sender and group access to pairing', () => {
