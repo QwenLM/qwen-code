@@ -52,7 +52,7 @@ function toolResult({
   };
 }
 
-function fakeDriver({ revisionCapability = true, results = {} } = {}) {
+function fakeDriver({ revisionCapability = true, results = {}, platform = "windows" } = {}) {
   const calls = [];
   const asyncOptions = [];
   const driver = {
@@ -65,6 +65,7 @@ function fakeDriver({ revisionCapability = true, results = {} } = {}) {
     },
     async listToolsJson() {
       return JSON.stringify({
+        platform,
         tools: [
           {
             name: "get_window_state",
@@ -1209,13 +1210,60 @@ test("an explicit delivery mode overrides the environment default", async () => 
   assert.equal(driver.calls[0].input.deliveryMode, "background");
 });
 
-test("an unset environment default resolves every supported action to background", async () => {
+test("an unset environment default preserves Windows background delivery", async () => {
   const driver = fakeDriver();
   const computer = new ComputerUse(driver, { sdk: fakeSdk, environment: {} });
 
   await computer.click({ pid: 42, windowId: 7, x: 10, y: 20 });
 
   assert.equal(driver.calls[0].input.deliveryMode, "background");
+});
+
+test("Linux defaults authorize native focus preparation for every input action", async () => {
+  const driver = fakeDriver({ platform: "linux" });
+  let inventories = 0;
+  const owner = { listToolsJson() { inventories += 1; return '{"platform":"linux"}'; } };
+  const computer = new ComputerUse(driver, { sdk: fakeSdk, owner });
+  const target = { pid: 42, windowId: 7 };
+  const element = { ...target, elementToken: "rv1:l_a:1" };
+  await computer.click(element);
+  await computer.doubleClick(element);
+  await computer.rightClick(element);
+  await computer.drag({ ...target, fromX: 1, fromY: 2, toX: 3, toY: 4 });
+  await computer.scroll({ ...element, direction: "down" });
+  await computer.typeText({ ...element, text: "once" });
+  await computer.pressKey({ ...target, key: "Enter" });
+  await computer.hotkey({ ...target, keys: ["ctrl", "a"] });
+  assert.equal(inventories, 1);
+  assert.equal(driver.calls.length, 8);
+  assert.ok(driver.calls.every(({ input }) => input.deliveryMode === "foreground"));
+  assert.ok(driver.calls.every(({ input }) => input.pid === 42 && input.windowId === 7n));
+  assert.equal(driver.calls[0].input.elementToken, element.elementToken);
+});
+
+test("Linux automatic delivery never replays an uncertain mutation error", async () => {
+  const driver = fakeDriver({ platform: "linux", results: {
+    windowTypeText: toolResult({ isError: true, structured: {
+      code: "verification_failed", effect: "unverifiable",
+    } }),
+  } });
+  const computer = new ComputerUse(driver, { sdk: fakeSdk });
+  await assert.rejects(computer.typeText({ pid: 42, windowId: 7, text: "once" }), {
+    code: "verification_failed",
+  });
+  assert.equal(driver.calls.length, 1);
+});
+
+test("refreshing the connected platform refreshes the input default", async () => {
+  const driver = fakeDriver();
+  let platform = "linux";
+  const owner = { listToolsJson: () => JSON.stringify({ platform }) };
+  const computer = new ComputerUse(driver, { sdk: fakeSdk, owner });
+  await computer.pressKey({ pid: 42, windowId: 7, key: "Tab" });
+  platform = "windows";
+  await computer.getPlatform();
+  await computer.pressKey({ pid: 42, windowId: 7, key: "Tab" });
+  assert.deepEqual(driver.calls.map(({ input }) => input.deliveryMode), ["foreground", "background"]);
 });
 
 test("an invalid environment delivery default fails before dispatch", async () => {
