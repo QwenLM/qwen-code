@@ -410,13 +410,17 @@ longer erase that action error a second later. These paths were source-inspected
 only.
 The daemon's ordinary session catalog already returned agent sessions, but the
 sidebar exposed only Tasks and Channels and therefore hid them behind the
-default-source filter. The existing source switch now includes Agents and
-feeds `sourceType: agent` into the same `WorkspaceSection`; it does not add a
-second conversation list or renderer. In the live Web Shell that tab listed
-the existing `demo-leader` and `demo-worker` sessions, and opening
-`demo-leader` loaded session `63465788-a16b-5328-92fc-8020330969a9` in the
-ordinary conversation page with its full ten-turn transcript. A hard reload
-preserved that transcript. No test suite, build, lint, typecheck, or CI ran.
+default-source filter. A temporary source switch added an Agents tab that fed
+`sourceType: agent` into the same `WorkspaceSection`; it added no second
+conversation list or renderer. That tab was removed on 2026-09-14: an agent
+session holds one run's transcript and is already reachable from the run row
+inside its own conversation, so presenting runs beside conversations made the
+sidebar read as if they were conversations. The switch is Tasks and Channels
+again. While it existed, that tab listed the existing `demo-leader` and
+`demo-worker` sessions, and opening `demo-leader` loaded session
+`63465788-a16b-5328-92fc-8020330969a9` in the ordinary conversation page
+with its full ten-turn transcript. A hard reload preserved that transcript.
+No test suite, build, lint, typecheck, or CI ran.
 The Agents navigation now opens runnable workspace Agents and their shared tasks
 instead of leading with reusable subagent definition files. New Agent reuses the
 existing manual/model-assisted builder but writes one roster identity directly;

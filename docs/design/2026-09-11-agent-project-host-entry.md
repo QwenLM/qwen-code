@@ -18,7 +18,7 @@ Messages arriving during Host execution are reliably continued in the next nativ
 
 The Agent belongs to the existing sidebar project, not a separate Team. Creation displays its project name and path. Execution location is an explicit selection of the coordinator's local Qwen Code or a registered Host, with provider and execution directory. Local and remote files are not synchronized automatically. The task project selector displays a short project name and the full selected path beneath it.
 
-The separate collaboration conversation group is superseded by one project conversation list. Root collaboration threads are adapted into view-only rows alongside ordinary sessions in their owning project, including title search. Clicking them opens shared Chat; they do not receive ordinary-session mutation actions. Storage and transcripts are not migrated. The sidebar Agent entry expands into roster, task board and execution hosts, navigating directly without a second tab strip inside the page.
+The separate collaboration conversation group is superseded by one project conversation list. Root collaboration threads are adapted into view-only rows alongside ordinary sessions in their owning project, including title search. Clicking them opens shared Chat; they do not receive ordinary-session mutation actions. Storage and transcripts are not migrated. The sidebar Agent entry expands into roster, task board and execution hosts, navigating directly without a second tab strip inside the page. The session-source switch no longer carries an Agents tab: an agent session holds one run's transcript and is reachable from the run row inside its own conversation, so the switch is Tasks and Channels again.
 
 ## Existing service connection
 

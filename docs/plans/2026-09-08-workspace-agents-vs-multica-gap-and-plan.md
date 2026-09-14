@@ -688,10 +688,12 @@ reached human acceptance. This overturns the earlier inference that writing
 
 Stage B turned out to be smaller than written. Agent sessions were already in
 the ordinary session catalog, but the sidebar's Tasks filter hid them. The
-existing session-source switch now has an Agents tab backed by the same
-`WorkspaceSection` and ordinary session page; no second conversation list was
-added. A run row links to the ordinary task session. The current automatic title
-is now `Agent · Task`, while a person's `/rename` remains authoritative. The
+session-source switch briefly carried an Agents tab backed by the same
+`WorkspaceSection` and ordinary session page, adding no second conversation
+list; it was removed on 2026-09-14 in favour of the run row's link to the
+ordinary task session, which is now the only entry, and the switch is Tasks and
+Channels again. The automatic title is now `Agent · Task`, while a person's
+`/rename` remains authoritative. The
 shared ledger still exists because it is the only record spanning several
 Agents, but it reuses the existing Markdown renderer and the ordinary session
 list instead of duplicating either. Root tasks appear once, child tasks stay
