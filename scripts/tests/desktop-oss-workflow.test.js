@@ -197,13 +197,19 @@ describe('Desktop OSS mirror workflow', () => {
     // from main. Narrowing it further was measured and abandoned — real tags
     // carry no single delta shape and none is a signed object — which leaves
     // the wording as the remediation. Pin it: an error message that overstates
-    // what ran is the thing this whole thread was about.
+    // what ran is the thing this whole thread was about. It must also name the
+    // operand that was actually checked, because a tag with extra commits on
+    // its release branch (a documented hotfix shape) was still cut from main,
+    // and blaming provenance for that sends the operator the wrong way.
     const source = getWorkflowStep(
       getWorkflowJob(releaseWorkflow, 'prepare'),
       'Resolve Qwen Code source',
     );
-    expect(source).toContain('::error::This release was not cut from main');
+    expect(source).toContain(
+      "::error::Release $INPUT_REF: the tag commit's first parent $ancestor is not reachable from main",
+    );
     expect(source).toContain('whoever can tag and publish a release');
+    expect(source).not.toContain('This release was not cut from main');
   });
 });
 

@@ -10,7 +10,7 @@ on:
         required: true
         type: 'string'
       qwen_code_ref:
-        description: 'Qwen Code branch or commit to bundle. A release tag is refused here: its commit is not reachable from main, and only the release event may bundle one.'
+        description: 'Qwen Code branch or commit to bundle, reachable from main. A release tag whose own commit is off main is refused here: dispatch checks the ref itself, while only the release event peels to its parent.'
         required: true
         default: 'main'
         type: 'string'
@@ -161,10 +161,10 @@ jobs:
             #
             # Narrowing it further was measured and abandoned: real tags carry
             # no single delta shape to allowlist (v0.14.5 is i18n files with no
-            # package.json, v0.22.3 is 24 manifests), none of the 94 v0.2* tags
-            # is an annotated or signed object, and building the parent instead
-            # would bundle the previous CLI version. Tightening who may tag is
-            # the lever that would change this.
+            # package.json, v0.22.3 is 24 manifests), none of the 30 stable
+            # v0.2* tags is an annotated or signed object, and building the
+            # parent instead would bundle the previous CLI version. Tightening
+            # who may tag is the lever that would change this.
             ancestor="$sha"
             if [ "$GITHUB_EVENT_NAME" = 'release' ]; then
               ancestor="$(git rev-parse "${sha}^")"
@@ -172,7 +172,7 @@ jobs:
             git fetch origin main:refs/remotes/origin/main
             if ! git merge-base --is-ancestor "$ancestor" refs/remotes/origin/main; then
               if [ "$GITHUB_EVENT_NAME" = 'release' ]; then
-                echo '::error::This release was not cut from main: the tag commit'"'"'s parent is unreachable from main.'
+                echo "::error::Release $INPUT_REF: the tag commit's first parent $ancestor is not reachable from main, so this step cannot confirm the release was cut from main. That shape is a non-main source ref, or commits added to the release branch after the version bump; the dispatch arm refuses it too."
               else
                 echo '::error::Published desktop releases may only bundle commits reachable from main.'
               fi

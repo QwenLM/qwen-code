@@ -19,8 +19,10 @@ run-name: 'Desktop release following ${{ github.event.release.tag_name }}'
 #
 # The variable is opt-IN rather than opt-out, unlike the VS Code one. A desktop
 # release is a push: publishing moves the updater feed, and every installation
-# follows within a day. That is worth turning on deliberately, after watching a
-# few releases build without publishing.
+# follows within a day. There is no half-way state here — the variable is all or
+# nothing, and the callee's dry_run is hardcoded false below — so rehearse
+# against desktop-packaging-check.yml first, which builds the same jobs with
+# dry_run true and therefore never publishes or moves the feed.
 on:
   release:
     types: ['published']
