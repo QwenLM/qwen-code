@@ -27,6 +27,7 @@ import chromeExtensionConfig from '../../packages/chrome-extension/vitest.config
 import cliConfig from '../../packages/cli/vitest.config.js';
 import coreConfig from '../../packages/core/vitest.config.js';
 import nodeReplConfig from '../../packages/node-repl/vitest.config.js';
+import qwenLiveConfig from '../../packages/qwen-live/vitest.config.js';
 import sdkTypescriptConfig from '../../packages/sdk-typescript/vitest.config.js';
 import vscodeCompanionConfig from '../../packages/vscode-ide-companion/vitest.config.js';
 import webShellConfig from '../../packages/web-shell/vitest.config.js';
@@ -68,6 +69,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/cli': cliConfig,
   'packages/core': coreConfig,
   'packages/node-repl': nodeReplConfig,
+  'packages/qwen-live': qwenLiveConfig,
   'packages/sdk-typescript': sdkTypescriptConfig,
   'packages/vscode-ide-companion': vscodeCompanionConfig,
   'packages/web-shell': webShellConfig,
@@ -84,6 +86,23 @@ describe('unhandled-error exemption on the platform lanes', () => {
       );
     });
   }
+
+  it('covers every workspace that runs on the platform lanes', () => {
+    // The map above is hand-maintained, and qwen-live spent two weeks on the
+    // lanes without the flag because nothing pinned completeness (#11890).
+    // One-directional on purpose, mirroring the shared-pool cross-check below:
+    // scripts/tests is in the map without being a workspace.
+    const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+    const missing = getTestCiWorkspacePackageJsonPaths(repoRoot)
+      .map((packageJsonPath) =>
+        packageJsonPath.slice(0, -'/package.json'.length),
+      )
+      .filter((name) => !(name in configs));
+    expect(
+      missing,
+      'runs test:ci but has no entry in the exemption map above',
+    ).toEqual([]);
+  });
 });
 
 // Every workspace that `npm run test:ci --workspaces` runs lands on the same

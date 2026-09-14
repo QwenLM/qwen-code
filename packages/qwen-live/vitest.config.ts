@@ -21,6 +21,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     // Discovery tests exercise real file locking; orchestrator tests use fake
     // timers but spawn no processes. Keep generous ceilings for slow CI hosts.
     testTimeout: 60_000,
