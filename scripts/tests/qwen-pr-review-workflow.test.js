@@ -7270,6 +7270,12 @@ describe('review supersede salvage (#10110)', () => {
 });
 
 describe('qwen pr review unchanged-diff anchor', () => {
+  const anchorDoc = parse(workflow);
+  const skipScript = readFileSync(
+    '.github/scripts/review-unchanged-diff.sh',
+    'utf8',
+  );
+
   it('stamps reviewed heads from its own job, never from review-pr', () => {
     const doc = parse(workflow);
     const reviewPr = doc.jobs['review-pr'];
@@ -7295,10 +7301,51 @@ describe('qwen pr review unchanged-diff anchor', () => {
   });
 
   it('checks for an unchanged diff on automatic synchronize runs only', () => {
-    const run = parse(workflow).jobs['review-pr'].steps.find(
+    const run = anchorDoc.jobs['review-pr'].steps.find(
       (s) => s.name === 'Run review',
     ).run;
     expect(run).toContain('bash .github/scripts/review-unchanged-diff.sh');
     expect(run).toContain('[ "${EVENT_ACTION:-}" = "synchronize" ]');
+  });
+
+  // R1-7. The skip is a three-link chain and only its ends were pinned: the
+  // gate that admits a skip into `record-reviewed` (the trust boundary),
+  // the event action the skip is keyed on, and the producer of the output
+  // the gate reads. Each assertion below fails if its link is dropped,
+  // including the `||` that joins the gate's two arms — a surviving arm
+  // alone is not the contract.
+  it('pins every link between the skip and the status it stamps', () => {
+    const reviewPr = anchorDoc.jobs['review-pr'];
+    const runStep = reviewPr.steps.find((s) => s.name === 'Run review');
+    // Whitespace-normalized: the gate is a YAML block scalar, so the line
+    // breaks around `||` are formatting, not the contract.
+    expect(anchorDoc.jobs['record-reviewed'].if.replace(/\s+/g, ' ')).toContain(
+      "needs.review-pr.outputs.review_completed == 'true' ||" +
+        " needs.review-pr.outputs.unchanged_diff == 'true'",
+    );
+    // Without this env entry EVENT_ACTION is unset in the step and the skip
+    // branch never opens.
+    expect(runStep.env.EVENT_ACTION).toBe("${{ github.event.action || '' }}");
+    // An output with no writer is never 'true', so the gate above admits
+    // nothing.
+    expect(runStep.run).toContain('echo "unchanged_diff=true"');
+  });
+
+  // R1-6. The reader's constants and the writer's identity are one contract
+  // split across two files; pin them to EACH OTHER, not each to itself, so
+  // moving either side alone reddens here instead of silently making every
+  // stamped status invisible to the lookup.
+  it('pins the status writer to the reader that has to find it', () => {
+    const [step] = anchorDoc.jobs['record-reviewed'].steps;
+    const context = skipScript.match(/STATUS_CONTEXT='([^']+)'/)?.[1];
+    const creator = skipScript.match(/STATUS_CREATOR='([^']+)'/)?.[1];
+    expect(context).toBeTruthy();
+    expect(creator).toBeTruthy();
+    expect(step.run).toContain(`-f context='${context}'`);
+    // github-actions[bot] is what the workflow's own GITHUB_TOKEN produces.
+    // A writer that moved to CI_BOT_PAT would stamp statuses the reader can
+    // never see — the skip would go dead without any test noticing.
+    expect(creator).toBe('github-actions[bot]');
+    expect(step.env.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
   });
 });

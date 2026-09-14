@@ -140,7 +140,12 @@ before(() => {
   statusDir = join(root, 'statuses');
   mkdirSync(fakeBin);
   mkdirSync(statusDir);
-  // gh api repos/<repo>/commits/<sha>/status → combined status JSON.
+  // The fake answers the endpoint the script actually calls —
+  // `repos/<repo>/commits/<sha>/statuses`, the statuses LIST — with the bare
+  // ARRAY of statuses that endpoint returns, each carrying its creator. Not
+  // the combined status: `.../commits/<sha>/status` returns a single object
+  // whose top-level shape has no per-status creator, so a fake that mirrored
+  // it could not exercise the creator filter at all.
   writeFileSync(
     join(fakeBin, 'gh'),
     [
