@@ -20,6 +20,10 @@ import {
   type ManagedSessionCommand,
 } from './managed-session-authority.js';
 import {
+  createInitialHarnessCheckpoint,
+  encodeHarnessCheckpointV1,
+} from './managed-harness-checkpoint.js';
+import {
   ManagedSessionRecordError,
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
@@ -1672,6 +1676,195 @@ describe('managed session checkpoints', () => {
     await expect(harness.authority.readCheckpointState()).rejects.toThrow(
       /is not present for session/,
     );
+    await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
+      status: 'blocked',
+      reason: 'missing_state',
+      message: expect.stringMatching(/is not present for session/),
+    });
+    await harness.close();
+  });
+
+  function initialV1State(
+    fixture: Fixture,
+    overrides: Partial<
+      Parameters<typeof createInitialHarnessCheckpoint>[0]
+    > = {},
+  ) {
+    return encodeHarnessCheckpointV1(
+      createInitialHarnessCheckpoint({
+        sessionKey: sessionKeyFor(fixture),
+        checkpointId: 'ckpt-4',
+        coveredSequence: 3,
+        activationId: 'act-1',
+        turnId: 'turn-1',
+        promptId: null,
+        definitionRevision: 'def-1',
+        configRevision: 'cfg-1',
+        inputDigest: DIGEST,
+        previousCheckpointId: null,
+        ...overrides,
+      }),
+    );
+  }
+
+  it('does not treat an opaque checkpoint blob as runnable', async () => {
+    const harness = await openWithResources(await createFixture());
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await activate(harness, 3);
+    await harness.authority.commitCheckpoint(
+      inputCommand(harness.fixture, {
+        operation: 'commitCheckpoint',
+        commandId: 'cmd-ckpt-opaque',
+      }),
+      { state: Buffer.from('first', 'utf8'), boundary: null },
+      HOLDS,
+    );
+    expect(harness.authority.restoreBasis()).toBe('checkpoint');
+    await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
+      status: 'blocked',
+      reason: 'opaque_state',
+      message: expect.stringMatching(/JSON/),
+    });
+    await harness.close();
+  });
+
+  it('authorizes a matching nine-group v1 checkpoint as runnable', async () => {
+    const harness = await openWithResources(await createFixture());
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await activate(harness, 3);
+    const checkpoint = createInitialHarnessCheckpoint({
+      sessionKey: sessionKeyFor(harness.fixture),
+      checkpointId: 'ckpt-4',
+      coveredSequence: 3,
+      activationId: 'act-1',
+      turnId: 'turn-1',
+      promptId: null,
+      definitionRevision: 'def-1',
+      configRevision: 'cfg-1',
+      inputDigest: DIGEST,
+      previousCheckpointId: null,
+    });
+    const committed = await harness.authority.commitCheckpoint(
+      inputCommand(harness.fixture, {
+        operation: 'commitCheckpoint',
+        commandId: 'cmd-ckpt-v1',
+      }),
+      { state: encodeHarnessCheckpointV1(checkpoint), boundary: null },
+      HOLDS,
+    );
+    expect(committed.checkpoint.checkpointId).toBe('ckpt-4');
+    expect(committed.checkpoint.coveredSequence).toBe(3);
+    expect(harness.authority.restoreBasis()).toBe('checkpoint');
+    await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
+      status: 'runnable',
+      checkpoint,
+    });
+    await harness.close();
+  });
+
+  it('blocks a v1 checkpoint whose sessionKey does not match', async () => {
+    const harness = await openWithResources(await createFixture());
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await activate(harness, 3);
+    await harness.authority.commitCheckpoint(
+      inputCommand(harness.fixture, {
+        operation: 'commitCheckpoint',
+        commandId: 'cmd-ckpt-mismatch',
+      }),
+      {
+        state: initialV1State(harness.fixture, {
+          sessionKey: {
+            ...sessionKeyFor(harness.fixture),
+            sessionId: 'other-session',
+          },
+        }),
+        boundary: null,
+      },
+      HOLDS,
+    );
+    expect(harness.authority.restoreBasis()).toBe('checkpoint');
+    await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
+      status: 'blocked',
+      reason: 'identity_mismatch',
+    });
+    await harness.close();
+  });
+
+  it('blocks a versioned but unparseable checkpoint as invalid_state', async () => {
+    const harness = await openWithResources(await createFixture());
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await activate(harness, 3);
+    await harness.authority.commitCheckpoint(
+      inputCommand(harness.fixture, {
+        operation: 'commitCheckpoint',
+        commandId: 'cmd-ckpt-invalid',
+      }),
+      {
+        state: Buffer.from(
+          JSON.stringify({ identity: { schemaVersion: 1 } }),
+          'utf8',
+        ),
+        boundary: null,
+      },
+      HOLDS,
+    );
+    expect(harness.authority.restoreBasis()).toBe('checkpoint');
+    await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
+      status: 'blocked',
+      reason: 'invalid_state',
+      message: expect.stringMatching(/identity/),
+    });
+    await harness.close();
+  });
+
+  it('authorizes an unused session as initial, not runnable', async () => {
+    const harness = await openWithResources(await createFixture());
+    expect(harness.authority.restoreBasis()).toBe('initial');
+    await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
+      status: 'initial',
+    });
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
+      status: 'initial',
+    });
+    await harness.close();
+  });
+
+  it('blocks continuation without a checkpoint as missing_checkpoint', async () => {
+    const harness = await openWithResources(await createFixture());
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await activate(harness, 3);
+    await harness.authority.appendExecution(
+      inputCommand(harness.fixture, {
+        operation: 'appendExecution',
+        commandId: 'cmd-model',
+      }),
+      [modelAttempt(harness.fixture, 4)],
+      HOLDS,
+    );
+    expect(harness.authority.restoreBasis()).toBe('blocked');
+    await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
+      status: 'blocked',
+      reason: 'missing_checkpoint',
+    });
     await harness.close();
   });
 });

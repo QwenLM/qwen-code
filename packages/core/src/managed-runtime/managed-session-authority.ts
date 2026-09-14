@@ -7,11 +7,12 @@
 import { randomUUID } from 'node:crypto';
 import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
-import {
-  readManagedBranchCheckpoint,
-  type LocalManagedSessionResourceStore,
-} from './managed-session-resources.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
+import {
+  authorizeParsedHarnessCheckpoint,
+  tryParseHarnessCheckpointV1,
+  type HarnessRunAuthorization,
+} from './managed-harness-checkpoint.js';
 import {
   MANAGED_SESSION_COMMIT_SUBTYPE,
   MANAGED_SESSION_EVENT_SUBTYPE,
@@ -38,6 +39,10 @@ import {
   type ManagedSessionHeader,
   type ManagedSessionKey,
 } from './managed-session-records.js';
+import {
+  readManagedBranchCheckpoint,
+  type LocalManagedSessionResourceStore,
+} from './managed-session-resources.js';
 
 export type ManagedSessionRecordBody =
   | ManagedSessionHeader
@@ -63,10 +68,11 @@ export interface ManagedSessionActor {
 }
 
 /**
- * Which basis a Harness may resume from. `blocked` is a real outcome, not an
- * error path: execution continuation depends on a checkpoint, so a session that
- * has model or tool history but no checkpoint must not silently restart from an
- * older state or an empty history.
+ * Storage-spec restore basis. `checkpoint` means a checkpoint resource exists,
+ * not that a Harness may run; use `harnessRunAuthorization()` for that gate.
+ * `blocked` is a real outcome, not an error path: execution continuation
+ * depends on a checkpoint, so a session that has model or tool history but no
+ * checkpoint must not silently restart from an older state or an empty history.
  */
 export type ManagedSessionRestoreBasis = 'checkpoint' | 'initial' | 'blocked';
 
@@ -540,9 +546,8 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
-   * Decides what a Harness may resume from, per the storage spec's closed set.
-   * The authority decides this; a Harness must not pick a weaker basis for
-   * itself.
+   * Storage-spec restore basis. The authority decides this; a Harness must not
+   * pick a weaker basis for itself. Runnable authorization is a separate gate.
    */
   restoreBasis(): ManagedSessionRestoreBasis {
     if (this.checkpoint !== undefined) return 'checkpoint';
@@ -628,6 +633,54 @@ export class LocalManagedSessionAuthority {
       );
     }
     return store.read(current.stateRef);
+  }
+
+  /**
+   * Whether a Harness may run from the current restore basis. A stored
+   * checkpoint is not runnable until its nine-group v1 state parses and
+   * matches this session; opaque historical blobs stay `restoreBasis=
+   * checkpoint` but authorize as blocked.
+   */
+  async harnessRunAuthorization(): Promise<HarnessRunAuthorization> {
+    const basis = this.restoreBasis();
+    if (basis === 'initial') return { status: 'initial' };
+    if (basis === 'blocked') {
+      return { status: 'blocked', reason: 'missing_checkpoint' };
+    }
+    const expected = this.checkpoint;
+    if (expected === undefined) {
+      return { status: 'blocked', reason: 'missing_checkpoint' };
+    }
+    let bytes: Buffer;
+    try {
+      const state = await this.readCheckpointState();
+      if (state === undefined) {
+        return { status: 'blocked', reason: 'missing_state' };
+      }
+      bytes = state;
+    } catch (error) {
+      if (error instanceof ManagedSessionRecordError) {
+        return {
+          status: 'blocked',
+          reason: 'missing_state',
+          message: error.message,
+        };
+      }
+      throw error;
+    }
+    const parsed = tryParseHarnessCheckpointV1(bytes);
+    if (!parsed.ok) {
+      return {
+        status: 'blocked',
+        reason: parsed.reason === 'opaque' ? 'opaque_state' : 'invalid_state',
+        message: parsed.message,
+      };
+    }
+    return authorizeParsedHarnessCheckpoint(parsed.checkpoint, {
+      sessionKey: this.sessionKey,
+      checkpointId: expected.checkpointId,
+      coveredSequence: expected.coveredSequence,
+    });
   }
 
   /**

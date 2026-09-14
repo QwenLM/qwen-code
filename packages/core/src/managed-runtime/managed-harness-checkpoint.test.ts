@@ -1,0 +1,308 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it } from 'vitest';
+import {
+  authorizeParsedHarnessCheckpoint,
+  createInitialHarnessCheckpoint,
+  encodeHarnessCheckpointV1,
+  parseHarnessCheckpointV1,
+  tryParseHarnessCheckpointV1,
+  type HarnessCheckpointV1,
+} from './managed-harness-checkpoint.js';
+import {
+  ManagedSessionRecordError,
+  type ManagedSessionDurableRef,
+} from './managed-session-records.js';
+
+const DIGEST = 'b'.repeat(64);
+const SESSION_KEY = {
+  tenantId: 'tenant-1',
+  workspaceId: 'workspace-1',
+  sessionId: 'managed-session',
+};
+
+function ref(kind = 'managed-test'): ManagedSessionDurableRef {
+  return {
+    resourceId: 'res-1',
+    kind,
+    schemaVersion: 1,
+    byteLength: 4,
+    digest: DIGEST,
+  };
+}
+
+function seed(
+  overrides: Partial<Parameters<typeof createInitialHarnessCheckpoint>[0]> = {},
+): HarnessCheckpointV1 {
+  return createInitialHarnessCheckpoint({
+    sessionKey: SESSION_KEY,
+    checkpointId: 'ckpt-4',
+    coveredSequence: 3,
+    activationId: 'act-1',
+    turnId: 'turn-1',
+    promptId: null,
+    definitionRevision: 'def-1',
+    configRevision: 'cfg-1',
+    inputDigest: DIGEST,
+    previousCheckpointId: null,
+    ...overrides,
+  });
+}
+
+function bytesOf(checkpoint: HarnessCheckpointV1): Buffer {
+  return encodeHarnessCheckpointV1(checkpoint);
+}
+
+function mutate(
+  checkpoint: HarnessCheckpointV1,
+  edit: (value: Record<string, unknown>) => void,
+): Buffer {
+  const value = JSON.parse(JSON.stringify(checkpoint)) as Record<
+    string,
+    unknown
+  >;
+  edit(value);
+  return Buffer.from(JSON.stringify(value), 'utf8');
+}
+
+function committedAttempt() {
+  return {
+    attemptId: 'att-1',
+    routeRef: ref('managed-route'),
+    capabilityRef: null,
+    samplingRef: null,
+    outputState: 'output_committed' as const,
+    usageRef: ref('managed-usage'),
+    budgetConsumed: 1,
+  };
+}
+
+function requestedUserApproval() {
+  return {
+    requestId: 'apr-1',
+    kind: 'ask_user',
+    source: 'user_operation' as const,
+    optionsRef: ref('managed-approval'),
+    inputRevision: 'rev-1',
+    confirmationVersion: null,
+    state: 'requested' as const,
+    decisionRef: null,
+    invocationRef: null,
+  };
+}
+
+describe('harness checkpoint v1', () => {
+  it('round-trips a before_model checkpoint with all nine groups', () => {
+    const checkpoint = seed();
+    expect(checkpoint.continuation.phase).toBe('before_model');
+    expect(checkpoint.attempt).toBeNull();
+    expect(checkpoint.tools).toBeNull();
+    expect(checkpoint.runtime).toBeNull();
+    expect(checkpoint.approval).toBeNull();
+    expect(parseHarnessCheckpointV1(bytesOf(checkpoint))).toEqual(checkpoint);
+    expect(tryParseHarnessCheckpointV1(bytesOf(checkpoint))).toEqual({
+      ok: true,
+      checkpoint,
+    });
+  });
+
+  it('rejects an unknown continuation phase', () => {
+    const bytes = mutate(seed(), (value) => {
+      const continuation = value['continuation'] as Record<string, unknown>;
+      continuation['phase'] = 'streaming';
+    });
+    expect(() => parseHarnessCheckpointV1(bytes)).toThrow(
+      ManagedSessionRecordError,
+    );
+    expect(() => parseHarnessCheckpointV1(bytes)).toThrow(
+      /continuation.phase must be one of/,
+    );
+    const parsed = tryParseHarnessCheckpointV1(bytes);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.reason).toBe('invalid');
+  });
+
+  it('rejects a before_model checkpoint that already carries an attempt', () => {
+    const checkpoint = {
+      ...seed(),
+      attempt: committedAttempt(),
+    };
+    expect(() => parseHarnessCheckpointV1(bytesOf(checkpoint))).toThrow(
+      /before_model cannot carry a model attempt/,
+    );
+  });
+
+  it('rejects a user_operation approval that carries an invocation ref', () => {
+    const checkpoint = {
+      ...seed(),
+      continuation: {
+        phase: 'await_action' as const,
+        pendingEventIds: [],
+      },
+      attempt: committedAttempt(),
+      approval: {
+        ...requestedUserApproval(),
+        invocationRef: ref('managed-invocation'),
+      },
+    };
+    expect(() => parseHarnessCheckpointV1(bytesOf(checkpoint))).toThrow(
+      /approval.invocationRef must be null for a user_operation approval/,
+    );
+  });
+
+  it('rejects a tool_call approval without an invocation ref', () => {
+    const checkpoint = {
+      ...seed(),
+      continuation: {
+        phase: 'await_action' as const,
+        pendingEventIds: [],
+      },
+      attempt: committedAttempt(),
+      approval: {
+        ...requestedUserApproval(),
+        source: 'tool_call' as const,
+      },
+    };
+    expect(() => parseHarnessCheckpointV1(bytesOf(checkpoint))).toThrow(
+      /approval.invocationRef is required for a tool_call approval/,
+    );
+  });
+
+  it('rejects await_runtime without in-flight tools and dispatch bindings', () => {
+    const checkpoint = {
+      ...seed(),
+      continuation: {
+        phase: 'await_runtime' as const,
+        pendingEventIds: [],
+      },
+      attempt: committedAttempt(),
+    };
+    expect(() => parseHarnessCheckpointV1(bytesOf(checkpoint))).toThrow(
+      /await_runtime requires in-progress tools and dispatch bindings/,
+    );
+  });
+
+  it('accepts await_action for a requested user_operation', () => {
+    const checkpoint = {
+      ...seed(),
+      continuation: {
+        phase: 'await_action' as const,
+        pendingEventIds: [],
+      },
+      attempt: committedAttempt(),
+      approval: requestedUserApproval(),
+    };
+    expect(parseHarnessCheckpointV1(bytesOf(checkpoint))).toEqual(checkpoint);
+  });
+
+  it('accepts await_runtime with in-progress tools and dispatch bindings', () => {
+    const checkpoint = {
+      ...seed(),
+      continuation: {
+        phase: 'await_runtime' as const,
+        pendingEventIds: [],
+      },
+      attempt: committedAttempt(),
+      tools: {
+        batchId: 'batch-1',
+        items: [
+          {
+            functionCallId: 'fc-1',
+            executionCallId: 'ex-1',
+            modelMessageId: 'msg-1',
+            partIndex: 0,
+            ordinal: 0,
+            inputDigest: DIGEST,
+            outcomeSource: 'runtime' as const,
+            state: 'in_progress' as const,
+            outcomeRef: null,
+            consumed: false,
+          },
+        ],
+      },
+      runtime: {
+        bindings: [
+          {
+            executionCallId: 'ex-1',
+            invocationBindingId: 'bind-1',
+            capabilityVersion: 'cap-1',
+            policyVersion: 'pol-1',
+            mediaVersion: null,
+            state: 'dispatch' as const,
+            progressCursor: 'cur-1',
+          },
+        ],
+      },
+    };
+    expect(parseHarnessCheckpointV1(bytesOf(checkpoint))).toEqual(checkpoint);
+  });
+
+  it('rejects unknown fields on the checkpoint object', () => {
+    const bytes = mutate(seed(), (value) => {
+      value['agentSnapshot'] = { tokens: 1 };
+    });
+    expect(() => parseHarnessCheckpointV1(bytes)).toThrow(
+      /harness checkpoint has the unknown field "agentSnapshot"/,
+    );
+    const parsed = tryParseHarnessCheckpointV1(bytes);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.reason).toBe('invalid');
+  });
+
+  it('classifies non-JSON and unversioned blobs as opaque', () => {
+    expect(tryParseHarnessCheckpointV1(Buffer.from('first', 'utf8'))).toEqual({
+      ok: false,
+      reason: 'opaque',
+      message: expect.stringMatching(/JSON/),
+    });
+    expect(
+      tryParseHarnessCheckpointV1(
+        Buffer.from('{"turn":1,"pending":[]}', 'utf8'),
+      ),
+    ).toEqual({
+      ok: false,
+      reason: 'opaque',
+      message: 'checkpoint state has no Harness schemaVersion.',
+    });
+  });
+
+  it('does not treat an in-flight model stream as a runnable phase', () => {
+    const checkpoint = {
+      ...seed(),
+      continuation: {
+        phase: 'model_output_committed' as const,
+        pendingEventIds: [],
+      },
+      attempt: {
+        ...committedAttempt(),
+        outputState: 'started' as const,
+        usageRef: null,
+      },
+    };
+    expect(() => parseHarnessCheckpointV1(bytesOf(checkpoint))).toThrow(
+      /an in-flight model stream is not a runnable checkpoint phase/,
+    );
+  });
+
+  it('authorizes a parsed checkpoint only when identity matches', () => {
+    const checkpoint = seed();
+    expect(
+      authorizeParsedHarnessCheckpoint(checkpoint, {
+        sessionKey: SESSION_KEY,
+        checkpointId: 'ckpt-4',
+        coveredSequence: 3,
+      }),
+    ).toEqual({ status: 'runnable', checkpoint });
+    expect(
+      authorizeParsedHarnessCheckpoint(checkpoint, {
+        sessionKey: { ...SESSION_KEY, sessionId: 'other-session' },
+        checkpointId: 'ckpt-4',
+        coveredSequence: 3,
+      }),
+    ).toEqual({ status: 'blocked', reason: 'identity_mismatch' });
+  });
+});
