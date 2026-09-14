@@ -2111,6 +2111,87 @@ describe('Session', () => {
     settleFirstTransport?.({ outcome: { outcome: 'cancelled' } });
   });
 
+  it('drops a queued permission request that was abandoned before the head settled', async () => {
+    let settleFirst:
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
+    vi.mocked(mockClient.requestPermission)
+      .mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            settleFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.ProceedOnce,
+        },
+      });
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
+      approvalId,
+      subagentId: `agent-${approvalId}`,
+      callId: `call-${approvalId}`,
+      name: 'run_shell_command',
+      description: 'Run command',
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command',
+        command: 'echo safe',
+        rootCommand: 'echo',
+        hideAlwaysAllow: true,
+      },
+      at: 1,
+    });
+
+    const first = callback(
+      { runId: 'wf_queued_abort' } as core.WorkflowTask,
+      makeApproval('wfap_head'),
+      { command: 'echo first' },
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    });
+    const queuedAbort = new AbortController();
+    const queued = callback(
+      { runId: 'wf_queued_abort' } as core.WorkflowTask,
+      makeApproval('wfap_queued'),
+      { command: 'echo second' },
+      queuedAbort.signal,
+    );
+    expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+
+    queuedAbort.abort();
+    await queued;
+    settleFirst?.({ outcome: { outcome: 'cancelled' } });
+    await first;
+    // The head releasing must not resurrect the abandoned request. Published
+    // after its caller is gone, it would sit on the host as a prompt nobody
+    // can answer and no longer cancels.
+    expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    expect(
+      vi
+        .mocked(mockWorkflowRunRegistry.resolvePendingApproval)
+        .mock.calls.map(([, approvalId]) => approvalId),
+    ).toEqual(['wfap_queued', 'wfap_head']);
+
+    // Dropping it must not wedge the session queue either.
+    await callback(
+      { runId: 'wf_queued_abort' } as core.WorkflowTask,
+      makeApproval('wfap_after'),
+      { command: 'echo third' },
+      new AbortController().signal,
+    );
+    expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
+    expect(
+      vi.mocked(mockClient.requestPermission).mock.calls[1]?.[0].toolCall
+        .toolCallId,
+    ).toBe('workflow:test-session-id:wf_queued_abort:wfap_after');
+  });
+
   it('fails a workflow approval closed when the ACP request times out', async () => {
     vi.mocked(mockClient.requestPermission).mockRejectedValue(
       new Error('Permission request timed out'),
