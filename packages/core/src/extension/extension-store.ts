@@ -13,6 +13,7 @@ import { Mutex } from 'async-mutex';
 import { Storage } from '../config/storage.js';
 import { atomicWriteJSON, renameWithRetry } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isNodeError } from '../utils/errors.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 
 const debugLogger = createDebugLogger('EXTENSION_STORE');
@@ -55,10 +56,7 @@ export interface ExtensionActivationResult {
   workspace: WorkspaceActivation;
   effective: ExtensionActivation;
   source:
-    | 'cli_override'
-    | 'workspace_override'
-    | 'legacy_path_rule'
-    | 'default';
+    'cli_override' | 'workspace_override' | 'legacy_path_rule' | 'default';
 }
 
 export interface ExtensionStoreOptions {
@@ -68,8 +66,7 @@ export interface ExtensionStoreOptions {
 }
 
 export type InitialExtensionActivation =
-  | { scope: 'user' }
-  | { scope: 'workspace'; workspacePath: string };
+  { scope: 'user' } | { scope: 'workspace'; workspacePath: string };
 
 export interface CommitExtensionArtifactInput {
   operation: 'install' | 'update' | 'uninstall';
@@ -88,6 +85,8 @@ interface ExtensionTransactionJournal {
   destinationDirectory: string;
   stagingDirectory?: string;
   backupDirectory: string;
+  /** Absent means 'rename'. 'copy' is the Windows fallback for a locked one. */
+  swapStrategy?: 'rename' | 'copy';
   previousGeneration: number;
   targetGeneration: number;
   targetSnapshot: ExtensionStoreSnapshot;
@@ -120,6 +119,31 @@ export class ExtensionConflictError extends Error {
     super(message);
     this.name = 'ExtensionConflictError';
   }
+}
+
+export class ExtensionDirectoryLockedError extends Error {
+  readonly code = 'extension_directory_locked';
+
+  constructor(directory: string, options?: ErrorOptions) {
+    super(
+      `Extension directory ${directory} is in use by another process. Close other Qwen Code sessions (or any program holding this directory open) and try again.`,
+      options,
+    );
+    this.name = 'ExtensionDirectoryLockedError';
+  }
+}
+
+function isDirectoryLockError(error: unknown): boolean {
+  return (
+    isNodeError(error) &&
+    (error.code === 'EPERM' ||
+      error.code === 'EACCES' ||
+      error.code === 'EBUSY')
+  );
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return isNodeError(error) && error.code === 'ENOENT';
 }
 
 const storeMutexes = new Map<string, Mutex>();
@@ -827,9 +851,42 @@ export class ExtensionStore {
       let stateCommitted = false;
       try {
         if (destinationExists) {
-          await renameWithRetry(destinationDirectory, backupDirectory, 3, 50);
+          try {
+            await renameWithRetry(destinationDirectory, backupDirectory, 3, 50);
+          } catch (error) {
+            if (process.platform !== 'win32' || !isDirectoryLockError(error)) {
+              throw error;
+            }
+            journal.swapStrategy = 'copy';
+            await atomicWriteJSON(journalPath, journal, {
+              mode: 0o600,
+              forceMode: true,
+              noFollow: true,
+            });
+            // A half-copied backup would be restored over an intact destination.
+            const partialBackup = `${backupDirectory}.partial`;
+            await fsp.rm(partialBackup, { recursive: true, force: true });
+            await fsp.cp(destinationDirectory, partialBackup, {
+              recursive: true,
+              force: true,
+            });
+            await renameWithRetry(partialBackup, backupDirectory, 3, 50);
+          }
         }
-        if (input.operation !== 'uninstall') {
+        if (journal.swapStrategy === 'copy') {
+          if (input.operation === 'uninstall') {
+            await this.removeDirectoryInPlace(destinationDirectory);
+          } else {
+            // Copy first, then prune: deleting ahead of the copy would widen the
+            // window in which a crash leaves the extension missing content.
+            const stagingDirectory = input.stagingDirectory!;
+            await fsp.cp(stagingDirectory, destinationDirectory, {
+              recursive: true,
+              force: true,
+            });
+            await this.pruneStalePaths(stagingDirectory, destinationDirectory);
+          }
+        } else if (input.operation !== 'uninstall') {
           await renameWithRetry(
             input.stagingDirectory!,
             destinationDirectory,
@@ -1657,6 +1714,8 @@ export class ExtensionStore {
         !['prepared', 'artifact_swapped', 'state_committed'].includes(
           journal.phase,
         ) ||
+        (journal.swapStrategy !== undefined &&
+          !['rename', 'copy'].includes(journal.swapStrategy)) ||
         !Number.isSafeInteger(journal.previousGeneration) ||
         journal.targetGeneration !== journal.previousGeneration + 1
       ) {
@@ -1732,10 +1791,64 @@ export class ExtensionStore {
     }
   }
 
+  private async pruneStalePaths(
+    stagingDirectory: string,
+    destinationDirectory: string,
+  ): Promise<void> {
+    for (const entry of await fsp.readdir(destinationDirectory, {
+      withFileTypes: true,
+    })) {
+      const destination = path.join(destinationDirectory, entry.name);
+      const staged = path.join(stagingDirectory, entry.name);
+      let stagedStats: Awaited<ReturnType<typeof fsp.lstat>> | undefined;
+      try {
+        stagedStats = await fsp.lstat(staged);
+      } catch (error) {
+        if (!isNotFoundError(error)) throw error;
+      }
+      if (!stagedStats) {
+        await fsp.rm(destination, { recursive: true, force: true });
+        continue;
+      }
+      if (stagedStats.isDirectory() && entry.isDirectory()) {
+        await this.pruneStalePaths(staged, destination);
+      }
+    }
+  }
+
+  private async emptyDirectory(directory: string): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await fsp.readdir(directory);
+    } catch (error) {
+      if (isNotFoundError(error)) return;
+      throw error;
+    }
+    for (const entry of entries) {
+      await fsp.rm(path.join(directory, entry), {
+        recursive: true,
+        force: true,
+      });
+    }
+  }
+
+  private async removeDirectoryInPlace(directory: string): Promise<void> {
+    await this.emptyDirectory(directory);
+    try {
+      await fsp.rmdir(directory);
+    } catch (error) {
+      if (isDirectoryLockError(error)) {
+        throw new ExtensionDirectoryLockedError(directory, { cause: error });
+      }
+      throw error;
+    }
+  }
+
   private async rollbackJournal(
     journal: ExtensionTransactionJournal,
   ): Promise<void> {
     const hasBackup = await this.pathExists(journal.backupDirectory);
+    const copySwap = journal.swapStrategy === 'copy';
     if (
       hasBackup ||
       (journal.operation === 'install' &&
@@ -1743,18 +1856,29 @@ export class ExtensionStore {
           ? await this.pathExists(journal.stagingDirectory)
           : false))
     ) {
-      await fsp.rm(journal.destinationDirectory, {
-        recursive: true,
-        force: true,
-      });
+      if (copySwap) {
+        await this.emptyDirectory(journal.destinationDirectory);
+      } else {
+        await fsp.rm(journal.destinationDirectory, {
+          recursive: true,
+          force: true,
+        });
+      }
     }
     if (hasBackup) {
-      await renameWithRetry(
-        journal.backupDirectory,
-        journal.destinationDirectory,
-        3,
-        50,
-      );
+      if (copySwap) {
+        await fsp.cp(journal.backupDirectory, journal.destinationDirectory, {
+          recursive: true,
+          force: true,
+        });
+      } else {
+        await renameWithRetry(
+          journal.backupDirectory,
+          journal.destinationDirectory,
+          3,
+          50,
+        );
+      }
     }
     if (journal.stagingDirectory) {
       await fsp.rm(journal.stagingDirectory, {

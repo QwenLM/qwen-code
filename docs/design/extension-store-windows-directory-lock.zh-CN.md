@@ -1,0 +1,206 @@
+# 扩展仓库 Windows 目录占用问题设计
+
+[English](extension-store-windows-directory-lock.md) | [简体中文](extension-store-windows-directory-lock.zh-CN.md)
+
+状态：已实现。日期：2026-09-14。
+
+## 背景
+
+在 Windows 上更新或卸载用户级扩展时，会抛出一条原始的文件系统错误，没有任何解释：
+
+```text
+EPERM: operation not permitted, rename
+'C:\Users\<user>\.qwen\extensions\i-have-adhd' ->
+'C:\Users\<user>\.qwen\extension-store\rollback\b101694b-c6a6-4a54-9cf1-4f3e8dd7f7c0'
+```
+
+这段文字会原样出现在终端里，因为更新命令用 `writeStderrLine(getErrorMessage(error))` 报告
+变更失败。事务被干净地回滚了，扩展停留在旧版本，没有损坏任何东西——但这个操作永远不可能
+成功，而且提示信息没有给用户任何可执行的下一步。全新安装扩展不受影响。
+
+## 根因
+
+`ExtensionStore.commitArtifact()` 通过把整个已安装目录改名挪进回滚区，来为新版本腾位置：
+
+```ts
+await renameWithRetry(destinationDirectory, backupDirectory, 3, 50);
+```
+
+在 Windows 上，如果被改名目录的**任意后代目录**上存在一个打开的句柄，`MoveFileEx` 就会失败。
+而这个句柄正是 Qwen Code 自己打开的：`ExtensionFileWatcher` 用 chokidar 以无限深度监视
+`~/.qwen/extensions`，而 chokidar 会为它发现的**每一个子目录**各挂一个原生
+`ReadDirectoryChangesW` 句柄。于是每个交互会话都会锁住每个已安装扩展的每个目录。
+
+重试救不了。`renameWithRetry` 针对 EPERM/EACCES 在约 350 ms 内做 4 次尝试，而这个锁不是瞬时
+的：它由另一个正在运行的会话持有，会一直持续到那个会话退出。
+
+周边代码有三个性质塑造了这个修法。
+`ExtensionFileWatcher.subscribeExtensionManagerMutations()` 对变更事件的响应是调用
+`ExtensionRefreshState.beginSuppression()`，它只是隐藏由此产生的刷新通知，从不释放 chokidar
+句柄——所以在活动会话内发起的变更会锁住自己的目标目录。`renameWithRetry` 与
+`atomicWriteFile`、原生 LSP 服务、后台 shell 注册表共用，所以它的可重试错误码不是加 store
+专用分类的地方。`EBUSY` 也不在重试集合里；它是子进程的工作目录**就是**被改名目录时上报的码，
+而这需要清单把 `cwd` 指到扩展内部——hook 用 `process.cwd()`，stdio server 的 `cwd` 取自自己
+那条清单配置——所以它进分类是因为失败形态相同，不是因为常见。上游 issue #10187 为托管 Skill
+修了同类问题，采用的正是这套备份改名模式，它消除了数据丢失，但没有处理 Windows 占用。
+
+谁持有句柄取决于入口：CLI 子命令在解析参数阶段就退出、根本不启动 watcher，所以那条路径上的锁
+属于**其他**会话。这正是修法必须与持有者无关的原因，也是"关掉其他 Qwen Code 会话"不可靠的原因
+——UI 路径是被发起会话自己锁住的。
+
+### 实测证据
+
+在 Windows 上的探针（Node 24 + chokidar 4，与本仓库依赖版本一致），被改名目录内含一层子目录：
+
+| 句柄持有者                       | 祖先目录改名结果          |
+| -------------------------------- | ------------------------- |
+| 无                               | OK                        |
+| `fs.watch` 在该目录本身          | OK                        |
+| `fs.watchFile`（stat 轮询）      | OK                        |
+| chokidar 递归，仓库同款配置      | **EPERM**，4 次尝试全失败 |
+| chokidar 递归，改名前先 close    | OK                        |
+| chokidar `depth: 1` / `depth: 0` | OK                        |
+| 目录树内某个文件被打开           | **EPERM**                 |
+| 子进程 cwd 在其子目录            | **EPERM**                 |
+| 子进程 cwd 就是该目录            | **EBUSY**                 |
+| 后代句柄存在时执行 `rm -rf`      | OK                        |
+| 后代句柄存在时执行 `cp -r` 覆盖  | OK                        |
+
+并已在真实机器上确认：在真实的 `~/.qwen/extensions` 下创建一次性目录，在其他 Qwen Code 会话
+运行期间同样无法改名；探针目录随后已清除。最后两行正是这个修法可行的原因：这些句柄只阻塞目录
+改名与目录删除，不阻塞删除内容与复制，所以交换可以绕开占用，而不需要任何跨进程协议。
+
+## 范围
+
+在范围内：
+
+- 在其他 Qwen Code 会话正在运行时，Windows 上的 `qwen extensions update <name>` 与
+  `uninstall <name>` 能够成功；并且即使发起更新的那个活动会话本身就是持有者之一，来自
+  `/extensions` UI 的更新也能完成。
+- 当交换确实无法完成时，用用户能据此采取行动的语言说明，并保留原已安装版本。
+- 让新交换方式的日志恢复语义保持明确，并保持 POSIX 行为不变。
+
+范围之外：
+
+- 不引入会话之间的跨进程协调协议，也不改动 watcher 挂到扩展目录树的方式。
+- 不修改 `renameWithRetry` 对其其他调用方的语义。
+- 不试图让基于复制的交换具备原子性。它做不到；本设计是把这种情况纳入处理，而不是假装它不存在。
+
+## 方案
+
+两部分。第一部分让交换能容忍别的进程持有着的目录；第二部分让仍然换不动的情况可读可行动。
+
+**A — 可容忍占用的交换。** 当备份改名在 Windows 上因占用类错误失败时，整个事务改用基于复制
+的交换。策略只决定一次，写入日志，并由应用、回滚、恢复三条路径一致使用：
+
+```ts
+swapStrategy?: 'rename' | 'copy';
+```
+
+`ExtensionTransactionJournal` 增加这个可选字段。字段缺失即表示 `rename`，因此旧版本写入的日志
+恢复行为不变，`version` 仍为 `1`。策略在第一次不可逆写入之前落盘。改名路径本身不变：
+destination → backup 改名，staging → destination 改名。复制路径是：
+
+1. **以复制做备份。** 把 `destinationDirectory` 复制到 `backupDirectory`。已实测证明在后代句柄
+   存在时可行。复制先落到 `${backupDirectory}.partial`，再用一次 rename 发布，因为"复制一半的
+   备份"比"没有备份"更糟：恢复时它会覆盖一个其实仍然完整的目标目录。复制过程中崩溃只会在回滚
+   区留下一个没有任何日志指向的孤儿 `.partial` 目录。
+2. **以复制应用。** `fsp.cp(stagingDirectory, destinationDirectory, { recursive: true,
+force: true })`，并保留符号链接（`dereference` 保持 false）。因为树形结构完全一致，相对目标
+   的链接依然有效。
+3. **清理。** 拿目标树与 staging 树对比遍历，删除 staging 不携带的每一条路径，并在两侧同为目录
+   时递归进入。遍历放在应用之后，正是它让刚复制进去的内容不会被误判为陈旧，也让"崩溃后扩展
+   内容缺失"的窗口在复制式交换允许的范围内尽可能窄。
+4. `uninstall` 时，把第 2-3 步换成：清空目标目录的子项，然后对目标目录本身执行 `rmdir`。若该
+   `rmdir` 失败，说明有进程把它当作工作目录；从备份复制恢复，并抛出占用错误。不能留下一个没有
+   清单的空壳目录，因为 `pathExists()` 会把它报告成"已安装"从而阻塞之后的重装。
+
+`rollbackJournal()` 增加反方向：当 `swapStrategy: 'copy'` 时，清空目标子项并把
+`backupDirectory` 复制回来，而不是改名回来。恢复逻辑不需要新概念——
+`recoverTransactionsUnlocked()` 保留现有的阶段比较，只是调用按策略分派的回滚。
+
+**B — 可行动的失败提示。** 在既有 store 错误旁边增加：
+
+```ts
+export class ExtensionDirectoryLockedError extends Error {
+  readonly code = 'extension_directory_locked';
+}
+```
+
+消息点出目录名，并说明可能有其他 Qwen Code 会话或进程仍持有该目录。它只有一个抛出点：copy
+模式卸载最后那步 `rmdir` 因目录被占用而拒绝。其余失败照原样抛出交给调用方；回滚本身失败仍走
+既有的 `AggregateError` 路径。占用分类放在这里而不是 `renameWithRetry` 里，覆盖 `EPERM`、
+`EACCES`、`EBUSY`——包含 `EBUSY` 是因为工作目录就是被改名目录的子进程上报的是这个码而不是
+`EPERM`，而这两个码否则既不重试也不解释。
+
+## 决策与否决的方案
+
+决策：
+
+- **仅限 Windows。** 回退同时以 `process.platform === 'win32'` 和"错误属于占用类"为条件。在
+  Linux lane 上用同样的句柄实测过：那里改名不受阻，所以 POSIX 侧什么都不变，也不会有任何 CI
+  平台在无声中失去原子性。
+- **复制备份，而不是跳过备份。** 跳过更省，但会让每一条未提交的 copy 模式日志变成不可恢复的
+  半状态。复制能完整保留现有的回滚与恢复设计，代价只是在这条本来就已经很慢的路径上多复制一棵
+  树。
+- **staging 在提交干净之前留在磁盘上。** 这一点现在已成立，也正是它让一次在应用中途死掉的 copy
+  模式事务能被后续运行回滚。
+
+否决：
+
+- **在变更窗口内释放发起会话自己的句柄。** 给 watcher 加 `pause()` 只在"发起会话是唯一持有者"
+  时有用，多开一个会话就失效；而 `beginMutation()` 有 18 个调用点，多数根本不碰产物。凡是
+  rename 可达的场景 copy 都可达，所以它换不到任何可达性。
+- **Windows 上改用轮询 watcher。** `usePolling` 不持任何句柄，代价是整棵扩展目录持续的 `stat`
+  流量，而且仍然看不见编辑器、资源管理器、杀毒扫描器、运行中的 MCP server。
+- **"变更进行中"标记加心跳。** 只能协调 Qwen 自己的会话，还要处理超时、崩溃残留与启动竞态，而
+  复制路径本来就已经无条件覆盖了这些情况。
+- **加大重试预算。** 锁由另一个会话持有到其退出；350 ms 内 4 次尝试对瞬时锁已经太多，对永久锁
+  又远远不够。
+
+## 风险与约束
+
+- **copy 模式不原子。** 在"应用"与"清理"两步之间崩溃，可能让目标目录新旧文件混杂，而日志仍是
+  `prepared`。此时恢复会把备份复制回滚，与改名路径处理未提交事务的方式完全一致——即使已经记录了
+  `artifact_swapped` 也是如此，因为让事务变为已提交的是快照。窗口很小且状态始终可判定，但它确实
+  比改名路径更宽。
+- **孤儿 `.partial` 备份**可能在 copy 模式备份被打断时堆积在 `extension-store/rollback/` 下。
+  没有任何东西读取它们，也没有任何日志指向它们；在带外清理之前只是占磁盘。
+- **并发的带外修改**：复制窗口内对目标的第三方修改可能被清理掉或被覆盖。改名路径存在同一类竞态、
+  只是时序不同；本设计不会让它变安全。
+- **额外 I/O**：占用路径上每次更新要复制两整棵树。自带 `node_modules` 的扩展会让这点比较明显
+  ——本机实测最大的是 298 个文件、55.6 MB——但有界，且只在 Windows。
+- **运行中子进程造成的 EBUSY 不是复制能解决的**，当该进程的工作目录就是扩展目录本身且操作是卸载
+  时。这种情况以 B 的提示收尾，这正是预期结果。
+- `assertRecoveredJournalPaths()` 负责校验日志路径，必须在不放松任何路径检查的前提下接受这个新
+  的可选字段；策略无法识别时隔离该日志。
+- 复制与清理不得顺着符号链接走出目标树——staging 内容已由 `archive-safety` 校验过，但清理时的
+  遍历必须把符号链接当作叶子节点。
+
+## 验证与验收
+
+单元测试与源文件同目录放在 `extension-store.test.ts`，在 `os.tmpdir()` 下使用真实文件系统，并为
+`fs.rename` 加一个模块级打桩入口，覆盖：Windows 占用错误触发复制回退且陈旧文件被清除；同样的
+错误在非 Windows 平台上原样抛出且已安装的目录树不变；copy 模式卸载删除目录；带 copy 策略的日志
+按复制回滚恢复，包括移除部分应用所新增的内容；策略无法识别的日志被隔离；不带该字段的既有日志
+保持原有恢复行为。有一个分支在非 Windows 上无法做单元测试：最后一步 `rmdir` 因为某进程把工作目录
+设在该目录上而拒绝执行——它需要真实的操作系统级占用，由 harness 与上面的 `EBUSY` 行覆盖。
+
+E2E harness 为一个扩展根目录树的每个目录挂一个原生监视句柄，并驱动另一个 CLI 进程走更新与卸载，
+先打隔离 `HOME`，再打真实 profile（占用方是真实运行的会话）。记录结果：已发行 CLI 两个操作都
+`EPERM` 失败、fixture 停留在旧版本；本构建两个都完成、清掉了新版本删除的文件，并且 `state.json`、
+`rollback/`、`transactions/` 均无残留。Linux lane 用同样的句柄跑同一套，完全不报占用。
+
+验收：
+
+- 在 Windows 上、至少还有一个其他交互会话运行时，`qwen extensions update <name>` 能完成，且新版本
+  可加载。
+- 无法完成的交换会报告 `extension_directory_locked` 并点出目录名，同时原版本仍已安装且可加载。
+- `npm run build && npm run typecheck` 与被改动文件在 `packages/core` 的单元测试全部通过，Windows
+  与 Linux lane 都要过。
+- diff 中 POSIX 代码路径保持不变。
+
+## 待解问题
+
+- 当 staging → destination 改名失败时，`install` 是否也该走复制路径？目前那次改名写入的是一个全新
+  路径，尚未观察到失败；不做可以让回退面更窄。
