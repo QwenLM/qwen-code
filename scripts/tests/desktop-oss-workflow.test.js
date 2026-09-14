@@ -261,6 +261,17 @@ describe('Desktop OSS mirror workflow', () => {
     );
     expect(source).toContain('whoever can tag and publish a release');
     expect(source).not.toContain('This release was not cut from main');
+    // The CLI's npm publish runs from main, not from the release tag; the old
+    // claim gave the tag a provenance anchor it does not have.
+    expect(source).not.toContain('publishes the CLI to npm from the same tag');
+  });
+
+  it('puts the feed-clobbering publish behind the deployment gate', () => {
+    // The publish job overwrites desktop-latest.json with --clobber. The OSS
+    // mirror job already waits on production-release; a feed move that could
+    // skip that gate would publish an updater target nobody approved.
+    const publish = getWorkflowJob(releaseWorkflow, 'publish');
+    expect(publish).toContain("environment:\n      name: 'production-release'");
   });
 });
 

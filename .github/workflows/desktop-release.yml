@@ -163,11 +163,11 @@ jobs:
             # review is the anchor. On the release arm the bundled commit is
             # the tag's own, which nothing here inspects: what is established
             # is that the release was cut from main, and the anchor for its
-            # contents is whoever can tag and publish a release. That is not a
-            # weaker position than the rest of the repository — the same
-            # permission already publishes the CLI to npm from the same tag —
-            # but it is a different one, and the wording below says so rather
-            # than claiming a check that is not performed.
+            # contents is whoever can tag and publish a release. That is the
+            # same maintainer role that cuts the CLI release this one follows
+            # — the CLI's npm publish runs from main, not from this tag — so
+            # it is a different anchor from the dispatch arm's, and the wording
+            # below says so rather than claiming a check that is not performed.
             #
             # Narrowing it further was measured and abandoned: real tags carry
             # no single delta shape to allowlist (v0.14.5 is i18n files with no
@@ -639,6 +639,10 @@ jobs:
       - 'build'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 20
+    # The feed move below overwrites desktop-latest.json with --clobber, so it
+    # sits behind the same deployment gate as the OSS mirror job.
+    environment:
+      name: 'production-release'
     permissions:
       contents: 'write'
     steps:

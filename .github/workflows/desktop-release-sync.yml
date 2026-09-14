@@ -26,6 +26,9 @@ run-name: 'Desktop release following ${{ github.event.release.tag_name }}'
 on:
   release:
     types: ['published']
+    # A prerelease promoted to stable fires `released`, not `published`, so a
+    # promoted release never reaches this path; mirror it by dispatching
+    # desktop-release.yml with follows_release set.
 
 permissions:
   actions: 'read'
