@@ -68,7 +68,6 @@ import { QuestionCardController } from './question-card-controller.js';
 import { PermissionCardController } from './permission-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
-  BackgroundResponseContext,
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
@@ -2703,39 +2702,6 @@ export class DingtalkChannel extends ChannelBase {
     this.stopReaction(chatId, messageId, sessionId);
   }
 
-  override async dispatchBackgroundResponse(
-    sessionId: string,
-    text: string,
-    context?: BackgroundResponseContext,
-  ): Promise<void> {
-    const target = this.router.getTarget(sessionId);
-    if (
-      !target ||
-      target.channelName !== this.name ||
-      (context !== undefined && context.kind !== 'agent') ||
-      !text.trim()
-    ) {
-      return super.dispatchBackgroundResponse(sessionId, text, context);
-    }
-    return super.dispatchBackgroundResponse(
-      sessionId,
-      this.formatBackgroundAgentResponse(text, context?.label),
-      context,
-    );
-  }
-
-  private formatBackgroundAgentResponse(text: string, label?: string): string {
-    return `## 🤖 Agent · ${this.formatBackgroundAgentLabel(label)}\n\n${text}`;
-  }
-
-  private formatBackgroundAgentLabel(label?: string): string {
-    const normalized = label
-      ?.replace(/\p{Cc}+/gu, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    return escapeDingTalkMarkdown(normalized || '后台任务');
-  }
-
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
@@ -3143,8 +3109,7 @@ export class DingtalkChannel extends ChannelBase {
    * this message's own media — `(audio)`, `(video)`, `(file: name)`. Only the
    * direct-media call site has one, and only that call may erase it: on the
    * quoted-media path `envelope.text` is the user's own reply, and a reply
-   * that happens to read exactly like a placeholder must survive (a group
-   * `@Bot (audio)` reaches here as exactly `(audio)` after mention removal).
+   * that happens to read exactly like a placeholder must survive.
    */
   private async attachMedia(
     envelope: Envelope,
@@ -3339,27 +3304,15 @@ export class DingtalkChannel extends ChannelBase {
 
       // Extract text and media info from message
       const content = this.extractContent(data);
-      let cleanText = content.text;
-
-      // Strip first @mention (the bot) from text, keep other @mentions intact.
-      // Anchor to start-of-string so @ symbols inside URLs or emails
-      // (e.g. git@host:path) are not accidentally stripped (#7402).
-      if (isMentioned) {
-        cleanText = cleanText.replace(/^\s*@[^\s\p{Cf}]+/u, '').trim();
-      }
 
       // Extract quoted message context
       const quoted = this.extractQuotedContext(data);
 
       const chatId = conversationId || sessionWebhook;
 
-      // After stripping the bot @mention, cleanText may legitimately be empty
-      // (user pinged the bot with no other text). Don't fall back to the
-      // original text in that case — it would re-introduce the @mention.
-      const messageText = isMentioned ? cleanText : cleanText || content.text;
       // Carry mention targets as a structured envelope field (like
       // referencedText) so ChannelBase renders the marker after prompt
-      // sanitization and slash-command parsing sees the body alone.
+      // sanitization.
       const mentionedMemberIds = isGroup ? collectNonBotMentionIds(data) : [];
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
@@ -3372,7 +3325,7 @@ export class DingtalkChannel extends ChannelBase {
         ...(isGroup && conversationTitle
           ? { chatName: conversationTitle }
           : {}),
-        text: messageText,
+        text: content.text,
         ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
