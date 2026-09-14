@@ -114,6 +114,9 @@ describe('readWorktreeSession', () => {
 });
 
 describe('readWorktreeSessionStrict', () => {
+  const differentIdentity = (value: number | bigint): number | bigint =>
+    typeof value === 'bigint' ? (value === 1n ? 2n : 1n) : value === 1 ? 2 : 1;
+
   it('distinguishes missing, valid, and malformed sidecars', async () => {
     await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
       state: 'missing',
@@ -189,9 +192,9 @@ describe('readWorktreeSessionStrict', () => {
     const statSpy = vi
       .spyOn(prototype, 'stat')
       .mockImplementationOnce(async function (this: typeof probe) {
-        const stats = await originalStat.call(this);
+        const stats = await originalStat.call(this, { bigint: true });
         return Object.assign(stats, {
-          ino: typeof stats.ino === 'bigint' ? stats.ino + 1n : stats.ino + 1,
+          ino: differentIdentity(stats.ino),
         });
       });
 
@@ -215,12 +218,11 @@ describe('readWorktreeSessionStrict', () => {
     const statSpy = vi
       .spyOn(prototype, 'stat')
       .mockImplementation(async function (this: typeof probe) {
-        const stats = await originalStat.call(this);
+        const stats = await originalStat.call(this, { bigint: true });
         statCalls++;
         return statCalls === 2
           ? Object.assign(stats, {
-              ino:
-                typeof stats.ino === 'bigint' ? stats.ino + 1n : stats.ino + 1,
+              ino: differentIdentity(stats.ino),
             })
           : stats;
       });
