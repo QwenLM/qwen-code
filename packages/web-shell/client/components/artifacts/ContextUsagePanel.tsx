@@ -8,6 +8,7 @@ import { useI18n } from '../../i18n';
 import { isTransientSessionReadError } from '../../utils/sessionErrors';
 import { ContextUsageMessage } from '../messages/ContextUsageMessage';
 import { Button } from '../ui/button';
+import { ContextCompressionFeedback } from '../ContextCompressionFeedback';
 import type { ContextUsageControls } from '../../hooks/useContextUsageControls';
 import styles from './ContextUsagePanel.module.css';
 
@@ -170,29 +171,10 @@ export function ContextUsagePanel({
         </div>
       </div>
       {(liveControls?.compressing || showCompressionResult) && (
-        <div
+        <ContextCompressionFeedback
+          controls={liveControls}
           className={styles.feedback}
-          role={
-            compressionResult?.kind === 'failed' ||
-            compressionResult?.kind === 'refreshFailed'
-              ? 'alert'
-              : 'status'
-          }
-        >
-          {t(
-            liveControls?.compressing
-              ? 'contextUsage.compressing'
-              : compressionResult?.kind === 'completed'
-                ? 'contextUsage.compressed'
-                : compressionResult?.kind === 'cancelled'
-                  ? 'contextUsage.compressCancelled'
-                  : compressionResult?.kind === 'interrupted'
-                    ? 'contextUsage.compressInterrupted'
-                    : compressionResult?.kind === 'refreshFailed'
-                      ? 'contextUsage.compressRefreshFailed'
-                      : 'contextUsage.compressFailed',
-          )}
-        </div>
+        />
       )}
       {error === 'transient' && status && (
         <div className={styles.feedback} role="status">

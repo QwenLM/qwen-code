@@ -78,6 +78,10 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     clientId: 'channels.editor.field.feishu.clientId',
     clientSecret: 'channels.editor.field.feishu.clientSecret',
   },
+  dws: {
+    senderPolicy: 'channels.editor.field.dws.senderPolicy',
+    dmPolicy: 'channels.editor.field.dws.dmPolicy',
+  },
   github: {
     token: 'channels.editor.field.github.token',
     useLocalGh: 'channels.editor.field.github.useLocalGh',
@@ -102,6 +106,7 @@ const SHARED_ACCESS_FIELD_KEYS = new Set([
   'senderPolicy',
   'allowedUsers',
   'groupPolicy',
+  'dmPolicy',
 ]);
 const SHARED_SESSION_FIELD_KEYS = new Set([
   'sessionScope',
