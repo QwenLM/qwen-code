@@ -210,7 +210,7 @@ describe('qwen sandbox', () => {
     loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
     resolveBwrapWritableRootsMock.mockImplementation(() => {
       throw new Error(
-        "Refusing sandbox writable root '/home/user': the home directory and its ancestors must stay read-only.",
+        "Refusing sandbox writable root '/home/user': the home directory ('/home/user') and its ancestors must stay read-only.",
       );
     });
 
@@ -408,7 +408,7 @@ describe('qwen sandbox', () => {
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
       ]);
 
       await run({ verify: true });
@@ -423,7 +423,7 @@ describe('qwen sandbox', () => {
       respond([
         [/proc\/net\/dev/, { status: 0, stdout: 'lo\neth0\n', stderr: '' }],
         [/usr\/local\/bin/, { status: 0, stdout: '', stderr: '' }],
-        [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
       ]);
 
       await run({ verify: true });
@@ -448,7 +448,7 @@ describe('qwen sandbox', () => {
             stderr: "touch: cannot touch '/usr/local/bin/x': Permission denied",
           },
         ],
-        [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
       ]);
 
       await run({ verify: true });
@@ -457,19 +457,19 @@ describe('qwen sandbox', () => {
       expect(process.exitCode).toBe(1);
     });
 
-    it('fails when host PIDs are hidden, which would break owner arbitration', async () => {
+    it('fails when a PID namespace isolates the payload, which would break owner arbitration', async () => {
       respond([
         [/proc\/net\/dev/, { status: 0, stdout: 'lo\neth0\n', stderr: '' }],
         [
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/ls \/proc/, { status: 0, stdout: '3\n', stderr: '' }],
+        [/\$\$/, { status: 1, stdout: '', stderr: '' }],
       ]);
 
       await run({ verify: true });
 
-      expect(report()).toContain('FAIL  host processes stay visible');
+      expect(report()).toContain('FAIL  payload shares the host PID namespace');
       expect(process.exitCode).toBe(1);
     });
 
@@ -484,7 +484,7 @@ describe('qwen sandbox', () => {
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
       ]);
 
       await run({ verify: true });
@@ -514,7 +514,7 @@ describe('qwen sandbox', () => {
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
       ]);
 
       await run({ verify: true });
@@ -533,7 +533,7 @@ describe('qwen sandbox', () => {
             /usr\/local\/bin/,
             { status: 1, stdout: '', stderr: 'Read-only file system' },
           ],
-          [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+          [/\$\$/, { status: 0, stdout: '', stderr: '' }],
         ]);
         await run({ verify: true });
         expect(report()).toContain(
@@ -553,7 +553,7 @@ describe('qwen sandbox', () => {
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
       ]);
 
       await run({ verify: true });
@@ -572,7 +572,7 @@ describe('qwen sandbox', () => {
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
       ]);
 
       await run({ verify: true });

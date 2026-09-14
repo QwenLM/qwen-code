@@ -603,6 +603,29 @@ describe('resolveBwrapWritableRoots', () => {
     );
   });
 
+  it('names the home directory when refusing a root that contains it', () => {
+    const home = path.join(work, 'home');
+    fs.mkdirSync(home);
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.spyOn(process, 'cwd').mockReturnValue(home);
+
+    expect(() => resolveBwrapWritableRoots()).toThrow(
+      `Refusing sandbox writable root '${fs.realpathSync(home)}': the home directory ('${fs.realpathSync(home)}') and its ancestors must stay read-only.`,
+    );
+  });
+
+  it('names the home directory when the temp dir is its ancestor', () => {
+    const tmp = path.join(work, 'shared-tmp');
+    const home = path.join(tmp, 'home');
+    fs.mkdirSync(home, { recursive: true });
+    vi.spyOn(os, 'tmpdir').mockReturnValue(tmp);
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+
+    expect(() => resolveBwrapWritableRoots()).toThrow(
+      `Refusing sandbox writable root '${fs.realpathSync(tmp)}': the home directory ('${fs.realpathSync(home)}') and its ancestors must stay read-only.`,
+    );
+  });
+
   it('reserves the global .env read-only and preserves later operator edits', () => {
     const ws = path.join(work, 'ws');
     fs.mkdirSync(ws);

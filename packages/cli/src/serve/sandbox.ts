@@ -369,7 +369,7 @@ export function normalizeWritableRoots(
     }
     if (real === homeDir || isSubpath(real, homeDir)) {
       throw new FatalSandboxError(
-        `Refusing sandbox writable root '${real}': the home directory and its ancestors must stay read-only.`,
+        `Refusing sandbox writable root '${real}': the home directory ('${homeDir}') and its ancestors must stay read-only.`,
       );
     }
     if (
@@ -685,7 +685,7 @@ export function runBwrap(
       });
       proxyProcess.once('error', proxyError);
       proxyProcess.once('close', proxyClosed);
-      // Proxy stdout is intentionally not piped — it disrupts ink rendering.
+      // Proxy stdout is piped but not forwarded — it disrupts ink rendering.
       proxyProcess.stderr?.on('data', (data) =>
         writeStderrLine(data.toString()),
       );

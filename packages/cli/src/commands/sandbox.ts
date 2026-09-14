@@ -337,12 +337,15 @@ export const sandboxCommand: CommandModule = {
         check: ({ output }) => denied.test(output),
       },
       {
-        name: 'host processes stay visible',
-        // `[0-9]\+`, since basic-regex `[0-9]*` also matches an empty line.
-        argv: ['sh', '-c', 'ls /proc | grep -c "^[0-9]\\+$"'],
+        name: 'payload shares the host PID namespace',
+        // `$$`, not a process count: a threshold on the host's process
+        // count measures host load, and an idle host fails it with no PID
+        // namespace anywhere. The payload is PID 1 exactly when a namespace
+        // isolates it.
+        argv: ['sh', '-c', 'test "$$" -ne 1'],
         expectation:
           'no PID namespace, so cross-process ownership records stay meaningful',
-        check: ({ output }) => Number(output.trim()) > 20,
+        check: ({ status }) => status === 0,
       },
       {
         name:
