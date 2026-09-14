@@ -2156,6 +2156,28 @@ describe('WebSearchTool budget', () => {
     expect((mockCtorOpts.current as { timeout: number }).timeout).toBe(200);
   });
 
+  it('reports a sub-second budget to the millisecond instead of rounding it to zero', async () => {
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.created' };
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            });
+          },
+        }),
+    );
+    const result = await runSearch(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 40 },
+      }),
+    );
+    expect(result.error?.message).toBe('Web search timed out after 0.04s.');
+  });
+
   it('salvages the partial result when the budget expires after a search ran', async () => {
     // terminalFailure tries partial salvage before the timeout arm: a search
     // that spent its budget after collecting evidence must return it.
@@ -2249,7 +2271,9 @@ describe('WebSearchTool extractor fallback', () => {
       streamDyingAfterPageRead('a'.repeat(5_958) + '\u{1F600}'),
     );
     const content = (await runSearch(makeConfig())).llmContent as string;
-    expect(content).toContain('Truncated to 6000 characters.]');
+    // The cut backs off one unit to keep the pair whole, and the label
+    // reports the 5999 units actually delivered, not the 6000 bound.
+    expect(content).toContain('Truncated to 5999 characters.]');
     // No high surrogate without its low surrogate anywhere in the payload.
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(content)).toBe(false);
   });
