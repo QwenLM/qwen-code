@@ -29,6 +29,7 @@ import {
   readAgentWorkspace,
   reconcileThreadOutbox,
   withAgentStoreTransaction,
+  type AgentStoreTransaction,
 } from './store.js';
 import {
   applyAggregateStatus,
@@ -286,90 +287,104 @@ async function rebookUndeliveredTriggers(
   attempt: number,
   now: number,
 ): Promise<ThreadRun | undefined> {
-  return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const thread = await transaction.readThread(threadId);
-    const run = thread?.runs.find((entry) => entry.id === runId);
-    if (
-      !thread ||
-      !run ||
-      run.attempts !== attempt ||
-      isThreadTerminal(thread.status) ||
-      (run.status !== 'running' &&
-        run.status !== 'finishing' &&
-        run.status !== 'completed')
-    ) {
-      return undefined;
-    }
-    const pending = pendingTriggerIds(run);
-    if (pending.length === 0) return undefined;
+  return withAgentStoreTransaction(projectRoot, (transaction) =>
+    rebookUndeliveredTriggersInTransaction(
+      transaction,
+      threadId,
+      runId,
+      attempt,
+      now,
+    ),
+  );
+}
 
-    const queued = thread.runs.find(
-      (entry) =>
-        entry.id !== run.id &&
-        entry.agentId === run.agentId &&
-        entry.status === 'queued',
-    );
-    const successor: ThreadRun = queued
-      ? {
-          ...queued,
-          triggerMessageIds: Array.from(
-            new Set([...queued.triggerMessageIds, ...pending]),
-          ),
-        }
-      : {
-          id: generateRunId(),
-          agentId: run.agentId,
-          status: 'queued',
-          triggerMessageIds: pending,
-          acceptedMessageIds: [],
-          consumedMessageIds: [],
-          usageByRound: [],
-          queueSequence: await transaction.allocateRunSequence(),
-          queuedAt: now,
-          attempts: 0,
-        };
+export async function rebookUndeliveredTriggersInTransaction(
+  transaction: AgentStoreTransaction,
+  threadId: string,
+  runId: string,
+  attempt: number,
+  now: number,
+): Promise<ThreadRun | undefined> {
+  const thread = await transaction.readThread(threadId);
+  const run = thread?.runs.find((entry) => entry.id === runId);
+  if (
+    !thread ||
+    !run ||
+    run.attempts !== attempt ||
+    isThreadTerminal(thread.status) ||
+    (run.status !== 'running' &&
+      run.status !== 'finishing' &&
+      run.status !== 'completed')
+  ) {
+    return undefined;
+  }
+  const pending = pendingTriggerIds(run);
+  if (pending.length === 0) return undefined;
 
-    const pendingSet = new Set(pending);
-    const nextRuns = thread.runs
-      .map((entry) =>
-        entry.id === run.id
-          ? {
-              ...entry,
-              triggerMessageIds: entry.triggerMessageIds.filter(
-                (id) => !pendingSet.has(id),
-              ),
-            }
-          : entry.id === successor.id
-            ? successor
-            : entry,
-      )
-      .concat(
-        thread.runs.some((entry) => entry.id === successor.id)
-          ? []
-          : [successor],
-      );
-    const messages = thread.messages.map((message) =>
-      pendingSet.has(message.id)
+  const queued = thread.runs.find(
+    (entry) =>
+      entry.id !== run.id &&
+      entry.agentId === run.agentId &&
+      entry.status === 'queued',
+  );
+  const successor: ThreadRun = queued
+    ? {
+        ...queued,
+        triggerMessageIds: Array.from(
+          new Set([...queued.triggerMessageIds, ...pending]),
+        ),
+      }
+    : {
+        id: generateRunId(),
+        agentId: run.agentId,
+        status: 'queued',
+        triggerMessageIds: pending,
+        acceptedMessageIds: [],
+        consumedMessageIds: [],
+        usageByRound: [],
+        queueSequence: await transaction.allocateRunSequence(),
+        queuedAt: now,
+        attempts: 0,
+      };
+
+  const pendingSet = new Set(pending);
+  const nextRuns = thread.runs
+    .map((entry) =>
+      entry.id === run.id
         ? {
-            ...message,
-            outcomes: message.outcomes.map((outcome) =>
-              outcome.runId === run.id && outcome.targetAgentId === run.agentId
-                ? {
-                    ...outcome,
-                    kind: 'coalesce' as const,
-                    into: 'queued' as const,
-                    runId: successor.id,
-                  }
-                : outcome,
+            ...entry,
+            triggerMessageIds: entry.triggerMessageIds.filter(
+              (id) => !pendingSet.has(id),
             ),
           }
-        : message,
+        : entry.id === successor.id
+          ? successor
+          : entry,
+    )
+    .concat(
+      thread.runs.some((entry) => entry.id === successor.id) ? [] : [successor],
     );
-    let next = { ...thread, messages, runs: nextRuns };
-    next = await applyAggregateStatus(transaction, next, now);
-    await transaction.writeThread(next);
-    return successor;
-  });
+  const messages = thread.messages.map((message) =>
+    pendingSet.has(message.id)
+      ? {
+          ...message,
+          outcomes: message.outcomes.map((outcome) =>
+            outcome.runId === run.id && outcome.targetAgentId === run.agentId
+              ? {
+                  ...outcome,
+                  kind: 'coalesce' as const,
+                  into: 'queued' as const,
+                  runId: successor.id,
+                }
+              : outcome,
+          ),
+        }
+      : message,
+  );
+  let next = { ...thread, messages, runs: nextRuns };
+  next = await applyAggregateStatus(transaction, next, now);
+  await transaction.writeThread(next);
+  return successor;
 }
 
 /**

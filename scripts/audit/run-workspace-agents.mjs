@@ -3,6 +3,7 @@
  * Executes the workspace-agents rules against a real temp directory.
  *
  * Usage: node scripts/audit/run-workspace-agents.mjs
+ * Focused: node scripts/audit/run-workspace-agents.mjs --host-coalesced-message
  *
  * Neither a build nor the test suite: esbuild bundles the pure store,
  * dispatcher and prompt modules — no daemon, no bridge, no model — and this
@@ -86,6 +87,134 @@ M.Storage.setRuntimeBaseDir(tmp);
 const ROOT = '/wa-run-project';
 const ALICE = { id: 'ag_alice', name: 'alice', createdAt: 1 };
 const BOB = { id: 'ag_bob', name: 'bob', createdAt: 1 };
+
+async function checkHostCoalescedMessage() {
+  console.log('\nHost follow-up: a message arriving after pickup is not lost');
+  const root = '/wa-host-coalesced-message';
+  const agentId = 'ag_coalescer';
+  const hostId = 'host-coalescer';
+  await M.updateWorkspaceAgents(root, () => [
+    {
+      id: agentId,
+      name: 'coalescer',
+      createdAt: 1,
+      execution: { mode: 'managed-host', hostIds: [hostId] },
+    },
+  ]);
+  const thread = await M.createThread(root, {
+    title: 'A follow-up arrives during the first turn',
+    assigneeAgentId: agentId,
+  });
+  const first = await M.postMessage(root, thread.id, {
+    from: M.HUMAN_AUTHOR_ID,
+    text: 'Answer the first question.',
+  });
+  const taken = await M.pickupRunForHost(root, hostId, 5_000_000);
+  ok(
+    'the Host first picks up the original message',
+    taken?.runId === first.dispatched[0]?.id,
+  );
+  const second = await M.postMessage(root, thread.id, {
+    from: M.HUMAN_AUTHOR_ID,
+    text: 'Now answer this distinct follow-up.',
+  });
+  const before = await M.readThread(root, thread.id);
+  const original = before.runs.find((run) => run.id === taken.runId);
+  ok(
+    'the late message coalesces into running but is not yet delivered',
+    before.runs.length === 1 &&
+      second.outcomes.some(
+        ({ decision }) =>
+          decision.kind === 'coalesce' && decision.into === 'running',
+      ) &&
+      original.triggerMessageIds.includes(second.message.id) &&
+      original.acceptedMessageIds.includes(first.message.id) &&
+      !original.acceptedMessageIds.includes(second.message.id) &&
+      !original.consumedMessageIds.includes(second.message.id),
+  );
+  const result = (assignment) => ({
+    threadId: thread.id,
+    runId: assignment.runId,
+    hostId,
+    leaseId: assignment.lease.leaseId,
+    attempt: assignment.attempt,
+    status: 'completed',
+    close: { kind: 'review', summary: 'Turn finished.' },
+  });
+  const applied = await M.applyHostRunResult(root, result(taken), 5_000_100);
+  const after = await M.readThread(root, thread.id);
+  const successor = after.runs.find((run) => run.id !== taken.runId);
+  ok(
+    'closing the first turn queues exactly one successor for the late message',
+    applied.ok &&
+      after.runs.length === 2 &&
+      successor?.status === 'queued' &&
+      successor.triggerMessageIds.length === 1 &&
+      successor.triggerMessageIds[0] === second.message.id &&
+      successor.acceptedMessageIds.length === 0 &&
+      successor.consumedMessageIds.length === 0 &&
+      !after.runs
+        .find((run) => run.id === taken.runId)
+        .triggerMessageIds.includes(second.message.id),
+    JSON.stringify(
+      after.runs.map(({ id, status, triggerMessageIds }) => ({
+        id,
+        status,
+        triggerMessageIds,
+      })),
+    ),
+  );
+  ok(
+    'the stored outcome now names the queued successor, not the completed turn',
+    after.messages
+      .find((message) => message.id === second.message.id)
+      .outcomes.some(
+        (outcome) =>
+          outcome.kind === 'coalesce' &&
+          outcome.into === 'queued' &&
+          outcome.runId === successor?.id,
+      ),
+  );
+  const replay = await M.applyHostRunResult(root, result(taken), 5_000_200);
+  const repeated = await M.readThread(root, thread.id);
+  ok(
+    'replaying the first result does not create another run or summary',
+    replay.ok &&
+      replay.value.alreadyApplied &&
+      JSON.stringify(repeated) === JSON.stringify(after),
+  );
+  const next = await M.pickupRunForHost(root, hostId, 5_000_300);
+  const picked = await M.readThread(root, thread.id);
+  const nextRun = picked.runs.find((run) => run.id === next?.runId);
+  ok(
+    'the next pickup accepts the follow-up and includes it in the prompt',
+    next?.runId === successor?.id &&
+      next.prompt.includes(second.message.text) &&
+      nextRun.acceptedMessageIds.includes(second.message.id) &&
+      !nextRun.consumedMessageIds.includes(second.message.id),
+  );
+  const completed = await M.applyHostRunResult(root, result(next), 5_000_400);
+  const final = await M.readThread(root, thread.id);
+  const finalRun = final.runs.find((run) => run.id === next.runId);
+  ok(
+    'the successor completes with the follow-up consumed and its watermark advanced',
+    completed.ok &&
+      finalRun.status === 'completed' &&
+      finalRun.acceptedMessageIds.includes(second.message.id) &&
+      finalRun.consumedMessageIds.includes(second.message.id) &&
+      final.deliveryByAgent[agentId].committedThroughSequence >=
+        second.message.sequence &&
+      final.runs.length === 2 &&
+      final.runs.every((run) => run.status === 'completed'),
+  );
+}
+
+if (process.argv.includes('--host-coalesced-message')) {
+  await checkHostCoalescedMessage();
+  await fs.rm(tmp, { recursive: true, force: true });
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail ? 1 : 0);
+}
 
 console.log('\n1. thread creation records what it was given');
 const t = await M.createThread(ROOT, {
@@ -3787,6 +3916,8 @@ ok(
   failedRun.error === 'the sandbox died' && failedRun.closeKind === undefined,
   `${failedRun.error} / ${failedRun.closeKind}`,
 );
+
+await checkHostCoalescedMessage();
 
 console.log('\n39. who must name an owner, and who need not');
 // `thread_create` requires an assignee; `createThread` does not. The asymmetry

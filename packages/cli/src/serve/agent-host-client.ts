@@ -268,7 +268,6 @@ async function executeAssignment(
       thoughtText: thoughtText.slice(0, 65536),
     };
   };
-  void flush();
   const progressHeartbeat = setInterval(() => void flush(), 500);
   progressHeartbeat.unref?.();
   renew.unref?.();
@@ -293,6 +292,7 @@ async function executeAssignment(
           command: 'codex',
           cwd: options.workspaceCwd,
           session,
+          keepAlive: true,
           onMessage: (id, text) => {
             messages.set(id, text);
             report(
@@ -315,6 +315,7 @@ async function executeAssignment(
         execution.signal,
       );
     } else {
+      void flush();
       const sessionId = agentThreadSessionId(
         `${credential.hostId}:${assignment.agent.id}`,
         assignment.threadId,

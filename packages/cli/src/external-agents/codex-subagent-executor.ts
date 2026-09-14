@@ -56,25 +56,103 @@ function id(value: unknown): string {
   return value;
 }
 
+type CodexAppServerParams = {
+  command: string;
+  args?: string[];
+  cwd: string;
+  maxTimeMinutes?: number;
+  onMessage?: (itemId: string, text: string) => void;
+  onThought?: (delta: string) => void;
+  onActivity?: (stage: string, detail: string) => void;
+  onCleanupWarning?: (detail: string) => void;
+  keepAlive?: boolean;
+  session?: {
+    threadId?: string;
+    save: (threadId: string) => Promise<void>;
+  };
+};
+
+type CodexNextTurn = {
+  params: CodexAppServerParams;
+  prompt: string;
+  signal: AbortSignal;
+};
+type CodexConnection = {
+  iterator: AsyncGenerator<string, void, CodexNextTurn | undefined>;
+  busy: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+};
+const codexConnections = new Map<string, CodexConnection>();
+const codexExitHandlers = new Set<() => void>();
+const stopCodexOnExit = () => {
+  for (const stop of codexExitHandlers) stop();
+};
+
 export async function runCodexAppServer(
-  params: {
-    command: string;
-    args?: string[];
-    cwd: string;
-    maxTimeMinutes?: number;
-    onMessage?: (itemId: string, text: string) => void;
-    onThought?: (delta: string) => void;
-    onActivity?: (stage: string, detail: string) => void;
-    onCleanupWarning?: (detail: string) => void;
-    session?: {
-      threadId?: string;
-      save: (threadId: string) => Promise<void>;
-    };
-  },
+  params: CodexAppServerParams,
   prompt: string,
   sandbox: string,
   signal: AbortSignal,
 ): Promise<string> {
+  if (signal.aborted) throw new CodexInterruption(AgentTerminateMode.CANCELLED);
+  const cacheKey = () =>
+    JSON.stringify([
+      params.command,
+      params.args,
+      params.cwd,
+      sandbox,
+      params.session?.threadId,
+    ]);
+  const cached = params.session?.threadId
+    ? codexConnections.get(cacheKey())
+    : undefined;
+  const connection: CodexConnection = cached ?? {
+    iterator: codexAppServer(params, prompt, sandbox, signal),
+    busy: false,
+  };
+  if (connection.busy)
+    throw new Error('Codex session already has an active turn.');
+  connection.busy = true;
+  clearTimeout(connection.timer);
+  const close = async () => {
+    if (codexConnections.get(cacheKey()) === connection)
+      codexConnections.delete(cacheKey());
+    await connection.iterator.return(undefined);
+  };
+  try {
+    const result = await connection.iterator.next(
+      cached ? { params, prompt, signal } : undefined,
+    );
+    if (result.done) throw new Error('Codex session closed before replying.');
+    if (params.keepAlive && params.session?.threadId) {
+      codexConnections.set(cacheKey(), connection);
+      // ponytail: keep idle conversations warm for five minutes, then resume from disk.
+      connection.timer = setTimeout(
+        () =>
+          void close().catch((error: unknown) => {
+            debugLogger.warn(`Codex idle cleanup failed: ${String(error)}`);
+          }),
+        300_000,
+      );
+      connection.timer.unref();
+    } else {
+      await close();
+    }
+    return result.value;
+  } catch (error) {
+    await close();
+    throw error;
+  } finally {
+    connection.busy = false;
+  }
+}
+
+async function* codexAppServer(
+  params: CodexAppServerParams,
+  prompt: string,
+  sandbox: string,
+  signal: AbortSignal,
+): AsyncGenerator<string, void, CodexNextTurn | undefined> {
   if (signal.aborted) throw new CodexInterruption(AgentTerminateMode.CANCELLED);
   const env = sanitizeChildEnv(process.env);
   delete env['CODEX_THREAD_ID'];
@@ -94,6 +172,26 @@ export async function runCodexAppServer(
   const tracked = new ProcessRegistry().reserve().attach(child, {
     ownsProcessTree: true,
   });
+  params.onActivity?.(
+    params.session?.threadId ? 'resuming' : 'starting',
+    `Codex PID ${child.pid} · ${params.session?.threadId ? '恢复原会话' : '启动会话'}`,
+  );
+  const onHostExit = () => {
+    if (child.exitCode === null && child.signalCode === null && child.pid) {
+      try {
+        process.kill(
+          process.platform === 'win32' ? child.pid : -child.pid,
+          'SIGTERM',
+        );
+      } catch {
+        /* Already exited. */
+      }
+    }
+  };
+  if (params.keepAlive) {
+    if (codexExitHandlers.size === 0) process.once('exit', stopCodexOnExit);
+    codexExitHandlers.add(onHostExit);
+  }
   child.stderr.resume();
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   const pending = new Map<
@@ -113,7 +211,7 @@ export async function runCodexAppServer(
     fail = reject;
   });
   let complete!: (turn: JsonObject) => void;
-  const completed = new Promise<JsonObject>((resolve) => {
+  let completed = new Promise<JsonObject>((resolve) => {
     complete = resolve;
   });
   const write = (frame: JsonObject) => {
@@ -291,7 +389,7 @@ export async function runCodexAppServer(
     10_000,
   );
   const minutes = params.maxTimeMinutes;
-  const executionTimer =
+  let executionTimer =
     minutes === undefined
       ? undefined
       : setTimeout(
@@ -299,28 +397,35 @@ export async function runCodexAppServer(
           minutes * 60_000,
         );
   const run = async () => {
-    await request('initialize', {
-      clientInfo: { name: 'qwen-code', version: '1.0.0' },
-      capabilities: { experimentalApi: false },
-    });
-    write({ method: 'initialized' });
-    const resumeId = params.session?.threadId;
-    const started = await request(resumeId ? 'thread/resume' : 'thread/start', {
-      cwd: params.cwd,
-      ...(resumeId ? { threadId: resumeId } : { ephemeral: !params.session }),
-      approvalPolicy: 'never',
-      sandbox,
-    });
-    const thread = object(started['thread']);
-    threadId = id(thread['id']);
-    if (resumeId && threadId !== resumeId)
-      throw new Error('Codex resumed a different thread.');
-    if (params.session && thread['ephemeral'] === true)
-      throw new Error('Codex did not create a persistent thread.');
-    if (!params.session && thread['ephemeral'] !== true)
-      throw new Error('Codex did not create an ephemeral thread.');
-    await params.session?.save(threadId);
-    clearTimeout(initTimer);
+    if (!threadId) {
+      await request('initialize', {
+        clientInfo: { name: 'qwen-code', version: '1.0.0' },
+        capabilities: { experimentalApi: false },
+      });
+      write({ method: 'initialized' });
+      const resumeId = params.session?.threadId;
+      const started = await request(
+        resumeId ? 'thread/resume' : 'thread/start',
+        {
+          cwd: params.cwd,
+          ...(resumeId
+            ? { threadId: resumeId }
+            : { ephemeral: !params.session }),
+          approvalPolicy: 'never',
+          sandbox,
+        },
+      );
+      const thread = object(started['thread']);
+      threadId = id(thread['id']);
+      if (resumeId && threadId !== resumeId)
+        throw new Error('Codex resumed a different thread.');
+      if (params.session && thread['ephemeral'] === true)
+        throw new Error('Codex did not create a persistent thread.');
+      if (!params.session && thread['ephemeral'] !== true)
+        throw new Error('Codex did not create an ephemeral thread.');
+      await params.session?.save(threadId);
+      clearTimeout(initTimer);
+    }
     const startedTurn = await request('turn/start', {
       threadId,
       ...(params.onThought ? { summary: 'auto' } : {}),
@@ -340,8 +445,37 @@ export async function runCodexAppServer(
   let completedAnswer: string | undefined;
   let interruption: CodexInterruption | undefined;
   try {
-    completedAnswer = await Promise.race([run(), failure]);
-    return completedAnswer;
+    for (;;) {
+      completedAnswer = await Promise.race([run(), failure]);
+      clearTimeout(executionTimer);
+      signal.removeEventListener('abort', abort);
+      const next = yield completedAnswer;
+      if (!next) return;
+      ({ params, prompt, signal } = next);
+      if (signal.aborted)
+        throw new CodexInterruption(AgentTerminateMode.CANCELLED);
+      params.onActivity?.(
+        'resuming',
+        `Codex PID ${child.pid} · 复用进程，继续原会话`,
+      );
+      turnId = undefined;
+      finalAnswer = undefined;
+      unphasedAnswer = undefined;
+      completedAnswer = undefined;
+      messageText.clear();
+      terminal = false;
+      completed = new Promise<JsonObject>((resolve) => {
+        complete = resolve;
+      });
+      signal.addEventListener('abort', abort, { once: true });
+      executionTimer =
+        params.maxTimeMinutes === undefined
+          ? undefined
+          : setTimeout(
+              () => fail(new CodexInterruption(AgentTerminateMode.TIMEOUT)),
+              params.maxTimeMinutes * 60_000,
+            );
+    }
   } catch (error) {
     if (error instanceof CodexInterruption) interruption = error;
     throw error;
@@ -350,6 +484,9 @@ export async function runCodexAppServer(
     clearTimeout(executionTimer);
     clearTimeout(exitDrainTimer);
     child.removeListener('exit', onExit);
+    codexExitHandlers.delete(onHostExit);
+    if (codexExitHandlers.size === 0)
+      process.removeListener('exit', stopCodexOnExit);
     signal.removeEventListener('abort', abort);
     lines.close();
     for (const reply of pending.values())

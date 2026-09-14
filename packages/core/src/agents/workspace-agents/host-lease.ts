@@ -25,6 +25,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { assembleAgentPrompt } from './prompt.js';
+import { rebookUndeliveredTriggersInTransaction } from './dispatcher.js';
 import {
   isAgentAddressable,
   isAgentExecutableByHost,
@@ -545,6 +546,13 @@ export async function applyHostRunResult(
       input.status === 'completed' &&
       input.close
     ) {
+      await rebookUndeliveredTriggersInTransaction(
+        transaction,
+        current.id,
+        run.id,
+        run.attempts,
+        now,
+      );
       await closeRunInTransaction(transaction, {
         context: {
           workspaceId: transaction.workspaceId,
