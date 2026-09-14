@@ -1,7 +1,7 @@
-# Windows and Linux Computer Use
+# Windows Computer Use
 
-Use this workflow only when `computer.getPlatform()` returned `windows` or
-`linux`. The shared entrypoint has already initialized `computer`.
+Use this workflow only when `computer.getPlatform()` returned `windows`.
+The shared entrypoint has already initialized `computer`.
 
 ## API surface
 
