@@ -1093,6 +1093,13 @@ What was verified, and how far the verification reaches:
 - The help dialog's reserved-row constant does not describe the rows actually
   observed on screen, and the window height this renderer shows below a 42-row
   terminal is bounded rather than matched.
+- The two reserves that size the conversation around an expanded confirmation
+  are hand-derived from a row inventory. The long-confirmation scenario shows
+  the shipped value green and zero timing out, but a value four rows smaller
+  passes there too, so what pins the numbers is the arithmetic in the unit
+  tests — which asserts the constants' own sums rather than the screen. A change
+  to the confirmation's geometry will therefore not fail on its own; re-deriving
+  them belongs with that change.
 - The loading indicator has no subagent token rollup and no tokens-per-second
   segment, both of which ink shows.
 - The theme mode helpers have no production caller, so this renderer always
