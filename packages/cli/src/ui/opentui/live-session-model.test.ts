@@ -146,6 +146,32 @@ describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {
   });
 });
 
+describe('foldLiveEvent tool-queued (approved but not started)', () => {
+  it('records the queued status and clears it again', () => {
+    const queued = foldLiveEvent([{ ...waitingTool(), confirm: 'approved' }], {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: true,
+    });
+    expect(queued[0]).toMatchObject({ confirm: 'approved', queued: true });
+    const running = foldLiveEvent(queued, {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: false,
+    });
+    expect(running[0]).toMatchObject({ queued: false });
+  });
+
+  it('ignores a status for a call with no card', () => {
+    const items = foldLiveEvent([assistant('hi')], {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: true,
+    });
+    expect(items).toHaveLength(1);
+  });
+});
+
 describe('foldLiveEvent user (promptId/sentToModel parity)', () => {
   it('carries promptId and sentToModel onto the user item (R1-16)', () => {
     const items = foldLiveEvent([assistant('hi')], {

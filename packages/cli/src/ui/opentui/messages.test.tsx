@@ -413,6 +413,27 @@ describe('message meta (ink glyph/color parity)', () => {
     expect(meta.glyph).toBe(TOOL_STATUS.CANCELED);
     expect(meta.color).not.toBe(C.red);
   });
+
+  it("shows an approved call that has not started with ink's pending glyph", () => {
+    // The scheduler holds an approved call in 'scheduled' while a sibling
+    // still awaits its own approval; ink draws that as pending, not running.
+    const item = {
+      kind: 'tool',
+      id: 't',
+      tool: 'run_shell_command',
+      title: 'Shell touch a',
+      output: '',
+      done: false,
+      confirm: 'approved',
+      queued: true,
+    } as unknown as LiveToolItem;
+    const queued = toolStatusMeta(item);
+    expect(queued.glyph).toBe(TOOL_STATUS.PENDING);
+    expect(queued.color).toBe(C.green);
+    expect(toolStatusMeta({ ...item, queued: false }).glyph).toBe(
+      TOOL_STATUS.EXECUTING,
+    );
+  });
 });
 
 describe('truncateTokenLine (ink wrap="truncate" parity)', () => {

@@ -30,6 +30,10 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
    * mapToDisplay parity) — takes precedence over the args-based fallback. */
   description?: string;
   confirm?: ToolConfirmState;
+  /** The scheduler reports the call as 'scheduled' — approved, but not
+   * started because the batch still holds another approval. ink reads the
+   * same status and draws its pending glyph instead of the executing one. */
+  queued?: boolean;
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */
   diff?: { fileDiff: string; fileName: string };
@@ -383,6 +387,14 @@ export function foldLiveEvent(
         if (t.confirm === 'pending') {
           items[i] = { ...t, confirm: ev.outcome };
         }
+      }
+      return items;
+    }
+    case 'tool-queued': {
+      const i = findToolIndex(items, ev.id);
+      if (i >= 0) {
+        const t = items[i] as LiveToolItem;
+        items[i] = { ...t, queued: ev.queued };
       }
       return items;
     }

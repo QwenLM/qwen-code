@@ -57,7 +57,7 @@ reconstruction.
 Each scenario runs twice, once per renderer, from the same bundle and the same
 boot arguments, and checkpoints are declared by the scenario rather than
 sampled on a timer, so both legs are captured at the same point in the script
-rather than at the same wall-clock moment. Twenty-two scenarios cover boot, a
+rather than at the same wall-clock moment. Twenty-five scenarios cover boot, a
 narrow terminal, typing and completion, `@` completion, mid-stream indicators,
 a tool run under auto-approval, a tool confirmation, the slash dialogs, the
 approval-mode cycle, the auto-mode boot notice, an error path, a resize, clear
@@ -66,8 +66,10 @@ question dialog on its own, the same dialog across three questions with a
 multi-select and a typed answer, the release of a parked confirmation when the
 approval mode changes, the approval of a gated server at startup, a tool call
 whose arguments are long enough to be capped, a control arm that repeats that
-call with the arguments row switched off, and an answer long enough to overflow
-the terminal.
+call with the arguments row switched off, an answer long enough to overflow
+the terminal, a scroll through that overflow and back, two answer rows wide
+enough to show where the wrap happens, and a turn that parks two calls on
+approval at once so the first waits behind the second's dialog.
 
 Three properties of the comparison matter for reading the results.
 
@@ -871,14 +873,59 @@ checkpoints matching byte for byte stays at 22 of 69 — that wrap row is what k
 these from joining it, so the freeze closed a row everywhere and flipped no
 verdict.
 
+## Decision 29 — a call approved behind another approval waits with ink's pending glyph
+
+One model turn can return two calls that both need approval. Approving the first
+does not start it: the batch still holds the second one's approval, so the
+scheduler parks the first in `scheduled` until that answer arrives. ink's card
+for it reads that status and holds `o` across the whole stretch; this renderer
+switched the row to `⊷` the moment the answer arrived — the glyph for work in
+progress, on a call that was waiting for a person.
+
+ink's status mapping hands `validating` and `executing` the Executing display
+status and `scheduled` the Pending one, and its indicator draws Pending as
+`TOOL_STATUS.PENDING` in the success green where Executing draws the toggling
+spinner's `⊷`. Both renderers read the same scheduler, so the status this needed
+was already in this renderer's hands — the batch update it subscribes to carries
+every call with its own `status`. Only the read was missing, and no change to the
+shared scheduler is involved.
+
+What made the row worth stopping on is that `TOOL_STATUS.PENDING` had no
+producer on this side at all. The comment above the status table names all six
+glyphs the shared constants define, and five of them were ever emitted here, so
+the row was not drawing the right state at the wrong frame. It was drawing a
+state this architecture had no name for.
+
+The scenario that surfaced it is new to the matrix: two shell calls in one turn
+under the default approval mode, the screen captured between the two approvals.
+Compared on the machine with one variable — the read site reverted, the rest of
+the bundle and the scenario untouched — ink's row reads
+`o Shell touch acceptance-two-a` where this renderer's reads `⊷ …`, and that pair
+is one of the checkpoint's four divergent rows. With the read in place both rows
+read `o` and the checkpoint is down to three, which are the long-path wrap break
+recorded under Decision 21.
+
+The event is edge-triggered against a per-call set: the update that first finds
+a call queued emits, a repeat of that status emits nothing, and the move to
+`executing` emits the clear — so a call that never left `awaiting_approval`
+carries neither event nor state. Three tests carry the three layers of the path,
+and four mutations fail them: deleting the glyph branch fails the render test
+alone, deleting the read fails the scheduler test alone, weakening the fold
+fails the model test alone, and dropping the dedupe guard fails the scheduler
+test by printing a clear for every call in every batch.
+
+The same scenario also puts a second divergence on the record, in Follow-ups:
+this renderer appends the open dialog after both waiting cards where ink sets it
+between them.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
 
 - **Geometry, row content, row order, row count and glyph identity**, on a
-  reconstructed screen, for twenty-two scenarios at 100×40 and, for the narrow
-  and resize scenarios, at 60×24. Both legs from one bundle and one set of
-  boot arguments.
+  reconstructed screen, for twenty-five scenarios at 100×40 and, for the narrow
+  and resize scenarios, at 60×24 — seventy-two checkpoints in all. Both legs
+  from one bundle and one set of boot arguments.
 - **Colour was not verified.** The reconstruction is text. Several rows are
   known to differ only in which theme token they use, and a styled capture
   exists that could settle it but was not read.
@@ -1096,3 +1143,10 @@ What was verified, and how far the verification reaches:
   indicator drawn on every card rather than the one call awaiting approval;
   Decision 25 closed both, and the empty-card reading of a disabled-tool error
   went with the first.
+- With two calls awaiting approval at once, the confirmation sits in a different
+  place. ink puts it directly below the row of the call it belongs to, so the
+  screen reads card, confirmation, card; here the conversation keeps both cards
+  in their order and the confirmation follows them. The difference is that one
+  row moving, on top of the three each side already loses to the wrap break at
+  the same checkpoint. Decision 22 fixed what the inline confirmation draws;
+  this is where it is mounted, which is a separate change.

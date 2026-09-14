@@ -486,6 +486,13 @@ export function toolStatusMeta(item: LiveToolItem): ToolStatusMeta {
     };
   }
   if (!item.done) {
+    if (item.queued) {
+      return {
+        glyph: TOOL_STATUS.PENDING,
+        color: C.green,
+        strikethrough: false,
+      };
+    }
     return {
       glyph: TOOL_STATUS.EXECUTING,
       color: C.text,
