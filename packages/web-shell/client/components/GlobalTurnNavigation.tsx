@@ -26,10 +26,12 @@ const OVERSCAN = 4;
 export function GlobalTurnNavigation({
   state,
   store,
+  follow,
   onSelect,
 }: {
   state: DaemonTurnNavigationSnapshot;
   store: DaemonTurnNavigationStore;
+  follow?: { start: number; end: number; current: number };
   onSelect: (ordinal: number) => void;
 }) {
   const { t } = useI18n();
@@ -76,6 +78,27 @@ export function GlobalTurnNavigation({
     setFocus(count - 1);
     setInitializedSession(state.sessionId);
   }, [count, state.sessionId, height, initializedSession]);
+
+  const selected = state.selected;
+  const currentOrdinal =
+    selected?.status === 'loading'
+      ? selected.ordinal
+      : (follow?.current ?? selected?.ordinal);
+  useLayoutEffect(() => {
+    if (currentOrdinal === undefined) return;
+    const element = viewport.current;
+    if (!element) return;
+    const target = Math.max(
+      0,
+      Math.min(
+        currentOrdinal * ROW_HEIGHT + ROW_HEIGHT / 2 - height / 2,
+        count * ROW_HEIGHT - height,
+      ),
+    );
+    if (element.scrollTop === target) return;
+    element.scrollTop = target;
+    setTop(element.scrollTop);
+  }, [currentOrdinal, count, height]);
 
   const missing = new Set<number>();
   for (
@@ -147,11 +170,17 @@ export function GlobalTurnNavigation({
                 entry?.label ??
                 state.provisionalTurns[ordinal - state.totalTurns]?.label;
               const title = `${t('timeline.turnPrefix', { index: ordinal + 1 })}${label ? ` · ${label}` : ''}`;
+              const isCurrent = ordinal === currentOrdinal;
+              const inRange =
+                follow !== undefined &&
+                ordinal >= follow.start &&
+                ordinal <= follow.end;
               return (
                 <li
                   key={ordinal}
                   aria-posinset={ordinal + 1}
                   aria-setsize={count}
+                  data-in-current-range={inRange || undefined}
                   className={`${timelineStyles.sessionTimelineItem} left-0 right-0`}
                   style={{
                     position: 'absolute',
@@ -163,14 +192,10 @@ export function GlobalTurnNavigation({
                     <TooltipTrigger asChild>
                       <button
                         type="button"
-                        className={`${timelineStyles.sessionTimelineButton} pointer-events-auto ${state.selected?.ordinal === ordinal ? timelineStyles.sessionTimelineButtonCurrent : ''}`}
+                        className={`${timelineStyles.sessionTimelineButton} pointer-events-auto ${inRange ? timelineStyles.sessionTimelineButtonInRange : ''} ${isCurrent ? timelineStyles.sessionTimelineButtonCurrent : ''}`}
                         style={{ top: 0, width: '100%' }}
                         aria-label={title}
-                        aria-current={
-                          state.selected?.ordinal === ordinal
-                            ? 'location'
-                            : undefined
-                        }
+                        aria-current={isCurrent ? 'location' : undefined}
                         data-turn-ordinal={ordinal}
                         tabIndex={focusOrdinal === ordinal ? 0 : -1}
                         onFocus={() => setFocus(ordinal)}
