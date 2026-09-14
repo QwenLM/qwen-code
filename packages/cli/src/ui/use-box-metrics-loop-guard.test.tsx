@@ -186,6 +186,25 @@ function ExternallySizedBox({ size }: { size: number }) {
   );
 }
 
+// Halves its own width on every measurement until it reaches the floor, so it
+// settles only if the guard lets several consecutive self-driven passes run.
+// The width is derived in the render body rather than from state of its own,
+// which keeps the passes on the hook's budget instead of handing the guard a
+// genuine external commit between them.
+function ConvergingBox({ from = 32, floor = 3 }) {
+  const ref = useRef<DOMElement>(null);
+  const { width, hasMeasured } = useBoxMetrics(ref);
+  const size = hasMeasured ? Math.max(floor, Math.floor(width / 2)) : from;
+  return (
+    <Box flexDirection="row">
+      <Box ref={ref}>
+        <Text>{'x'.repeat(size)}</Text>
+      </Box>
+      <Text>{hasMeasured ? ` settled=${width}px` : ' settled=pending'}</Text>
+    </Box>
+  );
+}
+
 describe('ink useBoxMetrics loop guard', () => {
   it('settles an oscillating box instead of throwing React #185', async () => {
     const { stdout, lastFrame } = createTestStdout();
@@ -242,10 +261,12 @@ describe('ink useBoxMetrics loop guard', () => {
   it('unfreezes a tripped instance on resize, which needs no React commit', async () => {
     // A tripped instance stops scheduling renders of its own, so it can only
     // measure again on an event from outside the cascade. Any later commit in
-    // the ink root reaches it too - `onLayout` runs for every commit, not only
-    // for commits that re-render this subtree - but a resize is recomputed by
-    // ink's own handler with no React commit at all, so `onResize` is the path
-    // that reaches a tripped instance while nothing else in the tree renders.
+    // the ink root reaches it too - this box keeps its measured element mounted,
+    // and `onLayout` runs for every commit of a root it is subscribed to, not
+    // only for commits that re-render this subtree - but a resize is recomputed
+    // by ink's own handler with no React commit at all, so `onResize` is the
+    // path that reaches a tripped instance while nothing else in the tree
+    // renders.
     // Drop that reset and this case goes red: `updateMetrics` returns before
     // `setMetrics`, so nothing follows the resize and the box renders against a
     // stale width for the rest of the session.
@@ -334,6 +355,19 @@ describe('ink useBoxMetrics loop guard', () => {
       expect(renders).toBeGreaterThan(2);
       expect(renders).toBeLessThanOrEqual(24);
     });
+  });
+
+  it('lets a consumer that needs several measurement passes converge', async () => {
+    // The other half of the bound, behaviourally rather than numerically: a
+    // budget tight enough to strand a consumer that legitimately needs more than
+    // one measurement pass fails here. This box halves its width on every
+    // measurement, so it reaches `settled=3px` only if five consecutive
+    // self-driven passes are allowed to run; a budget of 2 freezes it on an
+    // intermediate width and the frame keeps that width instead.
+    const { stdout, lastFrame } = createTestStdout();
+    await mount(<ConvergingBox />, stdout);
+
+    expect(lastFrame()).toContain('settled=3px');
   });
 
   it('settles a cascade driven only by a hasMeasured transition', async () => {
