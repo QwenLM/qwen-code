@@ -54,6 +54,13 @@ overrides:
   # pinned here rather than exempted there.
   '@tybys/wasm-util': '0.10.3'
   react-markdown: '^9.0.0'
+  # The root package declares zod 3.25.76 as a devDependency on purpose. With
+  # resolve-peers-from-workspace-root (on by default), every zod peer that a
+  # workspace package does not declare itself resolves to it — the copy npm
+  # hoists. Without it pnpm fills such a peer with the highest locked zod
+  # (4.4.3): web-shell bundles @modelcontextprotocol/ext-apps, whose zod is a
+  # peer, and zod 4 pushed the export renderer past its size budget. It also
+  # covers the override below, which predates it.
   # packages/acp-bridge declares no zod, so pnpm is free to satisfy the SDK's
   # `^3.25.0 || ^4.0.0` peer with the highest locked zod while npm serves it
   # 3.25.76. Both are npm-locked, so the version agreement gate cannot see the

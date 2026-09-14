@@ -181,6 +181,9 @@ importers:
       yargs:
         specifier: ^17.7.2
         version: 17.7.2
+      zod:
+        specifier: 3.25.76
+        version: 3.25.76
     optionalDependencies:
       '@lydell/node-pty':
         specifier: 1.2.0-beta.10
@@ -1359,7 +1362,7 @@ importers:
         version: 0.1.12(@types/react@19.2.10)(echarts@6.1.0)(react@19.2.4)(supports-color@7.2.0)
       '@modelcontextprotocol/ext-apps':
         specifier: ^1.7.5
-        version: 1.7.5(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@4.4.3))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(zod@4.4.3)
+        version: 1.7.5(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@3.25.76))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(zod@3.25.76)
       '@tanstack/react-table':
         specifier: ^8.21.3
         version: 8.21.3(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -11532,11 +11535,11 @@ snapshots:
     dependencies:
       zod: 4.4.3
 
-  '@modelcontextprotocol/ext-apps@1.7.5(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@4.4.3))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(zod@4.4.3)':
+  '@modelcontextprotocol/ext-apps@1.7.5(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@3.25.76))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(zod@3.25.76)':
     dependencies:
-      '@modelcontextprotocol/sdk': 1.30.0(supports-color@7.2.0)(zod@4.4.3)
+      '@modelcontextprotocol/sdk': 1.30.0(supports-color@7.2.0)(zod@3.25.76)
       '@standard-schema/spec': 1.1.0
-      zod: 4.4.3
+      zod: 3.25.76
     optionalDependencies:
       react: 19.2.4
       react-dom: 19.2.4(react@19.2.4)
@@ -11582,28 +11585,6 @@ snapshots:
       raw-body: 3.0.2
       zod: 3.25.76
       zod-to-json-schema: 3.25.2(zod@3.25.76)
-    transitivePeerDependencies:
-      - supports-color
-
-  '@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@4.4.3)':
-    dependencies:
-      '@hono/node-server': 2.0.12(hono@4.13.3)
-      ajv: 8.20.0
-      ajv-formats: 3.0.1(ajv@8.20.0)
-      content-type: 1.0.5
-      cors: 2.8.5
-      cross-spawn: 7.0.6
-      eventsource: 3.0.7
-      eventsource-parser: 3.0.3
-      express: 5.2.1(supports-color@7.2.0)
-      express-rate-limit: 8.5.2(express@5.2.1(supports-color@7.2.0))
-      hono: 4.13.3
-      jose: 6.1.3
-      json-schema-typed: 8.0.2
-      pkce-challenge: 5.0.0
-      raw-body: 3.0.2
-      zod: 4.4.3
-      zod-to-json-schema: 3.25.2(zod@4.4.3)
     transitivePeerDependencies:
       - supports-color
 
