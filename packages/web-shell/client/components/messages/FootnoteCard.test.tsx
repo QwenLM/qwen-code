@@ -49,6 +49,49 @@ afterEach(() => {
 });
 
 describe('Markdown footnote cards', () => {
+  it.each([
+    [
+      '[Physics](https://example.com/p) Mass-energy $E=mc^2$ equivalence.',
+      'Physics',
+      'Mass-energy E=mc^2 equivalence.',
+    ],
+    [
+      '[$E=mc^2$](https://example.com/p) A formula title.',
+      'E=mc^2',
+      'A formula title.',
+    ],
+    ['Two formulas: $x^2$ and $y_1$.', undefined, 'Two formulas: x^2 and y_1.'],
+    [
+      'Display formula:\n\n    $$\n    \\frac{a}{b}\n    $$\n\n    Followed by text.',
+      undefined,
+      'Display formula: \\frac{a}{b} Followed by text.',
+    ],
+  ])('extracts each KaTeX formula once from %s', (body, title, summary) => {
+    const definition = `[^a]: ${body}`;
+    const inline = vi.fn<WebShellFootnoteIconResolver>(() => null);
+    render(
+      <WebShellCustomizationProvider
+        value={{ markdown: { getInlineFootnoteIcon: inline } }}
+      >
+        <AssistantMessage content={`Energy[^a].\n\n${definition}`} />
+      </WebShellCustomizationProvider>,
+    );
+    expect(inline).toHaveBeenCalled();
+    for (const [notes] of inline.mock.calls) {
+      expect(notes).toHaveLength(1);
+      expect(notes[0]).toMatchObject({
+        title,
+        summary,
+        definitionMarkdown: definition,
+      });
+    }
+    click(container.querySelector(triggerSelector));
+    expect(
+      card().querySelector('[data-web-shell-footnote-summary]')?.textContent,
+    ).toBe(summary);
+    if (title) expect(card().querySelector('a')?.textContent).toBe(title);
+  });
+
   it('groups adjacent references in order, deduplicates IDs, and stops at text', () => {
     render(
       <AssistantMessage

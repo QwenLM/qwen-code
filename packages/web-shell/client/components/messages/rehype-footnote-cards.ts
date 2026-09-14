@@ -32,6 +32,21 @@ function noteText(node: RootContent, omit?: Element): string {
   if (node.type === 'text') return node.value;
   if (node.type !== 'element') return '';
   if (node.properties.dataFootnoteBackref !== undefined) return '';
+  if (
+    node.tagName === 'span' &&
+    Array.isArray(node.properties.className) &&
+    node.properties.className.includes('katex')
+  ) {
+    let annotation: Element | undefined;
+    visit(node, (child) => {
+      if (
+        child.tagName === 'annotation' &&
+        child.properties.encoding === 'application/x-tex'
+      )
+        annotation ??= child;
+    });
+    if (annotation) return noteText(annotation, omit);
+  }
   const text = node.children.map((child) => noteText(child, omit)).join('');
   return /^(p|li|br|div)$/.test(node.tagName) ? `${text} ` : text;
 }
