@@ -813,8 +813,14 @@ describe('workflow-saved — extension tier', () => {
       'audit',
       meta('audit'),
     );
-    await loadGcp();
-    const inactive = configWith([]);
+    const workflows = await loadGcp();
+    // Loaded but disabled: listed by getExtensions(), absent from
+    // getActiveExtensions(). Only the active list may contribute.
+    const inactive = {
+      storage: new Storage(projectDir),
+      getExtensions: () => [{ name: 'gcp', isActive: false, workflows }],
+      getActiveExtensions: () => [],
+    } as unknown as Config;
 
     await expect(
       resolveSavedWorkflowScript('gcp:audit', inactive),
