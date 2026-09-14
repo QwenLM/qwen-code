@@ -5,7 +5,11 @@
  */
 
 import { devices, expect, test } from '@playwright/test';
-import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonEvent,
+  DaemonSessionSummary,
+  DaemonSessionContextUsageStatus,
+} from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -100,6 +104,74 @@ function createTerminalGoalStatusEvent(
 
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('context usage', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        supportedCommands: {
+          availableCommands: [
+            {
+              name: 'compress',
+              description: 'Compress context',
+              input: null,
+              _meta: { source: 'builtin-command' },
+            },
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(/\/session\/[^/]+\/context-usage(?:\?|$)/, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            sessionId: scenario.sessionId,
+            workspaceCwd: scenario.workspaceCwd,
+            formattedText: '',
+            usage: {
+              modelName: 'Qwen Test',
+              totalTokens: 60_000,
+              contextWindowSize: 100_000,
+              breakdown: {
+                systemPrompt: 10_000,
+                builtinTools: 10_000,
+                mcpTools: 5_000,
+                memoryFiles: 5_000,
+                skills: 10_000,
+                messages: 20_000,
+                freeSpace: 30_000,
+                autocompactBuffer: 10_000,
+              },
+              builtinTools: [{ name: 'read_file', tokens: 10_000 }],
+              mcpTools: [{ name: 'mcp__github__create_issue', tokens: 5_000 }],
+              memoryFiles: [{ path: '/workspace/QWEN.md', tokens: 5_000 }],
+              skills: [
+                {
+                  name: 'review',
+                  tokens: 5_000,
+                  loaded: true,
+                  bodyTokens: 5_000,
+                },
+              ],
+              showDetails: true,
+            },
+          } satisfies DaemonSessionContextUsageStatus,
+        }),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Context Usage', exact: true })
+        .click();
+      const panel = page.locator('[class*="panel"][aria-busy]');
+      await expect(panel).toContainText('Remaining 40.0k');
+      await panel.locator('summary').filter({ hasText: 'Advanced' }).click();
+      await expect(
+        panel.getByRole('button', { name: 'Compress context', exact: true }),
+      ).toBeEnabled();
+      await captureScreenshot(page, `context-usage-${theme}`);
+    });
+
     test('session overview', async ({ page }, testInfo) => {
       const workspaceCwd = '/workspace/session-overview';
       const scenario = createWebShellDaemonScenario({
