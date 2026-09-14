@@ -12,6 +12,12 @@ import { Storage } from '../config/storage.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import {
+  createInitialHarnessCheckpoint,
+  encodeHarnessCheckpointV1,
+  HARNESS_TURN_COMPLETE_BOUNDARY,
+  parseHarnessCheckpointV1,
+} from './managed-harness-checkpoint.js';
+import {
   ManagedSessionRecordSink,
   ManagedSessionUnmappedRecordError,
 } from './managed-session-record-sink.js';
@@ -145,6 +151,33 @@ async function createHarness(): Promise<Harness> {
     runtimeBaseDir,
     close: () => authority.close(),
   };
+}
+
+async function commitInitialV1(harness: Harness): Promise<void> {
+  const covered = harness.authority.committedSequence;
+  const header = harness.authority.sessionHeader;
+  const checkpoint = createInitialHarnessCheckpoint({
+    sessionKey,
+    checkpointId: `ckpt-${covered + 1}`,
+    coveredSequence: covered,
+    activationId: 'act-1',
+    turnId: null,
+    promptId: null,
+    definitionRevision: header.definitionRef.resourceId,
+    configRevision: header.rootSnapshotRef.resourceId,
+    inputDigest: header.definitionRef.digest,
+    previousCheckpointId: null,
+  });
+  await harness.authority.commitCheckpoint(
+    {
+      operation: 'commitCheckpoint',
+      commandId: 'cmd-ckpt-v1',
+      sessionKey,
+      contentDigest: DIGEST,
+    },
+    { state: encodeHarnessCheckpointV1(checkpoint), boundary: null },
+    { class: 'harness', activation: { activationId: 'act-1', epoch: 1 } },
+  );
 }
 
 async function transcriptSubtypes(
@@ -416,6 +449,7 @@ describe('managed session record sink', () => {
       settled[0].payload['resultRef'] as never,
     );
     expect(JSON.parse(body.toString('utf8'))).toEqual(result);
+    expect(harness.authority.latestCheckpoint).toBeUndefined();
     await harness.close();
   });
 
@@ -431,6 +465,93 @@ describe('managed session record sink', () => {
         } as Partial<ChatRecord>),
       ),
     ).rejects.toThrow(ManagedSessionUnmappedRecordError);
+    await harness.close();
+  });
+
+  it('commits a next-turn checkpoint with turn.settled when a runnable v1 exists', async () => {
+    const harness = await createHarness();
+    await commitInitialV1(harness);
+    const firstId = harness.authority.latestCheckpoint?.checkpointId;
+    const coveredBefore = harness.authority.committedSequence;
+    const result = record({
+      uuid: 'rec-turn-complete',
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: 'turn-1',
+        state: 'completed',
+        stopReason: 'end_turn',
+      },
+    } as Partial<ChatRecord>);
+    await harness.sink.write(result);
+
+    const events = harness.authority.readEvents();
+    const settled = events.filter((event) => event.kind === 'turn.settled');
+    const checkpoints = events.filter(
+      (event) => event.kind === 'checkpoint.committed',
+    );
+    expect(settled).toHaveLength(1);
+    expect(checkpoints).toHaveLength(2);
+    expect(settled[0].sequence + 1).toBe(checkpoints[1].sequence);
+    expect(checkpoints[1].payload['boundary']).toBe(
+      HARNESS_TURN_COMPLETE_BOUNDARY,
+    );
+    expect(checkpoints[1].payload['previousCheckpointId']).toBe(firstId);
+    expect(checkpoints[1].payload['coveredSequence']).toBe(coveredBefore);
+    expect(harness.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_TURN_COMPLETE_BOUNDARY,
+    );
+    expect(
+      parseHarnessCheckpointV1((await harness.authority.readCheckpointState())!)
+        .continuation.phase,
+    ).toBe('before_model');
+    await expect(
+      harness.authority.harnessRunAuthorization(),
+    ).resolves.toMatchObject({ status: 'runnable' });
+    expect(await harness.sink.project()).toEqual([]);
+    await harness.close();
+  });
+
+  it('does not replace an opaque checkpoint when a turn settles', async () => {
+    const harness = await createHarness();
+    await harness.authority.commitCheckpoint(
+      {
+        operation: 'commitCheckpoint',
+        commandId: 'cmd-ckpt-opaque',
+        sessionKey,
+        contentDigest: DIGEST,
+      },
+      { state: Buffer.from('first', 'utf8'), boundary: null },
+      { class: 'harness', activation: { activationId: 'act-1', epoch: 1 } },
+    );
+    await harness.sink.write(
+      record({
+        uuid: 'rec-turn-opaque',
+        type: 'system',
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'turn-1',
+          state: 'completed',
+          stopReason: 'end_turn',
+        },
+      } as Partial<ChatRecord>),
+    );
+
+    expect(harness.authority.latestCheckpoint?.boundary).toBeNull();
+    expect(await harness.authority.readCheckpointState()).toEqual(
+      Buffer.from('first', 'utf8'),
+    );
+    await expect(
+      harness.authority.harnessRunAuthorization(),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reason: 'opaque_state',
+    });
+    expect(
+      harness.authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled'),
+    ).toHaveLength(1);
     await harness.close();
   });
 

@@ -10,7 +10,9 @@ import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import {
   authorizeParsedHarnessCheckpoint,
+  HARNESS_MODEL_START_PHASES,
   tryParseHarnessCheckpointV1,
+  type HarnessCheckpointV1,
   type HarnessRunAuthorization,
 } from './managed-harness-checkpoint.js';
 import {
@@ -607,6 +609,155 @@ export class LocalManagedSessionAuthority {
           },
         ],
         [actor],
+      );
+      const checkpoint = this.checkpoint;
+      if (checkpoint === undefined) {
+        throw new ManagedSessionRecordError(
+          'checkpoint was committed but not recorded.',
+        );
+      }
+      return { receipt, checkpoint };
+    });
+  }
+
+  /**
+   * Safety point A/D: a finished turn with no pending Harness work. The
+   * terminal `turn.settled` event and the next-turn-ready checkpoint land in
+   * one transaction. Storage forbids covering events from this transaction, so
+   * `coveredSequence` is the prefix already committed before this call; the
+   * settle event is the atomic companion, not part of coverage.
+   */
+  async commitTurnComplete(
+    command: ManagedSessionCommand,
+    request: {
+      readonly turn: {
+        readonly turnId: string;
+        readonly outcome: string;
+        readonly stopReason: string | null;
+        readonly resultRef: ManagedSessionDurableRef;
+        readonly occurredAt: number;
+        readonly eventId: string;
+      };
+      readonly boundary: string;
+      readonly state: (
+        identity: {
+          readonly checkpointId: string;
+          readonly coveredSequence: number;
+          readonly previousCheckpointId: string | null;
+        },
+        previous: HarnessCheckpointV1,
+      ) => Buffer;
+    },
+    actor: ManagedSessionActor,
+  ): Promise<ManagedSessionCheckpointReceipt> {
+    const store = this.resources;
+    if (store === undefined) {
+      throw new ManagedSessionRecordError(
+        'a resource store is required to commit checkpoints.',
+      );
+    }
+    const held = actor.activation;
+    if (actor.class !== 'harness' || held === undefined) {
+      throw new ManagedSessionConflictError(
+        'only the current harness may commit a checkpoint.',
+      );
+    }
+    return this.runSerial(async () => {
+      const authorization = await this.harnessRunAuthorization();
+      if (authorization.status !== 'runnable') {
+        throw new ManagedSessionConflictError(
+          'turn-complete checkpoint requires a runnable Harness checkpoint.',
+        );
+      }
+      const previous = authorization.checkpoint;
+      if (!HARNESS_MODEL_START_PHASES.has(previous.continuation.phase)) {
+        throw new ManagedSessionConflictError(
+          'turn-complete checkpoint requires no pending Harness work.',
+        );
+      }
+      const covered = this.committed;
+      const checkpointId = `ckpt-${covered + 2}`;
+      const previousCheckpointId = this.checkpoint?.checkpointId ?? null;
+      const state = request.state(
+        {
+          checkpointId,
+          coveredSequence: covered,
+          previousCheckpointId,
+        },
+        previous,
+      );
+      const parsed = tryParseHarnessCheckpointV1(state);
+      if (!parsed.ok) {
+        throw new ManagedSessionRecordError(
+          parsed.message ?? 'turn-complete checkpoint state is not Harness v1.',
+        );
+      }
+      if (
+        parsed.checkpoint.identity.checkpointId !== checkpointId ||
+        parsed.checkpoint.identity.coveredSequence !== covered ||
+        parsed.checkpoint.identity.previousCheckpointId !==
+          previousCheckpointId ||
+        !managedSessionKeysEqual(
+          parsed.checkpoint.identity.sessionKey,
+          this.sessionKey,
+        )
+      ) {
+        throw new ManagedSessionConflictError(
+          'turn-complete checkpoint identity does not match the assigned coverage.',
+        );
+      }
+      if (
+        !HARNESS_MODEL_START_PHASES.has(parsed.checkpoint.continuation.phase)
+      ) {
+        throw new ManagedSessionConflictError(
+          'turn-complete checkpoint requires no pending Harness work.',
+        );
+      }
+      const stateRef = await store.publish('managed-checkpoint', state);
+      const subject = {
+        type: 'activation' as const,
+        scopeId: held.activationId,
+        activationId: held.activationId,
+        epoch: held.epoch,
+      };
+      const receipt = await this.commit(
+        command,
+        [
+          {
+            v: MANAGED_SESSION_FORMAT_VERSION,
+            sequence: covered + 1,
+            eventId: request.turn.eventId,
+            sessionKey: command.sessionKey,
+            kind: 'turn.settled',
+            occurredAt: request.turn.occurredAt,
+            subject,
+            payload: {
+              turnId: request.turn.turnId,
+              outcome: request.turn.outcome,
+              stopReason: request.turn.stopReason,
+              resultRef: request.turn.resultRef,
+              usageRef: null,
+              pendingOwnersRef: null,
+            },
+          },
+          {
+            v: MANAGED_SESSION_FORMAT_VERSION,
+            sequence: covered + 2,
+            eventId: checkpointId,
+            sessionKey: command.sessionKey,
+            kind: 'checkpoint.committed',
+            occurredAt: this.now(),
+            subject,
+            payload: {
+              checkpointId,
+              coveredSequence: covered,
+              previousCheckpointId,
+              stateRef,
+              boundary: request.boundary,
+            },
+          },
+        ],
+        [actor, actor],
       );
       const checkpoint = this.checkpoint;
       if (checkpoint === undefined) {

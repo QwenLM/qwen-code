@@ -21,7 +21,10 @@ import {
 } from './managed-session-authority.js';
 import {
   createInitialHarnessCheckpoint,
+  createNextTurnReadyHarnessCheckpoint,
   encodeHarnessCheckpointV1,
+  HARNESS_TURN_COMPLETE_BOUNDARY,
+  parseHarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
 import {
   ManagedSessionRecordError,
@@ -1865,6 +1868,194 @@ describe('managed session checkpoints', () => {
       status: 'blocked',
       reason: 'missing_checkpoint',
     });
+    await harness.close();
+  });
+
+  it('commits turn.settled with the next-turn checkpoint in one transaction', async () => {
+    const harness = await openWithResources(await createFixture());
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await activate(harness, 3);
+    const first = createInitialHarnessCheckpoint({
+      sessionKey: sessionKeyFor(harness.fixture),
+      checkpointId: 'ckpt-4',
+      coveredSequence: 3,
+      activationId: 'act-1',
+      turnId: null,
+      promptId: null,
+      definitionRevision: 'def-1',
+      configRevision: 'cfg-1',
+      inputDigest: DIGEST,
+      previousCheckpointId: null,
+    });
+    await harness.authority.commitCheckpoint(
+      inputCommand(harness.fixture, {
+        operation: 'commitCheckpoint',
+        commandId: 'cmd-ckpt-v1',
+      }),
+      { state: encodeHarnessCheckpointV1(first), boundary: null },
+      HOLDS,
+    );
+    const resultRef = await harness.store.publish(
+      'managed-turn-result',
+      Buffer.from('{"state":"completed"}', 'utf8'),
+    );
+    const committed = await harness.authority.commitTurnComplete(
+      inputCommand(harness.fixture, {
+        operation: 'settleTurn',
+        commandId: 'cmd-turn-1',
+      }),
+      {
+        turn: {
+          turnId: 'turn-1',
+          outcome: 'completed',
+          stopReason: 'end_turn',
+          resultRef,
+          occurredAt: 1,
+          eventId: 'turn:turn-1',
+        },
+        boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
+        state: (identity, previous) =>
+          encodeHarnessCheckpointV1(
+            createNextTurnReadyHarnessCheckpoint({
+              previous,
+              ...identity,
+              activationId: HOLDS.activation.activationId,
+              turnId: 'turn-1',
+              promptId: 'turn-1',
+            }),
+          ),
+      },
+      HOLDS,
+    );
+
+    expect(committed.receipt.firstSequence).toBe(5);
+    expect(committed.receipt.lastSequence).toBe(6);
+    expect(committed.checkpoint.checkpointId).toBe('ckpt-6');
+    expect(committed.checkpoint.coveredSequence).toBe(4);
+    expect(committed.checkpoint.previousCheckpointId).toBe('ckpt-4');
+    expect(committed.checkpoint.boundary).toBe(HARNESS_TURN_COMPLETE_BOUNDARY);
+
+    const events = harness.authority.readEvents();
+    expect(events[4]?.kind).toBe('turn.settled');
+    expect(events[5]?.kind).toBe('checkpoint.committed');
+    expect(
+      parseHarnessCheckpointV1(
+        (await harness.authority.readCheckpointState())!,
+      ),
+    ).toMatchObject({
+      continuation: { phase: 'before_model' },
+      identity: {
+        checkpointId: 'ckpt-6',
+        coveredSequence: 4,
+        previousCheckpointId: 'ckpt-4',
+        turnId: 'turn-1',
+      },
+    });
+    await expect(
+      harness.authority.harnessRunAuthorization(),
+    ).resolves.toMatchObject({ status: 'runnable' });
+    await harness.close();
+  });
+
+  it('does not treat an opaque checkpoint as a turn-complete safety point', async () => {
+    const harness = await openWithResources(await createFixture());
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await activate(harness, 3);
+    await harness.authority.commitCheckpoint(
+      inputCommand(harness.fixture, {
+        operation: 'commitCheckpoint',
+        commandId: 'cmd-ckpt-opaque',
+      }),
+      { state: Buffer.from('first', 'utf8'), boundary: null },
+      HOLDS,
+    );
+    const before = harness.authority.committedSequence;
+    await expect(
+      harness.authority.commitTurnComplete(
+        inputCommand(harness.fixture, {
+          operation: 'settleTurn',
+          commandId: 'cmd-turn-opaque',
+        }),
+        {
+          turn: {
+            turnId: 'turn-1',
+            outcome: 'completed',
+            stopReason: null,
+            resultRef: ref(),
+            occurredAt: 1,
+            eventId: 'turn:turn-1',
+          },
+          boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
+          state: () => Buffer.from('healed', 'utf8'),
+        },
+        HOLDS,
+      ),
+    ).rejects.toThrow(/requires a runnable Harness checkpoint/);
+    expect(harness.authority.committedSequence).toBe(before);
+    expect(harness.authority.latestCheckpoint?.checkpointId).toBe('ckpt-4');
+    expect(
+      harness.authority
+        .readEvents()
+        .some((event) => event.kind === 'turn.settled'),
+    ).toBe(false);
+    await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
+      status: 'blocked',
+      reason: 'opaque_state',
+      message: expect.stringMatching(/JSON/),
+    });
+    await harness.close();
+  });
+
+  it('rejects a turn-complete body that is not a matching v1 checkpoint', async () => {
+    const harness = await openWithResources(await createFixture());
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await activate(harness, 3);
+    await harness.authority.commitCheckpoint(
+      inputCommand(harness.fixture, {
+        operation: 'commitCheckpoint',
+        commandId: 'cmd-ckpt-v1',
+      }),
+      { state: initialV1State(harness.fixture), boundary: null },
+      HOLDS,
+    );
+    const before = harness.authority.committedSequence;
+    await expect(
+      harness.authority.commitTurnComplete(
+        inputCommand(harness.fixture, {
+          operation: 'settleTurn',
+          commandId: 'cmd-turn-bad-state',
+        }),
+        {
+          turn: {
+            turnId: 'turn-1',
+            outcome: 'completed',
+            stopReason: null,
+            resultRef: ref(),
+            occurredAt: 1,
+            eventId: 'turn:turn-1',
+          },
+          boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
+          state: () => Buffer.from('healed', 'utf8'),
+        },
+        HOLDS,
+      ),
+    ).rejects.toThrow(/JSON/);
+    expect(harness.authority.committedSequence).toBe(before);
+    expect(harness.authority.latestCheckpoint?.checkpointId).toBe('ckpt-4');
+    expect(
+      harness.authority
+        .readEvents()
+        .some((event) => event.kind === 'turn.settled'),
+    ).toBe(false);
     await harness.close();
   });
 });

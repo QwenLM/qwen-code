@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import {
   createInitialHarnessCheckpoint,
   encodeHarnessCheckpointV1,
-  type HarnessCheckpointPhase,
+  HARNESS_MODEL_START_PHASES,
   type HarnessCheckpointV1,
   type HarnessRunAuthorization,
 } from './managed-harness-checkpoint.js';
@@ -17,18 +17,6 @@ import {
   type LocalManagedSessionAuthority,
 } from './managed-session-authority.js';
 import type { ManagedSession } from './managed-session-assembly.js';
-
-/**
- * R2.S2 may start a model request from these phases. Awaited approvals and
- * in-flight Runtime work are R2.S3; running the Agent from them would skip
- * the original invocation.
- */
-const MODEL_START_PHASES: ReadonlySet<HarnessCheckpointPhase> = new Set([
-  'before_model',
-  'model_output_committed',
-  'results_ready',
-  'turn_settled',
-]);
 
 export class ManagedHarnessBlockedError extends Error {
   readonly code = 'managed_harness_blocked';
@@ -108,7 +96,8 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       });
     }
     const phase = authorization.checkpoint.continuation.phase;
-    if (!MODEL_START_PHASES.has(phase)) {
+    // Awaited approvals and in-flight Runtime work are R2.S3.
+    if (!HARNESS_MODEL_START_PHASES.has(phase)) {
       throw new ManagedHarnessBlockedError({
         status: 'blocked',
         reason: 'invalid_state',

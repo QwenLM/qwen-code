@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   authorizeParsedHarnessCheckpoint,
   createInitialHarnessCheckpoint,
+  createNextTurnReadyHarnessCheckpoint,
   encodeHarnessCheckpointV1,
   parseHarnessCheckpointV1,
   tryParseHarnessCheckpointV1,
@@ -304,5 +305,44 @@ describe('harness checkpoint v1', () => {
         coveredSequence: 3,
       }),
     ).toEqual({ status: 'blocked', reason: 'identity_mismatch' });
+  });
+
+  it('clears in-flight groups when preparing the next-turn-ready checkpoint', () => {
+    const previous = {
+      ...seed(),
+      continuation: {
+        phase: 'turn_settled' as const,
+        pendingEventIds: ['evt-1'],
+      },
+      attempt: committedAttempt(),
+      followUp: {
+        ...seed().followUp,
+        pendingInputIds: ['in-2'],
+      },
+    };
+    const next = createNextTurnReadyHarnessCheckpoint({
+      previous,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      activationId: 'act-2',
+      turnId: 'turn-2',
+      promptId: 'turn-2',
+    });
+    expect(next.continuation.phase).toBe('before_model');
+    expect(next.continuation.pendingEventIds).toEqual([]);
+    expect(next.attempt).toBeNull();
+    expect(next.tools).toBeNull();
+    expect(next.identity).toMatchObject({
+      checkpointId: 'ckpt-6',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      activationId: 'act-2',
+      turnId: 'turn-2',
+      promptId: 'turn-2',
+    });
+    expect(next.resume.throughSequence).toBe(4);
+    expect(next.followUp.pendingInputIds).toEqual(['in-2']);
+    expect(parseHarnessCheckpointV1(bytesOf(next))).toEqual(next);
   });
 });

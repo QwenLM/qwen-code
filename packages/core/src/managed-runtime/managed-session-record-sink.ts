@@ -11,6 +11,12 @@ import type {
   LocalManagedSessionAuthority,
   ManagedSessionActor,
 } from './managed-session-authority.js';
+import {
+  createNextTurnReadyHarnessCheckpoint,
+  encodeHarnessCheckpointV1,
+  HARNESS_MODEL_START_PHASES,
+  HARNESS_TURN_COMPLETE_BOUNDARY,
+} from './managed-harness-checkpoint.js';
 import { ManagedSessionMessageProjection } from './managed-session-message-projection.js';
 import type { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 
@@ -293,21 +299,60 @@ export class ManagedSessionRecordSink {
     );
     const actor = this.actor();
     const held = actor.activation;
+    const command = {
+      operation: 'settleTurn',
+      commandId: `recorder:${record.uuid}`,
+      sessionKey: this.authority.sessionHeader.sessionKey,
+      contentDigest: resultRef.digest,
+    };
+    const turn = {
+      turnId,
+      outcome,
+      stopReason:
+        typeof payload?.stopReason === 'string' ? payload.stopReason : null,
+      resultRef,
+      occurredAt: Date.parse(record.timestamp) || Date.now(),
+      eventId: `turn:${turnId}`,
+    };
+    if (actor.class === 'harness' && held !== undefined) {
+      const authorization = await this.authority.harnessRunAuthorization();
+      if (
+        authorization.status === 'runnable' &&
+        HARNESS_MODEL_START_PHASES.has(
+          authorization.checkpoint.continuation.phase,
+        )
+      ) {
+        await this.authority.commitTurnComplete(
+          command,
+          {
+            turn,
+            boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
+            state: (identity, previous) =>
+              encodeHarnessCheckpointV1(
+                createNextTurnReadyHarnessCheckpoint({
+                  previous,
+                  ...identity,
+                  activationId: held.activationId,
+                  turnId,
+                  promptId: turnId,
+                }),
+              ),
+          },
+          actor,
+        );
+        return;
+      }
+    }
     await this.authority.appendExecution(
-      {
-        operation: 'settleTurn',
-        commandId: `recorder:${record.uuid}`,
-        sessionKey: this.authority.sessionHeader.sessionKey,
-        contentDigest: resultRef.digest,
-      },
+      command,
       [
         {
           v: 1,
           sequence: this.authority.committedSequence + 1,
-          eventId: `turn:${turnId}`,
+          eventId: turn.eventId,
           sessionKey: this.authority.sessionHeader.sessionKey,
           kind: 'turn.settled',
-          occurredAt: Date.parse(record.timestamp) || Date.now(),
+          occurredAt: turn.occurredAt,
           ...(actor.class === 'harness' && held !== undefined
             ? {
                 subject: {
@@ -319,12 +364,9 @@ export class ManagedSessionRecordSink {
               }
             : {}),
           payload: {
-            turnId,
-            outcome,
-            stopReason:
-              typeof payload?.stopReason === 'string'
-                ? payload.stopReason
-                : null,
+            turnId: turn.turnId,
+            outcome: turn.outcome,
+            stopReason: turn.stopReason,
             resultRef,
             usageRef: null,
             pendingOwnersRef: null,

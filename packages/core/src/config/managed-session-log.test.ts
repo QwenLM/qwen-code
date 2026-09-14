@@ -175,6 +175,63 @@ describe('managed session log activation', () => {
     });
   });
 
+  it('commits a turn-complete checkpoint with the settled turn, not on open', async () => {
+    await withWorkspace(async (activate) => {
+      const fixture = await activate({ managedSessionLog: true });
+      const recorder = fixture.config.getChatRecordingService()!;
+      recorder.recordUserMessage('summarise the docs');
+      await recorder.flush();
+      await fixture.config.ensureManagedHarnessRunnable();
+
+      recorder.recordTurnResult({
+        promptId: 'turn-1',
+        state: 'completed',
+        endedAt: Date.now(),
+        stopReason: 'end_turn',
+      });
+      await recorder.flush();
+
+      const after = await transcriptRecords(fixture.transcriptPath);
+      const events = after
+        .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
+        .map((entry) => entry['managedSession'] as Record<string, unknown>);
+      const checkpoints = events.filter(
+        (event) => event['kind'] === 'checkpoint.committed',
+      );
+      const settled = events.filter(
+        (event) => event['kind'] === 'turn.settled',
+      );
+      expect(checkpoints).toHaveLength(2);
+      expect(settled).toHaveLength(1);
+      expect(
+        (checkpoints[0]['payload'] as Record<string, unknown>)['boundary'],
+      ).toBeNull();
+      expect(
+        (checkpoints[1]['payload'] as Record<string, unknown>)['boundary'],
+      ).toBe('turn_complete');
+      expect(
+        (checkpoints[1]['payload'] as Record<string, unknown>)[
+          'previousCheckpointId'
+        ],
+      ).toBe(
+        (checkpoints[0]['payload'] as Record<string, unknown>)['checkpointId'],
+      );
+
+      const markers = after
+        .filter((entry) => entry['subtype'] === MANAGED_SESSION_COMMIT_SUBTYPE)
+        .map((entry) => entry['managedSession'] as Record<string, unknown>);
+      const settleMarker = markers.find(
+        (marker) => marker['operation'] === 'settleTurn',
+      );
+      expect(settleMarker?.['eventCount']).toBe(2);
+      expect(settleMarker?.['lastSequence']).toBe(
+        (settleMarker?.['firstSequence'] as number) + 1,
+      );
+
+      await fixture.config.closeSessionWriter();
+    });
+  });
+
   it('attributes records to the activation it installed and releases it', async () => {
     await withWorkspace(async (activate) => {
       const fixture = await activate({ managedSessionLog: true });

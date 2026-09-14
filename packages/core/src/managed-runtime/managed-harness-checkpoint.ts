@@ -32,6 +32,22 @@ export const HARNESS_CHECKPOINT_PHASES = [
 
 export type HarnessCheckpointPhase = (typeof HARNESS_CHECKPOINT_PHASES)[number];
 
+/**
+ * Phases from which R2.S2 may start a model request. Awaited approvals and
+ * in-flight Runtime work are R2.S3; those phases are runnable checkpoints
+ * but not a finished-turn safety point.
+ */
+export const HARNESS_MODEL_START_PHASES: ReadonlySet<HarnessCheckpointPhase> =
+  new Set([
+    'before_model',
+    'model_output_committed',
+    'results_ready',
+    'turn_settled',
+  ]);
+
+/** Event-payload boundary for a finished turn with no pending Harness work. */
+export const HARNESS_TURN_COMPLETE_BOUNDARY = 'turn_complete';
+
 export const HARNESS_ACTION_SOURCES = [
   'tool_call',
   'automation_run',
@@ -1255,5 +1271,52 @@ export function createInitialHarnessCheckpoint(input: {
       stopBudgetRemaining: null,
       scopeLineage: [],
     },
+  };
+}
+
+/**
+ * Next-turn-ready v1 after a finished turn with no pending work. Phase is
+ * `before_model` so the following model request may start; attempt/tools
+ * from the completed turn stay in the log rather than in this checkpoint.
+ */
+export function createNextTurnReadyHarnessCheckpoint(input: {
+  readonly previous: HarnessCheckpointV1;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly previousCheckpointId: string | null;
+  readonly activationId: string;
+  readonly turnId: string | null;
+  readonly promptId: string | null;
+}): HarnessCheckpointV1 {
+  return {
+    identity: {
+      ...input.previous.identity,
+      checkpointId: input.checkpointId,
+      coveredSequence: input.coveredSequence,
+      activationId: input.activationId,
+      turnId: input.turnId,
+      promptId: input.promptId,
+      previousCheckpointId: input.previousCheckpointId,
+    },
+    resume: {
+      ...input.previous.resume,
+      throughSequence: input.coveredSequence,
+    },
+    continuation: {
+      phase: 'before_model',
+      pendingEventIds: [],
+    },
+    attempt: null,
+    tools: null,
+    runtime: null,
+    approval: null,
+    output: {
+      llmContentRef: null,
+      physicalStatus: null,
+      hookResultRef: null,
+      mediaRefs: [],
+      parentHistory: input.previous.output.parentHistory,
+    },
+    followUp: input.previous.followUp,
   };
 }
