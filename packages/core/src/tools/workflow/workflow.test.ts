@@ -2469,3 +2469,83 @@ await agent('scan package.json')
     });
   });
 });
+
+describe('WorkflowTool — extension workflow labels', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'workflow-ext-label-')),
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  async function extensionScript(): Promise<string> {
+    const scriptPath = path.join(dir, 'gcp', 'workflows', 'audit.js');
+    await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+    await fs.writeFile(scriptPath, 'return 1;\n', 'utf8');
+    return scriptPath;
+  }
+
+  function configWithExtensionWorkflow(scriptPath: string, active: boolean) {
+    const { config } = configWithStorage();
+    Object.assign(config, {
+      getActiveExtensions: () =>
+        active
+          ? [
+              {
+                name: 'gcp',
+                workflows: [
+                  {
+                    name: 'gcp:audit',
+                    stem: 'audit',
+                    extensionName: 'gcp',
+                    scriptPath,
+                    description: 'Audits the project',
+                  },
+                ],
+              },
+            ]
+          : [],
+    });
+    return config;
+  }
+
+  it('names an active extension workflow instead of calling it saved', async () => {
+    const scriptPath = await extensionScript();
+    const tool = new WorkflowTool(
+      configWithExtensionWorkflow(scriptPath, true),
+    );
+    const invocation = tool.build({ scriptPath });
+
+    expect(invocation.getDescription()).toBe(
+      'Run extension workflow (gcp:audit)',
+    );
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as { prompt: string; permissionRules?: string[] };
+    expect(details.prompt).toContain('Extension workflow: gcp:audit');
+    expect(details.prompt).toContain('Audits the project');
+    expect(details.prompt).toContain(`Loaded from: ${scriptPath}`);
+    expect(details.prompt).not.toContain('Saved workflow');
+    // Same path-scoped pre-approval as any other saved script.
+    expect(details.permissionRules).toHaveLength(1);
+  });
+
+  it('falls back to the saved-workflow label once the extension is inactive', async () => {
+    const scriptPath = await extensionScript();
+    const tool = new WorkflowTool(
+      configWithExtensionWorkflow(scriptPath, false),
+    );
+    const invocation = tool.build({ scriptPath });
+
+    expect(invocation.getDescription()).toBe('Run saved workflow (audit.js)');
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as { prompt: string };
+    expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
+  });
+});
