@@ -959,6 +959,18 @@ export function splitCompoundCommandSegments(
   // Reading that `#` as a comment swallowed the `;` and folded both commands
   // into one allow-covered segment.
   let paramDepth = 0;
+  // Nesting depth of the substitutions whose body is scanned without honouring
+  // a `}`: `$( … )` and backtick substitutions. bash parses a substitution body
+  // before it looks for the `}` that closes an enclosing `${ … }`, so a brace
+  // inside one must not close the expansion — `bash -xc 'x=""; echo
+  // ${x:-$(echo }) #c} ; touch m ; echo SECOND'` traces `+ touch m` and runs the
+  // tail, while counting that `}` as the closer dropped the depth early and the
+  // literal `#` after it then swallowed the real `;`.
+  let commandSubDepth = 0;
+  // 0 or 1: whether the scanner is inside a backtick body. It is the only place
+  // a `#`-comment ends at a backtick rather than at the physical newline, so the
+  // skip below consults it.
+  let backtickDepth = 0;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -990,7 +1002,27 @@ export function splitCompoundCommandSegments(
       i++; // -1 +1: step onto the `{`
       continue;
     }
-    if (ch === '}' && paramDepth > 0) {
+    // `$((` is arithmetic, tracked below, and no substitution at all. The `(`
+    // is left to the operator scan so the matching `)` decrements this.
+    if (ch === '$' && command[i + 1] === '(' && command[i + 2] !== '(') {
+      commandSubDepth++;
+      continue;
+    }
+    if (ch === ')' && commandSubDepth > 0) {
+      commandSubDepth--;
+    }
+    // An unescaped backtick outside quotes opens or closes a body; quotes and
+    // backslashes were handled above, so this only sees a live delimiter.
+    if (ch === '`') {
+      backtickDepth = backtickDepth === 0 ? 1 : 0;
+      continue;
+    }
+    if (
+      ch === '}' &&
+      paramDepth > 0 &&
+      commandSubDepth === 0 &&
+      backtickDepth === 0
+    ) {
       paramDepth--;
     }
 
@@ -1010,22 +1042,32 @@ export function splitCompoundCommandSegments(
     // followed by a newline and `rm -rf /` — so honouring the escape would fold
     // that second command into the comment's segment and cost it its own rule
     // check. For the same reason the newline is left for the operator scan
-    // below, and stays a boundary. An unescaped backtick does end the skip:
-    // bash finds a backtick body's closing delimiter with a raw scan that does
-    // not honour an outer-level `#` (`bash -xc 'echo `date # c` ; echo SECOND'`
-    // traces `++ date`, `+ echo …` and `+ echo SECOND`), so stopping there keeps
-    // the operator after it a boundary. That can only over-split a genuine
-    // comment containing a backtick, which stays fail-closed.
+    // below, and stays a boundary. An unescaped backtick ends the skip only
+    // when the `#` sits inside a backtick body: bash finds such a body's closing
+    // delimiter with a raw scan that does not honour the `#`
+    // (`bash -xc 'echo `date # c` ; echo SECOND'` traces `++ date`, `+ echo …`
+    // and `+ echo SECOND`), so stopping there keeps the operator after it a
+    // boundary. Outside a body the backtick is comment text bash has already
+    // discarded, and stopping there handed the tail of the comment back to the
+    // state machine below, which rebuilt quote, escape and arithmetic state out
+    // of it — reopening a quote that never closes, re-arming the escape that
+    // eats the newline, or stranding the arithmetic depth — and folded a real
+    // boundary into an allow-covered segment.
     if (
       ch === '#' &&
       arithmeticDepth === 0 &&
       paramDepth === 0 &&
       isCommentStart(command, i)
     ) {
+      const stopAtBacktick = backtickDepth > 0;
       while (
         i < command.length &&
         command[i] !== '\n' &&
-        !(command[i] === '`' && precedingBackslashCount(command, i) % 2 === 0)
+        !(
+          stopAtBacktick &&
+          command[i] === '`' &&
+          precedingBackslashCount(command, i) % 2 === 0
+        )
       ) {
         i++;
       }

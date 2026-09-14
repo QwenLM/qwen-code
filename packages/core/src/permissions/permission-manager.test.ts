@@ -883,9 +883,59 @@ describe('splitCompoundCommand', () => {
     ['echo ${x} # c ; rm -rf /tmp/x', ['echo ${x} # c ; rm -rf /tmp/x']],
     ['echo ${x#pre} ; rm -rf /tmp/x', ['echo ${x#pre}', 'rm -rf /tmp/x']],
     ['echo ${#x} ; rm -rf /tmp/x', ['echo ${#x}', 'rm -rf /tmp/x']],
+    // The depth only ever grows from `${`, so the closing `}` has to be the
+    // guarded decrement rather than a bare `-1`: a stray unquoted `}` before the
+    // expansion would otherwise drive the depth negative, the following `${`
+    // would bring it back to 0 instead of 1, and the literal `#` inside the
+    // expansion would fold the line — relaxing the `> 0` clamp turns the
+    // verdict on this command from `deny` into `allow`.
+    [
+      'echo } ${x:- a #b} ; rm -rf /tmp/x',
+      ['echo } ${x:- a #b}', 'rm -rf /tmp/x'],
+    ],
   ])(
     'keeps the # semantics of %s around a parameter expansion',
     async (command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
+  // A `}` inside a substitution does not close an enclosing `${ … }`: bash
+  // parses the substitution body first, so the expansion is still open when the
+  // later `#` appears and the `;` after the real `}` stays a boundary.
+  // `bash -xc 'x=""; echo ${x:-$(echo }) #c} ; touch m ; echo SECOND'` traces
+  // `+ touch m` and `+ echo SECOND` — reading that `}` as the closer dropped the
+  // depth while bash was still inside the expansion, and the literal `#` then
+  // swallowed the `;` and the tail's rule check with it.
+  it.each([
+    [
+      'a command substitution',
+      'echo ${x:-$(echo }) #c} ; rm -rf /tmp/x',
+      ['echo ${x:-$(echo }) #c}', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a brace expansion in a command substitution',
+      'echo ${x:-$(ls {a,b}) # c} ; rm -rf /tmp/x',
+      ['echo ${x:-$(ls {a,b}) # c}', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a backtick substitution',
+      'echo ${x:-`echo }` #c} ; rm -rf /tmp/x',
+      ['echo ${x:-`echo }` #c}', 'rm -rf /tmp/x'],
+    ],
+    // Control: bash honours no bare `{ … }` while scanning for the `}` that
+    // closes `${ … }`, so `bash -xc 'x=""; echo ${x:-{a,b} # c} ; echo SECOND'`
+    // traces only `+ echo '{a,b'` and never runs the second command. This row
+    // keeps folding, and a substitution counter that also counted brace groups
+    // would start splitting it.
+    [
+      'no substitution at all',
+      'echo ${x:-{a,b} # c} ; echo SECOND',
+      ['echo ${x:-{a,b} # c} ; echo SECOND'],
+    ],
+  ])(
+    'does not let %s inside the expansion close it early',
+    async (_where, command, expected) => {
       expect(splitCompoundCommand(command)).toEqual(expected);
     },
   );
@@ -929,6 +979,48 @@ describe('splitCompoundCommand', () => {
       'echo `date # c`',
       'rm -rf /tmp/x',
     ]);
+  });
+
+  // …and outside a body a backtick inside a comment is comment text, so the
+  // skip must run to the newline there. Stopping at that backtick gave the
+  // discarded tail back to the state machine, which rebuilt quote, escape and
+  // arithmetic state from it and folded the next line into the comment's
+  // segment: `bash -xc $'echo a # x` b\'\nrm -rf /tmp/x'` runs the `rm`.
+  it.each([
+    [
+      'an apostrophe',
+      "echo a # x` b'\nrm -rf /tmp/x",
+      ["echo a # x` b'", 'rm -rf /tmp/x'],
+    ],
+    [
+      'a trailing backslash',
+      'echo a # x` b \\\nrm -rf /tmp/x',
+      ['echo a # x` b \\', 'rm -rf /tmp/x'],
+    ],
+    [
+      'an inert ((',
+      'echo a # x` y(( z\necho b & rm -rf /tmp/x',
+      ['echo a # x` y(( z', 'echo b', 'rm -rf /tmp/x'],
+    ],
+  ])(
+    'does not rebuild state from the tail of a comment holding %s',
+    async (_tail, command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
+  // Inside a backtick body the escape half of the terminator is load-bearing:
+  // bash's raw scan for the closing delimiter skips an escaped backtick, so
+  // `` `a # x \` b` `` is one body and the comment inside it runs to the closing
+  // backtick. Reading the escaped backtick as the delimiter instead leaves the
+  // body open, so the `${ … }` later in the line keeps its depth and the `#`
+  // after it stops being a comment.
+  it('does not stop a comment at an escaped backtick', async () => {
+    expect(
+      splitCompoundCommand(
+        'echo `a # x \\` b` ; echo ${y:- z} # c ; rm -rf /tmp/x',
+      ),
+    ).toEqual(['echo `a # x \\` b`', 'echo ${y:- z} # c ; rm -rf /tmp/x']);
   });
 });
 
@@ -2695,7 +2787,36 @@ describe('PermissionManager', () => {
         'echo NPMTEST ; (( failures #c )) ; rm -rf /tmp/x',
       ],
       ['a backtick substitution', 'echo `date # c` ; rm -rf /tmp/x'],
+      // A `}` inside a substitution body is not the closer of the `${ … }`
+      // around it, so the `#` that follows it is still literal inside the
+      // expansion and the `;` after the real `}` is a real boundary.
+      [
+        'a nested command substitution',
+        'echo ${x:-$(echo }) #c} ; rm -rf /tmp/x',
+      ],
+      ['a stray } before the expansion', 'echo } ${x:- a #b} ; rm -rf /tmp/x'],
     ])('comment-like # in %s: deny still fires', async (_where, command) => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
+      ).toBe('deny');
+    });
+
+    // A backtick in a comment is comment text, so the tail of the comment must
+    // not be fed back to the state machine: doing so folded the next line, or
+    // the command after a `&`, into a segment `Bash(echo *)` covers while bash
+    // runs the tail.
+    it.each([
+      ["echo a # x` b'\nrm -rf /tmp/x"],
+      ['echo a # x` b \\\nrm -rf /tmp/x'],
+      ['echo a # x` y(( z\necho b & rm -rf /tmp/x'],
+    ])('comment tail of %s: deny still fires', async (command) => {
       pm = new PermissionManager(
         makeConfig({
           permissionsAllow: ['Bash(echo *)'],
