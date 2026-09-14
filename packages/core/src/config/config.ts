@@ -10,7 +10,7 @@ import { resolveProviderProtocol } from '../models/modelRegistry.js';
 import {
   captureReasoningSnapshot,
   validateReasoningDeclaration,
-  resolveReasoningCapabilities,
+  validateReasoningCapabilities,
   resolveReasoningForModel,
   type ReasoningSnapshot,
 } from '../core/reasoning-overrides.js';
@@ -4858,7 +4858,7 @@ export class Config {
       for (const row of next) {
         validateReasoningDeclaration({ model: row.id }, row.reasoning);
         if (row.registryBaseUrl || row.reasoning?.profile) {
-          resolveReasoningCapabilities(
+          validateReasoningCapabilities(
             { model: row.id, authType: row.authType, baseUrl: row.baseUrl },
             row.reasoning,
           );
@@ -4866,10 +4866,15 @@ export class Config {
       }
       const generation = this.getContentGeneratorConfig();
       if (generation)
-        resolveReasoningForModel(this, {
-          ...generation,
-          reasoningSnapshot: next,
-        });
+        resolveReasoningForModel(
+          this,
+          {
+            ...generation,
+            reasoningSnapshot: next,
+          },
+          generation.model,
+          true,
+        );
       this.latestReasoningSnapshot = next;
     } catch (error) {
       this.debugLogger.error(

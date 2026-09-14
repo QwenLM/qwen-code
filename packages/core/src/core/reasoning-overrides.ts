@@ -10,9 +10,7 @@ import type {
   AvailableModel,
   ModelReasoningCapabilities,
 } from '../models/types.js';
-import { alibabaStandardProvider } from '../providers/presets/alibaba-standard.js';
-import { deepseekProvider } from '../providers/presets/deepseek.js';
-import { moonshotProvider } from '../providers/presets/moonshot.js';
+import { ALL_PROVIDERS } from '../providers/all-providers.js';
 import { normalize } from './tokenLimits.js';
 import {
   parseClaudeModelVersion,
@@ -132,6 +130,17 @@ export function resolveReasoningCapabilities(
   route: Route,
   declaration: unknown,
 ): ResolvedReasoning | undefined {
+  try {
+    return validateReasoningCapabilities(route, declaration);
+  } catch {
+    return undefined;
+  }
+}
+
+export function validateReasoningCapabilities(
+  route: Route,
+  declaration: unknown,
+): ResolvedReasoning | undefined {
   const input = validateReasoningDeclaration(route, declaration);
   if (!input) return undefined;
   if (input.profile === undefined && 'thinking' in input)
@@ -142,9 +151,15 @@ export function resolveReasoningCapabilities(
     );
   };
   const model = normalize(route.model);
-  const known = [alibabaStandardProvider, deepseekProvider, moonshotProvider]
-    .flatMap((provider) => provider.models ?? [])
-    .find((candidate) => candidate.id === model)?.capabilities?.reasoning;
+  const provider = ALL_PROVIDERS.find((candidate) =>
+    typeof candidate.baseUrl === 'string'
+      ? candidate.baseUrl === route.baseUrl
+      : candidate.baseUrl?.some((option) => option.url === route.baseUrl),
+  );
+  const known = (
+    provider?.models?.find((candidate) => candidate.id === route.model) ??
+    provider?.models?.find((candidate) => candidate.id === model)
+  )?.capabilities?.reasoning;
   const inherited = parseModelReasoningCapabilities(known);
   const gpt = getGptReasoningCapabilities(model);
   const claude =
@@ -176,15 +191,19 @@ export function resolveReasoningCapabilities(
                 (claude.major > 4 || (claude.major === 4 && claude.minor >= 6))
               ? 'anthropic-adaptive'
               : 'anthropic-manual'
-          : model.startsWith('qwen')
+          : inherited?.toggleOnly
             ? dashscope
-              ? inherited?.disableField === 'reasoning_effort'
-                ? 'dashscope-effort'
-                : 'dashscope-thinking'
+              ? 'dashscope-thinking'
               : 'qwen-chat-template'
-            : inherited?.disableField === 'thinking'
-              ? 'deepseek-openai'
-              : 'openai-effort');
+            : model.startsWith('qwen')
+              ? dashscope
+                ? inherited?.disableField === 'reasoning_effort'
+                  ? 'dashscope-effort'
+                  : 'dashscope-thinking'
+                : 'qwen-chat-template'
+              : inherited?.disableField === 'thinking'
+                ? 'deepseek-openai'
+                : 'openai-effort');
   const protocol =
     profile === 'gemini'
       ? 'gemini'
@@ -290,6 +309,7 @@ export function resolveReasoningForModel(
   config: Pick<Config, 'getResolvedModelConfig'> | undefined,
   generation: ContentGeneratorConfig,
   model = generation.model,
+  strict = false,
 ): ResolvedReasoning | undefined {
   let declaration: unknown;
   if (generation.reasoningSnapshot) {
@@ -320,7 +340,9 @@ export function resolveReasoningForModel(
         )?.capabilities?.reasoning
       : undefined;
   }
-  return resolveReasoningCapabilities({ ...generation, model }, declaration);
+  return (
+    strict ? validateReasoningCapabilities : resolveReasoningCapabilities
+  )({ ...generation, model }, declaration);
 }
 
 export function getEffectiveReasoning(

@@ -10,6 +10,7 @@ import {
   captureReasoningSnapshot,
   getEffectiveReasoning,
   resolveReasoningCapabilities,
+  validateReasoningCapabilities,
   resolveReasoningForModel,
 } from './reasoning-overrides.js';
 import type { AvailableModel } from '../models/types.js';
@@ -110,7 +111,8 @@ describe('reasoning declarations', () => {
     { ...declaration, profile: 'gemini' },
     { profile: 'dashscope-thinking', defaultEffort: 'medium' },
   ])('rejects an invalid declaration %j', (value) => {
-    expect(() => resolveReasoningCapabilities(route, value)).toThrow(
+    expect(resolveReasoningCapabilities(route, value)).toBeUndefined();
+    expect(() => validateReasoningCapabilities(route, value)).toThrow(
       'capabilities.reasoning',
     );
   });
@@ -141,8 +143,58 @@ describe('reasoning declarations', () => {
     });
   });
 
+  it.each([
+    ['qwen3.5-plus', 'https://coding.dashscope.aliyuncs.com/v1'],
+    ['qwen3-max-2026-01-23', 'https://coding.dashscope.aliyuncs.com/v1'],
+    ['kimi-k2.5', 'https://coding.dashscope.aliyuncs.com/v1'],
+    [
+      'qwen3.6-flash',
+      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    ],
+    [
+      'deepseek-v3.2',
+      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    ],
+  ])('inherits %s toggle capabilities from its provider', (model, baseUrl) => {
+    const target = { ...route, model, baseUrl };
+    expect(
+      resolveReasoningCapabilities(target, { canDisable: false }),
+    ).toMatchObject({
+      profile: 'dashscope-thinking',
+      toggleOnly: true,
+      canDisable: false,
+    });
+    expect(
+      resolveReasoningCapabilities(target, { defaultEffort: 'medium' }),
+    ).toBeUndefined();
+  });
+
+  it('inherits the selected provider policy for the same model', () => {
+    const target = { ...route, model: 'qwen3.8-max-preview' };
+    const input = { defaultEffort: 'medium' };
+    expect(
+      resolveReasoningCapabilities(
+        {
+          ...target,
+          baseUrl:
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        },
+        input,
+      ),
+    ).toMatchObject({ defaultEffort: 'medium', canDisable: false });
+    expect(
+      resolveReasoningCapabilities(
+        {
+          ...target,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        },
+        input,
+      )?.canDisable,
+    ).toBeUndefined();
+  });
+
   it('ignores misleading Qwen hosts during inference', () => {
-    expect(() =>
+    expect(
       resolveReasoningCapabilities(
         {
           ...route,
@@ -151,11 +203,28 @@ describe('reasoning declarations', () => {
         },
         { defaultEffort: 'medium' },
       ),
-    ).toThrow();
+    ).toBeUndefined();
   });
 });
 
 describe('prompt reasoning snapshots', () => {
+  it('degrades invalid initial declarations without losing healthy routes', () => {
+    const invalid = model('invalid');
+    invalid.capabilities = { reasoning: { ...declaration, efforts: ['low'] } };
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, { getAllConfiguredModels: () => [invalid, model()] });
+    const generation = {
+      ...route,
+      reasoningSnapshot: config.getReasoningSnapshot(),
+    };
+    expect(
+      resolveReasoningForModel(config, generation, 'invalid'),
+    ).toBeUndefined();
+    expect(resolveReasoningForModel(config, generation)).toMatchObject({
+      defaultEffort: 'medium',
+    });
+  });
+
   it('uses the captured capability for existing DashScope override controls', () => {
     const config = Object.create(Config.prototype) as Config;
     const generation = {

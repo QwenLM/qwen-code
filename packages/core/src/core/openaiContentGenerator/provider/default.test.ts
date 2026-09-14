@@ -536,6 +536,29 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result['reasoning']).toBeUndefined();
     });
 
+    it('preserves generic clamping for a legacy non-GPT declaration', () => {
+      mockContentGeneratorConfig.authType =
+        'openai' as ContentGeneratorConfig['authType'];
+      mockCliConfig.getResolvedModelConfig = vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['high', 'max'],
+            defaultEffort: 'high',
+            disableField: 'thinking',
+          },
+        },
+      });
+      const request = {
+        model: 'deepseek-v4-pro',
+        messages: [],
+        reasoning: { effort: 'low' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+      expect(provider.buildRequest(request, 'prompt-id')).toMatchObject({
+        reasoning: { effort: 'low' },
+      });
+    });
+
     it('keeps an unrecognized effort string as-is rather than rewriting it', () => {
       const originalRequest = {
         model: 'gpt-5.4',

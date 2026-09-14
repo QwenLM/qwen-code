@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType } from '../utils/auth-type.js';
 import { ProviderInstallError } from './install.js';
 import type {
   ModelSpec,

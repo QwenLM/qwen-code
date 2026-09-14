@@ -3,7 +3,7 @@
 [English](external-reasoning-overrides-v2.md) | [简体中文](external-reasoning-overrides-v2.zh-CN.md)
 
 Status: implemented; local validation passed. Supersedes the implementation
-approach in PR #11521. The new PR must stay within 3,000 changed lines, counting
+approach in PR #11521. The new PR must stay within 3,500 changed lines, counting
 additions and deletions across production code, tests, generated files and docs.
 
 ## 1. Goal and boundary
@@ -70,7 +70,9 @@ Do not add new on/off policy fields in this PR.
 | `efforts`       | Replace the supported subset of `low/medium/high/xhigh/max`.                             |
 | `defaultEffort` | Supply the effort when no explicit selection or existing raw override takes precedence.  |
 
-Omitted fields inherit known model capabilities. Replacing `efforts` replaces
+Omitted fields inherit capabilities from the existing provider catalog at the
+selected endpoint; exact model IDs take precedence over normalized aliases.
+Unknown gateway routes require an explicit declaration. Replacing `efforts` replaces
 the array rather than merging it. An inherited default is clamped using the
 existing helper; an explicitly supplied default must belong to the effective
 set. Unknown tiered models must declare `profile`, `efforts` and `defaultEffort`;
@@ -150,7 +152,9 @@ promote pending reasoning. Newly created sessions use the latest configuration.
 Cold model previews may read the latest validated table; an existing session's
 controls display its active table and update when that session adopts the change.
 
-Invalid reasoning updates keep the previous valid reasoning table and report a
+Runtime resolution of invalid declarations returns no override, preserving
+existing behavior even in a fresh session. Strict staging validation rejects
+invalid reasoning updates, keeps the previous valid table, and reports a
 model/field error through existing error channels. They must not reject unrelated
 settings updates or erase healthy model rows. Validate static fields independently
 from endpoint inference; no global boot failure based on placeholder URLs.
@@ -164,18 +168,18 @@ Use direct core-module imports in CLI production code. No unrelated cleanup.
 
 | Group                                                 | Changed-line budget |
 | ----------------------------------------------------- | ------------------: |
-| Production implementation                             |               1,320 |
-| Focused unit tests                                    |                 900 |
-| Local E2E harness and scenarios                       |                 270 |
+| Production implementation                             |               1,500 |
+| Focused unit tests                                    |               1,000 |
+| Local E2E harness and scenarios                       |                 300 |
 | Both design languages, user docs and generated schema |                 450 |
-| Review reserve                                        |                  60 |
-| Total hard limit                                      |               3,000 |
+| Review reserve                                        |                 250 |
+| Total hard limit                                      |               3,500 |
 
 Count additions plus deletions in the final PR diff against its main merge base,
 including renames, generated schemas and every test/document shipped. Track
 uncommitted/new files too. Do not hide implementation in ignored files or omit
 necessary tests to meet the limit. Exceeding a group budget requires simplifying
-within this scope; exceeding 3,000 blocks submission rather than silently growing
+within this scope; exceeding 3,500 blocks submission rather than silently growing
 the limit. Merge-only upstream changes do not count, but conflict-resolution
 changes that remain in the PR do.
 

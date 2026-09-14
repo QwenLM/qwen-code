@@ -72,7 +72,8 @@ configure two routes instead.
 ## Override reasoning capabilities
 
 Set `capabilities.reasoning` on a model entry to override its reasoning format,
-offered effort tiers and default. Known models inherit omitted fields; for example,
+offered effort tiers and default. Known models inherit omitted fields from the
+provider catalog at the selected endpoint; for example,
 `"capabilities": { "reasoning": { "defaultEffort": "medium" } }` makes a
 DashScope `qwen3.8-max` route use medium when no explicit effort is selected.
 For an unknown alias, declare all three fields:
@@ -105,7 +106,8 @@ continue to work.
 
 Reasoning changes apply before the next user prompt. Its requests, retries and
 child agents share the captured reasoning configuration. Invalid updates retain
-the previous configuration and log the model/field error. Explicit user choices
+the previous configuration and log the model/field error. Invalid declarations
+in fresh sessions safely fall back to the existing model behavior. Explicit user choices
 and provider-native overrides in `reasoning`, `samplingParams` and `extra_body`
 retain their existing precedence; a model default is not saved as a user choice.
 This mechanism does not change endpoint, credential or image-model lifecycles.

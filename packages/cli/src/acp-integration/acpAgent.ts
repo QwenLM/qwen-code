@@ -7865,22 +7865,14 @@ class QwenAgent implements Agent {
             config.getContentGeneratorConfig?.()?.reasoningSnapshot,
           reasoningRouteBaseUrl: model.registryBaseUrl ?? null,
         };
-        let configOptions;
-        try {
-          configOptions = model.isRuntimeModel
-            ? undefined
-            : buildModelReasoningRoutePreview(
-                generation,
-                resolveReasoningForModel(config, generation),
-                settings.merged.model?.reasoningEffort,
-                modelId.startsWith(ACP_ROUTE_ID_PREFIX),
-              );
-        } catch (error) {
-          debugLogger.warn(
-            `Invalid reasoning configuration for ${model.id}`,
-            error,
-          );
-        }
+        const configOptions = model.isRuntimeModel
+          ? undefined
+          : buildModelReasoningRoutePreview(
+              generation,
+              resolveReasoningForModel(config, generation),
+              settings.merged.model?.reasoningEffort,
+              modelId.startsWith(ACP_ROUTE_ID_PREFIX),
+            );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),

@@ -149,6 +149,8 @@ export class DefaultOpenAICompatibleProvider
     model: string | undefined,
   ): readonly ReasoningEffort[] {
     const configured = this.getReasoningCapabilities(model);
+    if (!configured?.profile && !getGptReasoningCapabilities(model))
+      return OPENAI_COMPATIBLE_EFFORTS;
     if (configured && !configured.toggleOnly) return configured.efforts;
     return (
       getGptReasoningCapabilities(model)?.efforts ?? OPENAI_COMPATIBLE_EFFORTS

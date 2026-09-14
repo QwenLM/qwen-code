@@ -179,23 +179,12 @@ function buildWorkspaceProvidersStatus(
         authType: model.authType,
         baseUrl: resolved?.baseUrl,
       };
-      let configOptions;
-      try {
-        configOptions = buildModelReasoningRoutePreview(
-          generation,
-          resolveReasoningCapabilities(
-            generation,
-            model.capabilities?.reasoning,
-          ),
-          settings.model?.reasoningEffort,
-          modelId.startsWith(ACP_ROUTE_ID_PREFIX),
-        );
-      } catch (error) {
-        debugLogger.warn(
-          `Invalid reasoning configuration for ${model.id}`,
-          error,
-        );
-      }
+      const configOptions = buildModelReasoningRoutePreview(
+        generation,
+        resolveReasoningCapabilities(generation, model.capabilities?.reasoning),
+        settings.model?.reasoningEffort,
+        modelId.startsWith(ACP_ROUTE_ID_PREFIX),
+      );
       const configurationKey = getModelConfigurationKey(
         loaded,
         authType,
