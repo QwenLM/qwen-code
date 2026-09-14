@@ -4041,15 +4041,21 @@ describe('createServeApp', () => {
       );
     });
 
-    // Both cases go through Express's real qs parser, which is where the
-    // server's reading of `?daemon=` can drift from the client's
-    // `URLSearchParams.get`. A repeated parameter stays first-value-wins on
-    // both sides. A qs bracket key is not a `daemon` parameter at all as far
-    // as the client is concerned, so it must not buy an allowance here — and
-    // when a bracket key is mixed with a plain one, the origin granted must be
-    // the one the client actually connects to, not the bracketed one.
-    it('keeps the shell CSP on the client parser for repeated and bracketed ?daemon=', async () => {
+    // `createSendIndex` reads `?daemon=` from the raw query with the client's
+    // parser, so the header cannot depend on how Express was configured to
+    // parse queries. That is only observable under `'extended'`: the shipped
+    // default is `'simple'` (Node `querystring`, Express 5) and nothing in this
+    // repo sets it, and under `simple` a bracket key never reaches
+    // `req.query.daemon` at all — so the old `req.query` read and this one
+    // behave identically there and a test on the default parser cannot
+    // discriminate the change. Forcing `extended` is what makes this case bite:
+    // `qs` folds `?daemon[]=X` into `{ daemon: ['X'] }`, which the old read
+    // granted and the client never parsed.
+    it('grants connect-src from the client parser whatever the Express query parser is', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
+      app.set('query parser', 'extended');
+      expect(app.get('query parser')).toBe('extended');
+
       const repeated = await request(app)
         .get(
           '/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170&daemon=https%3A%2F%2Fother.example',
@@ -4074,6 +4080,10 @@ describe('createServeApp', () => {
         "connect-src 'self';",
       );
 
+      // The mixed shape is the one that broke functionally, not just by
+      // widening: `qs` yields `['evil', 'daemon.example.com:4170']`, so the old
+      // read granted the bracketed origin while the client connected to the
+      // plain one and found its own target CSP-blocked.
       const mixed = await request(app)
         .get(
           '/?daemon%5B%5D=https%3A%2F%2Fevil.example&daemon=https%3A%2F%2Fdaemon.example.com%3A4170',

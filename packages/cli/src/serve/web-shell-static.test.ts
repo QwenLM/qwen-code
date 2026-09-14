@@ -121,15 +121,21 @@ describe('Web Shell sandbox framing', () => {
   });
 
   it('never widens connect-src for a key the client parser does not report', () => {
-    // Express's qs folds bracketed shapes into a `daemon` array. The client
-    // reads `URLSearchParams.get('daemon')`, which reports no such key, so it
-    // selects no target and shows no confirmation gate — while
-    // `INVALID_DAEMON_TARGET` and `UNCONFIRMED_DAEMON_TARGET` are both false,
-    // so nothing on the page signals anything. Taking the qs shape here would
-    // grant an origin no client-side parse ever produced.
+    // `requestedDaemonParam` must agree with the client's
+    // `URLSearchParams.get('daemon')` on every shape, so the emitted header can
+    // never depend on how Express was configured to parse queries. The
+    // bracketed rows are the ones that diverged under the old `req.query` read
+    // *when the parser is qs* (`'extended'`): qs folds them into a `daemon`
+    // array the client never sees. Under the shipped default (`'simple'`, Node
+    // `querystring`, Express 5 — nothing in this repo sets it) they do not
+    // diverge, because `req.query.daemon` is simply absent. So this table pins
+    // parser-independence, not a defect in the shipped configuration;
+    // `server.test.ts` drives the same shapes through a real app forced to
+    // `'extended'`.
     //
-    // Each row is a real measured disagreement between the two parsers; the
-    // `expected` column is what the client resolves for the same URL.
+    // `expected` is what the client resolves for the same URL, re-derived from
+    // `URLSearchParams` below rather than trusted from this table, so the client
+    // stays the oracle.
     const shapes: ReadonlyArray<{ url: string; expected: string | null }> = [
       // qs: { daemon: ['…4182', '…4181'] } → the old read granted 4182, but
       // the client connects to 4181, so its own target was CSP-blocked.

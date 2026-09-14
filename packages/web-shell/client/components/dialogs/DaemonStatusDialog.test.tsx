@@ -555,7 +555,9 @@ describe('DaemonStatusDialog', () => {
   it('drops a same-target probe the operator typed over', async () => {
     const onChangeTarget = vi.fn();
     // Deferred on purpose: the answer arrives even though the probe was
-    // retired, so what stops the switch is the ownership guard.
+    // retired, so what stops the switch is the ownership guard in `.then`. A
+    // signal-respecting stub cannot reach that guard, because the retirement's
+    // abort rejects the promise first and `.then` never runs.
     const { fetchMock, resolveProbe } = mountPendingProbe(false);
     try {
       mount('en', onChangeTarget);
@@ -576,8 +578,39 @@ describe('DaemonStatusDialog', () => {
         resolveProbe({ ok: true, status: 200 });
       });
       expect(onChangeTarget).not.toHaveBeenCalled();
-      // The abandoned probe reports no outcome either: its address is no
-      // longer the one on screen.
+      expect(address.value).toBe('https://other-daemon.example:4170');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reports no stale error for a probe the operator typed over', async () => {
+    const onChangeTarget = vi.fn();
+    // Signal-respecting, and the dialog stays mounted: the retirement's abort
+    // rejects the fetch, so the `.catch` continuation runs against a live tree.
+    // Without the ownership check there it paints "the daemon did not accept
+    // the connection" over an address the operator has already typed over —
+    // exactly the stale error the alert assertion below forbids. The unmount
+    // case cannot pin this, because `setConnectionError` on a dead tree is a
+    // no-op either way.
+    const { fetchMock, wasAborted } = mountPendingProbe(true);
+    try {
+      mount('en', onChangeTarget);
+      const token = typeToken('good-token');
+      await submitConnect(token);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const address = container!.querySelector<HTMLInputElement>(
+        '#daemon-connection-address',
+      )!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(address, 'https://other-daemon.example:4170');
+        address.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(wasAborted()).toBe(true);
+      expect(onChangeTarget).not.toHaveBeenCalled();
       expect(container!.querySelector('[role="alert"]')).toBeNull();
       expect(address.value).toBe('https://other-daemon.example:4170');
     } finally {

@@ -72,13 +72,21 @@ export function buildWebShellCsp(
 }
 
 /**
- * The `?daemon=` value read with the client's parser rather than Express's.
- * qs folds `?daemon[]=x` into `{ daemon: ['x'] }` — a key the client's
- * `URLSearchParams.get('daemon')` never reports, so taking that array would
- * widen `connect-src` for an origin the client never parsed: the document
- * would carry an allowance for a target no confirmation gate ever saw. One
- * parser on both sides also keeps the first-value-wins behaviour for a
- * repeated `?daemon=`, which is exactly what `URLSearchParams.get` does.
+ * The `?daemon=` value read with the client's parser instead of `req.query`.
+ *
+ * Hardening against a configuration dependency, not a fix for a live defect.
+ * Express 5 defaults `query parser` to `'simple'` (Node's `querystring`) and
+ * nothing in this repo ever sets it, so `req.query['daemon']` never saw the
+ * bracket folding `qs` produces and the previous read agreed with the client on
+ * every shape a browser can send. Under `'extended'` it did not: `qs` folds
+ * `?daemon[]=x` into `{ daemon: ['x'] }`, a key the client's
+ * `URLSearchParams.get('daemon')` never reports, so taking `raw[0]` granted
+ * `connect-src` for an origin the client never parsed — and for
+ * `?daemon[]=A&daemon=B` it granted A while the client connected to B, leaving
+ * the client's own target CSP-blocked. Measured over 38 query strings against
+ * real sockets: 18 divergences under `extended`, 0 under `simple`, 0 after this
+ * change under either. Reading the raw query with the client's own parser drops
+ * the dependency on that setting altogether.
  */
 export function requestedDaemonParam(originalUrl: string): string | null {
   const queryStart = originalUrl.indexOf('?');
