@@ -706,8 +706,12 @@ describe('McpTransportPool', () => {
           .catch((cause: Error) => {
             error = cause;
           });
-        // Past the cleanup barrier deadline (teardown budget + slack).
-        await vi.advanceTimersByTimeAsync(MCP_TEARDOWN_TIMEOUT_MS + 2_000);
+        await vi.advanceTimersByTimeAsync(MCP_TEARDOWN_TIMEOUT_MS);
+        expect(error).toBeUndefined();
+        expect(mocked.connect).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1_999);
+        expect(error).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(1);
         const timeout = error?.message;
         const connectsBeforeCleanup = mocked.connect.mock.calls.length;
         const barrier = entry.waitForCleanup();
