@@ -27,6 +27,15 @@ use objc2_foundation::{
 pub(super) type Representations = Vec<(String, Vec<u8>)>;
 type Snapshot = Vec<Representations>;
 
+pub(super) fn general_pasteboard() -> anyhow::Result<Retained<NSPasteboard>> {
+    // AppKit can return nil while the logged-in GUI session is unavailable.
+    let board: Option<Retained<NSPasteboard>> =
+        unsafe { msg_send_id![NSPasteboard::class(), generalPasteboard] };
+    board.ok_or_else(|| {
+        anyhow!("the macOS clipboard is unavailable; retry after the desktop session is restored")
+    })
+}
+
 pub(super) fn queue() -> Arc<tokio::sync::Mutex<()>> {
     static QUEUE: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
     Arc::clone(QUEUE.get_or_init(|| Arc::new(tokio::sync::Mutex::new(()))))
@@ -423,18 +432,16 @@ pub(super) struct Transaction {
 
 impl Transaction {
     pub(super) fn begin(content: Representations, signals: Arc<Signals>) -> anyhow::Result<Self> {
-        Self::on_board(content, signals, || unsafe {
-            NSPasteboard::generalPasteboard()
-        })
+        Self::on_board(content, signals, general_pasteboard)
     }
 
     fn on_board(
         content: Representations,
         signals: Arc<Signals>,
-        board: impl FnOnce() -> Retained<NSPasteboard> + Send + 'static,
+        board: impl FnOnce() -> anyhow::Result<Retained<NSPasteboard>> + Send + 'static,
     ) -> anyhow::Result<Self> {
         main_call(move || {
-            let transaction = NativeTransaction::begin_on(board(), content, signals)?;
+            let transaction = NativeTransaction::begin_on(board()?, content, signals)?;
             static NEXT: AtomicU64 = AtomicU64::new(1);
             let id = NEXT.fetch_add(1, Ordering::Relaxed);
             TRANSACTIONS.with(|transactions| {

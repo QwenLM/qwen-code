@@ -1147,12 +1147,12 @@ jobs:
           # a hung assessment push the round into the JOB cap, which cancels
           # the always() reporters (claim withdrawal) — a silent round.
           QWEN_TIMEOUT_MS: '3000000'
-          # vars.QWEN_AUTOFIX_EFFORT -> model.reasoningEffort ("" = provider
-          # default). maxSessionTurns lives inside `model`: next to a flat V1
-          # key, a `model` object replaces it wholesale during migration.
+          # QWEN_AUTOFIX_EFFORT maps to Kimi K3 reasoning_effort (default: max).
+          # maxSessionTurns stays inside model because a model object replaces
+          # the flat V1 key during migration.
           SETTINGS_JSON: |-
             {
-              "model": { "maxSessionTurns": 60, "reasoningEffort": "${{ vars.QWEN_AUTOFIX_EFFORT }}" },
+              "model": { "maxSessionTurns": 60, "generationConfig": { "samplingParams": { "reasoning_effort": "${{ vars.QWEN_AUTOFIX_EFFORT || 'max' }}" } } },
               "coreTools": [
                 "read_file",
                 "read_many_files",
@@ -1314,7 +1314,7 @@ jobs:
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-home'
           SETTINGS_JSON: |-
             {
-              "model": { "maxSessionTurns": 400, "reasoningEffort": "${{ vars.QWEN_AUTOFIX_EFFORT }}" },
+              "model": { "maxSessionTurns": 400, "generationConfig": { "samplingParams": { "reasoning_effort": "${{ vars.QWEN_AUTOFIX_EFFORT || 'max' }}" } } },
               "coreTools": [
                 "read_file",
                 "read_many_files",
@@ -5369,7 +5369,7 @@ jobs:
           BASE: 'main'
           SETTINGS_JSON: |-
             {
-              "model": { "maxSessionTurns": 400, "reasoningEffort": "${{ vars.QWEN_AUTOFIX_EFFORT }}" },
+              "model": { "maxSessionTurns": 400, "generationConfig": { "samplingParams": { "reasoning_effort": "${{ vars.QWEN_AUTOFIX_EFFORT || 'max' }}" } } },
               "coreTools": [
                 "read_file",
                 "read_many_files",
@@ -5615,7 +5615,7 @@ jobs:
           BASE: 'main'
           SETTINGS_JSON: |-
             {
-              "model": { "maxSessionTurns": 400, "reasoningEffort": "${{ vars.QWEN_AUTOFIX_EFFORT }}" },
+              "model": { "maxSessionTurns": 400, "generationConfig": { "samplingParams": { "reasoning_effort": "${{ vars.QWEN_AUTOFIX_EFFORT || 'max' }}" } } },
               "coreTools": [
                 "read_file",
                 "read_many_files",

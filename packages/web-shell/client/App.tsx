@@ -5417,6 +5417,15 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openCurrentContextUsagePanel = useCallback(() => {
+    if (connection.sessionId)
+      openContextUsagePanel(connection.sessionId, sessionActions);
+  }, [connection.sessionId, openContextUsagePanel, sessionActions]);
+  const openPaneContextUsagePanel = useCallback(
+    (sessionId: string, actions: DaemonSessionActions) =>
+      openContextUsagePanel(sessionId, actions, true),
+    [openContextUsagePanel],
+  );
   const openAttachmentPanel = useCallback(
     (
       file: AttachmentPreviewRequest,
@@ -10957,6 +10966,12 @@ export function App({
   useEffect(() => {
     const onBtwShortcut = (e: KeyboardEvent) => {
       if (interactionBlocked || pendingApproval || isWebTerminalTarget(e))
+        return;
+      const target = e.composedPath()[0] ?? e.target;
+      if (
+        target instanceof Element &&
+        target.closest('[data-web-shell-context-popover]')
+      )
         return;
       const message = btwMessage;
       if (!message || message.role !== 'btw') return;
@@ -17534,6 +17549,9 @@ export function App({
         .catch(() => undefined);
     }
   }, [primaryContextControls, paneContextControls, compressionResults]);
+  const reconciledContextControls = useRef(
+    new WeakMap<ContextUsageControls, ContextUsageControls>(),
+  );
   const contextUsageControls = useMemo(() => {
     const live =
       primaryContextControls &&
@@ -17545,18 +17563,21 @@ export function App({
           }
         : paneContextControls;
     return Object.fromEntries(
-      Object.entries(live).map(([id, controls]) => [
-        id,
-        {
-          ...controls,
-          result: controls.compressing
-            ? undefined
-            : controls.result &&
-                !observedCompressionResults.current.has(controls.result)
-              ? controls.result
-              : (compressionResults[id] ?? controls.result),
-        },
-      ]),
+      Object.entries(live).map(([id, controls]) => {
+        const result = controls.compressing
+          ? undefined
+          : controls.result &&
+              !observedCompressionResults.current.has(controls.result)
+            ? controls.result
+            : (compressionResults[id] ?? controls.result);
+        const previous = reconciledContextControls.current.get(controls);
+        const reconciled =
+          previous && previous.result === result
+            ? previous
+            : { ...controls, result };
+        reconciledContextControls.current.set(controls, reconciled);
+        return [id, reconciled];
+      }),
     );
   }, [
     mainView,
@@ -19070,6 +19091,7 @@ export function App({
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         registerContextUsageControls={registerContextUsageControls}
                         onBeforeContextCompress={preparePaneContextCompression}
+                        onOpenContextUsage={openPaneContextUsagePanel}
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}
@@ -19881,6 +19903,14 @@ export function App({
                           }
                           onShowContextUsage={
                             contextUsageAvailable ? handleShowContextUsage : undefined
+                          }
+                          contextUsageControls={
+                            connection.sessionId
+                              ? contextUsageControls[connection.sessionId]
+                              : undefined
+                          }
+                          onOpenContextUsage={
+                            contextUsageAvailable ? openCurrentContextUsagePanel : undefined
                           }
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}

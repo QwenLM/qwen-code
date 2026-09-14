@@ -229,6 +229,10 @@ export interface ChatPaneProps {
   ) => void;
   registerContextUsageControls?: RegisterContextUsageControls;
   onBeforeContextCompress?: (sessionId: string) => void;
+  onOpenContextUsage?: (
+    sessionId: string,
+    sessionActions: DaemonSessionActions,
+  ) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
@@ -274,6 +278,7 @@ export function ChatPane({
   onPaneArtifactsChange,
   registerContextUsageControls,
   onBeforeContextCompress,
+  onOpenContextUsage,
   messageTurnOutputs,
   embedded = false,
   onFirstPromptAdmitted,
@@ -1432,6 +1437,10 @@ export function ChatPane({
     clearFollowup();
     if (connection.sessionId) onBeforeContextCompress?.(connection.sessionId);
   }, [clearFollowup, connection.sessionId, onBeforeContextCompress]);
+  const handleOpenContextUsage = useCallback(() => {
+    if (connection.sessionId)
+      onOpenContextUsage?.(connection.sessionId, actions);
+  }, [actions, connection.sessionId, onOpenContextUsage]);
   const contextUsageControls = useContextUsageControls({
     connection,
     actions,
@@ -1795,6 +1804,14 @@ export function ChatPane({
             }
             onShowContextUsage={
               contextUsageAvailable ? handleShowContextUsage : undefined
+            }
+            contextUsageControls={
+              onOpenContextUsage ? contextUsageControls : undefined
+            }
+            onOpenContextUsage={
+              contextUsageAvailable && onOpenContextUsage
+                ? handleOpenContextUsage
+                : undefined
             }
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}
