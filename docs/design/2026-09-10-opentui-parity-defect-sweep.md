@@ -915,10 +915,10 @@ What was verified, and how far the verification reaches:
   scope for a sweep that measures itself against ink's behaviour as it stands;
   it is recorded here so the divergence between the two renderers is not
   re-reported as a porting gap.
-- The tool card does not print the call's arguments inline, and omits the
-  trailing indicator ink puts beside a row that is still pending. The first is
-  not cosmetic — it is why a disabled-tool error reads as an empty card here and
-  as a card carrying the full argument JSON there. A settled card also keeps the
-  position it was created at, where ink commits it to permanent history after
-  whatever notices arrived meanwhile, so a notice printed during a tool call
-  lands after the card here and before it there.
+- A settled card keeps the position it was created at, where ink commits it to
+  permanent history after whatever notices arrived meanwhile, so a notice
+  printed during a tool call lands after the card here and before it there.
+  This item also recorded an arguments row missing from the card and a pending
+  indicator drawn on every card rather than the one call awaiting approval;
+  Decision 25 closed both, and the empty-card reading of a disabled-tool error
+  went with the first.
