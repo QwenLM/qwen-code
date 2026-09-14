@@ -18,6 +18,13 @@ export interface VariableSchema {
 export interface LoadExtensionContext {
   extensionDir: string;
   workspaceDir?: string;
+  /** Trust symlinked manifest/hooks files (link-mode installs read the user's
+   *  own dev tree). Defaults to strict confinement. */
+  trustSymlinks?: boolean;
+  /** Out-of-band link grant: set by the store snapshot (CLI link installs)
+   *  or by the installing flow itself. Never derived from the extension's
+   *  own payload — a hand-placed manifest cannot self-grant. */
+  trustedLinkSource?: string;
 }
 
 const PATH_SEPARATOR_DEFINITION = {
