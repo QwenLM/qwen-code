@@ -30,7 +30,7 @@ const find = (actions, r) => actions.find((a) => a.id === r.id);
 describe('review runner schedule', () => {
   it('reads the night window across midnight in Asia/Shanghai', () => {
     assert.deepEqual(
-      [21, 22, 23, 0, 2, 3, 8].map((h) => isNight(h, 22, 3)),
+      [16, 17, 23, 0, 4, 5, 12].map((h) => isNight(h, 17, 5)),
       [false, true, true, true, true, false, false],
     );
     assert.equal(isNight(10, 10, 10), false);
@@ -93,14 +93,15 @@ describe('review runner schedule', () => {
   it('is wired to the review job and the three schedule variables', () => {
     const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
     const schedule = read('../workflows/qwen-review-runner-schedule.yml');
-    for (const name of [
-      'QWEN_REVIEW_NIGHT_START',
-      'QWEN_REVIEW_NIGHT_END',
-      'QWEN_REVIEW_DAY_RUNNERS',
+    // The defaults live in the workflow; a repository variable overrides.
+    for (const [name, fallback] of [
+      ['QWEN_REVIEW_NIGHT_START', '17'],
+      ['QWEN_REVIEW_NIGHT_END', '5'],
+      ['QWEN_REVIEW_DAY_RUNNERS', '0'],
     ]) {
-      assert.match(
-        schedule,
-        new RegExp(`${name}: '\\$\\{\\{ vars\\.${name} \\}\\}'`),
+      assert.ok(
+        schedule.includes(`${name}: "\${{ vars.${name} || '${fallback}' }}"`),
+        name,
       );
     }
     assert.match(

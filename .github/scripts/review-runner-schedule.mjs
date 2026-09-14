@@ -105,10 +105,11 @@ async function main() {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? '')) {
     throw new Error('usage: review-runner-schedule.mjs <owner/repo>');
   }
-  // The schedule lives in repository variables only; there are no built-in
-  // defaults. A missing or malformed one fails the run by name, as does a
-  // missing token: a silent no-op would freeze the labels in whichever phase
-  // they are in.
+  // The workflow supplies every value (its default, or the repository
+  // variable that overrides it); the script has no defaults of its own. A
+  // missing or malformed value fails the run by name, as does a missing
+  // token: a silent no-op would freeze the labels in whichever phase they
+  // are in.
   const schedule = {
     QWEN_REVIEW_NIGHT_START: intVar(process.env.QWEN_REVIEW_NIGHT_START, 23),
     QWEN_REVIEW_NIGHT_END: intVar(process.env.QWEN_REVIEW_NIGHT_END, 23),

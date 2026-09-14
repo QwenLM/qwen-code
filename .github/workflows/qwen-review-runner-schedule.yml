@@ -3,10 +3,11 @@ name: 'Qwen Review Runner Schedule'
 # Sizes the PR review pool (`ecs-review`, used by qwen-code-pr-review.yml's
 # review-pr job) by time of day: QWEN_REVIEW_DAY_RUNNERS hk2 runners by day,
 # every hk2 runner from QWEN_REVIEW_NIGHT_START to QWEN_REVIEW_NIGHT_END
-# (hours, Asia/Shanghai). Those three repository variables ARE the schedule
-# (17, 5 and 0 when this landed); the script has no defaults, so an unset or
-# malformed one fails the run by name. Reviews that find no runner queue and
-# drain at night. Logic: .github/scripts/review-runner-schedule.mjs.
+# (hours, Asia/Shanghai). The defaults are below: 17:00 to 05:00, none by
+# day. A repository variable of the same name overrides each one; a
+# malformed value fails the run by name. Reviews that find no runner queue
+# and drain in the evening window. Logic:
+# .github/scripts/review-runner-schedule.mjs.
 #
 # The runner-label API needs repository Administration: write, which no
 # GITHUB_TOKEN grants: RUNNER_ADMIN_PAT is a fine-grained PAT for this
@@ -46,7 +47,10 @@ jobs:
       - name: 'Converge review runner labels'
         env:
           RUNNER_ADMIN_TOKEN: '${{ secrets.RUNNER_ADMIN_PAT }}'
-          QWEN_REVIEW_NIGHT_START: '${{ vars.QWEN_REVIEW_NIGHT_START }}'
-          QWEN_REVIEW_NIGHT_END: '${{ vars.QWEN_REVIEW_NIGHT_END }}'
-          QWEN_REVIEW_DAY_RUNNERS: '${{ vars.QWEN_REVIEW_DAY_RUNNERS }}'
+          # `||` falls back only when the variable is unset: a variable's
+          # value is a string, and "0" is non-empty, so an override of 0
+          # (no review runners by day, or a window ending at midnight) holds.
+          QWEN_REVIEW_NIGHT_START: "${{ vars.QWEN_REVIEW_NIGHT_START || '17' }}"
+          QWEN_REVIEW_NIGHT_END: "${{ vars.QWEN_REVIEW_NIGHT_END || '5' }}"
+          QWEN_REVIEW_DAY_RUNNERS: "${{ vars.QWEN_REVIEW_DAY_RUNNERS || '0' }}"
         run: 'node .github/scripts/review-runner-schedule.mjs "$GITHUB_REPOSITORY"'
