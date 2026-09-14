@@ -189,6 +189,12 @@ describe('Desktop OSS mirror workflow', () => {
     expect(
       source.indexOf('ancestor="$(git rev-parse "${sha}^")"'),
     ).toBeLessThan(source.indexOf('git merge-base --is-ancestor "$ancestor"'));
+    // The peel feeds the ancestry check only; the build still consumes the tag
+    // commit. Emitting $ancestor instead would publish desktop-vX.Y.Z bundling
+    // CLI X.Y.(Z-1) with every gate green.
+    expect(source).toContain('sha="$(git rev-parse FETCH_HEAD)"');
+    expect(source).toContain('echo "sha=$sha" >> "$GITHUB_OUTPUT"');
+    expect(source).not.toContain('sha="$ancestor"');
   });
 
   it('says what the release arm actually establishes', () => {
