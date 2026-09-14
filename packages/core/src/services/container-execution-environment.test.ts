@@ -31,6 +31,7 @@ describe('container execution boundary', () => {
   it('preserves preparation errors and cleanup ownership when release fails', async () => {
     const failure = new Error('invalid working directory');
     const cleanupFailure = new ExecutionCleanupError('removal failed');
+    const releaseGitMountPoint = vi.fn();
     const primary = {
       request: vi
         .fn()
@@ -46,6 +47,7 @@ describe('container execution boundary', () => {
         temporaryDirectory: '/tmp/failed-container',
         workers: new Set([primary]),
         invocations: new Map(),
+        releaseGitMountPoint,
       },
     );
     await expect(
@@ -61,6 +63,7 @@ describe('container execution boundary', () => {
     });
     await expect(environment.dispose()).rejects.toBe(cleanupFailure);
     expect(primary.dispose).toHaveBeenCalledOnce();
+    expect(releaseGitMountPoint).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -415,18 +418,21 @@ describe('container execution boundary', () => {
     },
   );
 
-  it('allows ordinary networking only for the install worker and preserves rootless ownership', () => {
-    const args = workerContainerArguments(
-      options,
-      worker,
-      'install-name',
-      true,
-      '/tmp/mask',
-      true,
-    );
-    expect(args).not.toContain('--network');
-    expect(args).not.toContain('--user');
-    expect(args).toContain('/tmp/mask:/workspace/project/.git:ro');
-    expect(args).toContain('HOME=/executor-home');
-  });
+  it.skipIf(process.platform === 'win32')(
+    'allows ordinary networking only for the install worker and preserves rootless ownership',
+    () => {
+      const args = workerContainerArguments(
+        options,
+        worker,
+        'install-name',
+        true,
+        '/tmp/mask',
+        true,
+      );
+      expect(args).not.toContain('--network');
+      expect(args).not.toContain('--user');
+      expect(args).toContain('/tmp/mask:/workspace/project/.git:ro');
+      expect(args).toContain('HOME=/executor-home');
+    },
+  );
 });

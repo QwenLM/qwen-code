@@ -201,18 +201,40 @@ existing recovery path. Workers can still modify their shared output contents.
 
 Always mask the working tree's `.git` entry with an empty read-only mount on
 both the primary and installation workers, even when the entry is initially
-absent. Use a directory mask for an absent entry or directory and a file mask
+absent. This also prevents container code from creating root Git metadata that
+host Git clients could subsequently interpret, including configuration that
+runs external programs. Use a directory mask for an absent entry or directory and a file mask
 for a regular file. Reject symbolic links and other entry types. Recheck before
 container creation and attachment; a file/directory kind change requires a new
 agent environment. These checks are not atomic with concurrent host filesystem
-changes. The runtime may leave an empty `.git` mount-point directory in a
-previously non-Git workspace; executor cleanup does not remove workspace entries.
-In-container `git init` at the workspace root is consequently unsupported. Linked
+changes.
+
+For an absent entry, the CLI creates an empty mount-point directory as the host
+user before starting the runtime, and records its device and inode. Sibling
+environments in the same CLI process share its ownership. After all owning
+workers have stopped, the last environment removes only that same empty directory
+with a non-recursive removal. Pre-existing entries, replacements and directories
+that gained contents are preserved. Failed worker cleanup retains ownership and
+the backing mask. A hard exit can leave the mount point behind; there is no
+crash reaper or coordination between independent CLI processes. Do not run
+independent CLI processes concurrently in the same non-Git workspace. While in
+use, the placeholder is visible to host-side repository discovery too.
+
+The container sees an empty read-only `.git` even for a non-Git workspace.
+Existence-gated package lifecycle scripts may take their Git branch and fail
+when they propagate the Git error; this does not imply that all hook installers
+fail. In-container repository detection can also change ignore-file filtering
+and select Git-backed search strategies. File discovery may therefore omit
+paths that the parent, initialized before the placeholder, still lists.
+In-container `git init` at the workspace root is unsupported. Linked
 worktrees refer to a shared common directory which contains parent and sibling
 state and may contain credentials. Only the selected workspace root's `.git` is
 masked. Nested repositories and
 submodules inside the workspace remain readable and writable workspace content,
-including any credentials stored there. This is not a repository-secret filter.
+including any credentials stored there. Their repository-local configuration
+can name programs that host Git clients later execute; container-written files
+may have the invoking user's ownership. Container isolation does not make those
+files safe for subsequent host execution. This is not a repository-secret filter.
 The host still sees the actual changes and applies the existing worktree
 preservation rules. Git
 commit transfer or a private Git metadata view requires a separate design.

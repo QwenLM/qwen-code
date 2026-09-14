@@ -17,12 +17,14 @@ import {
   mkdtemp,
   realpath,
   rm,
+  rmdir,
   writeFile,
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parse } from 'shell-quote';
+import { Mutex } from 'async-mutex';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -158,7 +160,7 @@ export function workerContainerArguments(
   return args;
 }
 
-async function gitEntryIsDirectory(workspace: string): Promise<boolean> {
+async function readGitEntry(workspace: string) {
   const entry = await lstat(join(workspace, '.git')).catch(
     (error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT') throw error;
@@ -169,13 +171,75 @@ async function gitEntryIsDirectory(workspace: string): Promise<boolean> {
     throw new Error('A symlinked .git entry cannot be safely mounted.');
   if (entry && !entry.isDirectory() && !entry.isFile())
     throw new Error('The .git entry must be a regular file or directory.');
-  return !entry || entry.isDirectory();
+  return entry;
+}
+
+const gitMountPointMutex = new Mutex();
+const gitMountPoints = new Map<
+  string,
+  { users: number; dev: number; ino: number }
+>();
+
+async function acquireGitMountPoint(workspace: string) {
+  return gitMountPointMutex.runExclusive(async () => {
+    const path = join(workspace, '.git');
+    const entry = await readGitEntry(workspace);
+    let point = gitMountPoints.get(path);
+    if (point) {
+      if (!entry || entry.dev !== point.dev || entry.ino !== point.ino) {
+        throw new Error(
+          'The shared .git mount point changed while still in use.',
+        );
+      }
+    } else if (!entry) {
+      await mkdir(path);
+      const created = await lstat(path);
+      if (!created.isDirectory()) {
+        throw new Error('The .git mount point changed during creation.');
+      }
+      point = { users: 0, dev: created.dev, ino: created.ino };
+      gitMountPoints.set(path, point);
+    }
+    const directory = !entry || entry.isDirectory();
+    if (!point) return { directory, release: undefined };
+
+    // Siblings may share a workspace; only the last owner removes its target.
+    const owned = point;
+    owned.users++;
+    return {
+      directory,
+      release: () =>
+        gitMountPointMutex.runExclusive(async () => {
+          if (--owned.users > 0) return;
+          try {
+            const current = await lstat(path).catch(
+              (error: NodeJS.ErrnoException) => {
+                if (error.code !== 'ENOENT') throw error;
+                return undefined;
+              },
+            );
+            if (
+              current?.isDirectory() &&
+              current.dev === owned.dev &&
+              current.ino === owned.ino
+            ) {
+              await rmdir(path).catch((error: NodeJS.ErrnoException) => {
+                if (error.code !== 'ENOENT' && error.code !== 'ENOTEMPTY')
+                  throw error;
+              });
+            }
+          } finally {
+            gitMountPoints.delete(path);
+          }
+        }),
+    };
+  });
 }
 
 async function validateGitMask(workspace: string, gitMask: string) {
+  const entry = await readGitEntry(workspace);
   if (
-    (await gitEntryIsDirectory(workspace)) !==
-    (await lstat(gitMask)).isDirectory()
+    (!entry || entry.isDirectory()) !== (await lstat(gitMask)).isDirectory()
   ) {
     throw new Error(
       'The workspace .git entry changed type; restart the container agent.',
@@ -373,6 +437,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
   private readonly workers = new Set<ContainerWorker>();
   private readonly invocations = new Map<string, ContainerWorker>();
   private disposal?: Promise<void>;
+  private releaseGitMountPoint?: () => Promise<void>;
   private constructor(
     private readonly options: ContainerExecutionOptions,
     private readonly workerOptions: ExecutionWorkerOptions,
@@ -477,7 +542,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
       maxBufferedOutputBytes:
         config.getShellExecutionConfig().maxBufferedOutputBytes,
     };
-    const gitDirectory = await gitEntryIsDirectory(workspace);
+    await readGitEntry(workspace);
     const temporaryDirectory = await mkdtemp(
       join(temporaryRoot, 'qwen-agent-executor-'),
     );
@@ -494,7 +559,9 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
     try {
       await mkdir(environment.outputDirectory);
       workerOptions.outputDirectory = environment.outputDirectory;
-      if (gitDirectory) await mkdir(gitMask);
+      const gitMountPoint = await acquireGitMountPoint(workspace);
+      environment.releaseGitMountPoint = gitMountPoint.release;
+      if (gitMountPoint.directory) await mkdir(gitMask);
       else await writeFile(gitMask, '');
       await primary.start(workerOptions, rootless, gitMask, false, signal);
       return environment;
@@ -680,6 +747,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
         if (failure?.status === 'rejected') throw failure.reason;
         this.invocations.clear();
         this.workers.clear();
+        await this.releaseGitMountPoint?.();
         await rm(this.temporaryDirectory, { recursive: true, force: true });
       } catch (error) {
         // eslint-disable-next-line no-console -- report the exact retained resources on startup and shutdown failure
