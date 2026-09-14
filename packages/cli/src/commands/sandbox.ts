@@ -6,6 +6,7 @@
 
 import type { CommandModule } from 'yargs';
 import { DEFAULT_COMMAND_OPTIONS } from '../config/top-level-options.js';
+import { resolvePath } from '../utils/resolvePath.js';
 
 /**
  * One assertion in the `--verify` battery: a command to run confined, and a
@@ -34,7 +35,7 @@ interface SandboxArgs {
   safeMode?: boolean;
   /** Everything after `--`, which is how a command with its own flags has to be
    * passed so yargs does not try to parse `-c` and friends as ours. */
-  '--'?: Array<string | number>;
+  '--'?: string[];
 }
 
 /**
@@ -54,7 +55,14 @@ export const sandboxCommand: CommandModule = {
       // Keep `--` contents instead of discarding them: `qwen sandbox -- sh -c
       // '...'` is the only spelling that survives a command carrying its own
       // flags, and without this they never reach the handler.
-      .parserConfiguration({ 'populate--': true })
+      // 'parse-positional-numbers' stays off so yargs-parser does not coerce
+      // numeric-looking tokens after `--` (`echo 1e5 0x10` would otherwise
+      // reach the confined command as `100000 16`). Both keys go in ONE call:
+      // yargs 17's parserConfiguration replaces the config object outright.
+      .parserConfiguration({
+        'populate--': true,
+        'parse-positional-numbers': false,
+      })
       .positional('cmd', {
         describe: 'Command to run inside the sandbox',
         type: 'string',
@@ -101,10 +109,7 @@ export const sandboxCommand: CommandModule = {
     // A command may arrive as positionals or after `--`; the latter is required
     // when it has flags of its own. Positionals come first so a mixed
     // `sandbox sh -- -c 'x'` keeps its argv order.
-    const requestedCmd = [
-      ...(args.cmd ?? []),
-      ...(args['--']?.map(String) ?? []),
-    ];
+    const requestedCmd = [...(args.cmd ?? []), ...(args['--'] ?? [])];
     const writeReportLine = requestedCmd.length
       ? writeStderrLine
       : writeStdoutLine;
@@ -186,28 +191,31 @@ export const sandboxCommand: CommandModule = {
       return;
     }
 
-    const networkMode = resolveSandboxNetworkMode();
     // Settings-level extra workspace directories are bound by the hop too, so
-    // they belong in the report. A `--include-directories` flag passed to the
-    // main command is not reachable from this subcommand's argv, so the roots
-    // below are the settings-derived set, not necessarily every root a
-    // differently-invoked session would get.
+    // they belong in the report — expanded the way the session expands them.
+    // A `--include-directories` flag passed to the main command is not
+    // reachable from this subcommand's argv, so the roots below are the
+    // settings-derived set, not necessarily every root a differently-invoked
+    // session would get.
+    let networkMode: ReturnType<typeof resolveSandboxNetworkMode>;
     let rootsResult: BwrapWritableRoots;
     try {
+      networkMode = resolveSandboxNetworkMode();
       rootsResult = resolveBwrapWritableRoots(
-        effectiveSettings.context?.includeDirectories ?? [],
+        (effectiveSettings.context?.includeDirectories ?? []).map(resolvePath),
       );
     } catch (error) {
       // Same failure shape as the probe rejection above: the refusal (e.g. a
-      // workspace that is the home directory) is exactly what someone runs
-      // this subcommand to understand, so it must not escape as a raw stack.
+      // workspace that is the home directory, or a mistyped QWEN_SANDBOX_NET)
+      // is exactly what someone runs this subcommand to understand, so it must
+      // not escape as a raw stack.
       writeStderrLine(
         `Sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`,
       );
       process.exitCode = 1;
       return;
     }
-    const { targetDir, roots } = rootsResult;
+    const { targetDir, roots, readOnlyOverrides } = rootsResult;
 
     writeReportLine('Enforcement: full');
     writeReportLine(
@@ -220,9 +228,17 @@ export const sandboxCommand: CommandModule = {
       );
     }
     writeReportLine(`Target dir: ${targetDir}`);
-    writeReportLine('Writable roots:');
+    writeReportLine(
+      'Writable roots (settings-derived; a session started with --include-directories also binds those):',
+    );
     for (const root of roots) {
       writeReportLine(`  ${root}`);
+    }
+    if (readOnlyOverrides.length > 0) {
+      writeReportLine('Read-only inside a writable root:');
+      for (const override of readOnlyOverrides) {
+        writeReportLine(`  ${override}`);
+      }
     }
 
     const runConfined = (
@@ -235,6 +251,7 @@ export const sandboxCommand: CommandModule = {
           targetDir,
           networkMode,
           cliArgs: cmdArgv,
+          readOnlyOverrides,
         }),
         // The battery matches on message text rendered by the confined
         // libc, and glibc localizes strerror() through its own catalogs —
@@ -261,6 +278,7 @@ export const sandboxCommand: CommandModule = {
           targetDir,
           networkMode,
           cliArgs: requestedCmd,
+          readOnlyOverrides,
         }),
         { stdio: 'inherit' },
       );

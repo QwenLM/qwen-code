@@ -67,6 +67,7 @@ describe('qwen sandbox', () => {
     resolveBwrapWritableRootsMock.mockReturnValue({
       targetDir: '/ws',
       roots: ['/ws', '/tmp', '/repo/.git'],
+      readOnlyOverrides: [],
     });
     buildBwrapArgsMock.mockImplementation(
       ({ cliArgs }: { cliArgs: string[] }) => ['--stub', '--', ...cliArgs],
@@ -165,6 +166,38 @@ describe('qwen sandbox', () => {
     expect(report()).toContain('Backend: bwrap');
   });
 
+  // The env var, not only the flag: deleting `?? isSafeModeEnv()` must turn
+  // this red (the roots would become the settings-derived ['/extra']).
+  it('drives safe mode from QWEN_CODE_SAFE_MODE, not only the flag', async () => {
+    const merged = {
+      tools: { sandbox: true },
+      context: { includeDirectories: ['/extra'] },
+    };
+    loadSettingsMock.mockReturnValue({ merged } as never);
+    loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
+    vi.stubEnv('QWEN_CODE_SAFE_MODE', '1');
+
+    await run();
+
+    expect(loadSandboxConfigMock).toHaveBeenCalledWith(
+      merged,
+      expect.anything(),
+    );
+    expect(resolveBwrapWritableRootsMock).toHaveBeenCalledWith([]);
+  });
+
+  // Same for bare mode: reducing `isBareMode(args.bare)` to `args.bare ===
+  // true` must turn this red (loadSettings would be called).
+  it('drives bare mode from QWEN_CODE_SIMPLE, not only the flag', async () => {
+    loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
+    vi.stubEnv('QWEN_CODE_SIMPLE', '1');
+
+    await run();
+
+    expect(loadSettingsMock).not.toHaveBeenCalled();
+    expect(loadSandboxConfigMock).toHaveBeenCalledWith({}, expect.anything());
+  });
+
   // The root resolver throws FatalSandboxError for a workspace at or above the
   // home directory; that refusal is exactly what this subcommand exists to
   // explain, so it must take the reported failure path, not escape as a raw
@@ -206,6 +239,12 @@ describe('qwen sandbox', () => {
     {
       input: ['sandbox', '--', 'sh', '-c', 'echo hi'],
       expected: { '--': ['sh', '-c', 'echo hi'] },
+    },
+    {
+      // Numeric-looking tokens after `--` must reach the handler verbatim —
+      // yargs-parser would otherwise coerce them (`1e5` → 100000).
+      input: ['sandbox', '--', 'echo', '1e5', '0x10', '1.50'],
+      expected: { '--': ['echo', '1e5', '0x10', '1.50'] },
     },
   ])(
     'preserves the supported command spelling $input',

@@ -351,6 +351,10 @@ describe('isHardcodedProjectEnvExclusion', () => {
     );
     expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX_NET')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('qwen_sandbox_net')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX_IMAGE')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox_image')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('XDG_CACHE_HOME')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('xdg_cache_home')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('TMPDIR')).toBe(true);

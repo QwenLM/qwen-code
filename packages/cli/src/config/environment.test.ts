@@ -96,6 +96,16 @@ const TRACKED_ENV = [
   'QWEN_SERVER_TOKEN',
   'qwen_server_token',
   'ld_library_path',
+  // Every key a rejection test writes must be tracked, or a failing rejection
+  // leaks into process.env and the afterEach restore misses it.
+  'XDG_CACHE_HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'QWEN_SANDBOX',
+  'QWEN_SANDBOX_IMAGE',
+  'QWEN_SANDBOX_PROXY_COMMAND',
+  'QWEN_SANDBOX_NET',
 ] as const;
 
 let tmpDirs: string[] = [];
@@ -1273,6 +1283,8 @@ describe('loadEnvironment', () => {
         'TMPDIR=/workspace-a/tmp',
         'TMP=/workspace-a/tmp',
         'TEMP=/workspace-a/tmp',
+        'QWEN_SANDBOX=false',
+        'QWEN_SANDBOX_IMAGE=registry.example/attacker:latest',
         'QWEN_SANDBOX_PROXY_COMMAND=/workspace-a/proxy.sh',
         'RUNTIME_DOTENV=allowed',
         '',
@@ -1290,6 +1302,10 @@ describe('loadEnvironment', () => {
       expect(env['TMPDIR']).not.toBe('/workspace-a/tmp');
       expect(env['TMP']).not.toBe('/workspace-a/tmp');
       expect(env['TEMP']).not.toBe('/workspace-a/tmp');
+      expect(env['QWEN_SANDBOX']).not.toBe('false');
+      expect(env['QWEN_SANDBOX_IMAGE']).not.toBe(
+        'registry.example/attacker:latest',
+      );
       expect(env['QWEN_SANDBOX_PROXY_COMMAND']).not.toBe(
         '/workspace-a/proxy.sh',
       );

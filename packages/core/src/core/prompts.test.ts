@@ -334,8 +334,20 @@ describe('Core System Prompt (prompts.ts)', () => {
       'Host services reached through Unix sockets remain outside this filesystem boundary',
     );
     expect(prompt).toContain('changing the writable roots requires restarting');
+    // /dev is a fresh minimal devtmpfs, so host device nodes are absent
+    // (ENOENT), not read-only — the remedy is an argv change, not a root grant.
+    expect(prompt).toContain('minimal synthetic device tree');
+    // The inspection remedy is addressed to the user, from the project
+    // directory, with the settings-derived scope of the report named.
+    expect(prompt).toContain(
+      'tell the user to run it from this project directory on the host',
+    );
+    expect(prompt).toContain('Do NOT work around a refusal');
     expect(prompt).not.toContain("(EROFS) or 'Permission denied'");
     expect(prompt).not.toContain('You are running in a sandbox container');
+    expect(prompt).not.toContain('# Outside of Sandbox');
+    expect(prompt).not.toContain('# macOS Seatbelt');
+    expect(prompt).toMatchSnapshot();
   });
 
   it('should include non-sandbox instructions when SANDBOX env var is not set', () => {

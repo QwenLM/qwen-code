@@ -159,14 +159,19 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'XDG_CONFIG_HOME',
   'GIT_CONFIG_COUNT',
   'GIT_CONFIG_PARAMETERS',
-  // The sandbox backend selection and network mode are confinement decisions:
-  // `resolveSandboxNetworkMode` flips to `proxied` purely on the presence of
-  // QWEN_SANDBOX_PROXY_COMMAND, and the bwrap branch then executes that value
-  // through `bash -c` on the host, outside the confinement, before the agent
-  // starts. A project `.env` or settings.env supplying it is repository
-  // content running as the user — the same class as GIT_PROXY_COMMAND. The
-  // operator's launch environment or a home `.env` remains the only trusted
-  // source.
+  // The sandbox backend selection and network mode are confinement decisions.
+  // QWEN_SANDBOX decides whether confinement runs at all and which backend
+  // (an untrusted repo could cancel it with `QWEN_SANDBOX=false`, or force a
+  // backend over the operator's choice), and QWEN_SANDBOX_IMAGE selects the
+  // container image the agent runs inside. `resolveSandboxNetworkMode` flips
+  // to `proxied` purely on the presence of QWEN_SANDBOX_PROXY_COMMAND, and
+  // the bwrap branch then executes that value through `bash -c` on the host,
+  // outside the confinement, before the agent starts. A project `.env` or
+  // settings.env supplying any of them is repository content deciding the
+  // confinement — the same class as GIT_PROXY_COMMAND. The operator's launch
+  // environment or a home `.env` remains the only trusted source.
+  'QWEN_SANDBOX',
+  'QWEN_SANDBOX_IMAGE',
   'QWEN_SANDBOX_PROXY_COMMAND',
   'QWEN_SANDBOX_NET',
   // The bwrap writable-root derivation reads XDG_CACHE_HOME and, via

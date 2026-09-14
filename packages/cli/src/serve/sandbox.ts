@@ -231,13 +231,32 @@ function entrypoint(workdir: string, cliArgs: string[]): string[] {
  * profile vocabulary. */
 export type SandboxNetworkMode = 'open' | 'closed' | 'proxied';
 
+const VALID_SANDBOX_NETWORK_MODES: readonly SandboxNetworkMode[] = [
+  'open',
+  'closed',
+  'proxied',
+];
+
 export function resolveSandboxNetworkMode(
   env: NodeJS.ProcessEnv = process.env,
 ): SandboxNetworkMode {
+  // A non-empty value naming no mode is a typo on a hard-deny switch:
+  // pattern-matching only `closed` would fall through to the LEAST restrictive
+  // mode, silently dropping the confinement the operator asked for (D4).
+  // Reject it like the sibling sandbox-command switch does.
+  const requested = env['QWEN_SANDBOX_NET']?.toLowerCase().trim();
+  if (
+    requested &&
+    !VALID_SANDBOX_NETWORK_MODES.includes(requested as SandboxNetworkMode)
+  ) {
+    throw new FatalSandboxError(
+      `Invalid QWEN_SANDBOX_NET '${env['QWEN_SANDBOX_NET']}'. Must be one of ${VALID_SANDBOX_NETWORK_MODES.join(', ')}.`,
+    );
+  }
   // An explicit `closed` is a hard deny and outranks a configured proxy: the
   // caller asked for no network, and honoring the proxy instead would hand back
   // the egress they just switched off.
-  if (env['QWEN_SANDBOX_NET']?.toLowerCase().trim() === 'closed') {
+  if (requested === 'closed') {
     return 'closed';
   }
   return env['QWEN_SANDBOX_PROXY_COMMAND'] ? 'proxied' : 'open';
@@ -366,6 +385,9 @@ export function normalizeWritableRoots(
 export interface BwrapWritableRoots {
   targetDir: string;
   roots: string[];
+  /** Paths re-bound read-only on top of a writable root (must follow the
+   * writable bind in argv order to stack). */
+  readOnlyOverrides: string[];
 }
 
 /**
@@ -411,10 +433,57 @@ export function resolveBwrapWritableRoots(
     ...resolveGitWritableRoots(targetDir),
     path.join(homeDir, '.npm'),
     path.join(homeDir, '.gitconfig'),
-    ...includedDirs,
   ]);
 
-  return { targetDir, roots };
+  // Extra workspace directories get a stricter floor than the built-in roots:
+  // they can arrive from workspace-scope settings (`context.includeDirectories`,
+  // admitted by default with folder trust off), so repository content could
+  // name `~/.ssh` — or a sibling checkout carrying a `.git` — and have it
+  // bound read-write. Anything resolving inside the home directory is refused;
+  // directories already covered by a trusted root (the workspace itself, the
+  // cache/runtime dirs) stay admitted.
+  const realHomeDir = fs.realpathSync(homeDir);
+  const extras: string[] = [];
+  for (const dir of includedDirs) {
+    let real: string;
+    try {
+      real = fs.realpathSync(dir);
+    } catch {
+      // Same rule as the built-ins: a root that is not there is dropped
+      // instead of turning startup into an error.
+      continue;
+    }
+    if (roots.some((root) => isSubpath(root, real))) {
+      continue;
+    }
+    if (isSubpath(realHomeDir, real)) {
+      throw new FatalSandboxError(
+        `Refusing sandbox writable root '${real}': additional workspace directories inside the home directory must stay read-only.`,
+      );
+    }
+    extras.push(real);
+  }
+
+  // The QWEN_DIR `.env` is operator-trusted execution input (backend
+  // selection, network mode, the host-side proxy command) that every later
+  // launch re-reads, and QWEN_DIR itself must stay writable — so the file
+  // gets a read-only bind layered over the writable root, keeping a confined
+  // process from rewriting what the host next trusts.
+  const readOnlyOverrides: string[] = [];
+  const qwenEnvFile = path.join(qwenDir, '.env');
+  try {
+    if (fs.statSync(qwenEnvFile).isFile()) {
+      readOnlyOverrides.push(fs.realpathSync(qwenEnvFile));
+    }
+  } catch {
+    // No `.env` yet — nothing to pin.
+  }
+
+  return {
+    targetDir,
+    roots: normalizeWritableRoots([...roots, ...extras]),
+    readOnlyOverrides,
+  };
 }
 
 /** Options for {@link buildBwrapArgs}, split out so the unit tests can drive
@@ -424,6 +493,7 @@ export interface BwrapArgsOptions {
   targetDir: string;
   networkMode: SandboxNetworkMode;
   cliArgs: readonly string[];
+  readOnlyOverrides: readonly string[];
 }
 
 /**
@@ -454,6 +524,11 @@ export function buildBwrapArgs(options: BwrapArgsOptions): string[] {
   }
   for (const root of options.writableRoots) {
     args.push('--bind', root, root);
+  }
+  // Read-only overlays follow the writable binds so they stack on top of the
+  // root they carve out of (bwrap applies mounts in argv order).
+  for (const override of options.readOnlyOverrides) {
+    args.push('--ro-bind', override, override);
   }
   args.push('--chdir', options.targetDir, '--');
   args.push(...options.cliArgs);
@@ -637,7 +712,11 @@ export async function start_sandbox(
     const networkMode = resolveSandboxNetworkMode();
     writeStderrLine(`using bwrap (network: ${networkMode}) ...`);
 
-    const { targetDir, roots: writableRoots } = resolveBwrapWritableRoots(
+    const {
+      targetDir,
+      roots: writableRoots,
+      readOnlyOverrides,
+    } = resolveBwrapWritableRoots(
       cliConfig ? cliConfig.getWorkspaceContext().getDirectories() : [],
     );
 
@@ -646,6 +725,7 @@ export async function start_sandbox(
       targetDir,
       networkMode,
       cliArgs,
+      readOnlyOverrides,
     });
 
     const nodeOptions = [

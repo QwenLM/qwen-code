@@ -160,6 +160,9 @@ C 源码就放在旁边 `packages/core/vendor/landlock-run/src/qwen-landlock-run
 
 **决策。** `open`（共享网络）/ `closed`（`--unshare-net`）/ `proxied`（共享网络
 并向主机侧 `QWEN_SANDBOX_PROXY_COMMAND` 注入 `HTTP(S)_PROXY`）。解析顺序：
+`QWEN_SANDBOX_NET` 非空且不是 `closed`/`open`/`proxied` 之一时，启动即拒绝
+（`Invalid QWEN_SANDBOX_NET …`）——硬拒绝开关上的拼写错误绝不能静默落到
+最宽松的模式。否则：
 
 1. `QWEN_SANDBOX_NET=closed` ⇒ closed（硬拒绝，优先于代理配置）。
 2. 否则设置了 `QWEN_SANDBOX_PROXY_COMMAND` ⇒ proxied。
@@ -259,17 +262,17 @@ _存活_。结果是一个永远不会显示为已死的 owner，于是交接与
    `realpathSync`（内核比较的是解析后的路径；seatbelt 分支出于同一原因已经做了
    规范化，`sandbox.ts:252-259`）：
 
-   | 根              | 值                                                                                                   |
-   | --------------- | ---------------------------------------------------------------------------------------------------- |
-   | `TARGET_DIR`    | `realpathSync(process.cwd())`                                                                        |
-   | `TMP_DIR`       | `realpathSync(os.tmpdir())` —— 以可写方式绑定；`/tmp` 从不被换成新的 tmpfs（见下）                   |
-   | `CACHE_DIR`     | `XDG_CACHE_HOME`，为空或未设置则用 `~/.cache`（只创建末级目录，然后 realpath）                       |
-   | `QWEN_DIR`      | `Storage.getGlobalQwenDir()`（mkdir -p，realpath）                                                   |
-   | `RUNTIME_DIR`   | `Storage.getRuntimeBaseDir()`（mkdir -p，realpath）                                                  |
-   | git 目录        | `git rev-parse --git-dir` 与 `--git-common-dir`，当它们解析到 `TARGET_DIR` 之外时                    |
-   | npm 缓存        | `~/.npm`（若存在）                                                                                   |
-   | git 配置        | `~/.gitconfig`（若存在，按文件绑定）                                                                 |
-   | `INCLUDE_DIR_n` | `workspaceContext.getDirectories()` 去掉 `TARGET_DIR`（无 5 个上限；argv 没有 profile 参数数量限制） |
+   | 根              | 值                                                                                                                                       |
+   | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+   | `TARGET_DIR`    | `realpathSync(process.cwd())`                                                                                                            |
+   | `TMP_DIR`       | `realpathSync(os.tmpdir())` —— 以可写方式绑定；`/tmp` 从不被换成新的 tmpfs（见下）                                                       |
+   | `CACHE_DIR`     | `XDG_CACHE_HOME`，为空或未设置则用 `~/.cache`（只创建末级目录，然后 realpath）                                                           |
+   | `QWEN_DIR`      | `Storage.getGlobalQwenDir()`（mkdir -p，realpath）                                                                                       |
+   | `RUNTIME_DIR`   | `Storage.getRuntimeBaseDir()`（mkdir -p，realpath）                                                                                      |
+   | git 目录        | `git rev-parse --git-dir` 与 `--git-common-dir`，当它们解析到 `TARGET_DIR` 之外时                                                        |
+   | npm 缓存        | `~/.npm`（若存在）                                                                                                                       |
+   | git 配置        | `~/.gitconfig`（若存在，按文件绑定）                                                                                                     |
+   | `INCLUDE_DIR_n` | `workspaceContext.getDirectories()` 去掉 `TARGET_DIR`（无 5 个上限；argv 没有 profile 参数数量限制；解析到 home 目录内部的条目会被拒绝） |
 
    **为什么需要 git 那两个根。** 在 worktree 检出里 `.git` 是一个指向别处的文件，
    因此 index、`HEAD`、reflog 和 objects 全都位于工作区之外。对照本仓库自身的
@@ -415,7 +418,7 @@ CI 通道与 E2E 表也都要求这一点。
 
 ### 审查跟进契约
 
-- 在启动 bwrap 前，拒绝规范化后等于 HOME 或其任意祖先（包括 `/`）的可写根。此规则也适用于符号链接和额外工作区目录。应使用范围更小的工作区或缓存路径，不能静默授予整个 HOME 或主机文件系统。
+- 在启动 bwrap 前，拒绝规范化后等于 HOME 或其任意祖先（包括 `/`）的可写根。此规则也适用于符号链接和额外工作区目录，而额外工作区目录适用更严格的下限：任何解析到 home 目录内部的条目都会被拒绝，因为工作区范围的 settings（`context.includeDirectories`）是仓库内容，不能让它挑选 `~/.ssh` 或带有 `.git` 的兄弟检出这类 home 内部根。已被内建根覆盖的条目（工作区本身、缓存/运行时目录）仍然保留。应使用范围更小的工作区或缓存路径，不能静默授予整个 HOME 或主机文件系统。
 - 使用共享 `gitEnv()` 清理器派生 Git 根，防止环境中的仓库选择变量重定向探测。仅真实 `.git` 目录，或在 common 仓库下登记且反向指针匹配的 linked worktree，才能自动获得 Git 授权。符号链接元数据、伪造 gitfile、独立 Git 目录及没有该登记的 submodule gitfile 均不贡献根；用户必须显式添加所需的外部元数据目录。合法 linked worktree 继续保留 common Git 目录授权。
 - 检查命令传递显式 sandbox/image 参数；bare 模式跳过 settings 和 `.env` 加载，safe 模式忽略 settings。纯检查在无后端时可以成功退出；无法实际执行的验证或命令请求返回非零，包括已经处于沙箱内的情况。带自身参数的命令必须放在 `--` 后；之前的未知参数在解析时失败。
 - 透传命令直接继承 stdin、stdout、stderr。此模式的检查文本写入 stderr，从而保留大输出及管道中的结构化输出。验证电池继续捕获输出供各项断言使用。
@@ -494,7 +497,8 @@ CI 通道与 E2E 表也都要求这一点。
 ## Phase P2 —— 在辅助程序中收紧 seccomp
 
 **辅助程序中的 seccomp**（+约 80 行 C）：在 `no_new_privs` 之后安装一个最小 BPF
-过滤器，拒绝 `ptrace`、`mount`、`umount2`、`init_module`、`finit_module`、
+过滤器，拒绝 `ptrace`、`process_vm_readv`、`process_vm_writev`、`mount`、
+`umount2`、`init_module`、`finit_module`、
 `delete_module`、`kexec_load`、`kexec_file_load`、`bpf`、`perf_event_open`、
 `keyctl`、`iopl`、`ioperm`。这是把 Claude Code 的 `apply-seccomp` 模式折进同一个
 辅助程序；它只作用于 landlock 路径。bwrap 自身除了 `--seccomp <fd>` 之外没有
@@ -527,7 +531,7 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
 | worktree 检出里的 git                                                      | 会完全不可用                    | git dir 与 common dir 解析到 cwd 之外（布局已在 § Phase P0 核实）                                                                                                                                  | **已修** —— 两者都是可写根                                                                                       |
 | 跨进程 owner 存活性                                                        | 会静默挂起                      | `process.kill(pid, 0)` 返回非 `ESRCH` ⇒ 存活，而 PID 通过 `~/.qwen` 共享（`conversation-runtime-ownership.ts:44-65`、`serve/live/discovery.ts:147`、`worktreeSessionService.ts:424-446`）          | **已规避** —— 完全不用 PID 命名空间（D6）                                                                        |
 | GUI 启动（OAuth 登录、`artifact` 打开）                                    | 浏览器无法在约束下运行          | `xdg-open` 子进程继承约束，而 `~/.config/<browser>` 不是可写根                                                                                                                                     | 删除 display 变量 ⇒ 确定地走打印 URL 路径                                                                        |
-| `git push` 的 ssh-agent 认证                                               | 不受影响                        | agent socket 常位于 `/tmp` 之下，而它保持绑定、没有被 tmpfs 替换                                                                                                                                   | ——                                                                                                               |
+| `git push` 的 ssh-agent 认证                                               | 不受影响                        | agent socket 通常位于 `/run/user/$UID`（经只读主机绑定保持可达）；`/tmp/ssh-*` 下的 socket 也可用，因为主机 `/tmp` 保持绑定、没有被 tmpfs 替换 —— 共享 `/tmp` 暴露的面见 § 安全考量                | ——                                                                                                               |
 | 语音输入                                                                   | 不可用                          | `--dev /dev` 遮蔽 `/dev/snd`；`voice-availability.ts:50` 还需要 `PULSE_SERVER`                                                                                                                     | 已记录 —— 改用容器后端或无约束运行                                                                               |
 | 自更新                                                                     | 部分受影响                      | 受管更新根是 `~/.qwen/updates/npm`（`scripts/cli-entry.js:149-150`）——那是可写根，因此退出码 44 的受管流程可用；而 npm-global 的 `updateCommand`（`installationInfo.ts:350`）写全局 prefix，会失败 | 受管安装与独立安装正常更新；npm-global 用户从主机侧更新                                                          |
 | IDE companion、主机 `qwen serve`、localhost MCP                            | 仅在 `closed` 下不可达          | `--unshare-net` 移除 loopback（D5）                                                                                                                                                                | `open` / `proxied` 下仍可用                                                                                      |
@@ -549,7 +553,14 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
   同 uid 主机进程的根写入。P2 的 seccomp `ptrace` 拒绝帮不上忙：跟随链接并不发起
   `ptrace(2)` 调用。在 Landlock 后端上 ruleset 治理被重新打开的 inode，所以这条
   残余只存在于 bwrap。要收窄它需要 D6 的 PID 命名空间前置条件，或者挂载
-  `hidepid=` 的 procfs（后者对同 uid 目标仍然无效）。
+  `hidepid=` 的 procfs（后者对同 uid 目标仍然无效）。同一道
+  `ptrace_may_access`/Yama 闸门——同样不经过任何 `ptrace(2)` 调用——还管着
+  `open("/proc/<pid>/environ")` 与 `process_vm_readv`/`process_vm_writev`，
+  所以在 `ptrace_scope=0` 的主机上，这条残余不止是文件写入：任意同 uid
+  主机进程环境变量里的凭据会被读取，未受约束的同级进程还会被内存读写
+  （即代码注入）。这两者都不是作用于 ruleset 覆盖 inode 的文件操作，
+  Landlock 同样管不到；P2 的拒绝列表因此把
+  `process_vm_readv`/`process_vm_writev` 与 `ptrace` 一并列出。
 - **只读文件系统语义比看起来更窄**：内核只对 `S_ISREG` / `S_ISDIR` / `S_ISLNK`
   的写访问返回 `EROFS`。`--ro-bind / /` 之下的 socket、FIFO 与设备节点都被豁免，
   因此主机 unix socket 仍然可连接——这是实测结论，不是假设（§ 证据）。这在这里
@@ -575,6 +586,24 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
   proxied 模式会在宿主机上、约束之外、agent 启动之前，用 `bash -c` 执行该命令。
 - **非目录授权**：文件授权（例如 `~/.gitconfig`）只保留与文件兼容的访问位
   （内核会对非目录上的仅目录访问返回 EINVAL —— 辅助程序据此做掩码）。
+- **可写的 Git 元数据随后会在主机上被执行**：git dir / common dir 授权
+  （以及 `~/.gitconfig` 文件授权）让受约束进程可以改写 `hooks/` 与
+  `config`——`core.fsmonitor`、`core.hooksPath`、`core.pager`、别名、钩子
+  脚本——而之后**未受约束**的 `git` 调用会以用户身份运行它们。保留该授权
+  是因为 worktree 提交需要 `objects/`/`refs/`/`logs/` 可写，且该集合与
+  Seatbelt profiles 对齐（见 § 审查跟进契约）；把它收窄到排除 hooks/config
+  已记录为一项独立的跨后端决策。
+- **主机 `/tmp` 是共享的读写授权**：`os.tmpdir()` 保持绑定而不换成 tmpfs，
+  因此其下的同用户 socket 与锁路径（`/tmp/.X11-unix`、`/tmp/ssh-*/agent.*`）
+  可以从内部被 unlink 并替换——受约束进程可以顶替应答之后未受约束的
+  `git push` 签名请求，或截获主机 GUI 的显示 socket。这是刻意保留的：
+  私有 tmpfs 会破坏 GUI 启动与 ssh-agent 认证（见 § P0 可写根）。不需要
+  这些能力的操作者可以在启动前把 `TMPDIR` 指到一个按会话的目录。
+- **QWEN_DIR 的 `.env` 在约束内被钉为只读**：QWEN_DIR 是可写根（会话、
+  检查点、worktree、锁文件），但它的 `.env` 是每次后续启动都会重读的、
+  操作者信任的执行输入——包括 proxied 模式会在主机上经 `bash -c` 执行的
+  `QWEN_SANDBOX_PROXY_COMMAND`。在可写根之上叠一层只读绑定，受约束进程
+  就无法改写主机下一次信任的内容。
 - **启动器/命令失败的归因**：启动器失败以 125 退出并带 `qwen-landlock-run: `
   前缀；而一个成功 exec 的子进程也可能以 125 退出，所以消费方必须同时要求
   状态码 125 **且**有该前缀 —— 这与 dsh 的 CLI 契约钉下的规则相同。
@@ -639,7 +668,7 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
 
 | 检查项                                               | 期望                                                       |
 | ---------------------------------------------------- | ---------------------------------------------------------- |
-| 在无 docker 的 Linux VM 上 `qwen --sandbox bwrap`    | 能启动；状态行显示 `bwrap`                                 |
+| 在无 docker 的 Linux VM 上 `QWEN_SANDBOX=bwrap qwen` | 能启动；状态行显示 `bwrap`                                 |
 | 在 **worktree** 检出内：`git commit`                 | 可用（git 根的回归守卫）                                   |
 | 一个受约束会话持有时再起第二个 CLI                   | owner 交接仍然触发（D6 的回归守卫）                        |
 | 内部：`touch /usr/local/bin/x`                       | EROFS                                                      |

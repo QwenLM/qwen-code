@@ -25,8 +25,9 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-// Partial mock: this module also exports `QWEN_DIR` and friends that other
-// modules in the graph import, so only the two directory getters are replaced.
+// Total Storage mock: class statics are non-enumerable, so spreading the real
+// class would copy nothing. Only the two directory getters are consulted here;
+// the module's other named exports (QWEN_DIR, …) pass through unmocked.
 vi.mock(
   '@qwen-code/qwen-code-core/config/storage.js',
   async (importOriginal) => {
@@ -37,7 +38,6 @@ vi.mock(
     return {
       ...actual,
       Storage: {
-        ...actual.Storage,
         getGlobalQwenDir: () => storageDirs.qwen,
         getRuntimeBaseDir: () => storageDirs.runtime,
       },
@@ -64,6 +64,7 @@ import {
   normalizeWritableRoots,
   resolveBwrapWritableRoots,
   resolveGitWritableRoots,
+  resolveSandboxNetworkMode,
   start_sandbox,
 } from './sandbox.js';
 
@@ -84,11 +85,44 @@ function bindSources(args: string[]): string[] {
   return sources;
 }
 
+describe('resolveSandboxNetworkMode', () => {
+  it.each([
+    [{ QWEN_SANDBOX_NET: 'closed' }, 'closed'],
+    [{ QWEN_SANDBOX_NET: ' CLOSED ' }, 'closed'],
+    [{ QWEN_SANDBOX_NET: 'open' }, 'open'],
+    [{}, 'open'],
+    [{ QWEN_SANDBOX_PROXY_COMMAND: 'proxy-cmd' }, 'proxied'],
+    [
+      { QWEN_SANDBOX_NET: 'proxied', QWEN_SANDBOX_PROXY_COMMAND: 'proxy-cmd' },
+      'proxied',
+    ],
+    // An explicit hard deny outranks a configured proxy.
+    [
+      { QWEN_SANDBOX_NET: 'closed', QWEN_SANDBOX_PROXY_COMMAND: 'proxy-cmd' },
+      'closed',
+    ],
+  ] as Array<[NodeJS.ProcessEnv, string]>)('resolves %j to %s', (env, mode) => {
+    expect(resolveSandboxNetworkMode(env)).toBe(mode);
+  });
+
+  // A typo on the hard-deny switch must not fall through to the least
+  // restrictive mode: the operator asked for confinement and gets told.
+  it.each(['close', 'blocked', 'none', 'off'])(
+    'rejects an unrecognized QWEN_SANDBOX_NET=%s instead of falling open',
+    (value) => {
+      expect(() =>
+        resolveSandboxNetworkMode({ QWEN_SANDBOX_NET: value }),
+      ).toThrow(/Invalid QWEN_SANDBOX_NET/);
+    },
+  );
+});
+
 describe('buildBwrapArgs', () => {
   const base = {
     writableRoots: ['/ws'],
     targetDir: '/ws',
     cliArgs: ['node', '/cli.js', '--foo'],
+    readOnlyOverrides: [] as string[],
   };
 
   it('opens with a recursive read-only host root and a fresh /dev', () => {
@@ -141,6 +175,30 @@ describe('buildBwrapArgs', () => {
     });
 
     expect(bindSources(args)).toEqual(['/ws', '/tmp', '/home/u/.qwen']);
+  });
+
+  it('layers read-only overrides after the writable binds they carve out of', () => {
+    const args = buildBwrapArgs({
+      ...base,
+      writableRoots: ['/ws', '/home/u/.qwen'],
+      readOnlyOverrides: ['/home/u/.qwen/.env'],
+      networkMode: 'open',
+    });
+
+    const writableQwenAt = args.findIndex(
+      (arg, i) => arg === '--bind' && args[i + 1] === '/home/u/.qwen',
+    );
+    const overlayAt = args.findIndex(
+      (arg, i) =>
+        arg === '--ro-bind' &&
+        args[i + 1] === '/home/u/.qwen/.env' &&
+        args[i + 2] === '/home/u/.qwen/.env',
+    );
+    expect(writableQwenAt).toBeGreaterThan(-1);
+    expect(overlayAt).toBeGreaterThan(-1);
+    // bwrap applies mounts in argv order, so the carve-out must follow the
+    // writable bind it shadows.
+    expect(overlayAt).toBeGreaterThan(writableQwenAt);
   });
 
   it('chdirs into the target dir and passes cliArgs after the separator', () => {
@@ -435,6 +493,42 @@ describe('resolveBwrapWritableRoots', () => {
     const cache = path.join(home, '.cache');
     expect(resolveBwrapWritableRoots().roots).toContain(cache);
     expect(fs.statSync(cache).isDirectory()).toBe(true);
+  });
+
+  it('refuses an included directory that resolves inside the home directory', () => {
+    const home = path.join(work, 'home');
+    fs.mkdirSync(path.join(home, '.ssh'), { recursive: true });
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('XDG_CACHE_HOME', '');
+    const ws = path.join(work, 'ws');
+    fs.mkdirSync(ws);
+    vi.spyOn(process, 'cwd').mockReturnValue(ws);
+
+    // Workspace-scope settings can name this directory; it must not become a
+    // writable root.
+    expect(() => resolveBwrapWritableRoots([path.join(home, '.ssh')])).toThrow(
+      'Refusing sandbox writable root',
+    );
+
+    // A directory already covered by a built-in root stays admitted.
+    const cache = path.join(home, '.cache');
+    expect(resolveBwrapWritableRoots([cache]).roots).toContain(
+      fs.realpathSync(cache),
+    );
+  });
+
+  it('pins the global .env read-only over the writable QWEN_DIR when it exists', () => {
+    const ws = path.join(work, 'ws');
+    fs.mkdirSync(ws);
+    vi.spyOn(process, 'cwd').mockReturnValue(ws);
+
+    expect(resolveBwrapWritableRoots().readOnlyOverrides).toEqual([]);
+
+    const envFile = path.join(storageDirs.qwen, '.env');
+    fs.writeFileSync(envFile, 'KEY=1\n');
+    const { roots, readOnlyOverrides } = resolveBwrapWritableRoots();
+    expect(roots).toContain(fs.realpathSync(storageDirs.qwen));
+    expect(readOnlyOverrides).toEqual([fs.realpathSync(envFile)]);
   });
 });
 
