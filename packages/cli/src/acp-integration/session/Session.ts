@@ -10927,16 +10927,6 @@ export class Session implements SessionContext {
     await this.sendUpdate(update);
   }
 
-  /**
-   * Requests permission from the client for a tool call.
-   * Used by SubAgentTracker for sub-agent approval requests.
-   */
-  async requestPermission(
-    params: RequestPermissionRequest,
-  ): Promise<RequestPermissionResponse> {
-    return this.client.requestPermission(params);
-  }
-
   #requestPermissionQueued(
     params: RequestPermissionRequest,
     signal: AbortSignal,
