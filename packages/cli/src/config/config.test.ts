@@ -1248,28 +1248,45 @@ describe('loadCliConfig', () => {
     );
   });
 
-  it.each<Settings>([
-    { modelProviders: { 'openai-responses': [{ id: 'old' }] } },
-    { modelProviders: { 'openai-responses': [] } },
-    {
-      modelProviders: { gateway: [{ id: 'old' }] },
-      providerProtocol: { gateway: 'openai-responses' },
-    },
-    { providerProtocol: { unused: 'openai-responses' } },
-    {
-      modelProviders: { 'openai-responses': [{ id: 'old' }] },
-      providerProtocol: { 'openai-responses': 'openai' },
-    },
+  it.each<[Settings, AuthType | undefined]>([
+    [
+      { modelProviders: { 'openai-responses': [{ id: 'old' }] } },
+      AuthType.USE_OPENAI_RESPONSES,
+    ],
+    [{ modelProviders: { 'openai-responses': [] } }, undefined],
+    [
+      {
+        modelProviders: { gateway: [{ id: 'old' }] },
+        providerProtocol: { gateway: 'openai-responses' },
+      },
+      AuthType.USE_OPENAI_RESPONSES,
+    ],
+    [{ providerProtocol: { unused: 'openai-responses' } }, undefined],
+    [
+      {
+        modelProviders: { 'openai-responses': [{ id: 'old' }] },
+        providerProtocol: { 'openai-responses': 'openai' },
+      },
+      AuthType.USE_OPENAI,
+    ],
   ])(
-    'reports unsupported provider configuration as a config error: %j',
-    async (settings) => {
+    'loads released provider configuration without changing its declared route: %j',
+    async (settings, expectedProtocol) => {
       process.argv = ['node', 'script.js'];
+      const before = structuredClone(settings);
       const argv = await parseArguments();
-      const err = await loadCliConfig(settings, argv).catch((e: unknown) => e);
-      expect(err).toBeInstanceOf(FatalConfigError);
-      expect((err as Error).message).toMatch(
-        /openai-responses.*Use "openai" with wireApi: "responses"/,
-      );
+      const config = await loadCliConfig(settings, argv);
+      for (const authType of [
+        AuthType.USE_OPENAI,
+        AuthType.USE_OPENAI_RESPONSES,
+      ]) {
+        const oldModels = config
+          .getModelsConfig()
+          .getAvailableModelsForAuthType(authType)
+          .filter((model) => model.id === 'old');
+        expect(oldModels).toHaveLength(authType === expectedProtocol ? 1 : 0);
+      }
+      expect(settings).toEqual(before);
     },
   );
 
