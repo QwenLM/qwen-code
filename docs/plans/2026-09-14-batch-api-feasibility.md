@@ -257,3 +257,89 @@ UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度�
 
 测试面：现有 `pipeline.test.ts` 不动；新增一个小文件 mock `client.files` / `client.batches`，
 覆盖 create→persist→poll→fetch、abort→cancel、resume 对账三条路径。CI 本来就慢，测试文件保持最小。
+
+## 9. Handoff（接手者从这里开始）
+
+**一句话状态**：评估写完、探测脚本写完、草稿 PR #11874 已开，**脚本还没对线上跑过**。
+下一步不是写代码，是拿一个 DashScope key 跑三个脚本，用结果选方向。
+
+### 9.1 现在有什么
+
+| 物件 | 位置 | 状态 |
+| --- | --- | --- |
+| 本评估 | `docs/plans/2026-09-14-batch-api-feasibility.md` | §1-§8 完成 |
+| 探测脚本 + README | `docs/verification/batch-api/` | 语法检查过，无 key 路径跑过，**未对线上运行** |
+| 草稿 PR | https://github.com/QwenLM/qwen-code/pull/11874（分支 `docs/batch-api-feasibility`，基于 `origin/main` `85631a3d`） | 等测试结果 |
+| 运行时代码改动 | 无 | 刻意不动 `ContentGenerator` / `pipeline.ts` |
+
+### 9.2 立刻要做的事（按顺序）
+
+前提：北京 region 的 `DASHSCOPE_API_KEY`，只放 env，不落盘。在仓库根目录：
+
+```sh
+export DASHSCOPE_API_KEY=sk-...
+node docs/verification/batch-api/00-plumbing.mjs      # 免费模型，验管线；必须 PASS 才继续
+node docs/verification/batch-api/01-tools.mjs         # §6 问题 1
+node docs/verification/batch-api/02-cache.mjs         # §6 问题 2
+nohup node docs/verification/batch-api/03-queue-timing.mjs --hours 24 \
+  > docs/verification/batch-api/out/03.log 2>&1 &     # §6 问题 3，明天再看
+```
+
+把 `out/00|01|02-*.result.json` 的 `verdict` 段和 `out/03-queue-timing.summary.json`
+贴到 PR #11874 的评论里。`FAIL` 时连同 result 文件里的 `errors` / `raw`（含百炼报错原文）一起贴。
+
+### 9.3 结果怎么用
+
+| 01 工具直通 | 02 batch 内缓存 | 方向 | 接下来开什么 |
+| --- | --- | --- | --- |
+| 通 | 通 | §6 置换：headless `qwen -p ... --batch` | 开 issue，按 9.4 的改动点实施 |
+| 通 | 不通 | §3 形态 A：`qwen batch` 扇出命令 | 开 issue，`commands/batch.ts` + 同名工具，主循环不动 |
+| 不通 | — | 只做形态 A | 同上；置换永久搁置 |
+
+03 不改变方向，只决定 §7 的经验 ETA 数值和产品文案里怎么描述等待。
+
+### 9.4 如果走置换，改动点清单（不要扩大）
+
+1. **请求级开关**：`GenerateContentParameters.config` 加 `executionMode?: 'batch'`，
+   只由主循环那一次 `generateContent` 设置。原因见 §8.2——`BaseLlmClient` 与主循环共用
+   `ContentGenerator`（`config.ts:3693`、`:3718-3719`），生成器级置换会把 17 种 side-call 拖进 24h。
+2. **管线分支**：`openaiContentGenerator/pipeline.ts:475`（非流式）一处
+   `if (executionMode === 'batch') return this.executeBatch(...)`；流式 `:519` 走同一函数后一次性 yield 一个 chunk。
+   `executeBatch` = 单行 JSONL → `client.files.create({purpose:'batch'})` → `client.batches.create`
+   → 轮询 `batches.retrieve` → `files.content(output_file_id)` → 取第一行 `response.body`。
+   `client` 就是 `provider.buildClient()` 返回的 `openai` 实例（`provider/default.ts:77-92`），`files` / `batches` 已在上面。
+3. **持久化**：`batches.create` 成功后**立刻**把 `batch_id` 写进 session，再开始轮询；
+   `core/session-recovery.ts` 加一种 recovery kind（pending batch），resume 时先 `batches.retrieve` 再决定续等或重发；
+   启动时 `batches.list` 对账回收孤儿。
+4. **取消**：`abortSignal` → `batches.cancel`；提示已完成部分仍计费。重试前必须先 cancel 旧作业。
+5. **门禁**：只在 headless 接受 `--batch`；TUI 拒绝并说明原因。
+   provider 必须满足 `DashScopeOpenAICompatibleProvider.isDashScopeProvider` 且非 `QWEN_OAUTH`，否则启动即报错。
+6. **不走 batch 的**：子 agent、`chatCompressionService`、所有 side-call。压缩阈值取 `min(模型上限, 256K)`。
+7. **必须显式发 `enable_thinking`**，否则新模型在 batch 下默认开 thinking，5 折被吃回去。
+8. **计量**：费用估算按 0.5x；telemetry 打 `execution_mode=batch`。
+9. **收尾**：结果落盘后 `files.delete` 输入和输出文件（§8.1 D）。
+10. **测试**：现有 `pipeline.test.ts` 不动；新增一个小文件 mock `client.files` / `client.batches`，
+    只盖 create→persist→poll→fetch、abort→cancel、resume 对账三条路径。
+
+### 9.5 如果走扇出（形态 A），改动点清单
+
+- `packages/cli/src/commands/batch.ts`：照 `commands/sessions.ts` 的 `CommandModule` 写 `submit / status / fetch`，
+  挂到 `packages/cli/src/config/config.ts:1088-1103` 那串 `.command(...)`。
+- 一个同名工具让模型能自己提交作业；JSONL 的 `body` 用 `converter.ts` 现成的 Content → ChatCompletion 转换。
+- 结果按 `custom_id` 映射回文件路径写回工作区。
+- 进度显示用 `request_counts.completed / total`（§7）；完成前拿不到部分结果。
+- 同样需要 9.4 的第 5、7、9 条（门禁、`enable_thinking`、删文件）。
+
+### 9.6 已知但未验证的假设
+
+- "不支持多轮"指没有服务端会话，而非拒绝带历史的 `messages[]`——由 01 的 L2 验证。
+- 百炼缓存命中价为 input 的 20%——来自公开价格页，跑 02 时用 `CACHE_RATIO` 覆盖成目标模型的真实值。
+- 排队时长"空闲时几分钟"——纯猜测，由 03 验证。
+- `ds_batch_finish_callback` 仅北京 region、只在完成时通知一次——来自文档，未测。
+
+### 9.7 仓库约定（接手者务必遵守）
+
+- PR 有活动时**不要 force-push**，追加 commit。
+- PR body 英文在前，`<details><summary>中文说明</summary>` 折叠完整中文；先读 `.github/pull_request_template.md`。
+- PR 只开不合，由维护者审阅合并。
+- 不在本地跑 build / typecheck / vitest；需要度量的交给 CI 或写 `docs/verification/<topic>/README.md` 交接。
