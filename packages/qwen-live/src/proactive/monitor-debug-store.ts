@@ -42,10 +42,10 @@ async function privateDirectory(path: string): Promise<void> {
   if (
     !stat.isDirectory() ||
     stat.isSymbolicLink() ||
-    // Windows reports every directory with group/other bits set, so POSIX
-    // mode bits cannot reject a shared directory there.
-    (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
-    (process.getuid && stat.uid !== process.getuid())
+    (process.platform !== 'win32' &&
+      ((stat.mode & 0o077) !== 0 ||
+        (typeof process.getuid === 'function' &&
+          stat.uid !== process.getuid())))
   )
     throw new Error('unsafe_directory');
 }

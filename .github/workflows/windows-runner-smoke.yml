@@ -117,4 +117,10 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # Not a duplicate of the pre-checkout autocrlf step: HOME and
+          # USERPROFILE are redirected for this step, so git reads the empty
+          # profile created just above rather than the one that step wrote.
+          # Deleting this line silently returns CRLF conversion to every git
+          # operation the suites perform, and no test notices.
+          git config --global core.autocrlf false
           npm run test:ci
