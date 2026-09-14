@@ -90,7 +90,8 @@ describe('isSameFile', () => {
     // Hard-link identity rides dev/ino; on volumes that expose no inode
     // numbers (ino 0) the comparison degrades to canonical spellings by
     // design and cannot see through a hard link.
-    if (Number(statSync(original).ino) === 0) {
+    const inode = statSync(original).ino;
+    if (!Number.isSafeInteger(inode) || inode <= 0) {
       ctx.skip();
       return;
     }
