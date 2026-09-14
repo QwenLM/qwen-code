@@ -307,7 +307,7 @@ describe('extension tests', () => {
     const workflowSource = (name: string) =>
       `export const meta = { name: '${name}', description: 'Runs ${name}' };\nreturn 1;\n`;
 
-    it('loads workflows from the default directory as <extension>:<stem>', async () => {
+    it('loads workflows from the default directory as <extension>:<meta.name>', async () => {
       const directory = createExtension({
         extensionsDir: userExtensionsDir,
         name: 'suite',
@@ -397,6 +397,49 @@ describe('extension tests', () => {
       expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
         'wf-ext:audit',
       ]);
+    });
+
+    it.each([
+      'flows',
+      '${extensionPath}${/}flows',
+      '$QWEN_TEST_WORKFLOW_DIR',
+      '${QWEN_TEST_WORKFLOW_DIR}',
+    ])('discloses and loads the same workflows for %s', async (workflows) => {
+      const saved = process.env['QWEN_TEST_WORKFLOW_DIR'];
+      process.env['QWEN_TEST_WORKFLOW_DIR'] = 'flows';
+      try {
+        const sourcePath = path.join(tempWorkspaceDir, 'workflow-source');
+        fs.mkdirSync(path.join(sourcePath, 'flows'), { recursive: true });
+        fs.writeFileSync(
+          path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'wf-ext', version: '1.0.0', workflows }),
+        );
+        fs.writeFileSync(
+          path.join(sourcePath, 'flows', 'a.js'),
+          workflowSource('audit'),
+        );
+
+        const requestConsent = vi.fn(async () => {});
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extension = await manager.installExtension(
+          { type: 'local', source: sourcePath },
+          requestConsent,
+        );
+
+        expect(requestConsent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workflows: [expect.objectContaining({ name: 'wf-ext:audit' })],
+            previousWorkflows: [],
+          }),
+        );
+        expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+          'wf-ext:audit',
+        ]);
+      } finally {
+        if (saved === undefined) delete process.env['QWEN_TEST_WORKFLOW_DIR'];
+        else process.env['QWEN_TEST_WORKFLOW_DIR'] = saved;
+      }
     });
   });
 

@@ -412,14 +412,14 @@ An extension named `gcp` with the following structure:
     └── deep-research.js
 ```
 
-provides one workflow, registered as `gcp:deep-research` — the extension's `name`, a colon, then the file name without `.js`. Run it with `/gcp:deep-research`, or call it from another workflow with `workflow('gcp:deep-research')`. Like an extension skill, an extension workflow always carries its owner, so it never shadows one of your project or user workflows.
+provides one workflow when its script declares a static `meta` object with `name: 'deep-research'`, registered as `gcp:deep-research` — the extension's `name`, a colon, then `meta.name`. Run it with `/gcp:deep-research`, or call it from another workflow with `workflow('gcp:deep-research')`. Like an extension skill, an extension workflow always carries its owner, so it never shadows one of your project or user workflows.
 
-Each script must declare a static `export const meta = { name, description }` block. The `description` is shown in the install consent prompt and in the command list. Keep `meta.name` equal to the file name.
+Each script must declare a static `export const meta = { name, description }` block. The `description` is shown in the install consent prompt and in the command list. The file name may differ from `meta.name`; calls always use the metadata name. If multiple scripts declare the same `meta.name`, the first discovered script is kept.
 
 Discovery is deliberately narrow:
 
 - Only `.js` files directly inside each directory are read; subdirectories are ignored.
-- The file name must use lower-case letters, digits, and hyphens, and start with a letter.
+- `meta.name` must use lower-case letters, digits, and hyphens, start with a letter, and contain at most 41 characters.
 - Symlinks are skipped, and every declared path must stay inside the extension directory.
 - Scripts larger than 256 KiB, or without a valid `meta` block, are skipped with a warning.
 
@@ -427,7 +427,7 @@ Installing an extension lists its workflows in the consent prompt, and an update
 
 Edits to files in the default `workflows/` directory are picked up automatically. Changes under other declared paths take effect after `/reload-plugins` or a restart.
 
-Claude Code plugins that ship workflows are converted on install: the plugin's `workflows/` directory, or the paths its manifest declares in `workflows`, become the extension's `workflows/` directory.
+Claude Code plugins that ship workflows are converted on install. The default `workflows/` directory is preserved. Declared workflow files retain their relative paths and are listed explicitly in the converted extension's manifest, so files with the same basename in different directories remain available under their distinct `meta.name` values.
 
 ### Conflict resolution
 

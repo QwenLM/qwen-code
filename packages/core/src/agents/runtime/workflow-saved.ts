@@ -19,7 +19,7 @@
  *
  * Active extensions add a third tier: the `.js` files an extension ships
  * (`workflow-extension.ts` discovers them at extension load). They are always
- * addressed as `<extension name>:<file stem>`, which a project or user name
+ * addressed as `<extension name>:<meta.name>`, which a project or user name
  * can never spell, so the tiers never shadow each other. Their files are
  * readable by exact path only — the extension directories are deliberately
  * not workflow script roots (see {@link getWorkflowScriptRoots}).
@@ -58,7 +58,7 @@ export type SavedWorkflowSource = SavedWorkflowScope | 'extension';
 /** One discovered saved-workflow script (metadata only — no source read). */
 export interface SavedWorkflowEntry {
   /**
-   * Filename stem, e.g. `deep-research`, or `<extension>:<stem>` for an
+   * Filename stem, e.g. `deep-research`, or `<extension>:<meta.name>` for an
    * extension workflow. Doubles as the slash command name.
    */
   name: string;
@@ -113,7 +113,7 @@ export function validateWorkflowName(name: string): string | null {
  */
 const EXTENSION_NAME_SOURCE = '[A-Za-z0-9._-]+';
 
-/** `<extension name>:<workflow stem>` — how an extension workflow is addressed. */
+/** 扩展工作流通过 `<extension name>:<meta.name>` 寻址。 */
 export const EXTENSION_WORKFLOW_NAME_PATTERN = new RegExp(
   `^(${EXTENSION_NAME_SOURCE}):(${WORKFLOW_NAME_PATTERN.source.slice(1, -1)})$`,
 );
@@ -128,12 +128,12 @@ export function isValidWorkflowExtensionName(extensionName: string): boolean {
 /** `gcp` + `deep-research` → `gcp:deep-research`. */
 export function qualifyExtensionWorkflowName(
   extensionName: string,
-  stem: string,
+  workflowName: string,
 ): string {
-  return `${extensionName}:${stem}`;
+  return `${extensionName}:${workflowName}`;
 }
 
-/** Split `<extension>:<stem>`; `null` when the name does not have that shape. */
+/** 拆分 `<extension>:<meta.name>`；不符合格式时返回 `null`。 */
 export function parseExtensionWorkflowName(
   name: string,
 ): { extensionName: string; stem: string } | null {
@@ -394,7 +394,7 @@ export async function listSavedWorkflows(
 /**
  * Resolve `workflow('<name>')` or `workflow({scriptPath})` to a loaded
  * script. The string form looks up `<name>.js` in project then user scope,
- * or an active extension's workflow when the name is `<extension>:<stem>`;
+ * or an active extension's workflow when the name is `<extension>:<meta.name>`;
  * the `{scriptPath}` form reads the file at the given path directly, which
  * may sit in either saved scope or under the generated-scripts root.
  *

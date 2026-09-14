@@ -9,7 +9,7 @@
  *
  * An extension contributes `.js` workflow scripts from `<extension>/workflows/`
  * or from the paths its manifest declares in `workflows`. Each one becomes a
- * third saved-workflow tier, addressed as `<extension name>:<file stem>` by the
+ * third saved-workflow tier, addressed as `<extension name>:<meta.name>` by the
  * `/<name>` slash command and by `workflow('<name>')`
  * (`workflow-saved.ts` owns that tier; this module only finds the files).
  *
@@ -45,7 +45,7 @@ export const MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES = 256 * 1024;
 
 /** One workflow script an active extension ships (metadata only). */
 export interface ExtensionWorkflowDefinition {
-  /** `<extensionName>:<stem>` — the slash command name and `workflow()` address. */
+  /** `<extensionName>:<meta.name>`，同时用于斜杠命令和 `workflow()` 调用。 */
   name: string;
   /** File name without `.js`. */
   stem: string;
@@ -221,23 +221,9 @@ async function collectFile(
     );
     return;
   }
-  const stem = fileName.slice(0, -'.js'.length);
-  if (!WORKFLOW_NAME_PATTERN.test(stem)) {
-    debugLogger.warn(
-      `skipping workflow of extension "${owner.name}" whose file name is not a legal workflow name: ${filePath}`,
-    );
-    return;
-  }
   if (stat.size > MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES) {
     debugLogger.warn(
       `skipping workflow of extension "${owner.name}" larger than ${MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES} bytes: ${filePath}`,
-    );
-    return;
-  }
-  const name = qualifyExtensionWorkflowName(owner.name, stem);
-  if (found.has(name)) {
-    debugLogger.warn(
-      `skipping duplicate workflow "${name}" of extension "${owner.name}": ${filePath}`,
     );
     return;
   }
@@ -263,9 +249,22 @@ async function collectFile(
     );
     return;
   }
+  if (!WORKFLOW_NAME_PATTERN.test(meta.name)) {
+    debugLogger.warn(
+      `skipping workflow of extension "${owner.name}" whose meta.name is not a legal workflow name: ${filePath}`,
+    );
+    return;
+  }
+  const name = qualifyExtensionWorkflowName(owner.name, meta.name);
+  if (found.has(name)) {
+    debugLogger.warn(
+      `skipping duplicate workflow "${name}" of extension "${owner.name}": ${filePath}`,
+    );
+    return;
+  }
   found.set(name, {
     name,
-    stem,
+    stem: fileName.slice(0, -'.js'.length),
     extensionName: owner.name,
     ...(owner.displayName ? { extensionDisplayName: owner.displayName } : {}),
     scriptPath: filePath,

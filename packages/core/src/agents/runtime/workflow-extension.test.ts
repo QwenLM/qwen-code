@@ -90,11 +90,22 @@ describe('loadExtensionWorkflows', () => {
     expect(names).toEqual(['gcp:top']);
   });
 
-  it('skips non-.js files and file names that are not legal workflow names', async () => {
+  it('registers the meta name independently of the file name', async () => {
+    const scriptPath = await write(
+      'workflows/01.Child.js',
+      workflowSource('child'),
+    );
+
+    expect(await loadExtensionWorkflows(root, owner, undefined)).toEqual([
+      expect.objectContaining({ name: 'gcp:child', scriptPath }),
+    ]);
+  });
+
+  it('skips non-.js files and meta names that are not legal workflow names', async () => {
     await write('workflows/ok.js', workflowSource('ok'));
     await write('workflows/notes.md', workflowSource('notes'));
-    await write('workflows/Bad.js', workflowSource('Bad'));
-    await write('workflows/1x.js', workflowSource('1x'));
+    await write('workflows/bad.js', workflowSource('Bad'));
+    await write('workflows/number.js', workflowSource('1x'));
 
     const names = (await loadExtensionWorkflows(root, owner, undefined)).map(
       (w) => w.name,
@@ -192,7 +203,7 @@ describe('loadExtensionWorkflows', () => {
     expect(names).toEqual(['gcp:ok']);
   });
 
-  it('keeps the first file when two declared paths ship the same name', async () => {
+  it('keeps distinct meta names from files with the same basename', async () => {
     await write('first/same.js', workflowSource('same-first'));
     await write('second/same.js', workflowSource('same-second'));
 
@@ -200,8 +211,24 @@ describe('loadExtensionWorkflows', () => {
       'first',
       'second',
     ]);
+    expect(workflows.map((workflow) => workflow.name)).toEqual([
+      'gcp:same-first',
+      'gcp:same-second',
+    ]);
+    expect(workflows[0].scriptPath).toBe(path.join(root, 'first', 'same.js'));
+    expect(workflows[1].scriptPath).toBe(path.join(root, 'second', 'same.js'));
+  });
+
+  it('keeps the first file when two declared paths ship the same meta name', async () => {
+    await write('first/same.js', workflowSource('shared'));
+    await write('second/other.js', workflowSource('shared'));
+
+    const workflows = await loadExtensionWorkflows(root, owner, [
+      'first',
+      'second',
+    ]);
     expect(workflows).toHaveLength(1);
-    expect(workflows[0].description).toBe('Runs same-first');
+    expect(workflows[0].name).toBe('gcp:shared');
     expect(workflows[0].scriptPath).toBe(path.join(root, 'first', 'same.js'));
   });
 

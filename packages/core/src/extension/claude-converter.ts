@@ -663,19 +663,16 @@ export async function buildQwenExtensionFromPlugin(
       }
     }
 
-    // Workflows are collected flat, not through `collectResources`: the
-    // workflow loader reads one directory level, and `collectResources` keeps
-    // a declared sub-folder's own name (`workflows/<sub>/...`). Undeclared,
-    // the plugin's own `workflows/` already arrived with the copy above.
-    if (mergedConfig.workflows !== undefined) {
-      const workflowsDir = path.join(tmpDir, 'workflows');
-      fs.rmSync(workflowsDir, { recursive: true, force: true });
-      collectWorkflowResources(
-        mergedConfig.workflows,
-        pluginSource,
-        workflowsDir,
-      );
-    }
+    // 声明的工作流保留原相对路径，避免不同目录下的同名文件互相覆盖。
+    // 用精确文件列表控制发现范围；未声明时沿用已复制的 workflows/。
+    const workflowPaths =
+      mergedConfig.workflows === undefined
+        ? undefined
+        : collectWorkflowResources(
+            mergedConfig.workflows,
+            pluginSource,
+            tmpDir,
+          );
 
     // Handle hooks from a file path if needed.
     if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
@@ -713,6 +710,9 @@ export async function buildQwenExtensionFromPlugin(
     await convertAgentFiles(agentsDestDir);
 
     const qwenConfig = convertClaudeToQwenConfig(mergedConfig);
+    if (workflowPaths !== undefined) {
+      qwenConfig.workflows = workflowPaths;
+    }
 
     const qwenConfigPath = path.join(tmpDir, 'qwen-extension.json');
     fs.writeFileSync(
@@ -821,38 +821,28 @@ export async function convertClaudePluginStandalone(
 }
 
 /**
- * Collects resources (commands, skills, agents) to a destination folder.
- * Resources are always copied unconditionally — the caller
- * (`convertClaudePluginPackage`) clears `destDir` beforehand so it can
- * honor selective sub-entry lists.
- * @param resourcePaths String or array of resource paths
- * @param pluginRoot Root directory of the plugin
- * @param destDir Destination directory for collected resources
- */
-/**
- * Copies a plugin's declared workflow paths flat into `destDir`: each
- * directory contributes its top-level regular `.js` files, each `.js` file
- * itself. The first file collected under a name wins, matching how Claude
- * Code loads plugin workflows. Paths are confined to the plugin like every
- * other manifest resource.
+ * 在目标扩展内按原相对路径收集声明的工作流，并返回 manifest 文件列表。
+ * 只读取目录第一层的普通 .js 文件，且所有来源路径仍须限制在插件内。
+ * 重新复制可恢复被 commands/skills/agents 重映射移除的工作流文件。
  */
 function collectWorkflowResources(
   resourcePaths: unknown,
   pluginRoot: string,
   destDir: string,
-): void {
+): string[] {
   const paths = Array.isArray(resourcePaths) ? resourcePaths : [resourcePaths];
-  fs.mkdirSync(destDir, { recursive: true });
+  const collected = new Set<string>();
 
   const copy = (srcFile: string) => {
-    const destFile = path.join(destDir, path.basename(srcFile));
-    if (fs.existsSync(destFile)) {
-      debugLogger.warn(
-        `Skipping workflow ${srcFile}: ${path.basename(srcFile)} was already collected from an earlier workflows entry`,
-      );
-      return;
-    }
+    const relativePath = path
+      .relative(pluginRoot, srcFile)
+      .split(path.sep)
+      .join('/');
+    if (collected.has(relativePath)) return;
+    const destFile = path.join(destDir, relativePath);
+    fs.mkdirSync(path.dirname(destFile), { recursive: true });
     fs.copyFileSync(srcFile, destFile);
+    collected.add(relativePath);
   };
 
   for (const resourcePath of paths) {
@@ -888,8 +878,18 @@ function collectWorkflowResources(
       );
     }
   }
+  return [...collected];
 }
 
+/**
+ * Collects resources (commands, skills, agents) to a destination folder.
+ * Resources are always copied unconditionally — the caller
+ * (`convertClaudePluginPackage`) clears `destDir` beforehand so it can
+ * honor selective sub-entry lists.
+ * @param resourcePaths String or array of resource paths
+ * @param pluginRoot Root directory of the plugin
+ * @param destDir Destination directory for collected resources
+ */
 async function collectResources(
   resourcePaths: string | string[],
   pluginRoot: string,
@@ -1034,6 +1034,8 @@ export function mergeClaudeConfigs(
   if (marketplacePlugin.commands) merged.commands = marketplacePlugin.commands;
   if (marketplacePlugin.agents) merged.agents = marketplacePlugin.agents;
   if (marketplacePlugin.skills) merged.skills = marketplacePlugin.skills;
+  if (marketplacePlugin.workflows !== undefined)
+    merged.workflows = marketplacePlugin.workflows;
   if (marketplacePlugin.hooks) merged.hooks = marketplacePlugin.hooks;
   if (marketplacePlugin.mcpServers)
     merged.mcpServers = marketplacePlugin.mcpServers;

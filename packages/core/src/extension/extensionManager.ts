@@ -182,7 +182,7 @@ export interface Extension {
   commands?: string[];
   skills?: SkillConfig[];
   agents?: SubagentConfig[];
-  /** Workflow scripts this extension ships, addressed as `<name>:<stem>`. */
+  /** 扩展提供的工作流脚本，通过 `<name>:<meta.name>` 寻址。 */
   workflows?: ExtensionWorkflowDefinition[];
   // R10-2: executor-block refusals for this extension's agent files, keyed by
   // lowercased declared name, recorded at load so a by-name dispatch can refuse
@@ -2356,15 +2356,21 @@ export class ExtensionManager {
           : await loadSubagentFromDir(`${localSourcePath}/agents`);
         const previousSubagents = previous?.agents ?? [];
 
+        // 安装披露与运行时使用相同的环境变量展开规则，不改写待保存的 manifest。
+        const workflowConfig = resolveEnvVarsInObject({
+          name: newExtensionConfig.name,
+          displayName: newExtensionConfig.displayName,
+          workflows: newExtensionConfig.workflows,
+        });
         const workflows = isAgentPlugin
           ? []
           : await loadExtensionWorkflows(
               localSourcePath,
               {
-                name: newExtensionConfig.name,
-                displayName: newExtensionConfig.displayName,
+                name: workflowConfig.name,
+                displayName: workflowConfig.displayName,
               },
-              newExtensionConfig.workflows,
+              workflowConfig.workflows,
             );
         const previousWorkflows = previous?.workflows ?? [];
 

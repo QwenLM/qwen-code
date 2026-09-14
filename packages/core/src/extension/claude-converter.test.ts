@@ -23,6 +23,7 @@ import {
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
+import { loadExtensionWorkflows } from '../agents/runtime/workflow-extension.js';
 
 // The git-subdir source clones a repo; stub the network clone so the security
 // guards around the cloned subdirectory can be exercised against a real fs.
@@ -1632,15 +1633,26 @@ describe('convertClaudePluginPackage — workflows', () => {
     return source;
   }
 
-  function writeFile(root: string, rel: string, body = 'return 1;\n'): void {
+  function writeFile(
+    root: string,
+    rel: string,
+    body = `export const meta = { name: '${path.basename(rel, '.js')}', description: 'Test workflow' };\nreturn 1;\n`,
+  ): void {
     const filePath = path.join(root, rel);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, body);
   }
 
-  function convertedWorkflows(convertedDir: string): string[] {
-    const dir = path.join(convertedDir, 'workflows');
-    return fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
+  async function convertedWorkflows(result: {
+    convertedDir: string;
+    config: { name: string; workflows?: string | string[] };
+  }): Promise<string[]> {
+    const workflows = await loadExtensionWorkflows(
+      result.convertedDir,
+      result.config,
+      result.config.workflows,
+    );
+    return workflows.map((workflow) => workflow.name);
   }
 
   it('keeps the plugin workflows directory when none are declared', async () => {
@@ -1649,10 +1661,10 @@ describe('convertClaudePluginPackage — workflows', () => {
 
     const result = await convertClaudePluginPackage(source, 'wf-plugin');
 
-    expect(convertedWorkflows(result.convertedDir)).toEqual(['audit.js']);
+    expect(await convertedWorkflows(result)).toEqual(['wf-plugin:audit']);
   });
 
-  it('collects declared directories flat, one level deep, instead of the default', async () => {
+  it('collects one directory level and declares its preserved paths instead of the default', async () => {
     const source = writePlugin({ workflows: ['./flows'] });
     writeFile(source, 'workflows/default.js');
     writeFile(source, 'flows/deploy.js');
@@ -1661,7 +1673,8 @@ describe('convertClaudePluginPackage — workflows', () => {
 
     const result = await convertClaudePluginPackage(source, 'wf-plugin');
 
-    expect(convertedWorkflows(result.convertedDir)).toEqual(['deploy.js']);
+    expect(result.config.workflows).toEqual(['flows/deploy.js']);
+    expect(await convertedWorkflows(result)).toEqual(['wf-plugin:deploy']);
   });
 
   it('collects a declared single .js file', async () => {
@@ -1670,7 +1683,8 @@ describe('convertClaudePluginPackage — workflows', () => {
 
     const result = await convertClaudePluginPackage(source, 'wf-plugin');
 
-    expect(convertedWorkflows(result.convertedDir)).toEqual(['one.js']);
+    expect(result.config.workflows).toEqual(['extra/one.js']);
+    expect(await convertedWorkflows(result)).toEqual(['wf-plugin:one']);
   });
 
   it('ignores declared paths that escape the plugin', async () => {
@@ -1679,7 +1693,8 @@ describe('convertClaudePluginPackage — workflows', () => {
 
     const result = await convertClaudePluginPackage(source, 'wf-plugin');
 
-    expect(convertedWorkflows(result.convertedDir)).toEqual([]);
+    expect(result.config.workflows).toEqual([]);
+    expect(await convertedWorkflows(result)).toEqual([]);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -1695,22 +1710,105 @@ describe('convertClaudePluginPackage — workflows', () => {
 
       const result = await convertClaudePluginPackage(source, 'wf-plugin');
 
-      expect(convertedWorkflows(result.convertedDir)).toEqual(['real.js']);
+      expect(await convertedWorkflows(result)).toEqual(['wf-plugin:real']);
     },
   );
 
-  it('keeps the first file when two declared paths ship the same name', async () => {
+  it.each([
+    {
+      workflows: ['./first', './second'],
+      expected: ['wf-plugin:child-one', 'wf-plugin:child-two'],
+    },
+    { workflows: './first', expected: ['wf-plugin:child-one'] },
+    { workflows: [], expected: [] },
+    { workflows: undefined, expected: ['wf-plugin:from-plugin'] },
+  ])(
+    'merges marketplace workflows $workflows with plugin.json',
+    async ({ workflows, expected }) => {
+      const source = writePlugin({ workflows });
+      writeFile(
+        source,
+        '.claude-plugin/plugin.json',
+        JSON.stringify({
+          name: 'wf-plugin',
+          version: '1.0.0',
+          workflows: './plugin-flows',
+        }),
+      );
+      writeFile(source, 'plugin-flows/from-plugin.js');
+      writeFile(source, 'workflows/default.js');
+      writeFile(
+        source,
+        'first/same.js',
+        "export const meta = { name: 'child-one', description: 'First' };\nreturn 1;\n",
+      );
+      writeFile(
+        source,
+        'second/same.js',
+        "export const meta = { name: 'child-two', description: 'Second' };\nreturn 2;\n",
+      );
+
+      const result = await convertClaudePluginPackage(source, 'wf-plugin');
+
+      expect(await convertedWorkflows(result)).toEqual(expected);
+    },
+  );
+
+  it('preserves distinct workflows with the same basename through conversion and discovery', async () => {
     const source = writePlugin({ workflows: ['./first', './second'] });
-    writeFile(source, 'first/same.js', '// first\n');
-    writeFile(source, 'second/same.js', '// second\n');
+    const first =
+      "export const meta = { name: 'child-one', description: 'First' };\nreturn 1;\n";
+    const second =
+      "export const meta = { name: 'child-two', description: 'Second' };\nreturn 2;\n";
+    writeFile(source, 'first/same.js', first);
+    writeFile(source, 'second/same.js', second);
 
     const result = await convertClaudePluginPackage(source, 'wf-plugin');
 
+    expect(result.config.workflows).toEqual([
+      'first/same.js',
+      'second/same.js',
+    ]);
+    expect(await convertedWorkflows(result)).toEqual([
+      'wf-plugin:child-one',
+      'wf-plugin:child-two',
+    ]);
     expect(
-      fs.readFileSync(
-        path.join(result.convertedDir, 'workflows', 'same.js'),
-        'utf8',
-      ),
-    ).toBe('// first\n');
+      fs.readFileSync(path.join(result.convertedDir, 'first/same.js'), 'utf8'),
+    ).toBe(first);
+    expect(
+      fs.readFileSync(path.join(result.convertedDir, 'second/same.js'), 'utf8'),
+    ).toBe(second);
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(result.convertedDir, 'qwen-extension.json'),
+          'utf8',
+        ),
+      ).workflows,
+    ).toEqual(result.config.workflows);
+  });
+
+  it('restores declared workflow files inside a remapped resource directory', async () => {
+    const source = writePlugin({
+      commands: './other',
+      workflows: './commands/child.js',
+    });
+    writeFile(source, 'commands/child.js');
+    writeFile(source, 'other/command.md', 'A command');
+
+    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+
+    expect(await convertedWorkflows(result)).toEqual(['wf-plugin:child']);
+  });
+
+  it('keeps an explicit empty declaration from enabling the default directory', async () => {
+    const source = writePlugin({ workflows: [] });
+    writeFile(source, 'workflows/default.js');
+
+    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+
+    expect(result.config.workflows).toEqual([]);
+    expect(await convertedWorkflows(result)).toEqual([]);
   });
 });
