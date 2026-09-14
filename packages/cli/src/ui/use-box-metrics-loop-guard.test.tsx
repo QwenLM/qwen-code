@@ -116,21 +116,10 @@ function MeasuredBox({
 
 // Flips its own width on every measurement, so each commit produces a layout
 // that disagrees with the previous one and the measure -> setState -> commit
-// cycle never settles without the guard.
-function OscillatingBox() {
-  const ref = useRef<DOMElement>(null);
-  const { width, hasMeasured } = useBoxMetrics(ref);
-  return (
-    <Box ref={ref} width={hasMeasured && width >= 11 ? 10 : 11}>
-      <Text>x</Text>
-    </Box>
-  );
-}
-
-// Same oscillator, but counting renders so a test can assert on how many
+// cycle never settles without the guard. `onRender` lets a test count the
 // commits the guard let through before it stopped the cascade.
-function CountingOscillatingBox({ onRender }: { onRender: () => void }) {
-  onRender();
+function OscillatingBox({ onRender }: { onRender?: () => void } = {}) {
+  onRender?.();
   const ref = useRef<DOMElement>(null);
   const { width, hasMeasured } = useBoxMetrics(ref);
   return (
@@ -211,6 +200,40 @@ describe('ink useBoxMetrics loop guard', () => {
     expect(lastFrame()).toContain('probe:60');
   });
 
+  it('unfreezes a tripped instance on resize, the only path that reaches it', async () => {
+    // A tripped instance stops scheduling renders of its own, and ink recomputes
+    // a resize in its own handler without a React render, so the refill in
+    // `onResize` is the only thing that reaches it again. Drop that reset and
+    // this case goes red: `updateMetrics` returns before `setMetrics`, so
+    // nothing follows the resize and the box renders against a stale width for
+    // the rest of the session.
+    let renders = 0;
+    const { stdout, setColumns } = createTestStdout(80);
+    const app = await mount(
+      <Box flexDirection="row">
+        <Box width="50%" />
+        <OscillatingBox
+          onRender={() => {
+            renders += 1;
+          }}
+        />
+      </Box>,
+      stdout,
+    );
+    const afterTrip = renders;
+    expect(afterTrip).toBeGreaterThan(1);
+
+    // The sibling shrinks with the terminal, so the oscillator's own left moves
+    // and its metrics have genuinely changed by the time it re-measures.
+    setColumns(60);
+    await act(async () => {
+      stdout.emit('resize');
+    });
+    await app.waitUntilRenderFlush();
+
+    expect(renders).toBeGreaterThan(afterTrip);
+  });
+
   it('gives every instance its own measurement budget', async () => {
     const { stdout, lastFrame } = createTestStdout(120, 60);
     await mount(
@@ -256,7 +279,7 @@ describe('ink useBoxMetrics loop guard', () => {
     let renders = 0;
     const { stdout } = createTestStdout();
     await mount(
-      <CountingOscillatingBox
+      <OscillatingBox
         onRender={() => {
           renders += 1;
         }}
@@ -264,8 +287,11 @@ describe('ink useBoxMetrics loop guard', () => {
       stdout,
     );
 
-    expect(renders).toBeGreaterThan(1);
-    expect(renders).toBeLessThan(50);
+    // Bounded on both sides: a cap loose enough to only just beat React's own
+    // 50-nested-update limit, and one tight enough to stale a consumer that
+    // needs a second measurement pass, both fail here.
+    expect(renders).toBeGreaterThan(2);
+    expect(renders).toBeLessThanOrEqual(24);
   });
 
   it('keeps measuring across far more external re-renders than one budget', async () => {

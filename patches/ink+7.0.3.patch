@@ -204,7 +204,7 @@ index 0000000..745a4ba
 +export const getFrameController = (stdout) => instances.get(stdout)?.frameController;
 +//# sourceMappingURL=frame-controller.js.map
 diff --git a/node_modules/ink/build/hooks/use-box-metrics.js b/node_modules/ink/build/hooks/use-box-metrics.js
-index c4386e4..563c484 100644
+index c4386e4..e1b2567 100644
 --- a/node_modules/ink/build/hooks/use-box-metrics.js
 +++ b/node_modules/ink/build/hooks/use-box-metrics.js
 @@ -1,4 +1,4 @@
@@ -278,8 +278,8 @@ index c4386e4..563c484 100644
 +            // Arms the next commit as one this hook caused; the layout listener
 +            // below settles the budget when that commit arrives.
 +            guard.armed = true;
++            setMetrics(layout);
 +        }
-+        setMetrics(previousMetrics => (hasChanged ? layout : previousMetrics));
          setHasMeasured(Boolean(ref.current));
      }, [ref]);
 +    // Settles the budget for the commit this is called from, once per commit and
