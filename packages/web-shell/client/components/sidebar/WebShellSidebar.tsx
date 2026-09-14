@@ -5670,11 +5670,15 @@ export function WebShellSidebar({
                 >
                   <TabsTrigger value="default">
                     <ListTodoIcon />
-                    {t('sidebar.sessionSource.tasks')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.tasks')}
+                    </span>
                   </TabsTrigger>
                   <TabsTrigger value="channel">
                     <MessageCircleIcon />
-                    {t('sidebar.sessionSource.channels')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.channels')}
+                    </span>
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
