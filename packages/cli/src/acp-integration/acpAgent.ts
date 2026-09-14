@@ -6579,20 +6579,20 @@ class QwenAgent implements Agent {
    * through a symlink (`/tmp` vs `/private/tmp` on macOS) or a different case
    * on a case-insensitive volume; a plain string compare then turns a
    * workspace grant's *revocation* into a no-op on the live session while the
-   * caller is told it saved (fail-open). Resolve symlinks when the path
-   * exists and fold case where the volume does.
+   * caller is told it saved (fail-open). `realpathSync.native()` resolves
+   * both through the filesystem — including the on-disk casing on macOS and
+   * Windows — and deliberately does NOT fold case itself: on a case-sensitive
+   * volume `proj` and `PROJ` are genuinely different workspaces, and folding
+   * would silently authorise one under a rule written for the other.
    */
   private canonicalWorkspacePath(workspacePath: string): string {
-    let resolved = path.resolve(workspacePath);
+    const resolved = path.resolve(workspacePath);
     try {
-      resolved = realpathSync.native(resolved);
+      return realpathSync.native(resolved);
     } catch {
       // The path does not exist (yet); compare the resolved spelling.
+      return resolved;
     }
-    if (process.platform === 'darwin' || process.platform === 'win32') {
-      resolved = resolved.toLowerCase();
-    }
-    return resolved;
   }
 
   /**
@@ -6622,8 +6622,8 @@ class QwenAgent implements Agent {
    * status and reload routes keep reading the bootstrap workspace, so the
    * handler would answer "saved" for a server no route ever lists or applies.
    * Those five resolve `requestedCwd || this.config.getTargetDir()` instead
- * (`||`, not `??`: a present-but-empty `cwd` is not a workspace and falls to
- * the bootstrap dir like an absent one).
+   * (`||`, not `??`: a present-but-empty `cwd` is not a workspace and falls to
+   * the bootstrap dir like an absent one).
    *
    * `sessionId` names the requesting session, whose own Config is
    * relocated to its worktree; without one the daemon's bootstrap

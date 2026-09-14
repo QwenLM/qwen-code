@@ -14,7 +14,7 @@ import {
   afterAll,
   type MockInstance,
 } from 'vitest';
-import { readFileSync, mkdtempSync, symlinkSync } from 'node:fs';
+import { readFileSync, mkdtempSync, symlinkSync, unlinkSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import * as ts from 'typescript';
 import * as fs from 'node:fs/promises';
@@ -18073,9 +18073,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // The admission root and the request's cwd can name one directory through
     // a symlink (macOS /tmp vs /private/tmp) or case; a string compare would
     // turn a revocation written with the other spelling into a silent no-op
-    // on the live session while the caller is told it saved.
+    // on the live session while the caller is told it saved. Pin BOTH
+    // directions, and the removal direction is the reported failure mode.
     const realRoot = mkdtempSync(path.join(os.tmpdir(), 'qwen-acp-canon-'));
-    const linkRoot = path.join(os.tmpdir(), `qwen-acp-canon-link-${process.pid}`);
+    const linkRoot = path.join(
+      os.tmpdir(),
+      `qwen-acp-canon-link-${process.pid}`,
+    );
     symlinkSync(realRoot, linkRoot, 'dir');
 
     const settings = makeCoreSettings();
@@ -18098,22 +18102,37 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     );
 
-    // The write names the workspace by its realpath; the session was admitted
-    // under the symlinked spelling.
-    await agent.extMethod('qwen/permissions/setRules', {
-      cwd: realRoot,
-      scope: 'workspace',
-      ruleType: 'allow',
-      rules: ['Bash(git push:*)'],
-    });
+    try {
+      // Grant written under the symlinked spelling reaches the session
+      // admitted under it.
+      await agent.extMethod('qwen/permissions/setRules', {
+        cwd: linkRoot,
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['Bash(git push:*)'],
+      });
+      expect(livePm.addPersistentRule).toHaveBeenCalledWith(
+        'Bash(git push:*)',
+        'allow',
+      );
 
-    expect(livePm.addPersistentRule).toHaveBeenCalledWith(
-      'Bash(git push:*)',
-      'allow',
-    );
-
-    mockConnectionState.resolve();
-    await agentPromise;
+      // The revocation names the same directory by its realpath: it must
+      // still reach the live manager (the reported bug was this direction).
+      await agent.extMethod('qwen/permissions/setRules', {
+        cwd: realRoot,
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: [],
+      });
+      expect(livePm.removePersistentRule).toHaveBeenCalledWith(
+        'Bash(git push:*)',
+        'allow',
+      );
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+      unlinkSync(linkRoot);
+    }
   });
 
   it('treats an empty-string cwd as absent for the workspace-global handlers', async () => {
