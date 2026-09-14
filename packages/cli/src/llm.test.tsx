@@ -3717,6 +3717,10 @@ describe('startInteractiveUI', () => {
       ui: {
         hideWindowTitle: false,
       },
+      // Messaging is on by default, and on it binds an inbox and arms its
+      // own exit cleanup. These tests are about startup order and render
+      // options; the messaging path is covered in startInteractiveUI.test.
+      agents: { crossSessionMessaging: false },
     },
     getUserHooks: () => undefined,
     getProjectHooks: () => undefined,
