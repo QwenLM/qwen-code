@@ -267,7 +267,11 @@ export function resolveEffectiveReasoning(
       : generation.reasoning;
   if (reasoning === false) return false;
   if (resolved.toggleOnly) return reasoning;
-  if (reasoning === undefined && resolved.defaultEnabled === false)
+  if (
+    reasoning === undefined &&
+    resolved.defaultEnabled === false &&
+    resolved.canDisable !== false
+  )
     return false;
   const requested = reasoning?.effort ?? resolved.defaultEffort;
   if (requested && !REASONING_EFFORT_TIERS.includes(requested)) {

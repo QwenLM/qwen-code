@@ -90,6 +90,25 @@ describe('model providers reload at the next user prompt', () => {
     expect(config.getModel()).toBe('new-alias');
   });
 
+  it('drops a preserved selection removed by a later staged registry', async () => {
+    const config = create();
+    const withSelected = providers('medium');
+    withSelected['openai']!.push({ id: 'temporary-alias' });
+    config.stageModelProvidersReload(
+      withSelected,
+      undefined,
+      'temporary-alias',
+    );
+    config.stageModelProvidersReload(providers('high'));
+
+    const refresh = vi.fn(async (selection) => {
+      expect(selection).toBeUndefined();
+    });
+    expect(await config.applyPendingModelProvidersReload(refresh)).toBe(true);
+    expect(config.getModelProvidersConfig()).toEqual(providers('high'));
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
   it('preserves an exact endpoint selected with the same model id', async () => {
     const config = create();
     const next: ModelProvidersConfig = {

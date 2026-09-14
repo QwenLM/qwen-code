@@ -71,6 +71,55 @@ describe('ModelRegistry', () => {
       expect(openaiModels[0].id).toBe('gpt-4-turbo');
     });
 
+    it('defers hostname inference when a model has no authoritative base URL', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          {
+            id: 'qwen3.8-max',
+            generationConfig: {
+              reasoningConfig: { defaultEffort: 'high' },
+            },
+          },
+        ],
+      });
+      expect(
+        registry.getModel(AuthType.USE_OPENAI, 'qwen3.8-max'),
+      ).toBeDefined();
+    });
+
+    it('validates hostname inference when a model declares its base URL', () => {
+      expect(
+        () =>
+          new ModelRegistry({
+            openai: [
+              {
+                id: 'qwen-plus',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                generationConfig: {
+                  reasoningConfig: { defaultEffort: 'high' },
+                },
+              },
+            ],
+          }),
+      ).toThrow('inferred profile "dashscope-thinking"');
+    });
+
+    it('validates an explicit profile without a model base URL', () => {
+      expect(
+        () =>
+          new ModelRegistry({
+            openai: [
+              {
+                id: 'alias',
+                generationConfig: {
+                  reasoningConfig: { profile: 'gemini' },
+                },
+              },
+            ],
+          }),
+      ).toThrow('reasoningConfig.profile');
+    });
+
     it('should ignore qwen-oauth models in config (hard-coded)', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
         'qwen-oauth': [

@@ -174,14 +174,24 @@ export function mapReasoningControls(
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
   const thinkingMandatory = reasoningMeta?.['thinkingMandatory'] === true;
   if (!thinkingMandatory && !values.includes('none')) return undefined;
-  const currentValue = parseReasoningSelection(
-    getString(option, 'currentValue'),
-  );
-  if (!currentValue || !values.includes(currentValue)) return undefined;
-  if (thinkingMandatory && currentValue === 'none') return undefined;
   const effortValues = values.filter(
     (value) => value !== 'none' && value !== 'default',
   );
+  const rawCurrentValue = getString(option, 'currentValue');
+  const rawCurrentValueIsOffLadder = rawOptions.some(
+    (item) => getString(getRecord(item), 'value') === rawCurrentValue,
+  );
+  const parsedCurrentValue = parseReasoningSelection(rawCurrentValue);
+  const currentValue =
+    parsedCurrentValue && values.includes(parsedCurrentValue)
+      ? parsedCurrentValue
+      : !parsedCurrentValue &&
+          rawCurrentValueIsOffLadder &&
+          effortValues.length > 0
+        ? 'default'
+        : undefined;
+  if (!currentValue) return undefined;
+  if (thinkingMandatory && currentValue === 'none') return undefined;
   if (reasoningMeta?.['toggleOnly'] === true) {
     if (!values.includes('default')) return undefined;
     return {

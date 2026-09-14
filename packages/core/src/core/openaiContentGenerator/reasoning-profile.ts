@@ -204,6 +204,14 @@ export function applyOpenAIReasoningProfile(
           | undefined),
         ...(layer['chat_template_kwargs'] as Record<string, unknown>),
       };
+      if (profile !== 'qwen-chat-template') {
+        const next = {
+          ...(body['chat_template_kwargs'] as Record<string, unknown>),
+        };
+        delete next['enable_thinking'];
+        if (Object.keys(next).length) body['chat_template_kwargs'] = next;
+        else delete body['chat_template_kwargs'];
+      }
     }
     const rawTemplate = layer['chat_template_kwargs'];
     const templateSwitch =
@@ -230,10 +238,7 @@ export function applyOpenAIReasoningProfile(
       };
       delete body['enable_thinking'];
     }
-    if (
-      hasTemplateDisable &&
-      (profile === 'qwen-chat-template' || !useLayerEffort)
-    ) {
+    if (hasTemplateDisable && profile === 'qwen-chat-template') {
       delete body['reasoning'];
       delete body['reasoning_effort'];
       delete body['thinking'];
@@ -341,17 +346,6 @@ export function applyOpenAIReasoningProfile(
     }
   }
   if (
-    (profile === 'dashscope-thinking' || profile === 'dashscope-effort') &&
-    body['tool_choice'] === 'required' &&
-    (mandatory ||
-      body['enable_thinking'] === true ||
-      (body['reasoning_effort'] !== undefined &&
-        body['reasoning_effort'] !== 'none') ||
-      (body['thinking_budget'] !== undefined &&
-        body['enable_thinking'] !== false))
-  )
-    delete body['tool_choice'];
-  if (
     profile === 'deepseek-openai' &&
     (generation.reasoningConfig?.profile === 'deepseek-openai' ||
       isDeepSeekHostname(generation) ||
@@ -391,7 +385,8 @@ export function getOpenAIReasoningState(
     nested?.['effort'] === 'none' ||
     thinking?.['type'] === 'disabled' ||
     thinking?.['enabled'] === false ||
-    template?.['enable_thinking'] === false
+    (resolved.profile === 'qwen-chat-template' &&
+      template?.['enable_thinking'] === false)
   )
     return false;
   const value = body['reasoning_effort'] ?? (nested && nested['effort']);
@@ -400,6 +395,16 @@ export function getOpenAIReasoningState(
   if (typeof value === 'string' && value) {
     return { effort: value as ReasoningEffort };
   }
+  if (
+    body['enable_thinking'] === true ||
+    nested?.['enabled'] === true ||
+    thinking?.['type'] === 'enabled' ||
+    thinking?.['type'] === 'adaptive' ||
+    thinking?.['enabled'] === true ||
+    template?.['enable_thinking'] === true ||
+    body['thinking_budget'] !== undefined
+  )
+    return {};
   return resolveEffectiveReasoning(generation, resolved) === false
     ? false
     : undefined;

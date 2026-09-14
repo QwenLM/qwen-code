@@ -278,6 +278,22 @@ describe('mapReasoningControls', () => {
       efforts: ['low', 'max'],
     });
   });
+
+  it('keeps controls visible for a provider-native current effort', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'minimal',
+          options: [{ value: 'none' }, { value: 'low' }, { value: 'minimal' }],
+        },
+      ]),
+    ).toEqual({
+      enabled: true,
+      effort: 'default',
+      efforts: ['low'],
+    });
+  });
 });
 
 describe('mapProviderStatus reasoning preview', () => {

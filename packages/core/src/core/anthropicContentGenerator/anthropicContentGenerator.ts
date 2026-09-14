@@ -679,11 +679,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       effectiveEffort,
       sampling.max_tokens,
     );
-    if (
-      thinking?.type === 'enabled' &&
-      request.config?.thinkingConfig?.includeThoughts === false
-    )
-      sampling.temperature = 1;
+    if (thinking?.type === 'enabled') sampling.temperature = 1;
     const outputConfig = this.buildOutputConfig(request, effectiveEffort);
 
     // Compute per-request: `Config.setModel()` mutates contentGeneratorConfig
@@ -704,10 +700,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    ArenaManager / forkedAgent).
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
+    const adaptiveMessageRules =
+      this.modelGenerationSupportsAdaptiveThinking() ||
+      this.modelSupportsAdaptiveThinking();
     const dropUnsignedAssistantThinking =
       !isDeepSeek &&
       !!thinking &&
-      this.modelGenerationSupportsAdaptiveThinking() &&
+      adaptiveMessageRules &&
       !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
     // Opus/Sonnet 4.6+ and every 5.x family reject a request whose final
     // message has role 'assistant' ("assistant message prefill") with a
@@ -715,8 +714,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // model-generation behavior change, identical on the native API,
     // Vertex AI, and Bedrock, so (unlike the signature workaround above)
     // this is NOT gated on baseURL.
-    const stripTrailingAssistantPrefill =
-      this.modelGenerationSupportsAdaptiveThinking();
+    const stripTrailingAssistantPrefill = adaptiveMessageRules;
 
     // Sample the live cache-control flags once per request and forward
     // them to the converter (body-side `cache_control`). The converter's
@@ -1006,7 +1004,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
    */
   private modelRejectsManualThinking(): boolean {
     const external = this.configuredReasoning();
-    if (external) return external.profile === 'anthropic-adaptive-only';
+    if (external?.profile === 'anthropic-adaptive-only') return true;
+    if (external && external.profile !== 'anthropic-adaptive') return false;
     const parsed = parseClaudeModelVersion(
       this.contentGeneratorConfig.model || '',
     );
@@ -1064,12 +1063,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
         typeof requestBudgetCap === 'number' && requestBudgetCap > 0
           ? requestBudgetCap
           : budgetTokens;
-      const capped = Math.min(
-        budgetTokens,
-        requestCap,
-        forcedMandatoryThinking ? maxTokens - 1 : budgetTokens,
-      );
-      return capped >= 1024 ? capped : undefined;
+      const requestCapped = Math.min(budgetTokens, requestCap);
+      const enforceWindow = forcedMandatoryThinking || external !== undefined;
+      const capped = enforceWindow
+        ? Math.min(requestCapped, maxTokens - 1)
+        : requestCapped;
+      return enforceWindow && capped < 1024 ? undefined : capped;
     };
 
     if (reasoning === false) {

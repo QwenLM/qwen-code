@@ -58,6 +58,20 @@ describe('explicit OpenAI thinking profiles', () => {
     ).toEqual({ effort: 'xhigh' });
   });
 
+  it('leaves required tool choice intact for non-DashScope endpoints', () => {
+    const result = applyOpenAIReasoningProfile(
+      {
+        model: generation.model,
+        messages: [],
+        tool_choice: 'required',
+      },
+      generation,
+      resolveModelReasoningConfig(generation)!,
+      false,
+    );
+    expect(result.tool_choice).toBe('required');
+  });
+
   it('honors request opt-out above raw overrides', () => {
     expect(
       wire(
@@ -211,7 +225,7 @@ describe('explicit OpenAI thinking profiles', () => {
       },
       true,
     ) as unknown as Record<string, unknown>;
-    expect(result['chat_template_kwargs']).toEqual({ enable_thinking: false });
+    expect(result).not.toHaveProperty('chat_template_kwargs');
   });
 
   it('keeps nested and top-level DashScope disable switches consistent', () => {
@@ -224,7 +238,24 @@ describe('explicit OpenAI thinking profiles', () => {
       true,
     ) as unknown as Record<string, unknown>;
     expect(result['enable_thinking']).toBe(false);
-    expect(result['chat_template_kwargs']).toEqual({ enable_thinking: false });
+    expect(result).not.toHaveProperty('chat_template_kwargs');
+  });
+
+  it('ignores a foreign template disable for a DashScope profile', () => {
+    const result = wire({
+      ...generation,
+      reasoningConfig: { profile: 'dashscope-thinking' },
+      extra_body: {
+        chat_template_kwargs: {
+          enable_thinking: false,
+          tools_in_user_message: false,
+        },
+      },
+    }) as unknown as Record<string, unknown>;
+    expect(result['enable_thinking']).toBe(true);
+    expect(result['chat_template_kwargs']).toEqual({
+      tools_in_user_message: false,
+    });
   });
 
   it('removes lower-priority disable controls when a raw effort wins', () => {
@@ -276,6 +307,7 @@ describe('explicit OpenAI thinking profiles', () => {
 
     const higherTemplateSwitch = wire({
       ...generation,
+      reasoningConfig: { profile: 'qwen-chat-template' },
       samplingParams: { reasoning_effort: 'high' },
       extra_body: {
         chat_template_kwargs: { enable_thinking: false },
@@ -350,6 +382,19 @@ describe('explicit OpenAI thinking profiles', () => {
         resolved,
       ),
     ).toEqual({ effort: 'high' });
+  });
+
+  it('reports a raw nested enable above a model default-off', () => {
+    const config: ContentGeneratorConfig = {
+      model: 'gpt-5.2',
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://openrouter.ai/api/v1',
+      reasoningConfig: { supportedEfforts: ['low', 'medium', 'high'] },
+      extra_body: { reasoning: { enabled: true } },
+    };
+    const resolved = resolveModelReasoningConfig(config)!;
+    expect(wire(config)).toMatchObject({ reasoning: { enabled: true } });
+    expect(getOpenAIReasoningState(config, resolved)).toEqual({});
   });
 
   it('retains the lower DashScope knob when the higher layer contains a nullish placeholder', () => {

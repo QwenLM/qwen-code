@@ -1347,6 +1347,8 @@ export class ModelsConfig {
       }
 
       // Apply generation config
+      const priorReasoning = this._generationConfig.reasoning;
+      const priorReasoningSource = this.generationConfigSources['reasoning'];
       for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (this._generationConfig as any)[field] =
@@ -1354,6 +1356,15 @@ export class ModelsConfig {
         const source = runtimeModelSnapshot.sources[field];
         if (source) this.generationConfigSources[field] = { ...source };
         else delete this.generationConfigSources[field];
+      }
+      if (
+        priorReasoning === false &&
+        priorReasoningSource?.kind !== 'modelProviders'
+      ) {
+        this._generationConfig.reasoning = false;
+        if (priorReasoningSource)
+          this.generationConfigSources['reasoning'] = priorReasoningSource;
+        else delete this.generationConfigSources['reasoning'];
       }
 
       const requiresRefresh = isAuthTypeChange;
@@ -1493,6 +1504,22 @@ export class ModelsConfig {
       structuredClone(modelProviders),
       structuredClone(providerProtocol),
     );
+    if (
+      modelId === undefined &&
+      this.pendingModelSelection &&
+      this.currentAuthType !== undefined &&
+      !this.pendingModelRegistry.hasModel(
+        this.currentAuthType,
+        this.pendingModelSelection.modelId,
+        this.pendingModelSelection.baseUrl,
+      )
+    ) {
+      debugLogger.warn(
+        `Dropping staged model selection "${this.pendingModelSelection.modelId}" because it is not present in the newly staged registry`,
+      );
+      this.pendingModelSelection = undefined;
+      this.pendingModelSelectionSource = undefined;
+    }
     if (modelId !== undefined) {
       const selectionResolves =
         modelId !== null &&

@@ -2149,6 +2149,51 @@ describe('ModelsConfig', () => {
       ).toBeUndefined();
     });
 
+    it('keeps a live runtime thinking opt-out across runtime reselection', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'runtime-model',
+          apiKey: 'sk-runtime-key',
+          baseUrl: 'https://runtime.example.com/v1',
+        },
+      });
+      const runtimeId = modelsConfig.detectAndCaptureRuntimeModel()!;
+      modelsConfig.getGenerationConfig().reasoning = false;
+
+      await modelsConfig.switchToRuntimeModel(runtimeId);
+
+      expect(modelsConfig.getGenerationConfig().reasoning).toBe(false);
+    });
+
+    it('restores snapshot reasoning above a registry model default', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'declared-model',
+              generationConfig: { reasoning: false },
+            },
+          ],
+        },
+        generationConfig: {
+          model: 'runtime-model',
+          apiKey: 'sk-runtime-key',
+          baseUrl: 'https://runtime.example.com/v1',
+          reasoning: { effort: 'high' },
+        },
+      });
+      const runtimeId = modelsConfig.detectAndCaptureRuntimeModel()!;
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'declared-model');
+      await modelsConfig.switchToRuntimeModel(runtimeId);
+
+      expect(modelsConfig.getGenerationConfig().reasoning).toEqual({
+        effort: 'high',
+      });
+    });
+
     it('should throw error when switching to non-existent runtime snapshot', async () => {
       const modelsConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_OPENAI,

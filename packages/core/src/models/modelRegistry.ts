@@ -328,15 +328,17 @@ export class ModelRegistry {
 
     const baseUrl = config.baseUrl || this.getDefaultBaseUrl(authType);
 
-    resolveModelReasoningConfig(
-      {
-        ...generationConfig,
-        model: config.id,
-        authType,
-        baseUrl,
-      },
-      config.capabilities?.reasoning,
-    );
+    if (config.baseUrl || generationConfig.reasoningConfig?.profile) {
+      resolveModelReasoningConfig(
+        {
+          ...generationConfig,
+          model: config.id,
+          authType,
+          baseUrl,
+        },
+        config.capabilities?.reasoning,
+      );
+    }
 
     return {
       ...config,

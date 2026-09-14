@@ -60,6 +60,25 @@ describe('external model reasoning configuration', () => {
     });
   });
 
+  it('does not let a default-off model disable mandatory thinking', () => {
+    const config: ContentGeneratorConfig = {
+      model: 'gpt-5.2',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      thinkingMandatory: true,
+      reasoningConfig: {
+        profile: 'openai-reasoning',
+        defaultEffort: 'medium',
+      },
+    };
+    const resolved = resolveModelReasoningConfig(config);
+    expect(resolveEffectiveReasoning(config, resolved)).toEqual({
+      effort: 'medium',
+    });
+    expect(
+      resolveEffectiveReasoning({ ...config, reasoning: false }, resolved),
+    ).toEqual({ effort: 'medium' });
+  });
+
   it('overrides a known name and host, including mandatory name inference', () => {
     const resolved = resolveModelReasoningConfig({
       ...route,
