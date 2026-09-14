@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import path from 'node:path';
 import {
   SessionSourceService,
   restoreSessionSources,
@@ -21,7 +22,10 @@ const link = (url = 'https://example.com/doc#one') => ({
   locator: { type: 'url', url },
 });
 
-function fixture(sessionId = 'session', workspaceCwd = '/workspace') {
+function fixture(
+  sessionId = 'session',
+  workspaceCwd = path.resolve('/workspace'),
+) {
   let stored: SessionSourcesSnapshot | undefined;
   const persist = vi.fn(async (snapshot: SessionSourcesSnapshot) => {
     stored = structuredClone(snapshot);
@@ -59,7 +63,7 @@ describe('session sources', () => {
       change: 'unchanged',
     });
     expect(first.source).toMatchObject({
-      workspaceCwd: '/workspace',
+      workspaceCwd: path.resolve('/workspace'),
       locator: { workspacePath: 'docs/requirements.md' },
     });
     const one = await service.upsert(link());
