@@ -103,6 +103,8 @@ const markdown = {
 
 操作栏复用来源面板的已登记来源及附件兜底条目，只展示与当前用户轮次明确关联的项。旧来源在另一轮再次关联时，两轮都计入；每轮内部去重。入口只出现在该轮最终 Assistant 消息的操作栏。来源为空或不可用时不显示入口，不以脚注数量代替。
 
+`environmentPanel.items` 只控制面板分区。省略 `sources` 和 `attachments` 时隐藏对应分区，Assistant 操作栏来源仍然启用；所需来源和附件元数据继续按现有能力、会话及 owner 校验加载。宿主因此可以隐藏内置分区并使用自己的来源面板。该面板配置不是全局关闭来源能力的开关。
+
 关联来自成功的顶层 `record_source` 记录、用户消息附件引用，以及宿主显式提供的 `sourceReferences`（会话 ID、用户轮次 ID、已登记来源 ID）。选择器与当前来源面板条目求交集，排除失败/进行中/取消的登记、未知或已删除来源及其他轮次。优先匹配工具返回的来源 ID；fork 导致来源 ID 重新计算时，用规范化 locator 兜底，工作区文件还必须匹配工作区根。禁止用创建/更新时间或快照 revision 推测关联。手动、hook、client 仅登记到会话、却没有轮次关联的项仍只属于完整来源面板；本次不新增 Core 持久化协议，也不宣称自动追踪全部实际使用行为。
 
 Web Shell 顶层的 `getAssistantSourcesIcon` 接收本轮完整只读 `WebShellSource` 列表，返回资源 URL，沿用现有默认图标和 URL 策略。`WebShellSource` 区分已登记 `SessionSource` 和来源面板中已有的未登记附件条目。它替换 `markdown.getAssistantFootnoteIcon`，与 Markdown 定制分开。

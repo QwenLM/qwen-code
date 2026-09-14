@@ -212,7 +212,11 @@ export type WebShellEnvironmentPanelItem =
   | 'artifacts';
 
 export interface WebShellEnvironmentPanelOptions {
-  /** Sections to show. Sources includes attachments; both keys render one section. */
+  /**
+   * Panel sections to show. Sources includes attachments; both keys render one
+   * section. Omitting both keys does not disable the turn source footer or its
+   * metadata loading.
+   */
   items?: readonly WebShellEnvironmentPanelItem[];
 }
 
