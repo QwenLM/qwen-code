@@ -1100,7 +1100,19 @@ describe('bundled review skill', () => {
     // same deterministic path — without the `&&` (and the prose branch
     // for its failure) the auditor runs over that stale file and appends
     // the previous run's assumptions to this run's ledger.
-    expect(step).toContain('--out ' + hunksPath + ' && \\');
+    expect(step).toContain(
+      '--out ' +
+        hunksPath +
+        ' \\\n  --plan <the plan report from Step 1> && \\',
+    );
+    // Both captures take the plan: it is the one path that makes the flow's
+    // own bookkeeping derivable instead of enumerated, and the two moments
+    // must agree on what bookkeeping is or the second re-includes what the
+    // first excluded.
+    expect(step).toContain(
+      'review fix-delta --snapshot \\\n  --plan <the plan report from Step 1>',
+    );
+    expect(step).toContain('Pass the SAME plan to both');
     // The baseline record is anchored OUTSIDE the tree's write surface: the
     // snapshot prints a fingerprint of the record, the orchestrator keeps
     // it, and `--since` refuses the file without it or when it no longer
@@ -1130,6 +1142,27 @@ describe('bundled review skill', () => {
     // re-derived it from the file at `--since` time would hand the check
     // the forgery's own hash.
     expect(step).toContain('**Never recompute it from the file**');
+    // …and the HUNKS get the same anchor: they are the auditor's whole
+    // input, written by the same command into the same tree-writable
+    // directory and read back by a separate process, so a forgery that
+    // keeps every `diff --git` header byte-identical while substituting
+    // the bodies is detectable only against the hex `--since` printed.
+    // Both halves again: the receipt line, and the flag that hands it back
+    // inside the same `&&` chain.
+    expect(step).toContain(
+      'fix-delta: hunks fingerprint <hex>; pass it back as --hunks-fingerprint on agent-prompt --role fix-audit',
+    );
+    expect(step).toContain(
+      '--hunks ' +
+        hunksPath +
+        ' \\\n  --hunks-fingerprint <the fingerprint the --since run printed> --batch \\',
+    );
+    // The empty-diff arm: the changed-files summary does not print there,
+    // and an empty hunks file is exactly the one the skip decision keys on.
+    expect(step).toContain('it prints on the empty-diff path too');
+    expect(step).toContain(
+      'never worked around by re-running `--since`, which would fingerprint whatever is in the file by then',
+    );
     // Review worktrees are classified by the orchestrator's own naming,
     // never by anything in the tree — and a `--fix` run names none.
     expect(step).toContain(
@@ -1153,6 +1186,15 @@ describe('bundled review skill', () => {
     // and the disclosure-not-finding rule that closes the back door.
     expect(step).toContain('one agent, and not a re-review');
     expect(step).toContain('It produces no verdict and files no finding.');
+    // Two disclosures, one vocabulary: the auditor reports an unpinned
+    // assumption OR a `fixed` finding no hunk in its input attests, and the
+    // paragraph that introduces it must not still claim one thing — the
+    // ledger-note rule further down prescribes both line forms, so a stale
+    // "one thing" contradicts the note this same step tells the orchestrator
+    // to persist.
+    expect(step).toContain('It reports two things, and both are disclosures:');
+    expect(step).not.toContain('It reports one thing');
+    expect(step).toContain('hunks in, disclosures out, no verdict');
     expect(step).toContain(
       '**An unpinned assumption is a disclosure, not a finding.**',
     );
@@ -1207,6 +1249,24 @@ describe('bundled review skill', () => {
       'run the `review findings --outcomes` command above again',
     );
     expect(step).toContain('for every `fixed` the fix audit annotated');
+    // …and BOTH of the auditor's line forms have a template here. The
+    // `(no hunk)` form carries no assumption and no pin — the auditor
+    // holds zero bytes of that finding's edit — so a single
+    // `assumes …; pin with …` template left the orchestrator to fill
+    // slots the line does not have, and what it appended to the ledger
+    // as `outcomeNote` was invented.
+    expect(step).toContain(
+      '`fix audit: unpinned — assumes <…>; pin with: <…>` for an assumption',
+    );
+    expect(step).toContain(
+      '`fix audit: unattested — no hunk in the audit input touches <location>`',
+    );
+    expect(step).toContain(
+      'which carries no assumption and no pin for you to copy',
+    );
+    expect(step).toContain(
+      'the auditor reports such an entry on an `unattested:` line',
+    );
     // The subagent type mandate reaches this launch too.
     expect(step).toContain('`subagent_type: "review-agent"`');
     // The refusal rule's carve-outs: the THREE ledger/tree-mismatch

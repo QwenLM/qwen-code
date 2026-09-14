@@ -956,19 +956,20 @@ What does NOT pin an assumption: a comment; the finding's own prose; the fixer's
 
 **You write nothing.** This is the user's working tree with their fix in it — not a review worktree and not a scratch tree: a probe file you add or a line you mutate lands in their files. Reading, searching, and running an EXISTING test command are yours; creating, editing and mutating are not. So you do not prove a pin by mutation — you quote it, and where a quoted test would demonstrably stay green with the assumption violated, say so and count the assumption unpinned.
 
-An entry in the findings list may carry the line **"No hunk below touches this finding's location(s)"**. That is not a hunk to audit and not something to go hunting for: report it once as an unpinned line with \`(no hunk)\` where the file:line would go — the ledger marks it fixed and nothing in front of you attests that — and carry on with the hunks that ARE here. Every listed finding may carry it — a fix can land entirely in files no finding names (a test file the finding asked for, a caller of the declaration it named), and with one finding that is every finding: then no edit in front of you is attested to any finding, and the hunks are audited for what they assume all the same.
+An entry in the findings list may carry the line **"No hunk below touches this finding's location(s)"**. That is not a hunk to audit and not something to go hunting for: report that entry once, on the \`unattested:\` line form below — the ledger marks it fixed and nothing in front of you attests that — and carry on with the hunks that ARE here. Every listed finding may carry it — a fix can land entirely in files no finding names (a test file the finding asked for, a caller of the declaration it named), and with one finding that is every finding: then no edit in front of you is attested to any finding, and the hunks are audited for what they assume all the same.
 
 Scope discipline: a hunk that is a generated artifact, a lockfile, or a test the fix added is read for what it pins, not audited for assumptions of its own. Do not report a defect you happen to notice in or beside the hunks — that is a finding, and this audit files none: what you report is a disclosure to the person who will read the outcome, not a finding on the review, and it changes no verdict. If a defect is inseparable from an assumption, say it in one clause under that assumption; otherwise leave it.
 
 Your return is one of two shapes, and nothing else rides in it.
 
-**Unpinned assumptions found** — one line per assumption, in this exact form:
+**Disclosures found** — one line per disclosure, ordered by finding id, in one of two forms:
 
 - \`<finding id, or none>\` — \`<file>:<line>\` — assumes: <one sentence> — unpinned; pin with: <one clause naming the test input, the type, or the single source that would>
+- \`<finding id>\` — \`(no hunk)\` — unattested: the ledger marks this finding \`fixed\`, but no hunk in this input touches <its location> — nothing here pins that the fix landed
 
-Order the lines by finding id; an assumption in a hunk that closes no listed finding carries \`none\`. The \`pin with:\` clause is the part the reader acts on — name the concrete boundary input or the constant to derive from, never a bare "add a test".
+An assumption in a hunk that closes no listed finding carries \`none\`. The \`pin with:\` clause is the part the reader acts on — name the concrete boundary input or the constant to derive from, never a bare "add a test". The \`unattested:\` form says the whole of what you know about that entry and nothing more — no assumption and no pin, because not one byte of the edit it claims is in front of you and you are not to go hunting for it — and its finding id comes first, because that is the ledger entry the line is filed under. Never fill the other form's \`assumes:\` and \`pin with:\` slots for it: an assumption you had to invent is written into that finding's note and shown to the user as your disclosure.
 
-**Nothing unpinned** — exactly one line: \`No unpinned assumptions — audited <n> hunk(s) in <files>; named <k> assumption(s), each pinned by <the pins, briefly>\`. The clause names what you walked: a return that names nothing you read is indistinguishable from never having read anything.`,
+**Nothing unpinned** — exactly one line: \`No unpinned assumptions — audited <n> hunk(s) in <files>; named <k> assumption(s), each pinned by <the pins, briefly>\`. The clause names what you walked: a return that names nothing you read is indistinguishable from never having read anything. This shape is not yours when an entry carried the \`No hunk below touches\` line — that entry owes an \`unattested:\` line, so the return is the first shape.`,
   },
 };
 

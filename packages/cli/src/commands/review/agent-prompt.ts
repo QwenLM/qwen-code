@@ -150,6 +150,18 @@ interface AgentPromptArgs {
    */
   hunks?: string;
   /**
+   * The fingerprint `fix-delta --since` printed for that hunks file — a
+   * SHA-256 of its exact bytes. The hunks are the fix auditor's whole
+   * input, and the file sits in a directory the reviewed tree can write
+   * to, so nothing about it is self-certifying: a rewrite that keeps every
+   * `diff --git` header byte-identical and substitutes the bodies is
+   * invisible to every check below. The one channel a planted process
+   * cannot rewrite is the orchestrator's own argument construction, so the
+   * build refuses to read the file without the hex, and refuses a file
+   * that no longer matches it.
+   */
+  hunksFingerprint?: string;
+  /**
    * Which round of a findings role this build is (1-based). Baked into the
    * identity line and the record key by the CLI, because the orchestrator
    * otherwise bakes it in by hand: dogfooded, two same-findings reverse-audit
@@ -2836,9 +2848,11 @@ function findingTouchesHunks(
  * in a file other than the one the finding names, and a fix round with one
  * finding can legitimately land entirely there (a test file the finding
  * asked for, a caller of the declaration it named) — and the audit proceeds
- * over the hunks that are here, with the auditor told to report the entry as
- * unattested. The brief's own `none` return shape is for a hunk that closes
- * no listed finding.
+ * over the hunks that are here, with the auditor told to report the entry on
+ * its own `unattested:` line, a form that carries no `assumes:` and no
+ * `pin with:` because the auditor holds none of that finding's edit. The
+ * brief's own `none` return shape is for a hunk that closes no listed
+ * finding.
  */
 export function renderFixAuditInput(artifact: unknown, hunks: string): string {
   const findings = validateFindings(artifact);
@@ -2958,8 +2972,10 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
             "No hunk below touches this finding's location(s) — the fix " +
               'may have landed in another file, or it may not have landed ' +
               'at all. Nothing in this input attests that this finding was ' +
-              'closed; audit the hunks that are here and report it as ' +
-              'unattested.',
+              'closed; audit the hunks that are here and report this entry ' +
+              'on an `unattested:` line — the `(no hunk)` form your brief ' +
+              'gives, which takes no `assumes:` and no `pin with:` clause, ' +
+              'because no edit of this finding is in front of you.',
           ]
         : []),
     ].join('\n'),
@@ -3743,6 +3759,9 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   const hasWhole = !!args.wholeDiff;
   const hasRound = args.round !== undefined;
   const hasHunks = typeof args.hunks === 'string' && args.hunks.length > 0;
+  const hasHunksFingerprint =
+    typeof args.hunksFingerprint === 'string' &&
+    args.hunksFingerprint.length > 0;
   const bad = (msg: string): never => {
     throw new Error(`agent-prompt: ${msg}`);
   };
@@ -3756,13 +3775,15 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       hasFile ||
       hasFindings ||
       hasHunks ||
+      hasHunksFingerprint ||
       hasWhole ||
       args.allChunks ||
       hasRound
     ) {
       bad(
         '--roster builds every prompt the plan requires; it takes no --chunk, ' +
-          '--role, --file, --findings, --hunks, --whole-diff, --all-chunks or --round. ' +
+          '--role, --file, --findings, --hunks, --hunks-fingerprint, ' +
+          '--whole-diff, --all-chunks or --round. ' +
           '(Step 4/5 verify and reverse-audit prompts are built per round, ' +
           'with --role and --findings.)',
       );
@@ -3776,11 +3797,12 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       hasFile ||
       hasFindings ||
       hasHunks ||
+      hasHunksFingerprint ||
       args.allChunks ||
       hasRound
     ) {
       bad(
-        '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role, --file, --findings, --hunks, --all-chunks or --round.',
+        '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role, --file, --findings, --hunks, --hunks-fingerprint, --all-chunks or --round.',
       );
     }
   } else if (hasRole) {
@@ -3874,6 +3896,26 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       bad(
         `--hunks hands the applied hunks to a --role fix-audit block; role ` +
           `"${role}" does not take it.`,
+      );
+    }
+    // The hunks are the audit's WHOLE input, and the file lives in a
+    // directory the reviewed tree can write to — so the build reads it back
+    // only against the hex `fix-delta --since` printed beside it, exactly
+    // as `fix-delta --since` reads the snapshot only against `--fingerprint`.
+    // Required, not optional: an anchor a caller may omit anchors nothing.
+    if (role === 'fix-audit' && !hasHunksFingerprint) {
+      bad(
+        '--role fix-audit needs --hunks-fingerprint <hex> — the fingerprint ' +
+          '`fix-delta --since` printed beside the hunks file. That file lives ' +
+          'in the tree the reviewed code can write to, so it is read only ' +
+          'against the record the orchestrator kept; never recompute it from ' +
+          'the file.',
+      );
+    }
+    if (hasHunksFingerprint && !hasHunks) {
+      bad(
+        '--hunks-fingerprint fingerprints the --hunks file; pass the file it ' +
+          'was printed for.',
       );
     }
     // `--round` labels a repeat launch of a role that runs more than once —
@@ -4101,18 +4143,37 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // findings roles use, so the delivery floor reads this launch exactly as
     // it reads a verifier's.
     if (role === 'fix-audit') {
-      let hunks: string;
+      let hunksBytes: Buffer;
       try {
-        // utf8 on purpose: the artifact holds git's raw patch bytes, and
-        // the prompt is the lossy copy — fidelity is preserved at the
-        // source, not here.
-        hunks = readFileSync(args.hunks as string, 'utf8');
+        hunksBytes = readFileSync(args.hunks as string);
       } catch (err) {
         throw new Error(
           `agent-prompt: cannot read the hunks ${args.hunks}: ` +
             `${(err as Error).message}. Pass the file \`fix-delta --since\` wrote.`,
         );
       }
+      // The anchor: the hunks are the audit's whole input and this is a
+      // SEPARATE PROCESS from the one that wrote them, over a file inside
+      // the tree the reviewed code can write to. Ruled on the RAW bytes —
+      // the decode below is lossy for a patch holding names git could not
+      // represent, and a lossy copy cannot anchor anything.
+      const actualHunks = createHash('sha256').update(hunksBytes).digest('hex');
+      const expectedHunks = (args.hunksFingerprint as string)
+        .trim()
+        .toLowerCase();
+      if (actualHunks !== expectedHunks) {
+        throw new Error(
+          `agent-prompt: the hunks ${args.hunks} fingerprint is ` +
+            `${actualHunks}, not the ${args.hunksFingerprint} ` +
+            '`fix-delta --since` printed — the file was rewritten since that ' +
+            'command wrote it, and hunks this run cannot anchor are not the ' +
+            "audit's input. Never recompute the fingerprint from the file.",
+        );
+      }
+      // utf8 on purpose: the artifact holds git's raw patch bytes, and
+      // the prompt is the lossy copy — fidelity is preserved at the
+      // source, not here.
+      const hunks = hunksBytes.toString('utf8');
       let artifact: unknown;
       try {
         artifact = JSON.parse(findingsContent);
@@ -4492,6 +4553,15 @@ export const agentPromptCommand: CommandModule = {
           'outcome-bearing artifact, the command renders the `fixed` findings ' +
           'above the hunks into the one list file the block points at.',
       })
+      .option('hunks-fingerprint', {
+        type: 'string',
+        describe:
+          'With --role fix-audit: the `hunks fingerprint <hex>` line ' +
+          '`fix-delta --since` printed for the --hunks file. Required — the ' +
+          'file lives in the tree the reviewed code can write to, so it is ' +
+          'read only against that hex, and a file that no longer matches it ' +
+          'is refused. Never recompute it from the file.',
+      })
       .option('round', {
         type: 'number',
         describe:
@@ -4513,6 +4583,7 @@ export const agentPromptCommand: CommandModule = {
       rules: argv['rules'] as string | undefined,
       findings: argv['findings'] as string | undefined,
       hunks: argv['hunks'] as string | undefined,
+      hunksFingerprint: argv['hunks-fingerprint'] as string | undefined,
       round: argv['round'] as number | undefined,
     });
   },

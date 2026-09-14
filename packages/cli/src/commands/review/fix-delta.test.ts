@@ -71,6 +71,16 @@ const statHook = vi.hoisted(() => ({
 const realpathHook = vi.hoisted(() => ({
   failOn: null as RegExp | null,
 }));
+// …and the deletion classifier's on-disk reading: the shape it rules on
+// needs a path ABSENT when the second capture's `add -A` lstats it and
+// PRESENT when the classifier lstats it after that capture — a watcher the
+// reviewed code left running as this user. No fixture can time a write
+// between two calls of one run, so the reading is wrapped behind the same
+// kind of switch, keyed on the exact path and answered from a real regular
+// file's own stat. Everything around it stays the real thing.
+const lstatHook = vi.hoisted(() => ({
+  redirect: null as { from: string; to: string } | null,
+}));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   const hooked = (path: unknown, opts?: unknown): unknown => {
@@ -90,6 +100,17 @@ vi.mock('node:fs', async (importOriginal) => {
       actual.realpathSync(...args),
     { native: hooked },
   ) as typeof actual.realpathSync;
+  const lstatSync = ((...args: Parameters<typeof actual.lstatSync>) => {
+    const redirect = lstatHook.redirect;
+    if (redirect !== null) {
+      const asked = args[0];
+      const spelled = Buffer.isBuffer(asked)
+        ? asked.toString('utf8')
+        : String(asked);
+      if (spelled === redirect.from) return actual.lstatSync(redirect.to);
+    }
+    return actual.lstatSync(...args);
+  }) as typeof actual.lstatSync;
   const readdirSync = ((...args: Parameters<typeof actual.readdirSync>) => {
     const entries = actual.readdirSync(...args);
     const opts = args[1];
@@ -122,10 +143,11 @@ vi.mock('node:fs', async (importOriginal) => {
   }) as typeof actual.statSync;
   return {
     ...actual,
-    default: { ...actual, readdirSync, statSync, realpathSync },
+    default: { ...actual, readdirSync, statSync, realpathSync, lstatSync },
     readdirSync,
     statSync,
     realpathSync,
+    lstatSync,
   };
 });
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -162,6 +184,13 @@ import {
   type FixSnapshot,
 } from './fix-delta.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+
+// A name that is not valid UTF-8 cannot be planted on every platform: APFS
+// rejects the raw byte with EILSEQ at creation time, so the fixture fails
+// before the code under test runs. Linux filesystems are byte-transparent;
+// Windows is excluded for its own path-byte rules. Same convention as
+// lib/worktree.test.ts.
+const itWhereRawByteNamesExist = it.skipIf(process.platform !== 'linux');
 
 describe('fix-delta', () => {
   let repo: string;
@@ -310,6 +339,7 @@ describe('fix-delta', () => {
     readdirHook.unknownDirents = false;
     statHook.zeroInodes = false;
     realpathHook.failOn = null;
+    lstatHook.redirect = null;
     setWalkBudgetsForTest({
       perWalk: IGNORED_WALK_BUDGET,
       perRun: IGNORED_WALK_RUN_CAP,
@@ -1026,7 +1056,7 @@ describe('fix-delta', () => {
     try {
       execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: fresh });
       writeFileSync(join(fresh, 'a.ts'), 'a\n');
-      const tree = snapshotWorkingTree(fresh);
+      const { tree } = snapshotWorkingTree(fresh);
       expect(
         execFileSync('git', ['ls-tree', '--name-only', tree], {
           cwd: fresh,
@@ -1420,13 +1450,37 @@ describe('fix-delta', () => {
     ).toThrow(/excluded directory .* is a symlink/);
   });
 
+  it('refuses a symlink planted at a family directory under .qwen/tmp', () => {
+    // One level deeper than the prefixes the directory check lstats, which
+    // is where the exclusion's own glob sits — and the ancestor walk judges
+    // a link by where its PARENT canonically sits, so a target inside the
+    // checkout passed it too. Both prefixes are real directories here; the
+    // link is at the family name, so every side file the flow writes under
+    // that name lands in `src/`, a physical path no pathspec matches, and
+    // the next capture records the review's own bookkeeping as fix edits.
+    mkdirSync(join(repo, 'src'));
+    symlinkSync(
+      join(repo, 'src'),
+      join(repo, '.qwen', 'tmp', 'qwen-review-pr-1'),
+    );
+    expect(() =>
+      runFixDelta({
+        snapshot: true,
+        since: undefined,
+        out: join(repo, '.qwen', 'tmp', 'qwen-review-pr-1', 'snap.json'),
+      }),
+    ).toThrow(/excluded directory .*qwen-review-pr-1 is a symlink/);
+    expect(existsSync(join(repo, 'src', 'snap.json'))).toBe(false);
+  });
+
   it('refuses a symlink planted at a side path instead of writing through it', () => {
-    // The directory guard lstats only the PREFIXES of the excluded
-    // directories: the command's own deterministic side path — Step 6B
-    // re-runs with the same `--out` name every round, and the tree author
-    // knows it — is the tree author's to plant. A tracked link at exactly
-    // that name redirects the write through it, truncating whatever it
-    // points at outside everything this command is supposed to touch.
+    // The command's own deterministic side path — Step 6B re-runs with the
+    // same `--out` name every round, and the tree author knows it — is the
+    // tree author's to plant. A tracked link at exactly that name redirects
+    // the write through it, truncating whatever it points at outside
+    // everything this command is supposed to touch. Named as the side path
+    // it is: the leaf check answers before the family-directory check, which
+    // rules on a link at a family name that is not this run's own output.
     const victim = join(out, 'victim.txt');
     writeFileSync(victim, 'sentinel — must survive\n');
     const sidePath = join(
@@ -1459,7 +1513,7 @@ describe('fix-delta', () => {
   // POSIX-only: the raw-0xFF directory name cannot exist on NTFS (Buffer
   // paths are utf8-coerced before reaching the filesystem APIs), and the
   // byte-exact setup channel is /bin/sh.
-  it.skipIf(process.platform === 'win32')(
+  itWhereRawByteNamesExist(
     'names a nested repo whose directory name is not valid UTF-8',
     () => {
       // The `-z` output is parsed byte-exactly: a UTF-8 decode of the raw
@@ -1771,7 +1825,7 @@ describe('fix-delta', () => {
   // The name-side assertions are POSIX-only: a latin-1 Buffer path is
   // utf8-coerced before reaching the NTFS APIs, so the byte-exact name
   // never exists on disk on the Windows lane.
-  it.skipIf(process.platform === 'win32')(
+  itWhereRawByteNamesExist(
     'keeps the hunks byte-faithful for non-UTF-8 content and names',
     () => {
       // The artifact must stay git's patch itself: a lossy `.toString('utf8')`
@@ -2682,7 +2736,7 @@ describe('fix-delta', () => {
   });
 
   // POSIX-only: a raw 0xE9-byte directory name cannot exist on NTFS.
-  it.skipIf(process.platform === 'win32')(
+  itWhereRawByteNamesExist(
     'keeps colliding display names apart when keying the blind-spot sets',
     () => {
       // UTF-8 `C3 A9` and the single invalid byte `E9` decode to the SAME
@@ -2723,7 +2777,7 @@ describe('fix-delta', () => {
   );
 
   // POSIX-only: a raw 0xFF-byte directory name cannot exist on NTFS.
-  it.skipIf(process.platform === 'win32')(
+  itWhereRawByteNamesExist(
     'never probes a planted decoy in place of a name the bytes cannot reach',
     () => {
       // Spawn coerces every channel through UTF-8: a 0xFF name would
@@ -2998,7 +3052,7 @@ describe('fix-delta', () => {
   });
 
   // POSIX-only: a byte that is not valid UTF-8 cannot be a name on NTFS.
-  it.skipIf(process.platform === 'win32')(
+  itWhereRawByteNamesExist(
     'keys the git-dir exclusion on bytes, not on the display decode',
     () => {
       // `decodePath` is not injective: the UTF-8 pair `C3 A9` and the lone
@@ -3100,6 +3154,40 @@ describe('fix-delta', () => {
     expect(stderr().some((l) => l.includes('filter.evil.clean'))).toBe(true);
   });
 
+  it('refuses a capture whose filter screen could not read the config', () => {
+    // The screen caps its include fan-out (`MAX_INCLUDE_FILES = 64`); git
+    // does not. A filter planted in the 65th include is therefore one git
+    // reads and EXECUTES while the screen reports no filters at all — the
+    // blanking generates nothing for it, and `add -A` would run it as the
+    // reviewing user, which is the whole channel the blanking exists to
+    // close. What the screen cannot read to the bottom it cannot certify, so
+    // the capture refuses. The refusal keys on `unread`, not on `dangling`.
+    const canary = join(out, 'fanout-canary');
+    const script = join(out, 'evil.sh');
+    writeFileSync(script, `#!/bin/sh\ntouch '${canary}'\ntr a-z A-Z\n`);
+    chmodSync(script, 0o755);
+    const gitDir = join(repo, '.git');
+    for (let i = 1; i <= 65; i++) {
+      writeFileSync(join(gitDir, `i${i}`), `[user]\n\temail = t${i}@t.t\n`);
+      git('config', '--add', 'include.path', `i${i}`);
+    }
+    // …and the filter goes in the LAST include, past the screen's cap.
+    writeFileSync(
+      join(gitDir, 'i65'),
+      `[filter "evil"]\n\tclean = ${script}\n\trequired = true\n`,
+    );
+    mkdirSync(join(gitDir, 'info'), { recursive: true });
+    writeFileSync(join(gitDir, 'info', 'attributes'), 'a.ts filter=evil\n');
+
+    expect(() =>
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() }),
+    ).toThrow(/config file\(s\) to the bottom/);
+    // The planted command never ran: the refusal precedes every spawn that
+    // would execute a filter.
+    expect(existsSync(canary)).toBe(false);
+    expect(existsSync(snapshotFile())).toBe(false);
+  });
+
   it('discloses a clean filter that steers what the capture stores', () => {
     // `filter.<name>.clean` replaces a path's STORED content, so a real
     // edit can be absent from both trees, or bytes the worktree never held
@@ -3130,7 +3218,7 @@ describe('fix-delta', () => {
   });
 
   // POSIX-only: a byte that is not valid UTF-8 cannot be a name on NTFS.
-  it.skipIf(process.platform === 'win32')(
+  itWhereRawByteNamesExist(
     'asks git about the raw name bytes, not their display rendering',
     () => {
       // The attribute probe is fed the names `diff-tree` printed. Sending
@@ -3272,6 +3360,29 @@ describe('fix-delta', () => {
     expect(() =>
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() }),
     ).toThrow(/core\.worktree/);
+    expect(existsSync(snapshotFile())).toBe(false);
+  });
+
+  it('keeps a root-derivation refusal on one protocol line', () => {
+    // The refusal renders the paths git reported — and a directory NAME can
+    // carry a raw control byte. Unescaped, a name holding `\n` splits the
+    // message across two lines, so a planted directory name forges a second
+    // `fix-delta:` protocol line the run never printed (the same forgery
+    // `escapeNoteToken` already closes on the notes). Render-boundary only:
+    // the containment and identity comparisons stay on the raw strings.
+    const decoy = join(repo, '.de\ncoy');
+    mkdirSync(decoy);
+    git('config', 'core.worktree', decoy);
+
+    let message = '';
+    try {
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/core\.worktree/);
+    expect(message.split('\n')).toHaveLength(1);
+    expect(message).toContain('\\x0a');
     expect(existsSync(snapshotFile())).toBe(false);
   });
 
@@ -3530,6 +3641,41 @@ describe('fix-delta', () => {
     expect(() =>
       runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() }),
     ).toThrow(/--since needs --fingerprint/);
+  });
+
+  it('prints a hunks fingerprint on the --since path, the empty diff included', () => {
+    // The hunks are the fix auditor's whole input, written by the same
+    // `writeSideFile` into the same tree-writable directory as the snapshot
+    // record and read back by a SEPARATE process (`agent-prompt --role
+    // fix-audit`). The snapshot's anchor covers the record only, so a
+    // rewrite that keeps every `diff --git` header byte-identical and
+    // substitutes the bodies reached the auditor unanchored. The receipt
+    // prints on BOTH paths: the empty diff returns before the summary line,
+    // and an empty hunks file is exactly the one the skill's skip decision
+    // keys on.
+    const receipt = () =>
+      /^fix-delta: hunks fingerprint ([0-9a-f]{64}); pass it back as --hunks-fingerprint on agent-prompt --role fix-audit$/.exec(
+        stderr().find((l) => l.startsWith('fix-delta: hunks fingerprint ')) ??
+          '',
+      );
+    runSnapshot();
+    runSince();
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    let m = receipt();
+    expect(m).not.toBeNull();
+    expect(m![1]).toBe(fingerprintOf(hunksFile()));
+
+    (writeStderrLine as unknown as Mock).mockClear();
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 7;\n');
+    runSince();
+    expect(readFileSync(hunksFile(), 'utf8')).toContain('+export const x = 7;');
+    m = receipt();
+    expect(m).not.toBeNull();
+    expect(m![1]).toBe(fingerprintOf(hunksFile()));
+    // An empty file and a non-empty one cannot share a hex.
+    expect(m![1]).not.toBe(
+      createHash('sha256').update(Buffer.alloc(0)).digest('hex'),
+    );
   });
 
   it('probes a gitfile that points into the registry when the orchestrator did not name it', () => {
@@ -4164,6 +4310,30 @@ describe('fix-delta', () => {
     );
   });
 
+  it('records an edit confined to the exec bit under core.fileMode=false', () => {
+    // A `core.fileMode=false` in the audited repository's OWN config makes
+    // git read no mode difference at all, so a landed `chmod +x` left the two
+    // captured trees identical and the run all-cleared over an edit that was
+    // applied — the same bare all-clear `core.autocrlf` needed its pin for.
+    // Pinned at the CAPTURE only: the nested-repository probes keep git's own
+    // view of "modified", where the pin would fabricate permanent dirt.
+    const script = join(repo, 'script.sh');
+    writeFileSync(script, '#!/bin/sh\n');
+    chmodSync(script, 0o644);
+    git('add', '-A');
+    git('commit', '-qm', 'a non-executable script');
+    git('config', 'core.fileMode', 'false');
+
+    runSnapshot();
+    chmodSync(script, 0o755);
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toContain('new mode 100755');
+    expect(stderr().at(-1)).toBe(
+      'fix-delta: 1 file(s) changed since the snapshot — script.sh',
+    );
+  });
+
   it('probes a directory recreated over a stale registry entry', () => {
     // The squat: a worktree is registered, its directory removed (the
     // entry survives, stale), and a directory recreated at the same path
@@ -4197,7 +4367,7 @@ describe('fix-delta', () => {
   });
 
   // POSIX-only: a byte that is not valid UTF-8 cannot be a name on NTFS.
-  it.skipIf(process.platform === 'win32')(
+  itWhereRawByteNamesExist(
     'keeps the digest exact under core.quotePath=false',
     () => {
       // The digest is taken off the status output as a string: under
@@ -4665,6 +4835,75 @@ describe('fix-delta', () => {
     expect(lines.at(-1)).not.toContain('the tree is unchanged since');
   });
 
+  it('routes a nested repository’s own gitlinks, and keeps an uninitialised one silent', () => {
+    // The interior index sweep collected only mode-120000 entries, so a
+    // nested repository's mode-160000 gitlinks were routed NOWHERE: a
+    // submodule checkout that exists with files but no `.git` (a
+    // deinitialised submodule whose files were left behind, a
+    // `.git/modules/S` pruned away) emits no status entry, no interior
+    // directory and no interior link, and the repository was certified
+    // `clean` over a subtree nobody had read. The ROOT's index sweep
+    // names and closes exactly this dead gitlink; the interior takes the
+    // same ruling — including its not-exists skip, or every nested
+    // repository with an uninitialised submodule discloses on every run.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nvendor/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore vendor');
+    const nested = join(repo, 'vendor', 'R');
+    mkdirSync(nested, { recursive: true });
+    gitAt(nested, 'init', '-q', '-b', 'main');
+    gitAt(nested, 'config', 'user.email', 't@t.t');
+    gitAt(nested, 'config', 'user.name', 't');
+    writeFileSync(join(nested, 'f.txt'), 'v1\n');
+    gitAt(nested, 'add', '-A');
+    gitAt(nested, 'commit', '-qm', 'init');
+    gitAt(
+      nested,
+      'update-index',
+      '--add',
+      '--cacheinfo',
+      `160000,${gitAt(nested, 'rev-parse', 'HEAD')},S`,
+    );
+    gitAt(nested, 'commit', '-qm', 'record the gitlink S');
+    expect(gitAt(nested, 'ls-files', '-s', '--', 'S')).toMatch(/^160000 /);
+    expect(existsSync(join(nested, 'S'))).toBe(false);
+
+    // The fresh-clone arm: no checkout, nothing an edit could hide in.
+    runSnapshot();
+    let snap = JSON.parse(readFileSync(snapshotFile(), 'utf8')) as FixSnapshot;
+    expect(Object.keys(snap.digests)).toContain('vendor/R');
+    expect(snap.unresolved).not.toContain('vendor/R/S');
+
+    // The dead-gitlink arm: the checkout exists and holds content, its
+    // git dir is gone.
+    const sub = join(nested, 'S');
+    mkdirSync(sub);
+    gitAt(sub, 'init', '-q', '-b', 'main');
+    gitAt(sub, 'config', 'user.email', 't@t.t');
+    gitAt(sub, 'config', 'user.name', 't');
+    writeFileSync(join(sub, 's.txt'), 'v1\n');
+    gitAt(sub, 'add', '-A');
+    gitAt(sub, 'commit', '-qm', 'init');
+    rmSync(join(sub, '.git'), { recursive: true, force: true });
+    runSnapshot();
+    snap = JSON.parse(readFileSync(snapshotFile(), 'utf8')) as FixSnapshot;
+    expect(snap.unresolved).toContain('vendor/R/S');
+    // …and the repository holding it is still answered for, so the
+    // disclosure is the gitlink's and not a probe that could not run.
+    expect(Object.keys(snap.digests)).toContain('vendor/R');
+    expect(snap.unresolved).not.toContain('vendor/R');
+
+    writeFileSync(join(sub, 'planted.txt'), 'the hidden fix\n');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('vendor/R/S') && l.includes('cannot see')),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
   it('runs no hook the repository ships, at either moment', () => {
     // Hooks are steering the tree carries. `core.fsmonitor` runs from the
     // capture's `check-ignore` (the one spawn that measured this tree
@@ -4778,12 +5017,15 @@ describe('fix-delta', () => {
     );
   });
 
-  it('never baselines a repository the walk reaches outside the root', () => {
-    // A directory link out of the tree led the walk to enumerate, spawn
-    // against and BASELINE content the capture never records: an unrelated
-    // commit in that repository read as this tree's transition, and the
-    // enumeration spent the run's budget on it. Out of root is disclosed,
-    // never walked.
+  it('never reads a repository the walk reaches outside the root as this tree’s own transition', () => {
+    // A directory link out of the tree led the walk to ENUMERATE content
+    // the capture never records, spending the run's budget on it — so the
+    // walk still never queues one. It does PROBE it, the way every other
+    // route reaching the same shape does (`probeLinkedRepo`, and the
+    // funnel in `probeNestedRepo`): the repository's uncommitted dirt is
+    // a blind spot wherever the link that reaches it sits, and the
+    // outOfRoot bucket is what keeps a commit inside it — nothing a fix
+    // could have made — from reading as a move inside this tree.
     const outside = realpathSync(
       mkdtempSync(join(tmpdir(), 'qwen-fix-delta-outside-')),
     );
@@ -4805,12 +5047,18 @@ describe('fix-delta', () => {
       const snap = JSON.parse(
         readFileSync(snapshotFile(), 'utf8'),
       ) as FixSnapshot;
-      expect(Object.keys(snap.digests)).not.toContain('ig/ext');
-      expect(snap.dirtySubmodules).not.toContain('ig/ext');
+      // Probed and baselined — a digest is what makes "the same dirt" a
+      // comparable fact at the second moment.
+      expect(Object.keys(snap.digests)).toContain('ig/ext');
+      expect(snap.dirtySubmodules).toContain('ig/ext');
       expect(snap.unresolved).not.toContain('ig/ext');
       // Scope, not an unanswerable state: the link is named, its target's
       // dirt is not this tree's, and the run says so.
       expect(snap.outOfRoot).toContain('ig/ext');
+      // An unrelated commit inside it between the moments, plus a real
+      // edit in the audited tree.
+      gitAt(outside, 'add', '-A');
+      gitAt(outside, 'commit', '-qm', 'an unrelated move');
       writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
       runSince();
 
@@ -4820,7 +5068,66 @@ describe('fix-delta', () => {
           (l) => l.includes('ig/ext') && l.includes('outside this repository'),
         ),
       ).toBe(true);
+      // Neither transition the baseline could otherwise read out of the
+      // moved digest: not a move inside this tree, and not dirt that went
+      // away here.
+      expect(
+        lines.some(
+          (l) => l.includes('ig/ext') && l.includes('committed or stashed'),
+        ),
+      ).toBe(false);
+      expect(
+        lines.some((l) => l.includes('ig/ext') && l.includes('gone now')),
+      ).toBe(false);
       expect(lines.some((l) => l.includes('otherrepo'))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('names fresh dirt in an out-of-root repository the walk reaches inside an ignored directory', () => {
+    // The walk route recorded the scope and `continue`d WITHOUT probing,
+    // while the link route and the funnel both record AND probe — so the
+    // same external repository, with the same uncommitted edit in it, was
+    // a named blind spot when a top-level link reached it and nothing at
+    // all when the link sat inside an ignored directory (this flow's own
+    // `.qwen` being the everyday instance). The fix landed where neither
+    // tree records it, beside the bare all-clear.
+    const outside = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-outside-')),
+    );
+    try {
+      gitAt(outside, 'init', '-q', '-b', 'main');
+      gitAt(outside, 'config', 'user.email', 't@t.t');
+      gitAt(outside, 'config', 'user.name', 't');
+      writeFileSync(join(outside, 'o.txt'), 'v1\n');
+      gitAt(outside, 'add', '-A');
+      gitAt(outside, 'commit', '-qm', 'init');
+      writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+      git('add', '-A');
+      git('commit', '-qm', 'ignore ig');
+      mkdirSync(join(repo, 'ig'));
+      symlinkSync(outside, join(repo, 'ig', 'ext'));
+
+      runSnapshot();
+      const snap = JSON.parse(
+        readFileSync(snapshotFile(), 'utf8'),
+      ) as FixSnapshot;
+      expect(snap.outOfRoot).toContain('ig/ext');
+      expect(snap.dirtySubmodules).not.toContain('ig/ext');
+      // The fix lands inside the external repository, uncommitted there,
+      // and nowhere the audited tree records.
+      writeFileSync(join(outside, 'the-fix.txt'), 'the hidden fix\n');
+      runSince();
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some((l) => l.includes('ig/ext') && l.includes('cannot see')),
+      ).toBe(true);
+      expect(lines.at(-1)).not.toContain(
+        'the tree is unchanged since the snapshot',
+      );
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
@@ -5179,6 +5486,51 @@ describe('fix-delta', () => {
     expect(existsSync(snapshotFile())).toBe(false);
   });
 
+  it('refuses a subtree plant the enclosing index registers only DEEPER', () => {
+    // `ls-files -- <rel>` is a directory-PREFIX pathspec, and the mode of
+    // the listing's FIRST line was read as the reciprocal registration: a
+    // gitlink registered deeper under the nested path is listed by it too,
+    // so with nothing else tracked under `sub/` the deeper submodule
+    // answered for `sub` itself — the planted gitfile passed, and the
+    // capture recorded the subtree the gate exists to refuse. Registration
+    // is a fact about the entry whose recorded path EQUALS the nested path.
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    const plantWt = join(out, 'plant');
+    gitAt(out, 'init', '-q', '-b', 'main', 'plant');
+    gitAt(plantWt, 'config', 'user.email', 't@t.t');
+    gitAt(plantWt, 'config', 'user.name', 't');
+    writeFileSync(join(plantWt, 'p.txt'), 'v1\n');
+    gitAt(plantWt, 'add', '-A');
+    gitAt(plantWt, 'commit', '-qm', 'plant');
+    // A genuine submodule one level DEEPER, and nothing else tracked under
+    // `sub/` — so its entry is the listing's first line.
+    git(
+      'update-index',
+      '--add',
+      '--cacheinfo',
+      `160000,${git('rev-parse', 'HEAD')},sub/inner`,
+    );
+    // The premise, pinned: the prefix pathspec lists the deeper gitlink, in
+    // both the plain spelling and the literal one the gate now sends.
+    for (const spec of ['sub', ':(literal)sub']) {
+      expect(git('ls-files', '-s', '--', spec)).toMatch(
+        /^160000 [0-9a-f]{40,64} 0\tsub\/inner$/,
+      );
+    }
+    writeFileSync(
+      join(repo, 'sub', '.git'),
+      `gitdir: ${join(plantWt, '.git')}\n`,
+    );
+    const cwdHere = process.cwd();
+    try {
+      process.chdir(join(repo, 'sub'));
+      expect(() => runSnapshot()).toThrow(/no enclosing checkout registers/);
+    } finally {
+      process.chdir(cwdHere);
+    }
+    expect(existsSync(snapshotFile())).toBe(false);
+  });
+
   it('accepts a genuine submodule checkout and a genuine linked worktree', () => {
     // The reciprocal-registration gate's positive controls: the narrowing
     // is registered from the other side in both shapes, and neither is
@@ -5249,29 +5601,20 @@ describe('fix-delta', () => {
     expect(stderr().at(-1)).not.toContain('the tree is unchanged since');
   });
 
-  it('never re-includes the flow’s own bookkeeping staged into the user index', () => {
+  it('never re-includes the plan’s own record, whatever its keys are named', () => {
     // In a checkout that does not ignore `.qwen`, a user's `git add -A`
     // stages the flow's artifacts; the family re-inclusion then recorded
-    // the flow's own bookkeeping as the fix's edit — the two moments of
-    // `qwen-review-local-findings.json` riding the hunks as an edit no
-    // outcome owns. The narrowing is keyed on the names the flow writes,
-    // never on the family alone: user content under the family (the case
-    // above) still re-includes.
-    const artifact = join(
-      repo,
-      '.qwen',
-      'tmp',
-      'qwen-review-local-findings.json',
-    );
-    writeFileSync(artifact, '{"round":1}\n');
-    // The file-target family's own shapes ride the same contract: the
-    // plan report, and a role-keyed record in its `-prompts` directory.
-    const plan = join(
-      repo,
-      '.qwen',
-      'tmp',
-      'file-review-depth.ts-212237-plan.json',
-    );
+    // the flow's own bookkeeping as the fix's edit — its two moments riding
+    // the hunks as an edit no outcome owns. What separates that from user
+    // content is not a NAME: the keys the flow writes under its own record
+    // directory are bare (`chunk-8`, `run-sessions.json`) as often as they
+    // carry a content digest, so a suffix list and a digest-shaped regex
+    // classified most of the directory as content. The plan the
+    // orchestrator already carries derives it wholesale — the plan file and
+    // everything under `promptRecordDir(plan)` — and a user's own file
+    // under the same family is neither, so it still re-includes.
+    const planRel = '.qwen/tmp/file-review-depth.ts-212237-plan.json';
+    const plan = join(repo, planRel);
     writeFileSync(plan, '{"files":[]}\n');
     const prompts = join(
       repo,
@@ -5280,26 +5623,105 @@ describe('fix-delta', () => {
       'file-review-depth.ts-212237-plan-prompts',
     );
     mkdirSync(prompts, { recursive: true });
-    const record = join(prompts, 'fix-audit--9dace1f6b360.brief.md');
-    writeFileSync(record, '# brief v1\n');
+    const digestRecord = join(prompts, 'fix-audit--9dace1f6b360.brief.md');
+    writeFileSync(digestRecord, '# brief v1\n');
+    // Bare keys — no digest in the name, which is what the old regex's
+    // stated premise got wrong.
+    const bareRecord = join(prompts, 'chunk-8.brief.md');
+    writeFileSync(bareRecord, '# chunk 8 v1\n');
+    const sessions = join(prompts, 'run-sessions.json');
+    writeFileSync(sessions, '{"sessions":[]}\n');
+    // …and genuine user content under the same family, staged the same way.
+    const notes = join(repo, '.qwen', 'tmp', 'qwen-review-notes.md');
+    writeFileSync(notes, 'notes v1\n');
     git('add', '-A'); // staged, never committed — the user's own add
 
-    runSnapshot();
-    // The ledger rebuild between the moments rewrites them…
-    writeFileSync(artifact, '{"round":2,"rebuilt":true}\n');
+    runFixDelta({
+      snapshot: true,
+      since: undefined,
+      plan,
+      out: snapshotFile(),
+    });
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    // The record carries what this moment re-included — the gate `--since`
+    // rules the ambiguous half against.
+    expect(snap.reincluded).toContain('.qwen/tmp/qwen-review-notes.md');
+    expect(snap.reincluded).not.toContain(planRel);
+    expect(snap.reincluded.some((p) => p.includes('-plan-prompts/'))).toBe(
+      false,
+    );
+
+    // The flow rewrites its own records between the moments…
     writeFileSync(plan, '{"files":["src/depth.ts"]}\n');
-    writeFileSync(record, '# brief v2\n');
-    // …and the fix edits a real source file.
+    writeFileSync(digestRecord, '# brief v2\n');
+    writeFileSync(bareRecord, '# chunk 8 v2\n');
+    writeFileSync(sessions, '{"sessions":["chunk-8"]}\n');
+    // …and the fix edits the user's note beside a real source file.
+    writeFileSync(notes, 'notes v2 EDITED-BY-THE-FIX\n');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runFixDelta({
+      snapshot: false,
+      since: snapshotFile(),
+      fingerprint: fingerprintOf(snapshotFile()),
+      plan,
+      out: hunksFile(),
+    });
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('+export const x = 2;');
+    expect(hunks).not.toContain('file-review-depth.ts-212237-plan.json');
+    expect(hunks).not.toContain('fix-audit--9dace1f6b360.brief.md');
+    expect(hunks).not.toContain('chunk-8.brief.md');
+    expect(hunks).not.toContain('run-sessions.json');
+    expect(hunks).toContain('qwen-review-notes.md');
+    expect(hunks).toContain('EDITED-BY-THE-FIX');
+    expect(
+      stderr().some((l) => /2 file\(s\) changed since the snapshot/.test(l)),
+    ).toBe(true);
+  });
+
+  it('never re-includes a family path that entered the index between the moments', () => {
+    // The ambiguous half fails CLOSED: a family-named path the snapshot did
+    // not re-include is not re-included at `--since` either. Nothing
+    // structural tells a user's staged note from the flow's own artifact —
+    // both are staged-only entries under a family name — so the snapshot's
+    // own answer rules: what it re-included was user content before the fix
+    // ran, and what entered the index afterwards got there by a `git add`
+    // this flow never made (a fixer staging its work, a hook, the user),
+    // which in a checkout that does not ignore `.qwen` stages the flow's
+    // artifacts. Re-including one recorded its rewrite as an edit no
+    // outcome owns; dropping it silently would hide a real edit, so the
+    // drop is disclosed on its own line.
+    const artifact = join(
+      repo,
+      '.qwen',
+      'tmp',
+      'qwen-review-local-findings.json',
+    );
+    writeFileSync(artifact, '{"round":1}\n');
+    runSnapshot();
+    // The ledger rebuild between the moments rewrites it, and something
+    // stages the rewrite.
+    writeFileSync(artifact, '{"round":2,"rebuilt":true}\n');
+    git('add', '-A');
     writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
     runSince();
 
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).toContain('+export const x = 2;');
     expect(hunks).not.toContain('qwen-review-local-findings.json');
-    expect(hunks).not.toContain('file-review-depth.ts-212237-plan.json');
-    expect(hunks).not.toContain('fix-audit--9dace1f6b360.brief.md');
+    const lines = stderr();
     expect(
-      stderr().some((l) => /1 file\(s\) changed since the snapshot/.test(l)),
+      lines.some(
+        (l) =>
+          l.includes('qwen-review-local-findings.json') &&
+          l.includes('not re-included at snapshot time'),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((l) => /1 file\(s\) changed since the snapshot/.test(l)),
     ).toBe(true);
   });
 
@@ -5398,7 +5820,7 @@ describe('fix-delta', () => {
     ).toBe(false);
   });
 
-  it.skipIf(process.platform === 'win32')(
+  itWhereRawByteNamesExist(
     'walks an in-tree link whose own name is not valid UTF-8',
     () => {
       // The root bound is decided on BYTES: a link whose name carries an
@@ -5639,6 +6061,58 @@ describe('fix-delta', () => {
     ).toBe(true);
   });
 
+  it('never rules a real deletion of a HEAD-tracked path a capture invention', () => {
+    // The classifier's on-disk reading is taken at a THIRD moment — after
+    // the second capture was written — and `--no-index` answers "ignored"
+    // for a TRACKED path too, removing the one protection that kept such a
+    // path out of the ghost class: `add -A` records a tracked file whatever
+    // the rules say, so a `D` record for one means it was ABSENT when the
+    // second capture looked, and the deletion is the fix's. Anything the
+    // reviewed code left running as this user — a watch-mode build, a dev
+    // server — can write the path back in between, and the real deletion
+    // then rode out of the hunks as the capture's invention. The staged-
+    // but-uncommitted case above is what `--no-index` exists for and stays
+    // a ghost: such a path is not in HEAD's tree by definition.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\ndist/\n');
+    mkdirSync(join(repo, 'dist'));
+    writeFileSync(join(repo, 'dist', 'index.js'), 'v1\n');
+    git('add', '-A');
+    git('add', '-f', '--', 'dist/index.js');
+    git('commit', '-qm', 'commit the artifact');
+
+    runSnapshot();
+    // The fix deletes it, so the second capture's tree lacks it — the real
+    // deletion the hunks must carry.
+    rmSync(join(repo, 'dist', 'index.js'));
+    // …and a watcher the reviewed code left running writes the path back
+    // before the classifier looks. No fixture can time a write between two
+    // calls of one run, so the classifier's reading of THIS path is hooked
+    // to a real regular file's own stat; the git state around it — a
+    // HEAD-tracked path under an ignore rule, deleted, and a second tree
+    // without it — is the real thing.
+    const rewritten = join(out, 'watcher-rewrote.js');
+    writeFileSync(rewritten, 'v1\n');
+    lstatHook.redirect = {
+      from: join(repo, 'dist', 'index.js'),
+      to: rewritten,
+    };
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('diff --git a/dist/index.js b/dist/index.js');
+    expect(hunks).toContain('deleted file mode 100644');
+    expect(hunks).toContain('-v1');
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('dist/index.js') && l.includes('still on')),
+    ).toBe(false);
+    expect(
+      lines.some((l) =>
+        /1 file\(s\) changed since the snapshot — dist\/index\.js/.test(l),
+      ),
+    ).toBe(true);
+  });
+
   it('never reports an addition invented over a staged-but-uncommitted ignored file', () => {
     // The mirror of the case above, one rule direction over: the file is
     // in the USER's index (never committed), so the snapshot's `--others`
@@ -5668,6 +6142,54 @@ describe('fix-delta', () => {
     ).toBe(true);
     expect(
       lines.some((l) => /2 file\(s\) changed since the snapshot/.test(l)),
+    ).toBe(true);
+  });
+
+  it('records a real addition of an ignored path the snapshot found gone from disk', () => {
+    // `ls-files --cached --ignored` lists an index entry whose worktree copy
+    // is MISSING — a committed artifact under an ignore rule added later,
+    // cleaned before the snapshot, or deleted by the change under review and
+    // not staged. Membership in the hid-set is what the addition classifier
+    // reads as "already on disk at snapshot time", so the artifact's REAL
+    // return during the fix window (the build or test step the flow
+    // requires, a `git checkout -- .`) was ruled a capture invention: a
+    // landed addition dropped from the hunks and from the count. The
+    // staged-but-uncommitted case above stays hidden — that file IS on disk,
+    // the only thing membership may claim.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\ndist/\n');
+    mkdirSync(join(repo, 'dist'));
+    writeFileSync(join(repo, 'dist', 'index.js'), 'v1\n');
+    git('add', '-A');
+    git('add', '-f', '--', 'dist/index.js');
+    git('commit', '-qm', 'commit the artifact');
+    // Cleaned, index entry left: the state the enumeration on its own cannot
+    // tell from "on disk and hidden".
+    rmSync(join(repo, 'dist', 'index.js'));
+
+    runSnapshot();
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(snap.hiddenPaths).not.toContain('dist/index.js');
+
+    // The fix regenerates the artifact: a real addition between the trees.
+    writeFileSync(join(repo, 'dist', 'index.js'), 'v2\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('diff --git a/dist/index.js b/dist/index.js');
+    expect(hunks).toContain('new file mode 100644');
+    expect(hunks).toContain('+v2');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('dist/index.js') && l.includes('already on disk'),
+      ),
+    ).toBe(false);
+    expect(
+      lines.some((l) =>
+        /1 file\(s\) changed since the snapshot — dist\/index\.js/.test(l),
+      ),
     ).toBe(true);
   });
 
@@ -5973,7 +6495,7 @@ describe('fix-delta', () => {
   // POSIX-only: a name that is not valid UTF-8 cannot be planted on NTFS,
   // and APFS refuses it at creation (the sibling non-UTF-8 cases fail
   // there the same way).
-  it.skipIf(process.platform === 'win32')(
+  itWhereRawByteNamesExist(
     'probes a repository whose name decodes to the in-tree git dir name',
     () => {
       // The in-tree git dir is named gd-<0xE9> (not valid UTF-8): the

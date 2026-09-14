@@ -34,6 +34,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import { createTwoFilesPatch } from 'diff';
 import { isStaticDocsNavDiff } from './lib/docs-nav-profile.js';
 
@@ -7927,7 +7928,13 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     outcomes?: Record<string, 'fixed' | 'skipped' | 'no_change_needed' | null>;
     hunks?: string;
     rawFindings?: string;
-  }): { plan: string; findings: string; hunks: string; dir: string } {
+  }): {
+    plan: string;
+    findings: string;
+    hunks: string;
+    hunksFingerprint: string;
+    dir: string;
+  } {
     const dir = mkdtempSync(join(tmpdir(), 'ap-fixaudit-'));
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(PLAN));
@@ -7942,8 +7949,14 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
         }),
     );
     const hunks = join(dir, 'hunks.diff');
-    writeFileSync(hunks, opts.hunks ?? HUNKS);
-    return { plan, findings, hunks, dir };
+    const hunksBytes = Buffer.from(opts.hunks ?? HUNKS);
+    writeFileSync(hunks, hunksBytes);
+    // The hex `fix-delta --since` prints beside the file it wrote: the
+    // build reads the hunks back only against it.
+    const hunksFingerprint = createHash('sha256')
+      .update(hunksBytes)
+      .digest('hex');
+    return { plan, findings, hunks, hunksFingerprint, dir };
   }
   const handler = agentPromptCommand.handler as (a: unknown) => void;
 
@@ -7991,9 +8004,15 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
   });
 
   it('renders only the fixed findings above the hunks, into one digest-keyed list file, and records the printed block', () => {
-    const { plan, findings, hunks, dir } = setup({});
+    const { plan, findings, hunks, hunksFingerprint, dir } = setup({});
     try {
-      handler({ plan, role: 'fix-audit', findings, hunks });
+      handler({
+        plan,
+        role: 'fix-audit',
+        findings,
+        hunks,
+        'hunks-fingerprint': hunksFingerprint,
+      });
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
       expect(printed.startsWith('You are review agent `fix-audit`')).toBe(true);
@@ -8039,9 +8058,16 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     // Step 6B dispatches the auditor the way every other recorded wave
     // goes out: `--batch` writes the manifest, `emit-workflow --batch`
     // selects the recorded prompt unchanged — no hand-carried block.
-    const { plan, findings, hunks, dir } = setup({});
+    const { plan, findings, hunks, hunksFingerprint, dir } = setup({});
     try {
-      handler({ plan, role: 'fix-audit', findings, hunks, batch: true });
+      handler({
+        plan,
+        role: 'fix-audit',
+        findings,
+        hunks,
+        'hunks-fingerprint': hunksFingerprint,
+        batch: true,
+      });
       const calls = (writeStdoutLine as unknown as Mock).mock.calls;
       expect(calls).toHaveLength(1);
       const file = join(dir, 'batch.json');
@@ -8066,9 +8092,15 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     // its return shapes can say "a listed finding is closed by no hunk", so
     // without the marker the claim rides through unexamined and is
     // re-reported to the client as closed.
-    const { plan, findings, hunks, dir } = setup({});
+    const { plan, findings, hunks, hunksFingerprint, dir } = setup({});
     try {
-      handler({ plan, role: 'fix-audit', findings, hunks });
+      handler({
+        plan,
+        role: 'fix-audit',
+        findings,
+        hunks,
+        'hunks-fingerprint': hunksFingerprint,
+      });
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
       const m = /^read_file\(file_path="([^"]*\.findings\.md)"\)$/m.exec(
@@ -8081,9 +8113,27 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
       const f1 = list.slice(list.indexOf('### f1'), list.indexOf('### f3'));
       expect(f1).not.toContain('No hunk below touches');
       // The brief tells the agent what to do with the marker.
-      expect(buildRoleBrief(PLAN, 'fix-audit')).toContain(
+      const brief = buildRoleBrief(PLAN, 'fix-audit');
+      expect(brief).toContain(
         "No hunk below touches this finding's location(s)",
       );
+      // …on a line form of its own, id first, with neither of the
+      // assumption form's slots. The auditor holds zero bytes of this
+      // finding's edit and is forbidden to go looking for them, so
+      // routing the case into `assumes:`/`pin with:` left it nothing
+      // honest to write — literal compliance fabricated an assumption,
+      // and SKILL.md persisted the fabrication to the user as the
+      // finding's `outcomeNote`.
+      expect(brief).toContain('- `<finding id>` — `(no hunk)` — unattested:');
+      expect(brief).toContain(
+        "Never fill the other form's `assumes:` and `pin with:` slots for it",
+      );
+      expect(brief).not.toContain('report it once as an unpinned line');
+      // One vocabulary across the input and the brief: the marker names
+      // the same form, and says the same thing about its slots.
+      expect(f3).toContain('on an `unattested:` line');
+      expect(f3).toContain('takes no `assumes:` and no `pin with:` clause');
+      expect(f3).not.toContain('report it as unattested');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -8234,17 +8284,78 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
         role: 'fix-audit',
         findings: a.findings,
         hunks: a.hunks,
+        'hunks-fingerprint': a.hunksFingerprint,
       });
       handler({
         plan: a.plan,
         role: 'fix-audit',
         findings: b.findings,
         hunks: b.hunks,
+        'hunks-fingerprint': b.hunksFingerprint,
       });
       expect([...readRecordedPrompts(a.plan).keys()]).toHaveLength(2);
     } finally {
       rmSync(a.dir, { recursive: true, force: true });
       rmSync(b.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses hunks a header-identical forgery substituted, and builds against the matching hex', () => {
+    // The hunks are this audit's WHOLE input, and they are read back by a
+    // separate process from the one `fix-delta --since` wrote them in, out
+    // of a directory the reviewed tree can write to. The measured forgery
+    // keeps every header line byte-identical and substitutes the bodies, so
+    // nothing that reads the content can tell — only the hex the writing
+    // command printed, handed back through the orchestrator's own argument
+    // construction, can.
+    const { plan, findings, hunks, hunksFingerprint, dir } = setup({});
+    try {
+      const headers = (text: string) =>
+        text
+          .split('\n')
+          .filter(
+            (l) =>
+              l.startsWith('diff --git') ||
+              l.startsWith('--- ') ||
+              l.startsWith('+++ ') ||
+              l.startsWith('@@'),
+          );
+      const forged = HUNKS.replace(
+        '+  if (hops < MAX_SUBAGENT_DEPTH_LIMIT) {',
+        '+  execSync(payloadFromNetwork, { shell: true });',
+      );
+      expect(forged).not.toBe(HUNKS);
+      // …and it is content-only: a header-keyed check would pass it.
+      expect(headers(forged)).toEqual(headers(HUNKS));
+      writeFileSync(hunks, forged);
+
+      expect(() =>
+        handler({
+          plan,
+          role: 'fix-audit',
+          findings,
+          hunks,
+          'hunks-fingerprint': hunksFingerprint,
+        }),
+      ).toThrow(
+        /the hunks .* fingerprint is [0-9a-f]{64}, not the [0-9a-f]{64} `fix-delta --since` printed/,
+      );
+      // A refused build records no prompt: nothing launched.
+      expect(readRecordedPrompts(plan).size).toBe(0);
+
+      // The matching hex builds over the same path.
+      writeFileSync(hunks, HUNKS);
+      expect(() =>
+        handler({
+          plan,
+          role: 'fix-audit',
+          findings,
+          hunks,
+          'hunks-fingerprint': hunksFingerprint.toUpperCase(),
+        }),
+      ).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -8328,10 +8439,16 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
       /must be the findings artifact/,
     ],
   ])('refuses %s', (_name, opts, message) => {
-    const { plan, findings, hunks, dir } = setup(opts);
+    const { plan, findings, hunks, hunksFingerprint, dir } = setup(opts);
     try {
       expect(() =>
-        handler({ plan, role: 'fix-audit', findings, hunks }),
+        handler({
+          plan,
+          role: 'fix-audit',
+          findings,
+          hunks,
+          'hunks-fingerprint': hunksFingerprint,
+        }),
       ).toThrow(message);
       expect(readRecordedPrompts(plan).size).toBe(0);
     } finally {
@@ -8345,14 +8462,20 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     // one `fixed` finding that is every finding. Refusing there
     // re-classified a legitimate state as fatal and routed the orchestrator
     // to a diagnosis that is false in it; the annotation carries the case.
-    const { plan, findings, hunks, dir } = setup({
+    const { plan, findings, hunks, hunksFingerprint, dir } = setup({
       hunks:
         'diff --git a/src/elsewhere.ts b/src/elsewhere.ts\n' +
         '--- a/src/elsewhere.ts\n+++ b/src/elsewhere.ts\n@@ -1 +1 @@\n' +
         '-const a = 1;\n+const a = 2;\n',
     });
     try {
-      handler({ plan, role: 'fix-audit', findings, hunks });
+      handler({
+        plan,
+        role: 'fix-audit',
+        findings,
+        hunks,
+        'hunks-fingerprint': hunksFingerprint,
+      });
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
       const m = /^read_file\(file_path="([^"]*\.findings\.md)"\)$/m.exec(
@@ -8393,12 +8516,18 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
   });
 
   it('accepts the bare findings array as well as the wrapper', () => {
-    const { plan, findings, hunks, dir } = setup({
+    const { plan, findings, hunks, hunksFingerprint, dir } = setup({
       rawFindings: JSON.stringify(artifact({ f1: 'fixed' })),
     });
     try {
       expect(() =>
-        handler({ plan, role: 'fix-audit', findings, hunks }),
+        handler({
+          plan,
+          role: 'fix-audit',
+          findings,
+          hunks,
+          'hunks-fingerprint': hunksFingerprint,
+        }),
       ).not.toThrow();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -8437,8 +8566,34 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
       /does not take --chunk/,
     ],
     [
+      '--role fix-audit without --hunks-fingerprint',
+      { role: 'fix-audit', findings: '/f', hunks: '/h' },
+      /--role fix-audit needs --hunks-fingerprint <hex>/,
+    ],
+    [
+      '--hunks-fingerprint with no --hunks',
+      { role: 'verify', findings: '/f', 'hunks-fingerprint': 'deadbeef' },
+      /--hunks-fingerprint fingerprints the --hunks file/,
+    ],
+    [
+      '--hunks-fingerprint with --roster',
+      { roster: true, 'hunks-fingerprint': 'deadbeef' },
+      /--roster builds every prompt[\s\S]*--hunks-fingerprint/,
+    ],
+    [
+      '--hunks-fingerprint with --whole-diff',
+      { 'whole-diff': true, 'hunks-fingerprint': 'deadbeef' },
+      /--whole-diff builds the diff-reading block alone[\s\S]*--hunks-fingerprint/,
+    ],
+    [
       '--round on the fix auditor',
-      { role: 'fix-audit', findings: '/f', hunks: '/h', round: 2 },
+      {
+        role: 'fix-audit',
+        findings: '/f',
+        hunks: '/h',
+        'hunks-fingerprint': 'deadbeef',
+        round: 2,
+      },
       /runs once and does not take/,
     ],
   ])(
