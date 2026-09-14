@@ -1132,6 +1132,7 @@ export class DingtalkChannel extends ChannelBase {
     }
     this.interactionPresenter = new DingtalkInteractionPresenter({
       outputMode: this.outputMode,
+      prepareOutput: (chatId, text) => this.prepareReplyOutput(chatId, text),
       statusCards: this.statusCardController,
       questionCards: this.questionCardController,
       permissionCards: this.permissionCardController,
@@ -2825,24 +2826,40 @@ export class DingtalkChannel extends ChannelBase {
     let replyPlan: ReplyTextDelivery | undefined;
     // Prepared output can already have sent attachment messages.
     let preparedReplyBody: string | undefined;
+    let composedHeader: string | undefined;
     let composedTurnComplete = false;
     return async (output) => {
-      const body = this.formatBackgroundOutput(output);
+      const header = this.formatBackgroundOutputHeader(output);
+      const body = [header, output.text].filter(Boolean).join('\n\n');
       const plan = proactivePlan ?? replyPlan;
       if (!plan || plan.nextChunk === 0) {
-        const header = body.split('\n', 1)[0]!;
-        const replaceHeader = (text: string) =>
-          text.replace(
-            /## (?:✅|❌|⏹️) (?:Agent|Shell|Monitor|Workflow) · [^\n]+/,
-            () => header,
-          );
+        const replaceHeader = (text: string) => {
+          if (composedHeader === undefined || composedHeader === header) {
+            return text;
+          }
+          const separator = output.text ? '\n\n' : '';
+          const previous = composedHeader
+            ? `${composedHeader}${separator}`
+            : '';
+          const next = header ? `${header}${separator}` : '';
+          return text.startsWith(previous)
+            ? `${next}${text.slice(previous.length)}`
+            : text;
+        };
         if (plan) {
           plan.title = extractTitle(body);
-          plan.chunks[0] = replaceHeader(plan.chunks[0]!);
+          const prefix =
+            (replyPlan?.atUserId ? `@${replyPlan.atUserId}\n\n` : '') +
+            (target.sourceLabel
+              ? `${escapeDingTalkMarkdown(target.sourceLabel)}\n\n`
+              : '');
+          plan.chunks[0] =
+            prefix + replaceHeader(plan.chunks[0]!.slice(prefix.length));
         }
         if (preparedReplyBody) {
           preparedReplyBody = replaceHeader(preparedReplyBody);
         }
+        composedHeader = header;
         composedTurnComplete = output.turnComplete;
       }
       try {
@@ -2880,25 +2897,35 @@ export class DingtalkChannel extends ChannelBase {
     };
   }
 
-  private formatBackgroundOutput(delivery: BackgroundOutputPacket): string {
+  private formatBackgroundOutputHeader(
+    delivery: BackgroundOutputPacket,
+  ): string {
     const icon =
       delivery.status === 'completed'
         ? '✅'
         : delivery.status === 'failed'
           ? '❌'
           : '⏹️';
-    const label = this.formatBackgroundAgentLabel(delivery.label);
+    if (delivery.kind === 'agent') {
+      if (delivery.text) return delivery.partial ? '（部分）' : '';
+      const status =
+        delivery.status === 'completed'
+          ? '已完成'
+          : delivery.status === 'failed'
+            ? '失败'
+            : '已停止';
+      return `${icon} 后台任务${status}`;
+    }
+    const label = this.formatBackgroundTaskLabel(delivery.label);
     const kind = {
-      agent: 'Agent',
       shell: 'Shell',
       monitor: 'Monitor',
       workflow: 'Workflow',
     }[delivery.kind];
-    const header = `## ${icon} ${kind} · ${label}${delivery.partial ? '（部分）' : ''}`;
-    return delivery.text ? `${header}\n\n${delivery.text}` : header;
+    return `## ${icon} ${kind} · ${label}${delivery.partial ? '（部分）' : ''}`;
   }
 
-  private formatBackgroundAgentLabel(label?: string): string {
+  private formatBackgroundTaskLabel(label?: string): string {
     const normalized = label
       ?.replace(/\p{Cc}+/gu, ' ')
       .replace(/\s+/g, ' ')

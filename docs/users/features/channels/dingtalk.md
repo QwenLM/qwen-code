@@ -138,7 +138,9 @@ The setting applies to DingTalk conversation replies and their associated backgr
 
 `per_task` waits for Agent, background shell, monitor, and workflow work linked to that prompt, including work started by their notification turns. Paused tasks and long-running monitors keep it open until they finish or you cancel. Future scheduled runs and independently managed daemon child sessions are separate work and are not included in this task boundary.
 
-Standalone background turns that are interrupted, or have not ended after ten minutes, may deliver a labeled partial result. This does not reopen a completed main card.
+If Todo Stop Guard yields to a message queued in the same session, the waiting `per_task` request ends as cancelled so the queued message can start. Its retained reply is not delivered as a successful task result. Associated background work remains available to the session.
+
+Standalone background turns that are interrupted, or have not ended after ten minutes, may deliver a result marked as partial. This does not reopen a completed main card.
 
 Only `per_task`, `per_response`, and `per_turn` are accepted. The unpublished `final_only` and `process_and_result` values are not aliases; replace them with the desired mode. Removing `outputMode` restores the `per_turn` default. There is no separate background-aggregation toggle.
 

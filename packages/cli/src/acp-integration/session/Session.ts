@@ -1561,6 +1561,7 @@ interface PromptChannelDelivery {
 }
 
 interface ChannelTaskResponseCapture {
+  daemonPromptId?: string;
   workChainId?: string;
   finalText?: string;
   controller: AbortController;
@@ -3138,8 +3139,21 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
   ): Promise<TodoStopGuardClaimResult> {
     const context = getInvocationContext();
+    const channelTask =
+      context === undefined && this.currentNotificationWorkChainId
+        ? [...this.channelTaskCaptures].find(
+            (capture) =>
+              capture.workChainId === this.currentNotificationWorkChainId &&
+              capture.daemonPromptId &&
+              !capture.signal.aborted,
+          )
+        : undefined;
+    // Only the Guard claim borrows the waiting prompt's ownership. Background
+    // tools must keep their independent invocation context.
     const ownerPromptId =
-      context?.sessionId === this.sessionId ? context.promptId : undefined;
+      context?.sessionId === this.sessionId
+        ? context.promptId
+        : channelTask?.daemonPromptId;
     if (ownerPromptId) {
       this.todoStopGuardClaimOwnerCounts.set(
         ownerPromptId,
@@ -3162,7 +3176,11 @@ export class Session implements SessionContext {
         );
       });
       const response = await Promise.race([claimPromise, timeoutPromise]);
-      if (abortSignal.aborted || !isRecord(response)) {
+      if (
+        abortSignal.aborted ||
+        channelTask?.signal.aborted ||
+        !isRecord(response)
+      ) {
         return 'unavailable';
       }
       if (
@@ -4724,6 +4742,7 @@ export class Session implements SessionContext {
       params._meta?.[CHANNEL_PROMPT_META_KEY] === true &&
       params._meta?.[CHANNEL_OUTPUT_MODE_META_KEY] === 'per_task'
         ? {
+            daemonPromptId: invocationContext?.promptId,
             controller,
             signal: admissionCancellation
               ? AbortSignal.any([admissionCancellation, controller.signal])
@@ -4844,6 +4863,15 @@ export class Session implements SessionContext {
       // Registry completion and notification enqueue happen in the same turn.
       // Let both settle before interpreting an empty work set as terminal.
       await new Promise<void>((resolve) => setImmediate(resolve));
+      if (
+        capture.daemonPromptId &&
+        this.todoStopGuardQueuedPromptPriority &&
+        this.todoStopGuardQueuedPromptOwnerPromptId === capture.daemonPromptId
+      ) {
+        // The daemon FIFO cannot admit the queued prompt until this request
+        // settles; its priority also keeps background notifications queued.
+        capture.controller.abort(NEW_PROMPT_ABORT_REASON);
+      }
       if (capture.signal.aborted || this.disposed || this.closing) {
         return { ...result, stopReason: 'cancelled' };
       }

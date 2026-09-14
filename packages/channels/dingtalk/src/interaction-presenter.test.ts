@@ -128,6 +128,7 @@ function createHarness(
   options: {
     language?: string;
     outputMode?: 'per_task' | 'per_turn' | 'per_response';
+    prepareOutput?: (chatId: string, text: string) => Promise<string>;
   } = {},
 ) {
   const projectionOrder: string[] = [];
@@ -174,6 +175,7 @@ function createHarness(
   });
   const presenter = new DingtalkInteractionPresenter({
     outputMode: options.outputMode,
+    prepareOutput: options.prepareOutput,
     statusCards,
     questionCards,
     permissionCards,
@@ -361,6 +363,43 @@ describe('DingtalkInteractionPresenter', () => {
         .map(([request]) => request.content)
         .join('\n'),
     ).not.toContain('Final output');
+    presenter.terminalizeRun('run-1', 'completed');
+  });
+
+  it('finishes preparing a process response before displaying the next segment', async () => {
+    const prepared = deferred<string>();
+    const prepareOutput = vi.fn(() => prepared.promise);
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'per_response',
+      prepareOutput,
+    });
+    presenter.appendOutput(
+      segment('segment-1'),
+      'Intermediate [IMAGE: /tmp/chart.png]',
+    );
+    const first = presenter.closeOutput('segment-1', '', 'response_boundary');
+    await vi.waitFor(() => expect(prepareOutput).toHaveBeenCalledOnce());
+    presenter.appendOutput(segment('segment-2'), 'Final output');
+    const last = presenter.closeOutput(
+      'segment-2',
+      'Final output',
+      'completed',
+    );
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    expect(client.updateInstance).not.toHaveBeenCalled();
+    prepared.resolve('Intermediate ![image](@media-1)');
+    await first;
+    await last;
+    expect(prepareOutput).toHaveBeenCalledExactlyOnceWith(
+      'cid-1',
+      'Intermediate [IMAGE: /tmp/chart.png]',
+    );
+    expect(
+      vi
+        .mocked(client.updateInstance)
+        .mock.calls.map(([request]) => request.cardParamMap.content),
+    ).toEqual(['Intermediate ![image](@media-1)', 'Final output']);
+    expect(sendFallback).not.toHaveBeenCalled();
     presenter.terminalizeRun('run-1', 'completed');
   });
 

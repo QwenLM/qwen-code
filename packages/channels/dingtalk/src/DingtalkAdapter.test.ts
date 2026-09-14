@@ -27,7 +27,11 @@ import type {
   DingtalkCardCallback,
   DingtalkCardCallbackResult,
 } from './interactive-card-types.js';
-import { DingtalkInteractiveCardClient } from './interactive-card-client.js';
+import {
+  DingtalkCardRequestError,
+  DingtalkInteractiveCardClient,
+} from './interactive-card-client.js';
+import type { DingtalkInteractionPresenter } from './interaction-presenter.js';
 
 type LifecycleBase = Omit<
   Extract<ChannelTaskLifecycleEvent, { type: 'started' }>,
@@ -668,6 +672,104 @@ describe('turn-scoped output modes', () => {
     expect(create.mock.calls[1]![0].cardParamMap.flowStatus).toBe(3);
     expect(update).toHaveBeenCalledTimes(before);
   });
+
+  it.each(['card', 'card-failure', 'disabled'] as const)(
+    'prepares each per-response image exactly once before %s delivery',
+    async (delivery) => {
+      const image = createTempPng();
+      try {
+        const { channel, update } = createOutputChannel('per_response', {
+          cwd: image.dir,
+          ...(delivery === 'disabled'
+            ? { interactiveCards: { enabled: false } }
+            : {}),
+        });
+        seedWebhook(channel, 'cidGroup==');
+        if (delivery === 'card-failure') {
+          update.mockRejectedValueOnce(
+            new DingtalkCardRequestError('card unavailable', false),
+          );
+        }
+        const uploads: string[] = [];
+        const messages: string[] = [];
+        vi.spyOn(globalThis, 'fetch').mockImplementation(
+          async (input, init) => {
+            const url = String(input);
+            if (url.includes('/gettoken?')) {
+              return new Response(
+                JSON.stringify({ access_token: 'mock-token' }),
+              );
+            }
+            if (url.includes('/media/upload?')) {
+              const mediaId = `@image-${uploads.length + 1}`;
+              uploads.push(mediaId);
+              return new Response(JSON.stringify({ media_id: mediaId }));
+            }
+            messages.push(JSON.parse(String(init?.body)).markdown.text);
+            return new Response('{}');
+          },
+        );
+        const segment: ChannelOutputSegmentContext = {
+          channelName: 'test-dingtalk',
+          sessionId: 'session-1',
+          runId: 'run-1',
+          segmentId: 'segment-1',
+          owner: { kind: 'channel_user', id: 'owner-1' },
+          target: {
+            channelName: 'test-dingtalk',
+            chatId: 'cidGroup==',
+            senderId: 'owner-1',
+            isGroup: true,
+          },
+        };
+        const presenter = (
+          channel as unknown as {
+            interactionPresenter: DingtalkInteractionPresenter;
+          }
+        ).interactionPresenter;
+        presenter.registerRun('run-1', 'owner-1', segment.target, 'session-1');
+        presenter.startStatusCard('run-1');
+        getChunkHook(channel)(
+          'cidGroup==',
+          `Intermediate [IMAGE: ${image.path}]`,
+          'session-1',
+          segment,
+        );
+        await getOutputSegmentEndHook(channel)(
+          'cidGroup==',
+          'session-1',
+          segment,
+          'response_boundary',
+        );
+        expect(uploads).toEqual(['@image-1']);
+        if (delivery === 'card') {
+          expect(update).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              cardParamMap: expect.objectContaining({
+                content: 'Intermediate ![image](@image-1)',
+                flowStatus: 3,
+              }),
+            }),
+          );
+        } else {
+          expect(messages).toEqual(['Intermediate ![image](@image-1)']);
+        }
+        const final = { ...segment, segmentId: 'segment-2' };
+        const finalText = `Final [IMAGE: ${image.path}]`;
+        getChunkHook(channel)('cidGroup==', finalText, 'session-1', final);
+        await getCompleteHook(channel)(
+          'cidGroup==',
+          finalText,
+          'session-1',
+          final,
+        );
+        expect(uploads).toEqual(['@image-1', '@image-2']);
+        presenter.terminalizeRun('run-1', 'completed');
+      } finally {
+        rmSync(image.dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('routes a direct-message follow-up card to the sender', async () => {
     const { channel, create } = createOutputChannel('per_turn');
@@ -9060,7 +9162,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('keeps the latest labeled turn result by default and delivers unscoped replies separately', async () => {
+  it('keeps the latest Agent turn result unchanged and delivers unscoped replies separately', async () => {
     const channel = createChannel();
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -9114,7 +9216,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     await channel.dispatchBackgroundResponse('session-1', 'Legacy result.');
 
     expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-      '## ✅ Agent · Review \\#10807\n\nSecond result.',
+      'Second result.',
       'Transitional result.',
       'Legacy result.',
     ]);
@@ -9169,7 +9271,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(pushProactive).toHaveBeenCalledOnce();
     expect(pushProactive).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 'cidGroup==' }),
-      '## ✅ Agent · Review \\#10611\n\nFinal result.',
+      'Final result.',
     );
 
     await channel.dispatchBackgroundResponse('session-1', 'Fresh result.', {
@@ -9286,9 +9388,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     });
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).toBe(
-      '## ✅ Agent · Worker one\n\nWorking.',
-    );
+    expect(pushProactive.mock.calls[0]![1]).toBe('Working.');
 
     await channel.dispatchBackgroundResponse('session-1', 'Working again.', {
       taskId: 'agent-2',
@@ -9306,9 +9406,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     });
 
     expect(pushProactive).toHaveBeenCalledTimes(2);
-    expect(pushProactive.mock.calls[1]![1]).toBe(
-      '## ❌ Agent · Worker two\n\nWorking again.',
-    );
+    expect(pushProactive.mock.calls[1]![1]).toBe('Working again.');
   });
 
   it('reports completion on a card composed before the turn ended', async () => {
@@ -9353,15 +9451,13 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive).toHaveBeenCalledTimes(2);
-      expect(pushProactive.mock.calls[1]![1]).toBe(
-        '## ✅ Agent · Worker one\n\nWorking.',
-      );
+      expect(pushProactive.mock.calls[1]![1]).toBe('Working.');
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('refreshes a completed retry with a literal one-line agent label', async () => {
+  it('refreshes a completed retry with a literal one-line shell label', async () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
@@ -9387,7 +9483,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       await channel.dispatchBackgroundResponse('session-1', 'Working.', {
         taskId: 'agent-1',
         status: 'running',
-        kind: 'agent',
+        kind: 'shell',
         turnComplete: false,
         label: 'Fix $& substitution\nbug',
       });
@@ -9395,14 +9491,14 @@ describe('DingtalkChannel outbound file delivery', () => {
       await channel.dispatchBackgroundResponse('session-1', '', {
         taskId: 'agent-1',
         status: 'completed',
-        kind: 'agent',
+        kind: 'shell',
         turnComplete: true,
         label: 'Fix $& substitution\nbug',
       });
 
       expect(pushProactive).toHaveBeenCalledTimes(2);
       expect(pushProactive.mock.calls[1]![1]).toBe(
-        '## ✅ Agent · Fix $& substitution bug\n\nWorking.',
+        '## ✅ Shell · Fix $& substitution bug\n\nWorking.',
       );
     } finally {
       vi.useRealTimers();
@@ -9456,13 +9552,9 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive).toHaveBeenCalledTimes(4);
-      expect(pushProactive.mock.calls[1]![1]).toBe(
-        '## ✅ Agent · Worker one（部分）\n\nFirst result.',
-      );
-      expect(pushProactive.mock.calls[2]![1]).toBe(
-        '## ✅ Agent · Worker one（部分）\n\nThird result.',
-      );
-      expect(pushProactive.mock.calls[3]![1]).toBe('## ✅ Agent · Worker one');
+      expect(pushProactive.mock.calls[1]![1]).toBe('（部分）\n\nFirst result.');
+      expect(pushProactive.mock.calls[2]![1]).toBe('（部分）\n\nThird result.');
+      expect(pushProactive.mock.calls[3]![1]).toBe('✅ 后台任务已完成');
     } finally {
       vi.useRealTimers();
     }
@@ -9514,8 +9606,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.waitFor(() => expect(pushProactive).toHaveBeenCalledTimes(2));
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ⏹️ Agent · Worker one（部分）\n\nWorking.',
-        '## ✅ Agent · Worker one',
+        '（部分）\n\nWorking.',
+        '✅ 后台任务已完成',
       ]);
     } finally {
       vi.useRealTimers();
@@ -9570,12 +9662,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
       expect(sendProactiveChunk).toHaveBeenCalledTimes(2);
-      expect(sendProactiveChunk.mock.calls[0]![2]).toBe(
-        '## ⏹️ Agent · Worker one（部分）\n\nWorking.',
-      );
-      expect(sendProactiveChunk.mock.calls[1]![2]).toBe(
-        '## ✅ Agent · Worker one\n\nWorking.',
-      );
+      expect(sendProactiveChunk.mock.calls[0]![2]).toBe('（部分）\n\nWorking.');
+      expect(sendProactiveChunk.mock.calls[1]![2]).toBe('Working.');
     } finally {
       vi.useRealTimers();
     }
@@ -9634,9 +9722,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     });
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).toBe(
-      '## ✅ Agent · Worker one\n\nSecond result.',
-    );
+    expect(pushProactive.mock.calls[0]![1]).toBe('Second result.');
   });
 
   it('stops retrying an aggregation whose delivery cannot succeed', async () => {
@@ -9738,9 +9824,9 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.waitFor(() => expect(pushProactive).toHaveBeenCalledTimes(3));
       expect(pushProactive.mock.calls[0]![1]).toContain('First result.');
       expect(pushProactive.mock.calls[0]![1]).not.toContain('Late result.');
-      expect(pushProactive.mock.calls[1]![1]).toContain('Worker one（部分）');
+      expect(pushProactive.mock.calls[1]![1]).toContain('（部分）');
       expect(pushProactive.mock.calls[1]![1]).toContain('Late result.');
-      expect(pushProactive.mock.calls[2]![1]).toBe('## ✅ Agent · Worker one');
+      expect(pushProactive.mock.calls[2]![1]).toBe('✅ 后台任务已完成');
     } finally {
       vi.useRealTimers();
     }
@@ -9847,9 +9933,9 @@ describe('DingtalkChannel outbound file delivery', () => {
     });
 
     expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-      '## ❌ Agent · Worker two\n\nFinal B.',
-      '## ⏹️ Agent · 后台任务（部分）\n\nStopped.',
-      '## ✅ Agent · Worker one\n\nFinal A.',
+      'Final B.',
+      '（部分）\n\nStopped.',
+      'Final A.',
     ]);
   });
 
@@ -9887,7 +9973,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     });
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).toContain('## ✅ Agent ·');
+    expect(pushProactive.mock.calls[0]![1]).not.toContain('Agent ·');
   });
 
   it('flushes a partial aggregation after the bounded wait', async () => {
@@ -9922,9 +10008,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
 
       expect(pushProactive).toHaveBeenCalledOnce();
-      expect(pushProactive.mock.calls[0]![1]).toContain(
-        '## ✅ Agent · Worker one（部分）',
-      );
+      expect(pushProactive.mock.calls[0]![1]).toContain('（部分）');
       expect(pushProactive.mock.calls[0]![1]).toContain('First result.');
     } finally {
       vi.useRealTimers();
@@ -9986,9 +10070,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     await first;
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).toBe(
-      '## ✅ Agent · Worker one\n\nFirst result.',
-    );
+    expect(pushProactive.mock.calls[0]![1]).toBe('First result.');
   });
 
   it('retries target resolution without losing a parked terminal', async () => {
@@ -10046,9 +10128,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
       expect(pushProactive).toHaveBeenCalledOnce();
-      expect(pushProactive.mock.calls[0]![1]).toBe(
-        '## ✅ Agent · Worker one\n\nFirst result.',
-      );
+      expect(pushProactive.mock.calls[0]![1]).toBe('First result.');
     } finally {
       vi.useRealTimers();
     }
@@ -10117,7 +10197,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker one\n\nSecond result.',
+        'Second result.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -10195,9 +10275,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     await second;
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).toBe(
-      '## ✅ Agent · Worker one\n\nSecond result.',
-    );
+    expect(pushProactive.mock.calls[0]![1]).toBe('Second result.');
   });
 
   it('keeps a parked terminal until every overlapping resolver exits', async () => {
@@ -10269,9 +10347,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     await second;
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).toBe(
-      '## ✅ Agent · Worker one\n\nSecond result.',
-    );
+    expect(pushProactive.mock.calls[0]![1]).toBe('Second result.');
   });
 
   it.each(['throws', 'returns no target'] as const)(
@@ -10345,9 +10421,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       await first;
 
       expect(pushProactive).toHaveBeenCalledOnce();
-      expect(pushProactive.mock.calls[0]![1]).toBe(
-        '## ✅ Agent · Worker one\n\nSecond result.',
-      );
+      expect(pushProactive.mock.calls[0]![1]).toBe('Second result.');
     },
   );
 
@@ -10422,8 +10496,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Turn two\n\nTurn two result.',
-        '## ✅ Agent · Turn one\n\nTurn one result.',
+        'Turn two result.',
+        'Turn one result.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -10483,8 +10557,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker one\n\nTurn one result.',
-        '## ✅ Agent · Worker one\n\nTurn one result.',
+        'Turn one result.',
+        'Turn one result.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -10586,8 +10660,8 @@ describe('DingtalkChannel outbound file delivery', () => {
         label: 'Worker three',
       });
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ⏹️ Agent · Worker one（部分）\n\nTurn one result.',
-        '## ✅ Agent · Worker three\n\nTurn three result.',
+        '（部分）\n\nTurn one result.',
+        'Turn three result.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -10677,8 +10751,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.waitFor(() => expect(pushProactive).toHaveBeenCalledTimes(2));
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker two\n\nTurn two result.',
-        '## ✅ Agent · Worker one\n\nTurn one result.',
+        'Turn two result.',
+        'Turn one result.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -10755,8 +10829,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     });
 
     expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-      '## ✅ Agent · Worker one\n\nTurn one result.',
-      '## ✅ Agent · Worker two\n\nTurn two result.',
+      'Turn one result.',
+      'Turn two result.',
     ]);
   });
 
@@ -10816,7 +10890,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker one\n\nFinal part.',
+        'Final part.',
       ]);
       expect(
         (
@@ -10895,8 +10969,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker two\n\nTurn two result.',
-        '## ✅ Agent · Worker one\n\nTurn one result.',
+        'Turn two result.',
+        'Turn one result.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -10971,9 +11045,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     await second;
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).toBe(
-      '## ✅ Agent · Worker one\n\nSecond result.',
-    );
+    expect(pushProactive.mock.calls[0]![1]).toBe('Second result.');
   });
 
   it('does not apply an exhausted terminal to the next turn', async () => {
@@ -11050,7 +11122,7 @@ describe('DingtalkChannel outbound file delivery', () => {
         label: 'Worker two',
       });
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker two\n\nNext turn result.',
+        'Next turn result.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -11130,7 +11202,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker two\n\nNext turn result.',
+        'Next turn result.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -11211,7 +11283,7 @@ describe('DingtalkChannel outbound file delivery', () => {
         label: 'Worker two',
       });
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker two\n\nNext turn result.',
+        'Next turn result.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -11285,7 +11357,7 @@ describe('DingtalkChannel outbound file delivery', () => {
         expect(pending.size).toBe(0);
         await vi.waitFor(() => expect(pushProactive).toHaveBeenCalledOnce());
         expect(pushProactive.mock.calls[0]![1]).toBe(
-          '## ✅ Agent · Worker one（部分）\n\nLost result.',
+          '（部分）\n\nLost result.',
         );
       } finally {
         vi.useRealTimers();
@@ -11350,9 +11422,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     await dispatch;
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).toBe(
-      '## ✅ Agent · Worker one（部分）\n\nLost result.',
-    );
+    expect(pushProactive.mock.calls[0]![1]).toBe('（部分）\n\nLost result.');
   });
 
   it('refreshes a failed in-flight flush before retrying it', async () => {
@@ -11404,12 +11474,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       await boundedFlush;
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
-      expect(sendProactiveChunk.mock.calls[0]![2]).toBe(
-        '## ⏹️ Agent · Worker one（部分）\n\nWorking.',
-      );
-      expect(sendProactiveChunk.mock.calls[1]![2]).toBe(
-        '## ✅ Agent · Worker one\n\nWorking.',
-      );
+      expect(sendProactiveChunk.mock.calls[0]![2]).toBe('（部分）\n\nWorking.');
+      expect(sendProactiveChunk.mock.calls[1]![2]).toBe('Working.');
     } finally {
       vi.useRealTimers();
     }
@@ -11476,9 +11542,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive).toHaveBeenCalledOnce();
-      expect(pushProactive.mock.calls[0]![1]).toBe(
-        '## ✅ Agent · Worker one（部分）\n\nFinal result.',
-      );
+      expect(pushProactive.mock.calls[0]![1]).toBe('（部分）\n\nFinal result.');
     } finally {
       vi.useRealTimers();
     }
@@ -11515,7 +11579,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
       expect(pushProactive).toHaveBeenCalledOnce();
-      expect(pushProactive.mock.calls[0]![1]).toContain('Worker one（部分）');
+      expect(pushProactive.mock.calls[0]![1]).toContain('（部分）');
 
       await channel.dispatchBackgroundResponse('session-1', 'Final result.', {
         taskId: 'agent-1',
@@ -11526,11 +11590,9 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive).toHaveBeenCalledTimes(3);
-      expect(pushProactive.mock.calls[1]![1]).toContain(
-        '## ✅ Agent · Worker one（部分）',
-      );
+      expect(pushProactive.mock.calls[1]![1]).toContain('（部分）');
       expect(pushProactive.mock.calls[1]![1]).toContain('Final result.');
-      expect(pushProactive.mock.calls[2]![1]).toBe('## ✅ Agent · Worker one');
+      expect(pushProactive.mock.calls[2]![1]).toBe('✅ 后台任务已完成');
     } finally {
       vi.useRealTimers();
     }
@@ -11567,7 +11629,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
       expect(pushProactive).toHaveBeenCalledOnce();
-      expect(pushProactive.mock.calls[0]![1]).toContain('Worker one（部分）');
+      expect(pushProactive.mock.calls[0]![1]).toContain('（部分）');
 
       await channel.dispatchBackgroundResponse('session-1', '', {
         taskId: 'agent-1',
@@ -11578,7 +11640,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive).toHaveBeenCalledTimes(2);
-      expect(pushProactive.mock.calls[1]![1]).toBe('## ✅ Agent · Worker one');
+      expect(pushProactive.mock.calls[1]![1]).toBe('✅ 后台任务已完成');
       expect(
         (
           channel as unknown as {
@@ -11644,8 +11706,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ⏹️ Agent · Worker one（部分）\n\nWorking.',
-        '## ✅ Agent · Worker one',
+        '（部分）\n\nWorking.',
+        '✅ 后台任务已完成',
       ]);
     } finally {
       vi.useRealTimers();
@@ -11729,7 +11791,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
-  it('refreshes a DM retry after completion without resending files', async () => {
+  it('refreshes a DM retry while preserving attribution and sent files', async () => {
     vi.useFakeTimers();
     const file = createTempFile();
     try {
@@ -11737,13 +11799,29 @@ describe('DingtalkChannel outbound file delivery', () => {
         cwd: file.dir,
         outputMode: 'per_turn',
         interactiveCards: undefined,
+        atSender: true,
       });
       seedWebhook(channel, 'dm-cid');
-      seedSessionTarget(channel, 'session-1', {
+      const target: SessionTarget = {
         channelName: 'test-dingtalk',
         senderId: 'dm-user-1',
         chatId: 'dm-cid',
         isGroup: false,
+      };
+      seedSessionTarget(channel, 'session-1', target);
+      const internals = channel as unknown as {
+        sessionMentionTargets: Map<string, string>;
+        resolveBackgroundResponseDelivery(
+          sessionId: string,
+        ): Promise<{ target: SessionTarget; sourceLabel?: string }>;
+      };
+      internals.sessionMentionTargets.set('session-1', 'staff-1');
+      vi.spyOn(
+        internals,
+        'resolveBackgroundResponseDelivery',
+      ).mockResolvedValue({
+        target,
+        sourceLabel: '（部分）',
       });
       let fileSends = 0;
       const markdownTexts: string[] = [];
@@ -11807,8 +11885,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
       expect(fileSends).toBe(1);
       expect(markdownTexts).toEqual([
-        '## ⏹️ Agent · Worker one（部分）\n\n\nWorking.',
-        '## ✅ Agent · Worker one\n\n\nWorking.',
+        '@staff-1\n\n（部分）\n\n（部分）\n\n\nWorking.',
+        '@staff-1\n\n（部分）\n\n\nWorking.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -11923,10 +12001,7 @@ describe('DingtalkChannel outbound file delivery', () => {
 
         await vi.advanceTimersByTimeAsync(30 * 1000);
 
-        expect(markdownTexts).toEqual([
-          '## ✅ Agent · Worker one\n\nOnly result.',
-          '## ✅ Agent · Worker one\n\nOnly result.',
-        ]);
+        expect(markdownTexts).toEqual(['Only result.', 'Only result.']);
       } finally {
         vi.useRealTimers();
       }
@@ -12015,9 +12090,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     await Promise.resolve();
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).toContain(
-      '## ✅ Agent · Worker one（部分）',
-    );
+    expect(pushProactive.mock.calls[0]![1]).toContain('（部分）');
     expect(pushProactive.mock.calls[0]![1]).toContain('Segment one.');
   });
 
@@ -12140,7 +12213,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(pushProactive).not.toHaveBeenCalled();
     expect(deliverBackgroundReply).toHaveBeenCalledWith(
       'dm-user-1',
-      expect.stringContaining('Worker one（部分）'),
+      expect.stringContaining('（部分）'),
       'session-1',
       undefined,
       true,
@@ -12180,7 +12253,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     ).onSessionRetiring('session-1');
 
     await vi.waitFor(() => expect(pushProactive).toHaveBeenCalledOnce());
-    expect(pushProactive.mock.calls[0]![1]).toContain('Worker one（部分）');
+    expect(pushProactive.mock.calls[0]![1]).toContain('（部分）');
     expect(pushProactive.mock.calls[0]![1]).toContain('Segment one.');
   });
 
@@ -12308,9 +12381,9 @@ describe('DingtalkChannel outbound file delivery', () => {
 
       expect(pushProactive).toHaveBeenCalledTimes(3);
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker one\n\nTurn one.',
-        '## ✅ Agent · Worker one\n\nTurn two.',
-        '## ✅ Agent · Worker one\n\nTurn one.',
+        'Turn one.',
+        'Turn two.',
+        'Turn one.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -12357,9 +12430,9 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker one\n\nTurn one.',
-        '## ❌ Agent · Worker two\n\nTurn two.',
-        '## ✅ Agent · Worker one\n\nTurn one.',
+        'Turn one.',
+        'Turn two.',
+        'Turn one.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -12522,9 +12595,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive).toHaveBeenCalledTimes(4);
-      expect(pushProactive.mock.calls[3]![1]).toBe(
-        '## ✅ Agent · Worker one（部分）\n\nTail.',
-      );
+      expect(pushProactive.mock.calls[3]![1]).toBe('（部分）\n\nTail.');
     } finally {
       vi.useRealTimers();
     }
@@ -13248,7 +13319,7 @@ describe('DingtalkChannel proactive send', () => {
 
       const sends = sendCalls();
       expect(sends).toHaveLength(4);
-      expect(msgParamOf(sends[3]!).text).toBe('## ✅ Agent · Worker one');
+      expect(msgParamOf(sends[3]!).text).toBe('✅ 后台任务已完成');
     } finally {
       vi.useRealTimers();
     }

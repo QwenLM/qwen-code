@@ -56,6 +56,7 @@ export interface DingtalkInteractionPresenterOptions {
    * Simplified Chinese copy.
    */
   language?: string;
+  prepareOutput?(chatId: string, text: string): Promise<string>;
   sendFallback?(
     chatId: string,
     text: string,
@@ -257,15 +258,22 @@ export class DingtalkInteractionPresenter {
           this.cardTarget(statusContext.target),
         );
       }
+      const output =
+        reason === 'response_boundary' && this.options.prepareOutput
+          ? await this.options.prepareOutput(
+              presentation.context.target.chatId,
+              decision.text,
+            )
+          : decision.text;
       const completed =
         statusCards !== undefined &&
         (await statusCards.complete(
           statusContext.segmentId,
-          this.withSenderPrefix(run, decision.text),
+          this.withSenderPrefix(run, output),
         ));
       if (decision.rotate) run.statusContext = undefined;
       if (completed) return true;
-      const fallbackText = stripPartialImageMarker(decision.text);
+      const fallbackText = stripPartialImageMarker(output);
       if (!fallbackText || !(run.sendFallback ?? this.options.sendFallback))
         return false;
       await this.sendFallback(
