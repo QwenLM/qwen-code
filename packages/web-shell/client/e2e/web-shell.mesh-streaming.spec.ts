@@ -121,6 +121,15 @@ test('mesh shows growing replies before completion, survives reload, and replace
     );
   });
   await openChat(page, thread.id, scenario.workspaceCwd);
+  await expect(page.getByTestId('chat-context-header')).toContainText(
+    thread.title,
+  );
+  await expect(
+    page.getByRole('button', { name: '任务详情', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Task details', exact: true }),
+  ).toHaveCount(0);
   await send(page, '@stream-worker Please explain streaming.');
   await expect.poll(() => sent).toBe(1);
   await expect(
@@ -237,9 +246,7 @@ test('mesh shows growing replies before completion, survives reload, and replace
   await expect(
     transcript.getByText('First fragment. Second fragment.', { exact: true }),
   ).toHaveCount(1);
-  await expect(
-    page.getByRole('button', { name: 'Accept and complete' }),
-  ).toBeVisible();
+  await expect(page.getByRole('button', { name: '验收并完成' })).toBeVisible();
   await page.reload();
   await expect(
     transcript.getByText('First fragment. Second fragment.', { exact: true }),

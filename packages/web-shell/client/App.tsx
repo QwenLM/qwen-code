@@ -8584,6 +8584,11 @@ export function App({
     collaborationThread?.server === workspace.baseUrl
       ? collaborationThread.id
       : undefined;
+  const [collaborationTitle, setCollaborationTitle] = useState<{ id: string; title: string }>();
+  const [collaborationHeaderActions, setCollaborationHeaderActions] = useState<HTMLDivElement | null>(null);
+  const updateCollaborationTitle = useCallback((id: string, title: string) => {
+    setCollaborationTitle((current) => current?.id === id && current.title === title ? current : { id, title });
+  }, []);
   const [agentsNav, setAgentsNav] = useState<{
     view: 'agents' | 'tasks' | 'runtime';
     request: number;
@@ -9558,6 +9563,11 @@ export function App({
     connection.sessionContext?.kind === 'standalone'
       ? (sessionStatusDisplayName ?? connection.displayName)
       : (connection.displayName ?? sessionStatusDisplayName);
+  const chatHeaderTitle = collaborationThreadId
+    ? collaborationTitle?.id === collaborationThreadId
+      ? collaborationTitle.title
+      : '协作对话'
+    : sessionDisplayName;
   useEffect(() => {
     onSessionInfoChange?.({
       sessionId: connection.sessionId,
@@ -18134,7 +18144,7 @@ export function App({
               aria-hidden={artifactPanelFullscreen || undefined}
             >
               {chatHeaderEnabled &&
-                !isChatEmptyState &&
+                (!isChatEmptyState || Boolean(collaborationThreadId)) &&
                 !activePanel &&
                 (mainView === 'chat' || mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
@@ -18169,7 +18179,7 @@ export function App({
                     <div className={styles.customChatHeader}>
                       {renderChatHeader({
                         sessionId: connection.sessionId,
-                        sessionName: sessionDisplayName,
+                        sessionName: chatHeaderTitle,
                         workspaceCwd: workspaceContextActive
                           ? connection.workspaceCwd
                           : undefined,
@@ -18206,7 +18216,7 @@ export function App({
                     <ChatContextHeader
                       content={
                         titleHeaderItemVisible
-                          ? (sessionDisplayName ?? t('session.new'))
+                          ? (chatHeaderTitle ?? t('session.new'))
                           : null
                       }
                       environmentOpen={environmentPanelVisible}
@@ -18252,6 +18262,7 @@ export function App({
                       }
                     />
                   )}
+                  {collaborationThreadId && <div ref={setCollaborationHeaderActions} className="flex shrink-0 items-center pr-3" />}
                   {sessionWorkflowEnabled &&
                     (sessionWorkflowTodos.length > 0 ||
                       mainView === 'cockpit') && (
@@ -18295,14 +18306,14 @@ export function App({
             >
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
-                (!chatHeaderEnabled || isChatEmptyState) &&
+                (!chatHeaderEnabled || (isChatEmptyState && !collaborationThreadId)) &&
                 !activePanel &&
                 mainView === 'chat' && (
                   <button
                     type="button"
                     className={[
                       styles.hamburgerButton,
-                      !chatHeaderEnabled || isChatEmptyState
+                      !chatHeaderEnabled || (isChatEmptyState && !collaborationThreadId)
                         ? styles.hamburgerButtonFloating
                         : undefined,
                     ]
@@ -19051,6 +19062,8 @@ export function App({
                 {collaborationThreadId && (
                   <ThreadsRoute key={`${collaborationThread?.cwd}:${collaborationThreadId}`} chat initialThreadId={collaborationThreadId}
                     workspaceCwd={collaborationThread?.cwd}
+                    headerActionsContainer={collaborationHeaderActions}
+                    onTitleChange={updateCollaborationTitle}
                     onOpenActivity={(threadId, workspaceCwd) => {
                       const tab: ArtifactPanelTab = { id: `agent-activity:${workspaceCwd}:${threadId}`, kind: 'agent_activity', title: '运行详情', threadId, workspaceCwd };
                       setArtifactPanelTabs((tabs) => tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab]);

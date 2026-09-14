@@ -186,6 +186,8 @@ export interface ThreadsRouteProps {
   chat?: boolean;
   activityOnly?: boolean;
   onOpenActivity?: (threadId: string, workspaceCwd: string) => void;
+  headerActionsContainer?: HTMLElement | null;
+  onTitleChange?: (threadId: string, title: string) => void;
   hideNavigation?: boolean;
   onOpenThreadChat?: (threadId: string, workspaceCwd: string) => void;
   api?: ThreadsApi;
@@ -203,6 +205,8 @@ export function ThreadsRoute({
   chat = false,
   activityOnly = false,
   onOpenActivity,
+  headerActionsContainer,
+  onTitleChange,
   hideNavigation = false,
   onOpenThreadChat,
   api,
@@ -238,6 +242,10 @@ export function ThreadsRoute({
   const [openId, setOpenId] = useState<string | undefined>(initialThreadId);
   const [showDetails, setShowDetails] = useState(false);
   const [detail, setDetail] = useState<ThreadDetailView | undefined>();
+  useEffect(() => {
+    if (chat && !activityOnly && detail)
+      onTitleChange?.(detail.id, detail.title);
+  }, [chat, activityOnly, detail, onTitleChange]);
   const [draft, setDraft] = useState('');
   const [preview, setPreview] = useState<RoutingPreviewTarget[] | undefined>();
   const [createPreview, setCreatePreview] = useState<
@@ -423,6 +431,7 @@ export function ThreadsRoute({
           <ThreadChat
             key={detail.id}
             activityOnly={activityOnly}
+            headerActionsContainer={headerActionsContainer}
             onOpenActivity={
               onOpenActivity && workspaceCwd
                 ? () => onOpenActivity(detail.id, workspaceCwd)

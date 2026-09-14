@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
-import { LoaderCircle } from 'lucide-react';
+import { Activity, Check, ListTodo, LoaderCircle } from 'lucide-react';
+import { createPortal } from 'react-dom';
 import { MessageList } from '../MessageList';
 import { ChatEditor } from '../ChatEditor';
 import { Button } from '../ui/button';
@@ -39,7 +40,9 @@ export function ThreadChat({
   onOpenThread,
   activityOnly = false,
   onOpenActivity,
+  headerActionsContainer,
 }: {
+  headerActionsContainer?: HTMLElement | null;
   activityOnly?: boolean;
   onOpenActivity?: () => void;
   preview?: readonly RoutingPreviewTarget[];
@@ -184,27 +187,55 @@ export function ThreadChat({
         )}
       </section>
     );
+  const actions = (
+    <div className="flex shrink-0 items-center gap-1">
+      {thread.status === 'in_review' && (
+        <Button
+          variant="ghost"
+          size="icon"
+          title="验收并完成"
+          aria-label="验收并完成"
+          disabled={pending}
+          onClick={onMarkDone}
+        >
+          <Check className="size-4" />
+        </Button>
+      )}
+      <Button
+        variant="ghost"
+        size="icon"
+        title="任务详情"
+        aria-label="任务详情"
+        onClick={onDetails}
+      >
+        <ListTodo className="size-4" />
+      </Button>
+      {onOpenActivity && (
+        <Button
+          variant="ghost"
+          size="icon"
+          title="运行详情"
+          aria-label="运行详情"
+          onClick={onOpenActivity}
+        >
+          <Activity className="size-4" />
+        </Button>
+      )}
+    </div>
+  );
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <header className="flex items-center justify-between gap-4 border-b border-border p-4">
-        <div className="min-w-0">
-          <h1 className="truncate text-base font-semibold">{thread.title}</h1>
-          <p className="text-xs text-muted-foreground">{thread.reason}</p>
-        </div>
-        {thread.status === 'in_review' && (
-          <Button disabled={pending} onClick={onMarkDone}>
-            Accept and complete
-          </Button>
-        )}
-        <Button variant="outline" onClick={onDetails}>
-          Task details
-        </Button>
-        {onOpenActivity && (
-          <Button variant="ghost" className="shrink-0" onClick={onOpenActivity}>
-            运行详情
-          </Button>
-        )}
-      </header>
+      {headerActionsContainer ? (
+        createPortal(actions, headerActionsContainer)
+      ) : (
+        <header className="flex items-center gap-2 border-b border-border px-4 py-2">
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-base font-semibold">{thread.title}</h1>
+          </div>
+          {actions}
+        </header>
+      )}
+      <p className="px-4 py-2 text-xs text-muted-foreground">{thread.reason}</p>
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
