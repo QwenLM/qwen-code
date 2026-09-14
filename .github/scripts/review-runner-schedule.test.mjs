@@ -7,111 +7,85 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
-import {
-  AGENT_LABEL,
-  CI_LABEL,
-  RAMP_STEP,
-  REVIEW_LABEL,
-  hourIn,
-  intVar,
-  isNight,
-  planLabels,
-} from './review-runner-schedule.mjs';
+import { planLabels } from './review-runner-schedule.mjs';
 
-// node: builtins only, so it runs in ci.yml's HELPER_TESTS_DEP_FREE lane.
-
-let nextId = 1;
-const runner = (labels, { busy = false, status = 'online' } = {}) => {
-  const id = nextId++;
-  return { id, name: `ecs-qwen-hk2-${id}`, status, busy, labels };
-};
-const find = (actions, r) => actions.find((a) => a.id === r.id);
+const runner = (id, labels, extra = {}) => ({
+  id,
+  name: `ecs-qwen-hk2-${id}`,
+  labels: labels.map((name) => ({ name })),
+  ...extra,
+});
 
 describe('review runner schedule', () => {
-  it('reads the night window across midnight in Asia/Shanghai', () => {
+  it('switches the entire pool, including busy and offline runners', () => {
+    const runners = Array.from({ length: 30 }, (_, i) =>
+      runner(i + 1, ['ecs-qwen', 'ecs-agent', 'diagnostic'], {
+        busy: i % 2 === 0,
+        status: i === 0 ? 'offline' : 'online',
+      }),
+    );
+    const actions = planLabels(runners, 'review');
+    assert.equal(actions.length, 30);
+    for (const [i, action] of actions.entries()) {
+      assert.deepEqual(action, {
+        id: i + 1,
+        name: runners[i].name,
+        add: ['ecs-review'],
+        remove: ['ecs-qwen', 'ecs-agent'],
+      });
+    }
+  });
+
+  it('returns every review runner to CI and leaves unrelated runners alone', () => {
     assert.deepEqual(
-      [16, 17, 23, 0, 4, 5, 12].map((h) => isNight(h, 17, 5)),
-      [false, true, true, true, true, false, false],
+      planLabels(
+        [
+          runner(1, ['ecs-review', 'diagnostic']),
+          runner(2, ['ecs-agent'], { name: 'ecs-qwen-hk1-2' }),
+          runner(3, ['ecs-review'], { name: 'ecs-qwen-hk2-3-extra' }),
+        ],
+        'ci',
+      ),
+      [
+        {
+          id: 1,
+          name: 'ecs-qwen-hk2-1',
+          add: ['ecs-qwen'],
+          remove: ['ecs-review'],
+        },
+      ],
     );
-    assert.equal(isNight(10, 10, 10), false);
-    // 14:30Z is 22:30 in Shanghai; 16:05Z is 00:05, which must read 0.
-    assert.equal(hourIn(new Date('2026-09-14T14:30:00Z')), 22);
-    assert.equal(hourIn(new Date('2026-09-14T16:05:00Z')), 0);
   });
 
-  it('accepts 0 and rejects unset or malformed variables', () => {
-    // 0 is a real setting (no review runners by day), not "unset".
-    assert.equal(intVar('0', 999), 0);
-    assert.equal(intVar(' 4 ', 999), 4);
-    assert.equal(intVar('17', 23), 17);
-    for (const bad of [undefined, '', 'abc', '-1', '1.5', '24']) {
-      assert.equal(intVar(bad, 23), null, JSON.stringify(bad));
-    }
-  });
-
-  it('day: keeps busy review runners, lends the released ones to CI', () => {
-    const busy1 = runner([REVIEW_LABEL], { busy: true });
-    const idle = runner([REVIEW_LABEL]);
-    const busy2 = runner([REVIEW_LABEL], { busy: true });
-    const agent = runner([AGENT_LABEL]);
-    const actions = planLabels([busy1, idle, busy2, agent], 2);
-    assert.equal(find(actions, busy1), undefined);
-    assert.equal(find(actions, busy2), undefined);
-    assert.deepEqual(find(actions, idle), {
-      id: idle.id,
-      name: idle.name,
-      add: [CI_LABEL],
-      remove: [REVIEW_LABEL],
-    });
-    assert.deepEqual(find(actions, agent).add, [CI_LABEL]);
-    assert.deepEqual(find(actions, agent).remove, [AGENT_LABEL]);
-  });
-
-  it('night: grows by at most RAMP_STEP per tick, idle runners first', () => {
-    const ci = Array.from({ length: 12 }, (_, i) =>
-      runner([CI_LABEL], { busy: i < 4 }),
+  it('is idempotent and rejects invalid modes', () => {
+    assert.deepEqual(
+      planLabels([runner(1, ['ecs-review', 'diagnostic'])], 'review'),
+      [],
     );
-    const actions = planLabels(ci, ci.length);
-    assert.equal(actions.length, RAMP_STEP);
-    for (const a of actions) {
-      assert.deepEqual(a.add, [REVIEW_LABEL]);
-      assert.deepEqual(a.remove, [CI_LABEL]);
-      assert.equal(ci.find((r) => r.id === a.id).busy, false);
-    }
+    assert.deepEqual(planLabels([runner(1, ['ecs-qwen'])], 'ci'), []);
+    assert.throws(() => planLabels([], 'invalid'), /mode must be review or ci/);
   });
 
-  it('changes nothing once converged, and ignores offline runners', () => {
-    const runners = [
-      runner([REVIEW_LABEL], { busy: true }),
-      runner([REVIEW_LABEL]),
-      runner([CI_LABEL]),
-      runner([REVIEW_LABEL], { status: 'offline' }),
-    ];
-    assert.deepEqual(planLabels(runners, 2), []);
-  });
-
-  it('is wired to the review job and the three schedule variables', () => {
-    const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
-    const schedule = read('../workflows/qwen-review-runner-schedule.yml');
-    // The defaults live in the workflow; a repository variable overrides.
-    for (const [name, fallback] of [
-      ['QWEN_REVIEW_NIGHT_START', '17'],
-      ['QWEN_REVIEW_NIGHT_END', '5'],
-      ['QWEN_REVIEW_DAY_RUNNERS', '0'],
-    ]) {
-      assert.ok(
-        schedule.includes(`${name}: "\${{ vars.${name} || '${fallback}' }}"`),
-        name,
-      );
-    }
-    assert.match(
-      schedule,
-      /RUNNER_ADMIN_TOKEN: '\$\{\{ secrets\.RUNNER_ADMIN_PAT \}\}'/,
+  it('wires two daily UTC switches and manual pool selection', () => {
+    const schedule = readFileSync(
+      new URL('../workflows/qwen-review-runner-schedule.yml', import.meta.url),
+      'utf8',
     );
-    const review = read('../workflows/qwen-code-pr-review.yml');
-    const runsOn = review.match(
-      /^ {2}review-pr:[\s\S]*?^ {4}runs-on: (.*)$/m,
-    )[1];
-    assert.match(runsOn, /"ecs-review"/);
+    assert.deepEqual(
+      [...schedule.matchAll(/cron: '([^']+)'/g)].map((m) => m[1]),
+      ['0 9 * * *', '0 21 * * *'],
+    );
+    assert.ok(
+      schedule.includes(
+        "github.event_name == 'workflow_dispatch' && inputs.pool",
+      ),
+    );
+    assert.ok(
+      schedule.includes(
+        "github.event.schedule == '0 9 * * *' && 'review' || 'ci'",
+      ),
+    );
+    assert.ok(schedule.includes('"$GITHUB_REPOSITORY" "$POOL"'));
+    assert.ok(schedule.includes('secrets.RUNNER_ADMIN_PAT'));
   });
 });

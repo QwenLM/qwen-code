@@ -105,10 +105,7 @@ const realPgrepPath = realUtilityPath('pgrep');
 
 describe('qwen pr review runner routing', () => {
   it('isolates the long-running review job on the schedule-sized review pool', () => {
-    // `ecs-review` is sized by qwen-review-runner-schedule.yml (few runners
-    // by day, all at night). It must be neither the shared CI pool nor the
-    // autofix agent pool: CI would compete for the day slots, and autofix
-    // rounds must not share a host with the night review burst.
+    // Review and autofix use separate runner pools.
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
 
     expect(runsOn).toBe(

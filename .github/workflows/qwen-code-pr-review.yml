@@ -495,13 +495,8 @@ jobs:
     # (default: 360); must stay above QWEN_REVIEW_MAX_TIMEOUT_MINUTES so
     # retry plus posting never hit the cap.
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
-    # `ecs-review` is a pool whose SIZE follows the clock: the Qwen Review
-    # Runner Schedule workflow labels a few managed runners by day (model API
-    # at daytime prices) and all of them in the night window. A review that
-    # finds no labelled runner queues here — the PR concurrency group keeps
-    # one pending run per PR, so pushes coalesce — and drains at night. It
-    # is not `ecs-agent`: the autofix agent pool must not share a host with
-    # the night review burst.
+    # The schedule switches hk2 to `ecs-review` at 17:00 Asia/Shanghai
+    # and back to CI at 05:00. Reviews queue while the pool is closed.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
