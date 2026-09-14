@@ -33,6 +33,13 @@
 # WHY sha256 OF THE DIFF, NOT git patch-id. patch-id ignores whitespace, so a
 # formatting-only push would be skipped as "unchanged"; the raw diff (with
 # --full-index blob ids, which also fingerprint binary changes) is exact.
+# Every command-valued setting a reachable git config could otherwise use to
+# rewrite those bytes is neutralized on the diff itself: diff.external and
+# diff.<driver>.command by --no-ext-diff, diff.<driver>.textconv by
+# --no-textconv. A textconv filter that prints a constant makes two different
+# blobs compare equal, so git drops the file from the diff entirely — no
+# `index` line survives to differ — every head then hashes as the empty digest
+# and any reviewed ancestor anchors a false skip.
 # Context lines are part of the diff on purpose: when main edits a file the
 # PR also touches, the PR's diff against the new base differs and the
 # review runs — that is the case a merge can break.
@@ -100,11 +107,19 @@ fi
 
 # sha256 of the PR's diff against its merge-base with the base branch.
 fingerprint() {
-  local sha="$1" mb
+  local sha="$1" mb hasher
   mb="$("${GIT[@]}" merge-base "$BASE_TIP" "$sha" 2>/dev/null)" || return 1
   [ -n "$mb" ] || return 1
-  "${GIT[@]}" diff --no-color --no-ext-diff --no-renames --full-index "$mb" "$sha" \
-    | sha256sum | cut -d' ' -f1
+  # sha256sum is coreutils; macOS ships shasum instead. Bare, a missing binary
+  # exits 127 into `changed no-merge-base` — a missing hasher reported as a
+  # missing merge base, sending the reader to the wrong mechanism.
+  if command -v sha256sum > /dev/null 2>&1; then
+    hasher=(sha256sum)
+  else
+    hasher=(shasum -a 256)
+  fi
+  "${GIT[@]}" diff --no-color --no-ext-diff --no-textconv --no-renames --full-index "$mb" "$sha" \
+    | "${hasher[@]}" | cut -d' ' -f1
 }
 
 head_fp="$(fingerprint "$HEAD_SHA")" || verdict "changed no-merge-base"

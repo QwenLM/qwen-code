@@ -10,7 +10,9 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -72,6 +74,39 @@ function markReviewed(sha, creator = 'github-actions[bot]') {
   writeFileSync(join(statusDir, sha), creator);
 }
 
+// Every status lookup the script made, as the fake `gh` recorded them.
+function ghCalls() {
+  try {
+    return readFileSync(join(statusDir, 'calls'), 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+function hostTool(tool) {
+  const found = spawnSync('/bin/sh', ['-c', `command -v ${tool}`], {
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH },
+  });
+  return found.status === 0 ? found.stdout.trim() : '';
+}
+
+// A PATH that holds symlinks to exactly these host tools and nothing else.
+// The cases below need a program to be GENUINELY absent: a PATH that merely
+// prepends an empty dir still resolves `/usr/bin/gh` — so the "no gh" case
+// made a live authenticated api.github.com call and passed on its 401 — and
+// `/usr/bin/sha256sum`, so a hasher could never be missing either. Returns
+// null when the host lacks one of the tools (the case then skips).
+function binFarm(tools) {
+  const dir = mkdtempSync(join(root, 'bin-'));
+  for (const tool of tools) {
+    const path = hostTool(tool);
+    if (!path) return null;
+    symlinkSync(path, join(dir, tool));
+  }
+  return dir;
+}
+
 function run(
   headSha,
   { env = {}, path = `${fakeBin}:${process.env.PATH}` } = {},
@@ -112,6 +147,7 @@ before(() => {
       '#!/usr/bin/env bash',
       'set -u',
       'path="${2:-}"',
+      'printf \'%s\\n\' "${path}" >> "${FAKE_STATUS_DIR}/calls"',
       'sha="${path#*/commits/}"; sha="${sha%%/*}"',
       'if [ -f "${FAKE_STATUS_DIR}/${sha}" ]; then',
       '  who="$(cat "${FAKE_STATUS_DIR}/${sha}")"',
@@ -151,8 +187,14 @@ describe('review-unchanged-diff', () => {
       'A: real change',
     );
     publishPrHead();
-    const { verdict } = run(headA);
+    const { verdict, stderr } = run(headA);
     assert.equal(verdict, 'changed no-reviewed-ancestor');
+    // headA's parent IS the base tip, so the walk stops at the base branch —
+    // before a single status lookup. Without that stop the first-parent line
+    // runs the whole LOOKBACK into authenticated `gh api` calls and reports
+    // `changed lookback-exhausted`, pointing the reader at the wrong budget.
+    assert.match(stderr, /reached base branch/);
+    assert.equal(ghCalls(), '');
   });
 
   it('a merge of main that leaves the diff identical is unchanged', () => {
@@ -249,15 +291,63 @@ describe('review-unchanged-diff', () => {
     assert.equal(verdict, `unchanged ${chain.m1}`);
   });
 
+  it('a reachable textconv driver cannot collapse the fingerprint', () => {
+    // --no-ext-diff covers diff.external and diff.<driver>.command, not
+    // diff.<driver>.textconv. A filter that prints a constant makes two
+    // different blobs compare equal, so git drops the file from the diff
+    // entirely — no `index` line survives to differ — every head then hashes
+    // as the empty digest, and a reviewed ancestor anchors a skip for a head
+    // that carries genuinely new code.
+    const head = commit(
+      work,
+      'a.txt',
+      'one\ntwo\nthree\nfour\nfive\nsix\n  seven\ntextconv\n',
+      'T: textconv target',
+    );
+    const anchor = git(work, 'rev-parse', 'HEAD~1');
+    publishPrHead();
+    markReviewed(anchor);
+    const attrs = join(ci, '.git', 'info', 'attributes');
+    writeFileSync(attrs, '* diff=degenerate\n');
+    git(ci, 'config', 'diff.degenerate.textconv', 'true');
+    try {
+      const { verdict } = run(head);
+      assert.equal(verdict, 'changed diff-differs');
+    } finally {
+      git(ci, 'config', '--unset', 'diff.degenerate.textconv');
+      rmSync(attrs, { force: true });
+    }
+  });
+
   it('a head that no longer matches the PR is not decided here', () => {
     const { verdict } = run('0123456789abcdef0123456789abcdef01234567');
     assert.equal(verdict, 'changed head-moved');
   });
 
-  it('a failed status lookup falls back to a full review', () => {
+  it('a failed status lookup falls back to a full review', (t) => {
     const head = git(work, 'rev-parse', 'HEAD');
-    const noGh = mkdtempSync(join(root, 'nogh-'));
-    const { verdict } = run(head, { path: `${noGh}:/usr/bin:/bin` });
+    // Really no `gh`: the farm holds the script's own tools and nothing else,
+    // where `PATH=<empty dir>:/usr/bin:/bin` still resolved /usr/bin/gh.
+    const farm = binFarm(['bash', 'git', 'cut', 'sha256sum']);
+    if (!farm) return t.skip('a required host tool is missing');
+    const { verdict } = run(head, { path: farm });
+    assert.equal(verdict, 'changed status-lookup-failed');
+  });
+
+  it('hashes with shasum where the host has no sha256sum', (t) => {
+    const head = git(work, 'rev-parse', 'HEAD');
+    const farm = binFarm(['bash', 'git', 'cut']);
+    const coreutils = hostTool('sha256sum');
+    if (!farm || !coreutils) {
+      return t.skip('no host sha256sum to stand in as shasum');
+    }
+    // macOS ships `shasum -a 256`, not sha256sum: read the blob on stdin and
+    // print the same "<hex>  -" as sha256sum would.
+    writeFileSync(join(farm, 'shasum'), `#!/bin/sh\nexec ${coreutils}\n`);
+    chmodSync(join(farm, 'shasum'), 0o755);
+    // Bare, the 127 is reported as `changed no-merge-base` — a missing hasher
+    // pointed at git merge-base.
+    const { verdict } = run(head, { path: farm });
     assert.equal(verdict, 'changed status-lookup-failed');
   });
 
