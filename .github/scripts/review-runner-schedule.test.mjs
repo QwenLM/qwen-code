@@ -39,11 +39,14 @@ describe('review runner schedule', () => {
     assert.equal(hourIn(new Date('2026-09-14T16:05:00Z')), 0);
   });
 
-  it('falls back to the default on a malformed variable', () => {
-    assert.equal(intVar('4', 2, 999), 4);
-    assert.equal(intVar('', 2, 999), 2);
-    assert.equal(intVar('-1', 2, 999), 2);
-    assert.equal(intVar('24', 22, 23), 22);
+  it('accepts 0 and rejects unset or malformed variables', () => {
+    // 0 is a real setting (no review runners by day), not "unset".
+    assert.equal(intVar('0', 999), 0);
+    assert.equal(intVar(' 4 ', 999), 4);
+    assert.equal(intVar('17', 23), 17);
+    for (const bad of [undefined, '', 'abc', '-1', '1.5', '24']) {
+      assert.equal(intVar(bad, 23), null, JSON.stringify(bad));
+    }
   });
 
   it('day: keeps busy review runners, lends the released ones to CI', () => {

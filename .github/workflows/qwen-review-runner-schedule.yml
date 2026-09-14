@@ -1,10 +1,11 @@
 name: 'Qwen Review Runner Schedule'
 
 # Sizes the PR review pool (`ecs-review`, used by qwen-code-pr-review.yml's
-# review-pr job) by time of day: QWEN_REVIEW_DAY_RUNNERS (default 0) hk2
-# runners by day, every hk2 runner from QWEN_REVIEW_NIGHT_START to
-# QWEN_REVIEW_NIGHT_END (Asia/Shanghai, defaults 17 and 5). An unset or
-# malformed variable uses its default. Reviews that find no runner queue and
+# review-pr job) by time of day: QWEN_REVIEW_DAY_RUNNERS hk2 runners by day,
+# every hk2 runner from QWEN_REVIEW_NIGHT_START to QWEN_REVIEW_NIGHT_END
+# (hours, Asia/Shanghai). Those three repository variables ARE the schedule
+# (17, 5 and 0 when this landed); the script has no defaults, so an unset or
+# malformed one fails the run by name. Reviews that find no runner queue and
 # drain at night. Logic: .github/scripts/review-runner-schedule.mjs.
 #
 # The runner-label API needs repository Administration: write, which no

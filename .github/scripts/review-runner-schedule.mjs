@@ -30,12 +30,12 @@ const TIME_ZONE = 'Asia/Shanghai';
 // start every review's prebuild on one host in the same minute.
 export const RAMP_STEP = 8;
 
-// Repository variable → integer in [0, max]; anything else is the default.
-export function intVar(value, fallback, max) {
+// A repository variable as an integer in [0, max], or null when it is unset
+// or malformed. "0" is a real value (QWEN_REVIEW_DAY_RUNNERS=0: none by day),
+// so this never tests truthiness.
+export function intVar(value, max) {
   const text = String(value ?? '').trim();
-  return /^\d{1,3}$/.test(text) && Number(text) <= max
-    ? Number(text)
-    : fallback;
+  return /^\d{1,3}$/.test(text) && Number(text) <= max ? Number(text) : null;
 }
 
 export function hourIn(date, timeZone = TIME_ZONE) {
@@ -105,15 +105,29 @@ async function main() {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? '')) {
     throw new Error('usage: review-runner-schedule.mjs <owner/repo>');
   }
-  // A silent no-op would freeze the labels in whichever phase they are in.
+  // The schedule lives in repository variables only; there are no built-in
+  // defaults. A missing or malformed one fails the run by name, as does a
+  // missing token: a silent no-op would freeze the labels in whichever phase
+  // they are in.
+  const schedule = {
+    QWEN_REVIEW_NIGHT_START: intVar(process.env.QWEN_REVIEW_NIGHT_START, 23),
+    QWEN_REVIEW_NIGHT_END: intVar(process.env.QWEN_REVIEW_NIGHT_END, 23),
+    QWEN_REVIEW_DAY_RUNNERS: intVar(process.env.QWEN_REVIEW_DAY_RUNNERS, 999),
+  };
+  const bad = Object.keys(schedule).filter((k) => schedule[k] === null);
+  if (bad.length) {
+    throw new Error(
+      `unset or out-of-range repository variable: ${bad.join(', ')}`,
+    );
+  }
+  const start = schedule.QWEN_REVIEW_NIGHT_START;
+  const end = schedule.QWEN_REVIEW_NIGHT_END;
+  const dayRunners = schedule.QWEN_REVIEW_DAY_RUNNERS;
   if (!process.env.RUNNER_ADMIN_TOKEN) {
     throw new Error(
       'RUNNER_ADMIN_TOKEN is empty (needs Administration: write)',
     );
   }
-  const start = intVar(process.env.QWEN_REVIEW_NIGHT_START, 17, 23);
-  const end = intVar(process.env.QWEN_REVIEW_NIGHT_END, 5, 23);
-  const dayRunners = intVar(process.env.QWEN_REVIEW_DAY_RUNNERS, 0, 999);
 
   // --slurp returns an array of pages; gh refuses it together with --jq.
   const pages = JSON.parse(
