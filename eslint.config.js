@@ -245,6 +245,9 @@ export default tseslint.config(
     files: [
       'packages/**/src/**/*.{ts,tsx}',
       'integrations/**/src/**/*.{ts,tsx}',
+      // web-shell is published and keeps its shipped sources in client/, not
+      // src/, so the globs above reach none of it.
+      'packages/web-shell/client/**/*.{ts,tsx}',
     ],
     ignores: extraneousDependencyTestFiles,
     rules: {
