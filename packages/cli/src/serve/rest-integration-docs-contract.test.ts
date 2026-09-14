@@ -368,6 +368,29 @@ describe('REST integration documentation contract', () => {
     expect([...openApiOperations(openApi).keys()].sort()).toEqual(expected);
   });
 
+  it('links every guide operation to its own protocol section', () => {
+    const links = guideRouteRows(readFileSync(GUIDE, 'utf8')).flatMap((row) => [
+      ...routeCell(row).matchAll(/\[`([^`]+)`\]\(([^)\s]+)\)/g),
+    ]);
+    expect(
+      links.length,
+      'guide operation links must not be empty',
+    ).toBeGreaterThan(0);
+    expect(links.map((link) => link[1]).sort()).toEqual(
+      [...GUIDE_OPERATIONS].sort(),
+    );
+
+    const headings = protocolHeadings();
+    for (const link of links) {
+      const operation = link[1];
+      const ownHeadings = headings.filter((heading) =>
+        heading.startsWith(`\`${operation}\``),
+      );
+      expect(ownHeadings).toHaveLength(1);
+      expect(link[2]).toBe(`./qwen-serve-protocol.md#${slug(ownHeadings[0])}`);
+    }
+  });
+
   it('keeps the OpenAPI contract self-describing', () => {
     const openApi = JSON.parse(
       readFileSync(OPENAPI, 'utf8'),
