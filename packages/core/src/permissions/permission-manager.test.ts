@@ -671,6 +671,94 @@ describe('splitCompoundCommand', () => {
       expect(splitCompoundCommand(command)).toEqual(['echo hi']);
     },
   );
+
+  // A word-initial `#` outside quotes opens a comment that runs to the end of
+  // the physical line, so every operator inside it is inert. Confirmed against
+  // bash: each of these traces a single `+ echo a`, and
+  // `bash -xc "echo 'a' # comment ; echo B"` traces a single `+ echo a`.
+  //
+  // The `'a\'` rows passed before the comment state existed too, but only by
+  // accident — the backslash inside the quotes was read as an escape that
+  // swallowed the closing `'`, so the scanner sat in an unterminated string
+  // that masked the operator. They keep passing once #11765 makes that
+  // backslash literal, because the comment then masks the operator for the
+  // right reason.
+  it.each([
+    [`echo 'a' # comment ; echo B`],
+    [`echo 'a\\' # note: use ; carefully`],
+    [`echo 'a\\' # trailing && touch /tmp/x`],
+    [`echo 'a\\' # trailing | touch /tmp/x`],
+    ['echo hi # nothing here'],
+    [`git status # don't ; echo B`],
+    ['echo a # c && rm -rf /tmp/x'],
+    ['echo a # c || rm -rf /tmp/x'],
+    ['echo a # c | rm -rf /tmp/x'],
+    ['echo a # c & rm -rf /tmp/x'],
+  ])(
+    'does not split %s, where the operator is inside a comment',
+    async (command) => {
+      expect(splitCompoundCommand(command)).toEqual([command]);
+    },
+  );
+
+  // Over-correction guard: `#` starts a comment only at the start of a word, so
+  // bash really does run two commands here.
+  it('still splits echo a#b ; echo B, where # is not at a word start', async () => {
+    expect(splitCompoundCommand('echo a#b ; echo B')).toEqual([
+      'echo a#b',
+      'echo B',
+    ]);
+  });
+
+  // A word starts after an operator as well as after whitespace:
+  // `bash -xc "echo a;#c ; rm -rf /tmp/x"` traces a single `+ echo a`. The
+  // leftover `#c …` segment is pre-existing behaviour — bash runs one command
+  // here, not two — and is harmless in the fail-closed direction.
+  it('reads a # straight after an operator as a comment', async () => {
+    expect(splitCompoundCommand('echo a;#c ; rm -rf /tmp/x')).toEqual([
+      'echo a',
+      '#c ; rm -rf /tmp/x',
+    ]);
+  });
+
+  // Inside quotes a `#` is literal, so the operator after the closing quote is
+  // a real boundary.
+  it('does not treat a quoted # as a comment', async () => {
+    expect(splitCompoundCommand(`echo '# c' ; rm -rf /tmp/x`)).toEqual([
+      `echo '# c'`,
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // `#` at index 0 is at a word start, so a shebang line is a comment and the
+  // newline after it still bounds the real command.
+  it('treats a leading # as a comment', async () => {
+    expect(splitCompoundCommand('#!/bin/sh\necho hi')).toEqual([
+      '#!/bin/sh',
+      'echo hi',
+    ]);
+  });
+
+  // The comment ends at the *physical* newline, and that newline stays a
+  // boundary: `bash -xc $'echo hi # c\nrm -rf /tmp/x'` traces both commands, so
+  // the `rm` must keep its own segment and its own rule check.
+  it('keeps the newline that ends a comment as a boundary', async () => {
+    expect(splitCompoundCommand('echo hi # c\nrm -rf /tmp/x')).toEqual([
+      'echo hi # c',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // …and a backslash does not reach past that newline. bash does not continue a
+  // line inside a comment, so it runs the `rm` here; letting the existing
+  // `escaped` flag find the newline folded both commands into one segment and
+  // the `rm` lost its rule check.
+  it('does not let a trailing backslash extend a comment', async () => {
+    expect(splitCompoundCommand('echo hi # foo \\\nrm -rf /tmp/x')).toEqual([
+      'echo hi # foo \\',
+      'rm -rf /tmp/x',
+    ]);
+  });
 });
 
 // ─── splitCompoundCommandSegments ────────────────────────────────────────────
@@ -2362,6 +2450,63 @@ describe('PermissionManager', () => {
       expect(await pm.isCommandAllowed('safe-cmd a && evil-cmd b')).toBe(
         'deny',
       );
+    });
+
+    // #11815 — bash runs only the `echo` here, and `Bash(echo *)` covers it, so
+    // the commented-out tail must not drag the whole line into a prompt.
+    it('operator inside a comment: treated as single command', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `echo 'a' # comment ; rm -rf /tmp/x`,
+        }),
+      ).toBe('allow');
+    });
+
+    // The comment stops at the physical newline and bash runs the `rm` on the
+    // next line, so the backslash before that newline must not extend the
+    // comment over it and cost the `rm` its deny check.
+    it('command after a comment line: deny still fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo hi # foo \\\nrm -rf /tmp/x',
+        }),
+      ).toBe('deny');
+    });
+
+    // Only `walkCompoundCommand` strips heredoc bodies; the Bash-rule paths
+    // split the raw command, so this `#` line reaches the comment state. bash
+    // hands that line to `cat` as data and never runs the `rm` —
+    // `bash -xc $'cat <<EOF\n# hi ; rm -rf /\nEOF'` traces only `+ cat` — so the
+    // deny that fired before this change was a false positive on text that is
+    // never executed. Making these paths heredoc-aware is #9417's job, not
+    // this change's.
+    it('heredoc body comment line: no deny on text bash never runs', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cat <<EOF\n# hi ; rm -rf /\nEOF',
+        }),
+      ).not.toBe('deny');
     });
   });
 

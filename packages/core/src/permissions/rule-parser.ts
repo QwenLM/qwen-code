@@ -838,6 +838,33 @@ function isAsyncOperator(command: string, index: number): boolean {
 }
 
 /**
+ * Operators after which a `#` still starts a word, and so a comment.
+ *
+ * Whitespace and the start of the input are handled by {@link isCommentStart}
+ * itself. Confirmed against bash: `echo a;#c` and `echo a&#c` each run one
+ * command, and `echo a|#c` is a syntax error because the `#` comments out the
+ * right-hand side of the pipe. Redirection operators and `(` are deliberately
+ * absent: bash starts a word there too, but leaving them literal only
+ * over-splits, which stays fail-closed, and no reported shape needs them.
+ */
+const COMMENT_WORD_BOUNDARIES = [';', '&', '|'];
+
+/**
+ * Whether the `#` at `index` opens a comment rather than being a literal.
+ *
+ * bash only starts a comment at the start of a word, so `echo a#b` prints
+ * `a#b` while `echo a #b` prints `a`. The same word rule keeps the arithmetic
+ * base prefix in `echo $(( 8#17 ))` literal.
+ */
+function isCommentStart(command: string, index: number): boolean {
+  if (index === 0) {
+    return true;
+  }
+  const previous = command[index - 1]!;
+  return /\s/.test(previous) || COMMENT_WORD_BOUNDARIES.includes(previous);
+}
+
+/**
  * One segment of a compound command, together with the operator that ended it.
  */
 export interface CompoundCommandSegment {
@@ -893,6 +920,24 @@ export function splitCompoundCommandSegments(
       continue;
     }
 
+    // A word-initial `#` opens a comment that runs to the end of the physical
+    // line, so an operator inside it is not a boundary: bash runs
+    // `echo 'a' # comment ; echo B` as a single `echo` (#11815).
+    //
+    // This scan deliberately ignores `escaped`. A backslash does not continue a
+    // line inside a comment — bash really does run the `rm` in `echo hi # foo \`
+    // followed by a newline and `rm -rf /` — so honouring the escape would fold
+    // that second command into the comment's segment and cost it its own rule
+    // check. For the same reason the newline is left for the operator scan
+    // below, and stays a boundary.
+    if (ch === '#' && isCommentStart(command, i)) {
+      while (i < command.length && command[i] !== '\n') {
+        i++;
+      }
+      i--; // -1 because the loop will i++, landing back on the newline
+      continue;
+    }
+
     if (ch === '(' && command[i + 1] === '(') {
       arithmeticDepth++;
       i++;
@@ -945,6 +990,7 @@ export function splitCompoundCommandSegments(
  *   "git status && rm -rf /"  → ["git status", "rm -rf /"]
  *   "ls -la | grep foo"      → ["ls -la", "grep foo"]
  *   "echo 'a && b'"          → ["echo 'a && b'"]  (inside quotes)
+ *   "echo 'a' # c ; echo B"  → ["echo 'a' # c ; echo B"]  (inside a comment)
  *   "a && b || c"            → ["a", "b", "c"]
  *   "git status & rm -rf /"  → ["git status", "rm -rf /"]  (async operator)
  *   "build &> log.txt"       → ["build &> log.txt"]  (redirection, not async)
