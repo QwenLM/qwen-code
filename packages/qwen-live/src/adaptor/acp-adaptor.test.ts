@@ -677,6 +677,18 @@ describe('AcpAdaptor sessions and receipts', () => {
         _meta: { source },
       });
     }
+    // The background turn's own reply rides the discrete/backgroundTurn
+    // markers rather than a status source: it stays out of the foreground
+    // answer but still reaches the live transcript as an activity.
+    connection.update(handle.id, {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'background reply' },
+      _meta: {
+        source: 'background_notification_response',
+        qwenDiscreteMessage: true,
+        backgroundTurn: { turnId: 'bg-1' },
+      },
+    });
     connection.update(handle.id, {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: ' tail' },
@@ -697,7 +709,7 @@ describe('AcpAdaptor sessions and receipts', () => {
           ? [event.text]
           : [],
       ),
-    ).toEqual(['answer', ' tail']);
+    ).toEqual(['answer', 'background reply', ' tail']);
   });
 
   it.each(['_qwencode/start_turn', '_probe/unknown'])(

@@ -79,6 +79,18 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
           stream.lastActivityMs = Date.now();
           const collector = stream.activeCollector;
           if (collector) {
+            const meta = update['_meta'];
+            // Discrete frames (background task lifecycle, realtime transcript
+            // echoes, stop-guard notices) carry `_meta` like the genuine
+            // final chunk but are not answer text: neither collect them nor
+            // resolve on them.
+            if (
+              typeof meta === 'object' &&
+              meta !== null &&
+              (meta as Record<string, unknown>)['qwenDiscreteMessage'] === true
+            ) {
+              continue;
+            }
             const text = content['text'];
             if (typeof text === 'string' && text) {
               collector.texts.push(text);

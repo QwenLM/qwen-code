@@ -50,6 +50,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
+import {
+  getCurrentAgentId,
+  runWithAgentContext,
+} from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import { SettingScope } from '../../config/settings.js';
 import type {
   AgentSideConnection,
@@ -14239,6 +14243,52 @@ describe('Session', () => {
           },
         },
       });
+    });
+
+    it('runs the automatic turn outside the notifying agent frame', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background shell' }],
+      });
+
+      const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      const observedAgentIds: Array<string | null> = [];
+      vi.mocked(mockConfig.assertCanStartTurn).mockImplementation(async () => {
+        observedAgentIds.push(getCurrentAgentId());
+      });
+
+      // A background shell a subagent started exits while still inside the
+      // subagent's AsyncLocalStorage frame; the shell registry deliberately
+      // does not exit it (unlike the task/workflow registries).
+      runWithAgentContext('sub-agent-1', () =>
+        callback(
+          'Background shell "npm test" completed.',
+          '<task-notification><kind>shell</kind></task-notification>',
+          { shellId: 'shell-1', status: 'completed' },
+        ),
+      );
+
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      // The automatic turn's own turn-start check is the last one to run. It
+      // must observe no agent frame, or every record the turn persists loses
+      // its backgroundTurn attribution and the turn resolves the subagent's
+      // model (#7156 shape).
+      expect(observedAgentIds.length).toBeGreaterThan(0);
+      expect(observedAgentIds[observedAgentIds.length - 1]).toBeNull();
     });
 
     // The queue is bounded. ACP filters interim monitor pulses before they

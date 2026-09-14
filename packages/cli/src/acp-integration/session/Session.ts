@@ -226,6 +226,7 @@ import {
   TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
   runWithRuntimeContentGenerator,
+  runOutsideAgentContext,
   observeToolResultBoundary,
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
@@ -10588,11 +10589,23 @@ export class Session implements SessionContext {
           });
           const context = { sessionId: this.sessionId, turn, active: true };
           try {
+            // A notification fires as a continuation of whatever context
+            // completed the task — including a subagent's AsyncLocalStorage
+            // frame (shell/monitor registries do not exit it, unlike the
+            // task/workflow registries). The automatic turn is
+            // main-session-owned: run it with no agent frame, or its
+            // persisted records lose their backgroundTurn attribution and
+            // model resolution follows the finished subagent (#7156 shape).
             await backgroundTurnContext.run(context, () =>
               goalTurnContext.exit(() =>
-                runWithInvocationContext(undefined, () =>
-                  sessionIdContext.run(this.config.getSessionId(), () =>
-                    this.#executeBackgroundNotificationPromptInner(item, turn),
+                runOutsideAgentContext(() =>
+                  runWithInvocationContext(undefined, () =>
+                    sessionIdContext.run(this.config.getSessionId(), () =>
+                      this.#executeBackgroundNotificationPromptInner(
+                        item,
+                        turn,
+                      ),
+                    ),
                   ),
                 ),
               ),

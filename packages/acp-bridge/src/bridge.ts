@@ -4860,8 +4860,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               return false;
             entry.backgroundTurn = turn;
             delete entry.cancelBroadcastWithoutPrompt;
-            delete entry.turnError;
-            delete entry.turnErrorEvent;
+            // turnError/turnErrorEvent stay: only a new user prompt
+            // supersedes the previous turn's failure — an admitted
+            // background turn must not erase it from getSessionSummary().
             clearPromptSettledClose(entry);
             entry.sessionLastSeenAt = Date.now();
             touchActivity();

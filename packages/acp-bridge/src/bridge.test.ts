@@ -40927,6 +40927,47 @@ describe('background admission ownership boundaries', () => {
     kind: 'agent',
     startedAt: 100,
   };
+
+  it('keeps the previous turn error when a background turn is admitted', async () => {
+    const handle = makeChannel({
+      promptImpl: async () => {
+        throw Object.assign(new Error('model unavailable'), {
+          code: 'model_error',
+        });
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'fail' }],
+        }),
+      ).rejects.toThrow();
+      expect(bridge.getSessionSummary(session.sessionId).hasTurnError).toBe(
+        true,
+      );
+
+      expect(
+        await handle.agentConnection.extMethod('_qwencode/start_turn', {
+          sessionId: session.sessionId,
+          source: 'background_notification',
+          ...turn,
+        }),
+      ).toEqual({ accepted: true });
+
+      // Admitting an automatic background turn does not supersede the failed
+      // prompt: the terminal error stays visible until a new user prompt
+      // clears it (the dispatch-path clearing is pinned elsewhere).
+      expect(bridge.getSessionSummary(session.sessionId).hasTurnError).toBe(
+        true,
+      );
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('keeps new RPC permission and text ownership when old background completion is missing', async () => {
     let continueReply!: () => void;
     const replyGate = new Promise<void>((resolve) => (continueReply = resolve));

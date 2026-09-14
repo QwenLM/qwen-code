@@ -894,7 +894,17 @@ export class AcpAdaptor implements BackendAdaptor {
     if (kind === 'agent_message_chunk') {
       const content = isRecord(update['content']) ? update['content'] : {};
       const text = content['text'];
-      if (typeof text === 'string' && activity?.kind === 'message') {
+      // Discrete/background frames (status prose, the background turn's own
+      // reply) are transcript activities, never the foreground job's answer.
+      const meta = isRecord(update['_meta']) ? update['_meta'] : {};
+      const isAnswerChunk =
+        meta['qwenDiscreteMessage'] !== true &&
+        meta['backgroundTurn'] === undefined;
+      if (
+        typeof text === 'string' &&
+        activity?.kind === 'message' &&
+        isAnswerChunk
+      ) {
         state.turnBuffer = `${state.turnBuffer}${stripControlSequences(text)}`;
         if (state.turnBuffer.length > MAX_DETAIL_CHARS) {
           state.turnBuffer = tailSlice(state.turnBuffer, MAX_DETAIL_CHARS);

@@ -484,7 +484,17 @@ export class QwenCodeAdaptor implements BackendAdaptor {
   ): Promise<PromptReceipt> {
     const state = this.trackSession(handle.id);
 
-    if (opts?.steer && state.busy) {
+    // A background-only busy session (busy seeded by an observed background
+    // turn, with no foreground job) can never confirm a steer: the
+    // background turn's terminal is dropped by design, so a "joined" job
+    // would wait forever. Fall through and queue the handoff as a full
+    // prompt behind the background turn instead.
+    const backgroundOnlyBusy =
+      state.busy &&
+      state.activeJobRef === undefined &&
+      state.backgroundTurnId !== undefined;
+
+    if (opts?.steer && state.busy && !backgroundOnlyBusy) {
       // Mid-turn injection is text-only on the wire; a handoff carrying
       // image attachments must go through a full prompt so the images are
       // not silently dropped — the fall-through below queues it as the

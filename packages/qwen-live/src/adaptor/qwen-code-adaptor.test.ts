@@ -475,6 +475,71 @@ describe('QwenCodeAdaptor.prompt steering', () => {
     return { adaptor, handle };
   }
 
+  it('queues a steer instead of joining a background-only turn', async () => {
+    // Attach while only an automatic background turn runs: busy was seeded
+    // from the widened hasActivePrompt, and the background drain can never
+    // produce a turn_joined/terminal for an orchestrator job, so the
+    // handoff must queue as a full prompt instead of steering.
+    let firstFrameProcessed!: () => void;
+    const processed = new Promise<void>((resolve) => {
+      firstFrameProcessed = resolve;
+    });
+    let releaseStream!: () => void;
+    const streamGate = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const client = makeClient({
+      createOrAttachSession: vi.fn(async () => ({
+        sessionId: SESSION_ID,
+        clientId: ISSUED_CLIENT_ID,
+        hasActivePrompt: true,
+      })),
+      subscribeEvents: vi.fn(() =>
+        (async function* () {
+          yield envelope(
+            'session_update',
+            {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'Background turn' },
+                _meta: {
+                  source: 'background_notification_turn_started',
+                  qwenDiscreteMessage: true,
+                  backgroundTurn: { turnId: 'bg-1' },
+                },
+              },
+            },
+            { promptId: 'bg-1' },
+          );
+          // The consumer pulls the next frame only after normalizing this
+          // one, so reaching here proves backgroundTurnId is armed.
+          firstFrameProcessed();
+          await streamGate;
+        })(),
+      ),
+    });
+    const adaptor = makeAdaptor(client);
+    const handle = await adaptor.createSession();
+    const drained = (async () => {
+      for await (const event of adaptor.events(handle)) void event;
+    })();
+    await processed;
+
+    const receipt = await adaptor.prompt(
+      handle,
+      [{ type: 'text', text: 'do X' }],
+      { steer: true },
+    );
+
+    expect(client.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(client.promptNonBlocking).toHaveBeenCalledOnce();
+    expect(receipt).not.toHaveProperty('joinedActiveTurn');
+    expect(receipt).toMatchObject({ status: 'queued', jobRef: 'p1' });
+
+    releaseStream();
+    await drained;
+  });
+
   it('joins the active turn when the mid-turn injection is accepted', async () => {
     const client = makeClient();
     const { adaptor, handle } = await busyAdaptor(client);
