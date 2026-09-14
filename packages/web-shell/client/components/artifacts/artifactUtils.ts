@@ -3,6 +3,7 @@ import type {
   DaemonWorkspaceFileBytes,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
+import { escapeAttribute } from '../preview/web-preview';
 
 export function artifactKindLabel(
   kind: string,
@@ -387,7 +388,16 @@ export function isSamePath(
 }
 
 const ARTIFACT_PREVIEW_CSP =
-  "default-src 'none'; base-uri 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:;";
+  "default-src 'none'; base-uri 'none'; form-action 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data:;";
+
+export function artifactPreviewDocument(html: string, title: string): string {
+  // A frame's own CSP cannot block its self-navigation. Keep a trusted parent
+  // policy around the opaque content frame, including when the shell allows live URLs.
+  return `<!doctype html><html><head>
+<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_PREVIEW_CSP} frame-src 'none';">
+<style>html,body,iframe{width:100%;height:100%;margin:0;border:0;display:block;overflow:hidden}</style>
+</head><body><iframe title="${escapeAttribute(title)}" sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="${escapeAttribute(withArtifactPreviewCsp(html))}"></iframe></body></html>`;
+}
 
 export function withArtifactPreviewCsp(html: string) {
   if (typeof DOMParser === 'undefined') {

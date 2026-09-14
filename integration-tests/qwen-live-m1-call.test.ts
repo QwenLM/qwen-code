@@ -8,13 +8,13 @@
  * qwen-live M1 — one full call, end to end, against real subprocesses:
  * a real `qwen serve` (model side backed by the fake OpenAI server), the
  * real `qwen-live` daemon binary, a fake DashScope realtime endpoint, and
- * a protocol-v6 FakeHost.
+ * a protocol-v9 FakeHost.
  *
  *   a. the discovery file exists with the documented fields;
  *   b. FakeHost connect → hello → host.welcome;
  *   c. `toggle` opens the realtime connection (auth header + model query),
- *      sends session.update with the 8-tool surface, and the call reaches
- *      `listening`;
+ *      sends session.update with the default 16-tool surface, and the call
+ *      reaches `listening`;
  *   d. direct-answer path: Host input audio frames reach the provider as
  *      input_audio_buffer.append, provider output audio reaches the Host as
  *      bare PCM frames;
@@ -55,13 +55,21 @@ const describeE2E = SKIP ? describe.skip : describe;
 
 const EXPECTED_TOOL_NAMES = [
   'appshot',
+  'cancel_proactive_task',
+  'create_live_narration',
+  'create_proactive_monitor',
+  'create_proactive_timer',
   'handoff',
+  'list_proactive_tasks',
+  'omnibio',
+  'omniretrieve',
   'remain_silent',
   'respond_permission',
   'session_create',
   'session_list',
   'session_monitor',
   'session_stop',
+  'update_proactive_task',
 ];
 
 describeE2E('qwen-live M1 — end-to-end voice call', () => {
@@ -88,7 +96,7 @@ describeE2E('qwen-live M1 — end-to-end voice call', () => {
     expect(record['url']).toBe(stack.live.url);
     expect(typeof record['token']).toBe('string');
     expect(String(record['token']).length).toBeGreaterThan(0);
-    expect(record['protocolVersion']).toBe(7);
+    expect(record['protocolVersion']).toBe(9);
     expect(record['pid']).toBe(stack.live.proc.pid);
     expect(String(record['instanceNonce'])).toMatch(/^[A-Za-z0-9_-]{16,256}$/);
   });
@@ -101,6 +109,17 @@ describeE2E('qwen-live M1 — end-to-end voice call', () => {
     expect(Number.isInteger(welcome!.epoch)).toBe(true);
     expect(welcome!.status['available']).toBe(true);
     expect(welcome!.status['state']).toBe('idle');
+    expect(
+      stack.host.messages.find((entry) => entry['type'] === 'host.welcome')?.[
+        'memory'
+      ],
+    ).toMatchObject({
+      enabled: true,
+      visualEnabled: false,
+      libraryId: 'default',
+      model: 'qwen3.7-plus',
+      locked: false,
+    });
   });
 
   it('toggle connects to the realtime provider and reaches listening', async () => {
@@ -127,6 +146,14 @@ describeE2E('qwen-live M1 — end-to-end voice call', () => {
     );
     expect(typeof session['instructions']).toBe('string');
     expect(String(session['instructions']).length).toBeGreaterThan(0);
+    for (const section of [
+      'user_profile',
+      'recent',
+      'retrieved',
+      'personalized_user_memories',
+    ]) {
+      expect(String(session['instructions'])).toContain(`<${section}>`);
+    }
 
     const listening = await stack.host.waitForState(
       (entry) => entry.status['state'] === 'listening',
@@ -161,12 +188,12 @@ describeE2E('qwen-live M1 — end-to-end voice call', () => {
 
   it('hands off to the real serve daemon and injects the result back', async () => {
     const inboxIndex = stack.fakeDash.inbox.length;
-    conn.speakTranscript('fix the failing test');
-    conn.functionCall({
+    conn.queueFunctionCall({
       name: 'handoff',
       argumentsJson: '{"task":"fix the failing test"}',
       callId: 'call-1',
     });
+    conn.speakTranscript('fix the failing test');
 
     // Receipt: the handoff was admitted by qwen serve.
     const receiptMessage = await stack.fakeDash.waitForMessage(

@@ -422,4 +422,9 @@ describe('sanitizeDisplayText', () => {
     expect(out).toBe('a'.repeat(399) + EMOJI);
     expect(isHighSurrogate(out.charCodeAt(out.length - 1))).toBe(false);
   });
+
+  it('keeps the full text when no cap is given', () => {
+    const text = `${'a'.repeat(9000)}${EMOJI}tail`;
+    expect(sanitizeDisplayText(text)).toBe(text);
+  });
 });

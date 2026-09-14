@@ -6,17 +6,26 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
-import type { GoalRecoveryRecord } from './goal-persistence.js';
+import {
+  recoverGoalFromRecords,
+  type GoalRecoveryRecord,
+} from './goal-persistence.js';
 import {
   GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_CHECKPOINT_CLAIM_LIMIT,
+  GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS,
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_CHECKPOINT_STALL_LIMIT,
   GOAL_CHECKPOINT_STALLED_REASON,
+  GOAL_CHECKPOINT_UNREACHABLE_REASON,
+  GOAL_CHECKPOINT_UNUSABLE_REASON,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_NO_PROGRESS_TURN_LIMIT,
   GOAL_PAUSE_REASON_NO_PROGRESS,
   GOAL_PROPOSAL_REASON_MAX_BYTES,
+  goalActiveTimeBudgetReason,
+  goalCheckpointHealthVisible,
+  goalTurnBudgetReason,
   type GoalSnapshotV2,
   type GoalStateCause,
   type GoalStateRecordPayloadV2,
@@ -31,12 +40,19 @@ import {
   type GoalTurnHost,
 } from './goal-runtime.js';
 import { GoalConflictError } from './goal-reducer.js';
-import type {
-  GoalCheckpointVerificationResult,
-  GoalCheckpointVerifier,
-  GoalCheckpointVerifierInput,
+import {
+  GOAL_CHECKPOINT_BATCH_RECORD_LIMIT,
+  InvalidGoalCheckpointError,
+  type GoalCheckpointVerificationResult,
+  type GoalCheckpointVerifier,
+  type GoalCheckpointVerifierInput,
 } from './goal-checkpoint.js';
-import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
+import {
+  GoalCheckpointClaimBudgetError,
+  GoalCheckpointClaimCountError,
+  GoalCheckpointClaimLengthError,
+  GoalCheckpointVerifierInputTooLargeError,
+} from './goal-checkpoint-verifier.js';
 import type { GoalVerifier } from './goal-verifier.js';
 
 // Records the GOAL_RUNTIME debug-log calls so tests can assert that a failed
@@ -1991,6 +2007,18 @@ describe('goal runtime', () => {
     })),
   });
 
+  // How many window records each checkpoint verifier call was given, in call
+  // order. A 101-record turn leaves a 100-record window before any checkpoint
+  // and a 68-record one beside a full 32-claim checkpoint; a check sends it
+  // whole until one stalls, then in batches of 24, then of 12.
+  const batchSizes = (verifier: {
+    mock: {
+      calls: ReadonlyArray<
+        readonly [GoalCheckpointVerifierInput, ...unknown[]]
+      >;
+    };
+  }) => verifier.mock.calls.map(([input]) => input.evidence.length);
+
   function stallHarness() {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
@@ -2011,6 +2039,7 @@ describe('goal runtime', () => {
       host,
       runtime,
       checkpointVerifier,
+      evidenceSource,
       setRecords: (next: readonly RuntimeRecord[]) => {
         records = next;
       },
@@ -2033,10 +2062,11 @@ describe('goal runtime', () => {
         `window-${stall}`,
       );
       // Each stalled checkpoint is still written -- the streak is counted on
-      // the record, not held back in memory.
+      // the record, not held back in memory, and so is what it ran into.
       expect(runtime.getSnapshot().goal).toMatchObject({
         status: 'active',
         checkpointStalls: stall,
+        lastCheckpointFailure: expect.stringContaining('full claim list'),
       });
     }
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
@@ -2050,9 +2080,13 @@ describe('goal runtime', () => {
       'window-final',
     );
 
-    expect(checkpointVerifier).toHaveBeenCalledTimes(
-      GOAL_CHECKPOINT_STALL_LIMIT,
-    );
+    // Every check stalled, so each one after the first sent the window in
+    // smaller batches: the whole 100 records, then the 68 beside the full
+    // claim list in batches of 24, then of 12. None of the three was the
+    // same request.
+    expect(batchSizes(checkpointVerifier)).toEqual([
+      100, 24, 24, 20, 12, 12, 12, 12, 12, 8,
+    ]);
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'idle',
       goal: {
@@ -2100,9 +2134,15 @@ describe('goal runtime', () => {
       60,
       'c',
     );
-    expect(checkpointVerifier).toHaveBeenCalledTimes(3);
+    // The third check ran after two stalls, but on a window with room, which
+    // cannot spend a stall, so it went out whole.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24, 20, 60]);
     expect(runtime.getSnapshot().goal?.status).toBe('active');
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
+    // A check that succeeded is the only thing that retires the diagnostic.
+    expect(runtime.getSnapshot().goal).not.toHaveProperty(
+      'lastCheckpointFailure',
+    );
 
     // The streak restarts from zero rather than continuing from two.
     await runCheckpointTurn(runtime, host, setRecords, records, 101, 'd');
@@ -2136,9 +2176,15 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(2);
 
     await runCheckpointTurn(runtime, host, setRecords, records, 10, 'quiet');
-    expect(checkpointVerifier).toHaveBeenCalledTimes(2);
+    // The quiet turn needs no checkpoint, so it calls nothing.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24, 20]);
     expect(runtime.getSnapshot().goal?.status).toBe('active');
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
+    // The check that found room is the one that proved the window healthy,
+    // so it also retires the diagnostic the two stalls left behind.
+    expect(runtime.getSnapshot().goal).not.toHaveProperty(
+      'lastCheckpointFailure',
+    );
   });
 
   it('counts a verifier failure on an overflowing window as a stall', async () => {
@@ -2172,16 +2218,19 @@ describe('goal runtime', () => {
     checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
     await runCheckpointTurn(runtime, host, setRecords, records, 101, 'c');
 
-    expect(checkpointVerifier).toHaveBeenCalledTimes(
-      GOAL_CHECKPOINT_STALL_LIMIT,
-    );
+    // The third check ran in batches of 12 and ended at the first one.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24, 20, 12]);
+    // The stop follows the check that spent the last stall. The first two
+    // came back full, but the last never answered, so the advice is not to
+    // narrow the objective -- and the record says what the failure was.
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'idle',
       goal: {
         status: 'usage_limited',
         limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        lastCheckpointFailure: 'batch 1/6: Error: provider failed',
       },
     });
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
@@ -2194,6 +2243,7 @@ describe('goal runtime', () => {
     // The reported loop: one long turn overflowed the window, and every
     // checkpoint after it timed out. Nothing was ever folded into claims,
     // the cursor never moved, and each new turn was told to retry.
+    const timeout = 'Error: Goal checkpoint verifier timed out after 30000ms';
     checkpointVerifier.mockRejectedValue(
       new Error('Goal checkpoint verifier timed out after 30000ms'),
     );
@@ -2211,9 +2261,14 @@ describe('goal runtime', () => {
       ];
       setRecords(records);
       await runtime.finishTurn(permit);
+      // The failure is on the record from the first stall on, so every
+      // surface can show it long before the breaker has to stop the Goal.
       expect(runtime.getSnapshot().goal).toMatchObject({
         status: 'active',
         checkpointStalls: turn,
+        // The check after the first stall split the window and timed out
+        // on its first batch, so the record names that batch.
+        lastCheckpointFailure: turn === 1 ? timeout : `batch 1/5: ${timeout}`,
         evidenceCursor: { recordId: cursor },
       });
       expect(runtime.getSnapshot().goal).not.toHaveProperty(
@@ -2237,8 +2292,9 @@ describe('goal runtime', () => {
       goal: {
         status: 'usage_limited',
         limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        lastCheckpointFailure: `batch 1/9: ${timeout}`,
       },
     });
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
@@ -2282,6 +2338,11 @@ describe('goal runtime', () => {
         expect(runtime.getSnapshot().goal).toMatchObject({
           status: 'active',
           checkpointStalls: turn,
+          lastCheckpointFailure: expect.stringMatching(
+            turn === 1
+              ? /^InvalidGoalCheckpointError: /
+              : /^batch 1\/5: InvalidGoalCheckpointError: /,
+          ),
         });
       }
     }
@@ -2289,18 +2350,448 @@ describe('goal runtime', () => {
     expect(checkpointVerifier).toHaveBeenCalledTimes(
       GOAL_CHECKPOINT_STALL_LIMIT,
     );
+    // The verifier answered every time, just not with claims: the stop says
+    // so instead of sending the user to narrow an objective that was fine.
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'idle',
       goal: {
         status: 'usage_limited',
         limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        lastReason: GOAL_CHECKPOINT_UNUSABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        lastCheckpointFailure: expect.stringMatching(
+          /^batch 1\/9: InvalidGoalCheckpointError: /,
+        ),
       },
     });
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
     // No continuation was minted for the stopped Goal.
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+  });
+
+  it.each([
+    ['claim-count', new GoalCheckpointClaimCountError(33)],
+    ['claim-budget', new GoalCheckpointClaimBudgetError(20_000)],
+    ['claim-length', new GoalCheckpointClaimLengthError(0, 9_000)],
+  ] as const)(
+    'reads a %s overrun as capacity, not as unusable output',
+    async (_label, overrun) => {
+      // An overrun of a claim bound is well-formed JSON that could not fit the
+      // window within the checkpoint's bounds -- the capacity failure a
+      // narrower objective fixes -- so its stop keeps that advice rather than
+      // telling the user to debug JSON that was valid.
+      const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+      checkpointVerifier.mockRejectedValue(overrun);
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+      let records: RuntimeRecord[] = [];
+      for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+        records = await runCheckpointTurn(
+          runtime,
+          host,
+          setRecords,
+          records,
+          101,
+          `overrun-${turn}`,
+        );
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        // The third check ran in batches of 12 and ended at the first.
+        lastCheckpointFailure: `batch 1/9: ${overrun.name}: ${overrun.message}`,
+      });
+    },
+  );
+
+  it('reads any other subclass of the unusable-result error as unusable output', async () => {
+    // Pins `instanceof` rather than an exact-constructor check: the hierarchy
+    // is open, and a new unusable shape must keep the unusable advice.
+    class ProbeUnusableCheckpointError extends InvalidGoalCheckpointError {}
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValue(
+      new ProbeUnusableCheckpointError('probe'),
+    );
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+      records = await runCheckpointTurn(
+        runtime,
+        host,
+        setRecords,
+        records,
+        101,
+        `probe-${turn}`,
+      );
+    }
+
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'usage_limited',
+      lastReason: GOAL_CHECKPOINT_UNUSABLE_REASON,
+    });
+  });
+
+  it('records a bounded, one-line, display-safe failure', async () => {
+    // The only production call site of the record's bound: a provider error
+    // carrying a whole response body must not reach the journal, the model
+    // or a card intact.
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValueOnce(
+      new Error(
+        `upstream said:\n  ${'x'.repeat(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS + 100)}\r\u202e`,
+      ),
+    );
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    await runCheckpointTurn(runtime, host, setRecords, [], 101, 'body');
+
+    const value = runtime.getSnapshot().goal!.lastCheckpointFailure!;
+    expect([...value]).toHaveLength(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
+    expect(value.endsWith('…')).toBe(true);
+    expect(value.startsWith('Error: upstream said: xxx')).toBe(true);
+    expect(value).not.toMatch(/[\n\r\u202e]/);
+  });
+
+  it('records the failure that made the checkpoint request too large on the stop it caused', async () => {
+    // The stop's diagnostic belongs to this stop, not to whatever an earlier
+    // check left: the too-large request is itself the failure to report.
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    const records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      [],
+      101,
+      'first',
+    );
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      checkpointStalls: 1,
+      lastCheckpointFailure: 'Error: provider failed',
+    });
+
+    checkpointVerifier.mockRejectedValueOnce(
+      new GoalCheckpointVerifierInputTooLargeError(300_000),
+    );
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
+
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'checkpoint_request',
+      lastReason: GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+      checkpointStalls: 1,
+      // The measured size, so a reader can tell how far over the limit it is,
+      // and the batch it was measured on: the check after a stall splits.
+      lastCheckpointFailure: expect.stringMatching(
+        /^batch 1\/5: GoalCheckpointVerifierInputTooLargeError: .*\b300000 bytes\b/,
+      ),
+    });
+  });
+
+  it('shows the failure of a checkpoint request too large to send, with no streak behind it', async () => {
+    // That stop spends no stall, so only its own limit kind can make the
+    // failure it recorded visible.
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValueOnce(
+      new GoalCheckpointVerifierInputTooLargeError(300_000),
+    );
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    await runCheckpointTurn(runtime, host, setRecords, [], 101, 'only');
+
+    const goal = runtime.getSnapshot().goal!;
+    expect(goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'checkpoint_request',
+      lastCheckpointFailure: expect.stringContaining('300000 bytes'),
+    });
+    expect(goal).not.toHaveProperty('checkpointStalls');
+    expect(goalCheckpointHealthVisible(goal)).toBe(true);
+  });
+
+  it('clears the diagnostic but keeps the streak when a checkpoint stop has a cause of its own', async () => {
+    // Its own lastReason says what happened; an earlier provider failure left
+    // on the record would read as the cause of this stop.
+    const { host, runtime, checkpointVerifier, evidenceSource, setRecords } =
+      stallHarness();
+    checkpointVerifier.mockRejectedValue(new Error('provider failed'));
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    for (let turn = 1; turn < GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+      records = await runCheckpointTurn(
+        runtime,
+        host,
+        setRecords,
+        records,
+        101,
+        `stall-${turn}`,
+      );
+    }
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
+      lastCheckpointFailure: 'batch 1/5: Error: provider failed',
+    });
+
+    evidenceSource.readActiveTranscriptChain.mockRejectedValueOnce(
+      new Error('evidence source unavailable'),
+    );
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'lost');
+
+    const goal = runtime.getSnapshot().goal!;
+    expect(goal).toMatchObject({
+      status: 'usage_limited',
+      lastReason: 'evidence source unavailable',
+      checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
+    });
+    expect(goal).not.toHaveProperty('lastCheckpointFailure');
+  });
+
+  it('reruns a checkpoint that stalled on the whole window in batches that carry claims forward', async () => {
+    const { journal, host, runtime, checkpointVerifier, setRecords } =
+      stallHarness();
+    // A verifier that cannot answer for the whole window but can for a
+    // batch: the case a batched rerun is for. Each answer carries the first
+    // claim it was given forward and folds the first record of its batch.
+    checkpointVerifier.mockImplementation(
+      async (input: GoalCheckpointVerifierInput) => {
+        if (input.evidence.length > GOAL_CHECKPOINT_BATCH_RECORD_LIMIT) {
+          throw new Error('Goal checkpoint verifier timed out after 30000ms');
+        }
+        const carried = input.previousClaims[0];
+        return {
+          claims: [
+            ...(carried
+              ? [
+                  {
+                    proofKind: 'delivered_output' as const,
+                    claim: 'Carried forward.',
+                    sourceRefs: [carried.id],
+                  },
+                ]
+              : []),
+            {
+              proofKind: 'delivered_output' as const,
+              claim: `Folded ${input.evidence[0]!.uuid}.`,
+              sourceRefs: [input.evidence[0]!.uuid],
+            },
+          ],
+        };
+      },
+    );
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+
+    // The first check sends the whole window, as it always has, and stalls.
+    const records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      [],
+      101,
+      'first',
+    );
+    expect(batchSizes(checkpointVerifier)).toEqual([100]);
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'active',
+      checkpointStalls: 1,
+      lastCheckpointFailure:
+        'Error: Goal checkpoint verifier timed out after 30000ms',
+      evidenceCursor: { recordId: cursor },
+    });
+
+    // The check after it splits the window instead of resending it whole,
+    // covering every record once, oldest first.
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
+    const reruns = checkpointVerifier.mock.calls
+      .slice(1)
+      .map(([input]) => input);
+    expect(reruns.map(({ evidence }) => evidence.length)).toEqual([
+      24, 24, 24, 24, 4,
+    ]);
+    expect(
+      reruns.flatMap(({ evidence }) => evidence.map(({ uuid }) => uuid)),
+    ).toEqual(Array.from({ length: 100 }, (_, index) => `second-${index + 1}`));
+
+    const goal = runtime.getSnapshot().goal!;
+    const checkpointId = goal.evidenceCheckpoint!.checkpointId;
+    // Each batch is given the claims the one before it folded, under an id
+    // segment of its own, so none collides with the kept checkpoint's ids.
+    expect(reruns[0]!.previousClaims).toEqual([]);
+    expect(reruns[1]!.previousClaims.map(({ id }) => id)).toEqual([
+      `${checkpointId}:b1:1`,
+    ]);
+    for (let index = 2; index < reruns.length; index++) {
+      expect(reruns[index]!.previousClaims.map(({ id }) => id)).toEqual([
+        `${checkpointId}:b${index}:1`,
+        `${checkpointId}:b${index}:2`,
+      ]);
+    }
+    // Only the last batch's claims are kept, and the check that relieved
+    // the window ends the streak and retires the diagnostic.
+    expect(goal).toMatchObject({
+      status: 'active',
+      evidenceCursor: { recordId: checkpointId },
+      evidenceCheckpoint: {
+        claims: [
+          { id: `${checkpointId}:1`, sourceRefs: [`${checkpointId}:b4:1`] },
+          { id: `${checkpointId}:2`, sourceRefs: ['second-97'] },
+        ],
+      },
+    });
+    expect(goal).not.toHaveProperty('checkpointStalls');
+    expect(goal).not.toHaveProperty('lastCheckpointFailure');
+    // A kept claim citing an intermediate batch's id still passes the
+    // record validator recovery applies.
+    expect(recoverGoalFromRecords(journal.records)).toMatchObject({
+      kind: 'v2',
+      payload: {
+        cause: 'checkpoint',
+        snapshot: { goal: { evidenceCheckpoint: { checkpointId } } },
+      },
+    });
+  });
+
+  it('ends a batched rerun at the batch that fails, leaving the cursor where it was', async () => {
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+
+    const records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      [],
+      101,
+      'first',
+    );
+    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(1);
+
+    checkpointVerifier
+      .mockImplementationOnce(async (input: GoalCheckpointVerifierInput) =>
+        fullClaims(input),
+      )
+      .mockRejectedValueOnce(new Error('provider failed'));
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
+
+    // The first batch folded, the second failed, and no batch after it ran.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24]);
+    const goal = runtime.getSnapshot().goal!;
+    expect(goal).toMatchObject({
+      status: 'active',
+      checkpointStalls: 2,
+      lastCheckpointFailure: 'batch 2/5: Error: provider failed',
+      evidenceCursor: { recordId: cursor },
+    });
+    // The first batch's claims are not kept: the cursor cannot move past
+    // records a later batch failed to fold.
+    expect(goal).not.toHaveProperty('evidenceCheckpoint');
+    expect(failedCheckpointChecks().at(-1)![4]).toBe('batch=2/5');
+  });
+
+  it('keeps the failed batch in a diagnostic cut to the record bound', async () => {
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      [],
+      101,
+      'first',
+    );
+
+    checkpointVerifier.mockRejectedValueOnce(
+      new Error('x'.repeat(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS + 100)),
+    );
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
+
+    const value = runtime.getSnapshot().goal!.lastCheckpointFailure!;
+    expect(value.startsWith('batch 1/5: Error: xxx')).toBe(true);
+    expect([...value]).toHaveLength(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
+  });
+
+  it('sends a checkpoint replay whole, whatever streak it restored', async () => {
+    // Session activation waits for the replay, and a replay cannot spend a
+    // stall, so splitting it would only hold the session up for more calls.
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const checkpointVerifier = vi.fn(
+      async (_input: GoalCheckpointVerifierInput): Promise<never> => {
+        throw new Error('provider failed');
+      },
+    );
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => []),
+      verifier: vi.fn(),
+      checkpointVerifier,
+    });
+    runtime.bindHost(host);
+    const record = goalStateRecord(
+      {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-restored',
+          revision: 1,
+          objective: 'deliver result',
+          status: 'active',
+          evidenceCursor: { recordId: 'create-record' },
+          turnCount: 3,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          checkpointStalls: 1,
+        },
+      },
+      'turn_finished',
+    );
+    (record.systemPayload as GoalStateRecordPayloadV2).checkpointPending = {
+      permit: { goalId: 'g-restored', revision: 1, turnId: 'turn-restored' },
+      recordUuid: 'pending-checkpoint-record',
+    };
+    const preparedWindow = {
+      previousClaims: [],
+      evidence: Array.from({ length: 30 }, (_, index) => ({
+        uuid: `restored-evidence-${index}`,
+        provenance: 'assistant_output' as const,
+        turnId: 'turn-restored',
+        preview: `Delivered result ${index}`,
+        proofKind: 'delivered_output' as const,
+        content: `Delivered result ${index}`,
+      })),
+      truncated: true,
+      shouldCheckpoint: true,
+    };
+
+    await runtime.prepareRestore([record], preparedWindow);
+    await runtime.activateRestoredWork();
+
+    expect(batchSizes(checkpointVerifier)).toEqual([30]);
+    // Still exempt: the failed replay keeps the streak it restored.
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: {
+        status: 'active',
+        checkpointStalls: 1,
+        lastCheckpointFailure: 'Error: provider failed',
+      },
+    });
+    expect(failedCheckpointChecks()).toHaveLength(1);
+    expect(failedCheckpointChecks()[0]!.slice(3)).toEqual([
+      'replay=true',
+      'batch=1/1',
+    ]);
   });
 
   it('does not count an unusable result while the window has room', async () => {
@@ -2353,9 +2844,18 @@ describe('goal runtime', () => {
     checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
     await runCheckpointTurn(runtime, host, setRecords, records, 60, 'b');
 
+    // The failure spends no stall, but it is still a failure the surfaces
+    // should show: the record carries it beside the unchanged streak. The
+    // check followed a stall, but a window with room cannot spend one, so it
+    // went out whole rather than in batches.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 60]);
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'running',
-      goal: { status: 'active', checkpointStalls: 1 },
+      goal: {
+        status: 'active',
+        checkpointStalls: 1,
+        lastCheckpointFailure: 'Error: provider failed',
+      },
     });
     // The room arm leaves the same trace the truncated arm does: the
     // discarded error is diagnosable from the first failure, not only once
@@ -2390,9 +2890,12 @@ describe('goal runtime', () => {
     // only. That close proved nothing about room, so it keeps the streak.
     await runCheckpointTurn(runtime, host, setRecords, records, 0, 'quiet');
 
+    // The same close proved nothing about the failure either, so the
+    // diagnostic the stall left stays until a check actually succeeds.
     expect(runtime.getSnapshot().goal).toMatchObject({
       status: 'active',
       checkpointStalls: 1,
+      lastCheckpointFailure: expect.stringContaining('full claim list'),
     });
     expect(host.started).toHaveLength(3);
   });
@@ -4938,6 +5441,52 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(1);
   });
 
+  it('does not charge offline time to a restored active Goal', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(43_201_000);
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+      runtime.bindHost(host);
+      const record = goalStateRecord({
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-restored-time-budget',
+          revision: 1,
+          objective: 'resume without charging offline time',
+          status: 'active',
+          evidenceCursor: { recordId: 'restore-record' },
+          turnCount: 1,
+          activeTimeMs: 10_000,
+          activeTimeBudgetMs: 60_000,
+          tokensUsed: 0,
+          createdAt: 1_000,
+          updatedAt: 1_000,
+        },
+      });
+
+      await runtime.prepareRestore([record]);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        activeTimeMs: 10_000,
+        activeTimeBudgetMs: 60_000,
+        updatedAt: 43_201_000,
+      });
+
+      await runtime.activateRestoredWork();
+      expect(host.inputs).toHaveLength(1);
+      expect(host.inputs[0]).not.toHaveProperty('windDown');
+      expect(host.inputs[0]?.usage).toMatchObject({
+        activeTimeMs: 10_000,
+        activeTimeBudgetMs: 60_000,
+      });
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not spend the stall streak on a failed checkpoint replay at restore', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
@@ -4996,11 +5545,14 @@ describe('goal runtime', () => {
     // stop: the restored Goal keeps the streak it crashed with, and the
     // continuation the replay mints re-earns any stall as a live turn.
     expect(checkpointVerifier).toHaveBeenCalledOnce();
+    // The exemption covers the streak, not the diagnostic: the replay did
+    // fail, and the record says so without spending a stall on it.
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'running',
       goal: {
         status: 'active',
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
+        lastCheckpointFailure: 'Error: provider failed',
       },
     });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
@@ -5025,8 +5577,10 @@ describe('goal runtime', () => {
       goal: {
         status: 'usage_limited',
         limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        // Two stalls restored, so the live check split into batches of 12.
+        lastCheckpointFailure: 'batch 1/9: Error: provider failed',
       },
     });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
@@ -6438,9 +6992,10 @@ describe('goal runtime', () => {
         }
       }
 
-      expect(checkpointVerifier).toHaveBeenCalledTimes(
-        GOAL_CHECKPOINT_STALL_LIMIT,
-      );
+      // Three stalled checks, each after the first in smaller batches.
+      expect(batchSizes(checkpointVerifier)).toEqual([
+        100, 24, 24, 20, 12, 12, 12, 12, 12, 8,
+      ]);
       expect(runtime.getSnapshot()).toMatchObject({
         activity: 'idle',
         goal: {
@@ -6491,6 +7046,476 @@ describe('goal runtime', () => {
       expect(runtime.getSnapshot().goal?.lastReason).not.toBe(
         GOAL_PAUSE_REASON_NO_PROGRESS,
       );
+    });
+  });
+  describe('turn and active-time budgets', () => {
+    async function finishDelivered(
+      runtime: ReturnType<typeof createGoalRuntime>,
+      permit: GoalTurnPermit,
+    ): Promise<void> {
+      runtime.markTurnDelivered(`goal-runtime:${permit.turnId}`);
+      await runtime.finishTurn(permit);
+    }
+
+    it('arms no cadence ceiling unless one is granted', async () => {
+      // The token budget defaults to a number; these default to nothing. A
+      // cadence is what the user asks for, not a guard every Goal needs.
+      const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      const goal = runtime.getSnapshot().goal!;
+      expect(goal).not.toHaveProperty('turnBudget');
+      expect(goal).not.toHaveProperty('activeTimeBudgetMs');
+    });
+
+    it('hands off and stops when the turn budget is spent, and resume re-arms it', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal,
+        turnBudgetGrant: 2,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const created = runtime.getSnapshot().goal!;
+      expect(created).toMatchObject({ turnBudget: 2, turnCount: 0 });
+
+      // Two turns of real work: the ceiling is checked at the continuation
+      // boundary, so the turn that reaches it still runs to completion.
+      await finishDelivered(runtime, host.started[0]!);
+      expect(host.inputs[1]).not.toHaveProperty('windDown');
+      await finishDelivered(runtime, host.started[1]!);
+
+      // The spent window buys exactly one hand-off.
+      expect(host.started).toHaveLength(3);
+      expect(host.inputs[2]).toMatchObject({ windDown: true });
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+
+      await finishDelivered(runtime, host.started[2]!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+        turnCount: 3,
+        turnBudget: 2,
+        windDownTurnId: host.started[2]!.turnId,
+        lastReason: goalTurnBudgetReason(2),
+      });
+      expect(host.started).toHaveLength(3);
+      expect(journal.appended.map((payload) => payload.cause)).toEqual([
+        'create',
+        'turn_finished',
+        'turn_finished',
+        'turn_finished',
+        'usage_limited',
+      ]);
+
+      const resumed = await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: created.goalId,
+        expectedRevision: created.revision,
+      });
+      // The ceiling moves ahead of the count the resume never resets.
+      expect(resumed.snapshot.goal).toMatchObject({
+        status: 'active',
+        turnCount: 3,
+        turnBudget: 5,
+      });
+      expect(resumed.snapshot.goal?.limitKind).toBeUndefined();
+      expect(resumed.snapshot.goal).not.toHaveProperty('windDownTurnId');
+      expect(host.started).toHaveLength(4);
+      expect(host.inputs[3]).not.toHaveProperty('windDown');
+    });
+
+    it('still admits a user turn once the ceiling is already spent', async () => {
+      // Three surfaces promise this -- the settings row, the schema
+      // description and the `turnBudget` doc comment -- and nothing held it:
+      // `beginTurn` gates only on the Goal being active, and `spentBudget` sits
+      // in the same closure, so a plausible "stop admitting turns at the
+      // ceiling" edit would silently discard the user's message instead.
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        turnBudgetGrant: 1,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      // One automatic turn spends the window, and the gate grants the hand-off.
+      await finishDelivered(runtime, host.started[0]!);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        turnCount: 1,
+        turnBudget: 1,
+      });
+      expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+      // The user types with the ceiling already spent and the hand-off in
+      // flight. The turn is reserved, not refused.
+      expect(runtime.beginTurn('real-user')).toBeUndefined();
+      await finishDelivered(runtime, host.started[1]!);
+
+      const userPermit = runtime.permitForTurn('real-user');
+      expect(userPermit).toBeDefined();
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+
+      // And the stop still arrives once the user's own turn is done.
+      await runtime.finishTurn(userPermit!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal?.limitKind).toBe('turn_budget');
+    });
+
+    it('counts user-driven turns toward the turn ceiling', async () => {
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        turnBudgetGrant: 2,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      const automatic = host.started[0]!;
+      expect(runtime.beginTurn('real-user')).toBeUndefined();
+      await finishDelivered(runtime, automatic);
+      const userPermit = runtime.permitForTurn('real-user');
+      expect(userPermit).toBeDefined();
+      await runtime.finishTurn(userPermit!);
+
+      expect(runtime.getSnapshot().goal?.turnCount).toBe(2);
+      expect(host.inputs.at(-1)).toMatchObject({ windDown: true });
+      await finishDelivered(runtime, host.started.at(-1)!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+        turnCount: 3,
+      });
+    });
+
+    it('hands off and stops when the active-time budget is spent', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const journal = fakeGoalJournal();
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal,
+          activeTimeBudgetGrantMs: 60_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+        expect(runtime.getSnapshot().goal).toMatchObject({
+          activeTimeBudgetMs: 60_000,
+          activeTimeMs: 0,
+        });
+
+        // A turn that runs past the window: the clock is read at the
+        // continuation boundary, so the turn itself is never cut short.
+        vi.setSystemTime(91_000);
+        await finishDelivered(runtime, host.started[0]!);
+
+        expect(runtime.getSnapshot().goal?.activeTimeMs).toBe(90_000);
+        expect(host.started).toHaveLength(2);
+        expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+        await finishDelivered(runtime, host.started[1]!);
+        await vi.waitFor(() => {
+          expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+        });
+        expect(runtime.getSnapshot().goal).toMatchObject({
+          limitKind: 'time_budget',
+          activeTimeBudgetMs: 60_000,
+          lastReason: goalActiveTimeBudgetReason(60_000),
+        });
+        expect(host.started).toHaveLength(2);
+
+        // Resuming grants another window measured from where it stopped.
+        const stopped = runtime.getSnapshot().goal!;
+        const resumed = await runtime.dispatch({
+          action: 'resume',
+          expectedGoalId: stopped.goalId,
+          expectedRevision: stopped.revision,
+        });
+        expect(resumed.snapshot.goal).toMatchObject({
+          status: 'active',
+          activeTimeBudgetMs: stopped.activeTimeMs + 60_000,
+        });
+        expect(resumed.snapshot.goal).not.toHaveProperty('windDownTurnId');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not accrue active time while the Goal is stopped', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          activeTimeBudgetGrantMs: 60_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+        vi.setSystemTime(11_000);
+        await finishDelivered(runtime, host.started[0]!);
+        const paused = await runtime.dispatch({
+          action: 'pause',
+          expectedGoalId: runtime.getSnapshot().goal!.goalId,
+          expectedRevision: runtime.getSnapshot().goal!.revision,
+        });
+        expect(paused.snapshot.goal?.activeTimeMs).toBe(10_000);
+
+        // An hour of wall clock while paused: the window is untouched, so the
+        // resumed Goal still has the time it had.
+        vi.setSystemTime(3_611_000);
+        const resumed = await runtime.dispatch({
+          action: 'resume',
+          expectedGoalId: paused.snapshot.goal!.goalId,
+          expectedRevision: paused.snapshot.goal!.revision,
+        });
+        expect(resumed.snapshot.goal).toMatchObject({
+          status: 'active',
+          activeTimeMs: 10_000,
+          activeTimeBudgetMs: 60_000,
+        });
+        // And it is admitted a real continuation rather than a hand-off.
+        expect(host.inputs.at(-1)).not.toHaveProperty('windDown');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports one reason when a turn crosses more than one ceiling', async () => {
+      // Token first: it is the ceiling armed by default, so it is the one a
+      // user is likeliest to be asking about.
+      const host = fakeGoalTurnHost();
+      const spend = new Map<string, number>();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        ledger: {
+          takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+        },
+        tokenBudgetGrant: 1_000,
+        turnBudgetGrant: 1,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      spend.set(host.started[0]!.turnId, 5_000);
+      await finishDelivered(runtime, host.started[0]!);
+      await finishDelivered(runtime, host.started[1]!);
+
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal?.limitKind).toBe('token_budget');
+    });
+
+    it('reports the turn budget before the time budget when both are spent', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+          turnBudgetGrant: 1,
+          activeTimeBudgetGrantMs: 60_000,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+        vi.setSystemTime(61_000);
+        await finishDelivered(runtime, host.started[0]!);
+        expect(host.inputs.at(-1)).toMatchObject({ windDown: true });
+        await finishDelivered(runtime, host.started.at(-1)!);
+        await vi.waitFor(() => {
+          expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+        });
+        expect(runtime.getSnapshot().goal?.limitKind).toBe('turn_budget');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('carries the cadence figures to the host that renders the prompt', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          turnBudgetGrant: 20,
+          activeTimeBudgetGrantMs: 1_800_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+        expect(host.inputs[0]?.usage).toMatchObject({
+          turnCount: 0,
+          turnBudget: 20,
+          activeTimeMs: 0,
+          activeTimeBudgetMs: 1_800_000,
+        });
+
+        vi.setSystemTime(61_000);
+        await finishDelivered(runtime, host.started[0]!);
+        expect(host.inputs[1]?.usage).toMatchObject({
+          turnCount: 1,
+          turnBudget: 20,
+          activeTimeMs: 60_000,
+          activeTimeBudgetMs: 1_800_000,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('uses elapsed active time when a queued continuation waits for a host', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          activeTimeBudgetGrantMs: 1_800_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+        vi.setSystemTime(61_000);
+        runtime.bindHost(host);
+
+        expect(host.inputs).toHaveLength(1);
+        expect(host.inputs[0]?.usage).toMatchObject({
+          activeTimeMs: 60_000,
+          activeTimeBudgetMs: 1_800_000,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('re-reads the time ceiling when a queued continuation is finally delivered', async () => {
+      // The time ceiling is the only one whose spent state can change between
+      // queueing and delivery: spend and turn count are committed by
+      // `finishTurn` before the gate runs, but elapsed active time keeps
+      // accruing while the continuation sits queued with no host to flush it.
+      // A continuation queued under the ceiling and delivered past it must be
+      // the hand-off, not a full work turn a whole window late.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          activeTimeBudgetGrantMs: 60_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        // Queued with the ceiling unspent and no host to deliver it.
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+        expect(host.inputs).toHaveLength(0);
+
+        // The window runs out while the continuation waits.
+        vi.setSystemTime(121_000);
+        runtime.bindHost(host);
+
+        expect(host.inputs).toHaveLength(1);
+        expect(host.inputs[0]).toMatchObject({ windDown: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('sends no time figures to a Goal with no time ceiling', async () => {
+      // Elapsed active time with nothing to measure it against is a number on
+      // every turn that the model cannot act on.
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        turnBudgetGrant: 20,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      expect(host.inputs[0]?.usage).toMatchObject({ turnBudget: 20 });
+      expect(host.inputs[0]?.usage).not.toHaveProperty('activeTimeMs');
+      expect(host.inputs[0]?.usage).not.toHaveProperty('activeTimeBudgetMs');
+    });
+
+    it('lets a spent cadence budget outrank the no-progress bound', async () => {
+      // Both bounds are reached on the same turn. The budget owes this Goal a
+      // hand-off and a `usage_limited` stop the user can resume from; pausing
+      // for idleness here would skip both.
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        ledger: {
+          takeGoalTurnTokens: () => 0,
+          takeGoalTurnToolResults: () => 0,
+        },
+        turnBudgetGrant: GOAL_NO_PROGRESS_TURN_LIMIT,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await finishDelivered(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+      expect(host.inputs.at(-1)).toMatchObject({ windDown: true });
+      await finishDelivered(runtime, host.started.at(-1)!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+      });
+      expect(runtime.getSnapshot().goal?.lastReason).not.toBe(
+        GOAL_PAUSE_REASON_NO_PROGRESS,
+      );
+    });
+
+    it('shows the cadence stop even when the settle write fails', async () => {
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal({
+          appendErrors: [
+            undefined,
+            undefined,
+            undefined,
+            new Error('journal unavailable'),
+          ],
+        }),
+        turnBudgetGrant: 1,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      await finishDelivered(runtime, host.started[0]!);
+      await finishDelivered(runtime, host.started[1]!);
+
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+      });
+      expect(host.started).toHaveLength(2);
     });
   });
 });

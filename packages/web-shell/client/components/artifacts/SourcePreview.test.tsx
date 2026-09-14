@@ -109,6 +109,63 @@ afterEach(async () => {
 });
 
 describe('source preview', () => {
+  it('offers retry only after attachment loading fails', async () => {
+    mock.standalone = true;
+    mock.sessionActions.readAttachment
+      .mockRejectedValueOnce(new Error('Attachment read failed'))
+      .mockResolvedValueOnce({
+        data: btoa('Recovered attachment'),
+        mimeType: 'text/plain',
+      });
+    await render(source({ type: 'attachment', attachmentId: 'reference.txt' }));
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Attachment read failed'),
+    );
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Try again',
+    );
+    expect(retry).not.toBeUndefined();
+    await act(async () => retry!.click());
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Recovered attachment'),
+    );
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (button) => button.textContent === 'Try again',
+      ),
+    ).toBe(false);
+    expect(mock.sessionActions.readAttachment).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers retry only after workspace file loading fails', async () => {
+    mock.actions.readWorkspaceFile
+      .mockRejectedValueOnce(new Error('Workspace read failed'))
+      .mockResolvedValueOnce({
+        content: 'Recovered workspace file',
+        truncated: false,
+      });
+    await render(
+      source({ type: 'workspace_file', workspacePath: 'reference.txt' }),
+    );
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Workspace read failed'),
+    );
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Try again',
+    );
+    expect(retry).not.toBeUndefined();
+    await act(async () => retry!.click());
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Recovered workspace file'),
+    );
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (button) => button.textContent === 'Try again',
+      ),
+    ).toBe(false);
+    expect(mock.actions.readWorkspaceFile).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['text/plain', 'text/html'])(
     'previews standalone attachment bytes as %s without workspace access',
     async (mimeType) => {
@@ -180,7 +237,7 @@ describe('source preview', () => {
     await render(source({ type: 'attachment', attachmentId: 'image.png' }));
     expect(mock.sessionActions.readAttachment).not.toHaveBeenCalled();
   });
-  it('offers download for unsupported attachments and revokes blob URLs on removal', async () => {
+  it('places attachment download in the source header and revokes its blob URL', async () => {
     const create = vi.fn(() => 'blob:source-test');
     const revoke = vi.fn();
     Object.defineProperty(URL, 'createObjectURL', {
@@ -197,9 +254,13 @@ describe('source preview', () => {
     });
     await render(source({ type: 'attachment', attachmentId: 'data.bin' }));
     expect(mock.sessionActions.readAttachment).toHaveBeenCalledOnce();
-    expect(container.querySelector('a[download]')?.getAttribute('href')).toBe(
-      'blob:source-test',
-    );
+    expect(container.querySelectorAll('a[download]')).toHaveLength(1);
+    const download = container.querySelector<HTMLAnchorElement>('a[download]');
+    expect(download?.getAttribute('href')).toBe('blob:source-test');
+    const sourceHeader = container.querySelector(
+      'span[title="data.bin"]',
+    )?.parentElement;
+    expect(sourceHeader?.contains(download ?? null)).toBe(true);
     await act(async () => root.render(null));
     expect(revoke).toHaveBeenCalledWith('blob:source-test');
   });

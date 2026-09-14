@@ -1,4 +1,11 @@
-import { memo, useContext, useMemo, type ReactElement } from 'react';
+import {
+  memo,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ReactElement,
+} from 'react';
 import type {
   ACPToolCall,
   Message,
@@ -46,7 +53,18 @@ interface MessageItemProps {
   onRetryClick?: () => void;
   sendFailed?: boolean;
   onRetrySend?: () => void;
-  onEditUserMessage?: () => void;
+  /**
+   * Open the in-place editor for this user message. Return `true` when a host
+   * owns the edit lifecycle — then the inline editor stays closed.
+   */
+  onEditUserMessage?: () => boolean | void;
+  /**
+   * Send the text the user confirmed in the inline editor. Resolves `false`
+   * when the resend was refused or failed; the editor stays open then.
+   */
+  onSubmitUserMessageEdit?: (
+    content: string,
+  ) => boolean | void | Promise<boolean | void>;
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   branchRecordId?: string;
   showAssistantActions?: boolean;
@@ -69,6 +87,7 @@ export const MessageItem = memo(function MessageItem({
   sendFailed = false,
   onRetrySend,
   onEditUserMessage,
+  onSubmitUserMessageEdit,
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
@@ -78,6 +97,33 @@ export const MessageItem = memo(function MessageItem({
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
+  // The inline editor is owned here because the toggle (in the timestamp row)
+  // and the edited bubble are siblings under this row.
+  const [editingUserMessage, setEditingUserMessage] = useState(false);
+  // Held while the resend is in flight so the editor can show progress and
+  // survive a refusal instead of dropping the user's text.
+  const [submittingUserMessageEdit, setSubmittingUserMessageEdit] =
+    useState(false);
+  const openUserMessageEditor = useCallback(() => {
+    if (onEditUserMessage?.() === true) return;
+    setEditingUserMessage(true);
+  }, [onEditUserMessage]);
+  const closeUserMessageEditor = useCallback(() => {
+    setEditingUserMessage(false);
+  }, []);
+  const submitUserMessageEdit = useCallback(
+    (content: string) => {
+      if (!onSubmitUserMessageEdit) return;
+      setSubmittingUserMessageEdit(true);
+      void Promise.resolve(onSubmitUserMessageEdit(content))
+        .catch(() => false)
+        .then((accepted) => {
+          setSubmittingUserMessageEdit(false);
+          if (accepted !== false) setEditingUserMessage(false);
+        });
+    },
+    [onSubmitUserMessageEdit],
+  );
   const boundBranchSession = useMemo(
     () =>
       onBranchSession && branchRecordId
@@ -112,7 +158,10 @@ export const MessageItem = memo(function MessageItem({
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
-            onEdit={onEditUserMessage}
+            editing={editingUserMessage}
+            submittingEdit={submittingUserMessageEdit}
+            onEditSubmit={submitUserMessageEdit}
+            onEditCancel={closeUserMessageEditor}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
           />
@@ -298,6 +347,12 @@ export const MessageItem = memo(function MessageItem({
         isUserStyled && 'content' in message ? message.content : undefined
       }
       copyTitle={t('common.copy')}
+      onEdit={
+        onEditUserMessage && !editingUserMessage
+          ? openUserMessageEditor
+          : undefined
+      }
+      editTitle={t('userMessage.edit')}
     >
       {selectableSafeBody}
     </MessageTimestamp>
@@ -345,6 +400,8 @@ function areMessageItemPropsEqual(
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
+  if (prev.onSubmitUserMessageEdit !== next.onSubmitUserMessageEdit)
+    return false;
   if (prev.onInsightReportOpen !== next.onInsightReportOpen) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.branchRecordId !== next.branchRecordId) return false;

@@ -115,6 +115,7 @@ export class PermissionBroker {
     jobRef?: string;
     title: string;
     options: readonly PermissionOption[];
+    allowAutoAnswer?: boolean;
   }): Promise<PermissionAskEvent> {
     const existingHandle = this.pendingByRequestId.get(
       scopedRequestId(fields.backend, fields.requestId),
@@ -148,7 +149,7 @@ export class PermissionBroker {
       title: pending.title,
     });
 
-    if (this.matchesRule(pending)) {
+    if (fields.allowAutoAnswer !== false && this.matchesRule(pending)) {
       // A failed silent delivery must not crash the caller or swallow the
       // request: fall back to asking the user aloud.
       this.autoAnswering.add(pending.requestHandle);

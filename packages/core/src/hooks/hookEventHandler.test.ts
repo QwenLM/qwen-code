@@ -32,6 +32,9 @@ import type {
 import type { HookConfig, HookOutput, PermissionSuggestion } from './types.js';
 import type { HookExecutionResult } from './types.js';
 import { logHookCall } from '../telemetry/loggers.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { ApprovalMode } from '../config/approval-mode.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 
 // Mock the telemetry loggers module
 vi.mock('../telemetry/loggers.js', () => ({
@@ -52,6 +55,7 @@ describe('HookEventHandler', () => {
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
       getSessionSourceId: vi.fn().mockReturnValue(undefined),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
       getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
     } as unknown as Config;
 
@@ -573,6 +577,7 @@ describe('HookEventHandler', () => {
         getSessionSourceType: vi.fn().mockReturnValue(undefined),
         getSessionSourceId: vi.fn().mockReturnValue(undefined),
         getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+        getApprovalMode: vi.fn().mockReturnValue('default'),
         getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
       } as unknown as Config;
 
@@ -1786,6 +1791,114 @@ describe('HookEventHandler', () => {
 
       expect(mockHookRunner.executeHooksSequential).toHaveBeenCalled();
       expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('common input fields', () => {
+    const fireAndCaptureInput = async (
+      fire: () => Promise<unknown>,
+    ): Promise<Record<string, unknown>> => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      await fire();
+      const calls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      return calls[calls.length - 1][2] as Record<string, unknown>;
+    };
+
+    it('reports the session approval mode on events without their own mode', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+
+      const input = await fireAndCaptureInput(() =>
+        hookEventHandler.fireSessionEndEvent(SessionEndReason.Clear),
+      );
+
+      expect(input['permission_mode']).toBe(PermissionMode.Yolo);
+    });
+
+    it('keeps the permission mode an event reports itself', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+
+      const input = await fireAndCaptureInput(() =>
+        hookEventHandler.firePreToolUseEvent(
+          'shell',
+          {},
+          'toolu_mode',
+          PermissionMode.Plan,
+        ),
+      );
+
+      expect(input['permission_mode']).toBe(PermissionMode.Plan);
+    });
+
+    it('adds agent_id and prompt_id only when they are known', async () => {
+      const outside = await fireAndCaptureInput(() =>
+        hookEventHandler.fireSessionEndEvent(SessionEndReason.Clear),
+      );
+      expect(outside).not.toHaveProperty('agent_id');
+      expect(outside).not.toHaveProperty('prompt_id');
+
+      const inside = await fireAndCaptureInput(() =>
+        runWithAgentContext('agent-7', () =>
+          promptIdContext.run('prompt-9', () =>
+            hookEventHandler.fireSessionEndEvent(SessionEndReason.Clear),
+          ),
+        ),
+      );
+      expect(inside['agent_id']).toBe('agent-7');
+      expect(inside['prompt_id']).toBe('prompt-9');
+    });
+
+    it('reports duration_ms on PostToolUse and PostToolUseFailure when given', async () => {
+      const post = await fireAndCaptureInput(() =>
+        hookEventHandler.firePostToolUseEvent(
+          'shell',
+          {},
+          {},
+          'toolu_post',
+          PermissionMode.Default,
+          undefined,
+          'call-post',
+          42,
+        ),
+      );
+      expect(post['duration_ms']).toBe(42);
+
+      const failure = await fireAndCaptureInput(() =>
+        hookEventHandler.firePostToolUseFailureEvent(
+          'toolu_failure',
+          'shell',
+          {},
+          'boom',
+          false,
+          PermissionMode.Default,
+          undefined,
+          'call-failure',
+          7,
+        ),
+      );
+      expect(failure['duration_ms']).toBe(7);
+
+      const withoutDuration = await fireAndCaptureInput(() =>
+        hookEventHandler.firePostToolUseEvent(
+          'shell',
+          {},
+          {},
+          'toolu_untimed',
+          PermissionMode.Default,
+        ),
+      );
+      expect(withoutDuration).not.toHaveProperty('duration_ms');
     });
   });
 

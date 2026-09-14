@@ -24,6 +24,8 @@
 
 import {
   GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
   GOAL_TOKEN_BUDGET_CAP,
 } from '@qwen-code/qwen-code-core';
 
@@ -209,6 +211,58 @@ export function validateGoalTokenBudget(value: unknown): number {
     );
   }
   return value;
+}
+
+/**
+ * Shared shape for the two Goal cadence settings: `-1` opts out, anything
+ * else must be a positive integer inside its cap. Rejecting at startup rather
+ * than normalizing means a typo surfaces as a message instead of a Goal that
+ * silently runs with no ceiling.
+ */
+function validateGoalCadenceSetting(
+  key: 'model.goalMaxTurns' | 'model.goalMaxActiveMinutes',
+  unit: string,
+  cap: number,
+  value: unknown,
+): number {
+  if (value === -1) return -1;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${key} must be a finite number; got ${String(value)}.`);
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error(
+      `${key} must be an integer number of ${unit} (or -1 for no ceiling); got ${value}.`,
+    );
+  }
+  if (value <= 0) {
+    throw new Error(
+      `${key} must be > 0 (or -1 for no ceiling); got ${value}. Use -1 to disable, not 0.`,
+    );
+  }
+  if (value > cap) {
+    throw new Error(
+      `${key} ${value} exceeds the supported ceiling (${cap} ${unit}). Use a smaller value or -1 for no ceiling.`,
+    );
+  }
+  return value;
+}
+
+export function validateGoalMaxTurns(value: unknown): number {
+  return validateGoalCadenceSetting(
+    'model.goalMaxTurns',
+    'turns',
+    GOAL_MAX_TURNS_CAP,
+    value,
+  );
+}
+
+export function validateGoalMaxActiveMinutes(value: unknown): number {
+  return validateGoalCadenceSetting(
+    'model.goalMaxActiveMinutes',
+    'minutes',
+    GOAL_MAX_ACTIVE_MINUTES_CAP,
+    value,
+  );
 }
 
 export function validateGoalCheckpointTimeoutSeconds(value: unknown): number {

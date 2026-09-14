@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type {
   DaemonContextMemoryDetail,
   DaemonContextSkillDetail,
@@ -5,15 +6,12 @@ import type {
   DaemonSessionContextUsageStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { Button } from '../ui/button';
 import { getContextUsageLevel } from '../../utils/contextUsage';
 import { formatContextTokens as formatTokens } from '../../utils/formatTokenCount';
 import styles from './ContextUsageMessage.module.css';
 
 const SENTINEL = 'web-shell:context-usage:v1:';
-const FILLED = '\u2588';
-const BUFFER = '\u2592';
-const EMPTY = '\u2591';
-const DETAIL_NAME_MAX_LEN = 30;
 
 export function serializeContextUsageMessage(
   status: DaemonSessionContextUsageStatus,
@@ -36,11 +34,6 @@ export function parseContextUsageMessage(
   }
 }
 
-function truncateName(name: string, maxLen: number): string {
-  if (name.length <= maxLen) return name;
-  return `${name.slice(0, maxLen - 1)}\u2026`;
-}
-
 function formatPercentage(tokens: number, contextWindowSize: number): string {
   if (contextWindowSize <= 0) return '0.0';
   const percentage = (tokens / contextWindowSize) * 100;
@@ -55,11 +48,9 @@ function sortByTokens<T extends { tokens: number }>(items: readonly T[]): T[] {
 function ProgressBar({
   usedPercentage,
   bufferPercentage,
-  compact = false,
 }: {
   usedPercentage: number;
   bufferPercentage: number;
-  compact?: boolean;
 }) {
   const usedLevel = getContextUsageLevel(usedPercentage);
   const usedCount = Math.min(usedPercentage, 100);
@@ -69,91 +60,80 @@ function ProgressBar({
   );
   const freeCount = Math.max(0, 100 - usedCount - bufferCount);
 
-  if (compact) {
-    // Proportional blocks: the glyph track cannot scale to the pane width.
-    const usedColor =
-      usedLevel === 'error'
-        ? 'var(--error-color)'
-        : usedLevel === 'warning'
-          ? 'var(--warning-color)'
-          : 'var(--agent-blue-500)';
-    return (
-      <div className={styles.progress} aria-hidden="true">
-        <span style={{ width: `${usedCount}%`, background: usedColor }} />
-        <span
-          style={{
-            width: `${freeCount}%`,
-            background: 'var(--muted-foreground)',
-            opacity: 0.25,
-          }}
-        />
-        <span
-          style={{
-            width: `${bufferCount}%`,
-            background: 'var(--warning-color)',
-            opacity: 0.45,
-          }}
-        />
-      </div>
-    );
-  }
-
-  const width = 56;
-  const usedGlyphs = Math.round((usedCount / 100) * width);
-  const bufferGlyphs = Math.round((bufferCount / 100) * width);
-  const freeGlyphs = Math.max(0, width - usedGlyphs - bufferGlyphs);
-  const usedClass =
+  const usedColor =
     usedLevel === 'error'
-      ? styles.error
+      ? 'var(--error-color)'
       : usedLevel === 'warning'
-        ? styles.warning
-        : styles.accent;
-
+        ? 'var(--warning-color)'
+        : 'var(--agent-blue-500)';
   return (
-    <div className={styles.progress} aria-hidden="true">
-      <span className={usedClass}>
-        {FILLED.repeat(Math.max(0, usedGlyphs))}
-      </span>
-      <span className={styles.secondary}>
-        {EMPTY.repeat(Math.max(0, freeGlyphs))}
-      </span>
-      <span className={styles.warning}>
-        {BUFFER.repeat(Math.max(0, bufferGlyphs))}
-      </span>
+    <div
+      className={styles.progress}
+      data-web-shell-context-meter
+      aria-hidden="true"
+    >
+      <span style={{ width: `${usedCount}%`, background: usedColor }} />
+      <span
+        style={{
+          width: `${freeCount}%`,
+          background: 'var(--muted-foreground)',
+          opacity: 0.25,
+        }}
+      />
+      <span
+        style={{
+          width: `${bufferCount}%`,
+          background: 'var(--warning-color)',
+          opacity: 0.45,
+        }}
+      />
     </div>
   );
 }
 
 function CategoryRow({
-  symbol,
   label,
   tokens,
-  tokenLabel,
   contextWindowSize,
   symbolClassName = styles.secondary,
   isOverLimit,
+  children,
+  compact = false,
 }: {
-  symbol: string;
   label: string;
   tokens: number;
-  tokenLabel: string;
   contextWindowSize: number;
   symbolClassName?: string;
   isOverLimit?: boolean;
+  children?: ReactNode;
+  compact?: boolean;
 }) {
-  return (
-    <div className={styles.row}>
-      <span className={`${styles.symbol} ${symbolClassName}`}>{symbol}</span>
-      <span className={styles.label}>{label}</span>
-      <span className={isOverLimit ? styles.error : styles.value}>
-        {formatTokens(tokens)} {tokenLabel} (
-        {formatPercentage(tokens, contextWindowSize)}%)
+  const row = (
+    <span className={styles.row}>
+      <span
+        className={`${styles.symbol} ${symbolClassName}`}
+        aria-hidden="true"
+      />
+      <span className={styles.label}>{label}</span>{' '}
+      <span
+        className={`${styles.value}${isOverLimit ? ` ${styles.error}` : ''}`}
+      >
+        {formatTokens(tokens)}{' '}
+        <span className={styles.ratio}>
+          ({formatPercentage(tokens, contextWindowSize)}%)
+        </span>
       </span>
-    </div>
+    </span>
+  );
+  return children ? (
+    <details className={styles.disclosure} open={!compact}>
+      <summary className={styles.detailSummary}>{row}</summary>
+      <div className={styles.detailSection}>{children}</div>
+    </details>
+  ) : (
+    row
   );
 }
-
-const DETAIL_COMMAND = '/context detail';
 
 function DetailHint({
   hint,
@@ -162,23 +142,19 @@ function DetailHint({
   hint: string;
   onShowDetail?: () => void;
 }) {
-  // The clickable part is located by the literal command inside the
-  // translated hint, so a translation that drops it (or a missing
-  // callback) degrades to the plain text line.
-  const idx = onShowDetail ? hint.indexOf(DETAIL_COMMAND) : -1;
-  if (idx < 0) return <div className={styles.hint}>{hint}</div>;
-  return (
-    <div className={styles.hint}>
-      {hint.slice(0, idx)}
-      <button
-        type="button"
-        className={styles.detailCommand}
-        onClick={onShowDetail}
-      >
-        {DETAIL_COMMAND}
-      </button>
-      {hint.slice(idx + DETAIL_COMMAND.length)}
-    </div>
+  const { t } = useI18n();
+  return onShowDetail ? (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className={styles.detailCommand}
+      onClick={onShowDetail}
+    >
+      {t('contextUsage.viewDetails')}
+    </Button>
+  ) : (
+    <div className={styles.hint}>{hint}</div>
   );
 }
 
@@ -186,18 +162,16 @@ function DetailRow({
   name,
   tokens,
   tokenLabel,
-  detailNameMaxLen,
 }: {
   name: string;
   tokens: number;
   tokenLabel: string;
-  detailNameMaxLen: number;
 }) {
   return (
     <div className={styles.detailRow}>
       <span className={styles.secondary}>{'\u2514'} </span>
       <span className={styles.detailName} title={name}>
-        {truncateName(name, detailNameMaxLen)}
+        {name}
       </span>
       <span className={styles.value}>
         {formatTokens(tokens)} {tokenLabel}
@@ -207,51 +181,42 @@ function DetailRow({
 }
 
 function DetailSection({
-  title,
   items,
   getName,
   tokenLabel,
-  detailNameMaxLen,
 }: {
-  title: string;
   items: readonly (DaemonContextToolDetail | DaemonContextMemoryDetail)[];
   getName: (
     item: DaemonContextToolDetail | DaemonContextMemoryDetail,
   ) => string;
   tokenLabel: string;
-  detailNameMaxLen: number;
 }) {
   const sorted = sortByTokens(items);
   if (sorted.length === 0) return null;
   return (
-    <section className={styles.detailSection}>
-      <div className={styles.sectionTitle}>{title}</div>
+    <>
       {sorted.map((item) => (
         <DetailRow
           key={getName(item)}
           name={getName(item)}
           tokens={item.tokens}
           tokenLabel={tokenLabel}
-          detailNameMaxLen={detailNameMaxLen}
         />
       ))}
-    </section>
+    </>
   );
 }
 
 function SkillsSection({
   skills,
   labels,
-  detailNameMaxLen,
 }: {
   skills: readonly DaemonContextSkillDetail[];
   labels: {
     active: string;
     bodyLoaded: string;
-    skills: string;
     tokens: string;
   };
-  detailNameMaxLen: number;
 }) {
   const sorted = [...skills].sort((a, b) => {
     if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
@@ -260,14 +225,13 @@ function SkillsSection({
   if (sorted.length === 0) return null;
 
   return (
-    <section className={styles.detailSection}>
-      <div className={styles.sectionTitle}>{labels.skills}</div>
+    <>
       {sorted.map((skill) => (
         <div key={skill.name} className={styles.skillBlock}>
           <div className={styles.detailRow}>
             <span className={styles.secondary}>{'\u2514'} </span>
             <span className={styles.detailName} title={skill.name}>
-              {truncateName(skill.name, detailNameMaxLen)}
+              {skill.name}
               {skill.loaded && (
                 <span className={styles.success}> {labels.active}</span>
               )}
@@ -287,7 +251,7 @@ function SkillsSection({
           )}
         </div>
       ))}
-    </section>
+    </>
   );
 }
 
@@ -295,15 +259,11 @@ export function ContextUsageMessage({
   status,
   onShowDetail,
   compact = false,
-  detailNameMaxLen = DETAIL_NAME_MAX_LEN,
 }: {
   status: DaemonSessionContextUsageStatus;
   /** Run /context detail, exactly like typing it. */
   onShowDetail?: () => void;
   compact?: boolean;
-  /** Compact's wrapping column fits full names; the transcript's fixed
-   * name column keeps the default cap. */
-  detailNameMaxLen?: number;
 }) {
   const { t } = useI18n();
   const { usage } = status;
@@ -317,39 +277,66 @@ export function ContextUsageMessage({
       ? (breakdown.autocompactBuffer / contextWindowSize) * 100
       : 0;
 
-  return (
-    <div className={`${styles.panel}${compact ? ` ${styles.compact}` : ''}`}>
-      {!compact && (
-        <div className={styles.title}>{t('contextUsage.title')}</div>
-      )}
+  const categoryProps = {
+    contextWindowSize,
+    compact,
+    symbolClassName: styles.accent,
+  };
+  const hasDetails = usage.showDetails;
 
+  return (
+    <section
+      className={`${styles.panel}${compact ? ` ${styles.compact}` : ''}`}
+      role={compact ? undefined : 'group'}
+      aria-label={compact ? undefined : t('contextUsage.title')}
+    >
+      {!compact && (
+        <div className={styles.header}>
+          <div className={styles.title}>{t('contextUsage.title')}</div>
+          <span className={styles.secondary}>{t('contextUsage.snapshot')}</span>
+        </div>
+      )}
+      <div className={styles.metaLine}>
+        <span>
+          {t('contextUsage.model')}: {usage.modelName}
+        </span>
+      </div>
       {!hasTokenCount ? (
         <>
           <div className={styles.estimateHint}>
-            {t('contextUsage.noApiResponse')}
+            {t('contextUsage.usageUnavailable')}
           </div>
           <div className={styles.sectionTitle}>
             {t('contextUsage.estimatedOverhead')}
           </div>
           <div className={styles.metaLine}>
-            <span>
-              {t('contextUsage.model')}: {usage.modelName}
-            </span>
-            <span>
-              {t('contextUsage.contextWindow')}:{' '}
-              {formatTokens(contextWindowSize)} {t('contextUsage.tokens')}
-            </span>
+            {t('contextUsage.contextWindow')}: {formatTokens(contextWindowSize)}{' '}
+            {t('contextUsage.tokens')}
           </div>
         </>
       ) : (
         <>
-          <div className={styles.metaLine}>
-            <span>
-              {t('contextUsage.model')}: {usage.modelName}
+          <div className={styles.overview}>
+            <span className={styles.total}>
+              <strong>{formatTokens(usage.totalTokens)}</strong>
+              <span className={styles.secondary}>
+                {' '}
+                / {formatTokens(contextWindowSize)} {t('contextUsage.tokens')}
+              </span>
             </span>
-            <span>
-              {t('contextUsage.contextWindow')}:{' '}
-              {formatTokens(contextWindowSize)} {t('contextUsage.tokens')}
+            <span
+              className={styles.percentage}
+              data-level={getContextUsageLevel(percentage)}
+            >
+              {percentage.toFixed(1)}%
+            </span>
+            <span className={styles.remaining}>
+              {t('contextUsage.remaining')}{' '}
+              <strong>
+                {formatTokens(
+                  Math.max(0, contextWindowSize - usage.totalTokens),
+                )}
+              </strong>
             </span>
           </div>
           {usage.isEstimated && (
@@ -360,137 +347,123 @@ export function ContextUsageMessage({
           {isOverLimit && (
             <div className={styles.error}>{t('contextUsage.overLimit')}</div>
           )}
-
           <ProgressBar
             usedPercentage={Math.min(percentage, 100)}
             bufferPercentage={bufferPercentage}
-            compact={compact}
           />
-          <div className={styles.spacer} />
           <CategoryRow
-            symbol={FILLED}
+            {...categoryProps}
             label={t('contextUsage.used')}
             tokens={usage.totalTokens}
-            tokenLabel={t('contextUsage.tokens')}
-            contextWindowSize={contextWindowSize}
             symbolClassName={isOverLimit ? styles.error : styles.accent}
             isOverLimit={isOverLimit}
           />
           <CategoryRow
-            symbol={EMPTY}
+            {...categoryProps}
             label={t('contextUsage.free')}
             tokens={breakdown.freeSpace}
-            tokenLabel={t('contextUsage.tokens')}
-            contextWindowSize={contextWindowSize}
+            symbolClassName={styles.secondary}
           />
           <CategoryRow
-            symbol={BUFFER}
+            {...categoryProps}
             label={t('contextUsage.autocompactBuffer')}
             tokens={breakdown.autocompactBuffer}
-            tokenLabel={t('contextUsage.tokens')}
-            contextWindowSize={contextWindowSize}
             symbolClassName={styles.warning}
           />
-          <div className={styles.spacer} />
-          <div className={styles.sectionTitle}>
-            {t('contextUsage.usageByCategory')}
-          </div>
         </>
       )}
-
-      <CategoryRow
-        symbol={FILLED}
-        label={t('contextUsage.systemPrompt')}
-        tokens={breakdown.systemPrompt}
-        tokenLabel={t('contextUsage.tokens')}
-        contextWindowSize={contextWindowSize}
-        symbolClassName={styles.accent}
-      />
-      <CategoryRow
-        symbol={FILLED}
-        label={t('contextUsage.builtinTools')}
-        tokens={breakdown.builtinTools}
-        tokenLabel={t('contextUsage.tokens')}
-        contextWindowSize={contextWindowSize}
-        symbolClassName={styles.accent}
-      />
-      {breakdown.mcpTools > 0 && (
-        <CategoryRow
-          symbol={FILLED}
-          label={t('contextUsage.mcpTools')}
-          tokens={breakdown.mcpTools}
-          tokenLabel={t('contextUsage.tokens')}
-          contextWindowSize={contextWindowSize}
-          symbolClassName={styles.accent}
-        />
-      )}
-      <CategoryRow
-        symbol={FILLED}
-        label={t('contextUsage.memoryFiles')}
-        tokens={breakdown.memoryFiles}
-        tokenLabel={t('contextUsage.tokens')}
-        contextWindowSize={contextWindowSize}
-        symbolClassName={styles.accent}
-      />
-      <CategoryRow
-        symbol={FILLED}
-        label={t('contextUsage.skills')}
-        tokens={breakdown.skills}
-        tokenLabel={t('contextUsage.tokens')}
-        contextWindowSize={contextWindowSize}
-        symbolClassName={styles.accent}
-      />
-      {hasTokenCount && (
-        <CategoryRow
-          symbol={FILLED}
-          label={t('contextUsage.messages')}
-          tokens={breakdown.messages}
-          tokenLabel={t('contextUsage.tokens')}
-          contextWindowSize={contextWindowSize}
-          symbolClassName={styles.accent}
-        />
-      )}
-
-      {usage.showDetails ? (
-        <>
-          <DetailSection
-            title={t('contextUsage.builtinTools')}
-            items={usage.builtinTools}
-            getName={(item) => ('name' in item ? item.name : item.path)}
-            tokenLabel={t('contextUsage.tokens')}
-            detailNameMaxLen={detailNameMaxLen}
+      <details className={styles.advanced} open={!compact || !hasTokenCount}>
+        <summary className={styles.advancedSummary}>
+          {t('contextUsage.advanced')}
+        </summary>
+        <div className={styles.categories}>
+          <CategoryRow
+            {...categoryProps}
+            label={t('contextUsage.systemPrompt')}
+            tokens={breakdown.systemPrompt}
           />
-          <DetailSection
-            title={t('contextUsage.mcpTools')}
-            items={usage.mcpTools}
-            getName={(item) => ('name' in item ? item.name : item.path)}
-            tokenLabel={t('contextUsage.tokens')}
-            detailNameMaxLen={detailNameMaxLen}
-          />
-          <DetailSection
-            title={t('contextUsage.memoryFiles')}
-            items={usage.memoryFiles}
-            getName={(item) => ('path' in item ? item.path : item.name)}
-            tokenLabel={t('contextUsage.tokens')}
-            detailNameMaxLen={detailNameMaxLen}
-          />
-          <SkillsSection
-            skills={usage.skills}
-            labels={{
-              active: t('contextUsage.active'),
-              bodyLoaded: t('contextUsage.bodyLoaded'),
-              skills: t('contextUsage.skills'),
-              tokens: t('contextUsage.tokens'),
-            }}
-            detailNameMaxLen={detailNameMaxLen}
-          />
-        </>
-      ) : (
+          <CategoryRow
+            {...categoryProps}
+            label={t('contextUsage.builtinTools')}
+            tokens={breakdown.builtinTools}
+          >
+            {hasDetails && usage.builtinTools.length > 0 ? (
+              <DetailSection
+                items={usage.builtinTools}
+                getName={(item) => ('name' in item ? item.name : item.path)}
+                tokenLabel={t('contextUsage.tokens')}
+              />
+            ) : undefined}
+          </CategoryRow>
+          {breakdown.mcpTools > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.mcpTools')}
+              tokens={breakdown.mcpTools}
+            >
+              {hasDetails && usage.mcpTools.length > 0 ? (
+                <DetailSection
+                  items={usage.mcpTools}
+                  getName={(item) => ('name' in item ? item.name : item.path)}
+                  tokenLabel={t('contextUsage.tokens')}
+                />
+              ) : undefined}
+            </CategoryRow>
+          )}
+          <CategoryRow
+            {...categoryProps}
+            label={t('contextUsage.memoryFiles')}
+            tokens={breakdown.memoryFiles}
+          >
+            {hasDetails && usage.memoryFiles.length > 0 ? (
+              <DetailSection
+                items={usage.memoryFiles}
+                getName={(item) => ('path' in item ? item.path : item.name)}
+                tokenLabel={t('contextUsage.tokens')}
+              />
+            ) : undefined}
+          </CategoryRow>
+          <CategoryRow
+            {...categoryProps}
+            label={t('contextUsage.skills')}
+            tokens={breakdown.skills}
+          >
+            {hasDetails && usage.skills.length > 0 ? (
+              <SkillsSection
+                skills={usage.skills}
+                labels={{
+                  active: t('contextUsage.active'),
+                  bodyLoaded: t('contextUsage.bodyLoaded'),
+                  tokens: t('contextUsage.tokens'),
+                }}
+              />
+            ) : undefined}
+          </CategoryRow>
+          {hasTokenCount && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.messages')}
+              tokens={breakdown.messages}
+            />
+          )}
+        </div>
+      </details>
+      {!hasDetails ? (
         <DetailHint
           hint={t('contextUsage.detailHint')}
           onShowDetail={onShowDetail}
         />
-      )}
-    </div>
+      ) : onShowDetail ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className={styles.detailCommand}
+          onClick={onShowDetail}
+        >
+          {t('contextUsage.viewCurrent')}
+        </Button>
+      ) : null}
+    </section>
   );
 }

@@ -1012,7 +1012,7 @@ You are a monitor.
       expect(config.background).toBe(true);
     });
 
-    it('should not set background when background: false', () => {
+    it('preserves background: false for foreground agents', () => {
       const markdownWithBgFalse = `---
 name: monitor
 description: A foreground agent
@@ -1028,7 +1028,7 @@ You are an agent.
         'project',
       );
 
-      expect(config.background).toBeUndefined();
+      expect(config.background).toBe(false);
     });
 
     it('should not set background when omitted', () => {
@@ -1441,21 +1441,24 @@ You are weird.
       expect(frontmatterArg.hooks).toBeUndefined();
     });
 
-    it('should roundtrip background through serialize and parse', () => {
-      const configWithBackground: SubagentConfig = {
-        ...validConfig,
-        background: true,
-      };
+    it.each([true, false])(
+      'roundtrips background=%s through serialize and parse',
+      (background) => {
+        const configWithBackground: SubagentConfig = {
+          ...validConfig,
+          background,
+        };
 
-      const serialized = manager.serializeSubagent(configWithBackground);
-      const parsed = manager.parseSubagentContent(
-        serialized,
-        validConfig.filePath!,
-        'project',
-      );
+        const serialized = manager.serializeSubagent(configWithBackground);
+        const parsed = manager.parseSubagentContent(
+          serialized,
+          validConfig.filePath!,
+          'project',
+        );
 
-      expect(parsed.background).toBe(true);
-    });
+        expect(parsed.background).toBe(background);
+      },
+    );
 
     // --- CC 2.1.168 declarative-agent fields serialization ---
 
@@ -2115,6 +2118,74 @@ You are a helpful assistant.`;
   });
 
   describe('deleteSubagent', () => {
+    it.each([
+      ['codex', 'project'],
+      ['claude-code', 'project'],
+      ['codex', 'user'],
+      ['claude-code', 'user'],
+      ['codex', undefined],
+      ['claude-code', undefined],
+    ] as const)(
+      'deletes a custom %s definition at level %s despite its builtin name',
+      async (name, level) => {
+        vi.mocked(fs.readdir).mockResolvedValue([`${name}.md`] as never);
+        vi.mocked(fs.readFile).mockResolvedValue(
+          `---\nname: ${name}\ndescription: Custom native agent\n---\nInspect.`,
+        );
+        mockParseYaml.mockReturnValue({
+          name,
+          description: 'Custom native agent',
+        });
+        vi.mocked(fs.unlink).mockResolvedValue(undefined);
+        await manager.deleteSubagent(name, level);
+        expect(fs.unlink).toHaveBeenCalledTimes(level === undefined ? 2 : 1);
+        expect(
+          vi
+            .mocked(fs.unlink)
+            .mock.calls.every(([file]) => String(file).endsWith(`${name}.md`)),
+        ).toBe(true);
+      },
+    );
+
+    it.each(['codex', 'claude-code'])(
+      'protects the builtin %s definition from deletion',
+      async (name) => {
+        vi.mocked(fs.readdir).mockResolvedValue([]);
+        await expect(manager.deleteSubagent(name, 'builtin')).rejects.toThrow(
+          /Cannot delete built-in/,
+        );
+        await expect(manager.deleteSubagent(name)).rejects.toThrow(
+          /Cannot delete built-in/,
+        );
+        await expect(
+          manager.deleteSubagent(name, 'project'),
+        ).rejects.toMatchObject({
+          code: SubagentErrorCode.INVALID_CONFIG,
+        });
+        expect(fs.unlink).not.toHaveBeenCalled();
+      },
+    );
+
+    it('reports a file error when a custom builtin-name definition cannot be deleted', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue(['codex.md'] as never);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: codex\ndescription: Custom native agent\n---\nInspect.',
+      );
+      mockParseYaml.mockReturnValue({
+        name: 'codex',
+        description: 'Custom native agent',
+      });
+      vi.mocked(fs.unlink).mockRejectedValue(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+      await expect(
+        manager.deleteSubagent('codex', 'project'),
+      ).rejects.toMatchObject({
+        code: SubagentErrorCode.FILE_ERROR,
+        message: expect.stringContaining('permission denied'),
+      });
+    });
+
     it('should delete subagent from specified level', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vi.mocked(fs.readdir).mockResolvedValue(['test-agent.md'] as any);
@@ -2312,7 +2383,7 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(7); // agent1 (project takes precedence), agent2, agent3, general-purpose, Explore, statusline-setup, review-agent (built-in)
+      expect(subagents).toHaveLength(9);
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
@@ -2321,6 +2392,8 @@ System prompt 3`);
         'Explore',
         'statusline-setup',
         'review-agent',
+        'claude-code',
+        'codex',
       ]);
     });
 
@@ -2351,6 +2424,8 @@ System prompt 3`);
         'agent1',
         'agent2',
         'agent3',
+        'claude-code',
+        'codex',
         'Explore',
         'general-purpose',
         'review-agent',
@@ -2366,12 +2441,14 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(4); // Only built-in agents remain
+      expect(subagents).toHaveLength(6); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
         'statusline-setup',
         'review-agent',
+        'claude-code',
+        'codex',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -2383,12 +2460,14 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(4); // Only built-in agents remain
+      expect(subagents).toHaveLength(6); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
         'statusline-setup',
         'review-agent',
+        'claude-code',
+        'codex',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -2868,20 +2947,23 @@ bad`);
         expect(mockCreateContentGenerator).not.toHaveBeenCalled();
       });
 
-      it('refuses project executables in an untrusted workspace', async () => {
-        const create = vi.fn();
-        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
-          create,
-        });
-        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(false);
-        await expect(
-          manager.createAgentHeadless(
-            { ...executorConfig, level: 'project' },
-            mockConfig,
-          ),
-        ).rejects.toThrow(/untrusted project/);
-        expect(create).not.toHaveBeenCalled();
-      });
+      it.each(['project', 'builtin'] as const)(
+        'refuses %s executables in an untrusted workspace',
+        async (level) => {
+          const create = vi.fn();
+          vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+            create,
+          });
+          vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(false);
+          await expect(
+            manager.createAgentHeadless(
+              { ...executorConfig, level },
+              mockConfig,
+            ),
+          ).rejects.toThrow(/untrusted project/);
+          expect(create).not.toHaveBeenCalled();
+        },
+      );
 
       it('refuses an external executor in safe mode even in a trusted folder (R8-2)', async () => {
         const create = vi.fn();
@@ -3128,6 +3210,115 @@ bad`);
         await manager.createAgentHeadless(agentConfig, mockConfig);
 
         expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      // A per-agent reasoning effort needs its own content generator even on
+      // the parent's model: the tier goes onto the agent's copy of the
+      // config, and the session config the agent would otherwise share must
+      // never receive it.
+      it('should create a ContentGenerator on the parent model for a reasoning effort alone', async () => {
+        const parent = mockConfig.getContentGeneratorConfig();
+
+        await manager.createAgentHeadless(agentConfig, mockConfig, {
+          modelConfigOverrides: { reasoningEffort: 'low' },
+        });
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'parent-model',
+            reasoning: { effort: 'low' },
+          }),
+          mockConfig,
+          true,
+        );
+        const { runtimeView } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        expect(runtimeView).toBeDefined();
+        expect(parent.reasoning).toBeUndefined();
+      });
+
+      // A tier the session's model cannot take changes nothing, so it must not
+      // cost the agent a ContentGenerator of its own.
+      it('should NOT create a ContentGenerator for a tier the model cannot take', async () => {
+        vi.spyOn(mockConfig, 'getModelsConfig').mockReturnValue({
+          getResolvedModel: vi.fn().mockReturnValue({
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                toggleOnly: true,
+                disableField: 'enable_thinking',
+              },
+            },
+          }),
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+        } as unknown as ReturnType<Config['getModelsConfig']>);
+
+        await manager.createAgentHeadless(agentConfig, mockConfig, {
+          modelConfigOverrides: { reasoningEffort: 'low' },
+        });
+
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+        const { runtimeView } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        expect(runtimeView).toBeUndefined();
+      });
+
+      // A tier alone is no reason to log in, and no reason to fail the
+      // dispatch: a failed build leaves the agent on the session's generator.
+      it('should run an effort-only agent on the session generator when its own cannot be built', async () => {
+        mockCreateContentGenerator.mockRejectedValueOnce(
+          new Error('Qwen OAuth credentials expired.'),
+        );
+
+        await manager.createAgentHeadless(agentConfig, mockConfig, {
+          modelConfigOverrides: { reasoningEffort: 'low' },
+        });
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.anything(),
+          mockConfig,
+          true,
+        );
+        const { runtimeView } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        expect(runtimeView).toBeUndefined();
+      });
+
+      it('should carry a reasoning effort alongside a model override', async () => {
+        await manager.createAgentHeadless(
+          { ...agentConfig, model: 'custom-model' },
+          mockConfig,
+          { modelConfigOverrides: { reasoningEffort: 'max' } },
+        );
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'custom-model',
+            reasoning: { effort: 'max' },
+          }),
+          mockConfig,
+        );
+      });
+
+      // A deny that matches nothing silently leaves the agent the tool. Only an
+      // entry that is neither an MCP pattern, a built-in tool (registered here
+      // or not), nor a registered tool's name or display name comes back.
+      it('finds the deny entries that match no tool', async () => {
+        await expect(
+          manager.findUnmatchedToolNames([
+            'Write File',
+            'grep',
+            'edit',
+            'Shell',
+            'mcp__github',
+            'mcp__github__*',
+            'Bash',
+            'run_shell',
+          ]),
+        ).resolves.toEqual(['Bash', 'run_shell']);
       });
 
       it('should pass the agent runtimeView to AgentHeadless.create', async () => {

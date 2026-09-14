@@ -33,6 +33,7 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import { readBudgetStop, writeRoundCapStop } from './lib/deadline.js';
 import {
   promptRecordDir,
   briefPath,
@@ -1876,6 +1877,111 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.ok).toBe(true);
     expect(r.gaps).toEqual([]);
+  });
+
+  it('a wall that can no longer admit the rebuild waives the FIXes and keeps the gaps — marker or no marker', () => {
+    // Nothing built for Step 4 or Step 5, findings to post, and a 3600s
+    // wall captured 3000s ago (600s left, under the 1200s compose floor):
+    // the rebuild and the verifier build would both exit 4 at the gates, so
+    // neither FIX is owed — but both disclosures are, and the findings stay
+    // unverified. Same with a round-cap marker beside the closed wall: the
+    // marker never waives the not-built gap (its own disclosure claims the
+    // rounds ran), only the wall waives the FIX.
+    const p = plan();
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    const captured = new Date(Date.now() - 3000 * 1000);
+    utimesSync(p, captured, captured);
+    const closed = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(closed.ok).toBe(false);
+    expect(closed.unverifiedFindings).toBe(true);
+    expect(closed.gaps.map((g) => g.subject)).toEqual([
+      'verification and reverse audit',
+    ]);
+    expect(closed.remediation).toEqual([]);
+    // Withheld, and said so — with the gate's arithmetic, never silently.
+    expect(closed.waived.map((w) => w.split(':')[0])).toEqual([
+      'reverse audit',
+      'verification',
+    ]);
+    // In minutes, like every other line on that channel.
+    expect(closed.waived[0]).toMatch(
+      /withheld — the plan's wall can no longer admit that build \((?:10|9\.9) minutes of the wall left, under the 20-minute reserve plus at least the 30-minute round estimate/,
+    );
+    expect(closed.waived[1]).toMatch(
+      /withheld — the plan's wall is at or under the compose floor \((?:10|9\.9) minutes of the wall left, floor 20 minutes\)/,
+    );
+
+    writeRoundCapStop(p, 3, 4);
+    expect(readBudgetStop(p)?.cause).toBe('round-cap');
+    const capped = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(capped.gaps.map((g) => g.subject)).toEqual([
+      'verification and reverse audit',
+    ]);
+    expect(capped.remediation).toEqual([]);
+
+    // The two gates are asked separately: with 2,000s left the rebuild is
+    // refused (2,000 < 1,200 + 1,800) while a verify build still fits
+    // (2,000 > 1,200), so only the verification FIX is owed.
+    const mid = new Date(Date.now() - 1600 * 1000);
+    utimesSync(p, mid, mid);
+    const midway = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(midway.remediation.map((r) => r.split(':')[0])).toEqual([
+      'verification',
+    ]);
+    expect(midway.waived.map((w) => w.split(':')[0])).toEqual([
+      'reverse audit',
+    ]);
+
+    // The same run with hours of wall left owes both FIXes.
+    const open = new Date(Date.now() - 60 * 1000);
+    utimesSync(p, open, open);
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 28_800,
+        deadlineSource: 'default',
+      }),
+    );
+    utimesSync(p, open, open);
+    const owed = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(owed.remediation.map((r) => r.split(':')[0])).toEqual([
+      'reverse audit',
+      'verification',
+    ]);
+    expect(owed.waived).toEqual([]);
+
+    // Back at 600s left: a relaunch FIX is not a build the gates rule on,
+    // so a closed wall never waives it — a verifier that ran but never
+    // opened its findings list, and an auditor that ran but never opened
+    // its brief, are each told to relaunch the printed prompt.
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    utimesSync(p, captured, captured);
+    step45(p, 'verify', { findings: true, opensFindings: false });
+    step45(p, 'reverse-audit', { opensBrief: false });
+    const relaunch = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(relaunch.remediation.map((r) => r.split(':')[0])).toEqual([
+      'reverse audit',
+      'verification',
+    ]);
+    expect(relaunch.remediation[0]).toContain('relaunch');
+    expect(relaunch.remediation[1]).toContain('relaunch');
+    expect(relaunch.waived).toEqual([]);
   });
 
   it('does not let an OLDER findings digest vouch for the current one', () => {

@@ -16,6 +16,19 @@ import {
   fakeServerHostOptions,
 } from '../test-helper.js';
 
+// Keep fake-server request indexes structural: seed request 0 is followed by
+// the /compress side-query at request 1, without a memory extractor in between.
+const SUITE_SETTINGS = {
+  memory: {
+    enableManagedAutoMemory: false,
+  },
+  security: {
+    auth: {
+      selectedType: 'openai',
+    },
+  },
+};
+
 describe('Interactive Mode', () => {
   let rig: TestRig;
   let fakeServer: FakeOpenAIServer | undefined;
@@ -58,17 +71,31 @@ describe('Interactive Mode', () => {
     );
   }
 
+  function expectSuccessfulCompression() {
+    const compressionEvent = rig.readTelemetryEvent('chat_compression');
+    const tokensBefore = compressionEvent?.attributes?.['tokens_before'];
+    const tokensAfter = compressionEvent?.attributes?.['tokens_after'];
+    const outputTokens =
+      compressionEvent?.attributes?.['compression_output_token_count'];
+    const cacheSharing = compressionEvent?.attributes?.['cache_sharing_used'];
+
+    expect(
+      typeof tokensBefore === 'number' &&
+        typeof tokensAfter === 'number' &&
+        tokensBefore > tokensAfter,
+      'chat_compression event recorded no token reduction: ' +
+        `tokens_before=${String(tokensBefore)}, ` +
+        `tokens_after=${String(tokensAfter)}, ` +
+        `output=${String(outputTokens)}, ` +
+        `cache_sharing=${String(cacheSharing)}`,
+    ).toBe(true);
+  }
+
   it.skipIf(process.platform === 'win32')(
     'should trigger chat compression with /compress command',
     async () => {
       await rig.setup('interactive-compress-test', {
-        settings: {
-          security: {
-            auth: {
-              selectedType: 'openai',
-            },
-          },
-        },
+        settings: SUITE_SETTINGS,
       });
 
       const { ptyProcess } = await runInteractiveWithFakeModel();
@@ -107,18 +134,13 @@ describe('Interactive Mode', () => {
       expect(foundEvent, 'chat_compression telemetry event was not found').toBe(
         true,
       );
+      expectSuccessfulCompression();
     },
   );
 
   it.skip('should handle compression failure on token inflation', async () => {
     await rig.setup('interactive-compress-test', {
-      settings: {
-        security: {
-          auth: {
-            selectedType: 'openai',
-          },
-        },
-      },
+      settings: SUITE_SETTINGS,
     });
 
     const { ptyProcess } = rig.runInteractive();
@@ -154,13 +176,7 @@ describe('Interactive Mode', () => {
     'should forward /compress instructions through to the side-query',
     async () => {
       await rig.setup('interactive-compress-instructions-test', {
-        settings: {
-          security: {
-            auth: {
-              selectedType: 'openai',
-            },
-          },
-        },
+        settings: SUITE_SETTINGS,
       });
 
       const { ptyProcess } = await runInteractiveWithFakeModel();
@@ -187,11 +203,10 @@ describe('Interactive Mode', () => {
       const seedCompleted = await rig.waitForText('einstein');
       expect(seedCompleted, 'seed response did not complete').toBe(true);
 
-      // Fire /compress with a trailing instruction. We are not asserting on
-      // summary CONTENT (model behaviour) — only that the wiring runs
-      // end-to-end and the compression telemetry event lands. Earlier unit
-      // tests cover the prompt-composition path; this is the smoke test that
-      // the args plumbing reaches the side-query.
+      // Fire /compress with a trailing instruction. We do not assert summary
+      // content, but do require the deterministic fixture to reduce tokens.
+      // Earlier unit tests cover prompt composition; this pins the end-to-end
+      // argument path and a successful compression result.
       await type(ptyProcess, '/compress focus on the scientist mentioned');
       await new Promise((resolve) => setTimeout(resolve, 100));
       await type(ptyProcess, '\r');
@@ -203,6 +218,7 @@ describe('Interactive Mode', () => {
       expect(foundEvent, 'chat_compression telemetry event was not found').toBe(
         true,
       );
+      expectSuccessfulCompression();
     },
   );
 });

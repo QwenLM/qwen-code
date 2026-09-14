@@ -4848,7 +4848,7 @@ describe('DingtalkChannel chat records', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: '@DingTalkTest can you see this?',
+          content: 'can you see this?',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'forwarded-record-m1',
@@ -5844,7 +5844,7 @@ describe('DingtalkChannel chat records', () => {
           chatbotUserId: 'bot-1',
           isInAtList: true,
           text: {
-            content: '@DingTalkTest what was that?',
+            content: 'what was that?',
             isReplyMsg: true,
             repliedMsg: {
               msgId: 'forwarded-record-empty',
@@ -5895,7 +5895,7 @@ describe('DingtalkChannel chat records', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: '@DingTalkTest what was that?',
+          content: 'what was that?',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'forwarded-record-entries',
@@ -5947,7 +5947,7 @@ describe('DingtalkChannel chat records', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: '@DingTalkTest what was that?',
+          content: 'what was that?',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'forwarded-record-big',
@@ -6016,7 +6016,7 @@ describe('DingtalkChannel chat records', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: '@DingTalkTest what was that?',
+          content: 'what was that?',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'forwarded-record-astral',
@@ -6072,7 +6072,7 @@ describe('DingtalkChannel chat records', () => {
           chatbotUserId: 'bot-1',
           isInAtList: true,
           text: {
-            content: '@DingTalkTest what was that?',
+            content: 'what was that?',
             isReplyMsg: true,
             repliedMsg: {
               msgId: 'forwarded-record-dropped',
@@ -6124,7 +6124,10 @@ describe('DingtalkChannel quoted media', () => {
     vi.restoreAllMocks();
   });
 
-  function mockMediaDownload(mimeType: string, bytes: Uint8Array): string[] {
+  function mockMediaDownload(
+    mimeType: string,
+    bytes: Uint8Array | Record<string, Uint8Array>,
+  ): string[] {
     const downloadCodes: string[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(
       (input: RequestInfo | URL, init?: RequestInit) => {
@@ -6146,16 +6149,22 @@ describe('DingtalkChannel quoted media', () => {
           downloadCodes.push(request.downloadCode);
           return Promise.resolve(
             new Response(
-              JSON.stringify({ downloadUrl: 'https://example.com/media' }),
+              JSON.stringify({
+                downloadUrl: `https://example.com/${request.downloadCode}`,
+              }),
               { status: 200 },
             ),
           );
         }
+        const downloadCode = url.slice(url.lastIndexOf('/') + 1);
         return Promise.resolve(
-          new Response(bytes, {
-            status: 200,
-            headers: { 'content-type': mimeType },
-          }),
+          new Response(
+            bytes instanceof Uint8Array ? bytes : bytes[downloadCode],
+            {
+              status: 200,
+              headers: { 'content-type': mimeType },
+            },
+          ),
         );
       },
     );
@@ -6189,7 +6198,7 @@ describe('DingtalkChannel quoted media', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: `@DingTalkTest ${replyText}`,
+          content: replyText,
           isReplyMsg: true,
           repliedMsg: {
             msgId: `media-${msgType}`,
@@ -6426,6 +6435,48 @@ describe('DingtalkChannel quoted media', () => {
     ]);
   });
 
+  it('summarizes and downloads nested pictures from replied rich text', async () => {
+    const downloadCodes = mockMediaDownload('image/png', {
+      'quoted-rich-picture-1': new Uint8Array([1]),
+      'quoted-rich-picture-2': new Uint8Array([2]),
+    });
+    const channel = createChannel();
+
+    replyToMedia(channel, 'richText', {
+      richText: [
+        { msgType: 'picture', downloadCode: 'quoted-rich-picture-1' },
+        { msgType: 'text', content: '输出123' },
+        { msgType: 'picture', downloadCode: 'quoted-rich-picture-2' },
+      ],
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(downloadCodes).toEqual([
+      'quoted-rich-picture-1',
+      'quoted-rich-picture-2',
+    ]);
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'inspect this',
+        referencedText: '[image]输出123[image]',
+        attachments: [
+          {
+            type: 'image',
+            data: Buffer.from([1]).toString('base64'),
+            mimeType: 'image/png',
+          },
+          {
+            type: 'image',
+            data: Buffer.from([2]).toString('base64'),
+            mimeType: 'image/png',
+          },
+        ],
+      }),
+    );
+  });
+
   it('downloads a replied picture and attaches it to the prompt', async () => {
     const downloadCodes = mockMediaDownload(
       'image/png',
@@ -6597,7 +6648,7 @@ describe('DingtalkChannel quoted media', () => {
         msgtype: 'picture',
         content: { downloadCode: 'own-picture-code' },
         text: {
-          content: '@DingTalkTest inspect both',
+          content: 'inspect both',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'media-file',
@@ -6658,7 +6709,7 @@ describe('DingtalkChannel quoted media', () => {
         msgtype: 'picture',
         content: { downloadCode: 'own-picture-code' },
         text: {
-          content: '@DingTalkTest inspect both',
+          content: 'inspect both',
           isReplyMsg: true,
           repliedMsg: {
             msgId: 'media-picture',
@@ -7293,7 +7344,7 @@ describe('DingtalkChannel sender attribution', () => {
     );
   });
 
-  it('passes mention-stripped text with platform format characters to base', () => {
+  it('preserves platform text with format characters', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -7327,14 +7378,14 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '查看记忆\u200b',
+        text: '@qwen-code 查看记忆\u200b',
         isGroup: true,
         isMentioned: true,
       }),
     );
   });
 
-  it('does not consume text after a mention followed by a format character', () => {
+  it('preserves a mention followed by a platform format character', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -7368,14 +7419,14 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '\u200b查看记忆',
+        text: '@qwen-code\u200b查看记忆',
         isGroup: true,
         isMentioned: true,
       }),
     );
   });
 
-  it('preserves @ in git URLs and emails when stripping bot mention (#7402)', () => {
+  it('preserves the callback text containing a mention and git URL (#7402)', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -7411,7 +7462,7 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '重复： git@example.com:group/repo.git',
+        text: '@qwen-code 重复： git@example.com:group/repo.git',
         isMentioned: true,
       }),
     );
@@ -7451,8 +7502,8 @@ describe('DingtalkChannel sender attribution', () => {
       }
     ).handleInbound;
 
-    // When the bot @mention is not in the text (DingTalk already stripped it),
-    // the regex must NOT eat the @ in the git URL.
+    // DingTalk already omitted the bot mention, so the callback text stays
+    // unchanged, including the @ in the git URL.
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
         text: '重复： git@example.com:group/repo.git',
@@ -7628,7 +7679,7 @@ describe('DingtalkChannel sender attribution', () => {
     expect(envelope).not.toHaveProperty('mentionedMemberIds');
   });
 
-  it('returns context only when text is empty after mention stripping', () => {
+  it('returns context when the callback text is empty', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -8169,7 +8220,7 @@ describe('DingtalkChannel mention target lifecycle', () => {
     });
   });
 
-  it('does not retain a local-command candidate', async () => {
+  it('keeps a plain command local and a retained rich-text command as prose', async () => {
     vi.doUnmock('@qwen-code/channel-base');
     vi.resetModules();
     const { DingtalkChannel: RealDingtalkChannel } = await import(
@@ -8181,6 +8232,7 @@ describe('DingtalkChannel mention target lifecycle', () => {
       loadSession: vi.fn(),
       prompt: vi.fn().mockResolvedValue('agent response'),
       cancelSession: vi.fn().mockResolvedValue(undefined),
+      shellCommand: vi.fn(),
     }) as never;
     const channel = new RealDingtalkChannel(
       'real-dingtalk',
@@ -8232,6 +8284,103 @@ describe('DingtalkChannel mention target lifecycle', () => {
       ).toBe(false);
     });
     expect(bridge.prompt).not.toHaveBeenCalled();
+
+    (
+      channel as unknown as {
+        onMessage(downstream: DWClientDownStream): void;
+      }
+    ).onMessage({
+      data: JSON.stringify({
+        msgId: 'plain-bang-command',
+        conversationType: '2',
+        conversationId: 'cid-123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderStaffId: 'staff-123',
+        senderId: 'sender-123',
+        senderNick: 'Alice',
+        isInAtList: true,
+        text: { content: '!whoami' },
+      }),
+      headers: { messageId: 'plain-bang-command' },
+    } as unknown as DWClientDownStream);
+
+    await vi.waitFor(() => {
+      expect(
+        fetchSpy.mock.calls.some(([, init]) =>
+          String(init?.body).includes('Shell commands'),
+        ),
+      ).toBe(true);
+    });
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(bridge.shellCommand).not.toHaveBeenCalled();
+
+    (
+      channel as unknown as {
+        onMessage(downstream: DWClientDownStream): void;
+      }
+    ).onMessage({
+      data: JSON.stringify({
+        msgId: 'rich-command-prose',
+        msgtype: 'richText',
+        conversationType: '2',
+        conversationId: 'cid-123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderStaffId: 'staff-123',
+        senderId: 'sender-123',
+        senderNick: 'Alice',
+        isInAtList: true,
+        content: {
+          richText: [{ text: '@QwenBot ' }, { text: '/clear' }],
+        },
+      }),
+      headers: { messageId: 'rich-command-prose' },
+    } as unknown as DWClientDownStream);
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    expect(bridge.newSession).toHaveBeenCalledOnce();
+    const promptCall = vi.mocked(bridge.prompt).mock.calls[0]!;
+    expect(promptCall[0]).toBe('session-1');
+    expect(promptCall[1]).toMatch(/\[Alice\] @QwenBot \/clear$/u);
+    expect(promptCall[2]).toEqual(
+      expect.objectContaining({
+        displayText: expect.stringMatching(/\[Alice\] @QwenBot \/clear$/u),
+      }),
+    );
+
+    (
+      channel as unknown as {
+        onMessage(downstream: DWClientDownStream): void;
+      }
+    ).onMessage({
+      data: JSON.stringify({
+        msgId: 'rich-bang-prose',
+        msgtype: 'richText',
+        conversationType: '2',
+        conversationId: 'cid-123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderStaffId: 'staff-123',
+        senderId: 'sender-123',
+        senderNick: 'Alice',
+        isInAtList: true,
+        content: {
+          richText: [{ text: '@QwenBot ' }, { text: '!whoami' }],
+        },
+      }),
+      headers: { messageId: 'rich-bang-prose' },
+    } as unknown as DWClientDownStream);
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+    expect(bridge.shellCommand).not.toHaveBeenCalled();
+    const bangPromptCall = vi.mocked(bridge.prompt).mock.calls[1]!;
+    expect(bangPromptCall[1]).toMatch(/\[Alice\] @QwenBot !whoami$/u);
+    expect(bangPromptCall[2]).toEqual(
+      expect.objectContaining({
+        displayText: expect.stringMatching(/\[Alice\] @QwenBot !whoami$/u),
+      }),
+    );
     fetchSpy.mockRestore();
   });
 

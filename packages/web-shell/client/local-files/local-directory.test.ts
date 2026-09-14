@@ -505,6 +505,38 @@ describe('LocalDirectory.search', () => {
     expect(result.hits).toEqual([]);
   });
 
+  it('bounds directory skeletons with their own budget', async () => {
+    const root = new FakeDir('root');
+    // A huge near-file-less tree must not hang this one tool call.
+    for (const name of ['d1', 'd2', 'd3']) {
+      root.dirs.set(name, new FakeDir(name));
+    }
+    const dir = new LocalDirectory(root, {
+      ...DEFAULT_LOCAL_DIRECTORY_LIMITS,
+      maxSearchDirs: 2,
+    });
+    const result = await dir.search('x');
+    expect(result.truncatedBy).toBe('directories');
+    expect(result.dirsScanned).toBe(2);
+    expect(result.hits).toEqual([]);
+  });
+
+  it('keeps the file budget for files: the dir cap must not consume it or hide hits', async () => {
+    const root = new FakeDir('root');
+    // Five subdirectories each holding one matching file: the directory
+    // bound must not spend maxFiles, and the file budget must still cut in
+    // at its own cap without hiding the hits it did reach.
+    for (const name of ['d1', 'd2', 'd3', 'd4', 'd5']) {
+      root.dirs.set(name, new FakeDir(name).withFile('hit.txt', 'needle'));
+    }
+    const result = await new LocalDirectory(root).search('needle', {
+      maxFiles: 4,
+    });
+    expect(result.hits).toHaveLength(4);
+    expect(result.truncatedBy).toBe('files');
+    expect(result.dirsScanned).toBe(5);
+  });
+
   it('skips undecodable files in search instead of scanning mojibake', async () => {
     const root = new FakeDir('root');
     root.files.set(

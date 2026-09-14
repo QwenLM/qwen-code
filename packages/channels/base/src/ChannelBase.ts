@@ -75,7 +75,6 @@ import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
-  buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
   resolveChannelWebhookTarget,
 } from './ChannelWebhookTask.js';
@@ -351,7 +350,6 @@ type PendingPermissionLookup =
   | { kind: 'ambiguous'; requestIds: string[] };
 type CollectBufferEntry = {
   text: string;
-  displayText: string;
   envelope: Envelope;
 };
 type NamedTurnBinding = {
@@ -422,7 +420,6 @@ const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
 const LOOP_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
 const MAX_LOOP_JOBS_PER_TARGET = 10;
 const MAX_LOOP_PROMPT_CHARS = 4000;
-const MAX_DISPLAY_PROJECTION_CHARS = 8000;
 // Mirrors BTW_MAX_INPUT_LENGTH in core without adding core to channel-base.
 const CHANNEL_BTW_MAX_INPUT_LENGTH = 4096;
 
@@ -2024,13 +2021,11 @@ export abstract class ChannelBase {
     this.collectBuffers.delete(sessionId);
     const lost = buffer.length;
     const coalesced = buffer.map((b) => b.text).join('\n\n');
-    const coalescedDisplayText = buffer.map((b) => b.displayText).join('\n\n');
     const lastEnvelope = buffer[buffer.length - 1]!.envelope;
     this.notifyPromptBufferDrained(lastEnvelope.chatId, sessionId, buffer);
     const syntheticEnvelope: Envelope = {
       ...lastEnvelope,
       text: coalesced,
-      displayText: coalescedDisplayText,
       alreadyPrefixed: true,
       referencedText: undefined,
       mentionedMemberIds: undefined,
@@ -2258,7 +2253,6 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
-          job.prompt,
           promptState,
           job.id,
           options.timeoutMs,
@@ -2430,7 +2424,6 @@ export abstract class ChannelBase {
       },
     );
     const promptText = buildChannelWebhookPrompt(task, target);
-    const displayText = buildChannelWebhookDisplayText(task);
     const taskId = `webhook:${task.source}:${task.eventType}`;
     const safeTaskId = sanitizeLogText(taskId, 64);
     const safeChannel = sanitizeLogText(this.name, 64);
@@ -2556,7 +2549,6 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
-          displayText,
           promptState,
           taskId,
           options.timeoutMs,
@@ -2661,12 +2653,13 @@ export abstract class ChannelBase {
     promptBridge: ChannelAgentBridge,
     sessionId: string,
     promptText: string,
-    displayText: string,
     promptState: ActivePrompt,
     jobId: string,
     timeoutMs: number | undefined,
   ): Promise<string> {
-    const prompt = promptBridge.prompt(sessionId, promptText, { displayText });
+    const prompt = promptBridge.prompt(sessionId, promptText, {
+      displayText: sanitizeDisplayText(promptText),
+    });
     prompt.catch(() => {});
     if (timeoutMs === undefined) {
       return prompt;
@@ -6508,15 +6501,6 @@ export abstract class ChannelBase {
       await this.recordObservedContact(envelope);
       this.onObservedContact(envelope);
     }
-    // Adapters that never set `displayText` fall back to the raw message
-    // text; sanitize at this boundary so attacker-controlled bidi/zero-width/
-    // control chars cannot reach the session-bus echo, recorded transcript,
-    // or session previews.
-    const displayText = sanitizeDisplayText(
-      envelope.displayText ?? envelope.text,
-      MAX_DISPLAY_PROJECTION_CHARS,
-    );
-
     const parsed = this.parseCommand(envelope.text);
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parsed?.command === 'btw'
@@ -6916,17 +6900,7 @@ export abstract class ChannelBase {
             buffer = [];
             this.collectBuffers.set(sessionId, buffer);
           }
-          const bufferedDisplayText =
-            (envelope.isGroup || this.config.sessionScope === 'single') &&
-            !envelope.alreadyPrefixed &&
-            !recognizedSlashCommand
-              ? `[${sanitizeSenderName(envelope.senderName || envelope.senderId || 'unknown')}] ${sanitizePromptText(displayText)}`
-              : displayText;
-          buffer.push({
-            text: promptText,
-            displayText: bufferedDisplayText,
-            envelope,
-          });
+          buffer.push({ text: promptText, envelope });
           try {
             this.onPromptBuffered(
               envelope.chatId,
@@ -7253,7 +7227,9 @@ export abstract class ChannelBase {
           ...(images.length > 0 ? { images } : {}),
           imageBase64,
           imageMimeType,
-          displayText,
+          // Session history shows exactly what the model receives. Only the
+          // controls that can reorder or hide rendered text are neutralized.
+          displayText: sanitizeDisplayText(promptToSend),
         });
 
         await this.settleCancelRequested(promptState);

@@ -24,7 +24,9 @@ import {
 interface FetchDiffArgs {
   prNumber: number;
   repo: string;
-  out: string;
+  /** As yargs gave it: a repeated --out is an array, ruled by
+   * `assertWritableOutPath` before any use. */
+  out: unknown;
   /** The `--host` flag, fed to platform detection (an Aone host selects a1). */
   host?: string;
 }
@@ -114,7 +116,10 @@ export const fetchDiffCommand: CommandModule = {
       const result = runFetchDiff({
         prNumber,
         repo: String(argv['repo']),
-        out: String(argv['out']),
+        // As yargs gave it: a repeated --out is an array, which the shared
+        // ruling refuses as a usage error. `String()` joined it into one
+        // comma path and wrote there.
+        out: argv['out'],
         host,
       });
       writeStdoutLine(JSON.stringify(result));

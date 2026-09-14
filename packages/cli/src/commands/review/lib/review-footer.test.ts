@@ -1078,9 +1078,26 @@ describe('the review footer and the regex that strips it', () => {
         'q <!--the auth check at line 40 is missing',
         'q <![CDATA[the auth check at line 40 is missing',
         'q <?the auth check at line 40 is missing',
+        // A `<?` whose span leaves prose behind it: what it hides ends at
+        // the first `>`, so the sentence after that still counts.
+        'q <?x?> the auth check at line 40 is missing',
+        '<?x> the auth check at line 40 is missing',
       ]) {
         expect([body, rendersAsNothing(body)]).toEqual([body, false]);
       }
+      // These arms are POSITION-BLIND on purpose, and `&nbsp;<?x>` is the
+      // shape where that shows: mid-line a `<?` with no `?>` forms nothing
+      // in the renderer, so its characters are VISIBLE and calling the
+      // body empty is wrong. The split that would fix it was measured and
+      // REVERTED — being right about it needs the block structure this
+      // module does not model, and the half-measure cost more bodies than
+      // it saved. Pinned so the boundary is a decision on the record
+      // rather than something the next audit rediscovers; the numbers are
+      // on `rendersAsNothing` (#9940 review, round 12 reverse audit).
+      for (const body of ['&nbsp;<?x>', '<?x>', '<?php echo 1 ?>']) {
+        expect([body, rendersAsNothing(body)]).toEqual([body, true]);
+      }
+      expect(rendersAsNothing('q <?x>')).toBe(false);
     });
 
     it('still counts real content wearing the same shapes', () => {

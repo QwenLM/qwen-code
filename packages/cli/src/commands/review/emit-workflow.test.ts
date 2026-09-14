@@ -149,6 +149,16 @@ describe('emit-workflow — the roster it bakes into the script', () => {
     expect(agents.length).toBeGreaterThan(1);
   });
 
+  it('emits only the focused navigation reviewer for a profiled plan', () => {
+    const plan = localPlan({ reviewProfile: 'docs-nav' });
+    writeFileSync(planPath, JSON.stringify(plan));
+    const agents = buildFanOutRoster(plan, planPath);
+    expect(agents.map((agent) => agent.key)).toEqual(['docs-nav']);
+    expect(readRecordedPrompts(planPath).get('docs-nav')).toBe(
+      agents[0].prompt,
+    );
+  });
+
   // Byte-parity with the hand-launched path is structural — both go through
   // `buildLaunch` — and this pins it so a future refactor that gives this
   // command its own builder fails here rather than in a review whose delivery

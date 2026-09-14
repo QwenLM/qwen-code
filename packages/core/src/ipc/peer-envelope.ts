@@ -33,13 +33,15 @@ import type { PeerControllerIdentity } from './peer-controllers.js';
 const CROSS_SESSION_TAG = 'cross_session_message';
 
 /**
- * Characters that render as nothing: control characters plus the invisible
- * format set (zero-width spaces, bidi overrides, soft hyphen and kin).
- * {@link flattenPeerLabel} strips them from peer-supplied attributes so a
- * label cannot read differently than it compares.
+ * Characters that render as nothing: control and format characters, and
+ * the line and paragraph separators — by Unicode category, so zero-width
+ * spaces, bidi overrides and soft hyphens are covered along with the blocks
+ * nobody thinks to list (tag characters, the Mongolian vowel separator,
+ * interlinear annotation marks). {@link flattenPeerLabel} strips them from
+ * peer-supplied attributes so a label cannot read differently than it
+ * compares.
  */
-const INVISIBLE_CHARACTERS =
-  '\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u061c\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2060-\\u206f\\ufeff';
+const INVISIBLE_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
 
 /**
  * Framing appended after the envelope.
@@ -113,7 +115,7 @@ export function defangEnvelopeTags(text: string): string {
 }
 
 /**
- * Longest attribute value kept.
+ * Longest attribute value kept, in code points.
  *
  * A working reply address cannot exceed `MAX_SOCKET_PATH_BYTES` (103) and
  * a display name is a handful of characters, but both arrive from the peer
@@ -136,11 +138,12 @@ const MAX_ATTRIBUTE_CHARS = 200;
  * letting a label read differently than it compares.
  */
 export function flattenPeerLabel(value: string): string {
-  const oneLine = value
-    .replace(new RegExp(`[${INVISIBLE_CHARACTERS}]+`, 'g'), ' ')
-    .trim();
-  return oneLine.length > MAX_ATTRIBUTE_CHARS
-    ? `${oneLine.slice(0, MAX_ATTRIBUTE_CHARS - 1)}\u2026`
+  const oneLine = value.replace(INVISIBLE_CHARACTERS, ' ').trim();
+  // Counted in code points, so the cut never leaves half of an astral
+  // character behind as a lone surrogate.
+  const points = Array.from(oneLine);
+  return points.length > MAX_ATTRIBUTE_CHARS
+    ? `${points.slice(0, MAX_ATTRIBUTE_CHARS - 1).join('')}\u2026`
     : oneLine;
 }
 

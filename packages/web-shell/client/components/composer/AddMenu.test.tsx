@@ -158,6 +158,20 @@ describe('AddMenu', () => {
     expect(trigger.disabled).toBe(true);
   });
 
+  it('returns keyboard focus to the trigger after Escape', async () => {
+    render();
+    await openMenu();
+    await act(async () => {
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(document.activeElement).toBe(
+      container!.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    );
+  });
+
   it('lets an outside editor click close the menu without restoring trigger focus', async () => {
     render(
       <>
@@ -691,6 +705,45 @@ describe('AddMenu', () => {
   });
 
   describe('skills submenu', () => {
+    it('opens unloaded Skills and keeps the submenu open when data arrives', async () => {
+      const onSkillsOpenChange = vi.fn();
+      const props = baseProps({ onSkillsOpenChange, skillsLoading: true });
+      renderWith(props);
+      await openMenu();
+      expect(onSkillsOpenChange).not.toHaveBeenCalledWith(true);
+      expect(
+        menuItem('composer-add-menu-skills')?.hasAttribute('data-disabled'),
+      ).toBe(false);
+      await openSubmenu('composer-add-menu-skills');
+      expect(onSkillsOpenChange).toHaveBeenLastCalledWith(true);
+      expect(portalRoot?.textContent).toContain('Loading skills...');
+      rerenderWith({
+        ...props,
+        skillsLoading: false,
+        skills: [{ name: 'review', description: 'Review' }],
+      });
+      expect(menuItem('composer-add-menu-skills-item')?.textContent).toContain(
+        '/review',
+      );
+      expect(onSkillsOpenChange).toHaveBeenLastCalledWith(true);
+    });
+
+    it('shows no empty-state text before the catalog is requested', async () => {
+      const props = baseProps({
+        onSkillsOpenChange: vi.fn(),
+        skills: [],
+        skillsLoaded: false,
+      });
+      renderWith(props);
+      await openMenu();
+      await openSubmenu('composer-add-menu-skills');
+      await settle();
+      expect(portalRoot!.querySelector('[role="status"]')).toBeNull();
+      rerenderWith({ ...props, skillsLoaded: true });
+      await settle();
+      expect(portalRoot?.textContent).toContain('No results');
+    });
+
     it('lists skills and prepends the invocation on select', async () => {
       const props = baseProps({
         skills: [
