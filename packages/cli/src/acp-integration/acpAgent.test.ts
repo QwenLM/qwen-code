@@ -18075,7 +18075,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // turn a revocation written with the other spelling into a silent no-op
     // on the live session while the caller is told it saved.
     const realRoot = mkdtempSync(path.join(os.tmpdir(), 'qwen-acp-canon-'));
-    const linkRoot = path.join(os.tmpdir(), `qwen-acp-canon-link-${process.pid}`);
+    const linkRoot = path.join(
+      os.tmpdir(),
+      `qwen-acp-canon-link-${process.pid}`,
+    );
     symlinkSync(realRoot, linkRoot, 'dir');
 
     const settings = makeCoreSettings();

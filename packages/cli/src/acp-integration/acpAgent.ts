@@ -6622,8 +6622,8 @@ class QwenAgent implements Agent {
    * status and reload routes keep reading the bootstrap workspace, so the
    * handler would answer "saved" for a server no route ever lists or applies.
    * Those five resolve `requestedCwd || this.config.getTargetDir()` instead
- * (`||`, not `??`: a present-but-empty `cwd` is not a workspace and falls to
- * the bootstrap dir like an absent one).
+   * (`||`, not `??`: a present-but-empty `cwd` is not a workspace and falls to
+   * the bootstrap dir like an absent one).
    *
    * `sessionId` names the requesting session, whose own Config is
    * relocated to its worktree; without one the daemon's bootstrap
