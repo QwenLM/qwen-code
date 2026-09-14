@@ -999,9 +999,14 @@ describe('resolveWebShellBrand', () => {
       // lets a read-only FIFO open succeed.
       const logoPath = writeLogo(LOGO_SVG);
       vi.mocked(fs.fstatSync).mockImplementationOnce(((fd: number) => {
-        const stat = fsActual.fstatSync(fd);
-        const fake = Object.create(Object.getPrototypeOf(stat)) as fs.Stats;
-        Object.assign(fake, stat, { ino: stat.ino + 1 });
+        // Production stats both sides as BigIntStats and compares with a bare
+        // `!==`, so a number-backed fake would trip `dev` first and never
+        // reach the inode this test perturbs.
+        const stat = fsActual.fstatSync(fd, { bigint: true });
+        const fake = Object.create(
+          Object.getPrototypeOf(stat),
+        ) as fs.BigIntStats;
+        Object.assign(fake, stat, { ino: stat.ino + 1n });
         return fake;
       }) as never);
       const { brand, warnings } = resolveWebShellBrand(
@@ -1033,8 +1038,11 @@ describe('resolveWebShellBrand', () => {
         return;
       }
       // Drive the post-swap state: the pre-open lstat reports a regular file,
-      // so the guards pass and the open hits the FIFO.
-      const regular = fsActual.lstatSync(writeLogo(LOGO_SVG));
+      // so the guards pass and the open hits the FIFO. Production stats both
+      // sides as BigIntStats and compares with a bare `!==`, so a
+      // number-backed fake would trip `dev` first and the `!stat.isFile()`
+      // arm this test exists to drive would never be evaluated.
+      const regular = fsActual.lstatSync(writeLogo(LOGO_SVG), { bigint: true });
       vi.mocked(fs.lstatSync).mockImplementationOnce((() => regular) as never);
       const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: fifoPath }) }),

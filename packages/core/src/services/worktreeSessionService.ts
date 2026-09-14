@@ -158,19 +158,22 @@ export async function readWorktreeSessionStrict(
       nodeFs.constants.O_RDONLY |
       (nodeFs.constants.O_NOFOLLOW ?? 0) |
       (nodeFs.constants.O_NONBLOCK ?? 0);
-    const before = await fs.lstat(filePath);
+    const before = await fs.lstat(filePath, { bigint: true });
     observedSidecar = true;
-    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1) {
+    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1n) {
       return { state: 'invalid', reason: 'unsafe sidecar file type' };
     }
-    if (before.ino === 0 || before.size > WORKTREE_SESSION_SIDECAR_MAX_BYTES) {
+    if (
+      before.ino === 0n ||
+      before.size > BigInt(WORKTREE_SESSION_SIDECAR_MAX_BYTES)
+    ) {
       return { state: 'invalid', reason: 'unsafe sidecar size or identity' };
     }
     handle = await fs.open(filePath, flags);
-    const opened = await handle.stat();
+    const opened = await handle.stat({ bigint: true });
     if (
       !opened.isFile() ||
-      opened.nlink !== 1 ||
+      opened.nlink !== 1n ||
       opened.dev !== before.dev ||
       opened.ino !== before.ino
     ) {
@@ -194,16 +197,16 @@ export async function readWorktreeSessionStrict(
     if (bytesRead > WORKTREE_SESSION_SIDECAR_MAX_BYTES) {
       return { state: 'invalid', reason: 'unsafe sidecar size or identity' };
     }
-    const after = await handle.stat();
-    const pathStats = await fs.lstat(filePath);
+    const after = await handle.stat({ bigint: true });
+    const pathStats = await fs.lstat(filePath, { bigint: true });
     if (
       !after.isFile() ||
-      after.nlink !== 1 ||
-      after.size !== bytesRead ||
+      after.nlink !== 1n ||
+      after.size !== BigInt(bytesRead) ||
       after.dev !== opened.dev ||
       after.ino !== opened.ino ||
       !pathStats.isFile() ||
-      pathStats.nlink !== 1 ||
+      pathStats.nlink !== 1n ||
       pathStats.dev !== after.dev ||
       pathStats.ino !== after.ino
     ) {
