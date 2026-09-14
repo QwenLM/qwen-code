@@ -12,11 +12,12 @@
 //! `perform_action`, `set_value`, and `get_element_bounds` index into that same
 //! ordered set.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use atspi::connection::{AccessibilityConnection, P2P};
 use atspi::proxy::accessible::AccessibleProxy;
 use atspi::proxy::proxy_ext::ProxyExt;
@@ -28,7 +29,7 @@ use super::{AtspiIdentity, AtspiNode};
 /// lazily-built trees like Chromium's) must not stall the whole walk.
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 /// Overall budget for one tree walk / operation.
-const OP_TIMEOUT: Duration = Duration::from_secs(25);
+pub(super) const OP_TIMEOUT: Duration = Duration::from_secs(25);
 /// Startup may run before `serve` binds its socket or MCP reads stdin. A
 /// reachable but wedged accessibility bus must not hold either entry point
 /// forever. The worker is deliberately left running after this readiness
@@ -58,8 +59,8 @@ async fn before_snapshot_deadline<T>(
 /// those unwrapped round-trips pending indefinitely. `walk_tree` already guards
 /// itself this way; this helper applies the same backstop to every other public
 /// entry point so a modal/wedged app can never hang the caller (the daemon, an
-/// MCP client) past OP_TIMEOUT (#1936). On timeout it yields `on_timeout` — the
-/// graceful "couldn't complete" value, so e.g. `type_text` falls back to XTEST.
+/// MCP client) past OP_TIMEOUT (#1936). Input callers preserve dispatch state
+/// across that timeout so an unanswered write cannot trigger another input.
 fn bounded<T>(
     work: impl std::future::Future<Output = Result<T>>,
     on_timeout: impl FnOnce() -> Result<T>,
@@ -70,6 +71,33 @@ fn bounded<T>(
             Err(_) => on_timeout(),
         }
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("AT-SPI input was dispatched but not confirmed; observe before retrying")]
+struct InputDispatched;
+
+#[derive(Default)]
+struct InputAttempt {
+    dispatched: Cell<bool>,
+}
+
+impl InputAttempt {
+    fn dispatch(&self) {
+        self.dispatched.set(true);
+    }
+
+    fn finish<T>(&self, result: Result<T>) -> Result<T> {
+        if self.dispatched.get() {
+            result.context(InputDispatched)
+        } else {
+            result
+        }
+    }
+}
+
+pub(crate) fn input_was_dispatched(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<InputDispatched>().is_some()
 }
 
 /// Emit a one-line diagnostic to stderr when `CUA_ATSPI_DEBUG` is set. The
@@ -645,6 +673,23 @@ fn correlate_frame_to_window(
     Some(best_ordinal)
 }
 
+fn correlate_frame_by_title(
+    candidates: &[(usize, String)],
+    windows: &[crate::x11::WindowInfo],
+    window: &crate::x11::WindowInfo,
+) -> Option<usize> {
+    if window.title.trim().is_empty()
+        || windows.iter().filter(|w| w.title == window.title).count() != 1
+    {
+        return None;
+    }
+    let mut matches = candidates
+        .iter()
+        .filter(|(_, title)| title == &window.title);
+    let (ordinal, _) = matches.next()?;
+    matches.next().is_none().then_some(*ordinal)
+}
+
 /// Resolve native window `xid` to the ordinal of the application top-level that
 /// renders it, or `None` when that cannot be proven. `None` means the walk stays
 /// application-wide: callers that merely want a tree carry on, and callers that
@@ -661,24 +706,39 @@ async fn resolve_window_frame(
         // that more certain.
         return Some(0);
     }
-    let window = crate::x11::list_windows(Some(pid))
-        .into_iter()
-        .find(|candidate| candidate.xid == xid)?;
+    let windows = crate::x11::list_windows(Some(pid));
+    let window = windows.iter().find(|candidate| candidate.xid == xid)?;
+    let gtk4_x11 = !crate::wayland::is_wayland()
+        && std::fs::read_to_string(format!("/proc/{pid}/maps"))
+            .is_ok_and(|maps| maps.contains("libgtk-4.so"));
     let mut candidates: Vec<(usize, (i32, i32, i32, i32))> = Vec::new();
+    let mut titles = Vec::new();
+    let mut titles_complete = true;
     for (ordinal, oref) in seeds.iter().enumerate() {
         let Some(Ok(acc)) = call(accessible_for(conn, oref)).await else {
+            titles_complete = false;
             continue;
         };
         // Menus, tooltips and other transients are top-level accessibles too;
         // only real windows can correspond to a native window id.
         let role = match call(acc.get_role_name()).await {
             Some(Ok(role)) => role,
-            _ => continue,
+            _ => {
+                titles_complete = false;
+                continue;
+            }
         };
         if !matches!(
             role.as_str(),
             "frame" | "window" | "dialog" | "alert" | "file chooser"
         ) {
+            continue;
+        }
+        if gtk4_x11 {
+            match call(acc.name()).await {
+                Some(Ok(name)) => titles.push((ordinal, name)),
+                _ => titles_complete = false,
+            }
             continue;
         }
         let Some(Ok(proxies)) = call(acc.proxies()).await else {
@@ -691,12 +751,21 @@ async fn resolve_window_frame(
             candidates.push((ordinal, extents));
         }
     }
-    let resolved = correlate_frame_to_window(&candidates, &window);
+    // GTK4 reports window-local Screen extents and excludes the X11 shadow,
+    // so geometry cannot correlate its top-levels. Require a unique title on
+    // both sides of the same-PID window list instead.
+    let resolved = if gtk4_x11 {
+        titles_complete
+            .then(|| correlate_frame_by_title(&titles, &windows, window))
+            .flatten()
+    } else {
+        correlate_frame_to_window(&candidates, window)
+    };
     if resolved.is_none() {
         dlog!(
             "could not correlate xid {xid} to one of pid {pid}'s {} top-level frame(s); \
              walk stays application-scoped",
-            candidates.len()
+            seeds.len()
         );
     }
     resolved
@@ -932,7 +1001,7 @@ async fn collect_visited_bounded<'a>(
         // and drop the borrow before `acc` moves into `visited`.
         let mut actions: Vec<String> = Vec::new();
         let mut value: Option<String> = None;
-        let mut text_content = String::new();
+        let mut text_content = None;
         if has_action || has_value || has_text {
             if let Some(Ok(proxies)) = call(acc.proxies()).await {
                 if has_action {
@@ -961,20 +1030,21 @@ async fn collect_visited_bounded<'a>(
                             .map(format_value);
                     }
                 }
-                // Text content is where editable/entry text (the typed string)
-                // lives; `name` is usually empty for such widgets.
                 if has_text {
                     if let Some(Ok(tp)) = call(proxies.text()).await {
-                        let count = call(tp.character_count())
-                            .await
-                            .and_then(|r| r.ok())
-                            .unwrap_or(0);
-                        if count > 0 {
-                            let end = count.min(4096);
-                            if let Some(Ok(t)) = call(tp.get_text(0, end)).await {
-                                text_content = t;
-                            }
+                        let count = call(tp.character_count()).await.and_then(|r| r.ok());
+                        if let Some(count) = count {
+                            text_content = if count == 0 {
+                                Some(String::new())
+                            } else {
+                                call(tp.get_text(0, count.min(4096)))
+                                    .await
+                                    .and_then(|result| result.ok())
+                            };
                         }
+                    }
+                    if text_content.is_none() {
+                        status.incomplete("text_unavailable");
                     }
                 }
             } else {
@@ -982,9 +1052,16 @@ async fn collect_visited_bounded<'a>(
             }
         }
 
-        // Surface Text content as the display name when the widget has no name.
-        if name.trim().is_empty() && !text_content.trim().is_empty() {
-            name = text_content;
+        if let Some(text) = text_content {
+            // Keep editable contents separate from their accessible label so
+            // edits (including clearing the field) remain observable.
+            if has_editable {
+                value = Some(text);
+            } else if name.trim().is_empty() {
+                name = text;
+            } else if value.is_none() && text != name {
+                value = Some(text);
+            }
         }
 
         // Children inherit web-document context, plus this node's own role.
@@ -1120,7 +1197,7 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
                 } else {
                     Some(v.name.clone())
                 },
-                value: v.value.clone().filter(|s| !s.is_empty()),
+                value: v.value.clone(),
                 checked: v.checked,
                 enabled: v.enabled,
                 selected: v.selected,
@@ -1535,17 +1612,25 @@ fn pick_editable<'v, 'a>(visited: &'v [Visited<'a>]) -> Option<&'v Visited<'a>> 
 }
 
 /// Try to write `text` into the best editable node in `visited` via AT-SPI
-/// EditableText. Returns `Ok(true)` if the write landed,
-/// `Ok(false)` if no editable was found / the EditableText write was rejected.
-async fn write_into_editable(visited: &[Visited<'_>], text: &str) -> Result<bool> {
+/// EditableText. Returns `Ok(true)` if the write was acknowledged,
+/// `Ok(false)` if no editable was found.
+async fn write_into_editable(
+    visited: &[Visited<'_>],
+    text: &str,
+    attempt: &InputAttempt,
+) -> Result<bool> {
     let target = match pick_editable(visited) {
         Some(t) => t,
         None => return Ok(false),
     };
-    write_into_editable_target(target, text).await
+    write_into_editable_target(target, text, attempt).await
 }
 
-async fn write_into_editable_target(target: &Visited<'_>, text: &str) -> Result<bool> {
+async fn write_into_editable_target(
+    target: &Visited<'_>,
+    text: &str,
+    attempt: &InputAttempt,
+) -> Result<bool> {
     dlog!(
         "insert target: role={:?} in_web_doc={} focused={} has_component={}",
         target.role,
@@ -1560,76 +1645,47 @@ async fn write_into_editable_target(target: &Visited<'_>, text: &str) -> Result<
         .await
         .map_err(|e| anyhow!("interface proxies unavailable: {e}"))?;
 
-    // A focus-free EditableText write is the strongest background route. Try it
-    // before GrabFocus: WebKitGTK can invalidate the original proxy when focus
-    // changes, and writing through that stale object then returns false.
-    if write_through_editable_proxies(&proxies, text).await? {
-        return Ok(true);
-    }
-
-    // Try to grab focus on the widget via AT-SPI Component.GrabFocus.
-    // This should give the widget internal keyboard focus without activating
-    // the window, allowing GTK4 (and similar toolkits) to expose EditableText
-    // on an unfocused window's focused widget.
-    if target.has_component {
-        if let Ok(comp) = proxies.component().await {
-            match call(comp.grab_focus()).await {
-                Some(Ok(true)) => dlog!("GrabFocus succeeded on {:?}", target.role),
-                Some(Ok(false)) => dlog!("GrabFocus returned false on {:?}", target.role),
-                Some(Err(e)) => dlog!("GrabFocus failed on {:?}: {}", target.role, e),
-                None => dlog!("GrabFocus timed out on {:?}", target.role),
-            }
-        } else {
-            dlog!("Component interface unavailable despite has_component=true");
-        }
-    } else {
-        dlog!("Target has no Component interface, skipping GrabFocus");
-    }
-
-    write_through_editable_proxies(&proxies, text).await
+    write_through_editable_proxies(&proxies, text, attempt).await
 }
 
 async fn write_through_editable_proxies(
     proxies: &atspi::proxy::proxy_ext::Proxies<'_>,
     text: &str,
+    attempt: &InputAttempt,
 ) -> Result<bool> {
     let et = proxies
         .editable_text()
         .await
         .map_err(|e| anyhow!("EditableText unavailable: {e}"))?;
 
-    let off = match proxies.text().await {
-        Ok(tp) => tp.caret_offset().await.unwrap_or(0),
-        Err(_) => 0,
-    };
+    let off = proxies.text().await?.caret_offset().await?;
     let len = text.chars().count() as i32;
 
-    if et.insert_text(off, text, len).await.unwrap_or(false) {
-        return Ok(true);
+    attempt.dispatch();
+    if !et.insert_text(off, text, len).await? {
+        return Err(anyhow!("AT-SPI InsertText returned false"));
     }
-    if et.set_text_contents(text).await.unwrap_or(false) {
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(true)
 }
 
 /// Write into the best editable exposed by the current AT-SPI tree without
 /// falling through to synthetic X11 input.
 pub fn type_into_editable(pid: u32, text: &str) -> Result<()> {
-    bounded(
+    let attempt = InputAttempt::default();
+    attempt.finish(bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            if write_into_editable(&visited, text).await? {
+            if write_into_editable(&visited, text, &attempt).await? {
                 Ok(())
             } else {
                 Err(anyhow!("no writable AT-SPI element found for pid {pid}"))
             }
         },
         || Err(anyhow!("AT-SPI editable lookup timed out for pid {pid}")),
-    )
+    ))
 }
 
 /// Write into the exact indexed editable exposed by the caller's snapshot.
@@ -1639,31 +1695,20 @@ pub fn type_into_editable_at(
     identity: Option<AtspiIdentity>,
     text: &str,
 ) -> Result<()> {
-    bounded(
+    let attempt = InputAttempt::default();
+    attempt.finish(bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
             let target = select_indexable_target(&visited, idx, identity.as_ref())?;
-            if write_into_editable_target(target, text).await? {
+            if write_into_editable_target(target, text, &attempt).await? {
                 Ok(())
             } else {
-                // GrabFocus can rebuild WebKitGTK's accessibility object. Walk
-                // the same index space again and retry only that exact element;
-                // never fall through to a different focused/first editable.
-                let refreshed = collect_visited(conn, pid)
-                    .await?
-                    .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-                let refreshed_target = select_indexable_target(&refreshed, idx, identity.as_ref())
-                    .map_err(|_| anyhow!("element {idx} disappeared after AT-SPI focus refresh"))?;
-                if write_into_editable_target(refreshed_target, text).await? {
-                    Ok(())
-                } else {
-                    Err(anyhow!(
-                        "element {idx} is not writable through AT-SPI EditableText"
-                    ))
-                }
+                Err(anyhow!(
+                    "element {idx} is not writable through AT-SPI EditableText"
+                ))
             }
         },
         || {
@@ -1671,11 +1716,12 @@ pub fn type_into_editable_at(
                 "AT-SPI editable write timed out for element {idx} in pid {pid}"
             ))
         },
-    )
+    ))
 }
 
 pub fn insert_text(pid: u32, text: &str) -> Result<bool> {
-    bounded(
+    let attempt = InputAttempt::default();
+    attempt.finish(bounded(
         async {
             let conn = shared_connection().await?;
             let visited = match collect_visited(conn, pid).await? {
@@ -1693,12 +1739,7 @@ pub fn insert_text(pid: u32, text: &str) -> Result<bool> {
                     .count(),
             );
 
-            // Primary attempt: write into an editable exposed by the current tree.
-            // GrabFocus (inside write_into_editable) gives the widget internal
-            // keyboard focus without activating the window, so toolkits that expose
-            // EditableText on an unfocused window (Qt6, and GTK4 with GTK_A11Y=atspi)
-            // accept the write here.
-            if write_into_editable(&visited, text).await? {
+            if write_into_editable(&visited, text, &attempt).await? {
                 return Ok(true);
             }
 
@@ -1744,20 +1785,15 @@ pub fn insert_text(pid: u32, text: &str) -> Result<bool> {
                             dlog!("GTK3 fallback: window XID {xid}, local coords ({wx},{wy})");
 
                             // Click the entry to focus the widget (widget focus, not window focus).
-                            if let Err(e) = crate::input::send_click(xid as u64, wx, wy, 1, 1) {
-                                dlog!("GTK3 fallback: click failed: {e}");
-                                return Ok(false);
-                            };
+                            attempt.dispatch();
+                            crate::input::send_click(xid as u64, wx, wy, 1, 1)?;
 
                             // Small delay for the click to register and the widget to update focus.
                             tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
                             // Now type via X11 XSendEvent — the entry widget has internal focus
                             // so it should accept the keystrokes even though the window is unfocused.
-                            if let Err(e) = crate::input::send_type_text(xid as u64, text) {
-                                dlog!("GTK3 fallback: send_type_text failed: {e}");
-                                return Ok(false);
-                            }
+                            crate::input::send_type_text(xid as u64, text)?;
 
                             dlog!("GTK3 fallback: X11 click+type succeeded");
                             return Ok(true);
@@ -1768,11 +1804,8 @@ pub fn insert_text(pid: u32, text: &str) -> Result<bool> {
 
             Ok(false)
         },
-        || {
-            dlog!("insert_text timed out for pid {pid}; falling back to synthetic typing");
-            Ok(false)
-        },
-    )
+        || Err(anyhow!("AT-SPI insert_text timed out for pid {pid}")),
+    ))
 }
 
 /// Classify what holds keyboard focus in `pid`'s tree, so `type_text` can target
@@ -1886,7 +1919,7 @@ fn is_checkbox_role(role: &str) -> bool {
 /// Index of the action to actuate, or `None` when the element advertises no
 /// activation. `None` must not fall back to index 0: firing an arbitrary
 /// action is worse than reporting that there is nothing to fire.
-fn activation_index(role: &str, actions: &[String]) -> Option<usize> {
+pub(super) fn activation_index(role: &str, actions: &[String]) -> Option<usize> {
     actions.iter().position(|action| {
         is_activation_action(action)
             || (is_checkbox_role(role)
@@ -2002,7 +2035,8 @@ pub fn perform_action(
     idx: usize,
     identity: Option<AtspiIdentity>,
 ) -> Result<(String, bool)> {
-    bounded(
+    let attempt = InputAttempt::default();
+    let result = bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
@@ -2038,9 +2072,14 @@ pub fn perform_action(
                 .await
                 .map_err(|e| anyhow!("Action unavailable: {e}"))?;
             let action = target.actions.get(chosen).cloned().unwrap_or_default();
-            ap.do_action(chosen as i32)
+            attempt.dispatch();
+            let accepted = ap
+                .do_action(chosen as i32)
                 .await
                 .map_err(|e| anyhow!("doAction failed: {e}"))?;
+            if !accepted {
+                anyhow::bail!("doAction returned false");
+            }
             // AT-SPI's doAction acknowledgement can precede the renderer's
             // queued DOM mutation. Give WebKit/Chromium one short event-loop
             // turn before returning success so a caller's immediate external
@@ -2053,7 +2092,8 @@ pub fn perform_action(
                 "perform_action timed out for pid {pid} (app unresponsive to AT-SPI)"
             ))
         },
-    )
+    );
+    attempt.finish(result)
 }
 
 pub fn perform_secondary_action(
@@ -2119,7 +2159,8 @@ pub fn scroll_element(
     direction: &str,
     amount: usize,
 ) -> Result<()> {
-    bounded(
+    let attempt = InputAttempt::default();
+    let result = bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
@@ -2162,6 +2203,7 @@ pub fn scroll_element(
 
             if let (Some(action), Some(action_index)) = (action_proxy, selected) {
                 for _ in 0..amount.max(1) {
+                    attempt.dispatch();
                     match call(action.do_action(action_index)).await {
                         Some(Ok(true)) => {}
                         Some(Ok(false)) => return Err(anyhow!("scroll action returned false")),
@@ -2201,6 +2243,7 @@ pub fn scroll_element(
                 };
                 let next =
                     (current + sign * increment * amount.max(1) as f64).clamp(minimum, maximum);
+                attempt.dispatch();
                 call(value.set_current_value(next))
                     .await
                     .and_then(|result| result.ok())
@@ -2213,7 +2256,8 @@ pub fn scroll_element(
             ))
         },
         || Err(anyhow!("scroll_element timed out for pid {pid}")),
-    )
+    );
+    attempt.finish(result)
 }
 
 /// Give an indexed element keyboard focus through AT-SPI Component.GrabFocus
@@ -2291,7 +2335,8 @@ pub fn focus_element(pid: u32, idx: usize, identity: Option<AtspiIdentity>) -> R
 /// when an element was actuated, `Ok(None)` when no actionable element covers the
 /// point (the caller then falls back to the synthetic X11 path).
 pub fn perform_action_at_point(pid: u32, win_x: i32, win_y: i32) -> Result<Option<String>> {
-    bounded(
+    let attempt = InputAttempt::default();
+    let result = bounded(
         async {
             let conn = shared_connection().await?;
             let visited = match collect_visited(conn, pid).await? {
@@ -2355,13 +2400,19 @@ pub fn perform_action_at_point(pid: u32, win_x: i32, win_y: i32) -> Result<Optio
                 .action()
                 .await
                 .map_err(|e| anyhow!("Action unavailable: {e}"))?;
-            ap.do_action(chosen as i32)
+            attempt.dispatch();
+            let accepted = ap
+                .do_action(chosen as i32)
                 .await
                 .map_err(|e| anyhow!("doAction failed: {e}"))?;
+            if !accepted {
+                anyhow::bail!("doAction returned false");
+            }
             Ok(target.actions.get(chosen).cloned())
         },
-        || Ok(None),
-    )
+        || Err(anyhow!("perform_action_at_point timed out for pid {pid}")),
+    );
+    attempt.finish(result)
 }
 
 /// Vision/pixel click that actually lands — the Wayland answer (and a robust
@@ -2392,7 +2443,8 @@ pub fn perform_action_at_screen_point(
     screen_x: i32,
     screen_y: i32,
 ) -> Result<Option<String>> {
-    bounded(
+    let attempt = InputAttempt::default();
+    let result = bounded(
         async {
             let conn = shared_connection().await?;
             let visited = match collect_visited(conn, pid).await? {
@@ -2467,13 +2519,23 @@ pub fn perform_action_at_screen_point(
                 .action()
                 .await
                 .map_err(|e| anyhow!("Action unavailable: {e}"))?;
-            ap.do_action(chosen as i32)
+            attempt.dispatch();
+            let accepted = ap
+                .do_action(chosen as i32)
                 .await
                 .map_err(|e| anyhow!("doAction failed: {e}"))?;
+            if !accepted {
+                anyhow::bail!("doAction returned false");
+            }
             Ok(target.actions.get(chosen).cloned())
         },
-        || Ok(None),
-    )
+        || {
+            Err(anyhow!(
+                "perform_action_at_screen_point timed out for pid {pid}"
+            ))
+        },
+    );
+    attempt.finish(result)
 }
 
 /// Roles that draw text/graphics but don't *do* anything when actuated. GTK4
@@ -2519,7 +2581,8 @@ fn select_click_target(
 }
 
 pub fn set_value(pid: u32, idx: usize, identity: Option<AtspiIdentity>, value: &str) -> Result<()> {
-    bounded(
+    let attempt = InputAttempt::default();
+    attempt.finish(bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
@@ -2541,28 +2604,22 @@ pub fn set_value(pid: u32, idx: usize, identity: Option<AtspiIdentity>, value: &
             if let Ok(et) = proxies.editable_text().await {
                 // Replace whole contents (parity with the Windows/macOS set_value,
                 // which overwrite rather than insert at the caret).
-                if et.set_text_contents(value).await.unwrap_or(false) {
-                    return Ok(());
+                attempt.dispatch();
+                if !et.set_text_contents(value).await? {
+                    return Err(anyhow!("AT-SPI SetTextContents returned false"));
                 }
-                // Some toolkits reject SetTextContents but accept an insert at the
-                // caret offset; clear-then-insert as a fallback.
-                let off = match proxies.text().await {
-                    Ok(tp) => tp.caret_offset().await.unwrap_or(0),
-                    Err(_) => 0,
-                };
-                let len = value.chars().count() as i32;
-                if et.insert_text(off, value, len).await.unwrap_or(false) {
-                    return Ok(());
-                }
+                return Ok(());
             }
             if target.has_value {
                 let v: f64 = value
                     .parse()
                     .map_err(|_| anyhow!("value '{value}' is not numeric for a Value element"))?;
-                proxies
+                let value_proxy = proxies
                     .value()
                     .await
-                    .map_err(|e| anyhow!("Value unavailable: {e}"))?
+                    .map_err(|e| anyhow!("Value unavailable: {e}"))?;
+                attempt.dispatch();
+                value_proxy
                     .set_current_value(v)
                     .await
                     .map_err(|e| anyhow!("setCurrentValue failed: {e}"))?;
@@ -2577,7 +2634,7 @@ pub fn set_value(pid: u32, idx: usize, identity: Option<AtspiIdentity>, value: &
                 "set_value timed out for pid {pid} (app unresponsive to AT-SPI)"
             ))
         },
-    )
+    ))
 }
 
 pub fn get_element_bounds(
@@ -2585,16 +2642,28 @@ pub fn get_element_bounds(
     idx: usize,
     identity: Option<AtspiIdentity>,
 ) -> Result<(i32, i32, u32, u32)> {
+    get_element_bounds_in_window(pid, idx, 0, identity)
+}
+
+pub(crate) fn get_element_bounds_in_window(
+    pid: u32,
+    idx: usize,
+    xid: u64,
+    identity: Option<AtspiIdentity>,
+) -> Result<(i32, i32, u32, u32)> {
     bounded(
         async {
             let conn = shared_connection().await?;
-            let visited = collect_visited(conn, pid)
+            let (visited, only_frame, _) = collect_visited_bounded(conn, pid, xid, None, None)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
             let web_document_origin = web_document_origin_for_visited(&visited, pid)
                 .await
                 .unwrap_or((0, 0));
             let target = select_indexable_target(&visited, idx, identity.as_ref())?;
+            if xid != 0 && only_frame != Some(target.frame_ordinal) {
+                return Err(anyhow!("element {idx} does not belong to window {xid}"));
+            }
             if !target.has_component {
                 return Err(anyhow!("element {idx} exposes no Component interface"));
             }
@@ -2609,7 +2678,7 @@ pub fn get_element_bounds(
             // Prefer WINDOW coords + a deterministic screen offset — fixes GTK4,
             // whose CoordType::Screen collapses every element to (0,0). Fall back to
             // Screen on Wayland / when no X11 window resolves (offset is None).
-            match window_to_screen_offset(pid, 0, None) {
+            match window_to_screen_offset(pid, xid, None) {
                 Some((ox, oy)) => {
                     let (x, y, w, h) = comp
                         .get_extents(CoordType::Window)
@@ -2746,6 +2815,13 @@ fn window_to_screen_offset(pid: u32, xid: u64, title: Option<&str>) -> Option<(i
             authoritative,
             crate::wayland::observed_window_origin(pid),
         );
+    }
+    // GTK3 Screen coordinates already include the CSD inset. GTK4's broken
+    // Screen provider still needs the Window reconstruction below.
+    if std::fs::read_to_string(format!("/proc/{pid}/maps"))
+        .is_ok_and(|maps| maps.contains("libgtk-3.so") && !maps.contains("libgtk-4.so"))
+    {
+        return None;
     }
     // Resolve a usable window xid. `xid == 0` means "no hint" (get_element_bounds
     // has no window context); fall back to this pid's first window — the same
@@ -3090,7 +3166,7 @@ async fn element_bounds_for_visited(
 
 #[cfg(test)]
 mod frame_correlation_tests {
-    use super::{correlate_frame_to_window, FRAME_MATCH_TOLERANCE_PX};
+    use super::{correlate_frame_by_title, correlate_frame_to_window, FRAME_MATCH_TOLERANCE_PX};
     use crate::x11::WindowInfo;
 
     fn window(x: i32, y: i32, width: u32, height: u32) -> WindowInfo {
@@ -3186,6 +3262,47 @@ mod frame_correlation_tests {
         let candidates = [(0usize, (far_away, far_away, 1050, 953))];
         assert_eq!(
             correlate_frame_to_window(&candidates, &window(438, 80, 1050, 953)),
+            None
+        );
+    }
+
+    #[test]
+    fn gtk4_titles_require_uniqueness_in_both_window_lists() {
+        let mut first = window(560, 80, 482, 302);
+        first.title = "GTK4 A".into();
+        let mut second = window(620, 450, 482, 302);
+        second.xid += 1;
+        second.title = "GTK4 B".into();
+        let candidates = [(3, "GTK4 A".into()), (7, "GTK4 B".into())];
+        let windows = [first.clone(), second.clone()];
+        assert_eq!(
+            correlate_frame_by_title(&candidates, &windows, &first),
+            Some(3)
+        );
+        assert_eq!(
+            correlate_frame_by_title(&candidates, &windows, &second),
+            Some(7)
+        );
+        second.title = first.title.clone();
+        assert_eq!(
+            correlate_frame_by_title(&candidates, &[first.clone(), second], &first),
+            None
+        );
+        assert_eq!(
+            correlate_frame_by_title(
+                &[(3, "GTK4 A".into()), (7, "GTK4 A".into())],
+                &windows,
+                &first
+            ),
+            None
+        );
+        assert_eq!(
+            correlate_frame_by_title(&[(3, "other".into())], &windows, &first),
+            None
+        );
+        first.title.clear();
+        assert_eq!(
+            correlate_frame_by_title(&[(3, String::new())], &[first.clone()], &first),
             None
         );
     }

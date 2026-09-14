@@ -418,6 +418,77 @@ mod tests {
     }
 
     #[test]
+    fn named_editable_changes_and_clearing_remain_visible() {
+        let revisions = LinuxObservationRevisions::new();
+        let mut captured = tree(
+            (0..8)
+                .map(|index| {
+                    let mut item = node(&format!("/field/{index}"), "Name");
+                    item.element_index = Some(index);
+                    item.role = "entry".into();
+                    item.value = Some(String::new());
+                    item
+                })
+                .collect(),
+        );
+        let mut base = None;
+        let mut element_id = None;
+        for (value, mode) in [
+            ("", ObservationMode::Full),
+            ("prefix|X", ObservationMode::Diff),
+            ("prefix|X", ObservationMode::NoChange),
+            ("", ObservationMode::Diff),
+        ] {
+            captured.nodes[0].value = Some(value.into());
+            let observation = revisions
+                .observe(
+                    session(),
+                    10,
+                    20,
+                    5000,
+                    usize::MAX,
+                    &captured,
+                    &request(base),
+                )
+                .unwrap();
+            assert_eq!(observation.mode, mode);
+            assert!(observation.nodes[0]
+                .body
+                .contains(&format!("value={value:?}")));
+            if let Some(id) = &element_id {
+                assert_eq!(&observation.nodes[0].element_id, id);
+            }
+            element_id = Some(observation.nodes[0].element_id.clone());
+            base = Some(observation.revision_id);
+        }
+    }
+
+    #[test]
+    fn compact_rows_preserve_text_state_and_secondary_actions() {
+        let mut control = node("/entry", "Line 1\n\"Line 2\"");
+        control.role = "entry".into();
+        control.value = control.name.clone();
+        control.enabled = Some(false);
+        control.selected = Some(true);
+        control.actions = vec!["activate".into(), "showContextMenu".into()];
+        let body = format_revision_body(&control);
+        assert_eq!(
+            body,
+            "<entry> \"Line 1\\n\\\"Line 2\\\"\" disabled selected actions=[\"showContextMenu\"]"
+        );
+        let disabled = body.clone();
+        control.enabled = Some(true);
+        assert_ne!(format_revision_body(&control), disabled);
+        let selected = format_revision_body(&control);
+        control.selected = Some(false);
+        assert_ne!(format_revision_body(&control), selected);
+        let secondary = format_revision_body(&control);
+        control.actions.pop();
+        assert_ne!(format_revision_body(&control), secondary);
+        assert_eq!(control.actions, ["activate"]);
+    }
+
+    #[test]
     fn owner_change_and_incomplete_capture_fail_closed() {
         let revisions = LinuxObservationRevisions::new();
         let initial = revisions
