@@ -587,6 +587,39 @@ it('clears a rejected stored credential instead of pre-filling it', async () => 
   expect(container.textContent).toContain('Invalid or expired');
 });
 
+it('keeps a token typed during an automatic retry when that retry is rejected', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503 }))
+    .mockResolvedValueOnce(stubResponse({ status: 401 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount('stale-token');
+  // A transient 503 arms a retry and leaves the field editable for the whole
+  // window, so the operator can type before the next probe settles.
+  expect(fetch).toHaveBeenCalledTimes(1);
+  act(() => {
+    const input = tokenInput();
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'fresh-token');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () => {
+    vi.advanceTimersByTime(2_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  // The retry re-probes the credential the gate started with, so the 401 is a
+  // verdict about that one — never about the value just typed.
+  for (const call of fetch.mock.calls) {
+    expect((call[1] as RequestInit).headers).toEqual({
+      Authorization: 'Bearer stale-token',
+    });
+  }
+  expect(tokenInput().value).toBe('fresh-token');
+});
+
 it('scopes and themes the gate root like the app root', async () => {
   vi.stubGlobal(
     'fetch',

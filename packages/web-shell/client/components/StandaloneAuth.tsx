@@ -231,8 +231,11 @@ export function StandaloneAuth({
           setNeedsToken(true);
           // A rejected stored/fragment credential must not stay pre-filled in
           // the masked input: recovery replaces the value, not appends to it.
+          // Only that credential is dropped. The field stays editable while an
+          // automatic retry is outstanding, so a value typed during that window
+          // is not what this 401 rejected and must survive it.
           if (candidate && candidate === initialCandidateRef.current)
-            setToken('');
+            setToken((current) => (current === candidate ? '' : current));
           setStatus(
             candidate
               ? copyRef.current.invalidToken
