@@ -1,5 +1,7 @@
 # Web Shell channel sessions in the sidebar
 
+[English](2026-08-03-web-shell-channel-session-sidebar.md) | [简体中文](2026-08-03-web-shell-channel-session-sidebar.zh-CN.md)
+
 ## Motivation
 
 Daemon-managed channels create ordinary workspace sessions with
@@ -12,7 +14,11 @@ stored in the selected workspace.
 
 Add a two-option source switch above the sidebar's project session list:
 
-- **Tasks** lists `sourceType: "default"` and remains the initial selection.
+- **Tasks** requests `sourceType: "default"` and remains the initial selection.
+  The daemon catalog includes default, legacy, and `qwen-live` sessions.
+  Separately, the Sidebar adds sessions bound to durable scheduled tasks with
+  a mode other than `per_run` to its ordinary task list; scheduled-task run
+  history stays in its dedicated view.
 - **Channels** lists `sourceType: "channel"`.
 
 The switch is shown only when the daemon advertises
@@ -46,8 +52,14 @@ visible text.
 ## Boundaries
 
 - Channel configuration and runtime management are unchanged.
-- Session source metadata and daemon list APIs are unchanged.
-- Session Overview and Split View keep their existing default-session scope.
+- Persisted session source metadata is unchanged. The public daemon `default`
+  filter now also matches `qwen-live`; other source filters stay exact, and an
+  explicit `sourceId` remains an exact restriction within the selected catalog.
+  The internal Conversations filter is unchanged.
+- Session Overview, the Split View picker, and workspace total, running, and
+  attention counts share the expanded default catalog, including `qwen-live`.
+  Scheduled-task eligibility is unchanged. REST close, delete, and archive reject
+  Live tasks with an attached client or active prompt.
 - The switch is in-memory UI state and resets to Tasks on page reload.
 - Channel type classification reflects the current workspace configuration;
   sessions do not persist a historical platform type.

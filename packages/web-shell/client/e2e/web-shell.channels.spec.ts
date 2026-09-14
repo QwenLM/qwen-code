@@ -515,3 +515,53 @@ test('creates and deletes a typed Channel configuration', async ({
       }),
     ]);
 });
+
+test('shows Qwen Live sessions in Tasks and excludes them from Channels @smoke', async ({
+  page,
+}, testInfo) => {
+  const workspaceCwd = '/tmp/qwen-web-shell-e2e';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd,
+    sessions: [
+      {
+        workspaceCwd,
+        sessionId: 'qwen-live-task',
+        displayName: 'Qwen Live task fixture',
+        sourceType: 'qwen-live',
+      },
+      {
+        workspaceCwd,
+        sessionId: 'channel-task',
+        displayName: 'Channel task fixture',
+        sourceType: 'channel',
+      },
+    ],
+  });
+  await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+
+  await page.goto('/');
+  await expect(
+    page.getByRole('tab', { name: 'Tasks', exact: true }),
+  ).toHaveAttribute('aria-selected', 'true');
+  await expect(
+    page.getByText('Qwen Live task fixture', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText('Channel task fixture', { exact: true }),
+  ).toHaveCount(0);
+
+  await page.getByRole('tab', { name: 'Channels', exact: true }).click();
+  await expect(
+    page.getByText('Channel task fixture', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText('Qwen Live task fixture', { exact: true }),
+  ).toHaveCount(0);
+
+  await page.getByRole('tab', { name: 'Tasks', exact: true }).click();
+  await expect(
+    page.getByText('Qwen Live task fixture', { exact: true }),
+  ).toBeVisible();
+});

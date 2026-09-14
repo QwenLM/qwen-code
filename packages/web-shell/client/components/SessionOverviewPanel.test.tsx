@@ -522,6 +522,21 @@ describe('deriveSessionCards', () => {
 });
 
 describe('SessionOverviewPanel', () => {
+  it('includes qwen-live sessions in the overview and attention filter', () => {
+    sessionsState.sessions = [
+      session('live', {
+        displayName: 'Live task',
+        sourceType: 'qwen-live',
+        isWaitingForPermission: true,
+      }),
+      session('ordinary', { displayName: 'Ordinary task' }),
+    ];
+    render();
+    expect(rowTitles()).toEqual(['Live task', 'Ordinary task']);
+    act(() => click(statusFilterButton('Needs attention')));
+    expect(rowTitles()).toEqual(['Live task']);
+  });
+
   it.each(['FEATURE/TOPIC', '1234', '#1234', 'SESSION-SEARCH'])(
     'searches branch, PR and ID metadata: %s',
     (query) => {

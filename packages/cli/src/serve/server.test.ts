@@ -41087,6 +41087,75 @@ describe('Live conversation runtime lifecycle', () => {
     );
   });
 
+  it.each([
+    { clientCount: 1, hasActivePrompt: false },
+    { clientCount: 0, hasActivePrompt: true },
+  ])(
+    'blocks destructive REST actions for externally active Live sessions %j',
+    async (activity) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440211';
+      const summary: BridgeSessionSummary = {
+        sessionId,
+        workspaceCwd: '/tmp',
+        createdAt: '2026-05-17T12:00:00.000Z',
+        sourceType: 'qwen-live',
+        ...activity,
+      };
+      const bridge = fakeBridge({
+        listImpl: () => [summary],
+        summaryImpl: (id) => {
+          if (id !== sessionId) throw new SessionNotFoundError(id);
+          return summary;
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: '/tmp' },
+        undefined,
+        { bridge, boundWorkspace: '/tmp' },
+      );
+      const workspaceId = encodeURIComponent('/tmp');
+      const responses = [
+        await request(app)
+          .delete('/session/' + sessionId)
+          .set('Host', '127.0.0.1:' + baseOpts.port),
+      ];
+      for (const prefix of ['', '/workspaces/' + workspaceId]) {
+        for (const action of ['delete', 'archive']) {
+          responses.push(
+            await request(app)
+              .post(prefix + '/sessions/' + action)
+              .set('Host', '127.0.0.1:' + baseOpts.port)
+              .send({ sessionIds: [sessionId] }),
+          );
+        }
+      }
+      for (const response of responses) {
+        expect(response.status).toBe(409);
+        expect(response.body).toMatchObject({
+          code: 'live_session_active',
+          sessionId,
+        });
+      }
+      expect(bridge.closeCalls).toHaveLength(0);
+
+      summary.clientCount = 0;
+      summary.hasActivePrompt = false;
+      const stopped = await request(app)
+        .delete('/session/' + sessionId)
+        .set('Host', '127.0.0.1:' + baseOpts.port);
+      expect(stopped.status).toBe(204);
+
+      summary.sourceType = 'default';
+      summary.clientCount = 1;
+      summary.hasActivePrompt = true;
+      const ordinary = await request(app)
+        .delete('/session/' + sessionId)
+        .set('Host', '127.0.0.1:' + baseOpts.port);
+      expect(ordinary.status).toBe(204);
+      expect(bridge.closeCalls).toHaveLength(2);
+    },
+  );
+
   it('blocks REST close and archive for active Live sessions until the call stops', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
     const bridge = fakeBridge();

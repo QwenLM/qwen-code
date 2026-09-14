@@ -58,7 +58,7 @@ import styles from './WorkspacesOverviewPanel.module.css';
 const SESSIONS_POLL_MS = 30_000;
 const GIT_POLL_MS = 60_000;
 
-/** One page of active web-shell sessions for one workspace. */
+/** One page of the active default catalog, including Qwen Live tasks. */
 function useWorkspaceSessionsPage(cwd: string, enabled: boolean) {
   const workspace = useWorkspace();
   const query = useMemo(
