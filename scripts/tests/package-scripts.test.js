@@ -1807,7 +1807,7 @@ describe('package scripts', () => {
 
       expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
       expect(installStep).toContain(
-        'npm ci --prefer-offline --no-audit --progress=false',
+        'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
       );
       if (armsHooks) {
         expect(installStep).toContain('git config core.hooksPath .husky');

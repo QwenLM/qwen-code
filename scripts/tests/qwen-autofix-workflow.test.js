@@ -10873,7 +10873,7 @@ exit 1
     for (const step of installAndBuildSteps) {
       expect(step).toContain('for attempt in 1 2 3; do');
       expect(step).toContain(
-        'npm ci --prefer-offline --no-audit --progress=false',
+        'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
       );
       expect(step).toContain('sleep $((attempt * 15))');
       expect(step).toContain('npm run build');
@@ -10894,15 +10894,11 @@ exit 1
         'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
       );
       expect(step).toContain("node-version: '22.x'");
-      // The cache is the one input that is NOT the same on both pools — see
-      // 'does not restore the remote npm cache on the persistent pool'. The
-      // inputs are still identical across the three steps, which is what
-      // this test is for.
-      expect(step).toContain(
-        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
-      );
+      // No setup-node step restores a cache: dependencies install with pnpm,
+      // and the pnpm store has its own hosted-only restore step, pinned by
+      // 'does not restore a remote cache on the persistent pool'.
+      expect(step).not.toMatch(/^\s*cache(-dependency-path)?:/m);
       expect(step).toContain('package-manager-cache: false');
-      expect(step).toContain("cache-dependency-path: 'package-lock.json'");
     }
   });
 
@@ -10999,7 +10995,9 @@ exit 1
     // The leg itself never rebuilds the base bundle — that is the entire
     // point of the fan-out.
     const legInstall = stepOf(reviewAddressJob, 'Install dependencies');
-    expect(legInstall).toContain('npm ci --prefer-offline');
+    expect(legInstall).toContain(
+      'pnpm install --frozen-lockfile --prefer-offline',
+    );
     expect(legInstall).not.toContain('npm run build');
     expect(legInstall).not.toContain('npm run bundle');
   });
@@ -12817,34 +12815,38 @@ exit 1
     }
   });
 
-  it('does not restore the remote npm cache on the persistent pool', () => {
+  it('does not restore a remote cache on the persistent pool', () => {
     // Measured on one review-address leg: `Set up Node.js` took 339s, of
     // which Node itself was free (already in the runner tool cache) and
     // 2,654,052,865 bytes at ~10 MB/s were the npm cache restore — guarding
     // an `npm ci` that took 29s in the very next step. Every leg pays it,
-    // up to ten per scan, plus build-cli and issue-autofix.
-    // All three consumers, so a fourth job with a hardcoded cache fails
-    // here rather than quietly paying 2.65 GB per run — counted by step
-    // name, so no choice of inputs can dodge the capture.
+    // up to ten per scan, plus build-cli and issue-autofix. Dependencies now
+    // install with pnpm, whose store stays on the pool's disk, so the only
+    // remote restore left is the hosted fallback's store cache.
     expect(nodeSetupSteps).toHaveLength(3);
     for (const step of nodeSetupSteps) {
-      expect(step).toContain(
-        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
-      );
+      expect(step).not.toMatch(/^\s*cache:/m);
     }
-    // Text pins cannot tell a ternary that works from one that GHA's
-    // operand-value &&/|| semantics defeat — this PR's first attempt read
-    // correctly and still restored the cache on BOTH pools. Evaluate the
-    // pinned expression the way Actions does: '' on the persistent pool,
-    // 'npm' on the ephemeral hosted fallback.
-    const cacheExpression =
-      nodeSetupSteps[0].match(/cache: "\$\{\{ ([^}]+) \}\}"/)?.[1] ?? '';
+    const storeCacheSteps =
+      workflow.match(
+        /- name: 'Cache pnpm store \(hosted\)'\n\s+if: "[^"]*"\n\s+uses: '[^']*'/g,
+      ) ?? [];
+    // All three consumers, so a fourth job that restores the store without
+    // the pool guard fails here rather than quietly paying for it per run.
+    expect(storeCacheSteps).toHaveLength(3);
+    for (const step of storeCacheSteps) {
+      expect(step).toContain("uses: './.github/actions/pnpm-store-cache'");
+    }
+    // Text pins cannot tell a condition that works from one GHA's expression
+    // semantics defeat; evaluate it the way Actions does.
+    const condition =
+      storeCacheSteps[0].match(/if: "\$\{\{ ([^}]+) \}\}"/)?.[1] ?? '';
     for (const [environment, expected] of [
-      ['self-hosted', ''],
-      ['github-hosted', 'npm'],
+      ['self-hosted', false],
+      ['github-hosted', true],
     ]) {
       expect(
-        evalGhaExpression(cacheExpression, {
+        evalGhaExpression(condition, {
           'runner.environment': environment,
         }),
       ).toBe(expected);
