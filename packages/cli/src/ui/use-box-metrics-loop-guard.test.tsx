@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, useRef, useState, type ReactNode } from 'react';
+import {
+  act,
+  StrictMode,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   Box,
   render,
@@ -165,6 +171,32 @@ describe('ink useBoxMetrics loop guard', () => {
     expect(lastFrame()).toContain('x');
   });
 
+  it('settles an oscillating box inside StrictMode, where the render body runs twice', async () => {
+    // #11817. React invokes a render body twice under StrictMode, and `DEBUG=1
+    // npm run dev` renders the CLI inside it. A budget mutated during render is
+    // spent by the first invocation and refilled by the second, so it never
+    // drains and React's #185 fires instead. The budget therefore has to be
+    // settled once per commit rather than once per render invocation.
+    const { stdout, lastFrame } = createTestStdout();
+    let renderError: unknown;
+    try {
+      await mount(
+        <StrictMode>
+          <OscillatingBox />
+        </StrictMode>,
+        stdout,
+      );
+    } catch (error) {
+      // Captured instead of thrown so the failure stays one case: a mount that
+      // throws out of the commit phase also leaves this suite's act scope
+      // unusable for the cases after it.
+      renderError = error;
+    }
+
+    expect(renderError).toBeUndefined();
+    expect(lastFrame()).toContain('x');
+  });
+
   it('still measures on a later resize once an oscillation tripped the guard', async () => {
     const { stdout, setColumns, lastFrame } = createTestStdout(80);
     const app = await mount(
@@ -206,8 +238,9 @@ describe('ink useBoxMetrics loop guard', () => {
     // A cascade whose commits are slower than that refills on every measurement,
     // so the budget never drains and React's own 50-nested-update cap fires
     // first - which is what a loaded CI runner or a slower platform does.
-    // Advancing the clock on every read pins that machine speed, so the failure
-    // is deterministic instead of something you have to lose a race to see.
+    // Advancing the clock 16ms on every read keeps that refill firing on every
+    // measurement however fast the machine is, so this case separates a
+    // commit-counted budget from a timed one without racing the clock.
     let clock = 0;
     const now = vi
       .spyOn(performance, 'now')

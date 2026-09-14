@@ -204,7 +204,7 @@ index 0000000..745a4ba
 +export const getFrameController = (stdout) => instances.get(stdout)?.frameController;
 +//# sourceMappingURL=frame-controller.js.map
 diff --git a/node_modules/ink/build/hooks/use-box-metrics.js b/node_modules/ink/build/hooks/use-box-metrics.js
-index c4386e4..721fd0d 100644
+index c4386e4..563c484 100644
 --- a/node_modules/ink/build/hooks/use-box-metrics.js
 +++ b/node_modules/ink/build/hooks/use-box-metrics.js
 @@ -1,4 +1,4 @@
@@ -225,7 +225,7 @@ index c4386e4..721fd0d 100644
  // eslint-disable-next-line @typescript-eslint/no-restricted-types
  const findRootNode = (node) => {
      if (!node) {
-@@ -50,16 +55,55 @@ const useBoxMetrics = (
+@@ -50,18 +55,70 @@ const useBoxMetrics = (
  ref) => {
      const [metrics, setMetrics] = useState(emptyMetrics);
      const [hasMeasured, setHasMeasured] = useState(false);
@@ -235,10 +235,10 @@ index c4386e4..721fd0d 100644
 +    // #185 and the process dies.
 +    //
 +    // Only a measurement that changes the metrics schedules another render of
-+    // this component, so only those spend budget. The budget refills on any
-+    // render the hook did not cause (new props, a parent update, a measurement
-+    // that settled) and on a terminal resize, which keeps mount, streaming
-+    // content and resize measuring indefinitely.
++    // this component, so only those spend budget. The budget refills on a commit
++    // the hook did not cause (new props, a parent update, a re-measure after an
++    // external layout change) and on a terminal resize, which keeps mount,
++    // streaming content and resize measuring indefinitely.
 +    //
 +    // Every refill is an event in React's own update chain, so a cascade trips
 +    // after the same number of commits on any machine. Refilling on elapsed
@@ -250,16 +250,9 @@ index c4386e4..721fd0d 100644
 +    // stalls React's act queue.
 +    const guardRef = useRef({
 +        count: 0,
-+        selfDriven: false,
++        armed: false,
 +        last: null,
 +    });
-+    if (guardRef.current.selfDriven) {
-+        guardRef.current.selfDriven = false;
-+        guardRef.current.count += 1;
-+    }
-+    else {
-+        guardRef.current.count = 0;
-+    }
      const { stdout } = useStdout();
      const updateMetrics = useCallback(() => {
 +        const guard = guardRef.current;
@@ -282,13 +275,43 @@ index c4386e4..721fd0d 100644
 +            last.top !== layout.top;
 +        if (hasChanged) {
 +            guard.last = layout;
-+            guard.selfDriven = true;
++            // Arms the next commit as one this hook caused; the layout listener
++            // below settles the budget when that commit arrives.
++            guard.armed = true;
 +        }
 +        setMetrics(previousMetrics => (hasChanged ? layout : previousMetrics));
          setHasMeasured(Boolean(ref.current));
      }, [ref]);
++    // Settles the budget for the commit this is called from, once per commit and
++    // never during render. Accounting kept in render would be invoked twice under
++    // StrictMode - spent by the first invocation and refilled by the second - and
++    // the guard would then never trip on the one code path that renders inside
++    // StrictMode (`DEBUG=1 npm run dev`), letting React's 50-update cap fire
++    // instead. A commit is this hook's own when the measurement that scheduled it
++    // armed the guard, and any other commit refills the budget.
++    const onLayout = useCallback(() => {
++        const guard = guardRef.current;
++        if (guard.armed) {
++            guard.armed = false;
++            guard.count += 1;
++        }
++        else {
++            guard.count = 0;
++        }
++        updateMetrics();
++    }, [updateMetrics]);
      // Runs after every render of this component.
-@@ -79,9 +123,15 @@ ref) => {
+     // This keeps metrics fresh when local state/props in this subtree change.
+     useEffect(updateMetrics);
+@@ -72,16 +129,22 @@ ref) => {
+         if (!rootNode) {
+             return;
+         }
+-        return addLayoutListener(rootNode, updateMetrics);
++        return addLayoutListener(rootNode, onLayout);
+     });
+     // Terminal resize events do not go through React's render cycle. Ink
+     // recalculates Yoga layout in its own resize handler — registered in the
      // Ink constructor, before this hook mounts — so by the time the resize
      // callback runs, Yoga has already computed the post-resize metrics.
      useEffect(() => {
