@@ -110,7 +110,7 @@ function captureStatus(structured) {
     ? [...new Set(details.filter((detail) => typeof detail === "string"))]
     : [];
   const isBudgetDetail = (detail) =>
-    /^walk: max_(elements truncated|depth exceeded)$/.test(detail);
+    /^(walk: max_(elements truncated|depth exceeded)|max_(elements|depth)_reached)$/.test(detail);
   return {
     complete: revision?.capture_complete ?? structured?.capture_complete,
     readComplete:
@@ -274,7 +274,7 @@ function observationDisablesDiff(options) {
 
 function defaultDeliveryMode(environment) {
   const value = environment?.[DEFAULT_DELIVERY_MODE_ENV];
-  if (value === undefined) return "background";
+  if (value === undefined) return undefined;
   if (typeof value !== "string") {
     throw new ComputerUseError(
       `${DEFAULT_DELIVERY_MODE_ENV} must be background or foreground`,
@@ -408,6 +408,7 @@ export class ComputerUse {
   #closed = false;
   #revisionSupport;
   #defaultDeliveryMode;
+  #connectedPlatform;
   #apps = new Map();
 
   /** Internal injection seam for hermetic tests. Use create/connect in applications. */
@@ -596,6 +597,7 @@ export class ComputerUse {
   async getPlatform(options = {}) {
     this.#requireOpen();
     requireDispatchableSignal("getPlatform", options.signal);
+    this.#connectedPlatform = undefined;
     if (typeof this.#owner?.listToolsJson !== "function") {
       throw new ComputerUseError("the connected driver does not report its platform", {
         code: "driver_platform_unavailable",
@@ -615,6 +617,7 @@ export class ComputerUse {
         code: "driver_platform_unavailable",
       });
     }
+    this.#connectedPlatform = platform;
     return platform;
   }
 
@@ -680,6 +683,7 @@ export class ComputerUse {
         }
         this.#connectionGeneration += 1;
         this.#revisionSupport = undefined;
+        this.#connectedPlatform = undefined;
         this.#revisionCursors.clear();
         lifecycle.operation.state = "committed";
         lifecycle.operation.committed = true;
@@ -728,12 +732,16 @@ export class ComputerUse {
     return values[normalized];
   }
 
-  #actionDeliveryMode(options) {
+  async #actionDeliveryMode(options) {
     if (options && Object.hasOwn(options, "delivery_mode")) {
       throw new ComputerUseError("delivery_mode is not supported; use deliveryMode");
     }
-    const value = options?.deliveryMode;
-    return this.#deliveryMode(value === undefined ? this.#defaultDeliveryMode : value);
+    const value = options?.deliveryMode === undefined ? this.#defaultDeliveryMode : options.deliveryMode;
+    if (value !== undefined) return this.#deliveryMode(value);
+    const platform = this.#connectedPlatform ?? await this.getPlatform({ signal: options?.signal });
+    // Pass the possible focus change through native authorization. The Linux
+    // driver still chooses semantic input before guarded global input.
+    return this.#deliveryMode(platform === "linux" ? "foreground" : "background");
   }
 
   #scrollDirection(value) {
@@ -1128,14 +1136,14 @@ export class ComputerUse {
     const { button, count, signal } = options ?? {};
     if (button !== undefined) input.button = this.#clickButton(button);
     if (count !== undefined) input.count = requireIntegerRange("count", count, 1, 3);
-    input.deliveryMode = this.#actionDeliveryMode(options);
+    input.deliveryMode = await this.#actionDeliveryMode(options);
     return actionResult(await this.#invoke("windowClick", input, { signal }));
   }
 
   async doubleClick(options) {
     const input = this.#windowAddress(options);
     if (options?.appContext) input.appContext = true;
-    input.deliveryMode = this.#actionDeliveryMode(options);
+    input.deliveryMode = await this.#actionDeliveryMode(options);
     return actionResult(
       await this.#invoke("doubleClick", input, {
         signal: options?.signal,
@@ -1149,7 +1157,7 @@ export class ComputerUse {
     if (options?.modifier !== undefined) {
       input.modifier = requireStringList("modifier", options.modifier);
     }
-    input.deliveryMode = this.#actionDeliveryMode(options);
+    input.deliveryMode = await this.#actionDeliveryMode(options);
     return actionResult(
       await this.#invoke("rightClick", input, {
         signal: options?.signal,
@@ -1190,7 +1198,7 @@ export class ComputerUse {
     if (steps !== undefined) {
       input.steps = BigInt(requireIntegerRange("steps", steps, 1, 200));
     }
-    input.deliveryMode = this.#actionDeliveryMode(options);
+    input.deliveryMode = await this.#actionDeliveryMode(options);
     if (button !== undefined) input.button = this.#clickButton(button);
     if (modifier !== undefined) input.modifier = requireStringList("modifier", modifier);
     return actionResult(await this.#invoke("windowDrag", input, { signal }));
@@ -1203,7 +1211,7 @@ export class ComputerUse {
       input.amount = BigInt(requireIntegerRange("amount", options.amount, 1, 50));
     }
     if (options?.by !== undefined) input.by = this.#scrollBy(options.by);
-    input.deliveryMode = this.#actionDeliveryMode(options);
+    input.deliveryMode = await this.#actionDeliveryMode(options);
     return actionResult(
       await this.#invoke("windowScroll", input, {
         signal: options?.signal,
@@ -1235,7 +1243,7 @@ export class ComputerUse {
         requireIntegerRange("delayMs", options.delayMs, 0, Number.MAX_SAFE_INTEGER),
       );
     }
-    input.deliveryMode = this.#actionDeliveryMode(options);
+    input.deliveryMode = await this.#actionDeliveryMode(options);
     return actionResult(
       await this.#invoke("windowTypeText", input, {
         signal: options.signal,
@@ -1284,7 +1292,7 @@ export class ComputerUse {
     if (options?.modifiers !== undefined) {
       input.modifiers = requireStringList("modifiers", options.modifiers);
     }
-    input.deliveryMode = this.#actionDeliveryMode(options);
+    input.deliveryMode = await this.#actionDeliveryMode(options);
     return actionResult(
       await this.#invoke("windowPressKey", input, {
         signal: options?.signal,
@@ -1298,7 +1306,7 @@ export class ComputerUse {
       throw new ComputerUseError("keys must list modifiers plus one key");
     }
     input.keys = requireStringList("keys", options.keys);
-    input.deliveryMode = this.#actionDeliveryMode(options);
+    input.deliveryMode = await this.#actionDeliveryMode(options);
     return actionResult(
       await this.#invoke("windowHotkey", input, {
         signal: options?.signal,
