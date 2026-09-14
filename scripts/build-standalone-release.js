@@ -63,6 +63,12 @@ const RELEASE_TARGETS = [
 const DEFAULT_RUNTIME = 'node';
 const DEFAULT_BUN_VERSION = '1.3.14';
 const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
+// The runtime downloads are the publish job's least reliable leg: one
+// transient nodejs.org failure aborted the v0.23.4 publish while the
+// unchanged re-run passed. Bound each attempt and retry before failing.
+const MAX_DOWNLOAD_ATTEMPTS = 3;
+const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 // Temporary OpenTUI preview: the bundled OpenTUI backend resolves its native
 // render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
@@ -133,7 +139,7 @@ async function main() {
     const checksums = {};
     for (const flavor of flavors) {
       const checksumsPath = path.join(runtimeDir, `${flavor}-SHASUMS256.txt`);
-      await downloadFile(
+      await downloadWithRetry(
         `${flavor === 'bun' ? bunDistUrl : nodeDistUrl}/SHASUMS256.txt`,
         checksumsPath,
       );
@@ -205,13 +211,15 @@ async function packageTarget({
   }
   const archivePath = path.join(runtimeDir, archiveName);
 
-  await downloadFile(`${archiveUrlBase}/${archiveName}`, archivePath);
-  await verifyNodeArchive(
-    archivePath,
-    archiveName,
-    checksums,
-    runtime === 'bun' ? 'Bun' : 'Node.js',
-  );
+  await downloadWithRetry(`${archiveUrlBase}/${archiveName}`, archivePath, {
+    verify: () =>
+      verifyNodeArchive(
+        archivePath,
+        archiveName,
+        checksums,
+        runtime === 'bun' ? 'Bun' : 'Node.js',
+      ),
+  });
 
   const args = [
     'scripts/create-standalone-package.js',
@@ -345,9 +353,15 @@ function stageOpenTuiPackages(runtimeDir) {
   return path.join(installDir, 'node_modules');
 }
 
-async function downloadFile(url, destination) {
+async function downloadFile(
+  url,
+  destination,
+  { fetchImpl = fetch, timeoutMs = DOWNLOAD_TIMEOUT_MS } = {},
+) {
   console.log(`Downloading ${url}`);
-  const response = await fetch(url);
+  const response = await fetchImpl(url, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
   if (!response.ok) {
     fail(
       `Failed to download ${url}: ${response.status} ${response.statusText}`,
@@ -360,6 +374,37 @@ async function downloadFile(url, destination) {
     Readable.fromWeb(response.body),
     fs.createWriteStream(destination),
   );
+}
+
+// verify runs after each attempt: an integrity failure means the bytes on
+// disk are bad, so the retry re-downloads instead of reusing them.
+async function downloadWithRetry(
+  url,
+  destination,
+  {
+    verify,
+    fetchImpl = fetch,
+    sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    maxAttempts = MAX_DOWNLOAD_ATTEMPTS,
+  } = {},
+) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await downloadFile(url, destination, { fetchImpl });
+      await verify?.();
+      return;
+    } catch (error) {
+      if (attempt >= maxAttempts) {
+        throw error;
+      }
+      const delayMs = INITIAL_DOWNLOAD_BACKOFF_MS * 2 ** (attempt - 1);
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `Download attempt ${attempt}/${maxAttempts} failed for ${url}: ${message} Retrying in ${delayMs / 1000}s...`,
+      );
+      await sleepImpl(delayMs);
+    }
+  }
 }
 
 function parseChecksums(content) {
@@ -525,6 +570,7 @@ function fail(message) {
 
 export {
   assertStandaloneOutput,
+  downloadWithRetry,
   parseChecksums,
   readClipboardPackageSpecs,
   RELEASE_TARGETS,

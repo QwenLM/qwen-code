@@ -836,6 +836,82 @@ describe('standalone release packaging', () => {
     expect(checksums.get('node-v22.0.0-win-x64.zip')).toBe('b'.repeat(64));
   });
 
+  it('retries a failed standalone runtime download', async () => {
+    const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const sleepImpl = vi.fn(async () => {});
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('socket hang up'))
+      .mockResolvedValueOnce(new Response('runtime-bytes'));
+
+    try {
+      await downloadWithRetry(
+        'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+        destination,
+        { fetchImpl, sleepImpl },
+      );
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(sleepImpl).toHaveBeenCalledTimes(1);
+      expect(fetchImpl.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+      expect(readFileSync(destination, 'utf8')).toBe('runtime-bytes');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-downloads a runtime archive that fails verification', async () => {
+    const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const fetchImpl = vi.fn(async () => new Response('runtime-bytes'));
+    const verify = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Checksum verification failed'))
+      .mockResolvedValueOnce(undefined);
+
+    try {
+      await downloadWithRetry(
+        'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+        destination,
+        { fetchImpl, verify, sleepImpl: async () => {} },
+      );
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(verify).toHaveBeenCalledTimes(2);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails the download after the final attempt', async () => {
+    const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('boom', {
+          status: 500,
+          statusText: 'Internal Server Error',
+        }),
+    );
+
+    try {
+      await expect(
+        downloadWithRetry(
+          'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+          destination,
+          { fetchImpl, sleepImpl: async () => {} },
+        ),
+      ).rejects.toThrow(/Failed to download/);
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('stages the locked clipboard packages for every release target', async () => {
     const { readClipboardPackageSpecs } = await import(
       standaloneReleaseScriptUrl
