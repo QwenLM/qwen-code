@@ -5,8 +5,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Switch all registered hk2 runners between review and CI, twice a day.
-// Labels also change on offline runners so they return to the selected pool.
+// Switch all online hk2 runners between review and CI, twice a day.
+// Offline runners are skipped; their labels stay unchanged.
 // Running jobs finish normally; labels only control which job starts next.
 
 import { execFile as execFileCallback } from 'node:child_process';
@@ -22,7 +22,7 @@ export function planLabels(runners, mode) {
   }
   const target = mode === 'review' ? 'ecs-review' : 'ecs-qwen';
   return runners
-    .filter((r) => /^ecs-qwen-hk2-\d+$/.test(r.name))
+    .filter((r) => r.status === 'online' && /^ecs-qwen-hk2-\d+$/.test(r.name))
     .flatMap((r) => {
       const labels = r.labels.map((l) => l.name);
       const remove = labels.filter(

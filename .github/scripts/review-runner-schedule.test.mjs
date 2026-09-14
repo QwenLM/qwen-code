@@ -13,36 +13,43 @@ const runner = (id, labels, extra = {}) => ({
   id,
   name: `ecs-qwen-hk2-${id}`,
   labels: labels.map((name) => ({ name })),
+  status: 'online',
   ...extra,
 });
 
 describe('review runner schedule', () => {
-  it('switches the entire pool, including busy and offline runners', () => {
-    const runners = Array.from({ length: 30 }, (_, i) =>
+  it('switches the entire online pool, including busy runners', () => {
+    const runners = Array.from({ length: 32 }, (_, i) =>
       runner(i + 1, ['ecs-qwen', 'ecs-agent', 'diagnostic'], {
         busy: i % 2 === 0,
-        status: i === 0 ? 'offline' : 'online',
+        status: i < 2 ? 'offline' : 'online',
       }),
     );
     const actions = planLabels(runners, 'review');
+    const onlineRunners = runners.filter(({ status }) => status === 'online');
     assert.equal(actions.length, 30);
     for (const [i, action] of actions.entries()) {
       assert.deepEqual(action, {
-        id: i + 1,
-        name: runners[i].name,
+        id: onlineRunners[i].id,
+        name: onlineRunners[i].name,
         add: ['ecs-review'],
         remove: ['ecs-qwen', 'ecs-agent'],
       });
     }
+    assert.deepEqual(
+      actions.map(({ id }) => id),
+      onlineRunners.map(({ id }) => id),
+    );
   });
 
-  it('returns every review runner to CI and leaves unrelated runners alone', () => {
+  it('returns every online review runner to CI and leaves unrelated runners alone', () => {
     assert.deepEqual(
       planLabels(
         [
           runner(1, ['ecs-review', 'diagnostic']),
           runner(2, ['ecs-agent'], { name: 'ecs-qwen-hk1-2' }),
           runner(3, ['ecs-review'], { name: 'ecs-qwen-hk2-3-extra' }),
+          runner(4, ['ecs-review'], { status: 'offline' }),
         ],
         'ci',
       ),

@@ -1,13 +1,13 @@
 name: 'Qwen Review Runner Schedule'
 
-# Switch every registered hk2 runner at 17:00 / 05:00 Asia/Shanghai.
+# Switch every online hk2 runner at 17:00 / 05:00 Asia/Shanghai.
 # GitHub cron uses UTC. Manual runs can select either pool explicitly.
 # Running jobs finish; only the labels for the next job change.
 #
-# The runner-label API needs repository Administration: write, which no
-# GITHUB_TOKEN grants: RUNNER_ADMIN_PAT is a fine-grained PAT for this
-# repository with only that permission, stored in the environment below
-# (restrict it to `main`). To pause the schedule, disable this workflow.
+# RUNNER_ADMIN_PAT needs runner-label write access: repo scope for a
+# classic PAT, or repository Administration: write for a fine-grained PAT.
+# Store it in the environment below, restricted to `main`.
+# To pause the schedule, disable this workflow.
 
 on:
   schedule:
@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       pool:
-        description: 'Pool for all hk2 runners'
+        description: 'Pool for all online hk2 runners'
         type: choice
         required: true
         default: ci
