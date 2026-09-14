@@ -100,6 +100,10 @@ import {
 } from '../telemetry/types.js';
 import { loadSkillsFromDir } from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
+import {
+  loadExtensionWorkflows,
+  type ExtensionWorkflowDefinition,
+} from '../agents/runtime/workflow-extension.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { refreshExtensionRuntime } from './extension-runtime-refresh.js';
 import {
@@ -178,6 +182,8 @@ export interface Extension {
   commands?: string[];
   skills?: SkillConfig[];
   agents?: SubagentConfig[];
+  /** Workflow scripts this extension ships, addressed as `<name>:<stem>`. */
+  workflows?: ExtensionWorkflowDefinition[];
   // R10-2: executor-block refusals for this extension's agent files, keyed by
   // lowercased declared name, recorded at load so a by-name dispatch can refuse
   // instead of falling through to a builtin of the same name.
@@ -203,6 +209,8 @@ export interface ExtensionConfig {
   skills?: string | string[];
   skillStates?: Record<string, boolean>;
   agents?: string | string[];
+  /** Workflow directories or `.js` files; defaults to `workflows/`. */
+  workflows?: string | string[];
   settings?: ExtensionSetting[];
   hooks?: { [K in HookEventName]?: HookDefinition[] };
   channels?: Record<string, ExtensionChannelConfig>;
@@ -260,10 +268,12 @@ export type ExtensionRequestOptions = {
   commands?: string[];
   skills?: SkillConfig[];
   subagents?: SubagentConfig[];
+  workflows?: ExtensionWorkflowDefinition[];
   previousExtensionConfig?: ExtensionConfig;
   previousCommands?: string[];
   previousSkills?: SkillConfig[];
   previousSubagents?: SubagentConfig[];
+  previousWorkflows?: ExtensionWorkflowDefinition[];
 };
 
 export interface ExtensionManagerOptions {
@@ -1703,6 +1713,8 @@ export class ExtensionManager {
         extension.commands = [];
         extension.skills = await loadAgentPluginSkills(effectiveExtensionPath);
         extension.agents = [];
+        // The Agent Plugins v1 schema defines no workflows.
+        extension.workflows = [];
       } else {
         extension.commands = await loadCommandsFromDir(
           `${effectiveExtensionPath}/commands`,
@@ -1721,6 +1733,11 @@ export class ExtensionManager {
           agentExecutorRefusals,
         );
         extension.agentExecutorRefusals = agentExecutorRefusals;
+        extension.workflows = await loadExtensionWorkflows(
+          effectiveExtensionPath,
+          { name: config.name, displayName: config.displayName },
+          config.workflows,
+        );
       }
 
       if (
@@ -2339,6 +2356,18 @@ export class ExtensionManager {
           : await loadSubagentFromDir(`${localSourcePath}/agents`);
         const previousSubagents = previous?.agents ?? [];
 
+        const workflows = isAgentPlugin
+          ? []
+          : await loadExtensionWorkflows(
+              localSourcePath,
+              {
+                name: newExtensionConfig.name,
+                displayName: newExtensionConfig.displayName,
+              },
+              newExtensionConfig.workflows,
+            );
+        const previousWorkflows = previous?.workflows ?? [];
+
         if (requestConsent) {
           await requestConsent({
             extensionConfig: newExtensionConfig,
@@ -2349,6 +2378,8 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
+            workflows,
+            previousWorkflows,
             originSource,
           });
         } else {
@@ -2361,6 +2392,8 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
+            workflows,
+            previousWorkflows,
             originSource,
           });
         }

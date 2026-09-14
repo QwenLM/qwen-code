@@ -57,6 +57,7 @@ export interface ClaudePluginConfig {
   skills?: string | string[];
   hooks?: string | { [K in HookEventName]?: HookDefinition[] };
   mcpServers?: string | Record<string, MCPServerConfig>;
+  workflows?: string | string[];
   outputStyles?: string | string[];
   lspServers?: string | Record<string, unknown>;
 }
@@ -662,6 +663,20 @@ export async function buildQwenExtensionFromPlugin(
       }
     }
 
+    // Workflows are collected flat, not through `collectResources`: the
+    // workflow loader reads one directory level, and `collectResources` keeps
+    // a declared sub-folder's own name (`workflows/<sub>/...`). Undeclared,
+    // the plugin's own `workflows/` already arrived with the copy above.
+    if (mergedConfig.workflows !== undefined) {
+      const workflowsDir = path.join(tmpDir, 'workflows');
+      fs.rmSync(workflowsDir, { recursive: true, force: true });
+      collectWorkflowResources(
+        mergedConfig.workflows,
+        pluginSource,
+        workflowsDir,
+      );
+    }
+
     // Handle hooks from a file path if needed.
     if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
       const hooksPath = resolvePluginRelativeFile(
@@ -814,6 +829,67 @@ export async function convertClaudePluginStandalone(
  * @param pluginRoot Root directory of the plugin
  * @param destDir Destination directory for collected resources
  */
+/**
+ * Copies a plugin's declared workflow paths flat into `destDir`: each
+ * directory contributes its top-level regular `.js` files, each `.js` file
+ * itself. The first file collected under a name wins, matching how Claude
+ * Code loads plugin workflows. Paths are confined to the plugin like every
+ * other manifest resource.
+ */
+function collectWorkflowResources(
+  resourcePaths: unknown,
+  pluginRoot: string,
+  destDir: string,
+): void {
+  const paths = Array.isArray(resourcePaths) ? resourcePaths : [resourcePaths];
+  fs.mkdirSync(destDir, { recursive: true });
+
+  const copy = (srcFile: string) => {
+    const destFile = path.join(destDir, path.basename(srcFile));
+    if (fs.existsSync(destFile)) {
+      debugLogger.warn(
+        `Skipping workflow ${srcFile}: ${path.basename(srcFile)} was already collected from an earlier workflows entry`,
+      );
+      return;
+    }
+    fs.copyFileSync(srcFile, destFile);
+  };
+
+  for (const resourcePath of paths) {
+    if (typeof resourcePath !== 'string' || resourcePath.length === 0) {
+      debugLogger.warn(
+        'Ignoring a non-string workflows entry in plugin config',
+      );
+      continue;
+    }
+    const resolvedPath = resolvePluginRelativeFile(pluginRoot, resourcePath);
+    if (!resolvedPath) continue;
+    if (!fs.existsSync(resolvedPath)) {
+      debugLogger.warn(`Workflow path not found: ${resolvedPath}`);
+      continue;
+    }
+    const stat = fs.statSync(resolvedPath);
+    if (stat.isDirectory()) {
+      for (const name of fs.readdirSync(resolvedPath).sort()) {
+        if (!name.endsWith('.js')) continue;
+        const srcFile = path.join(resolvedPath, name);
+        const fileStat = fs.lstatSync(srcFile);
+        if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+          debugLogger.debug(`Skipping non-regular workflow file: ${srcFile}`);
+          continue;
+        }
+        copy(srcFile);
+      }
+    } else if (stat.isFile() && resolvedPath.endsWith('.js')) {
+      copy(resolvedPath);
+    } else {
+      debugLogger.warn(
+        `Ignoring workflows entry that is neither a directory nor a .js file: ${resolvedPath}`,
+      );
+    }
+  }
+}
+
 async function collectResources(
   resourcePaths: string | string[],
   pluginRoot: string,

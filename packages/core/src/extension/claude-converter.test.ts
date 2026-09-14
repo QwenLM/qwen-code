@@ -1593,3 +1593,124 @@ describe('normalizeClaudeMcpServer', () => {
     });
   });
 });
+
+describe('convertClaudePluginPackage — workflows', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-wf-'));
+    vi.mocked(downloadFromGitHubRelease).mockReset();
+    vi.mocked(cloneFromGit).mockReset();
+  });
+
+  afterEach(() => {
+    fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  function writePlugin(
+    entry: Partial<ClaudeMarketplacePluginConfig> = {},
+  ): string {
+    const source = path.join(testDir, 'plugin-source');
+    fs.mkdirSync(path.join(source, '.claude-plugin'), { recursive: true });
+    const marketplace: ClaudeMarketplaceConfig = {
+      name: 'wf-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'wf-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          ...entry,
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(source, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify(marketplace, null, 2),
+    );
+    return source;
+  }
+
+  function writeFile(root: string, rel: string, body = 'return 1;\n'): void {
+    const filePath = path.join(root, rel);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, body);
+  }
+
+  function convertedWorkflows(convertedDir: string): string[] {
+    const dir = path.join(convertedDir, 'workflows');
+    return fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
+  }
+
+  it('keeps the plugin workflows directory when none are declared', async () => {
+    const source = writePlugin();
+    writeFile(source, 'workflows/audit.js');
+
+    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+
+    expect(convertedWorkflows(result.convertedDir)).toEqual(['audit.js']);
+  });
+
+  it('collects declared directories flat, one level deep, instead of the default', async () => {
+    const source = writePlugin({ workflows: ['./flows'] });
+    writeFile(source, 'workflows/default.js');
+    writeFile(source, 'flows/deploy.js');
+    writeFile(source, 'flows/nested/deeper.js');
+    writeFile(source, 'flows/readme.md');
+
+    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+
+    expect(convertedWorkflows(result.convertedDir)).toEqual(['deploy.js']);
+  });
+
+  it('collects a declared single .js file', async () => {
+    const source = writePlugin({ workflows: './extra/one.js' });
+    writeFile(source, 'extra/one.js');
+
+    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+
+    expect(convertedWorkflows(result.convertedDir)).toEqual(['one.js']);
+  });
+
+  it('ignores declared paths that escape the plugin', async () => {
+    const source = writePlugin({ workflows: ['../outside'] });
+    writeFile(testDir, 'outside/leak.js');
+
+    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+
+    expect(convertedWorkflows(result.convertedDir)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'skips symlinked files inside a declared directory',
+    async () => {
+      const source = writePlugin({ workflows: ['./flows'] });
+      writeFile(source, 'flows/real.js');
+      writeFile(testDir, 'outside/leak.js');
+      fs.symlinkSync(
+        path.join(testDir, 'outside', 'leak.js'),
+        path.join(source, 'flows', 'leak.js'),
+      );
+
+      const result = await convertClaudePluginPackage(source, 'wf-plugin');
+
+      expect(convertedWorkflows(result.convertedDir)).toEqual(['real.js']);
+    },
+  );
+
+  it('keeps the first file when two declared paths ship the same name', async () => {
+    const source = writePlugin({ workflows: ['./first', './second'] });
+    writeFile(source, 'first/same.js', '// first\n');
+    writeFile(source, 'second/same.js', '// second\n');
+
+    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+
+    expect(
+      fs.readFileSync(
+        path.join(result.convertedDir, 'workflows', 'same.js'),
+        'utf8',
+      ),
+    ).toBe('// first\n');
+  });
+});
