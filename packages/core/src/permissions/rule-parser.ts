@@ -897,6 +897,20 @@ export function splitCompoundCommandSegments(
     // other way round: there the backslash really does escape, so `$'a\''`
     // ends at its second quote and the operator after it still splits.
     if (ch === '\\' && !(inSingle && !inAnsiC)) {
+      // A backslash-newline is a line continuation, which bash elides before
+      // it decides anything else about the line — so `$\<newline>'…'` still
+      // opens ANSI-C quoting, and the pending `$` has to survive the pair.
+      // Treating it as an ordinary escape instead lost the `$`, read the
+      // string as a plain `'…'`, and swallowed its real closing quote, which
+      // is the bypass this exception exists to close, re-entered through a
+      // continuation. The newline is consumed here rather than left to the
+      // `escaped` flag because it is itself a `SHELL_OPERATORS` entry: left
+      // unconsumed it would split every `echo a\<newline>b` continuation.
+      if (command[i + 1] === '\n') {
+        dollarPending = ansiCIntroducer;
+        i++;
+        continue;
+      }
       escaped = true;
       continue;
     }

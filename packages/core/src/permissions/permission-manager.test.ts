@@ -564,10 +564,16 @@ describe('splitCompoundCommand', () => {
   // the end of input, and returned the whole line as one segment — so an
   // `echo` allow rule authorised whatever followed. `bash -x` runs each of
   // these as two commands.
+  // The bare `&` and the newline are here because they reach the operator loop
+  // by their own routes — `&` through `isAsyncOperator`, `'\n'` as a plain
+  // `SHELL_OPERATORS` entry — and because both carriers go from one segment to
+  // two at this commit, which is the verdict flip the fix exists for.
   it.each([
     ["echo 'a\\' ; touch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
     ["echo 'a\\' && touch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
     ["echo 'a\\' | sh", ["echo 'a\\'", 'sh']],
+    ["echo 'a\\' & touch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
+    ["echo 'a\\'\ntouch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
   ])(
     'treats a backslash inside single quotes as literal in %s',
     async (command, parts) => {
@@ -583,6 +589,19 @@ describe('splitCompoundCommand', () => {
     ]);
   });
 
+  it('keeps a line bash runs as one command in one segment', async () => {
+    // The closing quote of `'a\'` is immediately followed by another quote,
+    // which re-opens a string that runs to the end of the line, so the `;` is
+    // inside it and bash traces a single `echo`. This is the one shape where
+    // the corrected scanner produces FEWER segments than before — segmentation
+    // matches bash in both directions, not only towards more segments — and
+    // nothing else pins it, so a later edit that re-split this line would give
+    // a spurious prompt for a command the allow rule does cover.
+    expect(splitCompoundCommand("echo 'a\\'' ; rm x'")).toEqual([
+      "echo 'a\\'' ; rm x'",
+    ]);
+  });
+
   // The other half of the rule. `$'…'` is bash's ANSI-C quoting, where the
   // backslash IS an escape, so `$'a\''` ends at its second quote and the
   // operator after it still separates two commands. Reading these as plain
@@ -592,6 +611,8 @@ describe('splitCompoundCommand', () => {
     ["echo $'a\\'' ; touch /tmp/x", ["echo $'a\\''", 'touch /tmp/x']],
     ["echo $'a\\'' && touch /tmp/x", ["echo $'a\\''", 'touch /tmp/x']],
     ["echo $'a\\'' | cat", ["echo $'a\\''", 'cat']],
+    ["echo $'a\\'' & touch /tmp/x", ["echo $'a\\''", 'touch /tmp/x']],
+    ["echo $'a\\''\ntouch /tmp/x", ["echo $'a\\''", 'touch /tmp/x']],
   ])(
     'escapes a backslash inside ANSI-C quotes in %s',
     async (command, parts) => {
@@ -609,6 +630,34 @@ describe('splitCompoundCommand', () => {
     ['echo "$"\'a\\\' ; touch /tmp/x', ['echo "$"\'a\\\'', 'touch /tmp/x']],
   ])('reads %s as a plain single-quoted string', async (command, parts) => {
     expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
+  // A line continuation between the `$` and its quote does not change what the
+  // quote is: bash elides the backslash-newline first, so these stay ANSI-C
+  // strings and the operator after each one still separates two commands.
+  // Letting the continuation consume the pending `$` read them as plain `'…'`
+  // instead, which swallowed the real closing quote and returned one segment.
+  it.each([
+    ["echo $\\\n'a\\'' ; touch /tmp/x", ["echo $\\\n'a\\''", 'touch /tmp/x']],
+    ["echo $\\\n'a\\'' & touch /tmp/x", ["echo $\\\n'a\\''", 'touch /tmp/x']],
+    ["echo $\\\n'a\\''\ntouch /tmp/x", ["echo $\\\n'a\\''", 'touch /tmp/x']],
+  ])(
+    'keeps ANSI-C quoting across a line continuation in %s',
+    async (command, parts) => {
+      expect(splitCompoundCommand(command)).toEqual(parts);
+    },
+  );
+
+  it('does not split a line continuation', async () => {
+    // The elided backslash-newline is not a boundary — bash runs `echo a\<nl>b`
+    // as the single command `echo ab`. This pins the newline being consumed
+    // with the backslash: `'\n'` is itself a `SHELL_OPERATORS` entry, so a
+    // continuation left unconsumed would split here.
+    expect(splitCompoundCommand('echo a\\\nb')).toEqual(['echo a\\\nb']);
+    expect(splitCompoundCommand("echo 'x' ; echo a\\\nb")).toEqual([
+      "echo 'x'",
+      'echo a\\\nb',
+    ]);
   });
 
   // Which form a string has is decided independently for each string, so the
@@ -2411,6 +2460,46 @@ describe('PermissionManager', () => {
           command: "echo $'a\\'' ; rm -rf /tmp/x",
         }),
       ).toBe('deny');
+    });
+
+    // The same carrier with a line continuation between the `$` and its quote.
+    // bash elides the backslash-newline before deciding the quote form, so this
+    // is still one ANSI-C word followed by a real operator, and the `rm` is a
+    // command of its own that the deny rule has to reach.
+    it('a deny rule still applies past a continued ANSI-C carrier', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "echo $\\\n'a\\'' ; rm -rf /tmp/x",
+        }),
+      ).toBe('deny');
+    });
+
+    // The counterpart of the segmentation characterisation above: the re-opened
+    // quote keeps the `;` inside a string, so bash runs one `echo` and the
+    // allow rule legitimately covers the whole line. Pinning the verdict, not
+    // just the segment count, keeps the relaxation deliberate.
+    it('allows a line bash runs as a single covered command', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "echo 'a\\'' ; rm x'",
+        }),
+      ).toBe('allow');
     });
 
     it('|| compound: all allowed → allow', async () => {
