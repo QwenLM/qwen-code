@@ -635,6 +635,20 @@ function DaemonStatusDialogInner({
   const [connectionToken, setConnectionToken] = useState('');
   const [connectionError, setConnectionError] = useState('');
   const [connectBusy, setConnectBusy] = useState(false);
+  // The same-target probe outlives this component unless it is retired: the
+  // parent mounts the dialog only while the panel is open, so a response
+  // landing after the operator closed it — or after they edited the address —
+  // would switch targets and reload the page out from under a session they had
+  // already returned to. Same contract as the boot gate's retireProbe.
+  const probeControllerRef = useRef<AbortController | null>(null);
+  const retireConnectionProbe = useCallback(() => {
+    probeControllerRef.current?.abort();
+    probeControllerRef.current = null;
+    setConnectBusy(false);
+  }, []);
+  useEffect(() => {
+    return retireConnectionProbe;
+  }, [retireConnectionProbe]);
   const [activeTab, setActiveTab] = useState<DaemonTab>('overview');
   // WAI-ARIA tabs keyboard support: roving tabindex (only the active tab is in
   // the tab order) + Arrow/Home/End moving focus and selection across the
@@ -860,15 +874,24 @@ function DaemonStatusDialogInner({
                   }
                   setConnectBusy(true);
                   const controller = new AbortController();
+                  probeControllerRef.current = controller;
                   const timeout = window.setTimeout(
                     () => controller.abort(),
                     10_000,
                   );
+                  // Retiring nulls the ref synchronously, so this check runs
+                  // before the microtask callbacks below can act on a submit
+                  // the operator has already abandoned. The 10s self-abort
+                  // leaves the ref pointing at this controller, so it still
+                  // reports "the daemon did not answer".
+                  const owned = (): boolean =>
+                    probeControllerRef.current === controller;
                   void fetch(`${daemonOrigin}/capabilities`, {
                     headers: token ? { Authorization: `Bearer ${token}` } : {},
                     signal: controller.signal,
                   })
                     .then((response) => {
+                      if (!owned()) return;
                       if (!response.ok) {
                         setConnectionError(
                           response.status === 401
@@ -881,6 +904,7 @@ function DaemonStatusDialogInner({
                       onChangeTarget(daemonOrigin, token);
                     })
                     .catch(() => {
+                      if (!owned()) return;
                       // A rejection means no answer arrived — including this
                       // handler's own 10 s abort, so "the daemon did not
                       // answer" is conclusive rather than inconclusive. Report
@@ -891,6 +915,8 @@ function DaemonStatusDialogInner({
                     })
                     .finally(() => {
                       window.clearTimeout(timeout);
+                      if (!owned()) return;
+                      probeControllerRef.current = null;
                       setConnectBusy(false);
                     });
                 }}
@@ -911,6 +937,10 @@ function DaemonStatusDialogInner({
                   }
                   value={connectionAddress}
                   onChange={(event) => {
+                    // Editing the address abandons the submit that armed the
+                    // probe: a late response must not switch to (and reload
+                    // onto) a target the operator has already typed over.
+                    retireConnectionProbe();
                     setConnectionAddress(event.target.value);
                     setConnectionToken('');
                   }}

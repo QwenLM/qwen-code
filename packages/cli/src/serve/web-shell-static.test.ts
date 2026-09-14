@@ -9,6 +9,7 @@ import {
   buildWebShellCsp,
   buildWebShellPermissionsPolicy,
   remoteDaemonConnectOrigins,
+  requestedDaemonParam,
 } from './web-shell-static.js';
 
 describe('Web Shell sandbox framing', () => {
@@ -60,32 +61,38 @@ describe('Web Shell sandbox framing', () => {
       remoteDaemonConnectOrigins('https://daemon.example.com/path'),
     ).toEqual([]);
 
-    // A repeated `?daemon=` arrives as an array (Express qs). The client reads
-    // the same parameter first-value-wins, so the header must allow that value
-    // instead of emitting a CSP with no remote origin at all.
+    // The parameter is read with the client's parser, so a repeated
+    // `?daemon=` is first-value-wins on both sides and the header allows the
+    // value the client will actually connect to.
     expect(
-      remoteDaemonConnectOrigins([
-        'https://daemon.example.com:4170',
-        'https://other.example',
-      ]),
+      requestedDaemonParam(
+        '/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170&daemon=https%3A%2F%2Fother.example',
+      ),
+    ).toBe('https://daemon.example.com:4170');
+    expect(
+      remoteDaemonConnectOrigins(
+        requestedDaemonParam(
+          '/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170&daemon=https%3A%2F%2Fother.example',
+        ),
+      ),
     ).toEqual([
       'https://daemon.example.com:4170',
       'wss://daemon.example.com:4170',
     ]);
     expect(
-      remoteDaemonConnectOrigins([
-        'file:///tmp/daemon',
-        'https://daemon.example.com:4170',
-      ]),
+      remoteDaemonConnectOrigins(
+        requestedDaemonParam('/?daemon=file%3A%2F%2F%2Ftmp%2Fdaemon'),
+      ),
     ).toEqual([]);
-    expect(remoteDaemonConnectOrigins([])).toEqual([]);
+    expect(remoteDaemonConnectOrigins(requestedDaemonParam('/'))).toEqual([]);
     expect(
       buildWebShellCsp(
         [],
-        remoteDaemonConnectOrigins([
-          'https://daemon.example.com:4170',
-          'https://other.example',
-        ]),
+        remoteDaemonConnectOrigins(
+          requestedDaemonParam(
+            '/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170&daemon=https%3A%2F%2Fother.example',
+          ),
+        ),
       ),
     ).toContain(
       "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
@@ -110,6 +117,68 @@ describe('Web Shell sandbox framing', () => {
     );
     expect(csp).toContain(
       "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+    );
+  });
+
+  it('never widens connect-src for a key the client parser does not report', () => {
+    // Express's qs folds bracketed shapes into a `daemon` array. The client
+    // reads `URLSearchParams.get('daemon')`, which reports no such key, so it
+    // selects no target and shows no confirmation gate — while
+    // `INVALID_DAEMON_TARGET` and `UNCONFIRMED_DAEMON_TARGET` are both false,
+    // so nothing on the page signals anything. Taking the qs shape here would
+    // grant an origin no client-side parse ever produced.
+    //
+    // Each row is a real measured disagreement between the two parsers; the
+    // `expected` column is what the client resolves for the same URL.
+    const shapes: ReadonlyArray<{ url: string; expected: string | null }> = [
+      // qs: { daemon: ['…4182', '…4181'] } → the old read granted 4182, but
+      // the client connects to 4181, so its own target was CSP-blocked.
+      {
+        url: '/?daemon[]=http%3A%2F%2Flocalhost%3A4182&daemon=http%3A%2F%2Flocalhost%3A4181',
+        expected: 'http://localhost:4181',
+      },
+      { url: '/?daemon[]=http%3A%2F%2Flocalhost%3A4182', expected: null },
+      { url: '/?daemon[0]=http%3A%2F%2Flocalhost%3A4182', expected: null },
+      {
+        url: '/?daemon[0]=http%3A%2F%2Flocalhost%3A4182&daemon[1]=http%3A%2F%2Flocalhost%3A4183',
+        expected: null,
+      },
+      // A plain repeated parameter is first-value-wins on both sides.
+      {
+        url: '/?daemon=http%3A%2F%2Fa&daemon=http%3A%2F%2Fb',
+        expected: 'http://a',
+      },
+      { url: '/', expected: null },
+    ];
+    for (const { url, expected } of shapes) {
+      expect(requestedDaemonParam(url)).toBe(expected);
+      // The client's own parse of the same URL is the oracle.
+      expect(
+        new URL(`http://127.0.0.1:4170${url}`).searchParams.get('daemon'),
+      ).toBe(expected);
+      const csp = buildWebShellCsp(
+        [],
+        remoteDaemonConnectOrigins(requestedDaemonParam(url)),
+      );
+      if (expected === null) {
+        expect(csp).toBe(buildWebShellCsp());
+      } else {
+        expect(csp).toContain(`connect-src 'self' ${expected}`);
+      }
+    }
+    // The one shape that both granted and blocked the wrong origin: the
+    // foreign origin must not appear, and the client's own target must.
+    const mixed = buildWebShellCsp(
+      [],
+      remoteDaemonConnectOrigins(
+        requestedDaemonParam(
+          '/?daemon[]=http%3A%2F%2Flocalhost%3A4182&daemon=http%3A%2F%2Flocalhost%3A4181',
+        ),
+      ),
+    );
+    expect(mixed).not.toContain('4182');
+    expect(mixed).toContain(
+      "connect-src 'self' http://localhost:4181 ws://localhost:4181",
     );
   });
 });

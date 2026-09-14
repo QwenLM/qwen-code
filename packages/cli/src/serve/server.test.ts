@@ -4041,6 +4041,53 @@ describe('createServeApp', () => {
       );
     });
 
+    // Both cases go through Express's real qs parser, which is where the
+    // server's reading of `?daemon=` can drift from the client's
+    // `URLSearchParams.get`. A repeated parameter stays first-value-wins on
+    // both sides. A qs bracket key is not a `daemon` parameter at all as far
+    // as the client is concerned, so it must not buy an allowance here — and
+    // when a bracket key is mixed with a plain one, the origin granted must be
+    // the one the client actually connects to, not the bracketed one.
+    it('keeps the shell CSP on the client parser for repeated and bracketed ?daemon=', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const repeated = await request(app)
+        .get(
+          '/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170&daemon=https%3A%2F%2Fother.example',
+        )
+        .set('Host', host);
+      expect(repeated.status).toBe(200);
+      expect(repeated.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
+      expect(repeated.headers['content-security-policy']).not.toContain(
+        'other.example',
+      );
+
+      const bracketed = await request(app)
+        .get('/?daemon%5B%5D=https%3A%2F%2Fevil.example')
+        .set('Host', host);
+      expect(bracketed.status).toBe(200);
+      expect(bracketed.headers['content-security-policy']).not.toContain(
+        'evil.example',
+      );
+      expect(bracketed.headers['content-security-policy']).toContain(
+        "connect-src 'self';",
+      );
+
+      const mixed = await request(app)
+        .get(
+          '/?daemon%5B%5D=https%3A%2F%2Fevil.example&daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
+        )
+        .set('Host', host);
+      expect(mixed.status).toBe(200);
+      expect(mixed.headers['content-security-policy']).not.toContain(
+        'evil.example',
+      );
+      expect(mixed.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
+    });
+
     it('rejects cross-origin requests for the pre-auth shell page (CORS wall runs first)', async () => {
       // Re-pins the contract the deleted `/demo` CORS test carried: the
       // pre-auth page surface sits behind the Origin wall, so a future

@@ -507,6 +507,82 @@ describe('DaemonStatusDialog', () => {
     }
   });
 
+  // A same-target probe that answers green calls onChangeTarget, which reloads
+  // the page. Both cases below abandon the submit before that answer arrives,
+  // so a green response must not switch targets or reload: the first destroys a
+  // freshly typed address, the second reloads a session the operator already
+  // returned to when they closed the panel.
+  function mountPendingProbe() {
+    let pending:
+      | ((response: { ok: boolean; status: number }) => void)
+      | undefined;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<{ ok: boolean; status: number }>((resolve) => {
+          pending = resolve;
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return {
+      fetchMock,
+      // Resolved lazily: the executor only runs once the submit calls fetch.
+      resolveProbe: (response: { ok: boolean; status: number }): void => {
+        if (!pending) throw new Error('the probe never started');
+        pending(response);
+      },
+    };
+  }
+
+  it('drops a same-target probe the operator typed over', async () => {
+    const onChangeTarget = vi.fn();
+    const { fetchMock, resolveProbe } = mountPendingProbe();
+    try {
+      mount('en', onChangeTarget);
+      const token = typeToken('good-token');
+      await submitConnect(token);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const address = container!.querySelector<HTMLInputElement>(
+        '#daemon-connection-address',
+      )!;
+      act(() => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(address, 'https://other-daemon.example:4170');
+        address.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        resolveProbe({ ok: true, status: 200 });
+      });
+      expect(onChangeTarget).not.toHaveBeenCalled();
+      // The abandoned probe reports no outcome either: its address is no
+      // longer the one on screen.
+      expect(container!.querySelector('[role="alert"]')).toBeNull();
+      expect(address.value).toBe('https://other-daemon.example:4170');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('drops a same-target probe that answers after the panel closed', async () => {
+    const onChangeTarget = vi.fn();
+    const { fetchMock, resolveProbe } = mountPendingProbe(onChangeTarget);
+    try {
+      mount('en', onChangeTarget);
+      const token = typeToken('good-token');
+      await submitConnect(token);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // The parent mounts the dialog only while the panel is open.
+      act(() => root!.unmount());
+      await act(async () => {
+        resolveProbe({ ok: true, status: 200 });
+      });
+      expect(onChangeTarget).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('renders live summary counters with the full-detail rollup badge', () => {
     mount();
     const text = container!.textContent ?? '';

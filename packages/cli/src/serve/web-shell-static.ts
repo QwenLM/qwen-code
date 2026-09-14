@@ -71,15 +71,24 @@ export function buildWebShellCsp(
   return [...WEB_SHELL_CSP_DIRECTIVES, connectSrc, frameSrc, fa].join('; ');
 }
 
-export function remoteDaemonConnectOrigins(raw: unknown): string[] {
-  // A repeated `?daemon=` parses to an array under Express's qs parser, so it is
-  // not a string. The client reads the same parameter first-value-wins
-  // (`URLSearchParams.get`), so agree with it rather than failing the whole
-  // header closed on multiplicity — that would let the client try to connect to
-  // an origin this CSP does not allow, and the shell would loop on "cannot
-  // reach the daemon" with only a console CSP violation as evidence.
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (typeof value !== 'string') return [];
+/**
+ * The `?daemon=` value read with the client's parser rather than Express's.
+ * qs folds `?daemon[]=x` into `{ daemon: ['x'] }` — a key the client's
+ * `URLSearchParams.get('daemon')` never reports, so taking that array would
+ * widen `connect-src` for an origin the client never parsed: the document
+ * would carry an allowance for a target no confirmation gate ever saw. One
+ * parser on both sides also keeps the first-value-wins behaviour for a
+ * repeated `?daemon=`, which is exactly what `URLSearchParams.get` does.
+ */
+export function requestedDaemonParam(originalUrl: string): string | null {
+  const queryStart = originalUrl.indexOf('?');
+  return new URLSearchParams(
+    queryStart === -1 ? '' : originalUrl.slice(queryStart + 1),
+  ).get('daemon');
+}
+
+export function remoteDaemonConnectOrigins(value: string | null): string[] {
+  if (!value) return [];
   try {
     const url = new URL(value);
     if (
@@ -134,7 +143,7 @@ function createSendIndex(
   return (req: Request, res: Response): void => {
     const csp = buildWebShellCsp(
       frameAncestors,
-      remoteDaemonConnectOrigins(req.query['daemon']),
+      remoteDaemonConnectOrigins(requestedDaemonParam(req.originalUrl)),
     );
     res
       .status(200)

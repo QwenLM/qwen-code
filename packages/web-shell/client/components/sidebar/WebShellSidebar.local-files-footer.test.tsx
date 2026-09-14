@@ -61,6 +61,24 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
     };
   });
 
+// Counts every mount of the browser-local bridge hook. The sidebar gate is the
+// only thing between a remote daemon and a client directory, so pin the hook
+// itself and not just the absent trigger: a refactor that hoisted the hook out
+// of LocalFilesControl would keep the trigger assertions green while the bridge
+// registered for a remote daemon.
+const bridgeHookCalls = vi.hoisted(() => ({ count: 0 }));
+
+vi.mock('../../local-files/useLocalFilesBridge', () => ({
+  useLocalFilesBridge: () => {
+    bridgeHookCalls.count += 1;
+    return {
+      status: { phase: 'idle', blocker: null },
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+  },
+}));
+
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => connection,
   useActions: () => ({ renameSession: vi.fn() }),
@@ -171,6 +189,7 @@ function setDesktopShell(enabled: boolean) {
 beforeEach(() => {
   window.localStorage.clear();
   workspace.baseUrl = window.location.origin;
+  bridgeHookCalls.count = 0;
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -213,7 +232,13 @@ it('withholds browser-local files on a remote daemon for standalone and embedded
   // bridge too — a client directory must not be handed to a remote daemon.
   renderSidebar();
   expect(localFilesTrigger()).toBeNull();
+  // Not merely hidden: the bridge hook never ran, so nothing registered,
+  // opened a WebSocket, or restored a directory handle for that origin.
+  // `https://` matters here — a remote secure context is exactly the case
+  // where the File System Access API would otherwise be available.
+  expect(bridgeHookCalls.count).toBe(0);
   workspace.baseUrl = window.location.origin;
   renderSidebar(undefined, true);
   expect(localFilesTrigger()).not.toBeNull();
+  expect(bridgeHookCalls.count).toBeGreaterThan(0);
 });
