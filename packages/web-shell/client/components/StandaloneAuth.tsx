@@ -191,6 +191,17 @@ export function StandaloneAuth({
   const copyRef = useRef(copy);
   copyRef.current = copy;
 
+  // Stop the probe loop synchronously. Clearing the controller alone is not
+  // enough: `retryIn`'s ownership check runs only when a response lands, so an
+  // already-armed timer would still bump `attempt` and relaunch the probe
+  // through the effect.
+  const retireProbe = useCallback(() => {
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    if (timerRef.current !== null) clearTimeout(timerRef.current);
+    timerRef.current = null;
+  }, []);
+
   const connect = useCallback(
     async (candidate: string) => {
       const controller = new AbortController();
@@ -295,13 +306,8 @@ export function StandaloneAuth({
   useEffect(() => {
     if (invalidTarget || confirming) return undefined;
     void connect(candidateRef.current);
-    return () => {
-      controllerRef.current?.abort();
-      controllerRef.current = null;
-      if (timerRef.current !== null) clearTimeout(timerRef.current);
-      timerRef.current = null;
-    };
-  }, [connect, attempt, invalidTarget, confirming]);
+    return retireProbe;
+  }, [connect, attempt, invalidTarget, confirming, retireProbe]);
 
   if (accepted) return children(accepted.token);
   const normalizedAddress = getAllowedDaemonOrigin(address.trim());
@@ -376,10 +382,7 @@ export function StandaloneAuth({
               className="h-11 font-mono"
               value={address}
               onChange={(event) => {
-                controllerRef.current?.abort();
-                controllerRef.current = null;
-                if (timerRef.current !== null) clearTimeout(timerRef.current);
-                timerRef.current = null;
+                retireProbe();
                 setConfirming(true);
                 setBusy(false);
                 setStatus(copy.addressChanged);
@@ -416,7 +419,17 @@ export function StandaloneAuth({
           {(invalidTarget || baseUrl !== window.location.origin) && (
             <Button
               variant="outline"
-              onClick={() => onChangeTarget(window.location.origin)}
+              onClick={() => {
+                // Retiring the target has to retire its probe loop first:
+                // assigning a new URL does not stop the JS event loop, and the
+                // document stays live until the navigation commits — long
+                // enough, on a cold-starting local daemon, for a queued retry to
+                // re-probe the daemon being left with its stored bearer token
+                // and mount the app on it.
+                retireProbe();
+                setConfirming(true);
+                onChangeTarget(window.location.origin);
+              }}
             >
               {copy.local}
             </Button>

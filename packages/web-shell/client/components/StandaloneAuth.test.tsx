@@ -87,6 +87,12 @@ function addressInput() {
 function tokenInput() {
   return container.querySelector<HTMLInputElement>('#daemon-bearer-token')!;
 }
+// Rendered outside the form, so it is the button whose label is copy.local.
+function localButton() {
+  return Array.from(container.querySelectorAll('button')).find(
+    (button) => button.textContent === 'Return to local workspaces',
+  )!;
+}
 async function submitForm() {
   container
     .querySelector('form')!
@@ -261,6 +267,43 @@ it.each(['queued retry', 'in-flight response'])(
     expect(fetch).toHaveBeenCalledTimes(1);
   },
 );
+// "Return to local workspaces" retires the target exactly the way editing the
+// address does, so it has to retire the probe loop too: assigning a new URL does
+// not stop the JS event loop, and the document stays live until the navigation
+// commits. A retry firing inside that window re-probes the daemon being left —
+// carrying its stored bearer token — and can mount the whole app on it.
+it('retires the probe loop when returning to local workspaces', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('Failed to fetch'))
+    .mockResolvedValue(stubResponse({ status: 200 }));
+  const onChangeTarget = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  await mount(
+    'boot-secret',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    onChangeTarget,
+  );
+  const signal = fetch.mock.calls[0][1].signal as AbortSignal;
+  // The boot probe rejected, so a retry is queued against the target being left.
+  expect(fetch).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    localButton().click();
+  });
+  await act(async () => {
+    vi.advanceTimersByTime(12_000);
+  });
+
+  expect(signal.aborted).toBe(true);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(onChangeTarget).toHaveBeenCalledWith(window.location.origin);
+  expect(container.textContent).not.toContain('Connected boot-secret');
+});
 it('distinguishes policy rejection from authentication failure', async () => {
   vi.stubGlobal(
     'fetch',
