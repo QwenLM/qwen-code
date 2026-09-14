@@ -293,10 +293,12 @@ function npmPackageName(location, details) {
 // alone: a bare name covers every version, `name@1.2.3` — or a `||` union of
 // exact versions — covers only those, and a source-like key such as
 // `name@file:packages/core` is an exact-instance rule no registry dependency
-// can match. A range is not a scope at all: pnpm files `esbuild@^0.25.0`
-// under a package literally named that, so it decides nothing. Reducing a key
-// to its name would let an approval scoped to one version silently cover the
-// next version npm installs.
+// can match. A range is not a scope at all: pnpm's parseVersionPolicyRule
+// throws INVALID_VERSION_UNION ('Use exact versions only') on
+// `esbuild@^0.25.0` and refuses to install, so counting such a key as no
+// decision keeps this gate red for a tree pnpm would not build either.
+// Reducing a key to its name would let an approval scoped to one version
+// silently cover the next version npm installs.
 function allowBuildDecisions(allowBuilds) {
   const names = new Set();
   const versions = new Set();
@@ -410,6 +412,11 @@ try {
 // allowBuilds approves it. Requiring an entry for each script npm runs keeps
 // that difference a reviewed decision instead of a silent one.
 const decidedBuilds = allowBuildDecisions(pnpmWorkspace?.allowBuilds);
+// A bare name decides name-wide here, while pnpm honours that only for a
+// registry-shaped depPath and wants a git-repo key for a git dependency. No
+// install-script entry in package-lock.json resolves from git or a tarball
+// today, so the two agree; the first one that does needs that key shape
+// modelled here as well.
 const undecidedBuilds = new Set();
 for (const [location, details] of Object.entries(packages)) {
   if (

@@ -283,3 +283,93 @@
     justify-content: flex-start;
   }
 }
+
+.goalApproval {
+  display: flex;
+  flex-direction: column;
+  max-height: min(640px, 80dvh);
+  overflow: hidden;
+}
+
+.goalApproval > .header,
+.goalApproval > .options,
+.goalHint,
+.goalFeedback {
+  flex-shrink: 0;
+}
+
+.goalTabs {
+  min-height: 0;
+  flex: 1 1 auto;
+  margin-top: 12px;
+}
+
+.goalBody {
+  height: 310px;
+  min-height: 0;
+  overflow: hidden;
+  flex: 1 1 auto;
+}
+
+.goalPanel {
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 12px 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+
+.goalPanel p {
+  margin: 0;
+}
+
+.goalPanel .goalNotice {
+  color: var(--muted-foreground);
+  margin-bottom: 16px;
+}
+
+.goalSection + .goalSection {
+  margin-top: 16px;
+}
+
+.goalSection h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.goalHint {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.goalFeedback {
+  min-height: 18px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.goalApproval > .options {
+  margin-top: 8px;
+  gap: 12px;
+}
+
+.goalApproval .option {
+  white-space: normal;
+}
+
+.goalApproval .option:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.goalTabs > [role='tablist'] {
+  flex-shrink: 0;
+}
