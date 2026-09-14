@@ -141,7 +141,7 @@ describe('StandaloneDeletionJournal', () => {
     }
   });
 
-  it.each(['base', 'state'] as const)(
+  it.skipIf(process.platform === 'win32').each(['base', 'state'] as const)(
     'rejects a complete private replacement %s tree on every operation',
     async (parent) => {
       const root = await workspace.getRoot();
@@ -258,7 +258,11 @@ describe('StandaloneDeletionJournal', () => {
     });
   });
 
-  it('rejects journal directory replacement during phase sync', async () => {
+  it('rejects journal directory replacement during phase sync', async (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     const root = await workspace.getRoot();
     const record = await makeRecord('prepared');
     const journalDirectory = path.dirname(journalPath('prepared'));
@@ -302,7 +306,11 @@ describe('StandaloneDeletionJournal', () => {
     }
   });
 
-  it('retains a same-session fence until clear durability is confirmed', async () => {
+  it('retains a same-session fence until clear durability is confirmed', async (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     const root = await workspace.getRoot();
     const prepared = await makeRecord('prepared');
     await journal.writePrepared(prepared, root);
@@ -421,11 +429,16 @@ describe('StandaloneDeletionJournal', () => {
     await expect(journal.read(SESSION_ID, root)).resolves.toBeUndefined();
   });
 
-  it('rejects journal directory replacement while clearing phases', async () => {
+  it('rejects journal directory replacement while clearing phases', async (ctx) => {
     const root = await workspace.getRoot();
     const prepared = await makeRecord('prepared');
     await journal.writePrepared(prepared, root);
     const journalDirectory = path.dirname(journalPath('prepared'));
+    const journalStats = await fs.lstat(journalDirectory);
+    if (!Number.isSafeInteger(journalStats.ino) || journalStats.ino <= 0) {
+      ctx.skip();
+      return;
+    }
     const originalDirectory = `${journalDirectory}.original`;
     const originalOpen = openMock.getMockImplementation();
     if (!originalOpen) throw new Error('expected fs.open implementation');
