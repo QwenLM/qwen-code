@@ -13,11 +13,18 @@ import type {
   Page,
 } from 'playwright-core';
 import { Buffer } from 'node:buffer';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { BridgeEvent, ChromeBridge } from '../bridge/index.js';
 import { BrowserRuntimeError } from '../core/errors.js';
-import type { ScreenshotEnvelope, TabInfo } from '../core/primitives.js';
+import type {
+  BrowserUserTabInfo,
+  ScreenshotEnvelope,
+  TabInfo,
+} from '../core/primitives.js';
 import { BrowserSdkContext } from '../sdk/context.js';
 import { TabProxy } from '../sdk/tab.js';
 import { PlaywrightRuntime } from './playwright-runtime.js';
@@ -29,6 +36,20 @@ const playwrightMocks = vi.hoisted(() => ({
 vi.mock('playwright-core', () => ({
   chromium: { connectOverCDP: playwrightMocks.connectOverCDP },
 }));
+
+// The runtime takes its timers from node:timers, which vi.useFakeTimers()
+// leaves alone; routing them through the globals lets the fake clock drive
+// the bounds the tests below advance past.
+vi.mock('node:timers', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:timers')>();
+  return {
+    ...actual,
+    setTimeout: (callback: () => void, ms?: number) =>
+      globalThis.setTimeout(callback, ms),
+    clearTimeout: (handle: NodeJS.Timeout | undefined) =>
+      globalThis.clearTimeout(handle),
+  };
+});
 
 const runtimes: PlaywrightRuntime[] = [];
 
@@ -565,6 +586,29 @@ describe('PlaywrightRuntime command contracts', () => {
     }
   });
 
+  it('clears the drain bound when the page settles first', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    vi.useFakeTimers();
+    try {
+      const settled = vi.fn();
+      const operation = fixture.runtime
+        .dispatch('locator.press', {
+          tabId: tab.id,
+          steps: [{ kind: 'locator', selector: '#submit' }],
+          value: 'Enter',
+        })
+        .then(settled);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toHaveBeenCalledExactlyOnceWith(null);
+      expect(fixture.page.evaluate).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+      await operation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     'selection failed',
     'Execution context was destroyed, most likely because of a navigation',
@@ -757,6 +801,10 @@ describe('PlaywrightRuntime command contracts', () => {
     });
 
     expect(fixture.page.mouse.click).not.toHaveBeenCalled();
+    expect(fixture.page.mouse.move).toHaveBeenCalledExactlyOnceWith(12, 34);
+    expect(fixture.page.mouse.move.mock.invocationCallOrder[0]).toBeLessThan(
+      fixture.cdp.send.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(fixture.cdp.send).toHaveBeenNthCalledWith(
       1,
       'Input.dispatchMouseEvent',
@@ -845,6 +893,9 @@ describe('PlaywrightRuntime command contracts', () => {
     await expect(
       fixture.runtime.dispatch('tab.title', { tabId: tab.id }),
     ).resolves.toBe('Fixture');
+    // All three other pages and the matching page were each probed once.
+    expect(fixture.probeDetach).toHaveBeenCalledTimes(4);
+    expect(fixture.cdp.detach).not.toHaveBeenCalled();
   });
 
   it('delegates locator reads, form actions, and waits', async () => {
@@ -1053,6 +1104,57 @@ describe('PlaywrightRuntime command contracts', () => {
     });
   });
 
+  it('validates upload paths before handing them to the file chooser', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const setFiles = vi.fn(async () => undefined);
+    fixture.page.waitForEvent.mockResolvedValueOnce({
+      isMultiple: () => true,
+      setFiles,
+    });
+    const chooser = (await fixture.runtime.dispatch('playwright.waitForEvent', {
+      tabId: tab.id,
+      event: 'filechooser',
+    })) as { chooserId: string };
+    expect(chooser).toEqual({
+      chooserId: expect.stringMatching(/^chooser-/),
+      multiple: true,
+    });
+    const setChooserFiles = (files: string[], timeoutMs?: number) =>
+      fixture.runtime.dispatch('fileChooser.setFiles', {
+        tabId: tab.id,
+        chooserId: chooser.chooserId,
+        files,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      });
+    const directory = await mkdtemp(join(tmpdir(), 'browser-use-upload-'));
+    try {
+      const file = join(directory, 'upload.txt');
+      await writeFile(file, 'payload');
+      const rejected: Array<[files: string[], reason: string]> = [
+        [['relative/upload.txt'], 'absolute'],
+        [[join(directory, 'missing.txt')], 'does not exist'],
+        [[directory], 'not a file'],
+      ];
+      for (const [files, reason] of rejected)
+        await expect(setChooserFiles(files)).rejects.toMatchObject({
+          code: 'INVALID_ARGUMENT',
+          message: expect.stringContaining(reason),
+        });
+      expect(setFiles).not.toHaveBeenCalled();
+
+      await expect(setChooserFiles([file], 1_000)).resolves.toBeNull();
+      expect(setFiles).toHaveBeenCalledExactlyOnceWith([await realpath(file)], {
+        timeout: 1_000,
+      });
+      await expect(setChooserFiles([file])).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('bounds unresolved file choosers and navigation waiters', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);
@@ -1098,6 +1200,46 @@ describe('PlaywrightRuntime command contracts', () => {
         waiterId: waiterIds.at(-1),
       }),
     ).resolves.toBeNull();
+  });
+
+  it('keeps an abandoned navigation waiter from surfacing as an unhandled rejection', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    let abort!: (error: Error) => void;
+    // A vi.fn records settled results by attaching its own rejection handler
+    // to the returned promise, which would count as handling the rejection
+    // this test watches for; the plain function leaves the waiter unobserved.
+    Object.assign(fixture.page, {
+      waitForNavigation: () =>
+        new Promise<null>((_resolve, reject) => {
+          abort = reject;
+        }),
+    });
+    const waiterId = (await fixture.runtime.dispatch(
+      'playwright.expectNavigation.begin',
+      { tabId: tab.id },
+    )) as string;
+    await fixture.runtime.dispatch('playwright.expectNavigation.cancel', {
+      tabId: tab.id,
+      waiterId,
+    });
+
+    // vitest ignores unhandled errors off Linux, so the check is explicit.
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      abort(new Error('Navigation aborted'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+    await expect(
+      fixture.runtime.dispatch('playwright.expectNavigation.wait', {
+        tabId: tab.id,
+        waiterId,
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('returns encoded screenshot bytes across the JSON boundary', async () => {
@@ -1236,6 +1378,24 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(current.dismiss).not.toHaveBeenCalled();
   });
 
+  it('passes prompt text to accept and nothing for a confirm', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const prompt = openDialog(fixture, 'prompt', 'Name?');
+    await fixture.runtime.dispatch('tab.dialog.accept', {
+      ...(await dialogArgs(fixture.runtime, tab.id)),
+      promptText: 'Codex',
+    });
+    expect(prompt.accept).toHaveBeenCalledExactlyOnceWith('Codex');
+
+    const confirm = openDialog(fixture, 'confirm', 'Continue?');
+    await fixture.runtime.dispatch(
+      'tab.dialog.accept',
+      await dialogArgs(fixture.runtime, tab.id),
+    );
+    expect(confirm.accept).toHaveBeenCalledExactlyOnceWith(undefined);
+  });
+
   it('unblocks a tab when Chrome closes a dialog externally without navigation', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);
@@ -1272,7 +1432,7 @@ describe('PlaywrightRuntime command contracts', () => {
     ).resolves.toMatchObject({ message: 'Second' });
     fixture.emitEvent({
       type: 'event',
-      tabId: 18,
+      tabId: 22,
       method: 'Page.javascriptDialogClosed',
       params: {},
     });
@@ -1285,6 +1445,73 @@ describe('PlaywrightRuntime command contracts', () => {
       method: 'Page.javascriptDialogClosed',
       params: {},
     });
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toBeNull();
+  });
+
+  it('drops a dialog the bridge already reported closed before Playwright delivered it', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    // Chrome reported the opening and the close in one chunk, so both bridge
+    // events run before Playwright hands the dialog over from a later
+    // macrotask (its in-process dispatcher hops through setImmediate).
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogOpening'));
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogClosed'));
+    await new Promise<void>((resolve) =>
+      setImmediate(() => {
+        openDialog(fixture, 'alert', 'Already gone');
+        resolve();
+      }),
+    );
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toBeNull();
+    await expect(
+      fixture.runtime.dispatch('tab.title', { tabId: tab.id }),
+    ).resolves.toBe('Fixture');
+  });
+
+  it('keeps a dialog whose close the bridge has not reported', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    // A close belonging to a dialog that was open before the tab was
+    // attached must not be charged to the dialog that opens next.
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogClosed'));
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogOpening'));
+    await new Promise<void>((resolve) =>
+      setImmediate(() => {
+        openDialog(fixture, 'confirm', 'Still open');
+        resolve();
+      }),
+    );
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toMatchObject({ message: 'Still open' });
+    await expect(
+      fixture.runtime.dispatch('tab.title', { tabId: tab.id }),
+    ).rejects.toMatchObject({ code: 'DIALOG_OPEN' });
+  });
+
+  it('pairs batched dialog events with their deliveries in order', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    // [opening, closed, opening] in one chunk: the first delivery is the
+    // closed dialog and the second is live.
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogOpening'));
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogClosed'));
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogOpening'));
+    await new Promise<void>((resolve) =>
+      setImmediate(() => {
+        openDialog(fixture, 'alert', 'First');
+        openDialog(fixture, 'confirm', 'Second');
+        resolve();
+      }),
+    );
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toMatchObject({ message: 'Second' });
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogClosed'));
     await expect(
       fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
     ).resolves.toBeNull();
@@ -1310,6 +1537,12 @@ describe('PlaywrightRuntime command contracts', () => {
     await expect(
       fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
     ).resolves.toEqual([expect.objectContaining({ id: tab.id, title: null })]);
+    await expect(
+      fixture.runtime.dispatch('tabs.get', {
+        browserId: 'chrome',
+        tabId: tab.id,
+      }),
+    ).resolves.toEqual(expect.objectContaining({ id: tab.id, title: null }));
     expect(fixture.page.title).toHaveBeenCalledTimes(titleCalls);
 
     await expect(
@@ -1333,6 +1566,58 @@ describe('PlaywrightRuntime command contracts', () => {
       url: 'https://example.com/',
     });
     expect(fixture.page.goto).toHaveBeenCalledOnce();
+  });
+
+  it('times out tab.title when the page never yields a title', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    fixture.page.title.mockReturnValue(new Promise<string>(() => {}));
+    vi.useFakeTimers();
+    try {
+      const result = fixture.runtime
+        .dispatch('tab.title', { tabId: tab.id })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await result).toMatchObject({ code: 'OPERATION_TIMEOUT' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lists a tab whose title read never settles with a null title', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    fixture.page.title.mockReturnValue(new Promise<string>(() => {}));
+    vi.useFakeTimers();
+    try {
+      const result = fixture.runtime
+        .dispatch('tabs.list', { browserId: 'chrome' })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await result).toEqual([
+        expect.objectContaining({ id: tab.id, title: null }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops the session while a registering tab’s title read never settles', async () => {
+    const fixture = await runtimeFixture();
+    fixture.page.title.mockReturnValue(new Promise<string>(() => {}));
+    vi.useFakeTimers();
+    try {
+      const created = fixture.runtime
+        .dispatch('tabs.new', { browserId: 'chrome' })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await created).toMatchObject({ title: null });
+      const stopped = fixture.runtime.stop().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await stopped).not.toBeInstanceOf(Error);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('clears the cached dialog when Chrome reports it already gone', async () => {
@@ -1506,13 +1791,13 @@ describe('PlaywrightRuntime command contracts', () => {
         if (method === 'tabs.queryDerived')
           return [
             {
-              providerTabId: 18,
+              providerTabId: 22,
               title: 'Popup',
               url: 'https://example.com/popup',
               derivedFromProviderTabId: 17,
             },
           ];
-        if (method === 'tabs.attach' && params.tabId === 18)
+        if (method === 'tabs.attach' && params.tabId === 22)
           throw new Error('Cannot attach to target');
         return null;
       },
@@ -1575,13 +1860,13 @@ describe('PlaywrightRuntime command contracts', () => {
         if (method === 'tabs.queryDerived')
           return [
             {
-              providerTabId: 18,
+              providerTabId: 22,
               title: 'Popup',
               url: 'https://example.com/popup',
               derivedFromProviderTabId: 17,
             },
           ];
-        if (method === 'tabs.attach' && params.tabId === 18)
+        if (method === 'tabs.attach' && params.tabId === 22)
           throw new BrowserRuntimeError(
             'BROWSER_DISCONNECTED',
             'Chrome extension disconnected',
@@ -1593,6 +1878,188 @@ describe('PlaywrightRuntime command contracts', () => {
     await expect(
       fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
     ).rejects.toMatchObject({ code: 'BROWSER_DISCONNECTED' });
+  });
+
+  it('lists open user tabs newest first and leaves non-http tabs undiscoverable', async () => {
+    const fixture = await runtimeFixture();
+    const original = fixture.request.getMockImplementation()!;
+    fixture.request.mockImplementation(
+      async (method: string, params: Record<string, unknown> = {}) => {
+        if (method === 'tabs.queryOpen')
+          return [
+            {
+              providerTabId: 21,
+              title: 'Mail',
+              url: 'https://mail.example/a',
+              lastOpened: '2026-09-01T00:00:00Z',
+            },
+            { providerTabId: 22, title: 'Mail', url: 'https://mail.example/b' },
+            {
+              providerTabId: 23,
+              title: 'Mail',
+              url: 'https://mail.example/c',
+              lastOpened: '2026-09-07T00:00:00Z',
+            },
+            {
+              providerTabId: 24,
+              title: 'Secrets',
+              url: 'file:///Users/x/.aws/credentials',
+              lastOpened: '2026-09-08T00:00:00Z',
+            },
+          ];
+        return await original(method, params);
+      },
+    );
+    const listed = (await fixture.runtime.dispatch('browser.user.openTabs', {
+      browserId: 'chrome',
+    })) as Array<{ id: string; url: string | null }>;
+    expect(listed.map((tab) => tab.url)).toEqual([
+      'https://mail.example/c',
+      'https://mail.example/a',
+      'https://mail.example/b',
+    ]);
+    // A filtered-out tab never became a discovery record, so it cannot be
+    // claimed by guessing its shape either.
+    await expect(
+      fixture.runtime.dispatch('browser.user.claimTab', {
+        browserId: 'chrome',
+        tab: {
+          id: listed[0]!.id.replace(/open-.*/, 'open-elsewhere'),
+          title: 'Secrets',
+          url: 'file:///Users/x/.aws/credentials',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'TAB_NOT_GRANTED' });
+  });
+
+  it('claims a discovered user tab only while it still matches discovery', async () => {
+    const fixture = await runtimeFixture();
+    const original = fixture.request.getMockImplementation()!;
+    const current = {
+      providerTabId: 17,
+      title: 'Fixture',
+      url: 'https://example.com/',
+    };
+    fixture.request.mockImplementation(
+      async (method: string, params: Record<string, unknown> = {}) => {
+        if (method === 'tabs.queryOpen') return [{ ...current }];
+        if (method === 'tabs.get') return current;
+        return await original(method, params);
+      },
+    );
+    const claim = (tab: unknown) =>
+      fixture.runtime.dispatch('browser.user.claimTab', {
+        browserId: 'chrome',
+        tab,
+      });
+    const attachCalls = () =>
+      fixture.request.mock.calls.filter(([method]) => method === 'tabs.attach');
+
+    const [open] = (await fixture.runtime.dispatch('browser.user.openTabs', {
+      browserId: 'chrome',
+    })) as BrowserUserTabInfo[];
+    if (open === undefined) throw new Error('Expected one open tab');
+    expect(open).toEqual({
+      id: expect.stringMatching(/^open-/),
+      title: 'Fixture',
+      url: 'https://example.com/',
+    });
+
+    await expect(claim('open-unknown')).rejects.toMatchObject({
+      code: 'TAB_NOT_GRANTED',
+    });
+    await expect(claim({ ...open, title: 'Edited' })).rejects.toMatchObject({
+      code: 'STALE_TAB',
+    });
+    current.url = 'https://example.com/moved';
+    await expect(claim(open.id)).rejects.toMatchObject({ code: 'STALE_TAB' });
+    expect(attachCalls()).toEqual([]);
+
+    current.url = 'https://example.com/';
+    await expect(claim(open.id)).resolves.toEqual({
+      id: expect.stringMatching(/^tab-/),
+      title: 'Fixture',
+      url: 'about:blank',
+    });
+    expect(attachCalls()).toEqual([['tabs.attach', { tabId: 17 }]]);
+    await expect(
+      fixture.runtime.dispatch('tabs.selected', { browserId: 'chrome' }),
+    ).resolves.toMatchObject({ title: 'Fixture' });
+  });
+
+  it('adopts a tracked popup only when its opener is a controlled tab', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const original = fixture.request.getMockImplementation()!;
+    fixture.request.mockImplementation(
+      async (method: string, params: Record<string, unknown> = {}) => {
+        if (method === 'tabs.get')
+          return { providerTabId: 22, title: 'Popup', url: 'about:blank' };
+        return await original(method, params);
+      },
+    );
+    const popupTracked = (openerTabId: number): BridgeEvent => ({
+      type: 'event',
+      tabId: 22,
+      method: 'qwenBrowser.derivedTabTracked',
+      params: { openerTabId },
+    });
+    const lookups = () =>
+      fixture.request.mock.calls.filter(([method]) => method === 'tabs.get');
+
+    fixture.emitEvent(popupTracked(99));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(lookups()).toEqual([]);
+
+    fixture.emitEvent(popupTracked(17));
+    await vi.waitFor(async () => {
+      await expect(
+        fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+      ).resolves.toHaveLength(2);
+    });
+    expect(lookups()).toEqual([['tabs.get', { tabId: 22 }]]);
+    await expect(
+      fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: tab.id }),
+      expect.objectContaining({ title: 'Popup', url: 'about:blank' }),
+    ]);
+    await expect(
+      fixture.runtime.dispatch('tabs.selected', { browserId: 'chrome' }),
+    ).resolves.toMatchObject({ id: tab.id });
+  });
+
+  it('keeps the selected tab when listing adopts a derived popup', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    await expect(
+      fixture.runtime.dispatch('tabs.selected', { browserId: 'chrome' }),
+    ).resolves.toMatchObject({ id: tab.id });
+    const original = fixture.request.getMockImplementation()!;
+    fixture.request.mockImplementation(
+      async (method: string, params: Record<string, unknown> = {}) => {
+        if (method === 'tabs.queryDerived')
+          return [
+            {
+              providerTabId: 22,
+              title: 'Popup',
+              url: 'about:blank',
+              derivedFromProviderTabId: 17,
+            },
+          ];
+        return await original(method, params);
+      },
+    );
+
+    await expect(
+      fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: tab.id }),
+      expect.objectContaining({ title: 'Popup' }),
+    ]);
+    await expect(
+      fixture.runtime.dispatch('tabs.selected', { browserId: 'chrome' }),
+    ).resolves.toMatchObject({ id: tab.id });
   });
 
   it('does not impose an origin allowlist on Playwright navigation', async () => {
@@ -1654,13 +2121,13 @@ describe('PlaywrightRuntime command contracts', () => {
     );
     fixture.emitEvent({
       type: 'event',
-      tabId: 18,
+      tabId: 22,
       method: 'qwenBrowser.derivedTabTracked',
       params: { openerTabId: 17 },
     });
     await fixture.runtime.stop();
     expect(fixture.listenerCount()).toBe(0);
-    finish({ providerTabId: 18, title: 'Popup', url: 'about:blank' });
+    finish({ providerTabId: 22, title: 'Popup', url: 'about:blank' });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(
       fixture.request.mock.calls.filter(([method]) => method === 'tabs.attach'),
@@ -1781,6 +2248,73 @@ describe('PlaywrightRuntime command contracts', () => {
       fixture.request.mock.calls.filter(([method]) => method === 'tabs.detach'),
     ).toHaveLength(1);
   });
+
+  it.each(['handoff', 'cleanup'] as const)(
+    'finalizes a re-registered crashed provider once for %s',
+    async (disposition) => {
+      const fixture = await runtimeFixture();
+      const oldTab = await createTab(fixture.runtime);
+      const listeners = new Map(
+        fixture.page.on.mock.calls as Array<[string, () => void]>,
+      );
+      listeners.get('crash')!();
+      const newTab = await createTab(fixture.runtime);
+      expect(newTab.id).not.toBe(oldTab.id);
+      listeners.get('close')!();
+
+      await fixture.runtime.dispatch('tabs.finalize', {
+        browserId: 'chrome',
+        keep:
+          disposition === 'handoff'
+            ? [{ tabId: newTab.id, status: 'handoff' }]
+            : [],
+      });
+
+      expect(
+        fixture.request.mock.calls.filter(
+          ([method]) => method === 'tabs.close',
+        ),
+      ).toEqual(
+        disposition === 'handoff' ? [] : [['tabs.close', { tabId: 17 }]],
+      );
+    },
+  );
+
+  it.each(['STALE_TAB', 'OPERATION_FAILED'] as const)(
+    'only forgets a crash-retained tab when cleanup reports it gone: %s',
+    async (code) => {
+      const fixture = await runtimeFixture();
+      await createTab(fixture.runtime);
+      const listeners = new Map(
+        fixture.page.on.mock.calls as Array<[string, () => void]>,
+      );
+      listeners.get('crash')!();
+      listeners.get('close')!();
+      const request = fixture.request.getMockImplementation()!;
+      const error = new BrowserRuntimeError(code, 'Controlled cleanup failure');
+      fixture.request.mockImplementation(async (method, params = {}) => {
+        if (method === 'tabs.close') throw error;
+        return await request(method, params);
+      });
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const result = fixture.runtime.dispatch('tabs.finalize', {
+            browserId: 'chrome',
+            keep: [],
+          });
+          if (code === 'STALE_TAB') await expect(result).resolves.toBeNull();
+          else await expect(result).rejects.toBe(error);
+        }
+        expect(
+          fixture.request.mock.calls.filter(
+            ([method]) => method === 'tabs.close',
+          ),
+        ).toHaveLength(code === 'STALE_TAB' ? 1 : 2);
+      } finally {
+        fixture.request.mockImplementation(request);
+      }
+    },
+  );
 
   it('releases tab and transport state when a page closes', async () => {
     const fixture = await runtimeFixture();
@@ -2235,6 +2769,7 @@ interface RuntimeFixture {
   request: ReturnType<typeof vi.fn>;
   derivedTabs: Array<Record<string, unknown>>;
   openTabs: Array<Record<string, unknown>>;
+  probeDetach: ReturnType<typeof vi.fn>;
   disconnect(): void;
   browserDisconnect(): void;
   listenerCount(): number;
@@ -2253,6 +2788,13 @@ async function dialogArgs(runtime: PlaywrightRuntime, tabId: string) {
     dialogId: string;
   };
   return { tabId, dialogId: descriptor.dialogId };
+}
+
+function dialogEvent(
+  method: 'Page.javascriptDialogOpening' | 'Page.javascriptDialogClosed',
+  tabId = 17,
+): BridgeEvent {
+  return { type: 'event', tabId, method, params: {} };
 }
 
 function openDialog(
@@ -2285,10 +2827,10 @@ async function runtimeFixture(
   };
   locator.methods.evaluateHandle.mockResolvedValue(typingState);
   const page = fakePage(locator.value);
+  const popupPage = fakePage(locator.value, 'Popup');
   const unrelatedPage = options.unrelatedPage
     ? fakePage(locator.value, 'Unrelated popup')
     : undefined;
-  const popupPage = fakePage(locator.value, 'Popup');
   const nestedPopupPage = fakePage(locator.value, 'Nested popup');
   const pageTargetIds = new Map<Page, string>([
     [page.value, 'target-17'],
@@ -2297,6 +2839,10 @@ async function runtimeFixture(
   ]);
   if (unrelatedPage !== undefined)
     pageTargetIds.set(unrelatedPage.value, 'target-popup');
+  // Registration probes each candidate page over its own CDP session; those
+  // sessions never forward a command, so their release is recorded apart from
+  // the operation session's detach.
+  const probeDetach = vi.fn();
   const cdp = {
     send: vi.fn(
       async (_method: string, _params?: Record<string, unknown>) => ({}),
@@ -2339,6 +2885,7 @@ async function runtimeFixture(
         },
         detach: async () => {
           if (forwarded) await cdp.detach();
+          else probeDetach();
         },
       };
     }),
@@ -2444,6 +2991,7 @@ async function runtimeFixture(
     request,
     derivedTabs,
     openTabs,
+    probeDetach,
     stopBridge: bridge.stop as ReturnType<typeof vi.fn>,
     browserDisconnect() {
       browserOn.mock.calls.at(-1)?.[1]();

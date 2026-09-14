@@ -71,11 +71,41 @@ describe('Playwright AI snapshots', () => {
   });
 
   it('keeps clickable generic nodes that AI mode marks cursor=pointer', async () => {
+    // The renderer appends a trailing colon when the node has children or
+    // properties; [cursor=pointer] is still the key's last attribute.
     const fixture = fakePage(
       [
         '- generic [ref=e1]:',
         '  - generic [ref=e2] [cursor=pointer]',
         '  - text: plain text',
+        '  - button "Save" [ref=e3]',
+        '  - generic "Card" [ref=e4] [cursor=pointer]:',
+        '    - text: Details',
+        '  - generic "Profile" [ref=e5] [cursor=pointer]:',
+        '    - /url: /profile',
+      ].join('\n'),
+    );
+
+    await expect(
+      snapshotTab(tab(fixture.page), { interactiveOnly: true }),
+    ).resolves.toBe(
+      [
+        '- generic [ref=e2] [cursor=pointer]',
+        '- button "Save" [ref=e3]',
+        '- generic "Card" [ref=e4] [cursor=pointer]',
+        '- generic "Profile" [ref=e5] [cursor=pointer]:',
+        '  - /url: /profile',
+      ].join('\n'),
+    );
+  });
+
+  it('keeps clickable nodes when the name forces YAML quoting of the key', async () => {
+    const fixture = fakePage(
+      [
+        '- generic [ref=e1]:',
+        `  - 'generic "Total: 3 items" [ref=e2] [cursor=pointer]'`,
+        `  - 'generic "Total: 4 items" [ref=e4] [cursor=pointer]':`,
+        '    - text: Details',
         '  - button "Save" [ref=e3]',
       ].join('\n'),
     );
@@ -83,9 +113,11 @@ describe('Playwright AI snapshots', () => {
     await expect(
       snapshotTab(tab(fixture.page), { interactiveOnly: true }),
     ).resolves.toBe(
-      ['- generic [ref=e2] [cursor=pointer]', '- button "Save" [ref=e3]'].join(
-        '\n',
-      ),
+      [
+        `- 'generic "Total: 3 items" [ref=e2] [cursor=pointer]'`,
+        `- 'generic "Total: 4 items" [ref=e4] [cursor=pointer]'`,
+        '- button "Save" [ref=e3]',
+      ].join('\n'),
     );
   });
 

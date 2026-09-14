@@ -254,6 +254,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     setTimeout,
     clearTimeout,
     TextDecoder,
+    TextEncoder,
     Uint8Array,
     chrome: {
       runtime: { id: 'extension-id', connectNative: () => port },
@@ -285,7 +286,9 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
           return [...tabs.values()];
         },
         async get(tabId: number) {
-          return tabs.get(tabId);
+          const tab = tabs.get(tabId);
+          if (!tab) throw new Error('No tab with this id');
+          return tab;
         },
         async create(options: { active: boolean }) {
           assert.equal(
@@ -413,6 +416,14 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
           params: Record<string, unknown> = {},
         ) {
           debuggerCommands.push({ tabId, method, params });
+          if (
+            method === 'Runtime.evaluate' &&
+            params.expression === 'oversizedResult'
+          ) {
+            return {
+              result: { type: 'string', value: '界'.repeat(6 * 1024 * 1024) },
+            };
+          }
           if (method === 'Runtime.callFunctionOn') {
             return await new Promise(() => undefined);
           }
@@ -482,10 +493,13 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     },
   ]);
   await assert.rejects(api.dispatch('tabs.attach', { tabId: 9 }), /http\(s\)/);
-  await assert.rejects(
-    api.dispatch('tabs.close', { tabId: 9 }),
-    /not controlled/,
-  );
+  await assert.rejects(api.dispatch('tabs.close', { tabId: 9 }), {
+    code: 'TAB_NOT_OWNED',
+  });
+  assert.ok(tabs.has(9));
+  await assert.rejects(api.dispatch('tabs.close', { tabId: 99 }), {
+    code: 'STALE_TAB',
+  });
 
   await api.dispatch('tabs.attach', { tabId: 1 });
   hangOverlayCleanup = true;
@@ -640,6 +654,42 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   );
   assert.ok(overlayBootstrap);
   assertOverlayLifecycle(String(overlayBootstrap.params.source));
+  assertOverlayLifecycle(String(overlayBootstrap.params.source), true);
+
+  const responseFor = (id: string) =>
+    postedMessages.find(
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'id' in message &&
+        message.id === id,
+    ) as { ok: boolean; error?: { code: string } } | undefined;
+  listeners['nativeMessage']?.({
+    type: 'request',
+    id: 'oversized-result',
+    method: 'cdp.send',
+    params: {
+      tabId: 1,
+      method: 'Runtime.evaluate',
+      params: { expression: 'oversizedResult', returnByValue: true },
+    },
+  });
+  await waitFor(() => responseFor('oversized-result') !== undefined);
+  const oversizedResponse = responseFor('oversized-result');
+  assert.ok(oversizedResponse);
+  assert.equal(oversizedResponse.ok, false);
+  assert.equal(oversizedResponse.error?.code, 'OPERATION_FAILED');
+  assert.ok(Buffer.byteLength(JSON.stringify(oversizedResponse)) < 1_024);
+  assert.ok(api.attachedTabs.has(1));
+  listeners['nativeMessage']?.({
+    type: 'request',
+    id: 'after-oversized-result',
+    method: 'cdp.send',
+    params: { tabId: 1, method: 'Page.enable', params: {} },
+  });
+  await waitFor(() => responseFor('after-oversized-result') !== undefined);
+  assert.equal(responseFor('after-oversized-result')?.ok, true);
+  assert.ok(debuggerAttachedTabIds.has(1));
 
   failUngroupTabId = 5;
   const createdTab = tabs.get(5);
@@ -801,8 +851,22 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   assert.equal(api.inFlightDispatches.size, 0);
 });
 
-function assertOverlayLifecycle(source: string): void {
+function assertOverlayLifecycle(source: string, preplant = false): void {
   const overlayDocument = document.implementation.createHTMLDocument('Page');
+  const planted = preplant ? overlayDocument.createElement('div') : undefined;
+  if (planted) {
+    planted.id = '__qwen-browser-overlay';
+    planted.style.cssText =
+      'position:fixed;inset:0;pointer-events:auto;z-index:5;background:red';
+    overlayDocument.body.appendChild(planted);
+  }
+  const plantedHtml = planted?.outerHTML;
+  const ownedRoot = () =>
+    [
+      ...overlayDocument.querySelectorAll<HTMLDivElement>(
+        '#__qwen-browser-overlay',
+      ),
+    ].find((element) => element !== planted);
   const originalHtml = overlayDocument.documentElement.outerHTML;
   const timers = new Map<number, () => void>();
   let nextTimerId = 0;
@@ -831,8 +895,14 @@ function assertOverlayLifecycle(source: string): void {
     move(x: number, y: number, pressed: boolean): void;
     destroy(): void;
   };
+  vm.runInContext(source, context);
+  assert.equal(
+    vm.runInContext('globalThis.__qwenBrowserOverlay', context),
+    controller,
+  );
   controller.move(12, 34, true);
-  const firstRoot = overlayDocument.getElementById('__qwen-browser-overlay');
+  assert.equal(planted?.outerHTML, plantedHtml);
+  const firstRoot = ownedRoot();
   assert.ok(firstRoot);
   assert.equal(firstRoot.style.transform, 'translate3d(12px, 34px, 0)');
   assert.equal(firstRoot.style.pointerEvents, 'none');
@@ -868,7 +938,7 @@ function assertOverlayLifecycle(source: string): void {
   );
 
   controller.move(90, 12, false);
-  const secondRoot = overlayDocument.getElementById('__qwen-browser-overlay');
+  const secondRoot = ownedRoot();
   assert.ok(secondRoot);
   assert.notEqual(
     secondRoot,

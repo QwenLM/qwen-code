@@ -118,6 +118,7 @@ async function fixture(
     Date,
     Error,
     TextDecoder,
+    TextEncoder,
     Uint8Array,
     atob,
   });

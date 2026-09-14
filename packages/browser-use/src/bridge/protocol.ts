@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { statSync } from 'node:fs';
 import { posix } from 'node:path';
 
 export const CHROME_BRIDGE_PROTOCOL_VERSION = 2;
@@ -30,7 +31,51 @@ export function defaultChromeBridgeSocketPath(
     typeof process.getuid === 'function' ? process.getuid() : 'default';
   // The win32 branch returned above; keep the remaining join POSIX so the
   // derived path is a pure function of uid and platform on every host.
-  return posix.join('/tmp', `qwen-browser-use-${uid}`, 'bridge.sock');
+  return posix.join(defaultChromeBridgeSocketDirectory(uid), 'bridge.sock');
+}
+
+interface DirectoryStat {
+  isDirectory(): boolean;
+  uid: number;
+  mode: number;
+}
+
+// The world-writable temp root lets any local user squat a predictable
+// socket name (or its recovery lock) and deny the bridge permanently.
+// Prefer a per-user directory when the platform offers one; otherwise fall
+// back to a per-user directory directly under the sticky temp root, which
+// the bridge server creates 0700 and verifies before binding. A shared
+// intermediate directory would belong to whichever user created it first,
+// so the fallback never inserts one. The choice must stay a pure
+// function of uid and platform — never of $TMPDIR/$XDG_RUNTIME_DIR — so the
+// CLI and the Chrome-launched native host derive the same path without
+// sharing an environment.
+export function defaultChromeBridgeSocketDirectory(
+  uid: number | 'default',
+  platform: NodeJS.Platform = process.platform,
+  stat: (path: string) => DirectoryStat | undefined = statDirectory,
+): string {
+  if (platform !== 'win32' && typeof uid === 'number') {
+    const runtimeDir = `/run/user/${uid}`;
+    const info = stat(runtimeDir);
+    if (
+      info !== undefined &&
+      info.isDirectory() &&
+      info.uid === uid &&
+      (info.mode & 0o077) === 0
+    )
+      return runtimeDir;
+  }
+  const base = platform === 'darwin' ? '/private/tmp' : '/tmp';
+  return posix.join(base, `qwen-browser-use-${uid}`);
+}
+
+function statDirectory(path: string): DirectoryStat | undefined {
+  try {
+    return statSync(path);
+  } catch {
+    return undefined;
+  }
 }
 
 export interface BridgeHello {

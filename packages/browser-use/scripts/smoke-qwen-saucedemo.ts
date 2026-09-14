@@ -472,7 +472,8 @@ async function verifySauceCompletion(socketPath: string): Promise<{
   const bridge = new ChromeExtensionTransport({ socketPath });
   const runtime = new PlaywrightRuntime({ bridge });
   try {
-    await bridge.request('ping', {}, 20_000);
+    await bridge.start();
+    await bridge.request('ping');
     const openTabs = await runtime.dispatch('browser.user.openTabs', {
       browserId: runtime.browserId,
     });
@@ -519,7 +520,7 @@ async function claimAfterPreviousSessionExits(
         Date.now() >= deadline ||
         !(error instanceof Error) ||
         !('code' in error) ||
-        error.code !== 'TAB_ALREADY_CLAIMED'
+        error.code !== 'TAB_DEBUGGER_CONFLICT'
       ) {
         throw error;
       }

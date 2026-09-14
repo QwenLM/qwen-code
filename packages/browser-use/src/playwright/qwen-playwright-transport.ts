@@ -101,10 +101,6 @@ export class QwenPlaywrightTransport implements ConnectOverCDPTransport {
     await this.model.unregisterTab(tabId);
   }
 
-  providerTabId(targetId: string): number | undefined {
-    return this.model.providerTabId(targetId);
-  }
-
   private async handle(message: CdpCommand): Promise<unknown> {
     const params = message.params ?? {};
     switch (message.method) {

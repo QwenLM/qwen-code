@@ -5,6 +5,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_CHROME_DOCUMENTATION } from '../core/chrome-runtime-documentation.js';
+import type { LocatorStep } from '../core/primitives.js';
 import { executeLocatorOperation } from './locator-operations.js';
 import type { TabState } from './runtime-state.js';
 
@@ -216,6 +218,20 @@ describe('locator.press', () => {
     expect(f.keyboard.up.mock.calls).toEqual([['Esc'], ['Control']]);
   });
 
+  it('releases the tokens Playwright derives, not a naive split of the chord', async () => {
+    const f = pressFixture();
+    f.args.value = 'Control+++Bogus';
+    f.locator.press.mockRejectedValue(new Error('Unknown key: "Bogus"'));
+    await expect(
+      executeLocatorOperation('locator.press', f.args, f.tab),
+    ).rejects.toThrow('Unknown key');
+    expect(f.locator.press).toHaveBeenCalledExactlyOnceWith('Control+++Bogus', {
+      timeout: 5_000,
+      noWaitAfter: true,
+    });
+    expect(f.keyboard.up.mock.calls).toEqual([['Bogus'], ['+'], ['Control']]);
+  });
+
   it('leaves the keyboard alone when the press succeeds', async () => {
     const f = pressFixture();
     await expect(
@@ -226,6 +242,207 @@ describe('locator.press', () => {
       noWaitAfter: true,
     });
     expect(f.keyboard.up).not.toHaveBeenCalled();
+  });
+});
+
+describe('locator read defaults', () => {
+  // The model learns the read default from the documentation string, so the
+  // runtime constant and the documented figure must move together.
+  const READ_TIMEOUT_MS = 1_000;
+
+  it('waits the documented default when a read passes no timeoutMs', async () => {
+    const locator = {
+      innerText: vi.fn(async (_options: { timeout: number }) => 'text'),
+      textContent: vi.fn(async (_options: { timeout: number }) => 'text'),
+      getAttribute: vi.fn(
+        async (_name: string, _options: { timeout: number }) => 'value',
+      ),
+      isEnabled: vi.fn(async (_options: { timeout: number }) => true),
+    };
+    const tab = { page: { locator: () => locator } } as unknown as TabState;
+    const steps = [{ kind: 'locator', selector: '#row' }];
+
+    await expect(
+      executeLocatorOperation('locator.innerText', { steps }, tab),
+    ).resolves.toBe('text');
+    await expect(
+      executeLocatorOperation('locator.textContent', { steps }, tab),
+    ).resolves.toBe('text');
+    await expect(
+      executeLocatorOperation(
+        'locator.getAttribute',
+        { steps, name: 'href' },
+        tab,
+      ),
+    ).resolves.toBe('value');
+    await expect(
+      executeLocatorOperation('locator.isEnabled', { steps }, tab),
+    ).resolves.toBe(true);
+
+    expect(locator.innerText).toHaveBeenCalledExactlyOnceWith({
+      timeout: READ_TIMEOUT_MS,
+    });
+    expect(locator.textContent).toHaveBeenCalledExactlyOnceWith({
+      timeout: READ_TIMEOUT_MS,
+    });
+    expect(locator.getAttribute).toHaveBeenCalledExactlyOnceWith('href', {
+      timeout: READ_TIMEOUT_MS,
+    });
+    expect(locator.isEnabled).toHaveBeenCalledExactlyOnceWith({
+      timeout: READ_TIMEOUT_MS,
+    });
+    expect(DEFAULT_CHROME_DOCUMENTATION).toContain(
+      `Reads default to a ${READ_TIMEOUT_MS / 1_000}s timeout`,
+    );
+  });
+});
+
+describe('buildLocator', () => {
+  type Call = [scope: string, method: string, args: unknown[]];
+  const PATH = Symbol('path');
+  const chainMethods = [
+    'locator',
+    'getByRole',
+    'getByText',
+    'getByLabel',
+    'getByPlaceholder',
+    'getByTestId',
+    'contentFrame',
+    'filter',
+    'first',
+    'last',
+    'nth',
+    'and',
+    'or',
+  ] as const;
+
+  // Every chain method records its receiver's path and returns a child, so
+  // a dispatched plan yields the exact Playwright call sequence it produces.
+  function recorder() {
+    const calls: Call[] = [];
+    const describeArg = (value: unknown): unknown => {
+      if (
+        value === null ||
+        typeof value !== 'object' ||
+        value instanceof RegExp
+      )
+        return value;
+      if (PATH in value) return value[PATH];
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, describeArg(item)]),
+      );
+    };
+    const node = (path: string): Record<string | symbol, unknown> => {
+      const self: Record<string | symbol, unknown> = {
+        [PATH]: path,
+        count: vi.fn(async () => 0),
+      };
+      for (const method of chainMethods) {
+        self[method] = (...args: unknown[]) => {
+          calls.push([path, method, args.map(describeArg)]);
+          return node(`${path}.${method}`);
+        };
+      }
+      return self;
+    };
+    return { calls, tab: { page: node('page') } as unknown as TabState };
+  }
+
+  it.each<[string, LocatorStep[], Call[]]>([
+    [
+      'frame scoping',
+      [
+        { kind: 'frame', selector: 'iframe#pay' },
+        { kind: 'getByRole', role: 'button', name: 'Pay' },
+      ],
+      [
+        ['page', 'locator', ['iframe#pay']],
+        ['page.locator', 'contentFrame', []],
+        ['page.locator.contentFrame', 'getByRole', ['button', { name: 'Pay' }]],
+      ],
+    ],
+    [
+      'an and operand',
+      [
+        { kind: 'locator', selector: 'button' },
+        { kind: 'and', steps: [{ kind: 'getByText', text: 'Submit' }] },
+      ],
+      [
+        ['page', 'locator', ['button']],
+        ['page', 'getByText', ['Submit', {}]],
+        ['page.locator', 'and', ['page.getByText']],
+      ],
+    ],
+    [
+      'an or operand',
+      [
+        { kind: 'locator', selector: 'button' },
+        { kind: 'or', steps: [{ kind: 'getByText', text: 'Submit' }] },
+      ],
+      [
+        ['page', 'locator', ['button']],
+        ['page', 'getByText', ['Submit', {}]],
+        ['page.locator', 'or', ['page.getByText']],
+      ],
+    ],
+    [
+      'a filter with text and a nested has operand',
+      [
+        { kind: 'getByTestId', testId: 'row' },
+        {
+          kind: 'filter',
+          hasText: { regex: '^a', flags: 'i' },
+          has: [
+            { kind: 'getByRole', role: 'cell', name: 'Total', exact: true },
+          ],
+          visible: true,
+        },
+      ],
+      [
+        ['page', 'getByTestId', ['row']],
+        ['page', 'getByRole', ['cell', { name: 'Total', exact: true }]],
+        [
+          'page.getByTestId',
+          'filter',
+          [{ hasText: /^a/i, has: 'page.getByRole', visible: true }],
+        ],
+      ],
+    ],
+    [
+      'positional steps',
+      [
+        { kind: 'getByLabel', text: 'Name', exact: true },
+        { kind: 'nth', index: -1 },
+        { kind: 'getByPlaceholder', text: 'Search' },
+        { kind: 'last' },
+      ],
+      [
+        ['page', 'getByLabel', ['Name', { exact: true }]],
+        ['page.getByLabel', 'nth', [-1]],
+        ['page.getByLabel.nth', 'getByPlaceholder', ['Search', {}]],
+        ['page.getByLabel.nth.getByPlaceholder', 'last', []],
+      ],
+    ],
+  ])(
+    'reconstructs %s in Playwright call order',
+    async (_name, steps, expected) => {
+      const f = recorder();
+      await expect(
+        executeLocatorOperation('locator.count', { steps }, f.tab),
+      ).resolves.toBe(0);
+      expect(f.calls).toEqual(expected);
+    },
+  );
+
+  it('rejects a plan that ends inside a frame without an element selector', async () => {
+    const f = recorder();
+    await expect(
+      executeLocatorOperation(
+        'locator.count',
+        { steps: [{ kind: 'frame', selector: 'iframe' }] },
+        f.tab,
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_LOCATOR' });
   });
 });
 
@@ -275,6 +492,92 @@ describe('locator.allTextContents', () => {
   });
 });
 
+describe('locator.evaluate bindings', () => {
+  // The SDK emits scripts that read the free variables `element` and
+  // `elements`; the runtime binds them when it compiles the script inside
+  // the page. Run the real page-side callbacks here so a renamed binding on
+  // either side surfaces as the ReferenceError it would be in production.
+  it('binds element and elements for the page-side script', async () => {
+    const evaluate = vi.fn(
+      async (
+        run: (element: unknown, source: string) => Promise<string>,
+        source: string,
+      ) => run({ tagName: 'BODY' }, source),
+    );
+    const evaluateAll = vi.fn(
+      async (
+        run: (elements: unknown[], source: string) => Promise<string>,
+        source: string,
+      ) => run([{}, {}], source),
+    );
+    const handle = { waitFor: vi.fn(async () => undefined) };
+    const locator = { first: vi.fn(() => handle), evaluate, evaluateAll };
+    const tab = { page: { locator: () => locator } } as unknown as TabState;
+    const steps = [{ kind: 'locator', selector: 'body' }];
+    await expect(
+      executeLocatorOperation(
+        'locator.evaluate',
+        { steps, script: 'return element.tagName;', timeoutMs: 50 },
+        tab,
+      ),
+    ).resolves.toBe('BODY');
+    await expect(
+      executeLocatorOperation(
+        'locator.evaluateAll',
+        { steps, script: 'return elements.length;', timeoutMs: 50 },
+        tab,
+      ),
+    ).resolves.toBe(2);
+  });
+});
+
+describe('locator.evaluateAll', () => {
+  function evaluateAllFixture() {
+    const handle = { waitFor: vi.fn(async () => undefined) };
+    const locator = {
+      first: vi.fn(() => handle),
+      evaluateAll: vi.fn(async () => '["a"]'),
+    };
+    const tab = { page: { locator: () => locator } } as unknown as TabState;
+    const args = {
+      steps: [{ kind: 'locator', selector: '.row' }],
+      script: 'return elements.length;',
+      timeoutMs: 50,
+    };
+    return { handle, locator, tab, args };
+  }
+
+  it('waits for the first match within the caller budget before evaluating', async () => {
+    const f = evaluateAllFixture();
+    await expect(
+      executeLocatorOperation('locator.evaluateAll', f.args, f.tab),
+    ).resolves.toEqual(['a']);
+    expect(f.handle.waitFor).toHaveBeenCalledExactlyOnceWith({
+      state: 'attached',
+      timeout: 50,
+    });
+  });
+
+  it('still evaluates when nothing attaches in time', async () => {
+    const f = evaluateAllFixture();
+    const timeout = new Error('Timeout 50ms exceeded');
+    timeout.name = 'TimeoutError';
+    f.handle.waitFor.mockRejectedValue(timeout);
+    f.locator.evaluateAll.mockResolvedValue('[]');
+    await expect(
+      executeLocatorOperation('locator.evaluateAll', f.args, f.tab),
+    ).resolves.toEqual([]);
+  });
+
+  it('propagates a wait failure that is not a timeout', async () => {
+    const f = evaluateAllFixture();
+    f.handle.waitFor.mockRejectedValue(new Error('Target crashed'));
+    await expect(
+      executeLocatorOperation('locator.evaluateAll', f.args, f.tab),
+    ).rejects.toThrow('Target crashed');
+  });
+});
+
 describe('locator.downloadMedia', () => {
   function downloadFixture(media: Record<string, unknown>) {
     const anchor = {
@@ -291,9 +594,11 @@ describe('locator.downloadMedia', () => {
       ): Promise<{
         ok: boolean;
         status?: number;
+        headers: Headers;
         blob: () => Promise<Blob>;
       }> => ({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/octet-stream' }),
         blob: async () => new Blob(['bytes']),
       }),
     );
@@ -301,6 +606,7 @@ describe('locator.downloadMedia', () => {
     vi.stubGlobal('document', {
       createElement: () => anchor,
       body: { append: vi.fn() },
+      baseURI: 'https://site.example/',
     });
     vi.stubGlobal(
       'setTimeout',
@@ -308,9 +614,8 @@ describe('locator.downloadMedia', () => {
     );
     const element = {
       scrollIntoView: vi.fn(),
-      matches: vi.fn(() => false),
       closest: vi.fn((): unknown => media),
-      querySelector: vi.fn((): unknown => null),
+      querySelectorAll: vi.fn((_selector: string): unknown[] => []),
     };
     const locator = {
       evaluate: vi.fn(
@@ -344,17 +649,212 @@ describe('locator.downloadMedia', () => {
     expect(f.anchor.click).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    'blob:https://page.example/7c9e6679-7425-40de-944b-e07fc1f90ae7',
+    'data:image/png;base64,iVBORw0KGgo=',
+  ])('lets the browser name a download from %s by MIME type', async (url) => {
+    const f = downloadFixture({ currentSrc: url });
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.anchor.download).toBe('');
+    expect(f.anchor.click).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    'https://cdn.example.com/photo.jpg#preview',
+    'https://cdn.example.com/photo.jpg?w=1#preview',
+  ])(
+    'strips the query and the fragment from the file name of %s',
+    async (url) => {
+      const f = downloadFixture({ currentSrc: url });
+      await expect(
+        executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+      ).resolves.toBeNull();
+      expect(f.anchor.download).toBe('photo.jpg');
+    },
+  );
+
   it('prefers media contained in a located wrapper over an ancestor link', async () => {
     const f = downloadFixture({ href: '/product' });
-    f.element.closest.mockReturnValue({ href: '/product' });
-    f.element.querySelector.mockReturnValue({
-      currentSrc: 'https://cdn.example.com/inner.webp',
-    });
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ currentSrc: 'https://cdn.example.com/inner.webp' }]
+        : [],
+    );
     await expect(
       executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
     ).resolves.toBeNull();
     expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
       'https://cdn.example.com/inner.webp',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('prefers a contained image over an anchor that precedes it in document order', async () => {
+    const f = downloadFixture({});
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ currentSrc: 'https://cdn.example.com/photo.jpg' }]
+        : [{ href: 'https://example.com/product' }],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/photo.jpg',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('prefers contained media over the located anchor\u2019s own href', async () => {
+    const f = downloadFixture({});
+    Object.assign(f.element, { href: '/products/42' });
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ src: 'https://cdn.example.com/photo.jpg' }]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/photo.jpg',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('downloads the located anchor\u2019s own href when it wraps no media', async () => {
+    const f = downloadFixture({});
+    Object.assign(f.element, { href: 'https://example.com/report.pdf' });
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://example.com/report.pdf',
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(f.anchor.download).toBe('report.pdf');
+  });
+
+  it('downloads the file a located anchor links to when it wraps only an icon', async () => {
+    const f = downloadFixture({});
+    Object.assign(f.element, { href: 'https://example.com/files/annual.pdf' });
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ src: 'https://cdn.example.com/icons/pdf.png' }]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://example.com/files/annual.pdf',
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(f.anchor.download).toBe('annual.pdf');
+  });
+
+  it('falls back to the contained media when the located anchor links to a page', async () => {
+    const f = downloadFixture({});
+    Object.assign(f.element, { href: 'https://example.com/products/42' });
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ src: 'https://cdn.example.com/photo.jpg' }]
+        : [],
+    );
+    f.fetchMock.mockImplementation(async (url: string) => ({
+      ok: true,
+      headers: new Headers({
+        'content-type': url.endsWith('/42')
+          ? 'text/html; charset=utf-8'
+          : 'image/jpeg',
+      }),
+      blob: async () => new Blob(['bytes']),
+    }));
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'https://example.com/products/42',
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(f.fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'https://cdn.example.com/photo.jpg',
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(f.anchor.download).toBe('photo.jpg');
+  });
+
+  it('reads the first srcset URL when a matched source exposes no src', async () => {
+    const f = downloadFixture({});
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [
+            {
+              srcset:
+                'https://cdn.example.com/hero.webp 1x, https://cdn.example.com/hero@2x.webp 2x',
+            },
+            { src: 'https://cdn.example.com/hero.png' },
+          ]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/hero.webp',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('resolves a relative srcset candidate against the document base', async () => {
+    const f = downloadFixture({});
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ srcset: '/images/hero.webp 1x, /images/hero@2x.webp 2x' }]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://site.example/images/hero.webp',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('keeps a srcset URL that itself contains a comma whole', async () => {
+    const f = downloadFixture({});
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ srcset: '/c_fill,w_400/hero.jpg 1x' }]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://site.example/c_fill,w_400/hero.jpg',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('falls back to a source child when the located video has not loaded', async () => {
+    const f = downloadFixture({});
+    Object.assign(f.element, { currentSrc: '', src: '' });
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [{ src: 'https://cdn.example.com/movie.mp4' }]
+        : [],
+    );
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/movie.mp4',
       { signal: expect.any(AbortSignal) },
     );
   });
@@ -411,6 +911,7 @@ describe('locator.downloadMedia', () => {
     f.fetchMock.mockResolvedValue({
       ok: false,
       status: 403,
+      headers: new Headers(),
       blob: async () => new Blob([]),
     });
     await expect(

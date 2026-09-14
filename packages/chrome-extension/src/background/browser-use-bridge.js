@@ -5,10 +5,11 @@
  */
 
 // @ts-check
-/* global atob, chrome, clearTimeout, crypto, setTimeout, TextDecoder */
+/* global atob, chrome, clearTimeout, crypto, setTimeout, TextDecoder, TextEncoder */
 
 const NATIVE_HOST = 'com.qwen.browser';
 const PROTOCOL_VERSION = 2;
+const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
 /** @type {Set<number>} */
 const attachedTabs = new Set();
 /** @type {Map<number, Promise<void>>} */
@@ -43,8 +44,7 @@ const AGENT_OVERLAY_BOOTSTRAP = `(() => {
   let hideTimer;
   const mount = () => {
     if (!document.documentElement) return;
-    root = document.getElementById("__qwen-browser-overlay");
-    if (!root) {
+    if (!root?.isConnected) {
       root = document.createElement("div");
       root.id = "__qwen-browser-overlay";
       root.setAttribute("aria-hidden", "true");
@@ -416,12 +416,22 @@ async function handleBridgeMessage(port, message, generation) {
   try {
     const result = await dispatch(message.method, params, generation);
     if (nativePort === port) {
-      port.postMessage({
+      const response = {
         type: 'response',
         id: message.id,
         ok: true,
         result,
-      });
+      };
+      if (
+        new TextEncoder().encode(JSON.stringify(response)).byteLength >
+        MAX_BRIDGE_FRAME_BYTES
+      ) {
+        throw bridgeError(
+          'OPERATION_FAILED',
+          'Browser response exceeds the 16 MiB bridge limit; request a smaller result',
+        );
+      }
+      port.postMessage(response);
     }
   } catch (error) {
     if (nativePort === port) {
@@ -528,6 +538,9 @@ async function dispatch(method, params, generation = connectionGeneration) {
     case 'tabs.close': {
       const tabId = numberParam(params, 'tabId');
       if (!attachedTabs.has(tabId) && !agentOwnedTabs.has(tabId)) {
+        await chrome.tabs.get(tabId).catch(() => {
+          throw bridgeError('STALE_TAB', 'The Chrome tab no longer exists');
+        });
         throw bridgeError(
           'TAB_NOT_OWNED',
           'Chrome tab is not controlled by this Browser Use session',

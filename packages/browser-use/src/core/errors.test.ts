@@ -59,10 +59,22 @@ describe('operation error classification', () => {
     expect(sanitizeOperationError('locator.click', timeout)).toMatchObject({
       code: 'OPERATION_TIMEOUT',
     });
+    // A genuine strict-mode violation crosses CDP as the raw exception
+    // description, so Playwright's phrase sits behind an "Error: " layer.
     expect(
       sanitizeOperationError(
         'locator.click',
-        new Error('locator.click: strict mode violation: two buttons'),
+        new Error(
+          "locator.click: Error: strict mode violation: locator('button') resolved to 2 elements:",
+        ),
+      ),
+    ).toMatchObject({ code: 'LOCATOR_NOT_UNIQUE' });
+    expect(
+      sanitizeOperationError(
+        'locator.click',
+        new Error(
+          "strict mode violation: locator('button') resolved to 2 elements:",
+        ),
       ),
     ).toMatchObject({ code: 'LOCATOR_NOT_UNIQUE' });
   });
@@ -124,6 +136,16 @@ describe('operation error classification', () => {
         new Error('locator.evaluate: Error: strict mode violation'),
       ),
     ).toMatchObject({ code: 'OPERATION_FAILED' });
+    // A page-thrown strict-mode lookalike lacks the element count Playwright
+    // always appends, so it must not pick the code either.
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error(
+          'locator.evaluate: Error: strict mode violation: resolved to elements',
+        ),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
     expect(
       sanitizeOperationError(
         'locator.click',
@@ -144,5 +166,91 @@ describe('operation error classification', () => {
     expect(sanitizeOperationError('locator.click', slowCrash)).toMatchObject({
       code: 'OPERATION_TIMEOUT',
     });
+  });
+
+  it('does not let a page-thrown primitive pick the code on the evaluate channel', () => {
+    // A page-thrown primitive string crosses CDP verbatim behind the
+    // evaluate apiName, with no "Error: " wrapper, so on that channel the
+    // first line is page-controlled and must not match Playwright's own
+    // crash/close phrases.
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error('locator.evaluate: Target crashed'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'playwright.evaluate',
+        new Error('page.evaluate: Page crashed'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error('locator.evaluate: frame was detached'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'locator.type',
+        new Error('locator.evaluateHandle: no tab with id 7'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    // A strict-mode lookalike thrown as a primitive carries no wrapper, and
+    // its element count is page-authored text, so it must not classify.
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error(
+          "locator.evaluate: strict mode violation: locator('button') resolved to 2 elements:",
+        ),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'playwright.evaluate',
+        new Error(
+          "page.evaluate: strict mode violation: locator('button') resolved to 2 elements:",
+        ),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    // A page-thrown Error object crosses CDP rendered as "Error: message",
+    // byte-identical to the wrapped genuine failure, so on the evaluate
+    // channel even the wrapped strict-mode form fails closed; the phrase
+    // stays visible in the message for the model.
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error(
+          "locator.evaluate: Error: strict mode violation: locator('button') resolved to 2 elements:",
+        ),
+      ),
+    ).toMatchObject({
+      code: 'OPERATION_FAILED',
+      message: expect.stringContaining('strict mode violation'),
+    });
+    expect(
+      sanitizeOperationError(
+        'locator.evaluateHandle',
+        new Error(
+          "locator.evaluateHandle: Error: strict mode violation: locator('button') resolved to 2 elements:",
+        ),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    // The same phrases stay classified on channels that never run page code.
+    expect(
+      sanitizeOperationError('locator.click', new Error('Target crashed ')),
+    ).toMatchObject({ code: 'STALE_TAB' });
+  });
+
+  it('ignores error-code tokens that no internal producer emits as text', () => {
+    for (const token of ['STALE_TAB', 'LOCATOR_NOT_UNIQUE', 'INVALID_LOCATOR'])
+      expect(
+        sanitizeOperationError(
+          'locator.click',
+          new Error(`locator.click: ${token}`),
+        ),
+      ).toMatchObject({ code: 'OPERATION_FAILED' });
   });
 });

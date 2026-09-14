@@ -5,6 +5,7 @@
  */
 
 import { types as utilTypes } from 'node:util';
+import { Script } from 'node:vm';
 
 import {
   SNAPSHOT_REF_PATTERN,
@@ -31,6 +32,12 @@ import type {
 } from './types.js';
 
 type Args = Record<string, unknown>;
+
+// Mirrors the contract's nth index range and locator step cap; a client
+// guard that disagreed with either would turn a late schema error into a
+// wrong early rejection.
+const MAX_NTH_INDEX = 10_000;
+const MAX_LOCATOR_STEPS = 32;
 
 function optionRecord(value: unknown, label: string): Args {
   if (value === undefined) return {};
@@ -79,6 +86,30 @@ function evaluateArg(value: unknown): string {
   }
 }
 
+function compiles(expression: string): boolean {
+  try {
+    new Script(expression);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// A method shorthand from an object literal or class body stringifies as
+// `name(args) { ... }`, which is not an expression, so the parenthesized form
+// is a page-side SyntaxError; as Playwright's own normalizer does, recover it
+// by prefixing `function `. The candidates are only compiled here, never run.
+function functionExpression(source: string, method: string): string {
+  const prefixed = source.startsWith('async ')
+    ? 'async function ' + source.slice('async '.length)
+    : 'function ' + source;
+  for (const candidate of [source, prefixed]) {
+    const expression = '(' + candidate + ')';
+    if (compiles(expression)) return expression;
+  }
+  throw new TypeError(method + ' pageFunction is not serializable');
+}
+
 export function pageEvaluateScript(
   pageFunction: unknown,
   arg: unknown,
@@ -98,7 +129,9 @@ export function pageEvaluateScript(
   if (typeof pageFunction === 'function') {
     return [
       'const arg = ' + serializedArg + ';',
-      'const __playwrightEvaluate = (' + pageFunction.toString() + ');',
+      'const __playwrightEvaluate = ' +
+        functionExpression(pageFunction.toString(), 'playwright.evaluate') +
+        ';',
       'return await __playwrightEvaluate(arg);',
     ].join('\n');
   }
@@ -126,7 +159,9 @@ function locatorEvaluateScript(
   if (typeof pageFunction === 'function') {
     return [
       'const arg = ' + serializedArg + ';',
-      'const __playwrightEvaluate = (' + pageFunction.toString() + ');',
+      'const __playwrightEvaluate = ' +
+        functionExpression(pageFunction.toString(), method) +
+        ';',
       'return await __playwrightEvaluate(' +
         (mode === 'all' ? 'elements' : 'element') +
         ', arg);',
@@ -252,8 +287,14 @@ export class LocatorProxy implements BrowserLocator {
     return this.append({ kind: 'last' });
   }
   nth(index: number): BrowserLocator {
-    if (!Number.isInteger(index))
-      throw new TypeError('nth index must be an integer');
+    if (
+      !Number.isInteger(index) ||
+      index < -MAX_NTH_INDEX ||
+      index > MAX_NTH_INDEX
+    )
+      throw new TypeError(
+        `nth index must be an integer between -${MAX_NTH_INDEX} and ${MAX_NTH_INDEX}`,
+      );
     return this.append({ kind: 'nth', index });
   }
   filter(options: LocatorFilterOptions = {}): BrowserLocator {
@@ -278,7 +319,17 @@ export class LocatorProxy implements BrowserLocator {
     return this.append({ kind: 'or', steps: this.operandSteps(other, 'or') });
   }
   async all(): Promise<BrowserLocator[]> {
+    // Each returned locator appends an nth step, so fail closed instead of
+    // handing back locators that would only be rejected on first use.
+    if (this.steps.length >= MAX_LOCATOR_STEPS)
+      throw new RangeError(
+        `all() cannot extend a locator that already has ${MAX_LOCATOR_STEPS} steps; narrow the locator`,
+      );
     const count = await this.count();
+    if (count > MAX_NTH_INDEX + 1)
+      throw new RangeError(
+        `all() matched ${count} elements, more than nth() can address; narrow the locator`,
+      );
     return Array.from({ length: count }, (_, index) => this.nth(index));
   }
 

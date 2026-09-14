@@ -220,12 +220,6 @@ export class BrowserModel {
     return undefined;
   }
 
-  providerTabId(targetId: string): number | undefined {
-    return this.findSession(
-      (candidate) => candidate.targetInfo.targetId === targetId,
-    )?.tabId;
-  }
-
   attachToBrowserTarget(): { sessionId: string } {
     const sessionId = `pw-browser-${this.nextSessionId++}`;
     this.browserSessions.add(sessionId);
@@ -321,16 +315,6 @@ export class BrowserModel {
     this.assertOpen();
     this.assertOwned(tabId);
     const info = targetInfo(response.targetInfo);
-    // Playwright never enables CDP download events here (noDefaults), so the
-    // bridge must: without this, Page.downloadWillBegin never fires and
-    // waitForEvent('download') cannot resolve.
-    await this.bridge.request('cdp.send', {
-      tabId,
-      method: 'Page.setDownloadBehavior',
-      params: { behavior: 'default', eventsEnabled: true },
-    });
-    this.assertOpen();
-    this.assertOwned(tabId);
     const session: TabSession = {
       tabId,
       sessionId: `pw-tab-${this.nextSessionId++}`,

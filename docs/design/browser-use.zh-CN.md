@@ -82,7 +82,7 @@ SDK 与浏览器运行时共用内部命令契约。SDK 对象将模型调用转
 
 可以用语义描述元素时使用 `tab.playwright`；模型从 DOM 快照识别目标时使用 `tab.dom_cua`；从截图视觉定位目标时使用 `tab.cua`。
 
-扩展为坐标鼠标输入显示短暂的指针 overlay，但该装饰仅尽力提供，绝不延迟输入命令本身。其 DOM 节点在鼠标输入时创建，指针到期后移除；只读检查不会创建 overlay 节点。
+扩展为坐标鼠标输入显示短暂的指针 overlay，但该装饰仅尽力提供，绝不延迟输入命令本身。其 DOM 节点在鼠标输入时创建，指针到期后移除；只读检查不会创建 overlay 节点。扩展创建并持有自己的节点，不会接管页面中同 ID 的元素。
 
 浏览器操作在后台运行。新标签页不会替换用户当前的活跃标签页，输入操作也不会将 Chrome 置于前台。页面焦点模拟使后台渲染和输入保持活跃，而不改变桌面焦点。
 
@@ -98,13 +98,13 @@ Locator plan 的每个数组最多包含 32 步，最多嵌套 32 层，顶层�
 
 Playwright 公共 CDP session API 提供坐标 CUA 的按钮 4（后退）和 5（前进）；较高层的 Playwright mouse API 不暴露它们。快照截断、截图编码和预算、会话失效检测及 JSON 传输封装属于运行时实现细节，不作为面向模型的选项。
 
-视口截图返回 JPEG 字节、MIME 类型及元数据。元数据包含原始图像尺寸、视口、设备像素比和 CSS 像素坐标空间，使模型客户端缩放预览后视觉坐标仍可用。Skill 将完整截图传给 `nodeRepl.emitImage()`。元数据随图像事件传递，紧邻每张保留图像之前返回，独立于普通文本输出预算。被拒绝或省略的图像不会遗留元数据。没有元数据专用大小上限；已有协议帧和客户端输出限制仍然适用。Node REPL 的分发和版本同步留待后续工作，届时将考虑把 MCP server 随 Qwen Code 一起打包。本次核验的已发布 0.1.2 和 0.1.3 包尚不具备该协议支持。视口截图根据编码字节数限制，不会仅因视口尺寸而拒绝。显式 clip 和整页截图保留像素预算，因为其尺寸由调用方控制或可能无界。
+视口截图返回 JPEG 字节、MIME 类型及元数据。元数据包含原始图像尺寸、视口、设备像素比和 CSS 像素坐标空间，使模型客户端缩放预览后视觉坐标仍可用。Skill 将完整截图传给 `nodeRepl.emitImage()`。元数据随图像事件传递，紧邻每张保留图像之前返回，独立于普通文本输出预算。被拒绝或省略的图像不会遗留元数据。没有元数据专用大小上限；已有协议帧和客户端输出限制仍然适用。Node REPL 的分发和版本同步留待后续工作，届时将考虑把 MCP server 随 Qwen Code 一起打包。本次核验的已发布 0.1.2 和 0.1.3 包尚不具备该协议支持。视口截图根据编码字节数限制，不会仅因视口尺寸而拒绝。显式 clip 和整页截图保留像素预算，因为其尺寸由调用方控制或可能无界。从页面脚本探测到的设备像素比只在真实 Chrome 窗口可能报告的范围内被信任；当截图像素与请求的 CSS 区域不一致时，运行时根据 Chrome 自身的输出推算真实像素比并重拍一次。
 
 截图获取采用 Codex Browser Use 策略，独立于 Playwright 的截图准备。短暂且有上限的渲染同步让待处理绘制在截图前完成。普通视口截图请求新的 CDP screencast 帧，帧期限为两秒，然后回退到命令超时为五秒的 `Page.captureScreenshot`。Clip 和整页截图直接使用后者。请求之前的旧帧会被丢弃；每个标签页的截图串行执行，事件监听器和 screencast 均会清理。运行时拥有这些事件，Playwright 不会重复确认同一帧。图像采用 JPEG quality 80，保留 CSS 像素坐标，不需要激活标签页或将 Chrome 置于前台。单次截图超时不会断开浏览器会话。
 
 Locator `downloadMedia()` 触发媒体或文件链接下载；`waitForEvent("download")` 用于同步其他页面操作触发的下载。返回的下载对象不透明，不暴露宿主文件系统路径。
 
-`downloadMedia()` 是 Qwen 适配功能，因为 Playwright 没有等价 locator 方法。Qwen 通过 Playwright locator 解析元素，为媒体 URL 临时创建页面内下载链接，点击后立即删除。调用方通过 Playwright `download` 事件同步。
+`downloadMedia()` 是 Qwen 适配功能，因为 Playwright 没有等价 locator 方法。Qwen 通过 Playwright locator 解析元素，为媒体 URL 临时创建页面内下载链接，点击后立即删除。调用方通过 Playwright `download` 事件同步。媒体字节在页面源内读取，因此服务端未返回 CORS 头的跨源资源无法用这种方式下载：调用会以指明该原因的错误失败，而不会让受控标签页跳转或保存空文件。带用户 cookie 下载此类资源需要浏览器侧的下载路径，属于后续工作。
 
 JavaScript 对话框使用类型相关操作：alert 和 before-unload 可以 dismiss，confirm 可以 accept 或 dismiss，prompt 在 accept 时需要文本。SDK 同时暴露对话框消息和 prompt 默认值。
 
@@ -121,11 +121,11 @@ JavaScript 对话框使用类型相关操作：alert 和 before-unload 可以 di
 
 页面级 `Page`、`Runtime`、`DOM`、`Accessibility`、`Input`、`Network`、`Fetch`、`Storage` 和 `Emulation` 命令及事件直接转发，Qwen 不重新实现它们。浏览器诊断保留有上限的 Playwright console 事件内存视图。在产品调用方提出需求前，不包含 HAR 导出。
 
-Chrome 将扩展 debugger target 的下载报告为 `Page` 事件，而 Playwright 消费对应的浏览器级事件。Transport 仅翻译这些事件名并保留载荷，不维护单独的下载状态机。
+Chrome 将扩展 debugger target 的下载报告为 `Page` 事件，而 Playwright 消费对应的浏览器级事件。Transport 仅翻译这些事件名并保留载荷，不维护单独的下载状态机。注册标签页时保留 Chrome 的下载策略：扩展无法调用 `Page.setDownloadBehavior`，而 Playwright 启用 Page 域后，无需该命令即可收到页面下载事件。
 
-Qwen 控制面保留非 CDP 操作，包括 `openTabs`、`claimTab`、`session.name` 和 `history.query`。
+Qwen 控制面保留非 CDP 操作，包括 `openTabs`、`claimTab`、`session.name` 和 `history.query`。History 省略 `from` 时沿用 Chrome 最近 24 小时的默认范围；显式传入 `from` 可查询更早的访问记录，无需同时指定 `to`。
 
-Native Host 发往 Chrome 的消息上限为 1 MiB。较大的后端到扩展消息拆分为有界协议分块，由扩展在 dispatch 前重新组装。
+Native Host 发往 Chrome 的消息上限为 1 MiB。较大的后端到扩展消息拆分为有界协议分块，由扩展在 dispatch 前重新组装。扩展响应必须满足 16 MiB 的 bridge 帧限制，按序列化后的 UTF-8 字节数计算。超大的操作结果返回有界的 `OPERATION_FAILED` 响应，Native Host 和浏览器会话仍可处理后续请求。
 
 ## 会话模型
 
@@ -139,13 +139,13 @@ Node Kernel 直接拥有本地 Chrome 扩展 transport：
 - 断开连接的标签页对象以 `STALE_BROWSER_SESSION` 失败，绝不静默重绑；
 - 关闭并重新初始化 Browser Use 会创建新一代 SDK 对象，旧一代保留的句柄继续失效。
 
-在 Unix 上，两端使用 `/tmp/qwen-browser-use-<uid>/bridge.sock`。后端创建当前用户拥有、权限为 `0700` 的目录，以及权限为 `0600` 的 socket。两端都会拒绝不安全的 ownership、权限及可被替换的祖先目录；Native Host 还会在转发流量前拒绝 socket 符号链接。显式 socket 路径覆盖也必须遵守相同的私有目录边界。同一用户的进程仍处于信任边界内。
+在 Unix 上，两端优先使用已存在、私有且由当前用户拥有的 `/run/user/<uid>/bridge.sock`；否则使用 `/tmp/qwen-browser-use-<uid>/bridge.sock`（macOS 为 `/private/tmp`）。后端创建当前用户拥有、权限为 `0700` 的目录，以及权限为 `0600` 的 socket。两端都会拒绝不安全的 ownership、权限及可被替换的祖先目录；Native Host 还会在转发流量前拒绝 socket 符号链接。显式 socket 路径覆盖也必须遵守相同的私有目录边界。同一用户的进程仍处于信任边界内。
 
 没有后端监听时，Native Host 退出。扩展使用 30 秒 Chrome alarm 安排一次重试，可跨 worker 挂起保留；发现失败不会启动每秒重试循环或重写空会话状态。后端首次发现最多等待 35 秒，连接建立后才开始常规请求执行超时。浏览器列表和选择都允许这个发现窗口；显式指定的短 transport 请求超时仍会限制发现等待。Chrome 105 及以上的活跃 `runtime.connectNative()` port 会保持 worker 存活，Chrome 118 及以上的活跃 `chrome.debugger` 会话还提供额外保活。这与独立的 `/cdp` WebSocket bridge 不同，遵循 Chrome 文档规定的扩展 service-worker 生命周期。真实 Chrome 会话必须在超过 60 秒无 Browser Use 流量后仍可使用。
 
 连接建立后若后端 socket 消失，Native Host 退出，Chrome 关闭其 Native Messaging port。扩展处理 port 断开时，会 detach 会话控制的标签页、移除 Browser Use overlays、清除 ownership 和派生标签页状态、取消托管标签页分组而不关闭页面，并安排 Native Host 发现以连接未来的后端。Debugger attach 和 detach 按标签页串行执行。成功释放会等待 Chrome 完成 detach；断线清理超时不会丢弃未完成的单标签页操作。新标签页初始化失败时，扩展会删除该新标签页。用户显式取消调试时，扩展释放 ownership 和派生关系，持久化状态，并尽力取消分组。
 
-每轮浏览器操作结束时，`tabs.finalize()` 将 `keep` 视为本次调用的完整保留集合：关闭未列出的 agent 创建标签页，释放未列出的认领标签页。Deliverable 标签页保持打开但释放控制；handoff 标签页保持打开并受控，直到下一次 finalization 或关闭 runtime。下一轮仍需使用的 handoff 必须再次列入。Agent 创建的 popup 在 opener 先于 finalization 关闭时仍保留该 ownership。扩展是浏览器侧 ownership 的权威来源，runtime 维护对应的会话视图；从两条路径观察到派生标签页时，agent 创建的 ownership 优先。
+每轮浏览器操作结束时，`tabs.finalize()` 将 `keep` 视为本次调用的完整保留集合：关闭未列出的 agent 创建标签页，释放未列出的认领标签页。Deliverable 标签页保持打开但释放控制；handoff 标签页保持打开并受控，直到下一次 finalization 或关闭 runtime。下一轮仍需使用的 handoff 必须再次列入。Agent 创建的 popup 在 opener 先于 finalization 关闭时仍保留该 ownership。扩展是浏览器侧 ownership 的权威来源，runtime 维护对应的会话视图；从两条路径观察到派生标签页时，agent 创建的 ownership 优先。重新注册崩溃的 Chrome 标签页会替换其过期 runtime 条目并保留该 ownership。清理时会移除 Chrome 中已不存在标签页的条目；其他关闭或释放失败则保留条目以便重试。
 
 `tabs.finalize()` 在关闭任何页面前校验整个 `keep` 集合。未知、过期或重复条目会终止 finalization，避免格式错误的保留列表意外关闭模型想保留的页面。派生标签页同步会独立尝试每次 attachment。某次 attachment 或发现查询失败时，finalization 仍按 disposition 清理其他已知标签页，然后报告失败。Attachment 失败不代表有权关闭尚未注册的标签页。
 
@@ -170,7 +170,9 @@ Native Messaging 协议和扩展 relay 还承载 Qwen 特有的标签页发现�
 
 Browser Use 包独立固定 `playwright-core@1.62.1`，因为自定义 CDP transport API，以及 `ariaSnapshot({ mode: "ai" })` 输出与 `aria-ref` locator 的配对均与版本有关。每次升级 Playwright 都必须通过真实 Chrome 冒烟测试：生成 AI 快照，并通过其中返回的 ref 执行操作。现有 workspace 消费方保留当前 Playwright 版本；该功能不需要全仓升级。
 
-Managed preflight 验证截图 MIME 类型及 JPEG 解码后的 clip 尺寸。SauceDemo 冒烟测试检查结账状态和价格；源码中出现输入或 finalization 方法名称不能证明执行过这些操作，因此该测试结果不声称验证了可信输入或标签页 finalization。
+Managed 冒烟脚本使用 Chromium 或 Chrome for Testing。自动发现不选择普通 Google Chrome；显式指定的 Google Chrome 137+ 因无法加载未打包扩展而被拒绝。正常结束、SIGINT 和 SIGTERM 均在脚本退出前停止托管浏览器进程组并删除临时 profile。
+
+Managed preflight 验证截图 MIME 类型及 JPEG 解码后的 clip 尺寸。SauceDemo 冒烟测试检查结账状态和价格；源码中出现输入或 finalization 方法名称不能证明执行过这些操作，因此该测试结果不声称验证了可信输入或标签页 finalization。独立的完成状态检查先启动 transport，允许完整的 35 秒发现窗口，并仅在前一会话释放 debugger attachment 期间重试 `TAB_DEBUGGER_CONFLICT`。
 
 ## 产品决策
 
@@ -197,7 +199,7 @@ Managed preflight 验证截图 MIME 类型及 JPEG 解码后的 clip 尺寸。Sa
 
 对话框句柄标识 `getJsDialog` 返回的具体对话框实例。Accept 或 dismiss 已过期句柄以 `NOT_FOUND` 失败，不能作用于替代对话框。Dialog id 属于 SDK 内部协议；公共句柄只保留其支持的操作。Before-unload 对话框支持接受导航和取消导航。
 
-Chrome 的 dialog-close 事件清理运行时缓存，包括 SDK 之外的用户操作。事件交付必须保留 Playwright 相对于后续对话框打开事件的异步顺序。`expectNavigation` waiter 在 action 或等待失败时释放，包括在等待实现运行前被 dialog gate 拒绝的情况。
+Chrome 的 dialog-close 事件清理运行时缓存，包括 SDK 之外的用户操作。Playwright 交付对话框的时机晚于 bridge 上报其 CDP 事件的轮次，因此运行时按 bridge 顺序记录每个标签页的对话框打开与关闭事件，并丢弃 bridge 已报告关闭的对话框；没有对应打开记录的关闭事件（标签页附着前就已打开的对话框）不会被记到后续对话框头上。`expectNavigation` waiter 在 action 或等待失败时释放，包括在等待实现运行前被 dialog gate 拒绝的情况。
 
 ## 输入完成
 
@@ -205,7 +207,7 @@ Locator fill 委托给 Playwright，包括其原生 input／change 事件行为�
 
 输入诊断通过页面内 handle 保留原始 DOM 元素及其值。只有可编辑元素仍连接、仍聚焦且值未变时才报告 `INPUT_BLOCKED`。导航、元素替换或不可编辑键盘目标不会把成功输入改报为该错误。输入成功或失败后均释放 handle。
 
-Modifier 清理会尝试释放所有尝试按下的键，即使 keydown 或 keyup 失败。清理保留原始操作错误；操作成功后的清理失败仍会报告。
+Modifier 清理会按相反顺序尝试释放所有尝试按下的键，即使 keydown 或 keyup 失败，且清理失败会被丢弃。清理永远不会把已完成的操作改写为失败；只有操作自身的错误会向外传播。
 
 ## 附加与会话关闭
 

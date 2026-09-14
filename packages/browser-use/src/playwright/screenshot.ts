@@ -28,6 +28,12 @@ import type { Args, TabState } from './runtime-state.js';
 const FRAME_TIMEOUT_MS = 2_000;
 const CAPTURE_TIMEOUT_MS = 5_000;
 const CLEANUP_TIMEOUT_MS = 1_000;
+// window.devicePixelRatio is page script: a spoofed or stale value would
+// become an unbounded clip.scale, so only ratios a real Chrome window can
+// report (25%–500% zoom on displays of a few device pixels per CSS pixel)
+// are trusted, and Chrome's own pixels correct whatever the page reported.
+const MIN_DEVICE_PIXEL_RATIO = 0.25;
+const MAX_DEVICE_PIXEL_RATIO = 8;
 const screenshotQueues = new WeakMap<TabState, Promise<unknown>>();
 
 type SendCdp = (
@@ -102,12 +108,7 @@ async function capture(
         )
       ).result,
     ).value;
-    if (
-      typeof pixelRatio === 'number' &&
-      Number.isFinite(pixelRatio) &&
-      pixelRatio > 0
-    )
-      probedRatio = pixelRatio;
+    if (isPlausibleRatio(pixelRatio)) probedRatio = pixelRatio;
   } catch {
     probedRatio = undefined;
   }
@@ -144,8 +145,9 @@ async function capture(
     );
 
   let data: string | undefined;
-  if (!constrained && devicePixelRatio >= 1)
-    data = await viewportFrame(
+  let frameOrigin: { x: number; y: number } | undefined;
+  if (!constrained && devicePixelRatio >= 1) {
+    const frame = await viewportFrame(
       tab.providerTabId,
       bridge,
       send,
@@ -153,51 +155,44 @@ async function capture(
       height,
       origin,
     );
+    if (frame !== undefined) {
+      data = frame.data;
+      frameOrigin = frame.origin;
+    }
+  }
   if (data === undefined) {
-    data = await captureRegion(
-      send,
-      constrained,
-      origin,
-      width,
-      height,
-      1 / devicePixelRatio,
-    );
-    if (probedRatio === undefined) {
-      // The settle probe failed, so the capture above assumed a ratio of 1;
-      // measure what Chrome actually produced and re-capture on HiDPI hosts
-      // instead of failing the capture or shipping rescaled pixels.
-      const measured = jpegDimensions(Buffer.from(data, 'base64'));
-      const implied = measured.width / width;
-      if (
-        (Math.abs(measured.width - Math.round(width)) > 1 ||
-          Math.abs(measured.height - Math.round(height)) > 1) &&
-        Number.isFinite(implied) &&
-        implied > 0 &&
-        Math.abs(implied - 1) > 0.01
-      ) {
-        devicePixelRatio = implied;
-        data = await captureRegion(
-          send,
-          constrained,
-          origin,
-          width,
-          height,
-          1 / implied,
-        );
-      }
+    const scale = 1 / devicePixelRatio;
+    data = await captureRegion(send, constrained, origin, width, height, scale);
+    // The ratio behind clip.scale came from page script (or defaulted to 1
+    // when the probe failed), so Chrome's own output is the authority: when
+    // the pixels disagree with the requested CSS region, derive the real
+    // ratio from what Chrome produced and re-capture once instead of
+    // failing the capture or shipping rescaled pixels.
+    const measured = jpegDimensions(Buffer.from(data, 'base64'));
+    const implied = measured.width / (width * scale);
+    if (
+      regionMismatch(measured, width, height) &&
+      isPlausibleRatio(implied) &&
+      Math.abs(implied - devicePixelRatio) > 0.01
+    ) {
+      devicePixelRatio = implied;
+      data = await captureRegion(
+        send,
+        constrained,
+        origin,
+        width,
+        height,
+        1 / implied,
+      );
     }
   }
 
   const buffer = Buffer.from(data, 'base64');
   const dimensions = jpegDimensions(buffer);
   // The css-pixels contract requires the capture to come back 1:1 with the
-  // requested CSS region. The pixel ratio behind clip.scale is probed from
-  // page script, so a page-controlled or stale ratio must not silently ship
-  // a rescaled image; ±1 covers Chrome's rounding of fractional CSS sizes.
-  if (
-    Math.abs(dimensions.width - Math.round(width)) > 1 ||
-    Math.abs(dimensions.height - Math.round(height)) > 1
-  )
+  // requested CSS region; a ratio Chrome's pixels did not confirm must not
+  // silently ship a rescaled image.
+  if (regionMismatch(dimensions, width, height))
     throw new BrowserRuntimeError(
       'OPERATION_FAILED',
       'Chrome returned a screenshot that does not match the viewport; retry',
@@ -223,7 +218,7 @@ async function capture(
     viewport: { width: viewportWidth, height: viewportHeight },
     devicePixelRatio,
     coordinateSpace: 'css-pixels',
-    origin,
+    origin: frameOrigin ?? origin,
   };
 }
 
@@ -249,6 +244,12 @@ async function captureRegion(
   return result.data;
 }
 
+interface ViewportFrame {
+  data: string;
+  sessionId: number;
+  origin: { x: number; y: number };
+}
+
 async function viewportFrame(
   tabId: number,
   bridge: ChromeBridge,
@@ -256,10 +257,9 @@ async function viewportFrame(
   width: number,
   height: number,
   origin: { x: number; y: number },
-): Promise<string | undefined> {
-  type Frame = { data: string; sessionId: number };
-  let settle: (frame: Frame | undefined) => void = () => undefined;
-  const nextFrame = new Promise<Frame | undefined>((resolve) => {
+): Promise<ViewportFrame | undefined> {
+  let settle: (frame: ViewportFrame | undefined) => void = () => undefined;
+  const nextFrame = new Promise<ViewportFrame | undefined>((resolve) => {
     settle = resolve;
   });
   const timer = setTimeout(() => settle(undefined), FRAME_TIMEOUT_MS);
@@ -283,21 +283,18 @@ async function viewportFrame(
       typeof timestamp === 'number' &&
       Number.isFinite(timestamp) &&
       timestamp >= startedAt;
-    // The origin was measured before this frame existed; a frame whose
-    // scroll offsets disagree with it depicts a different document region,
-    // so fall back to a capture whose clip pins the published region.
-    const moved =
-      (typeof metadata.scrollOffsetX === 'number' &&
-        Math.abs(metadata.scrollOffsetX - origin.x) > 1) ||
-      (typeof metadata.scrollOffsetY === 'number' &&
-        Math.abs(metadata.scrollOffsetY - origin.y) > 1);
-    if (
-      fresh &&
-      !moved &&
-      typeof params.data === 'string' &&
-      params.data.length > 0
-    ) {
-      settle({ data: params.data, sessionId });
+    if (fresh && typeof params.data === 'string' && params.data.length > 0) {
+      // The frame's scroll offsets describe the frame's own pixels, so they
+      // — not the origin measured before the capture — are what the envelope
+      // may publish for it; a frame without offsets keeps the measured one.
+      settle({
+        data: params.data,
+        sessionId,
+        origin: {
+          x: scrollOffset(metadata.scrollOffsetX, origin.x),
+          y: scrollOffset(metadata.scrollOffsetY, origin.y),
+        },
+      });
       return;
     }
     void send(
@@ -305,9 +302,8 @@ async function viewportFrame(
       { sessionId },
       CLEANUP_TIMEOUT_MS,
     ).catch(() => undefined);
-    if (fresh && moved) settle(undefined);
   });
-  let frame: Frame | undefined;
+  let frame: ViewportFrame | undefined;
   try {
     await send(
       'Page.startScreencast',
@@ -326,7 +322,7 @@ async function viewportFrame(
     // A resized viewport or a non-default zoom must not change CUA coordinates.
     return dimensions.width === Math.round(width) &&
       dimensions.height === Math.round(height)
-      ? frame.data
+      ? frame
       : undefined;
   } catch {
     return undefined;
@@ -344,4 +340,29 @@ async function viewportFrame(
         CLEANUP_TIMEOUT_MS,
       ).catch(() => undefined);
   }
+}
+
+function scrollOffset(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function isPlausibleRatio(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= MIN_DEVICE_PIXEL_RATIO &&
+    value <= MAX_DEVICE_PIXEL_RATIO
+  );
+}
+
+// ±1 covers Chrome's rounding of fractional CSS sizes.
+function regionMismatch(
+  actual: { width: number; height: number },
+  width: number,
+  height: number,
+): boolean {
+  return (
+    Math.abs(actual.width - Math.round(width)) > 1 ||
+    Math.abs(actual.height - Math.round(height)) > 1
+  );
 }

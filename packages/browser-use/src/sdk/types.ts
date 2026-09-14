@@ -275,6 +275,11 @@ export interface BrowserDomCUA {
   double_click(options: DomCuaTargetOptions): Promise<void>;
   type(options: { text: string }): Promise<void>;
   keypress(options: { keys: readonly string[] }): Promise<void>;
+  /**
+   * x and y are wheel deltas in CSS pixels (negative scrolls up or left),
+   * not viewport coordinates; unlike BrowserCUA.scroll, which anchors at
+   * {x, y} and scrolls by scrollX/scrollY.
+   */
   scroll(options: { node_id?: string; x: number; y: number }): Promise<void>;
 }
 

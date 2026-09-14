@@ -342,7 +342,7 @@ export class ModelsConfig {
   getResolvedModel(
     authType: AuthType,
     modelId: string,
-    baseUrl?: string,
+    baseUrl?: string | null,
   ): ResolvedModelConfig | undefined {
     return this.modelRegistry.getModel(authType, modelId, baseUrl);
   }
@@ -510,9 +510,9 @@ export class ModelsConfig {
           `Model '${modelId}' not found for authType '${authType}'`,
         );
       }
-      if (model.imageOnly) {
+      if (model.imageOnly || model.voiceOnly) {
         throw new Error(
-          `Image-only model '${modelId}' cannot be used as the primary model`,
+          `${model.imageOnly ? 'Image' : 'Voice'}-only model '${modelId}' cannot be used as the primary model`,
         );
       }
 
@@ -1041,9 +1041,9 @@ export class ModelsConfig {
       ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
         this.modelRegistry.getModel(authType, modelId))
       : undefined;
-    if (resolved?.imageOnly) {
+    if (resolved?.imageOnly || resolved?.voiceOnly) {
       throw new Error(
-        `Image-only model '${modelId}' cannot be used as the primary model`,
+        `${resolved.imageOnly ? 'Image' : 'Voice'}-only model '${modelId}' cannot be used as the primary model`,
       );
     }
 
@@ -1458,5 +1458,9 @@ export class ModelsConfig {
   /** The raw providers config the registry was last built from. */
   getModelProvidersConfig(): ModelProvidersConfig | undefined {
     return this.modelRegistry.getModelProvidersConfig();
+  }
+
+  getProviderProtocolConfig(): ProviderProtocolConfig {
+    return this.modelRegistry.getProviderProtocolConfig();
   }
 }

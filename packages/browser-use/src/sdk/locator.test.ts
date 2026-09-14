@@ -107,6 +107,41 @@ describe.each(['page', 'one', 'all'] as const)(
       );
     });
 
+    it('accepts method shorthand, class method and async shorthand sources', async () => {
+      const f = fixture();
+      const run = (
+        pageFunction: (...args: unknown[]) => number | Promise<number>,
+      ) =>
+        mode === 'page'
+          ? f.page.evaluate(pageFunction, 'x')
+          : mode === 'one'
+            ? f.locator.evaluate(pageFunction, 'x')
+            : f.locator.evaluateAll(pageFunction, 'x');
+      // None of these stringify with a `function` keyword, so their source
+      // is not an expression on its own.
+      const helpers = {
+        arity(...args: unknown[]) {
+          return args.length;
+        },
+        async arityLater(...args: unknown[]) {
+          return await Promise.resolve(args.length);
+        },
+      };
+      class Reader {
+        static arity(...args: unknown[]) {
+          return args.length;
+        }
+      }
+      const expected = mode === 'page' ? 1 : 2;
+
+      await expect(run(helpers.arity)).resolves.toBe(expected);
+      await expect(run(helpers.arityLater)).resolves.toBe(expected);
+      await expect(run(Reader.arity)).resolves.toBe(expected);
+      expect(() => run(helpers.arity.bind(helpers))).toThrow(
+        'pageFunction is not serializable',
+      );
+    });
+
     it('does not invoke a function-valued string', async () => {
       const f = fixture();
       const source = '() => { document.calls++; return 7; }';

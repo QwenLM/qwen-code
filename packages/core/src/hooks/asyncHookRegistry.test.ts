@@ -150,18 +150,23 @@ describe('AsyncHookRegistry', () => {
         hookEvent: HookEventName.PostToolUse,
         sessionId: 'session-1',
         startTime: Date.now(),
-        timeout: 1000,
+        timeout: 1500,
         stdout: '',
         stderr: '',
       });
+      const [hook] = registry.getPendingHooks();
 
       registry.timeout('test-hook-1');
 
       expect(registry.hasRunningHooks()).toBe(false);
+      // The registered timeout is in milliseconds; both messages report seconds.
+      expect(hook?.error?.message).toBe('Hook timed out after 1.5s');
       const output = registry.getPendingOutput();
       expect(output.messages.length).toBe(1);
       expect(output.messages[0].type).toBe('warning');
-      expect(output.messages[0].message).toContain('timed out');
+      expect(output.messages[0].message).toBe(
+        'Async hook Test Hook timed out after 1.5s',
+      );
     });
 
     it('should terminate process on timeout', () => {

@@ -97,6 +97,21 @@ function parseSnapshot(text: string): SnapshotNode[] {
   return roots;
 }
 
+// A YAML-quoted key ends at its closing quote ('' escapes a quote); an
+// unquoted key ends at the colon that introduces children or inline text.
+// Either way the attribute list — [ref=…] and the cursor marker — lives
+// inside the key, so a suffix test must run on the extracted key, not the
+// rendered line.
+const QUOTED_KEY = /^'((?:[^']|'')*)'(?::(?:\s.*)?)?$/;
+
+function nodeKey(line: string): string {
+  const body = line.trimEnd().replace(/^\s*-\s+/, '');
+  const quoted = QUOTED_KEY.exec(body);
+  if (quoted !== null) return (quoted[1] ?? '').replace(/''/g, "'");
+  const separator = /:(?=\s|$)/.exec(body);
+  return separator === null ? body : body.slice(0, separator.index);
+}
+
 function selectInteractiveNodes(
   nodes: readonly SnapshotNode[],
   parentSelected = false,
@@ -109,7 +124,7 @@ function selectInteractiveNodes(
     const cursorPointer =
       node.role !== undefined &&
       node.role !== 'text' &&
-      node.line.trimEnd().endsWith(' [cursor=pointer]');
+      nodeKey(node.line).endsWith(' [cursor=pointer]');
     const keep =
       node.role === 'iframe' ||
       (node.role !== undefined && INTERACTIVE_ROLES.has(node.role)) ||

@@ -149,7 +149,8 @@ styles:
 The extension renders a transient pointer overlay for coordinate mouse input,
 but that decoration is best-effort and never delays the input command itself.
 Its DOM node is created on mouse input and removed when the pointer expires;
-read-only inspection does not create an overlay node.
+read-only inspection does not create an overlay node. The extension creates
+and retains its own node instead of adopting a page element with the same ID.
 
 Browser operations run in the background. New tabs do not replace the user's
 active tab, and input actions do not bring Chrome to the foreground. Page focus
@@ -223,6 +224,7 @@ Viewport screenshots are limited by their encoded byte size rather than rejected
 from viewport dimensions alone. Explicit clips and full-page captures retain a
 pixel budget because their dimensions are caller-controlled or potentially
 unbounded.
+The device pixel ratio probed from page script is trusted only within the range a real Chrome window can report; when a capture's pixels disagree with the requested CSS region, the runtime derives the real ratio from Chrome's own output and re-captures once.
 
 Screenshot acquisition follows the Codex Browser Use strategy independently of
 Playwright's screenshot preparation. A short, bounded rendering synchronization
@@ -245,7 +247,11 @@ expose the host filesystem path.
 locator method. Qwen resolves the element through a Playwright locator, briefly
 creates a page-local download link for the resolved media URL, clicks it, and
 removes it immediately. Callers synchronize through Playwright's `download`
-event.
+event. The media bytes are read from the page origin, so a cross-origin
+resource whose server sends no CORS headers cannot be downloaded this way:
+the call fails with an error naming that cause rather than navigating the
+claimed tab or saving an empty file. Downloading such resources with the
+user's cookies needs a browser-side download path and is follow-up work.
 
 JavaScript dialogs use type-specific actions: alerts and before-unload dialogs
 can be dismissed, confirms can be accepted or dismissed, and prompts require
@@ -279,14 +285,22 @@ product caller requires it.
 Chrome reports downloads from an extension debugger target as `Page` events,
 while Playwright consumes the corresponding browser-level events. The
 transport translates only those event names and preserves their payloads; it
-does not maintain a separate download state machine.
+does not maintain a separate download state machine. Tab registration leaves
+Chrome's download policy unchanged: the extension cannot call
+`Page.setDownloadBehavior`, and the page events arrive after Playwright enables
+the Page domain without that command.
 
 The Qwen control plane retains operations that are not CDP, including
 `openTabs`, `claimTab`, `session.name`, and `history.query`.
+History defaults to Chrome's last 24 hours when `from` is omitted; an explicit
+`from` includes older visits without requiring `to`.
 
 Native Host messages sent to Chrome are limited to 1 MiB. Larger
 backend-to-extension messages are split into bounded protocol chunks and
-reassembled by the extension before dispatch.
+reassembled by the extension before dispatch. Extension responses must fit the
+16 MiB bridge frame limit, measured as serialized UTF-8 bytes. An oversized
+operation result returns a bounded `OPERATION_FAILED` response so the Native
+Host and the browser session remain available for subsequent requests.
 
 ## Session model
 
@@ -303,7 +317,9 @@ The Node Kernel directly owns the local Chrome extension transport:
 - closing and reinitializing Browser Use creates a new SDK object generation;
   handles retained from the closed generation remain stale.
 
-On Unix, both endpoints use `/tmp/qwen-browser-use-<uid>/bridge.sock`. The
+On Unix, both endpoints prefer an existing private, user-owned
+`/run/user/<uid>/bridge.sock`; otherwise they use
+`/tmp/qwen-browser-use-<uid>/bridge.sock` (`/private/tmp` on macOS). The
 backend creates a user-owned directory with mode `0700` and a socket with mode
 `0600`. Both endpoints reject unsafe ownership, permissions, and replaceable
 ancestors; the Native Host also rejects socket symlinks before forwarding any
@@ -345,6 +361,9 @@ agent-created popup keeps that ownership if its opener closes before
 finalization. The extension is the source of browser-side ownership, while the
 runtime keeps the corresponding session projection; agent-created ownership
 takes precedence if a derived tab is observed through both paths.
+Re-registering a crashed Chrome tab replaces its stale runtime entry and
+preserves that ownership. Cleanup forgets a tab already removed in Chrome,
+while other close or release failures retain the entry for retry.
 
 `tabs.finalize()` validates the complete `keep` set before closing anything. An
 unknown, stale, or duplicate entry aborts finalization so a malformed keep list
@@ -393,10 +412,19 @@ that takes an AI snapshot and acts on one of its returned refs. Existing
 workspace consumers remain on their current Playwright versions; this feature
 does not require a repository-wide upgrade.
 
+Managed smoke scripts use Chromium or Chrome for Testing. Automatic discovery
+excludes branded Google Chrome, and an explicit Google Chrome 137+ executable
+is rejected because it cannot load the unpacked extension. Normal completion,
+SIGINT, and SIGTERM stop the managed browser process group and remove its
+temporary profile before the script exits.
+
 The managed preflight validates screenshot MIME type and decoded JPEG clip
 dimensions. The SauceDemo smoke checks checkout state and prices; source-code
 mentions of input or finalization methods are not evidence that those actions
 ran, so its result does not claim to verify trusted input or tab finalization.
+Its independent completion check starts the transport, allows the full
+35-second discovery window, and retries only `TAB_DEBUGGER_CONFLICT` while the
+previous session releases its debugger attachment.
 
 ## Product decisions
 
@@ -446,8 +474,12 @@ the public handle retains only its supported actions. Before-unload dialogs
 support both accepting the navigation and dismissing it.
 
 Chrome dialog-close events clear the runtime cache, including user actions
-outside the SDK. Their delivery must preserve Playwright's asynchronous
-ordering relative to subsequent dialog openings. An `expectNavigation` waiter
+outside the SDK. Playwright hands a dialog over on a later turn than the
+bridge reports its CDP events, so the runtime traces each tab's dialog
+openings and closes in bridge order and drops a delivered dialog the bridge
+has already reported closed; a close with no traced opening (a dialog open
+before the tab was attached) is never charged to a later dialog. An
+`expectNavigation` waiter
 is released when either its action or its wait fails, including rejection by
 the dialog gate before the wait implementation runs.
 
@@ -464,9 +496,10 @@ remains connected and focused with the same value. Navigation, replacement,
 or a non-editable keyboard target cannot turn successful input into this
 error. The handle is disposed after both successful and failed input.
 
-Modifier cleanup attempts to release every attempted key even after a failed
-keydown or keyup. Cleanup preserves the original action error; a cleanup
-failure after a successful action is still reported.
+Modifier cleanup attempts to release every attempted key in reverse order even
+after a failed keydown or keyup, and cleanup failures are discarded. Cleanup
+never rewrites a completed action into a failure; only the action's own error
+propagates.
 
 ## Attachment and session shutdown
 

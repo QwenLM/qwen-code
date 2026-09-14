@@ -36,6 +36,12 @@ export async function launchManagedChrome(
     timeout: 5_000,
   });
   const chromeVersion = stdout.trim() || 'unknown';
+  const brandedVersion = /^Google Chrome (\d+)\./.exec(chromeVersion);
+  if (brandedVersion && Number(brandedVersion[1]) >= 137) {
+    throw new Error(
+      'Managed Chrome requires Chromium or Chrome for Testing; set QWEN_BROWSER_USE_CHROME to a supported build',
+    );
+  }
   const parent = process.platform === 'darwin' ? '/tmp' : tmpdir();
   const root = await mkdtemp(join(parent, 'qbu-' + label + '-'));
   const socketPath = join(root, 'bridge.sock');
@@ -110,13 +116,15 @@ export async function launchManagedChrome(
     }
   });
 
+  let stopping: Promise<void> | undefined;
   return {
     root,
     socketPath,
     chromeVersion,
-    async stop() {
-      await stopProcess(chrome);
-      await rm(root, { recursive: true, force: true });
+    stop() {
+      return (stopping ??= stopProcess(chrome).finally(() =>
+        rm(root, { recursive: true, force: true }),
+      ));
     },
   };
 }
@@ -126,6 +134,14 @@ export async function withManagedChrome(
   run: (chrome: ManagedChrome) => Promise<void>,
 ): Promise<void> {
   const chrome = await launchManagedChrome(label);
+  const interrupt = () => {
+    void chrome.stop().finally(() => process.exit(130));
+  };
+  const terminate = () => {
+    void chrome.stop().finally(() => process.exit(143));
+  };
+  process.once('SIGINT', interrupt);
+  process.once('SIGTERM', terminate);
   const previous = process.env['QWEN_BROWSER_USE_SOCKET_PATH'];
   process.env['QWEN_BROWSER_USE_SOCKET_PATH'] = chrome.socketPath;
   try {
@@ -136,7 +152,12 @@ export async function withManagedChrome(
     } else {
       process.env['QWEN_BROWSER_USE_SOCKET_PATH'] = previous;
     }
-    await chrome.stop();
+    try {
+      await chrome.stop();
+    } finally {
+      process.off('SIGINT', interrupt);
+      process.off('SIGTERM', terminate);
+    }
   }
 }
 
@@ -145,11 +166,9 @@ async function findChrome(): Promise<string> {
   if (configured) return configured;
   const candidates = [
     chromium.executablePath(),
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
     '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
   ];
   for (const candidate of candidates) {
     try {

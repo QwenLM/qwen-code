@@ -206,6 +206,9 @@ describe('Chrome screenshot acquisition', () => {
     };
     const image = await captureTabScreenshot(tab(), {}, bridge);
     expect(image.base64).toBe(jpeg(800, 600).toString('base64'));
+    // The fallback capture answers the same bytes, so only the absence of a
+    // capture shows the fresh frame was accepted.
+    expect(bridge.methods()).not.toContain('Page.captureScreenshot');
     expect(
       bridge.request.mock.calls
         .filter(([, args]) => args?.method === 'Page.screencastFrameAck')
@@ -213,7 +216,7 @@ describe('Chrome screenshot acquisition', () => {
     ).toEqual([{ sessionId: 2 }, { sessionId: 3 }]);
   });
 
-  it('falls back when a fresh frame disagrees with the measured origin', async () => {
+  it('publishes the frame scroll origin when it disagrees with the measured origin', async () => {
     const bridge = new ScreenshotBridge();
     bridge.viewport.pageY = 700;
     bridge.onStart = () =>
@@ -221,11 +224,12 @@ describe('Chrome screenshot acquisition', () => {
         metadata: { timestamp: Date.now() / 1000, scrollOffsetY: 200 },
       });
     const image = await captureTabScreenshot(tab(), {}, bridge);
-    // The scrolled frame is acknowledged, not published: the fallback
-    // capture pins the document region the envelope reports.
+    // The frame's pixels and its scroll offsets are a matched pair, so the
+    // envelope describes the accepted frame; a fallback capture clipped to
+    // the stale pre-scroll origin would certify pixels it does not contain.
+    expect(bridge.methods()).not.toContain('Page.captureScreenshot');
     expect(bridge.methods()).toContain('Page.screencastFrameAck');
-    expect(bridge.methods()).toContain('Page.captureScreenshot');
-    expect(image.origin).toEqual({ x: 0, y: 700 });
+    expect(image.origin).toEqual({ x: 0, y: 200 });
     expect(bridge.listeners.size).toBe(0);
   });
 
@@ -283,6 +287,50 @@ describe('Chrome screenshot acquisition', () => {
     expect(scales).toEqual([1, 0.5]);
     expect(bridge.listeners.size).toBe(0);
   });
+
+  it('recovers the real ratio when the page-probed ratio disagrees with Chrome pixels', async () => {
+    const bridge = new ScreenshotBridge();
+    // A page (or a privacy extension) reports devicePixelRatio 3 on a real
+    // DPR-2 host, so the first fallback capture lands at two-thirds size.
+    bridge.pixelRatio = 3;
+    bridge.onStart = () => {
+      throw new Error('Screencast unavailable');
+    };
+    bridge.captureData = jpeg(533, 400).toString('base64');
+    let captures = 0;
+    bridge.onCapture = () => {
+      captures += 1;
+      if (captures === 2)
+        bridge.captureData = jpeg(800, 600).toString('base64');
+    };
+    const image = await captureTabScreenshot(tab(), {}, bridge);
+    expect(image).toMatchObject({ width: 800, height: 600 });
+    expect(image.devicePixelRatio).toBeCloseTo(2, 2);
+    const scales = captureScales(bridge);
+    expect(scales).toHaveLength(2);
+    expect(scales[0]).toBeCloseTo(1 / 3, 5);
+    expect(scales[1]).toBeCloseTo(0.5, 2);
+    expect(bridge.listeners.size).toBe(0);
+  });
+
+  it.each([0.01, 100, -2, 0])(
+    'ignores a page-probed ratio of %s outside the device range',
+    async (ratio) => {
+      const bridge = new ScreenshotBridge();
+      bridge.pixelRatio = ratio;
+      bridge.onStart = () => {
+        throw new Error('Screencast unavailable');
+      };
+      const image = await captureTabScreenshot(tab(), {}, bridge);
+      expect(image).toMatchObject({
+        width: 800,
+        height: 600,
+        devicePixelRatio: 1,
+      });
+      // The rejected value never reaches clip.scale.
+      expect(captureScales(bridge)).toEqual([1]);
+    },
+  );
 
   it('stops an idle screencast after two seconds, then uses bounded capture', async () => {
     const bridge = new ScreenshotBridge();
@@ -479,6 +527,28 @@ describe('Chrome screenshot acquisition', () => {
     });
   });
 
+  it('bounds a viewport capture that bypasses the screencast', async () => {
+    const bridge = new ScreenshotBridge();
+    bridge.pixelRatio = 0.5;
+    bridge.viewport = {
+      clientWidth: 3000,
+      clientHeight: 1914,
+      pageX: 0,
+      pageY: 0,
+    };
+    bridge.captureData = Buffer.concat([
+      jpeg(3000, 1914),
+      Buffer.alloc(4 * 1024 * 1024),
+    ]).toString('base64');
+    await expect(captureTabScreenshot(tab(), {}, bridge)).rejects.toMatchObject(
+      {
+        code: 'OPERATION_FAILED',
+        message: expect.stringContaining('byte budget'),
+      },
+    );
+    expect(bridge.methods()).not.toContain('Page.startScreencast');
+  });
+
   it('rejects a fallback capture that does not match the CSS viewport', async () => {
     const bridge = new ScreenshotBridge();
     bridge.onStart = () => {
@@ -564,3 +634,11 @@ describe('Chrome screenshot acquisition', () => {
     expect(() => jpegDimensions(image.subarray(0, 12))).toThrow('invalid JPEG');
   });
 });
+
+function captureScales(bridge: ScreenshotBridge): number[] {
+  return bridge.request.mock.calls
+    .filter(([, args]) => args?.method === 'Page.captureScreenshot')
+    .map(
+      ([, args]) => (args?.params as { clip: { scale: number } }).clip.scale,
+    );
+}

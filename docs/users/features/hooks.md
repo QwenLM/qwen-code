@@ -51,11 +51,13 @@ Command hooks execute commands via child processes. Input JSON is passed through
 | `command`       | `string`                 | Yes      | Command to execute                          |
 | `name`          | `string`                 | No       | Hook name (for logging)                     |
 | `description`   | `string`                 | No       | Hook description                            |
-| `timeout`       | `number`                 | No       | Timeout in milliseconds, default 60000      |
+| `timeout`       | `number`                 | No       | Timeout in seconds, default 60              |
 | `async`         | `boolean`                | No       | Whether to run asynchronously in background |
 | `env`           | `Record<string, string>` | No       | Environment variables                       |
 | `shell`         | `"bash" \| "powershell"` | No       | Shell to use                                |
 | `statusMessage` | `string`                 | No       | Status message displayed during execution   |
+
+`timeout` is in seconds for command, HTTP and prompt hooks; SDK-registered function hooks keep milliseconds. Command hook timeouts used to be written in milliseconds, so for command hooks a value of `1000` or more is still read as milliseconds and existing settings keep working. To migrate, look for command hooks whose `timeout` is `1000` or more and rewrite the value in seconds, for example `10000` as `10`. To give a command hook a timeout of 1000 seconds or more, keep writing it in milliseconds, for example `1800000` for 30 minutes. A command hook `timeout` that is not a positive number, such as `"30s"`, is ignored and the 60 second default applies. With debug logging enabled (`QWEN_DEBUG_LOG_FILE=1`), each command hook with a millisecond or ignored `timeout` is named once per session in that session's debug log.
 
 **Example:**
 
@@ -70,7 +72,7 @@ Command hooks execute commands via child processes. Input JSON is passed through
             "type": "command",
             "command": "$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh",
             "name": "security-check",
-            "timeout": 10000
+            "timeout": 10
           }
         ]
       }
@@ -368,8 +370,8 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | Session Events      | `SessionStart`                                                                             | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`               |
 | Session Events      | `SessionEnd`                                                                               | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.          |
 | Session Events      | `SessionDelete`                                                                            | ❌ No           | N/A                                                           |
-| Notification Events | `Notification`                                                                             | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success`      |
-| Compact Events      | `PreCompact`                                                                               | ✅ Exact match  | Trigger: `manual`, `auto`                                     |
+| Notification Events | `Notification`                                                                             | ✅ Regex        | Type: `permission_prompt`, `idle_prompt`, `auth_success`      |
+| Compact Events      | `PreCompact`                                                                               | ✅ Regex        | Trigger: `manual`, `auto`                                     |
 | Todo Events         | `TodoCreated`, `TodoCompleted`                                                             | ❌ No           | N/A                                                           |
 | Prompt Events       | `UserPromptSubmit`                                                                         | ❌ No           | N/A                                                           |
 | Stop Events         | `Stop`                                                                                     | ❌ No           | N/A                                                           |
@@ -377,9 +379,11 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 
 **Matcher Syntax:**
 
-- Empty string `""` or `"*"` matches all events of that type
-- Standard regex syntax supported (e.g., `^run_shell_command$`, `read_.*`, `(write_file|edit)`)
-- Tool hooks receive the runtime tool id in `tool_name` (for example, `write_file`). Built-in display names such as `WriteFile` and `ReadFile` are also accepted as matcher aliases for compatibility, but new configs should prefer runtime ids.
+- Empty string `""`, `"*"` or `".*"` matches all events of that type
+- A matcher is first compared exactly. In a `|`-separated list such as `permission_prompt | idle_prompt`, the matcher matches when any entry, ignoring spaces around it, is `*`, `.*`, or exactly the value, unless the whole matcher starts with `^` or `(`, in which case it is only a regular expression. Only a `|` outside `[...]` and groups, and not escaped with a backslash, separates entries: the pipes in `notes\|todo\.md`, `foo[ |]bar` and `a(b | c)` are part of the regular expression, and the spaces around them are kept. List entries are never read as regular expressions on their own
+- Otherwise the matcher is an unanchored regular expression (e.g., `^run_shell_command$`, `read_.*`, `(write_file|edit)`). For a list that does not start with `^` or `(`, the expression is built from the trimmed, non-empty entries, so a stray `|` as in `read_(file|edit)|` is ignored and never makes the matcher match everything, and a matcher of only `|` matches nothing. A matcher that starts with `^` or `(` is compiled exactly as written, so a trailing `|` there, as in `^write_file|`, does make it match everything. Because the expression is unanchored, `read` also matches `read_file` and `edit` also matches `notebook_edit`. Add `^` and `$` to match a whole value, and anchor exclusions as well: `^(?!write_file).*$` excludes `write_file`, while unanchored `(?!write_file).*` still matches it
+- The same rules apply to every event that supports a matcher, and to hooks registered by skills
+- Tool hooks receive the runtime tool id in `tool_name` (for example, `write_file`). Built-in display names such as `WriteFile` and `ReadFile` are also accepted as matcher aliases for compatibility, but new configs should prefer runtime ids. Aliases are only compared exactly, so anchor runtime ids (`^write_file$`), not display names.
 
 **Examples:**
 
@@ -810,7 +814,7 @@ The hook uses the deleting runtime's normal session fields (`session_id`, `trans
 
 ```json
 {
-  "stop_hook_active": "boolean indicating if stop hook is active",
+  "stop_hook_active": "true when this turn is continuing because a stop hook blocked the previous stop check (still true after tool calls made during that continuation); false on the first check and again once the stop is allowed, the blocking cap is reached, the user steers or sends new input, or a new turn, retry or goal turn starts",
   "last_assistant_message": "the last message from the assistant",
   "context_usage": "ratio of context window used (may exceed 1 when tokens exceed window; optional)",
   "context_limit": "context window size in tokens (optional)",
@@ -933,7 +937,7 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 ```json
 {
   "permission_mode": "default | plan | auto_edit | yolo",
-  "stop_hook_active": "boolean indicating if stop hook is active",
+  "stop_hook_active": "false on the first stop check; true when the subagent is continuing because a SubagentStop hook blocked its previous stop",
   "agent_id": "identifier for the subagent",
   "agent_type": "type of agent",
   "agent_transcript_path": "path to the subagent's transcript",
@@ -1197,7 +1201,7 @@ exit 0
             "type": "command",
             "command": "$HOME/.qwen/hooks/todo-validator.sh",
             "name": "todo-validator",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -1291,7 +1295,7 @@ exit 0
             "type": "command",
             "command": "$HOME/.qwen/hooks/todo-completion-validator.sh",
             "name": "completion-validator",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -1324,7 +1328,7 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
             "command": "/path/to/security-check.sh",
             "name": "security-check",
             "description": "Run security checks before tool execution",
-            "timeout": 30000
+            "timeout": 30
           }
         ]
       }
@@ -1363,6 +1367,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
 - Cannot return decision control (operation has already occurred)
 - Results are injected in the next conversation turn via `systemMessage` or `additionalContext`, except for output-ignored fire-and-forget event types documented above
 - Suitable for auditing, logging, background testing, etc.
+- Occupies one of 10 concurrent async hook slots until it finishes or reaches its `timeout` (60 seconds by default)
 
 **Example:**
 
@@ -1377,7 +1382,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
             "type": "command",
             "command": "$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh",
             "async": true,
-            "timeout": 300000
+            "timeout": 300
           }
         ]
       }
@@ -1403,7 +1408,7 @@ fi
 
 - Hooks run in the user's environment with user privileges
 - Project-level hooks require trusted folder status
-- Timeouts prevent hanging hooks (default: 60 seconds)
+- Timeouts prevent hanging hooks (default: 60 seconds for command hooks)
 
 ## Best Practices
 
@@ -1463,7 +1468,7 @@ Configure in `.qwen/settings.json`:
             "command": "${SECURITY_CHECK_SCRIPT}",
             "name": "security-checker",
             "description": "Security validation for bash commands",
-            "timeout": 10000
+            "timeout": 10
           }
         ]
       }
