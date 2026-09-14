@@ -641,9 +641,17 @@ function DaemonStatusDialogInner({
   // would switch targets and reload the page out from under a session they had
   // already returned to. Same contract as the boot gate's retireProbe.
   const probeControllerRef = useRef<AbortController | null>(null);
+  const probeTimerRef = useRef<number | null>(null);
   const retireConnectionProbe = useCallback(() => {
     probeControllerRef.current?.abort();
     probeControllerRef.current = null;
+    // Clear the 10 s abort timer too: an abort alone leaves it armed, and a
+    // fetch stub or transport that ignores the signal would keep it alive for
+    // the full window after the operator has gone.
+    if (probeTimerRef.current !== null) {
+      window.clearTimeout(probeTimerRef.current);
+      probeTimerRef.current = null;
+    }
     setConnectBusy(false);
   }, []);
   useEffect(() => {
@@ -879,6 +887,7 @@ function DaemonStatusDialogInner({
                     () => controller.abort(),
                     10_000,
                   );
+                  probeTimerRef.current = timeout;
                   // Retiring nulls the ref synchronously, so this check runs
                   // before the microtask callbacks below can act on a submit
                   // the operator has already abandoned. The 10s self-abort
@@ -915,6 +924,11 @@ function DaemonStatusDialogInner({
                     })
                     .finally(() => {
                       window.clearTimeout(timeout);
+                      // Only release the ref if it still names this attempt: a
+                      // newer probe may already own it.
+                      if (probeTimerRef.current === timeout) {
+                        probeTimerRef.current = null;
+                      }
                       if (!owned()) return;
                       probeControllerRef.current = null;
                       setConnectBusy(false);

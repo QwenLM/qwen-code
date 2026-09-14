@@ -507,24 +507,43 @@ describe('DaemonStatusDialog', () => {
     }
   });
 
-  // A same-target probe that answers green calls onChangeTarget, which reloads
-  // the page. Both cases below abandon the submit before that answer arrives,
-  // so a green response must not switch targets or reload: the first destroys a
-  // freshly typed address, the second reloads a session the operator already
-  // returned to when they closed the panel.
-  function mountPendingProbe() {
+  // A same-target probe that answers green calls onChangeTarget, which persists
+  // the credential and reloads the page. Both cases below abandon the submit
+  // before that answer arrives, so nothing may be written or reloaded: the
+  // first destroys a freshly typed address, the second reloads a session the
+  // operator already returned to when they closed the panel.
+  //
+  // Two stub shapes, because the fix has two mechanisms and each needs its own
+  // mutation pin:
+  // - signal-respecting: `abort()` rejects the fetch, so `wasAborted()` proves
+  //   the request was actually torn down rather than merely ignored. Deleting
+  //   the abort turns that assertion red.
+  // - deferred (ignores `init.signal`): the response still lands after the probe
+  //   was retired, which is exactly what the ownership guard is for. Defeating
+  //   the guard turns that assertion red. A stub that ignores the signal is also
+  //   how this bug survived so long — the green-path stub above resolves
+  //   immediately and never observes a late landing.
+  function mountPendingProbe(signalRespecting: boolean) {
     let pending:
       | ((response: { ok: boolean; status: number }) => void)
       | undefined;
+    let aborted = false;
     const fetchMock = vi.fn(
-      () =>
-        new Promise<{ ok: boolean; status: number }>((resolve) => {
+      (_url: string, init?: RequestInit) =>
+        new Promise<{ ok: boolean; status: number }>((resolve, reject) => {
           pending = resolve;
+          if (signalRespecting) {
+            init?.signal?.addEventListener('abort', () => {
+              aborted = true;
+              reject(new Error('The user aborted a request.'));
+            });
+          }
         }),
     );
     vi.stubGlobal('fetch', fetchMock);
     return {
       fetchMock,
+      wasAborted: () => aborted,
       // Resolved lazily: the executor only runs once the submit calls fetch.
       resolveProbe: (response: { ok: boolean; status: number }): void => {
         if (!pending) throw new Error('the probe never started');
@@ -535,7 +554,9 @@ describe('DaemonStatusDialog', () => {
 
   it('drops a same-target probe the operator typed over', async () => {
     const onChangeTarget = vi.fn();
-    const { fetchMock, resolveProbe } = mountPendingProbe();
+    // Deferred on purpose: the answer arrives even though the probe was
+    // retired, so what stops the switch is the ownership guard.
+    const { fetchMock, resolveProbe } = mountPendingProbe(false);
     try {
       mount('en', onChangeTarget);
       const token = typeToken('good-token');
@@ -564,16 +585,20 @@ describe('DaemonStatusDialog', () => {
     }
   });
 
-  it('drops a same-target probe that answers after the panel closed', async () => {
+  it('aborts a same-target probe when the panel closes', async () => {
     const onChangeTarget = vi.fn();
-    const { fetchMock, resolveProbe } = mountPendingProbe(onChangeTarget);
+    const { fetchMock, wasAborted, resolveProbe } = mountPendingProbe(true);
     try {
       mount('en', onChangeTarget);
       const token = typeToken('good-token');
       await submitConnect(token);
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      // The parent mounts the dialog only while the panel is open.
+      expect(wasAborted()).toBe(false);
+      // The parent mounts the dialog only while the panel is open, so closing
+      // it unmounts this component with the fetch still in flight.
       act(() => root!.unmount());
+      expect(wasAborted()).toBe(true);
+      // And if an answer slips through anyway, it still must not switch.
       await act(async () => {
         resolveProbe({ ok: true, status: 200 });
       });
