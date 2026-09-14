@@ -9,6 +9,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Config, type ConfigParameters } from './config.js';
+import { LlmChat } from '../core/llm-chat.js';
+import type { ContentGenerator } from '../core/contentGenerator.js';
+import type { GenerateContentResponse } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
 import { buildGoalEvidenceCheckpointWindow } from '../goals/goal-evidence.js';
 import { Storage } from './storage.js';
@@ -98,6 +101,53 @@ async function transcriptRecords(
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+function checkpointPayloads(
+  records: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  return records
+    .filter((entry) => {
+      const body = entry['managedSession'] as
+        | Record<string, unknown>
+        | undefined;
+      return body?.['kind'] === 'checkpoint.committed';
+    })
+    .map(
+      (entry) =>
+        (entry['managedSession'] as Record<string, unknown>)[
+          'payload'
+        ] as Record<string, unknown>,
+    );
+}
+
+function stubStoppedModelStream(
+  config: Config,
+  beforeGenerate: () => Promise<void>,
+) {
+  const generateContentStream = vi.fn(async () => {
+    await beforeGenerate();
+    return (async function* () {
+      yield {
+        candidates: [
+          {
+            content: { role: 'model', parts: [{ text: 'ok' }] },
+            finishReason: 'STOP',
+          },
+        ],
+      } as unknown as GenerateContentResponse;
+    })();
+  });
+  vi.spyOn(config, 'getContentGenerator').mockReturnValue({
+    generateContent: vi.fn(),
+    generateContentStream,
+    embedContent: vi.fn(),
+  } as unknown as ContentGenerator);
+  vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue({
+    model: 'qwen3-coder-plus',
+    authType: 'openai',
+  } as ReturnType<Config['getContentGeneratorConfig']>);
+  return generateContentStream;
+}
+
 describe('managed session log activation', () => {
   it('records a managed session through the authority and seals on close', async () => {
     await withWorkspace(async (activate) => {
@@ -171,6 +221,106 @@ describe('managed session log activation', () => {
         ] as Record<string, unknown>,
       ).toMatchObject({ boundary: null });
 
+      await fixture.config.closeSessionWriter();
+    });
+  });
+
+  it('sends the Agent model stream only after a before_model checkpoint', async () => {
+    await withWorkspace(async (activate) => {
+      const fixture = await activate({ managedSessionLog: true });
+      const recorder = fixture.config.getChatRecordingService()!;
+      recorder.recordUserMessage('summarise the docs');
+      await recorder.flush();
+      expect(
+        checkpointPayloads(await transcriptRecords(fixture.transcriptPath)),
+      ).toHaveLength(0);
+
+      const generateContentStream = stubStoppedModelStream(
+        fixture.config,
+        async () => {
+          const during = checkpointPayloads(
+            await transcriptRecords(fixture.transcriptPath),
+          );
+          expect(during).toHaveLength(1);
+          expect(during[0]).toMatchObject({ boundary: null });
+        },
+      );
+
+      const chat = new LlmChat(fixture.config, {});
+      const stream = await chat.sendMessageStream(
+        'qwen3-coder-plus',
+        { message: 'summarise the docs' },
+        'prompt-h08',
+      );
+      for await (const _ of stream) {
+        /* consume the Agent stream */
+      }
+
+      expect(generateContentStream).toHaveBeenCalledOnce();
+
+      recorder.recordTurnResult({
+        promptId: 'prompt-h08',
+        state: 'completed',
+        endedAt: Date.now(),
+        stopReason: 'end_turn',
+      });
+      await recorder.flush();
+
+      const after = await transcriptRecords(fixture.transcriptPath);
+      const events = after
+        .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
+        .map((entry) => entry['managedSession'] as Record<string, unknown>);
+      const checkpoints = checkpointPayloads(after);
+      const settled = events.filter(
+        (event) => event['kind'] === 'turn.settled',
+      );
+      expect(checkpoints).toHaveLength(2);
+      expect(settled).toHaveLength(1);
+      expect(checkpoints[0]['boundary']).toBeNull();
+      expect(checkpoints[1]['boundary']).toBe('turn_complete');
+
+      await fixture.config.closeSessionWriter();
+    });
+  });
+
+  it('sends the Agent model stream after a cold reopen only once a before_model checkpoint exists', async () => {
+    await withWorkspace(async (activate) => {
+      const first = await activate({ managedSessionLog: true });
+      first.config
+        .getChatRecordingService()!
+        .recordUserMessage('summarise the docs');
+      await first.config.closeSessionWriter();
+      expect(
+        checkpointPayloads(await transcriptRecords(first.transcriptPath)),
+      ).toHaveLength(0);
+
+      const fixture = await activate({ managedSessionLog: true });
+      expect(
+        checkpointPayloads(await transcriptRecords(fixture.transcriptPath)),
+      ).toHaveLength(0);
+
+      const generateContentStream = stubStoppedModelStream(
+        fixture.config,
+        async () => {
+          const during = checkpointPayloads(
+            await transcriptRecords(fixture.transcriptPath),
+          );
+          expect(during).toHaveLength(1);
+          expect(during[0]).toMatchObject({ boundary: null });
+        },
+      );
+
+      const chat = new LlmChat(fixture.config, {});
+      const stream = await chat.sendMessageStream(
+        'qwen3-coder-plus',
+        { message: 'summarise the docs' },
+        'prompt-h08-cold',
+      );
+      for await (const _ of stream) {
+        /* consume the Agent stream */
+      }
+
+      expect(generateContentStream).toHaveBeenCalledOnce();
       await fixture.config.closeSessionWriter();
     });
   });
