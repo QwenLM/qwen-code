@@ -354,7 +354,7 @@ describe('SettingsSchema', () => {
         getSettingsSchema().agents.properties.crossSessionMessaging;
 
       expect(crossSessionMessaging.type).toBe('boolean');
-      expect(crossSessionMessaging.default).toBe(false);
+      expect(crossSessionMessaging.default).toBe(true);
       expect(crossSessionMessaging.requiresRestart).toBe(true);
       expect(crossSessionMessaging.showInDialog).toBe(false);
     });

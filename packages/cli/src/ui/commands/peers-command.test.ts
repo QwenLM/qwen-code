@@ -383,9 +383,19 @@ describe('formatHeldList', () => {
 });
 
 describe('/peers', () => {
-  it('explains how to turn the feature on when it is off', async () => {
-    const result = await run(null, '');
+  it('explains how to turn the feature back on when it is off', async () => {
+    const result = await run(null, '', false);
     expect(result.content).toContain('crossSessionMessaging');
+    expect(result.content).toContain('turned off');
+  });
+
+  it('does not claim the feature is off when nothing set the key', async () => {
+    // Unset means on: the null inbox is then a startup or bind problem,
+    // and telling the user to enable a setting that is already on sends
+    // them nowhere.
+    const result = await run(null, '');
+    expect(result.content).not.toContain('turned off');
+    expect(result.content).toContain('no inbox');
   });
 
   it('does not tell a user to enable a setting they already enabled', async () => {

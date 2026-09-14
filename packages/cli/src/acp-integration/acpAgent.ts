@@ -336,6 +336,7 @@ import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -4747,7 +4748,7 @@ class QwenAgent implements Agent {
     // from more than one workspace, and a record exists to be addressed,
     // so it is written only when that session's settings turn messaging
     // on. The process's startup settings answer for nobody else.
-    if (settings.merged.agents?.crossSessionMessaging !== true) return;
+    if (!isCrossSessionMessagingEnabled(settings.merged)) return;
     // Bound by the first session that needs it rather than at startup: an
     // ACP process with no session has nothing to advertise and nobody to
     // receive for, and this is also the first moment the agent exists.

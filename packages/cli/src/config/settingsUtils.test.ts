@@ -1278,13 +1278,15 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
     expect(messaging.strictness({})).toBe(messaging.strictness(false));
   });
 
-  it('ranks the switch off as stricter than on, and unset as off', () => {
+  it('ranks the switch off as stricter than on, and unset as on', () => {
+    // The switch defaults to on, so a workspace `false` must outrank an
+    // unset user scope or a repository could never turn messaging off.
     const messaging = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
       ({ key }) => key === 'crossSessionMessaging',
     )!;
     expect(messaging.strictness(true)).toBeLessThan(
       messaging.strictness(false),
     );
-    expect(messaging.strictness(undefined)).toBe(messaging.strictness(false));
+    expect(messaging.strictness(undefined)).toBe(messaging.strictness(true));
   });
 });

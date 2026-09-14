@@ -4883,8 +4883,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   }
 
+  // Messaging is on by default, and on it binds an inbox and registers
+  // every new session through mocks most suites here do not stage. The
+  // default settings turn it off; the daemon-session suite says on or off
+  // explicitly, which is the only place the switch is under test.
   function makeSessionSettings(
-    merged: Record<string, unknown> = { mcpServers: {} },
+    merged: Record<string, unknown> = {
+      mcpServers: {},
+      agents: { crossSessionMessaging: false },
+    },
   ) {
     return {
       merged,
@@ -5161,12 +5168,27 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       });
     }
 
+    // Off has to be said: the switch is on by default, so settings that
+    // never mention the key are the *on* case.
+    function messagingOff() {
+      return makeSessionSettings({
+        mcpServers: {},
+        agents: { crossSessionMessaging: false },
+      });
+    }
+
     beforeEach(() => {
       mockRegisterSession.mockClear();
       mockPeerMessagingStart.mockReset();
       mockPeerMessagingStart.mockResolvedValue({
         close: vi.fn().mockResolvedValue(undefined),
       });
+    });
+
+    // Messaging is on by default, so suites after this one bind an inbox
+    // too; hand them back the bare mock rather than this suite's fake.
+    afterEach(() => {
+      mockPeerMessagingStart.mockReset();
     });
 
     it('gives each hosted session a record of its own, and the shared inbox address', async () => {
@@ -5243,9 +5265,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // A record with no inbox behind it would advertise an address that
       // never answers, which is worse than not being listed at all.
       await setupSessionMocks('hosted-off');
-      const { agent, agentPromise } = await bootInitializedAcpAgent(
-        makeSessionSettings(),
-      );
+      vi.mocked(loadSettings).mockReturnValue(messagingOff());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOff());
       await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
       expect(mockPeerMessagingStart).not.toHaveBeenCalled();
@@ -5305,6 +5327,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // contract the docs state is about the session, and a session that
       // turned messaging off must not appear in any peer's listing.
       await setupSessionMocks('hosted-off');
+      vi.mocked(loadSettings).mockReturnValue(messagingOff());
       const { agent, agentPromise } =
         await bootInitializedAcpAgent(messagingOn());
       await agent.newSession({ cwd: '/tmp', mcpServers: [] });
@@ -23588,7 +23611,10 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
 
   function makeAcpSettings() {
     return {
-      merged: { mcpServers: {} },
+      // Messaging is on by default, and on it registers every new session
+      // through a config these tests do not stage; this suite is about
+      // session routing, so it turns the switch off.
+      merged: { mcpServers: {}, agents: { crossSessionMessaging: false } },
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29791,6 +29817,11 @@ describe('sessionLanguage multi-session propagation', () => {
       getModes: vi.fn().mockReturnValue([]),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getSessionId: vi.fn().mockReturnValue('sid'),
+      // Messaging is on by default, so every published session registers
+      // itself through these; the registry itself is mocked at module level.
+      getCliVersion: vi.fn().mockReturnValue('9.9.9'),
+      trackSessionRegistration: vi.fn(),
+      updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getLlmClient: vi.fn().mockReturnValue({

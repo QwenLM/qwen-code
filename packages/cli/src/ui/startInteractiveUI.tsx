@@ -25,6 +25,7 @@ import {
   PeerMessagingContext,
 } from '../peerMessaging/PeerMessagingContext.js';
 import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
+import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { isValidSessionId } from '../config/config.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -217,9 +218,22 @@ export async function startInteractiveUI(
         // cause is what the user needs, not the null.
         if (
           messaging === null &&
-          settings.merged.agents?.crossSessionMessaging === true
+          isCrossSessionMessagingEnabled(settings.merged)
         ) {
-          setPeerInboxFailure(getLastPeerInboxFailure());
+          const failure = getLastPeerInboxFailure();
+          // The switch is on by default, so a platform with no inbox
+          // transport would otherwise greet every one of its users with a
+          // failure about a feature they never asked for. That one is said
+          // only to a user who turned the switch on by hand. A bind that
+          // failed where it should have worked is said to everyone: they
+          // are unreachable, and this line is the only place they learn it.
+          if (
+            failure !== null &&
+            (failure.cause !== 'unsupported_platform' ||
+              settings.merged.agents?.crossSessionMessaging === true)
+          ) {
+            setPeerInboxFailure(failure);
+          }
         }
       });
       return () => {
@@ -452,7 +466,7 @@ export async function startInteractiveUI(
   // registry record, and `patchSessionRecord` no-ops when there is no record
   // yet, so binding any earlier would publish the socket path into nothing.
   // Not awaited — startup must never block on binding a socket.
-  if (settings.merged.agents?.crossSessionMessaging !== true) {
+  if (!isCrossSessionMessagingEnabled(settings.merged)) {
     publishPeerMessaging(null);
   } else {
     let exiting = false;

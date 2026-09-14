@@ -821,14 +821,17 @@ qwen sessions ps --json | jq -r .cwd
 ## 6. Messaging Another Running Session
 
 Two interactive sessions on the same machine can send each other
-messages. The feature is experimental and **off by default**; turn it on
-in `settings.json` and restart:
+messages. The feature is **on by default**: a session is discoverable by
+the other sessions of the same user on the machine, and what they send
+it goes through the review rules below before its model sees any of it.
+To keep a session invisible and unreachable, turn it off in
+`settings.json` and restart:
 
 ```json
-{ "agents": { "crossSessionMessaging": true } }
+{ "agents": { "crossSessionMessaging": false } }
 ```
 
-Once on, the model in one session can discover the others with
+With it on, the model in one session can discover the others with
 `list_agents` — each appears under `sessions` with the `name` that
 `qwen sessions ps --json` records (the table view may truncate long
 names) — and address one with `send_message` using
@@ -1051,8 +1054,8 @@ driven session's behalf; a sender is told at once instead of
 waiting out an expiry. Where a held message should surface for those
 sessions is not settled yet.
 
-A session registers only while its own settings have
-`agents.crossSessionMessaging` on. With it off it stays invisible,
+A session registers unless its own settings turn
+`agents.crossSessionMessaging` off. Turned off, it stays invisible,
 because the only reason to list a session nobody can message would be to
 advertise an address that never answers.
 
