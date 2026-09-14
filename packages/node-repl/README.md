@@ -14,7 +14,7 @@ client (Qwen Code via `mcpServers`, Claude, Codex, etc.) can run it.
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `node_repl`                     | Start one JavaScript cell. `{ code, timeout_ms?, yield_time_ms?, title? }`; yields a cell ID if it remains active. |
 | `node_repl_wait`                | Wait for the active cell by ID without cancelling it.                                                              |
-| `node_repl_cancel`              | Cancel the active cell by ID without replacing the kernel.                                                         |
+| `node_repl_cancel`              | Cancel the active cell by ID; terminate an unresponsive kernel after five seconds.                                 |
 | `node_repl_reset`               | Terminate the kernel process and discard all bindings/module state.                                                |
 | `node_repl_add_node_module_dir` | Register an extra `node_modules` directory for bare-package resolution.                                            |
 
@@ -33,12 +33,16 @@ client (Qwen Code via `mcpServers`, Claude, Codex, etc.) can run it.
 - Node builtins are importable except `process`/`node:process`. Use
   `(await import('node:module')).createRequire(import.meta.url)` for CommonJS or
   native (N-API) addons.
-- Timeout and cancellation stop only the active cell. Earlier bindings and the
-  kernel process remain available, while new bindings from that cell are not
-  committed. `node_repl_reset` or a real process crash discards all bindings.
-- Runtime errors retain completed statement/declarator checkpoints; cancellation
-  and timeout restore binding values from cell entry. Object mutations and
-  external side effects are not rolled back.
+- Timeout and cancellation normally stop only the active cell. Earlier bindings
+  and the kernel process remain available, while new bindings from that cell are
+  not committed. If the kernel does not return a terminal result within five
+  seconds of cancellation, the host terminates it and reports that all bindings
+  were lost. A subsequent cell starts a fresh kernel. External actions may have
+  completed, so verify external state before retrying. `node_repl_reset` or a
+  real process crash also discards all bindings.
+- When the kernel is retained, runtime errors keep completed statement/declarator
+  checkpoints; cancellation and timeout restore binding values from cell entry.
+  Object mutations and external side effects are not rolled back.
 
 > Isolation note: the VM context provides lifecycle/namespace isolation, **not** an
 > OS security sandbox. Imported packages and builtins run with ordinary Node.js
