@@ -25,7 +25,10 @@ import {
   readSessionTitleInfoFromFileSync,
 } from '../utils/sessionStorageUtils.js';
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
-import { MANAGED_SESSION_HEADER_SUBTYPE } from '../managed-runtime/managed-session-records.js';
+import {
+  MANAGED_SESSION_HEADER_SUBTYPE,
+  ManagedSessionRecordError,
+} from '../managed-runtime/managed-session-records.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
@@ -407,7 +410,11 @@ interface TranscriptIndex {
   lastUpdated: string;
   byUuid: Map<string, UuidIndexEntry>;
   branchPointsByAssistantUuid: ReadonlyMap<string, string>;
-  /** Present when the index was projected rather than scanned from the file. */
+  /**
+   * Present when the index was projected rather than scanned from the file.
+   * Such an index must not reach the index cache: its byte estimate does not
+   * account for these records.
+   */
   projectedRecords?: ReadonlyMap<string, ChatRecord>;
 }
 
@@ -2526,6 +2533,10 @@ export async function readSessionTranscriptSnapshot(
 }
 
 function offerFreshIndexToCache(index: TranscriptIndex): void {
+  // Projected indexes are only built for a page request and their byte
+  // estimate ignores `projectedRecords`. Caching one would both inflate the
+  // 64MB budget and serve wrapper-free pages from the physical-index cache.
+  if (index.projectedRecords !== undefined) return;
   pruneCache();
   const key = makeCacheKey(
     index.filePath,
@@ -2689,6 +2700,14 @@ function managedNavigationTurns(
 }
 
 /**
+ * Projections of the snapshots the index cache still holds.
+ *
+ * Weakly keyed so it inherits that cache's invalidation exactly: a new file
+ * identity or snapshot size builds a new index, which misses here.
+ */
+const managedProjections = new WeakMap<TranscriptIndex, ChatRecord[]>();
+
+/**
  * An index over projected records, shaped like the physical one.
  *
  * Selection, navigation anchors, goal positions and branch points all read the
@@ -2707,9 +2726,13 @@ function managedPageIndex(
   const goalStatePositions: number[] = [];
   const projectedRecords = new Map<string, ChatRecord>();
   for (const [position, record] of records.entries()) {
-    if (record.sessionId !== sessionId) {
+    if (
+      validateTranscriptRecord(record as unknown as TranscriptRecordInput)
+        .record === undefined ||
+      record.sessionId !== sessionId
+    ) {
       debugLogger.warn(
-        `transcript session mismatch session=${sessionId} uuid=${record.uuid}`,
+        `projected record rejected session=${sessionId} position=${position}`,
       );
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
@@ -2737,7 +2760,10 @@ function managedPageIndex(
   }
   const navigationTurns = managedNavigationTurns(records);
   for (const [ordinal, turn] of navigationTurns.entries()) {
-    byUuid.get(turn.turnId)!.navigationOrdinal = ordinal;
+    const entry = byUuid.get(turn.turnId);
+    if (entry) {
+      entry.navigationOrdinal = ordinal;
+    }
   }
   const replayUuids = records.map((record) => record.uuid);
   return {
@@ -3673,14 +3699,37 @@ export class SessionTranscriptReader {
       if (!firstRecordSeen) {
         throw new SessionTranscriptSnapshotUnavailableError(sessionId);
       }
-      return await readManagedSessionRecords({
-        transcriptPath: index.filePath,
-        runtimeBaseDir: this.storage.getRuntimeBaseDir(),
-        sessionKey: localManagedSessionKey(
-          this.storage.getProjectRoot(),
-          sessionId,
-        ),
-      });
+      // Keyed by the index, which the cache already invalidates by file
+      // identity and snapshot size: paging a session would otherwise reproject
+      // the whole log on every request. The gate above stays outside the cache
+      // because it authorises this caller, not the projection.
+      const cached = managedProjections.get(index);
+      let records = cached;
+      if (records === undefined) {
+        try {
+          records = await readManagedSessionRecords({
+            transcriptPath: index.filePath,
+            runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+            sessionKey: localManagedSessionKey(
+              this.storage.getProjectRoot(),
+              sessionId,
+            ),
+            // The index froze a byte length, so the projection answers from
+            // the same prefix rather than from records appended since.
+            maxBytes: index.snapshotSize,
+          });
+        } catch (error) {
+          // A missing or corrupt body is the same class of failure as a
+          // snapshot that can no longer be served: the page contract maps
+          // that to 409, not an untyped 500 from JSON.parse(null).
+          if (error instanceof ManagedSessionRecordError) {
+            throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+          }
+          throw error;
+        }
+        managedProjections.set(index, records);
+      }
+      return [...records];
     } finally {
       recordRestoreStage('selected_record_read', startedAt);
     }

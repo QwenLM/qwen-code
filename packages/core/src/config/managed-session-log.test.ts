@@ -15,8 +15,10 @@ import { Storage } from './storage.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { getSessionWriterLockPath } from '../services/session-writer-lease.js';
 import {
+  clearSessionTranscriptIndexCacheEntriesForTest,
   encodeSessionTranscriptCursor,
   SessionTranscriptReader,
+  SessionTranscriptSnapshotUnavailableError,
 } from '../services/session-transcript-reader.js';
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
 import {
@@ -27,6 +29,7 @@ import {
 import {
   isManagedSessionTranscriptSync,
   localManagedSessionKey,
+  managedSessionResourceRoot,
 } from '../utils/sessionStorageUtils.js';
 
 const sessionId = '550e8400-e29b-41d4-a716-4466554400aa';
@@ -415,6 +418,11 @@ describe('managed session log activation', () => {
       ).readPage(sessionId, { limit: 10 });
       expect(page.records).toEqual([]);
       expect(page.hasMore).toBe(false);
+      const backwardPage = await new SessionTranscriptReader(
+        first.config.getTargetDir(),
+      ).readPage(sessionId, { direction: 'backward', limit: 10 });
+      expect(backwardPage.records).toEqual([]);
+      expect(backwardPage.hasMore).toBe(false);
 
       const second = await activate({ managedSessionLog: true });
       second.config.getChatRecordingService()!.recordUserMessage('first turn');
@@ -732,6 +740,50 @@ describe('managed session log activation', () => {
       expect(before.records.map((item) => item.uuid)).toEqual(
         projected.records.slice(0, 3).map((item) => item.uuid),
       );
+
+      // A frozen snapshot has to keep answering from the bytes it covers, so a
+      // record appended afterwards must not appear on an anchored page.
+      const reopened = await activate({ managedSessionLog: true });
+      reopened.config
+        .getChatRecordingService()!
+        .recordUserMessage('third turn');
+      await reopened.config.closeSessionWriter();
+      // Drop the cached index so the projection is rebuilt: a cache hit would
+      // hide whether the byte bound is what keeps the new record out.
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      const afterAppend = await new SessionTranscriptReader(
+        workspaceCwd,
+      ).readPage(sessionId, {
+        snapshot: turns.snapshot,
+        atRecordId: turns.turns[1].turnId,
+        limit: 10,
+      });
+      const afterAppendTexts = afterAppend.records.map(
+        (item) => item.message?.parts?.[0]?.text,
+      );
+      expect(afterAppendTexts).toContain('second turn');
+      expect(afterAppendTexts).not.toContain('third turn');
+    });
+  });
+
+  it('maps a broken managed projection to an unavailable snapshot', async () => {
+    await withWorkspace(async (activate) => {
+      const fixture = await activate({ managedSessionLog: true });
+      fixture.config.getChatRecordingService()!.recordUserMessage('first turn');
+      await fixture.config.closeSessionWriter();
+
+      await rm(managedSessionResourceRoot(fixture.runtimeBaseDir, sessionId), {
+        recursive: true,
+        force: true,
+      });
+      clearSessionTranscriptIndexCacheEntriesForTest();
+
+      await expect(
+        new SessionTranscriptReader(fixture.config.getTargetDir()).readPage(
+          sessionId,
+          { limit: 10 },
+        ),
+      ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
     });
   });
 

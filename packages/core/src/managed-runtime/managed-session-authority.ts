@@ -1212,14 +1212,24 @@ interface ManagedSessionLogScan {
  * Reads the complete committed prefix. A corrupt line inside the prefix fails
  * the scan rather than being skipped, because skipping it would resume
  * execution from an incomplete state.
+ *
+ * `maxBytes` bounds the scan to a frozen snapshot: a reader that already froze
+ * a byte length has to keep answering from it, or a page it serves would mix in
+ * records appended after the cursor was issued.
  */
 export async function readManagedSessionLog(
   path: string,
   sessionKey: ManagedSessionKey,
+  maxBytes?: number,
 ): Promise<ManagedSessionLogScan> {
   let text: string;
   try {
-    text = await readFile(path, 'utf8');
+    const bytes = await readFile(path);
+    text = (
+      maxBytes === undefined || maxBytes >= bytes.byteLength
+        ? bytes
+        : bytes.subarray(0, maxBytes)
+    ).toString('utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return {

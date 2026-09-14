@@ -163,10 +163,13 @@ export async function readManagedSessionRecords(options: {
   readonly transcriptPath: string;
   readonly runtimeBaseDir: string;
   readonly sessionKey: ManagedSessionKey;
+  /** Bounds the projection to a frozen snapshot's byte length. */
+  readonly maxBytes?: number;
 }): Promise<ChatRecord[]> {
   const scan = await readManagedSessionLog(
     options.transcriptPath,
     options.sessionKey,
+    options.maxBytes,
   );
   if (scan.header === undefined) {
     throw new ManagedSessionRecordError(
