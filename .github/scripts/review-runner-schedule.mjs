@@ -48,7 +48,7 @@ export function hourIn(date, timeZone = TIME_ZONE) {
   );
 }
 
-// [start, end) on a 24-hour clock; 22..3 covers 22,23,0,1,2.
+// [start, end) on a 24-hour clock; 17..5 covers 17:00 through 04:59.
 export function isNight(hour, start, end) {
   if (start === end) return false;
   return start < end
@@ -111,9 +111,9 @@ async function main() {
       'RUNNER_ADMIN_TOKEN is empty (needs Administration: write)',
     );
   }
-  const start = intVar(process.env.QWEN_REVIEW_NIGHT_START, 22, 23);
-  const end = intVar(process.env.QWEN_REVIEW_NIGHT_END, 3, 23);
-  const dayRunners = intVar(process.env.QWEN_REVIEW_DAY_RUNNERS, 2, 999);
+  const start = intVar(process.env.QWEN_REVIEW_NIGHT_START, 17, 23);
+  const end = intVar(process.env.QWEN_REVIEW_NIGHT_END, 5, 23);
+  const dayRunners = intVar(process.env.QWEN_REVIEW_DAY_RUNNERS, 0, 999);
 
   // --slurp returns an array of pages; gh refuses it together with --jq.
   const pages = JSON.parse(
