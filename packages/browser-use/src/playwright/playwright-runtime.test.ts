@@ -917,11 +917,13 @@ describe('PlaywrightRuntime command contracts', () => {
       value: 'value',
       timeoutMs: 12,
     });
+    const downloadStartedAt = Date.now();
     await fixture.runtime.dispatch('locator.downloadMedia', {
       tabId: tab.id,
       steps,
       timeoutMs: 16,
     });
+    const downloadFinishedAt = Date.now();
     await expect(
       fixture.runtime.dispatch('locator.selectOption', {
         tabId: tab.id,
@@ -952,9 +954,12 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.locator.dispatchEvent).not.toHaveBeenCalled();
     expect(fixture.locator.evaluate).toHaveBeenCalledWith(
       expect.any(Function),
-      16,
+      expect.any(Number),
       { timeout: 16 },
     );
+    const deadline = fixture.locator.evaluate.mock.calls[0]?.[1];
+    expect(deadline).toBeGreaterThanOrEqual(downloadStartedAt + 16);
+    expect(deadline).toBeLessThanOrEqual(downloadFinishedAt + 16);
     expect(fixture.locator.selectOption).toHaveBeenCalledWith(
       { label: 'Choice' },
       { timeout: 13 },
