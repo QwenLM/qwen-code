@@ -174,6 +174,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP: 900,
   GOAL_MAX_TURNS_CAP: 10_000,
   GOAL_MAX_ACTIVE_MINUTES_CAP: 10_080,
+  DEFAULT_WEB_SEARCH_TIMEOUT_MS: 120_000,
+  MAX_WEB_SEARCH_TIMEOUT_MS: 600_000,
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION: 200,
+  MAX_WEB_SEARCH_MAX_PER_SESSION: 10_000,
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   ApprovalMode: {
     DEFAULT: 'default',
@@ -399,6 +403,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       getTargetDir: vi.fn().mockReturnValue('/fake/project'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      setImageModel: vi.fn().mockResolvedValue(undefined),
       getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),

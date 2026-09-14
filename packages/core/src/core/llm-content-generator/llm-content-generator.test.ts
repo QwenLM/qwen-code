@@ -534,6 +534,34 @@ describe('LlmContentGenerator', () => {
     );
   });
 
+  it.each([
+    [1000000, 4096, 4096],
+    [2048, 4096, 2048],
+    [undefined, 4096, 4096],
+    [2048, undefined, 2048],
+  ])(
+    'respects both configured and request output ceilings (%s, %s)',
+    async (configured, requested, expected) => {
+      const limited = new LlmContentGenerator(
+        { apiKey: 'test' },
+        { model: 'gemini-test', samplingParams: { max_tokens: configured } },
+      );
+      await limited.generateContent(
+        {
+          model: 'gemini-test',
+          contents: [],
+          config: { maxOutputTokens: requested },
+        },
+        'prompt-id',
+      );
+      expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({ maxOutputTokens: expected }),
+        }),
+      );
+    },
+  );
+
   it('should map reasoning effort to thinkingConfig', async () => {
     const generatorWithReasoning = new LlmContentGenerator({ apiKey: 'test' }, {
       model: 'gemini-2.5-pro',

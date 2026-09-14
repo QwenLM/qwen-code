@@ -166,6 +166,8 @@ By default, the bot requires an @mention in group chats (`requireMention: true`)
 
 Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default and only applies to agent replies with a DingTalk staff ID. Replies are sent as DingTalk markdown whether or not they carry a mention; the mention prefix is included in the first message chunk.
 
+Qwen Code preserves the text content supplied by DingTalk when constructing the canonical message; it does not remove a leading mention itself. When DingTalk omits the bot mention from a plain-text callback, a body such as `/clear` or `!command` still begins with that command marker and follows the normal local-command rules. When the callback retains a leading bot mention, as rich-text callbacks can, `@Bot /clear` and `@Bot !command` remain ordinary agent input because the canonical text does not begin with `/` or `!`. `isInAtList` continues to determine whether the group message addressed the bot.
+
 ### Finding a Group's Conversation ID
 
 DingTalk uses `conversationId` to identify groups. You can find it in the channel service logs when someone sends a message in the group — look for the `conversationId` field in the log output.
@@ -205,7 +207,7 @@ The multi-line layout above is what the agent sees in a 1:1 chat. In a group the
 
 - **Use DingTalk markdown-aware instructions** — DingTalk supports headings, bold text, links, code blocks, and tables. Keep tables compact because narrow screens may scroll horizontally.
 - **Restrict access** — In an organization context, `senderPolicy: "open"` may be acceptable. For tighter control, use `"allowlist"` or `"pairing"`. See [DM Pairing](./overview#dm-pairing) for details.
-- **Referenced messages** — Quoting (replying to) a user message includes the quoted text as context for the agent. If the quoted message is a picture, file, audio, or video message, the bot downloads and attaches it the same way as when sent directly. Quoting bot responses is not yet supported.
+- **Referenced messages** — Quoting (replying to) a user message includes the quoted text as context for the agent. Rich-text quotes preserve their text order and attach embedded pictures. If the quoted message is a picture, file, audio, or video message, the bot downloads and attaches it the same way as when sent directly. Quoting bot responses is not yet supported.
 
 ## Troubleshooting
 

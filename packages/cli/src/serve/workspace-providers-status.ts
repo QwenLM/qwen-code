@@ -38,6 +38,7 @@ import {
   resolvePersistedReasoningConfigState,
 } from '../acp-integration/model-configuration.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
+import { getModelConfigurationKey } from './model-configuration.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
 
@@ -192,7 +193,14 @@ function buildWorkspaceProvidersStatus(
                 }
               : undefined,
           );
+      const configurationKey = getModelConfigurationKey(
+        loaded,
+        authType,
+        model.id,
+        model.registryBaseUrl,
+      );
       const providerModel: ServeWorkspaceProviderModel = {
+        ...(configurationKey ? { configurationKey } : {}),
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),
         name: model.label,

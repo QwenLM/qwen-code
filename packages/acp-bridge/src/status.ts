@@ -584,6 +584,7 @@ export interface ServeWorkspaceProviderCurrent {
 }
 
 export interface ServeWorkspaceProviderModel {
+  configurationKey?: string;
   modelId: string;
   baseModelId: string;
   name: string;

@@ -116,6 +116,57 @@ function configuredInstance(): DaemonChannelInstanceSnapshot {
 }
 
 describe('Channel editor state', () => {
+  it.each([undefined, 'open', 'disabled'])(
+    'round-trips DWS direct-message access %s independently of group access',
+    (dmPolicy) => {
+      const descriptor: DaemonChannelTypeDescriptor = {
+        type: 'dws',
+        displayName: 'DingTalk Workspace',
+        manageable: true,
+        fields: [
+          {
+            key: 'dmPolicy',
+            label: 'Direct message access',
+            kind: 'enum',
+            required: true,
+            default: 'open',
+            options: [
+              { value: 'open', label: 'Open' },
+              { value: 'disabled', label: 'Disabled' },
+            ],
+          },
+        ],
+      };
+      const instance = configuredInstance();
+      instance.config = {
+        type: 'dws',
+        senderPolicy: 'pairing',
+        groupPolicy: 'disabled',
+        dmPolicy,
+      };
+      const draft = createChannelEditorDraft(descriptor, instance);
+      expect(draft.values.dmPolicy).toBe(dmPolicy ?? 'open');
+      expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+      const request = buildChannelUpsertRequest(
+        descriptor,
+        draft,
+        'revision-1',
+        instance,
+      );
+      expect(request.config).toMatchObject({
+        dmPolicy: dmPolicy ?? 'open',
+        senderPolicy: 'pairing',
+        groupPolicy: 'disabled',
+      });
+      expect(
+        createChannelEditorDraft(descriptor, {
+          ...instance,
+          config: request.config,
+        }).values.dmPolicy,
+      ).toBe(dmPolicy ?? 'open');
+    },
+  );
+
   it('builds a new typed configuration with an explicit secret replacement', () => {
     const draft = createChannelEditorDraft(DINGTALK);
     draft.name = 'release-bot';

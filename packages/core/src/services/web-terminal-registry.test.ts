@@ -5,18 +5,26 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pkg from '@xterm/headless';
 
-const { spawn, getPty, spawnSync, osPlatform } = vi.hoisted(() => ({
-  spawn: vi.fn(),
-  getPty: vi.fn(),
-  spawnSync: vi.fn(),
-  osPlatform: vi.fn(),
-}));
+const { Terminal } = pkg;
+
+const { spawn, getPty, spawnSync, osPlatform, loadXtermHeadless } = vi.hoisted(
+  () => ({
+    spawn: vi.fn(),
+    getPty: vi.fn(),
+    spawnSync: vi.fn(),
+    osPlatform: vi.fn(),
+    loadXtermHeadless: vi.fn(),
+  }),
+);
 
 vi.mock('node:child_process', () => ({ spawnSync }));
 vi.mock('../utils/getPty.js', () => ({ getPty }));
-// Only conpty-host reads os.platform(); killPtyTree branches on
-// process.platform, so this steers the ConPTY release without touching it.
+vi.mock('../utils/load-xterm-headless.js', () => ({ loadXtermHeadless }));
+// conpty-host reads os.platform() for its win32 release gate, and the
+// registry for the bundled-vs-inbox ConPTY backend choice; killPtyTree
+// branches on process.platform, so this steers both without touching it.
 // Windows CI is skipped on PRs, so the win32 path has to be reachable here.
 // Everything else passes through -- Storage (via debugLogger) needs the real
 // os.homedir()/os.tmpdir().
@@ -43,6 +51,44 @@ describe('WebTerminalRegistry', () => {
   let disposeData: ReturnType<typeof vi.fn>;
   let disposeExit: ReturnType<typeof vi.fn>;
 
+  const createSpawnedPty = () => ({
+    pid: 1,
+    write,
+    resize,
+    kill,
+    // node-pty's WindowsPtyAgent internals, which releaseConPtyHost drives
+    // directly instead of going through kill(). See #11303.
+    _agent: {
+      _pty: 42,
+      _useConptyDll: false,
+      _ptyNative: { kill: nativeKill },
+      _conoutSocketWorker: { dispose: conoutDispose },
+    },
+    onData: vi.fn((listener: (data: string) => void) => {
+      onData = listener;
+      // Capture this session's spy by value: the describe-scope `disposeData`
+      // variable is reassigned every test, and a deferred exit-time release
+      // from a previous session may fire during a later test — it must hit
+      // its own spy, not the current one. Same reason the detach guard
+      // checks listener identity before clearing the shared `onData`.
+      const disposeDataSpy = disposeData;
+      return {
+        // Model node-pty's disposable detaching the listener, so a test can
+        // tell a synchronous dispose apart from the deferred one.
+        dispose: () => {
+          if (onData === listener) onData = () => {};
+          disposeDataSpy();
+        },
+      };
+    }),
+    onExit: vi.fn(
+      (listener: (e: { exitCode: number; signal?: number }) => void) => {
+        onExit = listener;
+        return { dispose: disposeExit };
+      },
+    ),
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     write = vi.fn();
@@ -54,42 +100,9 @@ describe('WebTerminalRegistry', () => {
     disposeExit = vi.fn();
     spawnSync.mockReturnValue({ stdout: '' });
     osPlatform.mockReturnValue(process.platform);
-    spawn.mockReturnValue({
-      pid: 1,
-      write,
-      resize,
-      kill,
-      // node-pty's WindowsPtyAgent internals, which releaseConPtyHost drives
-      // directly instead of going through kill(). See #11303.
-      _agent: {
-        _pty: 42,
-        _useConptyDll: false,
-        _ptyNative: { kill: nativeKill },
-        _conoutSocketWorker: { dispose: conoutDispose },
-      },
-      onData: vi.fn((listener) => {
-        onData = listener;
-        // Capture this session's spy by value: the describe-scope `disposeData`
-        // variable is reassigned every test, and a deferred exit-time release
-        // from a previous session may fire during a later test — it must hit
-        // its own spy, not the current one. Same reason the detach guard
-        // checks listener identity before clearing the shared `onData`.
-        const disposeDataSpy = disposeData;
-        return {
-          // Model node-pty's disposable detaching the listener, so a test can
-          // tell a synchronous dispose apart from the deferred one.
-          dispose: () => {
-            if (onData === listener) onData = () => {};
-            disposeDataSpy();
-          },
-        };
-      }),
-      onExit: vi.fn((listener) => {
-        onExit = listener;
-        return { dispose: disposeExit };
-      }),
-    });
+    spawn.mockImplementation(() => createSpawnedPty());
     getPty.mockResolvedValue({ module: { spawn }, name: 'node-pty' });
+    loadXtermHeadless.mockResolvedValue({ Terminal });
   });
 
   afterEach(() => {
@@ -213,6 +226,9 @@ describe('WebTerminalRegistry', () => {
   });
 
   it('returns stable errors when PTY loading or spawning fails', async () => {
+    // Pin off Windows: on win32 a failed bundled spawn retries once on the
+    // inbox backend — covered by the bundled-backend cases below.
+    osPlatform.mockReturnValue('linux');
     const registry = new WebTerminalRegistry();
     getPty.mockResolvedValueOnce(null);
     await expect(
@@ -225,6 +241,290 @@ describe('WebTerminalRegistry', () => {
     await expect(
       registry.create({ workspaceCwd: '/workspace' }),
     ).resolves.toEqual({ error: 'Failed to spawn shell' });
+  });
+
+  it('spawns Windows terminals with the bundled ConPTY backend', async () => {
+    // Mirrors the shellExecutionService bundled-backend case: the inbox
+    // backend orphans a `conhost.exe --headless` per natural shell exit
+    // (microsoft/node-pty#965), so Windows terminals must spawn with the
+    // bundled backend. Hardcoding `useConptyDll: false` turns this red.
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+
+    await registry.create({
+      terminalId: 'terminal:bundled',
+      workspaceCwd: '/workspace',
+    });
+
+    expect(spawn.mock.calls[0]?.[2]).toMatchObject({ useConptyDll: true });
+  });
+
+  it('preserves the PTY stream and answers only primary DA on Windows', async () => {
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:queries',
+      workspaceCwd: '/workspace',
+    });
+    const received: string[] = [];
+    registry.addOutputListener('terminal:queries', (data) =>
+      received.push(data),
+    );
+    const chunks = [
+      '\x1b]0;title',
+      'visible\x1b[1;31mred\x1b[0m\x1b[2J\x1b[12;1H',
+      '\x1bP',
+      '$qm\x1b\\',
+      '\x1bP$',
+      'qm\x1b\\',
+      '\x1b[6n\x1b[?2026$p\x1b[>c',
+      '\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07',
+      '\x1b]4;0;?;1;?\x07',
+      '\x1b[',
+      'c',
+    ];
+    for (const chunk of chunks) onData(chunk);
+
+    // DA is last, so its answer also waits for all preceding queries to parse.
+    await vi.waitFor(() => {
+      expect(write).toHaveBeenCalledExactlyOnceWith('\x1b[?1;2c');
+    });
+    expect(received).toEqual(chunks);
+    expect(registry.readSnapshot('terminal:queries')).toMatchObject({
+      output: chunks.join(''),
+      handlesPrimaryDa: true,
+    });
+    registry.dispose();
+  });
+
+  it('leaves primary DA to the browser when headless cannot load', async () => {
+    osPlatform.mockReturnValue('win32');
+    loadXtermHeadless.mockRejectedValueOnce(new Error('headless load failed'));
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:no-responder',
+      workspaceCwd: '/workspace',
+    });
+    const received: string[] = [];
+    registry.addOutputListener('terminal:no-responder', (data) => {
+      received.push(data);
+    });
+
+    onData('\x1b[c');
+
+    expect(received.join('')).toBe('\x1b[c');
+    expect(
+      registry.readSnapshot('terminal:no-responder')?.handlesPrimaryDa,
+    ).not.toBe(true);
+    expect(write).not.toHaveBeenCalled();
+    registry.dispose();
+  });
+
+  it('leaves the OSC colour queries for the browser client to answer', async () => {
+    // The pinned @xterm/headless 5.5.0 responder answers no colour query:
+    // `onData` carries DSR/DA/DECRQM/DECRQSS only, while
+    // `_setOrReportSpecialColor` reports on the internal `_onColor` emitter
+    // that the headless Terminal does not expose (`term.onColor` is undefined)
+    // and nothing here subscribes to. Scrubbing the family therefore deleted it
+    // from the browser's stream as well, leaving a probing program unanswered
+    // where the browser's xterm.js 6.0.0 `_handleColorEvent` answered it at the
+    // merge base. The queries must reach the client untouched — whole or split
+    // across chunks, every form of the family — and nothing may be written
+    // back. The colour queries a reconnect replay re-answers are tracked in
+    // #11734.
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:colour',
+      workspaceCwd: '/workspace',
+    });
+
+    const received: string[] = [];
+    registry.addOutputListener('terminal:colour', (data) => {
+      received.push(data);
+    });
+
+    onData('\x1b]10;?\x07'); // OSC foreground-colour query
+    onData('\x1b]11;?'); // OSC background-colour query, split
+    onData('\x07'); // ... completed by the next chunk
+    onData('\x1b]12;?\x07'); // OSC cursor-colour query
+    onData('\x1b]4;5;?\x07'); // OSC palette-colour query
+    onData('\x1b]4;0;?;1;?\x07'); // OSC multi-index palette query
+
+    const family =
+      '\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07\x1b]4;5;?\x07\x1b]4;0;?;1;?\x07';
+    expect(received.join('')).toBe(family);
+    expect(registry.readSnapshot('terminal:colour')?.output).toBe(family);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('cancels an in-flight create released during the headless load', async () => {
+    // `loadXtermHeadless` is the second suspension point after getPty(); a
+    // release() landing during it must cancel the spawn, not leak a PTY the
+    // caller already gave up on (the getPty() re-check alone does not cover
+    // this window).
+    osPlatform.mockReturnValue('win32');
+    let resolveHeadless: ((value: unknown) => void) | undefined;
+    loadXtermHeadless.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveHeadless = resolve;
+      }),
+    );
+    const registry = new WebTerminalRegistry();
+    const creating = registry.create({
+      terminalId: 'terminal:pending-headless',
+      workspaceCwd: '/workspace',
+    });
+
+    await vi.waitFor(() => expect(loadXtermHeadless).toHaveBeenCalled());
+    expect(registry.release('terminal:pending-headless')).toBe(true);
+    resolveHeadless?.({ Terminal });
+
+    await expect(creating).resolves.toEqual({
+      error: 'Web terminal creation cancelled',
+    });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('does not spawn after disposal wins during the headless load', async () => {
+    osPlatform.mockReturnValue('win32');
+    let resolveHeadless: ((value: unknown) => void) | undefined;
+    loadXtermHeadless.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveHeadless = resolve;
+      }),
+    );
+    const registry = new WebTerminalRegistry();
+    const creating = registry.create({
+      terminalId: 'terminal:pending-headless-dispose',
+      workspaceCwd: '/workspace',
+    });
+
+    await vi.waitFor(() => expect(loadXtermHeadless).toHaveBeenCalled());
+    registry.dispose();
+    resolveHeadless?.({ Terminal });
+
+    await expect(creating).resolves.toEqual({
+      error: 'Web terminal registry disposed',
+    });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('spawns non-Windows terminals without the bundled backend', async () => {
+    osPlatform.mockReturnValue('linux');
+    const registry = new WebTerminalRegistry();
+
+    await registry.create({
+      terminalId: 'terminal:posix-backend',
+      workspaceCwd: '/workspace',
+    });
+
+    // Inert on the POSIX prebuilds, but pinned so the option stays a
+    // deliberate platform branch rather than an unconditional `true`.
+    expect(spawn.mock.calls[0]?.[2]).toMatchObject({ useConptyDll: false });
+
+    // POSIX leaves every query, including primary DA, to the browser.
+    onData('\x1b[c');
+    expect(registry.readSnapshot('terminal:posix-backend')?.output).toContain(
+      '\x1b[c',
+    );
+    expect(loadXtermHeadless).not.toHaveBeenCalled();
+  });
+
+  it('retries a failed bundled spawn once on the inbox backend', async () => {
+    // The bundled backend throws synchronously when its conpty.dll is missing
+    // or unloadable; a web terminal has no child_process fallback, so the
+    // registry drops to the pre-fix inbox behavior rather than fail the
+    // terminal outright. Deleting the retry branch in create() turns this
+    // red.
+    osPlatform.mockReturnValue('win32');
+    spawn.mockImplementationOnce(() => {
+      throw new Error('Failed to load conpty.dll, error code: 126');
+    });
+    const registry = new WebTerminalRegistry();
+
+    const created = await registry.create({
+      terminalId: 'terminal:bundled-retry',
+      workspaceCwd: '/workspace',
+    });
+
+    expect(created).toEqual({ terminalId: 'terminal:bundled-retry' });
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(spawn.mock.calls[0]?.[2]).toMatchObject({ useConptyDll: true });
+    expect(spawn.mock.calls[1]?.[2]).toMatchObject({ useConptyDll: false });
+    // The retried PTY is fully wired: output reaches the session buffer.
+    onData('ready');
+    expect(registry.readSnapshot('terminal:bundled-retry')?.output).toBe(
+      'ready',
+    );
+  });
+
+  it('reports a spawn failure and frees the id when both backends fail', async () => {
+    osPlatform.mockReturnValue('win32');
+    const responder = new Terminal();
+    const dispose = vi.spyOn(responder, 'dispose');
+    loadXtermHeadless.mockResolvedValueOnce({
+      Terminal: class {
+        constructor() {
+          return responder;
+        }
+      },
+    });
+    spawn.mockImplementation(() => {
+      throw new Error('spawn failed');
+    });
+    const registry = new WebTerminalRegistry();
+
+    await expect(
+      registry.create({
+        terminalId: 'terminal:bundled-double-fail',
+        workspaceCwd: '/workspace',
+      }),
+    ).resolves.toEqual({ error: 'Failed to spawn shell' });
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(dispose).toHaveBeenCalledOnce();
+
+    // finishCreating ran on the failure path: the same id is creatable again
+    // instead of being stuck on "is being created".
+    spawn.mockImplementation(() => createSpawnedPty());
+    await expect(
+      registry.create({
+        terminalId: 'terminal:bundled-double-fail',
+        workspaceCwd: '/workspace',
+      }),
+    ).resolves.toEqual({ terminalId: 'terminal:bundled-double-fail' });
+  });
+
+  it('frees a bundled-shape session once across kill and exit-time release', async () => {
+    osPlatform.mockReturnValue('win32');
+    // Bundled ConPTY shape: the host reference was released at spawn, so the
+    // native close is only reachable through kill(); the noted release must
+    // skip a second close yet still dispose the conout worker, which node-pty
+    // otherwise defers until more output that never comes. Mirrors the shell
+    // path's bundled cancel case in shellExecutionService.test.ts.
+    spawn.mockImplementationOnce(() => {
+      const pty = createSpawnedPty();
+      pty._agent._useConptyDll = true;
+      return pty;
+    });
+    kill.mockImplementation(() => {
+      nativeKill(42, true);
+    });
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:bundled-exit-release',
+      workspaceCwd: '/workspace',
+    });
+
+    expect(registry.release('terminal:bundled-exit-release')).toBe(true);
+    onExit({ exitCode: 0 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(kill).toHaveBeenCalledOnce();
+    // kill()'s own close is the only native close: the noted bundled release
+    // adds none, and the exit-time release is a no-op after it.
+    expect(nativeKill).toHaveBeenCalledOnce();
+    expect(conoutDispose).toHaveBeenCalledOnce();
   });
 
   it('caps replay output and records exit state', async () => {
@@ -471,6 +771,7 @@ describe('WebTerminalRegistry', () => {
         exited: true,
         exitCode: 3,
         workspaceCwd: '/workspace',
+        handlesPrimaryDa: true,
       },
     );
   });

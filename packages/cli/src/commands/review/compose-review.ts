@@ -53,6 +53,9 @@ import {
   roundCapStopEntryZh,
   roundCapStopDisclosure,
   readBudgetStop,
+  minutesPhrase,
+  verifyBudgetExhausted,
+  wallLeftText,
 } from './lib/deadline.js';
 import { LARGE_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
 import { shellQuotePath } from './lib/shell-quote.js';
@@ -1515,6 +1518,14 @@ export interface ComposeReviewResult {
    * operator which command repairs it. Two registers, two channels.
    */
   remediation: string[];
+  /**
+   * The FIXes the coverage check withheld because the plan's wall would
+   * refuse the build they name, each with the gate's arithmetic — printed
+   * to stderr as `NOTE:` lines beside the FIX lines, never rendered into
+   * the body. A gap the body discloses with no FIX beside it is explained
+   * here, not left to look like an oversight.
+   */
+  waivedFixes: string[];
   /**
    * How many findings the convergence posture deferred — Suggestions, and
    * the Criticals the critical floor deferred by their axes (#10291) — the
@@ -5092,6 +5103,7 @@ function composeReviewBody(
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
   // lines of the second register posted to the first reader.
   const remediation: string[] = [];
+  const waivedFixes: string[] = [];
   // Budget-gap disclosures from the coverage report — the checks agents said
   // their soft tool budget cut short. A DISCLOSURE channel, deliberately not
   // a cap: these render in the body's "Not reviewed" section mechanically
@@ -5823,6 +5835,7 @@ function composeReviewBody(
         });
       }
       remediation.push(...verification.remediation);
+      waivedFixes.push(...verification.waived);
       criticalsUnverified =
         verification.unverifiedFindings && criticalsNeedingVerify >= 1;
     } catch (err) {
@@ -5870,12 +5883,34 @@ function composeReviewBody(
       ).length;
       findingsUnverifiedAtCompose = unverifiedTagCount > 0;
       if (findingsUnverifiedAtCompose) {
-        remediation.push(
-          'findings still tagged `— [unverified]`: relaunch the verifier ' +
-            'for each tagged entry (Step 4, `--role verify` with that ' +
-            'entry), apply its verdict in the cumulative findings file, ' +
-            'and run compose-review again with the updated file',
+        // The relaunch is a `--role verify` build, which the compose floor
+        // gates: a FIX the verify builder would refuse (exit 4) is withheld
+        // and explained, like the coverage check's own (`waived`), or the
+        // one repair round Step 6 prescribes is spent on a refusal and the
+        // same FIX comes back. Same predicate as `verifyBudgetExhausted`
+        // in the coverage check, asked here for this FIX.
+        const floorRefusal = verifyBudgetExhausted(
+          input.env ?? process.env,
+          Date.now(),
+          input.planPath,
         );
+        if (floorRefusal === null) {
+          remediation.push(
+            'findings still tagged `— [unverified]`: relaunch the verifier ' +
+              'for each tagged entry (Step 4, `--role verify` with that ' +
+              'entry), apply its verdict in the cumulative findings file, ' +
+              'and run compose-review again with the updated file',
+          );
+        } else {
+          waivedFixes.push(
+            'findings still tagged `— [unverified]`: the relaunch FIX is ' +
+              "withheld — the plan's wall is at or under the compose floor (" +
+              `${wallLeftText(floorRefusal.remainingSeconds)}, floor ` +
+              `${minutesPhrase(floorRefusal.composeFloorSeconds)}), so the ` +
+              'verify builder would refuse each relaunch (exit 4); the tags ' +
+              'stand and cap the verdict, so do not attempt it',
+          );
+        }
       }
     } catch {
       findingsFileUnreadable = true;
@@ -7077,8 +7112,17 @@ function composeReviewBody(
   >();
   const reasonZhOf = new Map<string, string>();
   for (const e of covEntries) {
-    if (seenSubjects.has(e.subject)) continue;
-    seenSubjects.add(e.subject);
+    // One line per subject — except that the budget / round-cap entry does
+    // not claim its subject: it says how the audit loop ENDED (stopped by
+    // the budget, capped without converging), and a Step 5 delivery gap
+    // under the same subject says what did or did not run before it — "no
+    // auditor was launched with a prompt this skill builds" beside "did not
+    // converge within the round cap" are two facts, not a duplicate, and
+    // dropping the second would let the first imply rounds that never ran.
+    if (e !== budgetEntry) {
+      if (seenSubjects.has(e.subject)) continue;
+      seenSubjects.add(e.subject);
+    }
     // Keyed on the reason the body will PRINT — public over internal. Two
     // unread briefs differ internally only by their brief paths; grouped on
     // those, the path-free public sentence would render once per role, which
@@ -7801,6 +7845,7 @@ function composeReviewBody(
       downgraded,
       downgradedFrom,
       remediation,
+      waivedFixes,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
       floorEnforcedEntries: reroute.entries,
@@ -7897,6 +7942,7 @@ function composeReviewBody(
       downgraded,
       downgradedFrom,
       remediation,
+      waivedFixes,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
       floorEnforcedEntries: reroute.entries,
@@ -8239,6 +8285,7 @@ function composeReviewBody(
     downgraded,
     downgradedFrom,
     remediation,
+    waivedFixes,
     deferredCount: deferredSuggestions.length,
     floorEnforced: reroute.indices,
     floorEnforcedEntries: reroute.entries,
@@ -9079,6 +9126,11 @@ export const composeReviewCommand: CommandModule = {
     // that repairs it, on the channel the author never sees.
     for (const fix of result.remediation) {
       writeStderrLine(`FIX: ${fix}`);
+    }
+    // The FIXes withheld, and why — beside the FIX lines, on the same
+    // channel, so a disclosed gap with no FIX is never a silent one.
+    for (const note of result.waivedFixes) {
+      writeStderrLine(`NOTE: ${note}`);
     }
     // The volume this round adds to the pull request, stated rather than
     // left to be counted by hand — and beside the previous round's when the

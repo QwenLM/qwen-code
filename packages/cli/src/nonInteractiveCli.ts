@@ -2121,6 +2121,7 @@ export async function runNonInteractive(
               typeof toolResponse.resultDisplay === 'string'
                 ? toolResponse.resultDisplay
                 : undefined,
+              { approvalRequired: toolResponse.approvalRequired === true },
             );
           }
 

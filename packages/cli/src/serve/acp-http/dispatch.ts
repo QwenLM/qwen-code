@@ -2364,6 +2364,8 @@ export class AcpDispatcher {
               ...(s.activeWorkState !== undefined
                 ? { activeWorkState: s.activeWorkState }
                 : {}),
+              hasRunningBackgroundTasks: s.hasRunningBackgroundTasks,
+              ...(s.backgroundTurn ? { backgroundTurn: s.backgroundTurn } : {}),
               isArchived: s.isArchived === true,
               ...(s.isPinned !== undefined ? { isPinned: s.isPinned } : {}),
               ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}),

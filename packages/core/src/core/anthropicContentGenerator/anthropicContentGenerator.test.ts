@@ -3959,46 +3959,69 @@ describe('AnthropicContentGenerator', () => {
       ]);
     });
 
-    it('releases closed valid tool calls before rethrowing an upstream stream error', async () => {
-      const networkError = Object.assign(
-        new Error('SSE connection reset by peer'),
-        { code: 'ECONNRESET' },
-      );
-      anthropicState.createImpl.mockResolvedValue(
-        (async function* interruptedToolUseStream() {
-          yield {
-            type: 'content_block_start',
-            index: 0,
-            content_block: {
-              type: 'tool_use',
-              id: 'call-complete',
-              name: 'read_file',
-              input: {},
-            },
-          };
-          yield {
-            type: 'content_block_delta',
-            index: 0,
-            delta: {
-              type: 'input_json_delta',
-              partial_json: '{"file_path":"a.sql"}',
-            },
-          };
-          yield { type: 'content_block_stop', index: 0 };
-          throw networkError;
-        })(),
-      );
-      const { chunks, error } = await collectGeneratedStream();
+    it.each([
+      {
+        case: 'a retryable socket cut',
+        error: Object.assign(new Error('SSE connection reset by peer'), {
+          code: 'ECONNRESET',
+        }),
+      },
+      {
+        // A gateway error frame pushed into an already-200 stream carries
+        // neither a status nor an allow-listed socket code; the provider's
+        // own request id is what classifies it. LlmChat's mid-stream
+        // boundary admits this class, so the release gate does too: the
+        // delivered functionCall shuts both recovery gates there, and the
+        // error-path persistence plus the scheduler's repair flow take over
+        // — the same footing a socket cut produces. The fixture must carry
+        // no allow-listed socket code at any cause level, or it classifies
+        // as transport and the case no longer exercises the status-less
+        // disjunct.
+        case: 'a status-less upstream error the provider traced with a request id',
+        error: Object.assign(new Error("'id'"), {
+          code: 'KeyError',
+          requestID: 'req-1',
+        }),
+      },
+    ])(
+      'releases closed valid tool calls before rethrowing $case',
+      async ({ error: upstreamError }) => {
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* interruptedToolUseStream() {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-complete',
+                name: 'read_file',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: '{"file_path":"a.sql"}',
+              },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+            throw upstreamError;
+          })(),
+        );
+        const { chunks, error } = await collectGeneratedStream();
 
-      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
-        {
-          id: 'call-complete',
-          name: 'read_file',
-          args: { file_path: 'a.sql' },
-        },
-      ]);
-      expect(error).toBe(networkError);
-    });
+        expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
+          {
+            id: 'call-complete',
+            name: 'read_file',
+            args: { file_path: 'a.sql' },
+          },
+        ]);
+        expect(error).toBe(upstreamError);
+      },
+    );
 
     it.each([
       {

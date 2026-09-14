@@ -217,6 +217,12 @@ export type {
   WebSearchToolParams,
   WebSearchSettings,
 } from './tools/web-search.js';
+export {
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
+  DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
+  MAX_WEB_SEARCH_TIMEOUT_MS,
+} from './tools/web-search.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 // Exported for the cross-package contract test in packages/cli (see the
 // function's own doc comment) — the daemon's file-read route must resolve the
@@ -553,9 +559,9 @@ export * from './lsp/configHash.js';
 export * from './lsp/LspConfigLoader.js';
 export * from './lsp/LspConnectionFactory.js';
 export * from './lsp/LspResponseNormalizer.js';
-export * from './lsp/LspServerManager.js';
+export * from './lsp/lsp-server-manager.js';
 export * from './lsp/NativeLspClient.js';
-export * from './lsp/NativeLspService.js';
+export * from './lsp/native-lsp-service.js';
 export * from './lsp/types.js';
 
 // ============================================================================
@@ -702,6 +708,7 @@ export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
+export * from './utils/background-turn-context.js';
 export * from './tools/tool-result-boundary-diagnostics.js';
 export * from './utils/proxyUtils.js';
 export * from './utils/quotaErrorDetection.js';
@@ -798,7 +805,7 @@ export {
   resolveStopHookBlockingCap,
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
-export { type StopFailureErrorType } from './hooks/types.js';
+export type { StopFailureErrorType } from './hooks/types.js';
 export { buildContextUsage } from './hooks/context-usage.js';
 export {
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
