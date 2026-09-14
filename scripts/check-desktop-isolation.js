@@ -9,6 +9,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { parse as parseYaml } from 'yaml';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const desktopPrefixes = ['packages/desktop-shell', 'packages/live-host'];
@@ -67,16 +69,14 @@ if (desktopWorkspaces.length > 0) {
   );
 }
 
-const lockfile = JSON.parse(
-  readFileSync(join(root, 'package-lock.json'), 'utf8'),
-);
-const desktopLockfileEntries = Object.keys(lockfile.packages ?? {}).filter(
+const lockfile = parseYaml(readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8'));
+const desktopLockfileEntries = Object.keys(lockfile.importers ?? {}).filter(
   isDesktopLocation,
 );
 
 if (desktopLockfileEntries.length > 0) {
   reportError(
-    'Root package-lock.json should not contain desktop package entries.',
+    'Root pnpm-lock.yaml should not contain desktop importers.',
     desktopLockfileEntries,
   );
 }

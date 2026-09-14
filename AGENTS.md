@@ -94,11 +94,10 @@ pnpm version pinned in `packageManager` (`corepack pnpm install
 worktree can use `node scripts/setup-worktree.js`, which runs the same install
 from a shared store (≈ 99 MiB on copy-on-write filesystems such as APFS, btrfs,
 and XFS with reflink; ≈ 1.2 GiB on ext4) and skips the `prepare` build, so run
-`npm run build` before package tests. `package-lock.json` is still committed
-and gated: when dependencies change, update it with npm first, then
-regenerate the pnpm lockfile from it with `corepack pnpm import` and commit
-both lockfiles together; `npm run check:lockfile` fails when pnpm resolves a
-version npm has not locked.
+`npm run build` before package tests. When dependencies change, edit the
+manifest, run `corepack pnpm install` (or `corepack pnpm add`), and commit
+`pnpm-lock.yaml`; every CI install runs with `--frozen-lockfile`, so a
+lockfile that no longer matches the manifests fails the build.
 
 **Run individual test files** (always preferred):
 

@@ -9347,7 +9347,7 @@ exit 1
       );
       expect(forkMain.split('\n').pop()).toBe('false 0');
       expect(measureBlock).toContain(
-        "GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')",
+        "GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude,glob)**/pnpm-lock.yaml' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')",
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -13869,6 +13869,9 @@ exit 1
       'packages/channels/github/tsconfig.json',
       'package-lock.json',
       'packages/cli/package-lock.json',
+      'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      '.pnpmfile.mjs',
       'patches/ink+7.0.3.patch',
       '.gitattributes',
       'packages/core/.gitattributes',
@@ -13893,6 +13896,9 @@ exit 1
     );
     expect(classes).toContain('package-lock.json=supply-chain');
     expect(classes).toContain('packages/cli/package-lock.json=supply-chain');
+    expect(classes).toContain('pnpm-lock.yaml=supply-chain');
+    expect(classes).toContain('pnpm-workspace.yaml=supply-chain');
+    expect(classes).toContain('.pnpmfile.mjs=supply-chain');
     expect(classes).toContain('patches/ink+7.0.3.patch=supply-chain');
     expect(classes).toContain('.gitattributes=measurement-config');
     expect(classes).toContain(

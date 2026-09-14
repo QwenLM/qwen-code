@@ -41,8 +41,9 @@ if (!versionType) {
 
 // 2. Bump the version in the root and all workspace package.json files.
 // --no-workspaces-update stops npm from reifying node_modules after each bump:
-// CI and release install that tree with pnpm, and an npm reify would silently
-// rewrite it into npm's own layout. Step 9 refreshes package-lock.json alone.
+// the tree is pnpm's, and an npm reify would silently rewrite it into npm's own
+// layout. pnpm-lock.yaml needs no refresh either: .pnpmfile.mjs rewrites every
+// internal dependency to workspace:*, so a version bump leaves it unchanged.
 run(
   `npm version ${versionType} --no-git-tag-version --allow-same-version --no-workspaces-update`,
 );
@@ -127,15 +128,7 @@ for (const entry of readdirSync(channelsDir)) {
   }
 }
 
-// 9. Refresh package-lock.json against the pinned exact versions so the
-// adapters resolve channel-base to the workspace link again. It must leave
-// node_modules alone: that tree is pnpm's, and pnpm-lock.yaml does not change
-// on a version bump because .pnpmfile.mjs rewrites every internal dependency
-// to workspace:*. --ignore-scripts keeps the root `prepare` lifecycle from
-// triggering a redundant full build.
-run('npm install --package-lock-only --ignore-scripts');
-
-// 10. An npm reify can nest a stale registry copy of channel-base under an
+// 9. An npm reify can nest a stale registry copy of channel-base under an
 // adapter while ranges briefly mismatch, where it shadows the workspace link
 // during tsc. Nothing above reifies any more, but a tree an earlier npm install
 // left behind can still carry that directory, so remove it.

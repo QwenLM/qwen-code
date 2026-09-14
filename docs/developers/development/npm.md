@@ -101,7 +101,7 @@ The above pattern for creating patch or hotfix releases from current or older co
     out this tag gets the exact code that was published.
 2.  The Branch (`release-vX.Y.Z-patch.1`): This branch contains one new commit on top of the
     tagged commit. That new commit only contains the version number change in package.json
-    (and other related files like package-lock.json).
+    (and the other workspace manifests).
 
 This separation is good. It keeps your main branch history clean of release-specific
 version bumps until you decide to merge them.

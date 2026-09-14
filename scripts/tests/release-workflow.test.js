@@ -55,7 +55,6 @@ const cuaReleaseWorkflow = readFileSync(
 const nodeReplPackage = JSON.parse(
   readFileSync('packages/node-repl/package.json', 'utf8'),
 );
-const rootPackageLock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
 );
@@ -100,9 +99,6 @@ describe('CUA release workflow', () => {
     );
     expect(cuaReleaseWorkflow).not.toContain(
       'NODE_REPL_VERSION does not match release version',
-    );
-    expect(rootPackageLock.packages['packages/node-repl'].version).toBe(
-      nodeReplPackage.version,
     );
     expect(cuaSdkPackageLock.version).toBe(cuaSdkPackage.version);
     expect(cuaSdkPackageLock.packages[''].version).toBe(cuaSdkPackage.version);
@@ -2198,7 +2194,7 @@ describe('release workflow', () => {
 
   it('stages every integration package manifest after versioning', () => {
     expect(releaseStepScript).toContain(
-      'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
+      'git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
     );
   });
 

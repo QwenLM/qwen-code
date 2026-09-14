@@ -183,7 +183,7 @@ jobs:
         run: |-
           # Ensure the package version matches the computed release version.
           # This is required for nightly/preview because npm does not allow re-publishing the same version.
-          npm version -w @qwen-code/sdk "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version
+          npm version -w @qwen-code/sdk "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version --no-workspaces-update
 
       - name: 'Determine CLI source and version'
         id: 'cli_source'
@@ -334,7 +334,7 @@ jobs:
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
         run: |-
           # Only persist version bumps after a successful publish.
-          git add packages/sdk-typescript/package.json package-lock.json
+          git add packages/sdk-typescript/package.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
             echo "::notice::No version changes in sdk-typescript; skipping release branch push and PR creation."

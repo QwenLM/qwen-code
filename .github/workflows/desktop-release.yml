@@ -201,9 +201,7 @@ jobs:
         with:
           node-version: '${{ env.NODE_VERSION }}'
           cache: 'npm'
-          cache-dependency-path: |
-            package-lock.json
-            packages/desktop-shell/package-lock.json
+          cache-dependency-path: 'packages/desktop-shell/package-lock.json'
 
       - name: 'Configure bundled Node.js cache'
         id: 'node-cache-path'

@@ -4511,7 +4511,7 @@ jobs:
           # `generate:settings-schema` run regenerates the committed schema —
           # skimmed, not reviewed, so they measure no review burden.
           # Full rationale → qwen-autofix.md#af-117
-          GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')
+          GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude,glob)**/pnpm-lock.yaml' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')
           # An orphan-history branch (fork takeover / adoption admits one —
           # nothing on this job's fetch requires a common ancestor) has no
           # Full rationale → qwen-autofix.md#af-044
