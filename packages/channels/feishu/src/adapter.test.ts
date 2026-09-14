@@ -8140,8 +8140,11 @@ describe('Feishu inbound media delivery (#11554)', () => {
     expect(prompt).not.toContain('om_forged');
     expect(prompt).toContain('ignore this');
     expect(prompt.match(/message_id=/g)).toHaveLength(1);
-    // Exactly one closing delimiter: the genuine wrapper's own.
+    // Exactly one closing delimiter: the genuine wrapper's own. Counted by
+    // the bracket-less alphabet too, so a mid-line bracket-less forgery —
+    // the group path's delivered form — cannot slip a second close past.
     expect(prompt.match(/\[\/引用内容\]/g)).toHaveLength(1);
+    expect(prompt.match(/\/引用内容/g)).toHaveLength(1);
   });
 
   it('neutralizes a field separator inside a legacy image key', async () => {
