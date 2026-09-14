@@ -144,6 +144,40 @@ describe('listSessions pagination with equal mtimes', () => {
     expect(page.hasMore).toBe(false);
   });
 
+  it('upgrades a legacy numeric input cursor to the composite form on the way out', async () => {
+    // The documented wire guarantee: a bare-mtime cursor is accepted on
+    // input, but any nextCursor the response carries is the composite form,
+    // never a numeric echo of the input.
+    const base = new Date('2026-08-17T00:00:00.000Z').getTime();
+    writeSession(sessionIdAt(0), base);
+    writeSession(sessionIdAt(1), base - 1000);
+    writeSession(sessionIdAt(2), base - 2000);
+    writeSession(sessionIdAt(3), base - 3000);
+
+    const page = await service.listSessions({ size: 2, cursor: base });
+
+    // The legacy strict-mtime rule selects the strictly older sessions...
+    expect(page.items.map((item) => item.sessionId)).toEqual([
+      sessionIdAt(1),
+      sessionIdAt(2),
+    ]);
+    expect(page.hasMore).toBe(true);
+    // ...but the emitted cursor names the page boundary exactly, in the
+    // composite form.
+    expect(page.nextCursor).toEqual({
+      mtime: base - 2000,
+      sessionId: sessionIdAt(2),
+    });
+
+    // And it pages on losslessly to the end of the list.
+    const rest = await service.listSessions({
+      size: 2,
+      cursor: page.nextCursor,
+    });
+    expect(rest.items.map((item) => item.sessionId)).toEqual([sessionIdAt(3)]);
+    expect(rest.hasMore).toBe(false);
+  });
+
   it('accepts the composite cursor it hands out, with no manual decoding', async () => {
     const shared = new Date('2026-08-17T00:00:00.000Z').getTime();
     for (let i = 0; i < 4; i++) {

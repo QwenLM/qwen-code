@@ -1423,6 +1423,30 @@ describe('LiveTaskService', () => {
     }
   });
 
+  it('stops the persisted scan at list exhaustion instead of re-requesting page one', async () => {
+    // An undefined nextCursor means the list is exhausted. Without that
+    // exit condition the loop would re-request page one on every iteration
+    // until the page cap: a hundred identical calls for a single lookup
+    // miss.
+    const harness = makeHarness();
+    persistedSessions.set('missing-thread', persisted('missing-thread'));
+    persistedSessionOwners.set('missing-thread', '/project');
+    listWorkspaceSessionsForResponse.mockResolvedValue({
+      sessions: [],
+      nextCursor: undefined,
+    });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: 'missing-thread' },
+      }),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+
+    expect(listWorkspaceSessionsForResponse).toHaveBeenCalledTimes(1);
+  });
+
   it('stops the persisted scan as soon as the thread is found', async () => {
     const harness = makeHarness();
     persistedSessions.set('late-thread', persisted('late-thread'));

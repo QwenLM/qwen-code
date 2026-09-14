@@ -45,6 +45,34 @@ import { handleAuthenticateUpdate } from '../utils/authNotificationHandler.js';
 
 export type { ChatMessage, PlanEntry, ToolCallUpdateData };
 
+interface FallbackCursor {
+  mtime: number;
+  sessionId?: string;
+}
+
+/**
+ * Parse a session-list cursor for the filesystem fallback. Accepts the
+ * legacy bare-mtime form and the composite "<mtimeMs>:<sessionId>" form the
+ * daemon hands out; anything else is malformed and the caller fails closed,
+ * because an unfiltered page would re-serve page one and duplicate rows.
+ */
+function parseFallbackCursor(cursor: string): FallbackCursor | undefined {
+  const separator = cursor.indexOf(':');
+  const mtimePart = separator === -1 ? cursor : cursor.slice(0, separator);
+  if (!/^-?\d+$/.test(mtimePart)) {
+    return undefined;
+  }
+  const mtime = Number(mtimePart);
+  if (!Number.isFinite(mtime)) {
+    return undefined;
+  }
+  if (separator === -1) {
+    return { mtime };
+  }
+  const sessionId = cursor.slice(separator + 1);
+  return sessionId === '' ? undefined : { mtime, sessionId };
+}
+
 /**
  * Extract session list items from ACP response.
  * Handles both 'sessions' (new) and 'items' (legacy) response shapes.
@@ -639,22 +667,43 @@ export class QwenAgentManager {
         this.currentWorkingDir,
         false,
       );
-      // Sorted by lastUpdated desc already per reader
       const allWithMtime = all.map((s) => ({
         raw: s,
         mtime: new Date(s.lastUpdated).getTime(),
       }));
-      // The local fallback only ever produces bare-mtime cursors, so a
-      // numeric parse round-trips. A composite cursor here means the caller
-      // mixed servers mid-pagination; fail closed with an empty page rather
-      // than re-serving page one.
-      const cursorMtime = cursor !== undefined ? Number(cursor) : undefined;
+      // The daemon wire cursor is the composite "<mtimeMs>:<sessionId>" form
+      // now, so an ACP failure mid-pagination lands here holding one: parse
+      // it and keep serving the remainder from disk instead of dropping the
+      // rest of the list. The fallback orders by mtime desc, sessionId asc
+      // itself (matching the daemon composite ordering) so a cursor handed
+      // over mid-pagination splits the same sequence. A genuinely malformed
+      // cursor still fails closed with an empty page: re-serving page one
+      // would duplicate rows in the webview.
+      const parsedCursor =
+        cursor === undefined ? undefined : parseFallbackCursor(cursor);
+      if (cursor !== undefined && parsedCursor === undefined) {
+        return { sessions: [], hasMore: false };
+      }
+      const ordered = [...allWithMtime].sort(
+        (a, b) =>
+          b.mtime - a.mtime || a.raw.sessionId.localeCompare(b.raw.sessionId),
+      );
       const filtered =
-        cursor === undefined
-          ? allWithMtime
-          : cursorMtime !== undefined && Number.isFinite(cursorMtime)
-            ? allWithMtime.filter((x) => x.mtime < cursorMtime)
-            : [];
+        parsedCursor === undefined
+          ? ordered
+          : ordered.filter((x) => {
+              const boundary = parsedCursor;
+              if (x.mtime < boundary.mtime) {
+                return true;
+              }
+              if (x.mtime > boundary.mtime) {
+                return false;
+              }
+              return (
+                boundary.sessionId !== undefined &&
+                x.raw.sessionId.localeCompare(boundary.sessionId) > 0
+              );
+            });
       const page = filtered.slice(0, size);
       const sessions = page.map((x) => ({
         id: x.raw.sessionId,
@@ -668,8 +717,11 @@ export class QwenAgentManager {
         filePath: x.raw.filePath,
         cwd: x.raw.cwd,
       }));
+      const lastRow = page.at(-1);
       const nextCursorVal =
-        page.length > 0 ? String(page[page.length - 1].mtime) : undefined;
+        lastRow === undefined
+          ? undefined
+          : `${lastRow.mtime}:${lastRow.raw.sessionId}`;
       const hasMore = filtered.length > size;
       return { sessions, nextCursor: nextCursorVal, hasMore };
     } catch (error) {

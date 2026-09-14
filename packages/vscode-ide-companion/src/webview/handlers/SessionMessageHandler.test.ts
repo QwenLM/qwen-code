@@ -124,6 +124,73 @@ describe('SessionMessageHandler', () => {
     mockRealpath.mockImplementation(async (value: string) => value);
   });
 
+  it('normalizes a numeric webview cursor to the string wire form', async () => {
+    // Older webviews send the cursor as a JSON number; the daemon only
+    // understands the opaque string form (composite "<mtimeMs>:<sessionId>"
+    // or legacy bare mtime), so the handler must stringify on the way in.
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionListPaged: vi.fn().mockResolvedValue({
+        sessions: [],
+        nextCursor: undefined,
+        hasMore: false,
+      }),
+    };
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'getQwenSessions',
+      data: { cursor: 1755000000000, size: 20 },
+    });
+
+    expect(agentManager.getSessionListPaged).toHaveBeenCalledWith({
+      cursor: '1755000000000',
+      size: 20,
+    });
+  });
+
+  it('flips the webview list to append mode exactly when a cursor is present', async () => {
+    // A cursored call is a page turn: the webview must append the page to
+    // the list it already shows, where a cursorless call replaces it.
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionListPaged: vi.fn().mockResolvedValue({
+        sessions: [],
+        nextCursor: '1755000000000:550e8400-e29b-41d4-a716-446655440000',
+        hasMore: true,
+      }),
+    };
+    const sendToWebView = vi.fn();
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'getQwenSessions',
+      data: { cursor: '1755000000000:550e8400-e29b-41d4-a716-446655440001' },
+    });
+    await handler.handle({ type: 'getQwenSessions', data: {} });
+
+    expect(sendToWebView).toHaveBeenNthCalledWith(1, {
+      type: 'qwenSessionList',
+      data: expect.objectContaining({ append: true, hasMore: true }),
+    });
+    expect(sendToWebView).toHaveBeenNthCalledWith(2, {
+      type: 'qwenSessionList',
+      data: expect.objectContaining({ append: false, hasMore: true }),
+    });
+  });
+
   it('forwards the active model when opening a new chat tab', async () => {
     const handler = new SessionMessageHandler(
       {

@@ -151,10 +151,106 @@ describe('QwenAgentManager.getSessionListPaged', () => {
     expect(page.hasMore).toBe(false);
   });
 
-  it('fails closed when a composite cursor reaches the filesystem fallback', async () => {
-    // Regression: a composite "<mtimeMs>:<sessionId>" cursor parses to NaN;
-    // the fallback must return an empty page, not the unfiltered list
-    // (which would re-serve page one and duplicate rows in the webview).
+  it('keeps serving from disk with a composite cursor when ACP fails mid-pagination', async () => {
+    // The daemon hands out composite "<mtimeMs>:<sessionId>" cursors now, so
+    // an ACP failure mid-pagination lands in this fallback holding one.
+    // Dropping to an empty page would silently lose the rest of the list.
+    const manager = new QwenAgentManager();
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions: vi.fn().mockRejectedValue(new Error('ACP unavailable')),
+    };
+    const tie = new Date('2026-08-17T00:02:00.000Z').getTime();
+    const mk = (sessionId: string, lastUpdated: string) => ({
+      sessionId,
+      projectHash: 'p',
+      startTime: lastUpdated,
+      lastUpdated,
+      messages: [],
+    });
+    // Deliberately ascending fixture order: the fallback must order by mtime
+    // desc, sessionId asc itself, matching the daemon composite ordering, so
+    // a cursor handed over mid-pagination splits the same sequence.
+    const stored = [
+      mk('550e8400-e29b-41d4-a716-446655440000', '2026-08-17T00:01:00.000Z'),
+      mk('550e8400-e29b-41d4-a716-446655440001', '2026-08-17T00:02:00.000Z'),
+      mk('550e8400-e29b-41d4-a716-446655440002', '2026-08-17T00:02:00.000Z'),
+      mk('550e8400-e29b-41d4-a716-446655440003', '2026-08-17T00:03:00.000Z'),
+    ];
+    (manager as unknown as { sessionReader: unknown }).sessionReader = {
+      getAllSessions: vi.fn().mockResolvedValue(stored),
+      getSessionTitle: vi.fn().mockReturnValue('t'),
+    };
+
+    // Composite order: 0003 (00:03), tie members 0001 then 0002 (00:02, id
+    // asc), 0000 (00:01). The cursor names tie member 0001, so the remainder
+    // is 0002 then 0000.
+    const page = await manager.getSessionListPaged({
+      cursor: `${tie}:550e8400-e29b-41d4-a716-446655440001`,
+      size: 10,
+    });
+
+    expect(page.sessions.map((session) => session.sessionId)).toEqual([
+      '550e8400-e29b-41d4-a716-446655440002',
+      '550e8400-e29b-41d4-a716-446655440000',
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
+
+  it('pages the filesystem fallback losslessly with the composite cursor it emits', async () => {
+    // Slice + cursor advance: page one hands out a composite cursor naming
+    // its last row; feeding it back must continue exactly where page one
+    // stopped, with no skip or duplicate.
+    const manager = new QwenAgentManager();
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions: vi.fn().mockRejectedValue(new Error('ACP unavailable')),
+    };
+    const tie = new Date('2026-08-17T00:02:00.000Z').getTime();
+    const mk = (sessionId: string, lastUpdated: string) => ({
+      sessionId,
+      projectHash: 'p',
+      startTime: lastUpdated,
+      lastUpdated,
+      messages: [],
+    });
+    // Ascending with the tie members in reverse id order: only the
+    // production-side sort (mtime desc, sessionId asc) can put 0001 ahead of
+    // 0002, so the emitted page-one cursor names 0001.
+    const stored = [
+      mk('550e8400-e29b-41d4-a716-446655440000', '2026-08-17T00:01:00.000Z'),
+      mk('550e8400-e29b-41d4-a716-446655440002', '2026-08-17T00:02:00.000Z'),
+      mk('550e8400-e29b-41d4-a716-446655440001', '2026-08-17T00:02:00.000Z'),
+      mk('550e8400-e29b-41d4-a716-446655440003', '2026-08-17T00:03:00.000Z'),
+    ];
+    (manager as unknown as { sessionReader: unknown }).sessionReader = {
+      getAllSessions: vi.fn().mockResolvedValue(stored),
+      getSessionTitle: vi.fn().mockReturnValue('t'),
+    };
+
+    const first = await manager.getSessionListPaged({ size: 2 });
+    expect(first.sessions.map((session) => session.sessionId)).toEqual([
+      '550e8400-e29b-41d4-a716-446655440003',
+      '550e8400-e29b-41d4-a716-446655440001',
+    ]);
+    expect(first.nextCursor).toBe(
+      `${tie}:550e8400-e29b-41d4-a716-446655440001`,
+    );
+    expect(first.hasMore).toBe(true);
+
+    const second = await manager.getSessionListPaged({
+      cursor: first.nextCursor,
+      size: 2,
+    });
+    expect(second.sessions.map((session) => session.sessionId)).toEqual([
+      '550e8400-e29b-41d4-a716-446655440002',
+      '550e8400-e29b-41d4-a716-446655440000',
+    ]);
+    expect(second.hasMore).toBe(false);
+  });
+
+  it('still fails closed on a malformed cursor in the filesystem fallback', async () => {
+    // Garbage that parses as neither legacy numeric nor composite:
+    // re-serving page one would duplicate rows in the webview, so the
+    // fallback returns an empty page instead.
     const manager = new QwenAgentManager();
     (manager as unknown as { connection: unknown }).connection = {
       listSessions: vi.fn().mockRejectedValue(new Error('ACP unavailable')),
@@ -167,13 +263,6 @@ describe('QwenAgentManager.getSessionListPaged', () => {
         lastUpdated: '2026-08-17T00:00:00.000Z',
         messages: [],
       },
-      {
-        sessionId: '550e8400-e29b-41d4-a716-446655440001',
-        projectHash: 'p',
-        startTime: '2026-08-17T00:01:00.000Z',
-        lastUpdated: '2026-08-17T00:01:00.000Z',
-        messages: [],
-      },
     ];
     (manager as unknown as { sessionReader: unknown }).sessionReader = {
       getAllSessions: vi.fn().mockResolvedValue(stored),
@@ -181,7 +270,7 @@ describe('QwenAgentManager.getSessionListPaged', () => {
     };
 
     const page = await manager.getSessionListPaged({
-      cursor: '1755000000000:550e8400-e29b-41d4-a716-446655440000',
+      cursor: 'not-a-cursor',
       size: 1,
     });
 

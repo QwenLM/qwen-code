@@ -1169,7 +1169,6 @@ describe('LiveSessionCoordinator', () => {
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
-    vi.stubEnv('QWEN_LIVE_DIAGNOSTICS', '1');
     const harness = makeHarness({ useCoordinatorScan: true });
     try {
       await harness.coordinator.start({
@@ -1182,15 +1181,59 @@ describe('LiveSessionCoordinator', () => {
       );
       expect(listSessionsStub).toHaveBeenCalledTimes(100);
       expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
-      // Cap exhaustion is diagnosable: exactly one truncation line naming the
-      // budget, so "gave up" never reads as "no compatible session exists".
+      // Cap exhaustion is diagnosable without QWEN_LIVE_DIAGNOSTICS: exactly
+      // one unconditional truncation line naming the budget and the
+      // workspace, so "gave up" never reads as "no compatible session
+      // exists", and two workspaces hitting the cap in one daemon log stay
+      // distinguishable.
       const truncationLines = stderrSpy.mock.calls.filter(([chunk]) =>
-        String(chunk).includes('resume_scan_truncated'),
+        String(chunk).includes('live resume scan truncated'),
       );
       expect(truncationLines).toHaveLength(1);
+      expect(String(truncationLines[0]?.[0])).toContain('/conversations');
     } finally {
       stderrSpy.mockRestore();
-      vi.unstubAllEnvs();
+    }
+  });
+
+  it('stops the resume scan when the daemon repeats a cursor', async () => {
+    // A daemon that answers page N+1 with page N's cursor would otherwise
+    // spin the scan to the page cap making no progress: the repeat guard
+    // must trip on the second sighting and end the scan. This is not a cap
+    // exit, so no truncation line is logged for it.
+    const stuckCursor = {
+      mtime: 1_000,
+      sessionId: '550e8400-e29b-41d4-a716-446655440099',
+    };
+    // Bounded even with the guard deleted: the page cap still stops the
+    // loop at 100, so a regression fails as an assertion, not heap
+    // exhaustion.
+    listSessionsStub.mockImplementation(async () => ({
+      items: [],
+      hasMore: true,
+      nextCursor: stuckCursor,
+    }));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const harness = makeHarness({ useCoordinatorScan: true });
+    try {
+      await harness.coordinator.start({
+        epoch: 1,
+        callId: 'call-1',
+        mode: 'resume',
+      });
+      await waitFor(() =>
+        expect(harness.bridge.spawnOrAttach).toHaveBeenCalled(),
+      );
+      expect(listSessionsStub).toHaveBeenCalledTimes(2);
+      expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
+      const truncationLines = stderrSpy.mock.calls.filter(([chunk]) =>
+        String(chunk).includes('live resume scan truncated'),
+      );
+      expect(truncationLines).toHaveLength(0);
+    } finally {
+      stderrSpy.mockRestore();
     }
   });
 

@@ -46,6 +46,7 @@ import {
   LIVE_SESSION_SOURCE_PREFIX,
 } from '../../runtime/live-session-source.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
 
 export { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
@@ -643,7 +644,19 @@ export class LiveSessionCoordinator {
     // so the "no compatible session" outcome below is really "gave up".
     writeLiveDiagnostic('resume_scan_truncated', {
       pages: MAX_SESSION_SCAN_PAGES,
+      workspaceCwd: runtime.workspaceCwd,
     });
+    // Unlike the JSON diagnostic above (QWEN_LIVE_DIAGNOSTICS-gated), this
+    // line is unconditional and names the workspace, so an oncall grepping
+    // the daemon log can tell "gave up" from "does not exist", and two
+    // workspaces hitting the cap in one run stay distinguishable.
+    writeStderrLineSafe(
+      `qwen serve: live resume scan truncated at ${MAX_SESSION_SCAN_PAGES} pages for ${runtime.workspaceCwd}`,
+    );
+    // Unlike the JSON diagnostic above (QWEN_LIVE_DIAGNOSTICS-gated), this
+    // line is unconditional and names the workspace, so an oncall grepping
+    // the daemon log can tell "gave up" from "does not exist", and two
+    // workspaces hitting the cap in one run stay distinguishable.
     return undefined;
   }
 
