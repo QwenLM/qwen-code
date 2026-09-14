@@ -20,6 +20,7 @@ import {
   computeModelListVersion,
   PROVIDER_METADATA_NS,
 } from '@qwen-code/qwen-code-core';
+import { SettingScope } from '../../config/settings.js';
 import { setNestedPropertySafe } from '../../config/settingsUtils.js';
 import { useProviderUpdates } from './useProviderUpdates.js';
 
@@ -57,21 +58,39 @@ describe('useProviderUpdates', () => {
     } as Record<string, unknown>,
     setValue: vi.fn(),
     setValues: vi.fn(),
-    forScope: vi.fn(
-      (): {
-        path: string;
-        settings: Record<string, unknown>;
-        originalSettings: Record<string, unknown>;
-      } => ({
-        path: '/tmp/settings.json',
-        settings: mockSettings.merged,
-        originalSettings: structuredClone(mockSettings.merged),
-      }),
+    forScope: vi.fn((scope: SettingScope) =>
+      scope === SettingScope.User
+        ? mockSettings.user
+        : scope === SettingScope.Workspace
+          ? mockSettings.workspace
+          : scope === SettingScope.System
+            ? mockSettings.system
+            : mockSettings.systemDefaults,
     ),
     recomputeMerged: vi.fn(),
     isTrusted: true,
-    workspace: { settings: {} },
-    user: { settings: {} },
+    workspace: {
+      settings: {},
+      originalSettings: {},
+      path: '/tmp/workspace-settings.json',
+    },
+    system: {
+      settings: {},
+      originalSettings: {},
+      path: '/tmp/system-settings.json',
+    },
+    systemDefaults: {
+      settings: {},
+      originalSettings: {},
+      path: '/tmp/default-settings.json',
+    },
+    get user() {
+      return {
+        settings: mockSettings.merged,
+        originalSettings: structuredClone(mockSettings.merged),
+        path: '/tmp/settings.json',
+      };
+    },
   };
 
   const mockModelsConfig = {

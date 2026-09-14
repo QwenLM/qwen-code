@@ -12,11 +12,13 @@ import {
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
   buildInstallPlan,
+  getModelsForProviderProtocol,
 } from '@qwen-code/qwen-code-core';
 import type {
   InputModalities,
   ModelWireApi,
   ModelProvidersConfig,
+  ProviderProtocolConfig,
   ProviderConfig,
   ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
@@ -113,6 +115,7 @@ export function useProviderSetupFlow(
     inputs: ProviderSetupInputs,
   ) => Promise<void>,
   modelProviders?: ModelProvidersConfig,
+  providerProtocol?: ProviderProtocolConfig,
 ) {
   const [provider, setProvider] = useState<ProviderConfig | null>(null);
   const [visibleSteps, setVisibleSteps] = useState<SetupStep[]>([]);
@@ -483,7 +486,11 @@ export function useProviderSetupFlow(
     const plan = buildInstallPlan(
       provider,
       { ...inputs, apiKey: maskApiKey(inputs.apiKey) },
-      modelProviders?.[inputs.protocol ?? provider.protocol],
+      getModelsForProviderProtocol(
+        modelProviders,
+        inputs.protocol ?? provider.protocol,
+        providerProtocol,
+      ),
     );
     return JSON.stringify(
       {

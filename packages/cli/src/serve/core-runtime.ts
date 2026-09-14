@@ -11,6 +11,7 @@ export {
   Storage,
   applyProviderInstallPlan,
   buildInstallPlan,
+  getModelsForProviderProtocol,
   createDaemonBridgeTelemetry,
   emitDaemonLog,
   findProviderById,

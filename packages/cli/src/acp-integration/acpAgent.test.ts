@@ -246,6 +246,9 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  getModelsForProviderProtocol: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getModelsForProviderProtocol,
   resolveModelSelectionAuthType: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).resolveModelSelectionAuthType,
@@ -20325,7 +20328,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         apiKey: 'sk-test',
         modelIds: ['deepseek-chat'],
       }),
-      settings.merged.modelProviders?.['openai'],
+      settings.merged.modelProviders?.['openai'] ?? [],
     );
     expect(applyProviderInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({ providerId: 'deepseek' }),
@@ -20569,7 +20572,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect(buildInstallPlan).toHaveBeenCalledWith(
           expect.anything(),
           expect.objectContaining(selection),
-          undefined,
+          [],
         );
       } finally {
         mockConnectionState.resolve();

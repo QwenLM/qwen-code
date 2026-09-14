@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isDeepStrictEqual } from 'node:util';
+import { getModelsForProviderProtocol } from './provider-config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { isImageGenerationCapable } from '../models/image-generation-capability.js';
 import {
   resolveModelProtocol,
+  resolveProviderProtocol,
   tryResolveModelProtocol,
   resolveModelSelectionAuthType,
 } from '../models/modelRegistry.js';
@@ -56,7 +59,21 @@ function isSameModelIdentity(
 function applyModelProvidersPatch(
   existingModelProviders: ModelProvidersConfig,
   patch: ProviderModelProvidersPatch,
+  mapping?: ProviderProtocolConfig,
 ): ModelProvidersConfig {
+  if (
+    patch.authType === AuthType.USE_OPENAI &&
+    resolveProviderProtocol(patch.authType, mapping) ===
+      AuthType.USE_OPENAI_RESPONSES
+  ) {
+    patch = {
+      ...patch,
+      models: patch.models.map((model) => ({
+        ...model,
+        wireApi: model.wireApi ?? 'chat-completions',
+      })),
+    };
+  }
   const existingModels = existingModelProviders[patch.authType] ?? [];
 
   let updatedModels = patch.models;
@@ -71,7 +88,7 @@ function applyModelProvidersPatch(
           !patch.models.some(
             (newModel) =>
               resolveModelProtocol(patch.authType, newModel) ===
-              tryResolveModelProtocol(patch.authType, model),
+              tryResolveModelProtocol(patch.authType, model, mapping),
           )
         );
       }
@@ -79,7 +96,7 @@ function applyModelProvidersPatch(
         (newModel) =>
           isSameModelIdentity(newModel, model) &&
           resolveModelProtocol(patch.authType, newModel) ===
-            tryResolveModelProtocol(patch.authType, model),
+            tryResolveModelProtocol(patch.authType, model, mapping),
       );
     });
 
@@ -160,6 +177,9 @@ export async function applyProviderInstallPlan(
   } = options;
 
   const selectedAuthType = settings.getValue('security.auth.selectedType');
+  const mapping = settings.getValue('providerProtocol') as
+    | ProviderProtocolConfig
+    | undefined;
   const serviceOnly = (plan.modelProviders ?? []).flatMap(
     (patch) => patch.models,
   );
@@ -174,8 +194,52 @@ export async function applyProviderInstallPlan(
   const previousRuntimeProviders: ModelProvidersConfig = {
     ...settings.getModelProviders(),
   };
+  const writeContext = settings.getModelProvidersForWrite?.();
+  const writeMapping = writeContext ? writeContext.providerProtocol : mapping;
+  for (const [providerId, models] of Object.entries(
+    writeContext?.modelProviders ?? {},
+  )) {
+    if (!Array.isArray(models)) continue;
+    if (
+      providerId !== AuthType.USE_OPENAI_RESPONSES &&
+      resolveProviderProtocol(providerId, writeMapping) !==
+        AuthType.USE_OPENAI_RESPONSES
+    )
+      continue;
+    const overwritten = models.filter((existing) =>
+      plan.modelProviders?.some(
+        (patch) =>
+          patch.authType === AuthType.USE_OPENAI &&
+          patch.models.some(
+            (model) =>
+              isSameModelIdentity(existing, model) &&
+              tryResolveModelProtocol(providerId, existing, writeMapping) ===
+                resolveModelProtocol(patch.authType, model),
+          ),
+      ),
+    );
+    if (
+      overwritten.length &&
+      (writeContext?.shadowedProviders.includes(providerId) ||
+        overwritten.some(
+          (model) =>
+            tryResolveModelProtocol(providerId, model, writeMapping) !==
+            tryResolveModelProtocol(providerId, model, mapping),
+        ))
+    ) {
+      throw new ProviderInstallError(
+        'A higher-precedence settings scope overrides this released provider declaration. Reconfigure it in the owning scope without that override.',
+        'modelProviders',
+        plan.authType,
+      );
+    }
+  }
   for (const patch of plan.modelProviders ?? []) {
-    const existingModels = previousRuntimeProviders[patch.authType] ?? [];
+    const existingModels = getModelsForProviderProtocol(
+      previousRuntimeProviders,
+      patch.authType,
+      mapping,
+    );
     const changesRole = existingModels.some((existing) =>
       patch.models.some(
         (model) =>
@@ -241,7 +305,7 @@ export async function applyProviderInstallPlan(
   if (changedVoiceIds.length) {
     let prospective = previousRuntimeProviders;
     for (const patch of plan.modelProviders ?? []) {
-      prospective = applyModelProvidersPatch(prospective, patch);
+      prospective = applyModelProvidersPatch(prospective, patch, mapping);
     }
     const configured = new ModelsConfig({
       modelProvidersConfig: prospective,
@@ -331,22 +395,81 @@ export async function applyProviderInstallPlan(
                 ),
             }
           : patch,
+        mapping,
       );
       settings.setValue(
         `modelProviders.${patch.authType}`,
         updatedModelProviders[patch.authType] ?? [],
       );
+      if (patch.authType !== AuthType.USE_OPENAI) continue;
+      const ownProviders =
+        settings.getModelProvidersForWrite?.().modelProviders ??
+        settings.getModelProviders();
+      for (const [providerId, models] of Object.entries(ownProviders)) {
+        if (providerId === patch.authType || !Array.isArray(models)) continue;
+        if (
+          providerId !== AuthType.USE_OPENAI_RESPONSES &&
+          resolveProviderProtocol(providerId, writeMapping) !==
+            AuthType.USE_OPENAI_RESPONSES
+        )
+          continue;
+        const remaining = models.filter(
+          (existing) =>
+            !patch.models.some(
+              (model) =>
+                isSameModelIdentity(existing, model) &&
+                tryResolveModelProtocol(providerId, existing, writeMapping) ===
+                  resolveModelProtocol(patch.authType, model),
+            ),
+        );
+        if (remaining.length !== models.length)
+          settings.setValue(`modelProviders.${providerId}`, remaining);
+      }
     }
 
     const effectiveProviders = settings.getModelProviders();
     for (const patch of plan.modelProviders ?? []) {
+      const effectiveModels = getModelsForProviderProtocol(
+        effectiveProviders,
+        patch.authType,
+        mapping,
+      );
+      const expectedModels = getModelsForProviderProtocol(
+        { [patch.authType]: patch.models },
+        patch.authType,
+      );
+      const ownProviders =
+        settings.getModelProvidersForWrite?.().modelProviders;
+      const installedModels = ownProviders
+        ? getModelsForProviderProtocol(
+            { [patch.authType]: ownProviders[patch.authType] ?? [] },
+            patch.authType,
+            mapping,
+          )
+        : expectedModels;
       if (
-        patch.models.some(
-          (model) =>
-            !effectiveProviders[patch.authType]?.some((effective) =>
-              isSameModelIdentity(model, effective),
-            ),
-        )
+        expectedModels.some((model) => {
+          const winner = effectiveModels.find(
+            (effective) =>
+              isSameModelIdentity(model, effective) &&
+              resolveModelProtocol(patch.authType, model) ===
+                resolveModelProtocol(patch.authType, effective),
+          );
+          const installed = installedModels.find(
+            (entry) =>
+              isSameModelIdentity(model, entry) &&
+              resolveModelProtocol(patch.authType, model) ===
+                resolveModelProtocol(patch.authType, entry),
+          );
+          return (
+            !winner ||
+            !installed ||
+            !isDeepStrictEqual(
+              JSON.parse(JSON.stringify({ ...installed, wireApi: undefined })),
+              JSON.parse(JSON.stringify({ ...winner, wireApi: undefined })),
+            )
+          );
+        })
       ) {
         throw new ProviderInstallError(
           'A higher-precedence settings scope overrides the installed models. Update the scope that owns this provider.',

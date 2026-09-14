@@ -64,31 +64,81 @@ describe('model API selection', () => {
       mapping: { 'openai-responses': 'openai' },
     },
   ])(
-    'rejects old provider configuration and preserves routes on reload: %j',
+    'reads released declarations without changing their source: %j',
     ({ models, mapping }) => {
-      expect(() => new ModelRegistry(models, mapping)).toThrow(
-        /openai-responses.*Use "openai" with wireApi: "responses"/,
-      );
-      const registry = new ModelRegistry(routes);
-      expect(() => registry.reloadModels(models, mapping)).toThrow(
-        /openai-responses/,
-      );
-      expect(registry.getModelProvidersConfig()).toBe(routes);
-      expect(
-        registry.getModel(AuthType.USE_OPENAI, 'shared', baseUrl),
-      ).toBeDefined();
-      expect(
-        registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'shared', baseUrl),
-      ).toBeDefined();
+      const before = JSON.stringify({ models, mapping });
+      const registry = new ModelRegistry(models, mapping);
+      const expected =
+        mapping?.['openai-responses'] === 'openai'
+          ? AuthType.USE_OPENAI
+          : AuthType.USE_OPENAI_RESPONSES;
+      if (Object.values(models ?? {}).some((entries) => entries.length)) {
+        expect(registry.getModel(expected, 'old')).toBeDefined();
+      }
+      const reloaded = new ModelRegistry(routes);
+      reloaded.reloadModels(models, mapping);
+      expect(reloaded.getModelProvidersConfig()).toBe(models);
+      expect(JSON.stringify({ models, mapping })).toBe(before);
     },
   );
 
-  it('skips unsupported provider entries in repair reads', () => {
-    expect(tryResolveModelProtocol('openai-responses', {})).toBeUndefined();
+  it('resolves released declarations in repair reads', () => {
+    expect(tryResolveModelProtocol('openai-responses', {})).toBe(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
     expect(
       tryResolveModelProtocol('gateway', {}, { gateway: 'openai-responses' }),
-    ).toBeUndefined();
+    ).toBe(AuthType.USE_OPENAI_RESPONSES);
   });
+
+  it('resolves generic OpenAI startup against released Responses while keeping exact routes preferred', () => {
+    const legacy = { 'openai-responses': [{ id: 'same', baseUrl }] };
+    expect(
+      resolveModelSelectionAuthType(
+        AuthType.USE_OPENAI,
+        'same',
+        legacy,
+        undefined,
+        baseUrl,
+      ),
+    ).toBe(AuthType.USE_OPENAI_RESPONSES);
+    expect(
+      resolveModelSelectionAuthType(
+        AuthType.USE_OPENAI,
+        'same',
+        {
+          ...legacy,
+          openai: [{ id: 'same', baseUrl }],
+        },
+        undefined,
+        baseUrl,
+      ),
+    ).toBe(AuthType.USE_OPENAI);
+  });
+
+  it.each(['openai-responses', 'gateway'])(
+    'allows explicit wire selection under the released %s protocol without accepting invalid values',
+    (providerId) => {
+      const mapping = { gateway: 'openai-responses' };
+      expect(
+        resolveModelProtocol(
+          providerId,
+          { wireApi: 'chat-completions' },
+          mapping,
+        ),
+      ).toBe(AuthType.USE_OPENAI);
+      expect(
+        resolveModelProtocol(providerId, { wireApi: 'responses' }, mapping),
+      ).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(() =>
+        resolveModelProtocol(
+          providerId,
+          { wireApi: 'invalid' as ModelConfig['wireApi'] },
+          mapping,
+        ),
+      ).toThrow('Invalid wireApi');
+    },
+  );
 
   it('does not let api validate an unknown provider', () => {
     expect(

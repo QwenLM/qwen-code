@@ -7838,9 +7838,11 @@ async function runQwenServeImpl(
             const plan = core.buildInstallPlan(
               provider,
               inputs,
-              fresh.merged.modelProviders?.[
-                inputs.protocol ?? provider.protocol
-              ],
+              core.getModelsForProviderProtocol(
+                fresh.merged.modelProviders,
+                inputs.protocol ?? provider.protocol,
+                fresh.merged.providerProtocol,
+              ),
             );
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(

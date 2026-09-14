@@ -38,6 +38,7 @@ import {
   AuthType,
   applyProviderInstallPlan,
   buildInstallPlan,
+  getModelsForProviderProtocol,
   customProvider,
   findExistingProviderModels,
   findProviderByCredentials,
@@ -851,9 +852,11 @@ function AuthDialogFlow({
         const plan = buildInstallPlan(
           providerConfig,
           inputs,
-          settings.merged.modelProviders?.[
-            inputs.protocol ?? providerConfig.protocol
-          ],
+          getModelsForProviderProtocol(
+            settings.merged.modelProviders,
+            inputs.protocol ?? providerConfig.protocol,
+            settings.merged.providerProtocol,
+          ),
         );
         protocol = plan.authType;
         await applyProviderInstallPlan(plan, {
@@ -898,6 +901,7 @@ function AuthDialogFlow({
   const setupFlow = useProviderSetupFlow(
     handleProviderSubmit,
     settings.merged.modelProviders,
+    settings.merged.providerProtocol,
   );
 
   // -- Navigation (AuthDialog parity) ---------------------------------------
@@ -939,6 +943,12 @@ function AuthDialogFlow({
     const saved = findExistingProviderModels(
       providerConfig,
       settings.merged.modelProviders as Record<string, unknown> | undefined,
+      settings.merged.providerProtocol,
+      {
+        authType: settings.merged.security?.auth?.selectedType,
+        id: settings.merged.model?.name,
+        baseUrl: settings.merged.model?.baseUrl,
+      },
     );
     if (!saved) return [];
     const builtinIds = new Set(getDefaultModelIds(providerConfig));
@@ -955,6 +965,12 @@ function AuthDialogFlow({
         findExistingProviderModels(
           providerConfig,
           settings.merged.modelProviders,
+          settings.merged.providerProtocol,
+          {
+            authType: settings.merged.security?.auth?.selectedType,
+            id: settings.merged.model?.name,
+            baseUrl: settings.merged.model?.baseUrl,
+          },
         )?.protocol,
         existingEnv,
         getExistingModelIds(providerConfig),

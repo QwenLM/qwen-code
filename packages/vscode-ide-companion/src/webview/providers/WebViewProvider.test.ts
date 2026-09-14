@@ -246,7 +246,10 @@ vi.mock('vscode', () => ({
   },
 }));
 
-vi.mock('../../services/settingsWriter.js', () => ({
+vi.mock('../../services/settingsWriter.js', async (importOriginal) => ({
+  resolveProviderSettings: (
+    await importOriginal<typeof import('../../services/settingsWriter.js')>()
+  ).resolveProviderSettings,
   writeCodingPlanConfig: mockWriteCodingPlanConfig,
   writeModelProvidersConfig: mockWriteModelProvidersConfig,
   readQwenSettingsForVSCode: mockReadQwenSettingsForVSCode,

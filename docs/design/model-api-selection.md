@@ -37,12 +37,14 @@ migration are out of scope.
 }
 ```
 
-| Provider protocol                  | Model `wireApi`               | Effective internal protocol |
-| ---------------------------------- | ----------------------------- | --------------------------- |
-| `openai`                           | omitted or `chat-completions` | `openai`                    |
-| `openai`                           | `responses`                   | `openai-responses`          |
-| Custom provider mapped to `openai` | same rules                    | same rules                  |
-| Other known protocol               | specified                     | configuration error         |
+| Provider protocol                                        | Model `wireApi`               | Effective internal protocol |
+| -------------------------------------------------------- | ----------------------------- | --------------------------- |
+| `openai`                                                 | omitted or `chat-completions` | `openai`                    |
+| `openai`                                                 | `responses`                   | `openai-responses`          |
+| Custom provider mapped to `openai`                       | same rules                    | same rules                  |
+| Released `openai-responses` (including mapped providers) | omitted                       | `openai-responses`          |
+| Released OpenAI-family declarations                      | specified                     | selected `wireApi`          |
+| Other known protocol                                     | specified                     | configuration error         |
 
 Unknown `wireApi` values are configuration errors. This field cannot make an
 unknown provider id valid; existing unknown-provider warnings remain. Setup
@@ -50,18 +52,25 @@ uses one OpenAI credential namespace and writes both APIs under `openai`.
 Explicit `envKey` values retain their meaning within the supported format.
 `wireApi` is routing metadata and is never forwarded in request bodies.
 
-This refactor immediately follows the initial Responses implementation. The
-supported configuration is `openai` plus per-model `wireApi`; compatibility
-with the previous `modelProviders.openai-responses` format and automatic
-migration are deliberately out of scope. The draft field name `api` is not an
-alias. Do not add legacy-bucket discovery, pruning, credential fallback, or
-migration code. Internal `AuthType.USE_OPENAI_RESPONSES` still identifies the
-Responses transport and recorded session route; it is not a separate provider
-configuration choice. Configuration ingestion rejects the old provider id and
-`providerProtocol` mappings to `openai-responses`, including empty buckets and
-unused mappings. The error names the supported `openai` + `wireApi` format;
-settings are never rewritten. Runtime lookup, explicit switches, and session
-restoration still accept the internal Responses identity.
+Responses shipped in v0.23.3 before this refactor. Keep reading the released
+`modelProviders.openai-responses` bucket and `providerProtocol` mappings to
+`openai-responses`, including empty buckets and unused mappings. Explicit
+provider mappings retain precedence over bucket names; an explicit model
+`wireApi` overrides either OpenAI-family protocol. Missing `wireApi` retains
+the declared protocol. Loading and hot reload never rewrite settings or add
+credential references. Existing explicit references and default credential
+resolution retain their published meaning. The draft field `api` is not an alias.
+
+New setup writes `openai` plus per-model `wireApi`. Reconfiguration preserves
+metadata and credential references for the exact selected route. It removes
+only matching legacy entries in the writable scope, comparing effective API,
+model id and exact configured URL. Other endpoints, APIs, models and scopes
+remain intact; custom mappings are not rewritten. A higher-precedence override of the selected released declaration rejects
+reconfiguration before writing; reconfigure it in its owning context without
+that override. Other overrides that prevent the new configuration taking effect
+cause rollback. Internal
+`AuthType.USE_OPENAI_RESPONSES` continues to identify Responses transport and
+recorded session routes. There is still one OpenAI provider choice.
 
 The name `wireApi` identifies the request protocol explicitly, following the
 meaning of Codex's `wire_api` while retaining this project's camelCase settings.
@@ -109,7 +118,8 @@ effective settings and preserves valid Workspace selections that inherit fields
 from a cleared User selection. A survivor must be the first registered route
 and eligible for conversation use.
 
-Preview and submission use the same canonical existing-model bucket. Preset
+Preview and submission use the same canonical view of existing models, including
+released declarations without modifying the source settings. Preset
 reconnection without an API picker preserves the identified saved route at the
 same endpoint; generic custom-provider setup keeps its visible API choice.
 `protocolOptions` controls SDK protocol selection, not whether a model may use
@@ -127,7 +137,7 @@ documentation. No daemon route ownership or workspace-resolution rules change.
 
 - Unit tests cover the configuration table, invalid inputs, mixed API entries,
   exact endpoint credentials, install merge, and transactional registry reload.
-  Old provider ids and mappings are rejected without changing the prior registry.
+  Released provider ids and mappings remain readable without disk migration.
 - Configuration tests cover initial `openai` selection resolving Responses,
   explicit route precedence, model switching, and recorded session restoration.
 - Setup tests cover API selection, preview/write parity, shared credentials,
@@ -138,7 +148,7 @@ documentation. No daemon route ownership or workspace-resolution rules change.
   reconnection, and voice/wire validation before persistence.
 - An isolated localhost server records actual CLI endpoint paths and payloads:
   implicit Chat, explicit Chat, canonical Responses, custom-provider Responses,
-  invalid API and old provider configuration rejection before any request, and
+  released Responses declarations, invalid API rejection before any request, and
   tool continuation for both APIs.
 - Dry-run the plan against global `qwen`, then verify the built local CLI. Use
   temporary `QWEN_HOME` directories and mock keys; do not modify real settings

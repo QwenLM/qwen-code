@@ -10,6 +10,7 @@ import {
   resolveModelProtocol,
   tryResolveModelProtocol,
 } from '../models/modelRegistry.js';
+import type { ProviderProtocolConfig } from '../models/types.js';
 import { ProviderInstallError } from './install.js';
 import type {
   ModelSpec,
@@ -324,7 +325,12 @@ export function buildInstallPlan(
     protocol === AuthType.USE_OPENAI ||
     protocol === AuthType.USE_OPENAI_RESPONSES;
   const savedProtocol = isOpenAI ? AuthType.USE_OPENAI : protocol;
-  const wireApi = inputs.wireApi;
+  const wireApi =
+    inputs.wireApi ??
+    (inputProtocol === AuthType.USE_OPENAI_RESPONSES ? 'responses' : undefined);
+  if (inputProtocol === AuthType.USE_OPENAI_RESPONSES) {
+    inputs = { ...inputs, protocol: savedProtocol, wireApi };
+  }
   let envKey = resolveEnvKey(config, inputs);
   const providerOwns = resolveOwnsModel(config);
   const builtModels =
@@ -357,7 +363,7 @@ export function buildInstallPlan(
     models = models.map((model) => {
       const existing = existingModels.find(
         (entry) =>
-          providerOwns?.(entry) &&
+          (providerOwns?.(entry) || config.mergeModelsByIdentity) &&
           entry.id === model.id &&
           entry.baseUrl === model.baseUrl &&
           tryResolveModelProtocol(savedProtocol, entry) ===
@@ -443,23 +449,22 @@ export function buildInstallPlan(
           : {}),
         ...(existing?.imageOnly ? { imageOnly: true } : {}),
         ...(existing?.voiceOnly ? { voiceOnly: true } : {}),
-        ...((existing?.imageOnly || existing?.voiceOnly) && existing.envKey
-          ? { envKey: existing.envKey }
-          : {}),
+        ...(existing.envKey ? { envKey: existing.envKey } : {}),
       };
     });
   }
-  if (
-    models.length > 0 &&
-    models.every((model) => model.imageOnly || model.voiceOnly)
-  ) {
-    const keys = new Set(models.map((model) => model.envKey));
-    if (keys.size > 1) {
+  if (models.length > 0) {
+    const conversation = models.filter(
+      (model) => !model.imageOnly && !model.voiceOnly,
+    );
+    const credentialModels = conversation.length ? conversation : models;
+    const keys = new Set(credentialModels.map((model) => model.envKey));
+    if (keys.size > 1 && inputs.apiKey) {
       throw new Error(
-        'Reconnect image and voice models separately to preserve their independent API keys.',
+        'Reconnect models with different credential references separately to preserve their independent API keys.',
       );
     }
-    if (keys.size === 1 && models[0]?.envKey) envKey = models[0].envKey;
+    if (credentialModels[0]?.envKey) envKey = credentialModels[0].envKey;
   }
   const ownsModel = config.mergeModelsByIdentity
     ? undefined
@@ -601,6 +606,45 @@ function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
   );
 }
 
+/** A canonical setup view; never mutate or persist the source configuration. */
+export function getModelsForProviderProtocol(
+  modelProviders: Record<string, unknown> | undefined,
+  protocol: AuthType,
+  providerProtocol?: ProviderProtocolConfig,
+): ProviderModelConfig[] {
+  const canonicalProtocol =
+    protocol === AuthType.USE_OPENAI_RESPONSES ? AuthType.USE_OPENAI : protocol;
+  const result: ProviderModelConfig[] = [];
+  for (const [providerId, raw] of Object.entries(modelProviders ?? {})) {
+    if (!Array.isArray(raw)) continue;
+    for (const model of raw) {
+      if (!isProviderModelConfig(model)) continue;
+      const effective = tryResolveModelProtocol(
+        providerId,
+        model,
+        providerProtocol,
+      );
+      if (
+        effective !== canonicalProtocol &&
+        !(
+          canonicalProtocol === AuthType.USE_OPENAI &&
+          effective === AuthType.USE_OPENAI_RESPONSES
+        )
+      )
+        continue;
+      result.push(
+        effective === AuthType.USE_OPENAI_RESPONSES
+          ? { ...model, wireApi: 'responses' }
+          : canonicalProtocol === AuthType.USE_OPENAI &&
+              providerId !== canonicalProtocol
+            ? { ...model, wireApi: 'chat-completions' }
+            : model,
+      );
+    }
+  }
+  return result;
+}
+
 /**
  * Find the model entries a user has already saved for `config` under the
  * `modelProviders` map in settings. Returns the first protocol (in the
@@ -611,6 +655,8 @@ function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
 export function findExistingProviderModels(
   config: ProviderConfig,
   modelProviders: Record<string, unknown> | undefined,
+  mapping?: ProviderProtocolConfig,
+  selection?: { authType?: string; id?: string; baseUrl?: string },
 ):
   | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
   | undefined {
@@ -620,16 +666,27 @@ export function findExistingProviderModels(
     ? config.protocolOptions
     : [config.protocol];
   for (const providerProtocol of protocols) {
-    const raw = modelProviders[providerProtocol];
-    if (!Array.isArray(raw)) continue;
-    const models = raw.filter(
-      (model): model is ProviderModelConfig =>
-        isProviderModelConfig(model) &&
-        ownsModel(model) &&
-        tryResolveModelProtocol(providerProtocol, model) !== undefined,
-    );
+    const models = getModelsForProviderProtocol(
+      modelProviders,
+      providerProtocol,
+      mapping,
+    ).filter(ownsModel);
     if (!models.length) continue;
-    const protocol = resolveModelProtocol(providerProtocol, models[0]!)!;
+    const selectedModels = selection?.id
+      ? models.filter(
+          (model) =>
+            model.id === selection.id &&
+            (!selection.baseUrl || model.baseUrl === selection.baseUrl),
+        )
+      : [];
+    const selected =
+      selectedModels.find(
+        (model) =>
+          resolveModelProtocol(providerProtocol, model) === selection?.authType,
+      ) ??
+      selectedModels[0] ??
+      models[0]!;
+    const protocol = resolveModelProtocol(providerProtocol, selected)!;
     return {
       protocol,
       models: models.filter(

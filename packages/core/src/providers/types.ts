@@ -10,6 +10,7 @@ import type {
   ModelCapabilities,
   ModelConfig,
   ModelProvidersConfig,
+  ProviderProtocolConfig,
 } from '../models/types.js';
 
 // Re-export for convenience
@@ -233,6 +234,12 @@ export interface ProviderSettingsAdapter {
   setValue(key: string, value: unknown): void;
   /** Get the current model providers config. */
   getModelProviders(): ModelProvidersConfig;
+  /** Scope-owned entries and routing; omitted by unscoped adapters. */
+  getModelProvidersForWrite?(): {
+    modelProviders: ModelProvidersConfig;
+    providerProtocol?: ProviderProtocolConfig;
+    shadowedProviders: string[];
+  };
   /**
    * Flush changes to disk. NOTE: this may be a no-op for adapters whose
    * `setValue` already persists eagerly (see the warning on `setValue`).

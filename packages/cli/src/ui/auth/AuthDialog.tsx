@@ -140,6 +140,7 @@ export function AuthDialog(): React.JSX.Element {
   const setupFlow = useProviderSetupFlow(
     handleProviderSubmit,
     settings.merged.modelProviders,
+    settings.merged.providerProtocol,
   );
 
   // -- Navigation -----------------------------------------------------------
@@ -183,6 +184,12 @@ export function AuthDialog(): React.JSX.Element {
     const saved = findExistingProviderModels(
       providerConfig,
       settings.merged.modelProviders as Record<string, unknown> | undefined,
+      settings.merged.providerProtocol,
+      {
+        authType: settings.merged.security?.auth?.selectedType,
+        id: settings.merged.model?.name,
+        baseUrl: settings.merged.model?.baseUrl,
+      },
     );
     if (!saved) return [];
     const builtinIds = new Set(getDefaultModelIds(providerConfig));
@@ -195,8 +202,16 @@ export function AuthDialog(): React.JSX.Element {
     if (!providerConfig) return;
     setupFlow.start(
       providerConfig,
-      findExistingProviderModels(providerConfig, settings.merged.modelProviders)
-        ?.protocol,
+      findExistingProviderModels(
+        providerConfig,
+        settings.merged.modelProviders,
+        settings.merged.providerProtocol,
+        {
+          authType: settings.merged.security?.auth?.selectedType,
+          id: settings.merged.model?.name,
+          baseUrl: settings.merged.model?.baseUrl,
+        },
+      )?.protocol,
       existingEnv,
       getExistingModelIds(providerConfig),
     );

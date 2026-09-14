@@ -11,6 +11,7 @@ import {
   logAuth,
   type Config,
   buildInstallPlan,
+  getModelsForProviderProtocol,
   applyProviderInstallPlan,
   type ProviderConfig,
   type ProviderSetupInputs,
@@ -175,9 +176,11 @@ export const useAuthCommand = (
         const plan = buildInstallPlan(
           providerConfig,
           inputs,
-          settings.merged.modelProviders?.[
-            inputs.protocol ?? providerConfig.protocol
-          ],
+          getModelsForProviderProtocol(
+            settings.merged.modelProviders,
+            inputs.protocol ?? providerConfig.protocol,
+            settings.merged.providerProtocol,
+          ),
         );
         protocol = plan.authType;
         setPendingAuthType(protocol);

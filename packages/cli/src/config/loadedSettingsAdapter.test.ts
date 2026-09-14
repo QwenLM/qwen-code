@@ -16,6 +16,7 @@ import {
   buildInstallPlan,
   customProvider,
   generateCustomEnvKey,
+  getModelsForProviderProtocol,
 } from '@qwen-code/qwen-code-core';
 
 const temporaryRoots: string[] = [];
@@ -95,55 +96,241 @@ function makeSettings(initial: SettingsShape = {}) {
 }
 
 describe('createLoadedSettingsAdapter', () => {
-  it('preserves each API route placeholder when a bucket is reordered', () => {
-    const root = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'provider-wire-placeholders-'),
-    );
-    temporaryRoots.push(root);
-    vi.stubEnv('QWEN_HOME', root);
-    vi.stubEnv('TEST_WIRE_URL', 'https://gateway.example/v1');
-    vi.stubEnv('TEST_CHAT_HEADER', 'chat-header');
-    vi.stubEnv('TEST_RESPONSES_HEADER', 'responses-header');
-    const chat = {
-      id: 'same',
-      baseUrl: '${TEST_WIRE_URL}',
-      generationConfig: { customHeaders: { 'X-Test': '${TEST_CHAT_HEADER}' } },
-    };
-    const responses = {
-      ...chat,
-      wireApi: 'responses',
-      generationConfig: {
-        customHeaders: { 'X-Test': '${TEST_RESPONSES_HEADER}' },
-      },
-    };
-    fs.writeFileSync(
-      path.join(root, 'settings.json'),
-      JSON.stringify({
+  it.each([SettingScope.User, SettingScope.Workspace])(
+    'canonicalizes a released route in %s while preserving placeholders and the other scope',
+    async (scope) => {
+      const root = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'released-provider-scope-'),
+      );
+      temporaryRoots.push(root);
+      const userHome = path.join(root, 'home');
+      const workspace = path.join(root, 'workspace');
+      fs.mkdirSync(userHome);
+      fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+      vi.stubEnv('QWEN_HOME', userHome);
+      vi.stubEnv('RELEASED_URL', 'https://released.example/v1');
+      vi.stubEnv('RELEASED_HEADER', 'test-only-header');
+      vi.stubEnv('RELEASED_KEY', 'test-only-old');
+      const userFile = path.join(userHome, 'settings.json');
+      const workspaceFile = path.join(workspace, '.qwen', 'settings.json');
+      const target = scope === SettingScope.User ? userFile : workspaceFile;
+      const other = scope === SettingScope.User ? workspaceFile : userFile;
+      const otherBytes = JSON.stringify({
         $version: 4,
-        modelProviders: { openai: [chat, responses] },
-      }),
-    );
-    try {
-      const loaded = loadSettings(root, {
-        skipLoadEnvironment: true,
-        skipWorkspaceSettings: true,
+        modelProviders: {
+          unrelated: [
+            {
+              id: 'same',
+              baseUrl: 'https://other.example/v1',
+              envKey: 'OTHER_KEY',
+            },
+          ],
+        },
+        providerProtocol: { unrelated: 'openai-responses' },
       });
-      const models = loaded.merged.modelProviders!['openai']!;
-      createLoadedSettingsAdapter(loaded, SettingScope.User).setValue(
-        'modelProviders.openai',
-        [models[1], { ...models[0], wireApi: 'chat-completions' }],
+      const selected = {
+        id: 'same',
+        baseUrl: '${RELEASED_URL}',
+        envKey: 'RELEASED_KEY',
+        generationConfig: {
+          customHeaders: { 'X-Route': '${RELEASED_HEADER}' },
+        },
+      };
+      const sibling = {
+        id: 'keep',
+        baseUrl: '${RELEASED_URL}',
+        envKey: 'SIBLING_KEY',
+      };
+      fs.writeFileSync(
+        target,
+        JSON.stringify({
+          $version: 4,
+          modelProviders: { gateway: [selected, sibling] },
+          providerProtocol: { gateway: 'openai-responses' },
+        }),
       );
-      const saved = JSON.parse(
-        fs.readFileSync(path.join(root, 'settings.json'), 'utf8'),
+      fs.writeFileSync(other, otherBytes);
+      try {
+        const loaded = loadSettings(workspace, {
+          skipLoadEnvironment: true,
+          workspaceTrusted: true,
+        });
+        const plan = buildInstallPlan(
+          customProvider,
+          {
+            baseUrl: process.env['RELEASED_URL']!,
+            wireApi: 'responses',
+            modelIds: ['same'],
+            apiKey: 'test-only-new',
+          },
+          getModelsForProviderProtocol(
+            loaded.merged.modelProviders,
+            AuthType.USE_OPENAI,
+            loaded.merged.providerProtocol,
+          ),
+        );
+        await applyProviderInstallPlan(plan, {
+          settings: createLoadedSettingsAdapter(loaded, scope),
+          doRefreshAuth: false,
+        });
+        const saved = JSON.parse(fs.readFileSync(target, 'utf8'));
+        expect(saved.modelProviders.gateway).toEqual([sibling]);
+        expect(saved.modelProviders.openai[0]).toMatchObject({
+          ...selected,
+          wireApi: 'responses',
+        });
+        expect(saved.providerProtocol.gateway).toBe('openai-responses');
+        expect(saved.env.RELEASED_KEY).toBe('test-only-new');
+        expect(fs.readFileSync(other, 'utf8')).toBe(otherBytes);
+        expect(loaded.merged.modelProviders?.['openai']?.[0]?.baseUrl).toBe(
+          process.env['RELEASED_URL'],
+        );
+        expect(
+          loaded.merged.modelProviders?.['openai']?.[0]?.generationConfig
+            ?.customHeaders?.['X-Route'],
+        ).toBe('test-only-header');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each(['responses', '${TEST_WIRE_API}'])(
+    'preserves each API route placeholder when a bucket is reordered (%s)',
+    (wireApi) => {
+      const root = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'provider-wire-placeholders-'),
       );
-      expect(saved.modelProviders.openai).toEqual([
-        responses,
-        { ...chat, wireApi: 'chat-completions' },
-      ]);
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
+      temporaryRoots.push(root);
+      vi.stubEnv('QWEN_HOME', root);
+      vi.stubEnv('TEST_WIRE_URL', 'https://gateway.example/v1');
+      vi.stubEnv('TEST_WIRE_API', 'responses');
+      vi.stubEnv('TEST_CHAT_HEADER', 'chat-header');
+      vi.stubEnv('TEST_RESPONSES_HEADER', 'responses-header');
+      const chat = {
+        id: 'same',
+        baseUrl: '${TEST_WIRE_URL}',
+        generationConfig: {
+          customHeaders: { 'X-Test': '${TEST_CHAT_HEADER}' },
+        },
+      };
+      const responses = {
+        ...chat,
+        wireApi,
+        generationConfig: {
+          customHeaders: { 'X-Test': '${TEST_RESPONSES_HEADER}' },
+        },
+      };
+      fs.writeFileSync(
+        path.join(root, 'settings.json'),
+        JSON.stringify({
+          $version: 4,
+          modelProviders: { openai: [chat, responses] },
+        }),
+      );
+      try {
+        const loaded = loadSettings(root, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: true,
+        });
+        const models = loaded.merged.modelProviders!['openai']!;
+        createLoadedSettingsAdapter(loaded, SettingScope.User).setValue(
+          'modelProviders.openai',
+          [models[1], { ...models[0], wireApi: 'chat-completions' }],
+        );
+        const saved = JSON.parse(
+          fs.readFileSync(path.join(root, 'settings.json'), 'utf8'),
+        );
+        expect(saved.modelProviders.openai).toEqual([
+          responses,
+          { ...chat, wireApi: 'chat-completions' },
+        ]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each(['bucket', 'mapping'])(
+    'rejects User legacy reconfiguration shadowed by Workspace %s without changing either scope',
+    async (shadow) => {
+      const root = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'released-shadow-placeholder-'),
+      );
+      temporaryRoots.push(root);
+      const userHome = path.join(root, 'home');
+      const workspace = path.join(root, 'workspace');
+      fs.mkdirSync(userHome);
+      fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+      vi.stubEnv('QWEN_HOME', userHome);
+      vi.stubEnv('LEGACY_SIBLING_HEADER', 'test-only-secret');
+      const userFile = path.join(userHome, 'settings.json');
+      const workspaceFile = path.join(workspace, '.qwen', 'settings.json');
+      const sibling = {
+        id: 'keep',
+        baseUrl: 'https://keep.example/v1',
+        envKey: 'KEEP_KEY',
+        generationConfig: {
+          customHeaders: { 'X-Key': '${LEGACY_SIBLING_HEADER}' },
+        },
+      };
+      fs.writeFileSync(
+        userFile,
+        JSON.stringify({
+          $version: 4,
+          modelProviders: {
+            'openai-responses': [
+              { id: 'selected', baseUrl: 'https://selected.example/v1' },
+              sibling,
+            ],
+          },
+        }),
+      );
+      const workspaceBytes = JSON.stringify({
+        $version: 4,
+        ...(shadow === 'bucket'
+          ? {
+              modelProviders: {
+                'openai-responses': [
+                  { id: 'workspace', baseUrl: 'https://workspace.example/v1' },
+                ],
+              },
+            }
+          : { providerProtocol: { 'openai-responses': 'anthropic' } }),
+      });
+      fs.writeFileSync(workspaceFile, workspaceBytes);
+      try {
+        const loaded = loadSettings(workspace, {
+          skipLoadEnvironment: true,
+          workspaceTrusted: true,
+        });
+        const plan = buildInstallPlan(customProvider, {
+          wireApi: 'responses',
+          baseUrl: 'https://selected.example/v1',
+          modelIds: ['selected'],
+          apiKey: 'test-only-new',
+        });
+        const key = Object.keys(plan.env!)[0]!;
+        vi.stubEnv(key, 'test-only-old');
+        const before = fs.readFileSync(userFile, 'utf8');
+        await expect(
+          applyProviderInstallPlan(plan, {
+            settings: createLoadedSettingsAdapter(loaded, SettingScope.User),
+            doRefreshAuth: false,
+          }),
+        ).rejects.toThrow('higher-precedence');
+        expect(fs.readFileSync(userFile, 'utf8')).toBe(before);
+        const saved = JSON.parse(fs.readFileSync(userFile, 'utf8'));
+        expect(saved.modelProviders['openai-responses'][1]).toEqual(sibling);
+        expect(fs.readFileSync(userFile, 'utf8')).not.toContain(
+          'test-only-secret',
+        );
+        expect(fs.readFileSync(workspaceFile, 'utf8')).toBe(workspaceBytes);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it.each([true, false])(
     'restores actual file contents or absence after a shadowed install (existing: %s)',

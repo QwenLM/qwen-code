@@ -50,27 +50,17 @@ function validateAuthTypeKey(key: string): AuthType | undefined {
  * Returns `undefined` for an unknown provider id with no mapping, or an explicit
  * mapping whose value is not a known protocol, so the caller skips it (keeping
  * the typo guard for hand-edited settings). Pure: callers decide how loudly to
- * report a skip. The internal Responses identity is not a provider protocol.
+ * report a skip. Released Responses provider declarations remain readable.
  */
 export function resolveProviderProtocol(
   providerId: string,
   providerProtocol?: ProviderProtocolConfig,
 ): AuthType | undefined {
-  if (providerId === 'openai-responses') {
-    throw new Error(
-      'Provider "openai-responses" is not supported in modelProviders or providerProtocol. Use "openai" with wireApi: "responses" on each model.',
-    );
-  }
   const explicit =
     providerProtocol && Object.hasOwn(providerProtocol, providerId)
       ? providerProtocol[providerId]
       : undefined;
   if (explicit !== undefined) {
-    if (explicit === AuthType.USE_OPENAI_RESPONSES) {
-      throw new Error(
-        `providerProtocol["${providerId}"] cannot be "openai-responses". Use "openai" with wireApi: "responses" on each model.`,
-      );
-    }
     return validateAuthTypeKey(explicit);
   }
   return validateAuthTypeKey(providerId);
@@ -88,7 +78,10 @@ export function resolveModelProtocol(
       `Invalid wireApi "${model.wireApi}" for provider "${providerId}". Expected "chat-completions" or "responses".`,
     );
   }
-  if (protocol !== AuthType.USE_OPENAI) {
+  if (
+    protocol !== AuthType.USE_OPENAI &&
+    protocol !== AuthType.USE_OPENAI_RESPONSES
+  ) {
     throw new Error(
       `Provider "${providerId}" uses protocol "${protocol}"; wireApi is only supported for OpenAI-compatible models.`,
     );
@@ -161,7 +154,9 @@ export function resolveModelSelectionAuthType(
       if (
         model.id === modelId &&
         (protocol === authType ||
-          (model.wireApi !== undefined &&
+          ((model.wireApi !== undefined ||
+            resolveProviderProtocol(providerId, providerProtocol) ===
+              AuthType.USE_OPENAI_RESPONSES) &&
             (protocol === AuthType.USE_OPENAI ||
               protocol === AuthType.USE_OPENAI_RESPONSES)))
       ) {

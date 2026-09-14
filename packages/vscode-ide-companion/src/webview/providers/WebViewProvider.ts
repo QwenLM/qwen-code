@@ -34,6 +34,7 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
   applyProviderInstallPlanToFile,
   snapshotSettingsForRollback,
+  resolveProviderSettings,
   restoreSettingsSnapshot,
   writeCodingPlanConfig,
   readQwenSettingsForVSCode,
@@ -42,6 +43,8 @@ import {
 import {
   AuthType,
   buildInstallPlan,
+  getModelsForProviderProtocol,
+  type ProviderProtocolConfig,
   resolveModelSelectionAuthType,
   resolveOwnsModel,
   parseInsightMessage,
@@ -1490,10 +1493,20 @@ export class WebViewProvider {
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
-      const existingProviders = rollbackSnapshot?.['modelProviders'] as
+      const resolvedSnapshot = rollbackSnapshot
+        ? resolveProviderSettings(rollbackSnapshot)
+        : null;
+      const existingProviders = resolvedSnapshot?.['modelProviders'] as
         | ModelProvidersConfig
         | undefined;
       const protocol = inputs.protocol ?? providerConfig.protocol;
+      const existingModelsForProtocol = getModelsForProviderProtocol(
+        existingProviders,
+        protocol,
+        resolvedSnapshot?.['providerProtocol'] as
+          | ProviderProtocolConfig
+          | undefined,
+      );
       let installInputs = inputs;
       if (
         protocol === AuthType.USE_OPENAI &&
@@ -1501,10 +1514,10 @@ export class WebViewProvider {
         inputs.wireApi === undefined
       ) {
         const owns = resolveOwnsModel(providerConfig);
-        const existingModels = existingProviders?.openai?.filter(
+        const existingModels = existingModelsForProtocol.filter(
           (model) => owns?.(model) && model.baseUrl === inputs.baseUrl,
         );
-        const saved = rollbackSnapshot as {
+        const saved = resolvedSnapshot as {
           model?: { name?: string; baseUrl?: string };
           security?: { auth?: { selectedType?: string } };
         } | null;
@@ -1531,7 +1544,7 @@ export class WebViewProvider {
       const plan = buildInstallPlan(
         providerConfig,
         installInputs,
-        existingProviders?.[protocol],
+        existingModelsForProtocol,
       );
       await applyProviderInstallPlanToFile(plan);
 

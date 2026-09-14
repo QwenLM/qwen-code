@@ -14,6 +14,7 @@ import {
   ALL_PROVIDERS,
   applyProviderInstallPlan,
   buildInstallPlan,
+  getModelsForProviderProtocol,
   buildProviderTemplate,
   computeModelListVersion,
   getDefaultModelIds,
@@ -263,8 +264,10 @@ export function useProviderUpdates(
         const resolved = resolveBaseUrl(providerCfg, pending.baseUrl);
         const defaultIds = getDefaultModelIds(providerCfg);
         const ownsModel = resolveOwnsModel(providerCfg);
-        const existingModels = (
-          settings.merged.modelProviders?.[providerCfg.protocol] ?? []
+        const existingModels = getModelsForProviderProtocol(
+          settings.merged.modelProviders,
+          providerCfg.protocol,
+          settings.merged.providerProtocol,
         ).filter((model) => !ownsModel || ownsModel(model));
         const prebuiltModels: ProviderModelConfig[] = defaultIds.flatMap(
           (id) => {

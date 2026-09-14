@@ -20,6 +20,7 @@ import {
   ALL_PROVIDERS,
   applyProviderInstallPlan,
   buildInstallPlan,
+  getModelsForProviderProtocol,
   clearCachedCredentialFile,
   createDebugLogger,
   generateSessionRecap,
@@ -1677,6 +1678,12 @@ function readExistingProviderConfig(
     (settings.merged as Record<string, unknown>)['modelProviders'] as
       | Record<string, unknown>
       | undefined,
+    settings.merged.providerProtocol,
+    {
+      authType: settings.merged.security?.auth?.selectedType,
+      id: settings.merged.model?.name,
+      baseUrl: settings.merged.model?.baseUrl,
+    },
   );
   const firstModel = existing?.models[0];
   const protocol = existing?.protocol ?? config.protocol;
@@ -1742,13 +1749,15 @@ function resolveExistingProviderApiKey(
   const ownsModel = resolveOwnsModel(config);
   const canonicalProtocol =
     protocol === AuthType.USE_OPENAI_RESPONSES ? AuthType.USE_OPENAI : protocol;
-  const matched = (
-    settings.merged.modelProviders?.[canonicalProtocol] ?? []
+  const matched = getModelsForProviderProtocol(
+    settings.merged.modelProviders,
+    canonicalProtocol,
+    settings.merged.providerProtocol,
   ).filter(
     (model) =>
       model.baseUrl === baseUrl &&
       model.envKey &&
-      ownsModel?.(model) &&
+      (ownsModel?.(model) || config.mergeModelsByIdentity) &&
       modelIds.includes(model.id) &&
       tryResolveModelProtocol(canonicalProtocol, model) === protocol,
   );
@@ -9071,9 +9080,11 @@ class QwenAgent implements Agent {
         const plan = buildInstallPlan(
           providerConfig,
           inputs,
-          this.settings.merged.modelProviders?.[
-            inputs.protocol ?? providerConfig.protocol
-          ],
+          getModelsForProviderProtocol(
+            this.settings.merged.modelProviders,
+            inputs.protocol ?? providerConfig.protocol,
+            this.settings.merged.providerProtocol,
+          ),
         );
         const adapter = createLoadedSettingsAdapter(
           this.settings,

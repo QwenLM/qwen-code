@@ -35,26 +35,32 @@ OpenAI Chat Completions 与 Responses 共用凭据配置，但目前 Qwen Code �
 }
 ```
 
-| 提供商协议                     | 模型 `wireApi`            | 实际内部协议       |
-| ------------------------------ | ------------------------- | ------------------ |
-| `openai`                       | 未填或 `chat-completions` | `openai`           |
-| `openai`                       | `responses`               | `openai-responses` |
-| 映射至 `openai` 的自定义提供商 | 同上                      | 同上               |
-| 其他已知协议                   | 已填写                    | 配置错误           |
+| 提供商协议                                  | 模型 `wireApi`            | 实际内部协议       |
+| ------------------------------------------- | ------------------------- | ------------------ |
+| `openai`                                    | 未填或 `chat-completions` | `openai`           |
+| `openai`                                    | `responses`               | `openai-responses` |
+| 映射至 `openai` 的自定义提供商              | 同上                      | 同上               |
+| 已发布 `openai-responses`（含映射的提供商） | 未填                      | `openai-responses` |
+| 已发布的 OpenAI 协议声明                    | 已填写                    | 选定的 `wireApi`   |
+| 其他已知协议                                | 已填写                    | 配置错误           |
 
 未知 `wireApi` 值属于配置错误。该字段不能使未知提供商 id 变为合法，保留现有未知
 提供商警告。配置流程使用同一个 OpenAI 凭据命名空间，两种 API 都写入 `openai`。
 在受支持的格式中，显式 `envKey` 的含义保持不变。`wireApi` 是路由元数据，不能发送
 到模型请求体。
 
-本次重构紧接着 Responses 首次实现合入。受支持的配置统一为 `openai` 加模型级
-`wireApi`，明确不兼容之前的 `modelProviders.openai-responses` 格式，也不做自动
-迁移。草案字段 `api` 不作为别名保留。不要增加旧配置组的查找、清理、凭据回退或迁移
-代码。内部 `AuthType.USE_OPENAI_RESPONSES` 仍用于标识 Responses 传输和会话记录
-路由，它不是独立的提供商配置选项。配置入口拒绝旧提供商 id，以及指向
-`openai-responses` 的 `providerProtocol` 映射，包括空配置组和未引用的映射。错误
-提示说明受支持的 `openai` + `wireApi` 格式，不自动改写设置。运行时查找、显式
-切换和会话恢复仍接受内部 Responses 标识。
+Responses 已先于本次重构随 v0.23.3 发布。继续读取已发布的
+`modelProviders.openai-responses` 配置组，以及指向 `openai-responses` 的
+`providerProtocol` 映射，包括空配置组和未引用映射。显式提供商映射仍优先于配置组
+名称；显式模型 `wireApi` 可以覆盖两种 OpenAI 协议，未填时保留声明的协议。
+加载和热重载不改写设置，也不添加凭据引用。已有显式引用和默认凭据解析保持发布版
+语义。草案字段 `api` 不作为别名。
+
+新配置写入 `openai` 加模型级 `wireApi`。重配置保留所选精确路由的元数据和凭据引用，
+仅清理当前可写作用域中实际 API、模型 id 和精确配置 URL 都匹配的旧条目。
+其他端点、API、模型和作用域保持不变，不改写自定义映射。若所选已发布声明被更高优先级作用域覆盖，写入前拒绝重配置，
+应回到没有该覆盖的所属上下文重新配置。其他覆盖导致新配置无法生效时回滚。内部 `AuthType.USE_OPENAI_RESPONSES` 继续标识 Responses
+传输和已记录会话路由。界面仍只有一个 OpenAI 提供商入口。
 
 `wireApi` 明确表示请求协议，借鉴 Codex 的 `wire_api` 含义，同时遵循本项目配置的
 camelCase 风格。该字段仍放在模型层，使同一提供商可以提供两种 API。
@@ -89,7 +95,7 @@ ACP 持久化 User 自己的 OpenAI wire 选择，与 Workspace 推导出的运�
 删除时按每个可写作用域自己的有效设置校验选择；清空 User 选择时，保留仍有效且
 继承了其字段的 Workspace 选择。剩余条目必须是注册顺序中真正胜出的路由，且可用于对话。
 
-预览与提交读取同一个新格式已有模型 bucket。预设提供商重连没有 API 选择步骤时，
+预览与提交读取同一个已有模型的新格式视图，包含已发布声明，不修改源设置。预设提供商重连没有 API 选择步骤时，
 保留同一端点上已确定的保存路由；通用自定义提供商入口继续显式选择 API。
 `protocolOptions` 控制 SDK 协议选择，不限制模型能否设置 `wireApi`。
 当前语音转写只支持 Chat Completions：Responses 语音配置必须在写入前拒绝，
@@ -102,7 +108,7 @@ ACP 持久化 User 自己的 OpenAI wire 选择，与 Workspace 推导出的运�
 ## 验证与验收
 
 - 单元测试覆盖配置表、非法输入、混合 API 配置、精确端点凭据、安装合并和事务性重载。
-  旧提供商 id 和映射被拒绝，且不改变原有 registry。
+  已发布提供商 id 和映射仍可读取，不自动迁移磁盘配置。
 - 配置测试覆盖初始 `openai` 选择解析至 Responses、精确路由优先、模型切换和会话恢复。
 - 配置流程测试覆盖 API 选择、预览与保存一致性、共享凭据、新格式配置检查、请求校验，
   以及仅删除目标 API 配置。
@@ -110,7 +116,7 @@ ACP 持久化 User 自己的 OpenAI wire 选择，与 Workspace 推导出的运�
   继承模型字段时的删除、服务别名遮蔽对话路由、保存元数据的预览、预设提供商重连，
   以及持久化前的语音/wire 校验。
 - 隔离的 localhost 服务记录实际 CLI 请求路径和负载：隐式 Chat、显式 Chat、新格式
-  Responses、自定义提供商 Responses、在请求前拒绝非法 API 与旧提供商配置，
+  Responses、自定义提供商 Responses、已发布 Responses 声明、在请求前拒绝非法 API，
   以及两种 API 的工具调用续接。
 - 先对全局 `qwen` 执行基线，再验证本地构建 CLI。使用临时 `QWEN_HOME` 和 mock key，
   不修改真实设置，不向远端模型发送测试提示。
