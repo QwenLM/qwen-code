@@ -944,6 +944,7 @@ describe('Session', () => {
       readPendingManagedApprovalWait: vi.fn().mockResolvedValue(null),
       commitManagedDurableWait: vi.fn().mockResolvedValue(undefined),
       resolveManagedDurableWait: vi.fn().mockResolvedValue(undefined),
+      detachManagedHarnessWait: vi.fn().mockResolvedValue(undefined),
       commitManagedAwaitRuntime: vi.fn().mockResolvedValue(undefined),
       resolveManagedAwaitRuntime: vi.fn().mockResolvedValue(undefined),
       shouldRetainManagedRuntimeInvocation: vi.fn().mockReturnValue(false),
@@ -5888,6 +5889,187 @@ describe('Session', () => {
       expect(result.stopReason).toBe('end_turn');
       expect(execute).not.toHaveBeenCalled();
       expect(mockConfig.resolveManagedDurableWait).not.toHaveBeenCalled();
+    });
+
+    it('does not cancel a live permission ticket when the client RPC is lost', async () => {
+      mockChat.getHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'run ls' }] }]);
+      const execute = vi.fn();
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('run_shell_command', execute, 'exec'),
+      );
+      vi.mocked(mockClient.requestPermission).mockRejectedValue(
+        new Error('ACP connection closed.'),
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'fc-wait-1',
+                  name: 'run_shell_command',
+                  args: { command: 'ls' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run ls' }],
+      });
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(execute).not.toHaveBeenCalled();
+      expect(mockConfig.commitManagedDurableWait).toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: 'fc-wait-1' }),
+      );
+      expect(mockConfig.resolveManagedDurableWait).not.toHaveBeenCalled();
+      expect(mockConfig.detachManagedHarnessWait).toHaveBeenCalledOnce();
+    });
+
+    it('does not cancel a live permission ticket on an unattended session_closed', async () => {
+      mockChat.getHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'run ls' }] }]);
+      const execute = vi.fn();
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('run_shell_command', execute, 'exec'),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+        _meta: { 'qwen.daemon.permissionCancelReason': 'session_closed' },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'fc-wait-1',
+                  name: 'run_shell_command',
+                  args: { command: 'ls' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run ls' }],
+      });
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(execute).not.toHaveBeenCalled();
+      expect(mockConfig.resolveManagedDurableWait).not.toHaveBeenCalled();
+      expect(mockConfig.detachManagedHarnessWait).toHaveBeenCalledOnce();
+    });
+
+    it('re-hangs a live-retained ticket and persists the later tool result', async () => {
+      mockChat.getHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'run ls' }] }]);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('run_shell_command', execute, 'exec'),
+      );
+      vi.mocked(mockClient.requestPermission)
+        .mockRejectedValueOnce(new Error('ACP connection closed.'))
+        .mockResolvedValueOnce({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'fc-wait-1',
+                  name: 'run_shell_command',
+                  args: { command: 'ls' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run ls' }],
+      });
+      expect(execute).not.toHaveBeenCalled();
+      expect(mockConfig.resolveManagedDurableWait).not.toHaveBeenCalled();
+      expect(mockConfig.detachManagedHarnessWait).toHaveBeenCalledOnce();
+      expect(
+        mockChatRecordingService.recordToolResult,
+      ).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ callId: 'fc-wait-1' }),
+      );
+
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'run ls' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'fc-wait-1',
+                name: 'run_shell_command',
+                args: { command: 'ls' },
+              },
+            },
+          ],
+        },
+      ]);
+      vi.mocked(mockConfig.readPendingManagedApprovalWait).mockResolvedValue({
+        requestId: 'fc-wait-1',
+        kind: 'execute',
+        source: 'tool_call',
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        invocation: { toolCallId: 'fc-wait-1', kind: 'execute' },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'listed' }] } }],
+            },
+          },
+        ]),
+      );
+
+      const restored = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreManagedApproval': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(restored.stopReason).toBe('end_turn');
+      expect(execute).toHaveBeenCalled();
+      expect(mockConfig.resolveManagedDurableWait).toHaveBeenCalledWith({
+        requestId: 'fc-wait-1',
+        outcome: 'decided',
+        body: { optionId: 'proceed_once', answers: null },
+      });
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ callId: 'fc-wait-1' }),
+      );
     });
 
     it('does not classify a still-requested wait as an interrupted turn', async () => {
@@ -38525,15 +38707,13 @@ describe('Session', () => {
           error_type: core.ToolErrorType.UNHANDLED_EXCEPTION,
         }),
       );
-      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+      expect(
+        mockChatRecordingService.recordToolResult,
+      ).not.toHaveBeenCalledWith(
         [result.parts[0]],
-        expect.objectContaining({
-          callId: 'shell_call',
-          status: 'error',
-          executionStatus: 'not_started',
-          errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
-        }),
+        expect.objectContaining({ callId: 'shell_call' }),
       );
+      expect(mockConfig.detachManagedHarnessWait).toHaveBeenCalledOnce();
     });
 
     it('does not treat a parent abort during permission as explicit rejection', async () => {

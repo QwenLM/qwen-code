@@ -2471,6 +2471,74 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
   });
 
+  it('keeps a sibling Session sending after one Session closes without host shutdown', async () => {
+    const innerA = await setupSessionMocks('sibling-a');
+    const innerB = makeInnerConfig();
+    innerB.getSessionId = vi.fn().mockReturnValue('sibling-b');
+    const configs: Config[] = [
+      innerA as unknown as Config,
+      innerB as unknown as Config,
+    ];
+    vi.mocked(loadCliConfig).mockImplementation(async () => {
+      const next = configs.shift();
+      if (next === undefined) {
+        throw new Error('unexpected extra loadCliConfig call');
+      }
+      return next;
+    });
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+    );
+    const beginManagedShutdown = vi.spyOn(agent, 'beginManagedShutdown');
+    const sessionA = await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const sessionB = await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    expect(sessionA).toMatchObject({ sessionId: 'sibling-a' });
+    expect(sessionB).toMatchObject({ sessionId: 'sibling-b' });
+    const hosted = agent as unknown as {
+      getActiveSessions(): Array<{ getId(): string }>;
+    };
+    expect(
+      hosted.getActiveSessions().map((session) => session.getId()),
+    ).toEqual(['sibling-a', 'sibling-b']);
+
+    await expect(
+      agent.prompt({
+        sessionId: 'sibling-a',
+        prompt: [{ type: 'text', text: 'from a' }],
+      }),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+    await expect(
+      agent.prompt({
+        sessionId: 'sibling-b',
+        prompt: [{ type: 'text', text: 'from b' }],
+      }),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: 'sibling-a',
+      }),
+    ).resolves.toEqual({ sessionId: 'sibling-a', closed: true });
+
+    expect(
+      hosted.getActiveSessions().map((session) => session.getId()),
+    ).toEqual(['sibling-b']);
+    expect(innerA.shutdown).toHaveBeenCalledOnce();
+    expect(innerB.shutdown).not.toHaveBeenCalled();
+    expect(mockConfig.shutdown).not.toHaveBeenCalled();
+    expect(beginManagedShutdown).not.toHaveBeenCalled();
+
+    await expect(
+      agent.prompt({
+        sessionId: 'sibling-b',
+        prompt: [{ type: 'text', text: 'from b after a closed' }],
+      }),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('rejects an explicit host whose bootstrap environment differs', async () => {
     mockConfig.getRuntimeEnvironment = vi.fn().mockReturnValue({ KEY: 'boot' });
     await expect(

@@ -633,6 +633,40 @@ describe('managed session log activation', () => {
     });
   });
 
+  it('resolves a detached approval wait on a successor handle', async () => {
+    await withWorkspace(async (activate) => {
+      const fixture = await activate({ managedSessionLog: true });
+      const recorder = fixture.config.getChatRecordingService()!;
+      recorder.recordUserMessage('needs permission');
+      await recorder.flush();
+      await fixture.config.ensureManagedHarnessRunnable();
+      await fixture.config.commitManagedDurableWait({
+        requestId: 'fc-wait-1',
+        kind: 'execute',
+        source: 'tool_call',
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        invocation: { toolCallId: 'fc-wait-1', kind: 'execute' },
+      });
+      await fixture.config.detachManagedHarnessWait();
+      await expect(
+        fixture.config.ensureManagedHarnessRunnable(),
+      ).rejects.toMatchObject({ reason: 'invalid_state' });
+      await expect(
+        fixture.config.readPendingManagedApprovalWait(),
+      ).resolves.toMatchObject({ requestId: 'fc-wait-1' });
+      await fixture.config.resolveManagedDurableWait({
+        requestId: 'fc-wait-1',
+        outcome: 'decided',
+        body: { optionId: 'allow' },
+      });
+      await expect(
+        fixture.config.readPendingManagedApprovalWait(),
+      ).resolves.toBeNull();
+      await fixture.config.ensureManagedHarnessRunnable();
+      await fixture.config.closeSessionWriter();
+    });
+  });
+
   it('persists admitted Runtime work without replacing the Harness handle', async () => {
     await withWorkspace(async (activate) => {
       const fixture = await activate({ managedSessionLog: true });

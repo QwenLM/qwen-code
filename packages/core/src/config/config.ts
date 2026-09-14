@@ -4967,6 +4967,20 @@ export class Config {
     return this.sessionExecutionEngine;
   }
 
+  private dropDetachedManagedHarness(): void {
+    if (this.managedHarness?.isDetached() === true) {
+      this.managedHarness = undefined;
+    }
+  }
+
+  private liveManagedHarness(): ManagedHarnessHandle | undefined {
+    const session = this.managedSession;
+    if (session === undefined) return undefined;
+    this.dropDetachedManagedHarness();
+    this.managedHarness ??= createManagedHarnessHandle(session);
+    return this.managedHarness;
+  }
+
   /**
    * A Managed session may not start a model request until a runnable Harness
    * checkpoint exists. Legal initial starts submit `before_model` first;
@@ -4979,6 +4993,7 @@ export class Config {
   async ensureManagedHarnessRunnable(): Promise<void> {
     const session = this.managedSession;
     if (session === undefined) return;
+    this.dropDetachedManagedHarness();
     const handle = this.managedHarness;
     let replacedHost = false;
     if (handle !== undefined) {
@@ -4996,8 +5011,9 @@ export class Config {
         replacedHost = true;
       }
     }
-    this.managedHarness ??= createManagedHarnessHandle(session);
-    await this.managedHarness.ensureRunnable();
+    const live = this.liveManagedHarness();
+    if (live === undefined) return;
+    await live.ensureRunnable();
     if (replacedHost && this.llmClient.isInitialized()) {
       const records = await session.sink.project();
       await this.llmClient.rebuildChatFromDurableHistory(
@@ -5015,7 +5031,8 @@ export class Config {
   ): Promise<void> {
     const session = this.managedSession;
     if (session === undefined) return;
-    this.managedHarness ??= createManagedHarnessHandle(session);
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
     const optionsBytes = Buffer.from(
       JSON.stringify(request.options ?? null),
       'utf8',
@@ -5035,7 +5052,7 @@ export class Config {
       'managed-route',
       Buffer.from(JSON.stringify({ model: this.getModel() }), 'utf8'),
     );
-    await this.managedHarness.commitDurableWait({
+    await handle.commitDurableWait({
       requestId: request.requestId,
       kind: request.kind,
       source: request.source,
@@ -5048,6 +5065,29 @@ export class Config {
   }
 
   /**
+   * Transfers an in-flight approval/Runtime wait off this handle. The
+   * durable ticket stays requested; a successor handle on the same
+   * activation continues. Not a finished-turn A/D swap.
+   */
+  async detachManagedHarnessWait(): Promise<void> {
+    const session = this.managedSession;
+    const handle = this.managedHarness;
+    if (session === undefined || handle === undefined) return;
+    if (handle.isDetached()) {
+      this.managedHarness = undefined;
+      return;
+    }
+    if (
+      session.authority.latestCheckpoint?.boundary !==
+      HARNESS_DURABLE_WAIT_BOUNDARY
+    ) {
+      return;
+    }
+    await handle.detach();
+    this.managedHarness = undefined;
+  }
+
+  /**
    * Persists the permission decision, then restores a model-start phase.
    * Legacy sessions no-op. The original tool is not authorized until the
    * decision is in the log.
@@ -5057,7 +5097,8 @@ export class Config {
   ): Promise<void> {
     const session = this.managedSession;
     if (session === undefined) return;
-    this.managedHarness ??= createManagedHarnessHandle(session);
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
     const decisionRef =
       decision.outcome === 'decided'
         ? await session.resources.publish(
@@ -5080,7 +5121,7 @@ export class Config {
         decisionRef,
       },
     );
-    await this.managedHarness.resolveDurableWait();
+    await handle.resolveDurableWait();
   }
 
   async commitManagedAwaitRuntime(
@@ -5088,12 +5129,13 @@ export class Config {
   ): Promise<void> {
     const session = this.managedSession;
     if (session === undefined) return;
-    this.managedHarness ??= createManagedHarnessHandle(session);
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
     const routeRef = await session.resources.publish(
       'managed-route',
       Buffer.from(JSON.stringify({ model: this.getModel() }), 'utf8'),
     );
-    await this.managedHarness.commitAwaitRuntime({
+    await handle.commitAwaitRuntime({
       functionCallId: request.functionCallId,
       executionCallId: request.executionCallId,
       invocationBindingId:
@@ -5124,7 +5166,8 @@ export class Config {
   }): Promise<void> {
     const session = this.managedSession;
     if (session === undefined) return;
-    this.managedHarness ??= createManagedHarnessHandle(session);
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
     const resultRef = await session.resources.publish(
       'managed-tool-outcome',
       Buffer.from(
@@ -5140,7 +5183,7 @@ export class Config {
         'utf8',
       ),
     );
-    await this.managedHarness.resolveAwaitRuntime(resultRef);
+    await handle.resolveAwaitRuntime(resultRef);
   }
 
   shouldRetainManagedRuntimeInvocation(executionCallId: string): boolean {
@@ -5208,8 +5251,9 @@ export class Config {
   async consumeManagedRuntimeResults(): Promise<void> {
     const session = this.managedSession;
     if (session === undefined) return;
-    this.managedHarness ??= createManagedHarnessHandle(session);
-    await this.managedHarness.consumeRuntimeResults();
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
+    await handle.consumeRuntimeResults();
   }
 
   /**

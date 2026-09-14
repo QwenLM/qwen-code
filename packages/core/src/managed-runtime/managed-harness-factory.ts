@@ -165,6 +165,8 @@ export interface ManagedHarnessHandle {
    * coordinator gate instead of cancelling it.
    */
   detach(): Promise<void>;
+  /** True after {@link detach}; a successor handle continues the wait. */
+  isDetached(): boolean;
   /**
    * Commits safety point B: a requested approval as `await_action` with
    * `durable_wait`. The next model request stays blocked until
@@ -276,6 +278,10 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       activationId: this.activation.activationId,
       epoch: this.activation.epoch,
     };
+  }
+
+  isDetached(): boolean {
+    return this.detached;
   }
 
   async detach(): Promise<void> {

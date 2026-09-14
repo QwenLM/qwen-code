@@ -387,6 +387,7 @@ describe('managed harness factory', () => {
     );
     expect(session.authority.action('fc-1')?.state).toBe('requested');
     await handle.detach();
+    expect(handle.isDetached()).toBe(true);
     await expect(handle.resolveDurableWait()).rejects.toThrow(/detached/);
 
     await decideAction(session);

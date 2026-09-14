@@ -579,6 +579,14 @@ function isUnattendedRestorePermissionCancel(reason: unknown): boolean {
   return reason === 'timeout' || reason === 'session_closed';
 }
 
+function isManagedPermissionTransportLoss(error: unknown): boolean {
+  if (!(error instanceof Error)) return true;
+  return (
+    error.message !== 'Permission request was aborted.' &&
+    error.message !== SESSION_DISPOSE_ABORT_REASON
+  );
+}
+
 type RunToolResult = {
   parts: Part[];
   stopAfterPermissionCancel: boolean;
@@ -2232,6 +2240,11 @@ export class Session implements SessionContext {
   private restoringManagedApprovalCallIds: Set<string> | undefined;
   /** Once any restored call is unattended-terminated, remaining batch skips follow. */
   private restoredAskUserQuestionSkipPersistence = false;
+  /**
+   * Live or restored permission waits whose in-flight RPC was lost. Skip
+   * persisting a fabricated cancel so a later connection can re-hang.
+   */
+  private retainedManagedPermissionCallIds: Set<string> | undefined;
 
   // Implement SessionContext interface
   readonly sessionId: string;
@@ -6107,6 +6120,7 @@ export class Session implements SessionContext {
                   this.restoringAskUserQuestionCallIds = undefined;
                   this.restoringManagedApprovalCallIds = undefined;
                   this.restoredAskUserQuestionSkipPersistence = false;
+                  this.retainedManagedPermissionCallIds = undefined;
                 }
                 if (
                   toolRun.stopAfterPermissionCancel ||
@@ -8218,6 +8232,7 @@ export class Session implements SessionContext {
   #clearPendingRestoreNotices(): void {
     this.pendingWorktreeNotice = null;
     this.pendingRecoveredAgentsNotice = null;
+    this.retainedManagedPermissionCallIds = undefined;
   }
 
   #markUnattendedRestoredAskUserQuestion(): void {
@@ -8235,6 +8250,12 @@ export class Session implements SessionContext {
   #shouldSkipRestoredAskUserQuestionPersistence(
     callId: string | undefined,
   ): boolean {
+    if (
+      typeof callId === 'string' &&
+      this.retainedManagedPermissionCallIds?.has(callId) === true
+    ) {
+      return true;
+    }
     return (
       this.#isRestoringPermissionCall(callId) &&
       this.restoredAskUserQuestionSkipPersistence
@@ -10948,6 +10969,9 @@ export class Session implements SessionContext {
     error?: unknown,
   ): Promise<void> {
     if (this.#shouldRetainManagedPermissionTicket(params, result, error)) {
+      this.retainedManagedPermissionCallIds ??= new Set();
+      this.retainedManagedPermissionCallIds.add(params.toolCall.toolCallId);
+      await this.config.detachManagedHarnessWait?.();
       return;
     }
     const requestId = params.toolCall.toolCallId;
@@ -10979,13 +11003,16 @@ export class Session implements SessionContext {
     error: unknown,
   ): boolean {
     const callId = params.toolCall.toolCallId;
-    if (!this.#isRestoringPermissionCall(callId)) {
-      return false;
-    }
-    if (error !== undefined) return true;
     const reason = (
       result as { _meta?: Record<string, unknown> | null } | undefined
     )?._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
+    if (this.#isRestoringPermissionCall(callId)) {
+      if (error !== undefined) return true;
+      return isUnattendedRestorePermissionCancel(reason);
+    }
+    if (error !== undefined) {
+      return isManagedPermissionTransportLoss(error);
+    }
     return isUnattendedRestorePermissionCancel(reason);
   }
 
@@ -11436,6 +11463,10 @@ export class Session implements SessionContext {
     toolLoopState?: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
+    // A previous batch may have retained call ids after a lost RPC. Those
+    // ids must not leak into this run: skip-persistence would then omit a
+    // later successful restore of the same tool.
+    this.retainedManagedPermissionCallIds = undefined;
     // The daemon executes tools directly rather than through
     // CoreToolScheduler, so the ALS bindings the scheduler would provide must
     // happen here. `enterWith` (not `run`) is deliberate: background
