@@ -47,6 +47,24 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
+// Lets a test pin the platform shell (e.g. cmd.exe) that a hook without its
+// own `shell` resolves to; unset, the real platform configuration is used.
+const shellConfigOverride = vi.hoisted(() => ({
+  current: undefined as
+    | import('../utils/shell-utils.js').ShellConfiguration
+    | undefined,
+}));
+
+vi.mock('../utils/shell-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/shell-utils.js')>();
+  return {
+    ...actual,
+    getShellConfiguration: () =>
+      shellConfigOverride.current ?? actual.getShellConfiguration(),
+  };
+});
+
 describe('HookRunner', () => {
   let hookRunner: HookRunner;
 
@@ -981,41 +999,146 @@ describe('HookRunner', () => {
   });
 
   describe('expandCommand', () => {
-    it('should expand GEMINI_PROJECT_DIR placeholder', async () => {
+    const runAndGetSpawn = async (
+      hookConfig: HookConfig,
+      cwd: string,
+    ): Promise<{
+      executable: string;
+      command: string;
+      env: NodeJS.ProcessEnv;
+    }> => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
 
-      const hookConfig: HookConfig = {
-        type: HookType.Command,
-        command: 'echo $GEMINI_PROJECT_DIR',
-        source: HooksConfigSource.Project,
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput({ cwd }),
+      );
+
+      const [executable, args, options] = mockSpawn.mock.calls[0];
+      return {
+        executable,
+        command: args[args.length - 1], // Last arg is the command
+        env: options.env,
       };
-      const input = createMockInput({ cwd: '/test/project' });
+    };
 
-      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+    it.each([
+      'echo $CLAUDE_PROJECT_DIR',
+      '"$QWEN_PROJECT_DIR/x.sh"',
+      "'$GEMINI_PROJECT_DIR'",
+    ])(
+      'passes bash command %s through verbatim for bash to read the environment',
+      async (hookCommand) => {
+        const cwd = '/home/u/my proj';
+        const { command, env } = await runAndGetSpawn(
+          {
+            type: HookType.Command,
+            command: hookCommand,
+            source: HooksConfigSource.Project,
+            shell: 'bash',
+          },
+          cwd,
+        );
 
-      // Verify spawn was called with expanded command
-      const spawnCall = mockSpawn.mock.calls[0];
-      const command = spawnCall[1][spawnCall[1].length - 1]; // Last arg is the command
-      expect(command).toContain('/test/project');
+        expect(command).toBe(hookCommand);
+        expect(env['QWEN_PROJECT_DIR']).toBe(cwd);
+        expect(env['CLAUDE_PROJECT_DIR']).toBe(cwd);
+        expect(env['GEMINI_PROJECT_DIR']).toBe(cwd);
+      },
+    );
+
+    it.each(['QWEN_PROJECT_DIR', 'CLAUDE_PROJECT_DIR', 'GEMINI_PROJECT_DIR'])(
+      'replaces a bare $%s with the quoted project directory for PowerShell',
+      async (variable) => {
+        const { command } = await runAndGetSpawn(
+          {
+            type: HookType.Command,
+            command: `& $${variable}/hook.ps1`,
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          'C:\\Users\\u\\my proj',
+        );
+
+        expect(command).toBe("& 'C:\\Users\\u\\my proj'/hook.ps1");
+      },
+    );
+
+    it('doubles an apostrophe in the project directory for PowerShell', async () => {
+      const { command } = await runAndGetSpawn(
+        {
+          type: HookType.Command,
+          command: 'Write-Output $QWEN_PROJECT_DIR',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        "C:\\Users\\o'brien\\proj",
+      );
+
+      expect(command).toBe("Write-Output 'C:\\Users\\o''brien\\proj'");
     });
 
-    it('should expand CLAUDE_PROJECT_DIR placeholder for compatibility', async () => {
-      const mockProcess = createMockProcess(0, 'result');
-      mockSpawn.mockImplementation(() => mockProcess);
+    it('leaves $env:QWEN_PROJECT_DIR for PowerShell to read', async () => {
+      const { command } = await runAndGetSpawn(
+        {
+          type: HookType.Command,
+          command: 'Write-Output $env:QWEN_PROJECT_DIR',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        'C:\\Users\\u\\proj',
+      );
 
-      const hookConfig: HookConfig = {
-        type: HookType.Command,
-        command: 'echo $CLAUDE_PROJECT_DIR',
-        source: HooksConfigSource.Project,
+      expect(command).toBe('Write-Output $env:QWEN_PROJECT_DIR');
+    });
+
+    it.each([
+      'QWEN_PROJECT_DIRS',
+      'CLAUDE_PROJECT_DIRS',
+      'GEMINI_PROJECT_DIRS',
+    ])(
+      'does not rewrite a longer variable name $%s for PowerShell',
+      async (variable) => {
+        const { command } = await runAndGetSpawn(
+          {
+            type: HookType.Command,
+            command: `Write-Output $${variable}`,
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          'C:\\Users\\u\\proj',
+        );
+
+        expect(command).toBe(`Write-Output $${variable}`);
+      },
+    );
+
+    it('replaces all three variables with the quoted project directory for cmd', async () => {
+      shellConfigOverride.current = {
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
       };
-      const input = createMockInput({ cwd: '/test/project' });
+      try {
+        const { executable, command } = await runAndGetSpawn(
+          {
+            type: HookType.Command,
+            command:
+              '$QWEN_PROJECT_DIR\\hooks\\check.cmd && echo $CLAUDE_PROJECT_DIR $GEMINI_PROJECT_DIR',
+            source: HooksConfigSource.Project,
+          },
+          'C:\\Users\\u\\my proj',
+        );
 
-      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
-
-      const spawnCall = mockSpawn.mock.calls[0];
-      const command = spawnCall[1][spawnCall[1].length - 1]; // Last arg is the command
-      expect(command).toContain('/test/project');
+        expect(executable).toBe('cmd.exe');
+        expect(command).toBe(
+          '"C:\\Users\\u\\my proj"\\hooks\\check.cmd && echo "C:\\Users\\u\\my proj" "C:\\Users\\u\\my proj"',
+        );
+      } finally {
+        shellConfigOverride.current = undefined;
+      }
     });
 
     it('should not modify command without placeholders', async () => {

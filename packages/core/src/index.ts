@@ -218,7 +218,9 @@ export type {
   WebSearchSettings,
 } from './tools/web-search.js';
 export {
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
   DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
   MAX_WEB_SEARCH_TIMEOUT_MS,
 } from './tools/web-search.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
