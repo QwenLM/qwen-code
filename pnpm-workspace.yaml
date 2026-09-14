@@ -19,6 +19,11 @@ packages:
   - '!packages/desktop-shell'
   - '!packages/live-host'
 
+# npm links every workspace package into the root node_modules; pnpm links
+# one only where it is a declared dependency. The root package therefore
+# declares, as file: devDependencies, the workspace packages that root-level
+# code (integration-tests/, scripts/) imports, and .pnpmfile.mjs rewrites them
+# to workspace:* like every other internal dependency.
 nodeLinker: 'hoisted'
 # The root postinstall runs patch-package, which rewrites files inside
 # node_modules in place. Under the default import method those files are

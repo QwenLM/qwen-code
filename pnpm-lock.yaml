@@ -43,6 +43,27 @@ importers:
       '@emnapi/runtime':
         specifier: 1.11.3
         version: 1.11.3
+      '@qwen-code/acp-bridge':
+        specifier: workspace:*
+        version: link:packages/acp-bridge
+      '@qwen-code/channel-base':
+        specifier: workspace:*
+        version: link:packages/channels/base
+      '@qwen-code/qwen-code':
+        specifier: workspace:*
+        version: link:packages/cli
+      '@qwen-code/qwen-code-core':
+        specifier: workspace:*
+        version: link:packages/core
+      '@qwen-code/sdk':
+        specifier: workspace:*
+        version: link:packages/sdk-typescript
+      '@qwen-code/web-shell':
+        specifier: workspace:*
+        version: link:packages/web-shell
+      '@qwen-code/web-templates':
+        specifier: workspace:*
+        version: link:packages/web-templates
       '@types/chrome':
         specifier: ^0.1.32
         version: 0.1.43
