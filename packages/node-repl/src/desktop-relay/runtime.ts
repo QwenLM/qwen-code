@@ -256,9 +256,9 @@ async function runRelay(
 
 /** Serves the connection launchd accepted and handed over as stdin/stdout. */
 export async function runAgent(home: string): Promise<void> {
-  // stdout is the accepted socket,   // Under launchd the accepted connection is stdin and stdout; nothing on
+  // Under launchd the accepted connection is stdin and stdout; nothing on
   // this path writes to stdout, so the socket carries only the reply.
-: 0, readable: true, writable: true });
+  const socket = new net.Socket({ fd: 0, readable: true, writable: true });
   const store = createRecordStore(home);
   await serveConnection(socket, {
     http: {
