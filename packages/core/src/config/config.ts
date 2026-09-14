@@ -5092,6 +5092,9 @@ export class Config {
       if (skillTool && 'clearLoadedSkills' in skillTool) {
         (skillTool as { clearLoadedSkills(): void }).clearLoadedSkills();
       }
+      // Skill grants belong to the session that loaded the skill; a resumed
+      // session re-arms its own from history during `initialize()`.
+      this.permissionManager?.clearSessionAllowRules();
     }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;

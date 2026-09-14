@@ -3367,6 +3367,20 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
+    it('clearSessionAllowRules drops live and AUTO-stashed session grants', async () => {
+      const call = { toolName: 'run_shell_command', command: 'npm test' };
+      pm.addSessionAllowRule('Bash(git *)');
+      pm.stripDangerousRulesForAutoMode();
+      pm.addSessionAllowRule('Bash(npm *)');
+      expect(pm.getStrippedDangerousRules()?.session).toHaveLength(1);
+
+      pm.clearSessionAllowRules();
+      pm.restoreDangerousRules();
+
+      expect(pm.getAllowRawStrings()).toEqual([]);
+      expect(await pm.evaluate(call)).not.toBe('allow');
+    });
+
     it('addSessionAllowRule deduplicates identical rules', () => {
       pm.addSessionAllowRule('Bash(git *)');
       pm.addSessionAllowRule('Bash(git *)');
