@@ -516,6 +516,13 @@ above both the shell confirmation and the tool confirmation, so it takes the slo
 outright here too, and the update notice stays suppressed while it owns the
 screen exactly as the other popups keep it suppressed.
 
+Reading that frame line by line found a defect the port had introduced. ink's
+layout drops the whole Composer — its footer included — for any dialog it counts
+as visible, and this approval is one of them; here the dialog took the Composer's
+slot while the footer kept its own separate gate, unaware of the new occupant, so
+two rows ink does not draw stayed painted underneath the box. One term on that
+gate, and the checkpoint now differs only by the two residuals below.
+
 The geometry was measured against ink rather than assumed, and the first attempt
 was wrong in two ways: it drew the box at the terminal's left edge spanning the
 full width, and it printed no row numbers. ink insets this box one column further

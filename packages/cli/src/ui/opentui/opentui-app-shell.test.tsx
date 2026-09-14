@@ -384,6 +384,17 @@ describe('OpenTuiApp shell wiring', () => {
     expect(screen.getByText('footer')).toBeTruthy();
   });
 
+  it('hides the footer while the gated-server approval dialog is open', async () => {
+    // ink's layout swaps the whole Composer — footer included — for the dialog
+    // mount while any dialog is visible, and the approval is one of them. Here
+    // the footer is a sibling with its own gate, so it needs the same term.
+    mocks.state.mcpQueue.push({ name: 'acceptance-server' });
+    renderApp();
+    await settle();
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('footer')).toBeNull();
+  });
+
   it('keeps an armed quit warning mounted while a dialog hides the footer', async () => {
     // A dialog unmounts the composer, so nothing intercepts Ctrl+C and the
     // app-level guard still arms. The warning has to survive the footer's

@@ -1061,7 +1061,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             the user that a second press exits. With the warning set the footer
             returns just that row, so nothing else appears. */}
           {exitHint ||
-          (!dialog && !activeModal && !activeToolCall && !showSuggestions) ? (
+          (!dialog &&
+            !activeModal &&
+            !activeToolCall &&
+            !mcpApproval.isMcpApprovalDialogOpen &&
+            !showSuggestions) ? (
             <OpenTuiFooter
               config={config}
               streaming={Boolean(streaming)}
