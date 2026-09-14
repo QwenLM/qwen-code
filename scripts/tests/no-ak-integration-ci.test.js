@@ -980,6 +980,6 @@ describe('Windows temp short-alias guard', () => {
     // configure-windows-runner and the hosted redirect both set TEMP and TMP,
     // so an unset value means one of them stopped running — a clear message
     // beats realpathSync(undefined)'s TypeError.
-    expect(() => runGuard({})).toThrow(/TEMP is not set/);
+    expect(() => runGuard({ TEMP: '', TMP: '' })).toThrow(/TEMP is not set/);
   });
 });
