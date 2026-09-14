@@ -23,6 +23,7 @@ import {
   TableHeader,
   TableRow,
 } from './table';
+import { TabsList } from './tabs';
 import {
   Tooltip,
   TooltipContent,
@@ -59,6 +60,7 @@ describe('React 18 ref compatibility', () => {
     ['TableHead', TableHead],
     ['TableCell', TableCell],
     ['TableCaption', TableCaption],
+    ['TabsList', TabsList],
     ['TooltipTrigger', TooltipTrigger],
     ['TooltipContent', TooltipContent],
   ])('%s forwards refs', (_name, Component) => {
