@@ -855,13 +855,21 @@ const COMMENT_WORD_BOUNDARIES = [';', '&', '|'];
  * bash only starts a comment at the start of a word, so `echo a#b` prints
  * `a#b` while `echo a #b` prints `a`. The same word rule keeps the arithmetic
  * base prefix in `echo $(( 8#17 ))` literal.
+ *
+ * The boundary check is escape-aware: a backslash-escaped space or operator
+ * does not end a word, so the `#` after `a\ ` or `a\;` is mid-word and
+ * literal — treating it as a comment would swallow the rest of the line and
+ * merge a real `;` boundary away, dropping the rule check the following
+ * command would have got.
  */
 function isCommentStart(command: string, index: number): boolean {
   if (index === 0) {
     return true;
   }
   const previous = command[index - 1]!;
-  return /\s/.test(previous) || COMMENT_WORD_BOUNDARIES.includes(previous);
+  const isBoundary =
+    /\s/.test(previous) || COMMENT_WORD_BOUNDARIES.includes(previous);
+  return isBoundary && precedingBackslashCount(command, index - 1) % 2 === 0;
 }
 
 /**

@@ -710,6 +710,24 @@ describe('splitCompoundCommand', () => {
     ]);
   });
 
+  // An escaped boundary does not end a word: `bash -xc 'echo a\ #b ; echo B'`
+  // traces `+ echo a #b` then `+ echo B` — the `#` is mid-word and literal.
+  // Reading it as a comment would swallow the `;` boundary and drop the second
+  // command's rule check.
+  it('does not read a comment after an escaped space', async () => {
+    expect(splitCompoundCommand('echo a\\ #b ; rm -rf /tmp/x')).toEqual([
+      'echo a\\ #b',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  it('does not read a comment after an escaped operator', async () => {
+    expect(splitCompoundCommand('echo a\\;#c ; rm -rf /tmp/x')).toEqual([
+      'echo a\\;#c',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
   // A word starts after an operator as well as after whitespace:
   // `bash -xc "echo a;#c ; rm -rf /tmp/x"` traces a single `+ echo a`. The
   // leftover `#c …` segment is pre-existing behaviour — bash runs one command
@@ -2501,12 +2519,14 @@ describe('PermissionManager', () => {
         }),
       );
       pm.initialize();
+      // `cat` with a heredoc has no rule hitting it; the rm text is data for
+      // cat, not a command. Name the verdict rather than only ruling deny out.
       expect(
         await pm.evaluate({
           toolName: 'run_shell_command',
           command: 'cat <<EOF\n# hi ; rm -rf /\nEOF',
         }),
-      ).not.toBe('deny');
+      ).toBe('ask');
     });
   });
 
