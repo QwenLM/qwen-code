@@ -85,7 +85,7 @@ describe('daemon worktree session markers', () => {
       path.join(repo, '.git', 'info', 'exclude'),
       'utf8',
     );
-    expect(exclude.split(/\r?\n/)).toContain(WORKTREE_SESSION_FILE);
+    expect(exclude.split(/\r?\n/)).toContain(`/${WORKTREE_SESSION_FILE}`);
     await execFileAsync('git', ['add', '-A'], { cwd: worktree });
 
     const { stdout } = await execFileAsync(
@@ -641,8 +641,8 @@ describe('transferWorktreeSessionMarkerOwner', () => {
       'utf8',
     );
     const rules = exclude.split(/\r?\n/);
-    expect(rules).toContain(WORKTREE_SESSION_FILE);
-    expect(rules).toContain(`${WORKTREE_SESSION_FILE}.*.tmp`);
+    expect(rules).toContain(`/${WORKTREE_SESSION_FILE}`);
+    expect(rules).toContain(`/${WORKTREE_SESSION_FILE}.*.tmp`);
     await execFileAsync('git', ['add', '-A'], { cwd: worktree });
     const { stdout } = await execFileAsync(
       'git',

@@ -6,9 +6,14 @@
 
 import * as fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { Request, Response } from 'express';
+import { gitEnv, WORKTREE_SESSION_FILE } from '@qwen-code/qwen-code-core';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
+import { parseCallerSuppliedSessionId } from '../config/session-id.js';
+import type { SendBridgeError } from './server/error-response.js';
+import { createWorkspaceRuntimeSessionService } from './workspace-runtime-storage.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -399,4 +404,234 @@ export function resolveContainedCwdOrFail(
     // Path doesn't exist or can't be resolved.
   }
   return null;
+}
+
+function resolveGitCommonDir(cwd: string): string | null {
+  try {
+    const raw = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: gitEnv(),
+    }).trim();
+    return fs.realpathSync(path.resolve(cwd, raw));
+  } catch {
+    return null;
+  }
+}
+
+function resolveAbsoluteGitDir(cwd: string): string | null {
+  try {
+    const raw = execFileSync('git', ['rev-parse', '--absolute-git-dir'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: gitEnv(),
+    }).trim();
+    return fs.realpathSync(raw);
+  } catch {
+    return null;
+  }
+}
+
+function readBoundedRegularFileSync(
+  filePath: string,
+  maxBytes: number,
+): string | null {
+  let fd: number | undefined;
+  const pathStat = fs.lstatSync(filePath);
+  if (!pathStat.isFile() || pathStat.nlink !== 1 || pathStat.size > maxBytes) {
+    return null;
+  }
+  try {
+    fd = fs.openSync(
+      filePath,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+    );
+    const openedStat = fs.fstatSync(fd);
+    if (
+      !openedStat.isFile() ||
+      openedStat.nlink !== 1 ||
+      openedStat.dev !== pathStat.dev ||
+      openedStat.ino !== pathStat.ino ||
+      openedStat.size > maxBytes
+    ) {
+      return null;
+    }
+    const buffer = Buffer.alloc(maxBytes + 1);
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    if (bytesRead > maxBytes) return null;
+    const finalStat = fs.lstatSync(filePath);
+    if (
+      !finalStat.isFile() ||
+      finalStat.nlink !== 1 ||
+      finalStat.dev !== openedStat.dev ||
+      finalStat.ino !== openedStat.ino
+    ) {
+      return null;
+    }
+    return buffer.subarray(0, bytesRead).toString('utf8');
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function markerIsOwnedBy(markerPath: string, sessionId: string): boolean {
+  try {
+    return readBoundedRegularFileSync(markerPath, 256)?.trim() === sessionId;
+  } catch {
+    return false;
+  }
+}
+
+export function resolveSessionManagedGitCwd(
+  req: Request,
+  runtime: WorkspaceRuntime,
+): string | null {
+  const rawCwd = req.query['cwd'];
+  if (rawCwd === undefined) return runtime.workspaceCwd;
+  if (typeof rawCwd !== 'string' || rawCwd.length === 0) return null;
+
+  let requested: string;
+  let workspace: string;
+  try {
+    requested = fs.realpathSync(path.resolve(rawCwd));
+    workspace = fs.realpathSync(runtime.workspaceCwd);
+  } catch {
+    return null;
+  }
+
+  let repoTop: string | undefined;
+  try {
+    repoTop = fs.realpathSync(
+      execFileSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: workspace,
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: gitEnv(),
+      }).trim(),
+    );
+  } catch (error) {
+    const stderr = (error as { stderr?: unknown }).stderr;
+    if (
+      typeof stderr === 'string' &&
+      /not a git repository/i.test(stderr) &&
+      isWithinRoot(requested, workspace)
+    ) {
+      return requested;
+    }
+    return null;
+  }
+  const managedRoot = path.join(repoTop, '.qwen', 'worktrees');
+  if (
+    isWithinRoot(requested, workspace) &&
+    !isWithinRoot(requested, managedRoot)
+  ) {
+    return requested;
+  }
+  if (!isWithinRoot(requested, managedRoot)) return null;
+  const workspaceCommonDir = resolveGitCommonDir(workspace);
+  const requestedCommonDir = resolveGitCommonDir(requested);
+  if (
+    workspaceCommonDir === null ||
+    requestedCommonDir === null ||
+    requestedCommonDir !== workspaceCommonDir
+  ) {
+    return null;
+  }
+
+  const parsedSessionId = parseCallerSuppliedSessionId(req.query['sessionId']);
+  if (parsedSessionId.kind !== 'valid') return null;
+  const sessionId = parsedSessionId.sessionId;
+  try {
+    let snapshot: ReturnType<typeof runtime.bridge.getSessionExecutionSnapshot>;
+    try {
+      snapshot = runtime.bridge.getSessionExecutionSnapshot(sessionId);
+    } catch {
+      return null;
+    }
+    if (
+      fs.realpathSync(snapshot.workspaceCwd) !== workspace ||
+      !snapshot.worktree
+    ) {
+      return null;
+    }
+    const worktreeRoot = fs.realpathSync(snapshot.worktree.path);
+    if (
+      path.dirname(worktreeRoot) !== managedRoot ||
+      !isWithinRoot(requested, worktreeRoot)
+    ) {
+      return null;
+    }
+    const sidecarPath =
+      createWorkspaceRuntimeSessionService(runtime).getWorktreeSessionPath(
+        sessionId,
+      );
+    const sidecarRaw = readBoundedRegularFileSync(sidecarPath, 64 * 1024);
+    if (sidecarRaw === null) return null;
+    const sidecar = JSON.parse(sidecarRaw) as Record<string, unknown>;
+    if (
+      typeof sidecar['worktreePath'] !== 'string' ||
+      fs.realpathSync(sidecar['worktreePath']) !== worktreeRoot
+    ) {
+      return null;
+    }
+    const markerPath = path.join(worktreeRoot, WORKTREE_SESSION_FILE);
+    if (!markerIsOwnedBy(markerPath, sessionId)) {
+      return null;
+    }
+    const requestedGitDir = resolveAbsoluteGitDir(requested);
+    if (requestedGitDir === null) return null;
+    const metadataRoot = fs.realpathSync(
+      path.join(workspaceCommonDir, 'worktrees'),
+    );
+    if (path.dirname(requestedGitDir) !== metadataRoot) return null;
+    const backpointer = readBoundedRegularFileSync(
+      path.join(requestedGitDir, 'gitdir'),
+      4096,
+    );
+    if (backpointer === null) return null;
+    const actualGitFile = fs.realpathSync(
+      path.resolve(requestedGitDir, backpointer.trim()),
+    );
+    const expectedGitFile = fs.realpathSync(path.join(worktreeRoot, '.git'));
+    if (actualGitFile !== expectedGitFile) return null;
+    return requested;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (
+      code === 'ENOENT' ||
+      code === 'EACCES' ||
+      code === 'EPERM' ||
+      code === 'ELOOP' ||
+      code === 'ENOTDIR'
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export function resolveSessionManagedGitCwdForRoute(
+  req: Request,
+  res: Response,
+  runtime: WorkspaceRuntime,
+  route: string,
+  sendBridgeError: SendBridgeError,
+): string | undefined {
+  let cwd: string | null;
+  try {
+    cwd = resolveSessionManagedGitCwd(req, runtime);
+  } catch (error) {
+    sendBridgeError(res, error, { route });
+    return undefined;
+  }
+  if (cwd === null) {
+    res.status(400).json({
+      error: 'invalid_cwd',
+      message: 'The supplied cwd is invalid or outside the workspace',
+    });
+    return undefined;
+  }
+  return cwd;
 }
