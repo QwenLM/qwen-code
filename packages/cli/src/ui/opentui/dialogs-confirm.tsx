@@ -78,6 +78,7 @@ import {
 } from '../utils/textUtils.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import { normalizePastedText } from './input-prompt-model.js';
+import { caretSpans, useLineEdit } from './line-edit.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
 import { computeHeaderCap } from '../components/messages/AskUserQuestionDialog.js';
@@ -707,8 +708,7 @@ function AskUserQuestionFlow(props: {
     return labels.length > 0 ? labels.join(', ') : undefined;
   };
 
-  const setCustomValue = (update: (previous: string) => string) => {
-    const next = update(typedValue(tab));
+  const writeCustomValue = (next: string) => {
     typedRef.current = { ...typedRef.current, [tab]: next };
     setTyped((prev) => ({ ...prev, [tab]: next }));
     // A multi-select box tracks whether its free-text entry counts, so typing
@@ -717,6 +717,15 @@ function AskUserQuestionFlow(props: {
       setTypedChecked((prev) => ({ ...prev, [tab]: next.trim().length > 0 }));
     }
   };
+
+  // ink mounts this field only while its row is the selected option, and mounts
+  // it with the caret past the value it holds. Coming back to the row, or to
+  // another question's row, drops the position it was left at.
+  const custom = useLineEdit(
+    customValue,
+    writeCustomValue,
+    `${isCustomRow}:${tab}`,
+  );
 
   const submitCustomRow = () => {
     // Re-read rather than use the rendered value: the keystroke that fills the
@@ -772,10 +781,8 @@ function AskUserQuestionFlow(props: {
         setSelected(Math.min(totalOptions - 1, selected + 1));
       } else if (original.name === 'return') {
         submitCustomRow();
-      } else if (original.name === 'backspace') {
-        setCustomValue((previous) => previous.slice(0, -1));
-      } else if (isPrintableKeyInput(key)) {
-        setCustomValue((previous) => previous + key.sequence);
+      } else if (!custom.handleKey(original) && isPrintableKeyInput(key)) {
+        custom.insert(key.sequence);
       }
       return;
     }
@@ -855,7 +862,7 @@ function AskUserQuestionFlow(props: {
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    setCustomValue((previous) => previous + text);
+    custom.insert(text);
   });
 
   // Defensive: an empty question list, or a question with no options, has
@@ -945,6 +952,7 @@ function AskUserQuestionFlow(props: {
   const customEmphasis = isCustomAnswer || typedChecked[tab] === true;
   const customLabel = `${question.options.length + 1}. `;
   const placeholder = t('Type something...');
+  const customSpans = caretSpans({ text: customValue, cursor: custom.caret });
 
   return (
     <>
@@ -999,10 +1007,15 @@ function AskUserQuestionFlow(props: {
             <text fg={C.accent}>{'> '}</text>
             {customValue ? (
               <>
-                <text fg={C.text}>{sanitizeTerminalText(customValue)}</text>
+                <text fg={C.text}>
+                  {sanitizeTerminalText(customSpans.before)}
+                </text>
                 {/* ink's software cursor: a background-filled cell at the
-                    insert position, which a text frame cannot show. */}
-                <text bg={C.accent}> </text>
+                    caret, which a text frame cannot show. */}
+                <text bg={C.accent}>{customSpans.at || ' '}</text>
+                <text fg={C.text}>
+                  {sanitizeTerminalText(customSpans.after)}
+                </text>
               </>
             ) : (
               <>

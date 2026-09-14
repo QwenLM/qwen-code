@@ -20,7 +20,7 @@
  *  - documentation/TOS links render as plain text (no OSC 8 in dialogs).
  */
 
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useState } from 'react';
 import { useKeyboard, usePaste, useRenderer } from '@opentui/react';
 import type { PasteEvent } from '@opentui/core';
 import { decodePasteBytes } from '@opentui/core';
@@ -57,6 +57,7 @@ import { normalizeModelIds } from '../auth/useAuth.js';
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import { normalizePastedText } from './input-prompt-model.js';
+import { caretSpans, useLineEdit } from './line-edit.js';
 import { Shell } from './dialogs-misc.js';
 import { C } from './theme.js';
 
@@ -213,55 +214,82 @@ function RadioList({ items, cursor }: { items: RadioItem[]; cursor: number }) {
   );
 }
 
-function InputLine({
+/**
+ * A dialog field's text with ink's software cursor: the cell under the caret
+ * drawn on a background, and an empty field putting that cell on its
+ * placeholder's first character so it still shows where text will start.
+ */
+function FieldText({
   value,
+  caret,
   placeholder,
   active,
 }: {
   value: string;
+  caret: number;
   placeholder?: string;
   active?: boolean;
 }) {
-  const empty = value.length === 0;
+  if (value.length === 0 && placeholder) {
+    if (!active) return <text fg={C.dim}>{placeholder}</text>;
+    return (
+      <>
+        <text bg={C.accent}>{placeholder.slice(0, 1)}</text>
+        <text fg={C.dim}>{placeholder.slice(1)}</text>
+      </>
+    );
+  }
+  const spans = caretSpans({ text: value, cursor: caret });
+  return (
+    <>
+      <text fg={C.text}>{spans.before}</text>
+      {active && <text bg={C.accent}>{spans.at || ' '}</text>}
+      <text fg={C.text}>{spans.after}</text>
+    </>
+  );
+}
+
+function InputLine({
+  value,
+  caret,
+  placeholder,
+  active,
+}: {
+  value: string;
+  caret: number;
+  placeholder?: string;
+  active?: boolean;
+}) {
   return (
     <box flexDirection="row" marginTop={1} paddingLeft={1}>
-      <text fg={empty ? C.dim : C.text}>
-        {empty ? (placeholder ?? '') : value}
-      </text>
-      {active && <text fg={C.accent}>{'█'}</text>}
+      <FieldText
+        value={value}
+        caret={caret}
+        placeholder={placeholder}
+        active={active}
+      />
     </box>
   );
 }
 
-/** Shared single-line text-input key handling (backend ask-user parity). */
+/**
+ * Shared single-line text-input key handling (backend ask-user parity). Returns
+ * the caret offset so the row can put its cursor cell where ink's would be.
+ */
 function useLineInputKeys(
   value: string,
   onChange: (next: string) => void,
   onSubmit: () => void,
-) {
-  // Key events can land in one React batch, where the value captured by the
-  // render that registered the handler is already stale by the second
-  // keystroke. The mirror is written synchronously so each event appends to
-  // what the previous one produced, and re-synced on render so a value set
-  // from anywhere else is not lost.
-  const latest = useRef(value);
-  latest.current = value;
-  const change = (next: string) => {
-    latest.current = next;
-    onChange(next);
-  };
+): number {
+  const line = useLineEdit(value, onChange);
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (o.name === 'return' || o.name === 'enter') {
       onSubmit();
       return;
     }
-    if (o.name === 'backspace' || o.name === 'delete') {
-      change(latest.current.slice(0, -1));
-      return;
-    }
-    if (isPrintableKeyInput(key)) {
-      change(latest.current + key.sequence);
+    if (!line.handleKey(o) && isPrintableKeyInput(key)) {
+      line.insert(key.sequence);
     }
   });
   // Bracketed pastes arrive as one PasteEvent with no keypress per character
@@ -273,8 +301,9 @@ function useLineInputKeys(
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    change(latest.current + text);
+    line.insert(text);
   });
+  return line.caret;
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +389,7 @@ function BaseUrlInputStep({
   flow: ProviderSetupFlow;
   documentationUrl?: string;
 }) {
-  useLineInputKeys(flow.state.baseUrl, flow.changeBaseUrl, () =>
+  const caret = useLineInputKeys(flow.state.baseUrl, flow.changeBaseUrl, () =>
     flow.submitBaseUrl(),
   );
   return (
@@ -368,6 +397,7 @@ function BaseUrlInputStep({
       <text fg={C.text}>{t('Enter the API endpoint for this protocol.')}</text>
       <InputLine
         value={flow.state.baseUrl}
+        caret={caret}
         placeholder={
           flow.state.baseUrlPlaceholder || 'https://api.openai.com/v1'
         }
@@ -400,7 +430,7 @@ function ApiKeyStep({
   flow: ProviderSetupFlow;
 }) {
   const docUrl = resolveDocumentationUrl(provider, flow.state.baseUrl);
-  useLineInputKeys(flow.state.apiKey, flow.changeApiKey, () =>
+  const caret = useLineInputKeys(flow.state.apiKey, flow.changeApiKey, () =>
     flow.submitApiKey(flow.state.apiKey),
   );
   return (
@@ -412,6 +442,7 @@ function ApiKeyStep({
       )}
       <InputLine
         value={flow.state.apiKey}
+        caret={caret}
         placeholder={provider.apiKeyPlaceholder ?? 'sk-...'}
         active
       />
@@ -480,6 +511,10 @@ function ModelsStep({
     [checked, syncModelIds],
   );
 
+  // ink keeps this field in a TextInput whose buffer survives the list taking
+  // focus, so the caret is still where it was left when Tab comes back.
+  const custom = useLineEdit(customText, updateCustom);
+
   const toggleRecommended = useCallback(
     (id: string) => {
       const next = new Set(checked);
@@ -523,12 +558,8 @@ function ModelsStep({
       submit();
       return;
     }
-    if (o.name === 'backspace' || o.name === 'delete') {
-      updateCustom(customText.slice(0, -1));
-      return;
-    }
-    if (isPrintableKeyInput(key)) {
-      updateCustom(customText + key.sequence);
+    if (!custom.handleKey(o) && isPrintableKeyInput(key)) {
+      custom.insert(key.sequence);
     }
   });
   // Pastes land in the custom-ID input only when it owns focus; while the
@@ -538,7 +569,7 @@ function ModelsStep({
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    updateCustom(customText + text);
+    custom.insert(text);
   });
 
   return (
@@ -548,7 +579,12 @@ function ModelsStep({
           'Enter model IDs directly. Use commas to configure multiple models.',
         )}
       </text>
-      <InputLine value={customText} placeholder="model-id" active={focus < 0} />
+      <InputLine
+        value={customText}
+        caret={custom.caret}
+        placeholder="model-id"
+        active={focus < 0}
+      />
       {flow.state.modelIdsError && (
         <box marginTop={1}>
           <text fg={C.red}>{flow.state.modelIdsError}</text>
@@ -608,6 +644,7 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
   } = flow.state;
   const ctxIdx = modalityEnabled ? 6 : 2;
   const onCtxRow = focusedConfigIndex === ctxIdx;
+  const ctxField = useLineEdit(contextWindowSize, flow.changeContextWindowSize);
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     // Focus-row navigation restricted to unambiguous shortcuts (ink parity:
@@ -623,7 +660,7 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     if (o.name === 'space') {
       // On the context row Space inserts a space into the field; the flow's
       // toggleFocusedAdvancedOption has no case for ctxIdx (ink parity).
-      if (onCtxRow) flow.changeContextWindowSize(contextWindowSize + ' ');
+      if (onCtxRow) ctxField.insert(' ');
       else flow.toggleFocusedAdvancedOption();
       return;
     }
@@ -631,14 +668,8 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
       flow.submitAdvancedConfig();
       return;
     }
-    if (onCtxRow) {
-      if (o.name === 'backspace' || o.name === 'delete') {
-        flow.changeContextWindowSize(contextWindowSize.slice(0, -1));
-        return;
-      }
-      if (isPrintableKeyInput(key)) {
-        flow.changeContextWindowSize(contextWindowSize + key.sequence);
-      }
+    if (onCtxRow && !ctxField.handleKey(o) && isPrintableKeyInput(key)) {
+      ctxField.insert(key.sequence);
     }
   });
   // Only the context-window field accepts text; a paste while another row is
@@ -648,7 +679,7 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    flow.changeContextWindowSize(contextWindowSize + text);
+    ctxField.insert(text);
   });
   const checkmark = (v: boolean) => (v ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY);
   const cursor = (index: number) => (focusedConfigIndex === index ? '›' : ' ');
@@ -701,10 +732,12 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
         <text
           fg={rowFg(ctxIdx)}
         >{`${cursor(ctxIdx)} ${t('Context window')}: `}</text>
-        <text fg={onCtxRow ? C.text : C.dim}>
-          {contextWindowSize || 'auto'}
-        </text>
-        {onCtxRow && <text fg={C.accent}>{'█'}</text>}
+        <FieldText
+          value={contextWindowSize}
+          caret={ctxField.caret}
+          placeholder="auto"
+          active={onCtxRow}
+        />
       </box>
       <box paddingLeft={4}>
         <text fg={C.dim}>

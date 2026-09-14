@@ -42,9 +42,15 @@ const mocks = vi.hoisted(() => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
       if (type === 'box' || type === 'text') {
+        // `bg` is the one style prop carried through: the dialog gives a
+        // background colour to exactly one cell, the software cursor.
+        const bg = (config as { bg?: string }).bg;
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          {
+            key: key ?? null,
+            ...(bg === undefined ? null : { 'data-bg': bg }),
+          },
           children,
         );
       }
@@ -479,6 +485,13 @@ describe('OpenTuiToolConfirmation', () => {
       });
     }
 
+    /** The character the software cursor is drawn on. */
+    function cursorCell(container: HTMLElement): string {
+      const cell = container.querySelector('[data-bg]');
+      if (!cell) throw new Error('no cursor cell is drawn');
+      return cell.textContent ?? '';
+    }
+
     beforeEach(() => {
       vi.useFakeTimers();
     });
@@ -553,6 +566,61 @@ describe('OpenTuiToolConfirmation', () => {
       expect(onConfirm).toHaveBeenCalledWith(
         ToolConfirmationOutcome.ProceedOnce,
         { answers: { '0': 'burst' } },
+      );
+    });
+
+    it('edits the middle of a typed answer', () => {
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(askDetails(twoOptions, onConfirm));
+      press({ name: '3', sequence: '3' });
+      typeChars('abcdef');
+      press({ name: 'left' });
+      press({ name: 'left' });
+      expect(cursorCell(container)).toBe('e');
+      typeChars('X');
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'abcdXef' } },
+      );
+    });
+
+    it('moves the caret instead of the question with the arrows', () => {
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(multiAskDetails(onConfirm));
+      press({ name: '3', sequence: '3' });
+      typeChars('ab');
+      press({ name: 'left' });
+      press({ name: 'left' });
+      press({ name: 'right' });
+      // the row owns the cursor, so neither arrow reached the tab switch
+      expect(cursorCell(container)).toBe('b');
+      expect(container.textContent ?? '').toContain('Pick a deploy target?');
+      press({ name: 'return', sequence: '\r' });
+      expect(container.textContent ?? '').not.toContain('Pick a region?');
+      settleAdvance();
+      expect(container.textContent ?? '').toContain('Pick a region?');
+    });
+
+    it('restarts the caret past the value when the row is selected again', () => {
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(askDetails(twoOptions, onConfirm));
+      press({ name: '3', sequence: '3' });
+      typeChars('abc');
+      press({ name: 'left' });
+      press({ name: 'left' });
+      press({ name: 'left' });
+      expect(cursorCell(container)).toBe('a');
+      // ink mounts this field per selected row, and mounts it at the end of the
+      // value it holds, so leaving the row and returning drops that position
+      press({ name: 'up' });
+      press({ name: 'down' });
+      typeChars('X');
+      expect(container.textContent ?? '').toContain('> abcX');
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'abcX' } },
       );
     });
 

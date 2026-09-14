@@ -57,13 +57,14 @@ reconstruction.
 Each scenario runs twice, once per renderer, from the same bundle and the same
 boot arguments, and checkpoints are declared by the scenario rather than
 sampled on a timer, so both legs are captured at the same point in the script
-rather than at the same wall-clock moment. Twenty-five scenarios cover boot, a
+rather than at the same wall-clock moment. Twenty-six scenarios cover boot, a
 narrow terminal, typing and completion, `@` completion, mid-stream indicators,
 a tool run under auto-approval, a tool confirmation, the slash dialogs, the
 approval-mode cycle, the auto-mode boot notice, an error path, a resize, clear
 and exit, a long hold that cycles the loading phrases, a to-do card, the
 question dialog on its own, the same dialog across three questions with a
-multi-select and a typed answer, the release of a parked confirmation when the
+multi-select and a typed answer, that dialog's free-text row corrected in the
+middle of a typed value, the release of a parked confirmation when the
 approval mode changes, the approval of a gated server at startup, a tool call
 whose arguments are long enough to be capped, a control arm that repeats that
 call with the arguments row switched off, an answer long enough to overflow
@@ -992,17 +993,103 @@ replay: the shared resume loader reads this payload shape and this renderer's
 session switch calls it, but no scenario resumed a session to watch the row come
 back.
 
+## Decision 32 — a dialog field's caret moves, as ink's does
+
+Every text field in these dialogs kept its value in the dialog's own state and
+only ever appended to it. The keyboard could add a character and erase the last
+one; nothing else. ← and → did nothing, so did Home and End, and a mistake
+anywhere but the end of the value could be repaired only by erasing everything
+after it. ink routes the same fields through one text-input component whose
+editing lives in a buffer with a caret measured in code points, which is why
+those keys move a cursor there. Two field families were affected: the question
+dialog's free-text row, whose own help line advertises ← and → as tab switches
+while the row gave them up entirely, and the four text fields of the
+authentication wizard.
+
+The buffer was not reimplemented from a reading of what it ought to do. What
+exists is the one-line slice of ink's own operations, and the tests assert no
+hand-written expectation: each fixture replays a keystroke sequence through
+ink's reducer and through this model side by side, comparing the text and the
+caret offset after every step rather than at the end — across a paste that
+leaves a line break behind, over characters ink weighs as one cell and as two,
+and at both walls where a move has nowhere to go. ink's word segmentation is
+reused as itself: two helpers that had been module-private became exported, so
+the span ctrl+W erases is the span ink erases, and ink's own behaviour is
+unchanged. The key order is ink's as well, restricted to the keys a one-line
+field can receive, and every other key goes back to the dialog — which is what
+ink needs, since its dialog stops handling the arrows once the field owns the
+row. Word jumps, delete-word-right, kill-line and undo/redo are recorded as not
+ported, all four of them bound by ink. Two absences are forced: ctrl+D belongs
+to the app's global exit binding, which takes the key before any field sees it,
+and a field whose value another keystroke replaced wholesale has its caret pulled
+back inside the string rather than left pointing past it.
+
+Three rendering differences stand. ink windows a field to a fixed column count
+and shows only the line the caret is on, so a pasted multi-line value hides
+everything off that line, while these rows render the whole value. ink paints its
+cell a gray read off the terminal background, falling back to an underline where
+a block would corrupt IME composition, while this cell carries the theme accent
+as the composer's cursor does. And ink runs a 530 ms interval that toggles the
+cell's visibility for as long as a field holds focus, where a steady cell keeps
+the dialog off a repaint timer. That interval shows up in a measurement, not just
+in the source: over a scenario that parks the caret in the free-text row, the ink
+leg wrote 270 KB in each sixty-second window it sat there, four of the scenario's
+seven settling waits burned their full timeout, and the leg took 251 s where this
+renderer's took 14 s.
+
+Mount semantics differ per field, because ink's do. The question dialog's row is
+mounted by that dialog only while its own option is the selected one, and mounted
+with the caret past the value it holds, so this port treats the row as freshly
+mounted whenever it is (re)selected and drops a caret left mid-value. The wizard's
+custom-model field is not unmounted when the list below it takes focus, so there
+the caret is still where it was left when Tab comes back.
+
+One field's text is not the model's own either. The context-window setter keeps
+digits only, and this port renders the value it is handed, so a character that
+setter rejects — a letter, or the Space that step binds — moves the caret and
+never appears in the row. ink's buffer is the source of truth there and is never
+re-read from the property, so it goes on showing what its own flow threw away.
+The caret lands in the same column both ways, and what is displayed took this
+shape before the caret existed at all — ink showing a value its flow has already
+discarded is recorded as a follow-up rather than reproduced here.
+
+Coverage is twenty-two new unit tests in three suites — thirteen of them the
+model compared against ink, the rest the fields that use it — plus seven
+mutations, each failing the tests that own the behaviour taken away: a left
+arrow that moves nothing, the context-window field's typing branch, the two
+end-of-line jumps, forward delete, a modified Delete that erases a character
+instead of passing through, ctrl+W, and a row that stops re-mounting. On a
+machine, a new scenario answers one question from its free-text row on both
+legs, with a single question so that neither the tab clamp nor the double-fire
+recorded under Decision 21 can be what produced the frame: six characters
+typed, the caret taken back two cells, one character inserted. Both legs show
+`> abcdXef` at the same column of the same row and both record `abcdXef` as
+the answer. The styled capture pins the cell itself — at the one checkpoint
+where both frames caught ink's cursor visible it sits on the same column over
+the same character on both sides, differing only in the two colours; at the
+two before it ink's cell is simply absent, which is its interval rather than a
+missing cursor. What no scenario reaches is the authentication wizard, as
+before: its four fields' editing rests on the unit suites alone. One
+test-runtime note belongs here because it cost a debugging pass: the DOM
+runtime the field tests use keeps earlier renders of a re-rendered row
+mounted beside the live one, so the probe that reads the cursor cell reads
+the last one. Rendering the same shape through the real renderer over five
+state changes leaves exactly one row, so this is the harness, not the dialog.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
 
 - **Geometry, row content, row order, row count and glyph identity**, on a
-  reconstructed screen, for twenty-five scenarios at 100×40 and, for the narrow
-  and resize scenarios, at 60×24 — seventy-two checkpoints in all. Both legs
-  from one bundle and one set of boot arguments.
-- **Colour was not verified.** The reconstruction is text. Several rows are
-  known to differ only in which theme token they use, and a styled capture
-  exists that could settle it but was not read.
+  reconstructed screen, for twenty-six scenarios at 100×40 and, for the narrow
+  and resize scenarios, at 60×24 — seventy-seven checkpoints in all, of which
+  twenty-two match byte for byte. Both legs from one bundle and one set of
+  boot arguments.
+- **Colour was not verified, apart from one row family.** The reconstruction is
+  text. Several rows are known to differ only in which theme token they use.
+  A styled capture backs all but three of the seventy-seven checkpoints and was
+  read for one family only — Decision 32's cursor cell — leaving the rest
+  unread.
 - **The scrollbar costs the transcript no column.** Measured at a hundred
   columns with two answer rows of 95 and 96 characters: this renderer fills 99
   columns before it breaks a row where ink fills 98, so the one-column gap sits

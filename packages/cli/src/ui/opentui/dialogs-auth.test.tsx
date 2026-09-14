@@ -54,9 +54,15 @@ const mocks = vi.hoisted(() => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
       if (type === 'box' || type === 'text') {
+        // `bg` is the one style prop carried through: the dialog gives a
+        // background colour to exactly one cell, the software cursor.
+        const bg = (config as { bg?: string }).bg;
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          {
+            key: key ?? null,
+            ...(bg === undefined ? null : { 'data-bg': bg }),
+          },
           children,
         );
       }
@@ -131,11 +137,24 @@ function lastKeyboardHandler(): (key: unknown) => void {
   return handler;
 }
 
-async function press(name: string): Promise<void> {
+async function press(
+  name: string,
+  overrides: Record<string, unknown> = {},
+): Promise<void> {
   const handler = lastKeyboardHandler();
   await act(async () => {
-    handler(baseKeyEvent({ name, sequence: name }));
+    handler(baseKeyEvent({ name, sequence: name, ...overrides }));
   });
+}
+
+/**
+ * The cell the software cursor is drawn on, or null with no focused field. The
+ * jsdom harness keeps the earlier renders of one row mounted beside the live one
+ * (the native renderer does not), so the newest cell is the last.
+ */
+function cursorCell(): HTMLElement | null {
+  const cells = document.querySelectorAll<HTMLElement>('[data-bg]');
+  return cells[cells.length - 1] ?? null;
 }
 
 async function typeText(text: string): Promise<void> {
@@ -517,5 +536,130 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     expect(screen.getByText('auto')).toBeTruthy();
     await press('return'); // advancedConfig: skip → review
     expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+  });
+});
+
+describe('caret editing in dialog text fields (#107)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    core.applyProviderInstallPlan.mockReset().mockResolvedValue(undefined);
+    core.logAuth.mockReset();
+  });
+
+  /** Walk to the base-URL step, whose field starts empty. */
+  async function runToBaseUrlStep(): Promise<void> {
+    renderDialog();
+    await press('down');
+    await press('down');
+    await press('return'); // main: CUSTOM_PROVIDER → protocol
+    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+  }
+
+  /** Walk to the advanced-config step with the context-window row focused. */
+  async function runToContextWindowRow(): Promise<void> {
+    await runToBaseUrlStep();
+    await typeText('https://api.example.com/v1');
+    await press('return'); // baseUrl → apiKey
+    await typeText('sk-test');
+    await press('return'); // apiKey → models
+    await typeText('test-model');
+    await press('return'); // models → advancedConfig
+    await press('down'); // thinking → modality
+    await press('down'); // modality → context window (index 2 while it's closed)
+  }
+
+  /**
+   * The focused field's rendered text and the cell the cursor sits on, read off
+   * the cursor cell's neighbours so a row that labels its own field — the
+   * context-window row — contributes only the value. Valid while the field holds
+   * a value: an empty field puts the cell on its placeholder's first character,
+   * which is the row's first text element.
+   */
+  function focusedField(): { text: string; cell: string } {
+    const cell = cursorCell();
+    if (!cell) throw new Error('no field renders a cursor cell');
+    const at = cell.textContent ?? '';
+    return {
+      text:
+        (cell.previousElementSibling?.textContent ?? '') +
+        at +
+        (cell.nextElementSibling?.textContent ?? ''),
+      cell: at,
+    };
+  }
+
+  it('inserts at the position the arrows left the caret', async () => {
+    await runToBaseUrlStep();
+    await typeText('abcdef');
+    await press('left');
+    await press('left');
+    await typeText('X');
+    expect(focusedField()).toEqual({ text: 'abcdXef', cell: 'e' });
+  });
+
+  it('keeps the caret at either end for ctrl+A and ctrl+E', async () => {
+    await runToBaseUrlStep();
+    await typeText('ab');
+    await press('a', { ctrl: true, sequence: '\x01' });
+    expect(focusedField()).toEqual({ text: 'ab', cell: 'a' });
+    await press('e', { ctrl: true, sequence: '\x05' });
+    // past the last code point ink draws a blank cell, which the text keeps
+    expect(focusedField()).toEqual({ text: 'ab ', cell: ' ' });
+    await typeText('c');
+    expect(focusedField()).toEqual({ text: 'abc ', cell: ' ' });
+  });
+
+  it('erases backward with backspace and forward with delete', async () => {
+    await runToBaseUrlStep();
+    await typeText('abcd');
+    await press('a', { ctrl: true, sequence: '\x01' });
+    await press('backspace');
+    // nothing left of the caret, so the value stands
+    expect(focusedField()).toEqual({ text: 'abcd', cell: 'a' });
+    await press('delete');
+    expect(focusedField()).toEqual({ text: 'bcd', cell: 'b' });
+  });
+
+  it('erases the word left of the caret with ctrl+W', async () => {
+    await runToBaseUrlStep();
+    await typeText('https://openai');
+    await press('w', { ctrl: true, sequence: '\x17' });
+    expect(focusedField()).toEqual({ text: 'https:// ', cell: ' ' });
+    // the edited value, not the typed one, is what the step submits
+    await press('return');
+    expect(screen.getByText(/Step 3\/6 · API Key/)).toBeTruthy();
+  });
+
+  it('sends End past the line break a paste leaves behind', async () => {
+    await runToBaseUrlStep();
+    await pasteText('https://one.test\nhttps://two.test');
+    await press('a', { ctrl: true, sequence: '\x01' });
+    expect(focusedField().cell).toBe('h');
+    await press('e', { ctrl: true, sequence: '\x05' });
+    await typeText('s');
+    // ink's End is the end of the value, not of the caret's own line
+    expect(focusedField()).toEqual({
+      text: 'https://one.test\nhttps://two.tests ',
+      cell: ' ',
+    });
+  });
+
+  it('edits the context-window field in place', async () => {
+    await runToContextWindowRow();
+    await typeText('1234');
+    await press('left');
+    await press('left');
+    await typeText('9');
+    expect(focusedField()).toEqual({ text: '12934', cell: '3' });
+    // The step's setter keeps digits only, so a letter never reaches the value.
+    // The caret still advances one cell, as ink's does; ink also keeps the letter
+    // on screen, because its field renders its own buffer rather than the value.
+    await typeText('x');
+    expect(focusedField()).toEqual({ text: '12934', cell: '4' });
+    await press('return');
+    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(document.body.textContent).toContain('"contextWindowSize": 12934');
   });
 });
