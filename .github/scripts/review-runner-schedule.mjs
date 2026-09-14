@@ -74,14 +74,10 @@ async function main() {
   const results = await Promise.all(
     actions.map(async ({ id, name, add, remove }) => {
       try {
-        for (const label of remove) {
-          await gh([
-            'api',
-            '--method',
-            'DELETE',
-            `repos/${repo}/actions/runners/${id}/labels/${label}`,
-          ]);
-        }
+        // Add before removing, so a failure can only leave the host in both
+        // pools. The reverse order lets a failed POST strand the host with
+        // no pool label at all — no job in either pool can match it until
+        // the next successful switch, which can be 12 hours away.
         if (add.length) {
           await gh([
             'api',
@@ -89,6 +85,14 @@ async function main() {
             'POST',
             `repos/${repo}/actions/runners/${id}/labels`,
             ...add.flatMap((l) => ['-f', `labels[]=${l}`]),
+          ]);
+        }
+        for (const label of remove) {
+          await gh([
+            'api',
+            '--method',
+            'DELETE',
+            `repos/${repo}/actions/runners/${id}/labels/${label}`,
           ]);
         }
         return {

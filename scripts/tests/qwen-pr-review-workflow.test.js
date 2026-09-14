@@ -3960,6 +3960,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       runCreated = '',
       runStartedAttempt = '',
       reviewPrResult = 'failure',
+      jobs = '',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
@@ -3994,6 +3995,17 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           '  [ "${SCENARIO:-}" = "lookup_fail" ] && exit 1',
           '  echo "qwen-code-ci-bot"; exit 0',
           'fi',
+          // The never-started guard asks this run's job list whether review-pr
+          // ever got a runner. It runs the step's REAL --jq filter over the
+          // fixture, like the reviews branch below. Leaving JOBS_JSON unset
+          // keeps every pre-existing case on the unreadable-list path
+          // ("unknown"), where posting wins — the same posture they had before
+          // this branch existed.
+          'case "$*" in',
+          '  *"/actions/runs/12345/jobs"*)',
+          '    [ -n "${JOBS_JSON:-}" ] || exit 1',
+          '    printf "%s" "$JOBS_JSON" | jq -r "$filter"; exit 0 ;;',
+          'esac',
           'if [ "$cmd" = "run" ] && [ "$sub" = "view" ]; then',
           '  case "$*" in',
           '    *createdAt*|*startedAt*)',
@@ -4088,6 +4100,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               RUN_CREATED: runCreated,
               RUN_STARTED_ATTEMPT: runStartedAttempt,
               REVIEW_PR_RESULT: reviewPrResult,
+              JOBS_JSON: jobs,
             },
           },
         );
@@ -4139,6 +4152,64 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     // The failure path keeps the original body.
     const failed = runFallbackStep('default', { reviewPrResult: 'failure' });
     expect(failed.posted).toContain('did not complete successfully');
+  });
+
+  it('skips the fallback comment when no runner ever started review-pr', () => {
+    // The review pool is closed for 12 of every 24 hours, so a review-pr job
+    // queued into the dark window can expire without a runner ever picking it
+    // up: no runner_name and no steps. Nothing ran, so the failure body's
+    // "did not complete successfully / retried automatically" claims would
+    // both be false — the step records the skip and posts nothing.
+    const r = runFallbackStep('never_started', {
+      reviewPrResult: 'failure',
+      jobs: JSON.stringify({
+        total_count: 2,
+        jobs: [
+          {
+            name: 'precheck-pr',
+            runner_name: 'ubuntu-latest',
+            steps: [{ name: 'Checkout' }],
+          },
+          { name: 'review-pr', runner_name: '', status: 'queued', steps: [] },
+        ],
+      }),
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).toBe('');
+    expect(r.calls).not.toContain('pr comment');
+    expect(r.summary).toContain('never started by a runner');
+  });
+
+  it('still posts when review-pr did run on a runner', () => {
+    // The control for the skip above: the same job list with a runner
+    // recorded must keep the failure comment, or the "never started" branch
+    // would swallow every genuine failure too.
+    const r = runFallbackStep('ran', {
+      reviewPrResult: 'failure',
+      jobs: JSON.stringify({
+        total_count: 1,
+        jobs: [
+          {
+            name: 'review-pr',
+            runner_name: 'ecs-qwen-hk1-3',
+            steps: [{ name: 'Run review' }],
+          },
+        ],
+      }),
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    expect(r.posted).toContain('did not complete successfully');
+  });
+
+  it('posts when the job list cannot be read', () => {
+    // No fixture, so the listing fails and the step cannot prove the job
+    // never started. An unreadable list must not be read as "nothing ran".
+    const r = runFallbackStep('jobs_unreadable', {
+      reviewPrResult: 'failure',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
   });
 
   it('dedupes on the marker plus this run URL', () => {
