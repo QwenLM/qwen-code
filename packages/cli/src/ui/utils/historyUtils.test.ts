@@ -16,6 +16,7 @@ import {
   omitSystemReminderBlocks,
   prependMissingSystemReminders,
   realUserPromptTexts,
+  splitInjectedLeadingReminders,
   splitLeadingSystemReminders,
   stripLeadingSystemReminders,
 } from './historyUtils.js';
@@ -475,23 +476,72 @@ describe('omitSystemReminderBlocks', () => {
     expect(omitSystemReminderBlocks(text, `${envelope}\n\n`)).toBe('my prompt');
   });
 
-  it("removes only the producer separator, keeping the next line's indentation", () => {
-    // A queue member's projection is the trimmed typed text, so the
-    // producer's envelope run ends with the whitespace up to it —
-    // including the user's own leading indentation. Removing a greedy
-    // whitespace run with the block would eat that indentation.
+  it('consumes exactly the separator run the decomposition recorded', () => {
+    // Round-trip against the arming side: any separator run
+    // isOnlyLeadingSystemReminders accepted into the prefix must come out
+    // with the block, or the dispatch adoption gate's byte-identity can
+    // never hold (a member's trimmed projection leaves its leading
+    // whitespace inside the armed run) and a mid-string envelope falls
+    // through to the leading-only strip, surfacing as the user's words.
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    for (const separator of ['\n\n', '\n\n ', '\n\n\n\n']) {
+      const prefix = `${envelope}${separator}`;
+      expect(isOnlyLeadingSystemReminders(prefix)).toBe(true);
+      expect(omitSystemReminderBlocks(`${prefix}rest`, prefix)).toBe('rest');
+      expect(omitSystemReminderBlocks(`first\n\n${prefix}rest`, prefix)).toBe(
+        'first\n\nrest',
+      );
+    }
+  });
+
+  it('keeps whitespace the decomposition did not record', () => {
+    // The removal is the exact inverse of the arming, never a greedy
+    // whitespace run re-derived from the text: whitespace past the
+    // recorded separator is display content and stays.
     const envelope = '<system-reminder>\nnotice\n</system-reminder>';
     expect(
       omitSystemReminderBlocks(
         `${envelope}\n\n  indented prompt`,
-        `${envelope}\n\n  `,
+        `${envelope}\n\n`,
       ),
     ).toBe('  indented prompt');
+  });
+});
+
+describe('splitInjectedLeadingReminders', () => {
+  const userRun = '<system-reminder>\nuser pasted note\n</system-reminder>\n\n';
+  const injected = '<system-reminder>\nmanaged context\n</system-reminder>\n\n';
+
+  it('returns the injected prefix ahead of a user-authored leading run', () => {
+    // The membership test this replaces answered "user-authored" here
+    // because the model text CONTAINS the user's run — ahead of it sits
+    // the injected block the run had to be distinguished from.
     expect(
-      omitSystemReminderBlocks(
-        `first\n\n${envelope}\n\n  indented second`,
-        `${envelope}\n\n  `,
+      splitInjectedLeadingReminders(
+        `${userRun}[Pasted Content 12 chars]`,
+        `${injected}${userRun}line1\nline2`,
       ),
-    ).toBe('first\n\n  indented second');
+    ).toBe(injected);
+  });
+
+  it('returns an empty prefix when nothing was injected ahead', () => {
+    expect(
+      splitInjectedLeadingReminders(`${userRun}rest`, `${userRun}rest`),
+    ).toBe('');
+  });
+
+  it('returns undefined when the projection carries no leading run', () => {
+    expect(splitInjectedLeadingReminders('rest', `${injected}rest`)).toBe(
+      undefined,
+    );
+  });
+
+  it('returns undefined when the runs do not line up', () => {
+    expect(
+      splitInjectedLeadingReminders(
+        `${userRun}rest`,
+        `${injected}rest without the user run`,
+      ),
+    ).toBe(undefined);
   });
 });

@@ -2195,6 +2195,7 @@ describe('AppContainer State Management', () => {
         ['persistent failure batch'],
         undefined,
         true,
+        undefined,
       );
 
       // The guard holds while nothing has settled or changed: a failed
@@ -3348,10 +3349,14 @@ describe('AppContainer State Management', () => {
         submittedPrompt: stashedText,
       });
 
+      // The restore carries provenance, so the unedited resubmit hands
+      // the stashed text back as its own projection — the dispatch path
+      // adopts it verbatim and the user's leading block reaches every
+      // read-back surface instead of being shape-stripped.
       expect(mockQueueMessage).toHaveBeenCalledWith(
         stashedText,
         false,
-        undefined,
+        stashedText,
       );
     });
 
@@ -5324,6 +5329,76 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('drops an injected envelope ahead of a user-pasted block on a projection-less queue restore', async () => {
+      // A member's projection leads with a <system-reminder> block the
+      // user pasted themselves while the injector's copy sits AHEAD of it
+      // in the model text, and a collapsed paste keeps the projection
+      // from being a suffix: the restore must arm and remove exactly the
+      // injected prefix. The membership test this replaces read the
+      // user's run as proof the whole model text was user content and
+      // refilled the composer with the injected envelope.
+      const injectedEnvelope =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\n';
+      const userEnvelope =
+        '<system-reminder>\nuser pasted note\n</system-reminder>\n\n';
+      const expandedPaste = 'line1\nline2\nline3';
+      const aggregateModelText = `${injectedEnvelope}${userEnvelope}${expandedPaste}`;
+      const projection = `${userEnvelope}[Pasted Content 12 chars]`;
+      const mockSetText = vi.fn();
+      const mockQueueMessage = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: vi.fn().mockResolvedValue(true),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [aggregateModelText],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(aggregateModelText),
+        popAllMessages: vi.fn().mockReturnValue({
+          kind: 'user',
+          modelText: aggregateModelText,
+          submittedPrompt: projection,
+          turnKey: 'k1',
+        }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const poppedText = capturedUIActions.popAllQueuedMessages();
+      // The composer's text drops the injected block and keeps the user's
+      // own leading envelope.
+      expect(poppedText).toBe(`${userEnvelope}${expandedPaste}`);
+
+      // The injected envelope was armed by the restore, so the unedited
+      // resubmit re-delivers it with the user's text as the projection.
+      capturedUIActions.handleFinalSubmit(poppedText as string, {
+        submittedPrompt: poppedText as string,
+      });
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        `${injectedEnvelope}${userEnvelope}${expandedPaste}`,
+        false,
+        `${userEnvelope}${expandedPaste}`,
+      );
+    });
+
     it('keeps attachment refs in the composer when the queue aggregate projection predates them', async () => {
       // handleSubmitAndClear captures the projection before prepending
       // attachment @refs, so a two-member aggregate's projection
@@ -5466,6 +5541,90 @@ describe('AppContainer State Management', () => {
         `${envelope}follow up`,
         false,
         'follow up',
+      );
+    });
+
+    it('carries the envelope decomposition through the admission-failed re-queue', async () => {
+      // A two-member aggregate's injected envelope sits mid-string. When
+      // admission fails the batch is re-queued as ONE entry whose text is
+      // the joined model text, where the aggregation's leading-prefix
+      // arithmetic can no longer see the envelope: the decomposition must
+      // ride the re-queue, or the re-drained submission loses its
+      // provenance and the envelope reads back as the user's own words.
+      const envelope =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\n';
+      const modelText = `first message\n\n${envelope}second message`;
+      const submittedPrompt = 'first message\n\nsecond message';
+      const restoreMessages = vi.fn();
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'user' as const,
+          modelText,
+          submittedPrompt,
+          reminders: envelope,
+          turnKey: 'k1',
+        };
+      });
+      const submitQuery = vi.fn(async (...args: unknown[]) => {
+        const metadata = args[3] as
+          | { onAdmissionFailed?: () => void }
+          | undefined;
+        metadata?.onAdmissionFailed?.();
+      }) as unknown as ReturnType<typeof useLlmStream>['submitQuery'];
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [modelText],
+        pendingSubmissionCount: 1,
+        addMessage: vi.fn(),
+        addPeerMessage: vi.fn(),
+        enqueueGoalTurn: vi.fn(),
+        peekNextUserBatchKey: vi.fn(),
+        hasQueuedUserMessages: vi.fn().mockReturnValue(false),
+        getPendingSubmissionCount: vi.fn(() => (popped ? 0 : 1)),
+        getQueuedPeerCount: vi.fn().mockReturnValue(0),
+        claimGoalTurn: vi.fn(),
+        claimDirectUserAdmission: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(modelText),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        popNextSubmission,
+        restoreMessages,
+        restorePeerMessage: vi.fn(),
+        drainQueue: vi.fn().mockReturnValue([]),
+      });
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledOnce());
+      // The re-queue hands the producer decomposition back to the queue:
+      // without it the restored single entry re-aggregates with no
+      // reminders and the mid-string envelope is lost to the strip.
+      expect(restoreMessages).toHaveBeenCalledWith(
+        [modelText],
+        submittedPrompt,
+        true,
+        envelope,
       );
     });
 

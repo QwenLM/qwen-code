@@ -276,13 +276,13 @@ import {
 } from '../commands/extensions/consent.js';
 import {
   findLastUserItemIndex,
-  hasUserAuthoredLeadingReminders,
   isOnlyLeadingSystemReminders,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
   omitSystemReminderBlocks,
   prependMissingSystemReminders,
   realUserPromptTexts,
+  splitInjectedLeadingReminders,
   splitLeadingSystemReminders,
   stripLeadingSystemReminders,
 } from './utils/historyUtils.js';
@@ -596,11 +596,15 @@ export function useQueuedSubmissionDrain({
             // path uses: admission failed because a turn is active,
             // and the mid-turn steer drain returns raw text only, which
             // would steer an undeferred restore into that turn with its
-            // projection lost.
+            // projection lost. The decomposition rides along: the
+            // re-queued single entry's text is the joined model text,
+            // where the aggregation's leading-prefix arithmetic can no
+            // longer see a mid-string envelope.
             restoreMessages(
               [submission.modelText],
               submission.submittedPrompt,
               true,
+              submission.reminders,
             );
             markAdmissionFailed();
           },
@@ -1581,16 +1585,25 @@ export const AppContainer = (props: AppContainerProps) => {
     }
     restoredPromptStashTargetsRef.current.add(promptStashTargetDir);
     restorePromptStash(promptStashTargetDir, buffer.text, (text, version) => {
-      restoredSubmissionRef.current = null;
-      submittedPromptProvenanceUnavailableRef.current = true;
-      // A version-1 stash was written by an older build and can hold the
-      // model-facing text with its injected envelope; restore only the
-      // user-visible form. A version-2 stash holds composer text only —
-      // user content by construction — so a user-pasted leading
-      // <system-reminder> block survives verbatim.
-      buffer.setText(version === 1 ? stripLeadingSystemReminders(text) : text);
+      if (version === 1) {
+        // A version-1 stash was written by an older build and can hold
+        // the model-facing text with its injected envelope; restore only
+        // the user-visible form and keep the provenance void.
+        invalidateSubmittedPromptProvenance();
+        buffer.setText(stripLeadingSystemReminders(text));
+        return;
+      }
+      // A version-2 stash holds composer text only — user content by
+      // construction — so the restore carries the same provenance every
+      // other restore records: an unedited resubmit hands the stashed
+      // text back as its own projection and a user-pasted leading
+      // <system-reminder> block survives on every read-back surface.
+      restoredSubmissionRef.current = { displayText: text };
+      submittedPromptProvenanceUnavailableRef.current = false;
+      restoredPromptEditedRef.current = false;
+      buffer.setText(text);
     });
-  }, [buffer, promptStashTargetDir]);
+  }, [buffer, invalidateSubmittedPromptProvenance, promptStashTargetDir]);
 
   useEffect(() => {
     const fetchUserMessages = async () => {
@@ -2730,30 +2743,42 @@ export const AppContainer = (props: AppContainerProps) => {
         // blocks were injected, so omit those (a mid-string aggregate
         // envelope included) from the model text instead; a leading-only
         // split would leave a mid-string envelope in the composer and
-        // drop its re-arm. Without a producer decomposition the leading
-        // split is all that is safe to remove — and even that only when
-        // the projection does not itself lead with the same run: a leading
-        // run the model text shares with the projection is user-authored
-        // content (a pasted note ahead of the collapsed paste), which the
-        // shape split must not delete and the re-arm must not consume.
+        // drop its re-arm. Without a producer decomposition, a projection
+        // whose leading envelope run the model text's own leading run
+        // ENDS with is user-authored content (a pasted note ahead of the
+        // collapsed paste): exactly the injected blocks ahead of it are
+        // armed and removed — a membership test anywhere in the model
+        // text would misread an injected envelope ahead of the user's
+        // run as user content and refill the composer with it. When the
+        // runs do not line up, the leading split is all that is safe to
+        // remove.
         if (submission.reminders !== undefined) {
           reminders = submission.reminders;
           displayText = omitSystemReminderBlocks(
             submission.modelText,
             reminders,
           );
-        } else if (
-          producerDisplay !== undefined &&
-          hasUserAuthoredLeadingReminders(producerDisplay, submission.modelText)
-        ) {
-          reminders = '';
-          displayText = submission.modelText;
         } else {
-          reminders = split.reminders;
-          displayText = omitSystemReminderBlocks(
-            submission.modelText,
-            reminders,
-          );
+          const injectedLeading =
+            producerDisplay === undefined
+              ? undefined
+              : splitInjectedLeadingReminders(
+                  producerDisplay,
+                  submission.modelText,
+                );
+          if (injectedLeading !== undefined) {
+            reminders = injectedLeading;
+            displayText = omitSystemReminderBlocks(
+              submission.modelText,
+              injectedLeading,
+            );
+          } else {
+            reminders = split.reminders;
+            displayText = omitSystemReminderBlocks(
+              submission.modelText,
+              reminders,
+            );
+          }
         }
       }
       restoredSubmissionRef.current = { displayText };

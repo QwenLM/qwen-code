@@ -1168,6 +1168,40 @@ describe('useMessageQueue', () => {
       expect(drained).toEqual(['steer now']);
     });
 
+    it('carries a restored producer decomposition through the re-queue', () => {
+      // A drained aggregate whose admission failed is re-queued as ONE
+      // entry whose text is the joined model text: the mid-string
+      // envelope is invisible to the aggregation's leading-prefix
+      // arithmetic, so the producer decomposition must ride the restore
+      // itself or the re-drained submission loses it.
+      const { result } = renderHook(() => useMessageQueue());
+      const envelope =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\n';
+      const modelText = `first message\n\n${envelope}second message`;
+      const submittedPrompt = 'first message\n\nsecond message';
+
+      act(() => {
+        result.current.restoreMessages(
+          [modelText],
+          submittedPrompt,
+          true,
+          envelope,
+        );
+      });
+
+      let popped: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        popped = result.current.popNextSubmission();
+      });
+
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText,
+        submittedPrompt,
+        reminders: envelope,
+      });
+    });
+
     it('fabricates no projection when restoring multiple messages', () => {
       // The single original prompt cannot be attributed across several
       // restored messages, so it is dropped; with no member carrying

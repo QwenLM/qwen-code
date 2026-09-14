@@ -1245,6 +1245,95 @@ describe('useLlmStream', () => {
     );
   });
 
+  it('drops an injected envelope ahead of a user-authored leading block', async () => {
+    // An injector fired ahead of a <system-reminder> block the user pasted
+    // themselves, and a large paste collapsed the projection to a
+    // placeholder so no adoption leg fires. The projection's leading run
+    // trails the injected block inside the model text's own leading run;
+    // a membership test anywhere in the model text cannot tell the blocks
+    // apart and would display, log, and refill the injected envelope as
+    // the user's own words. Only the injected prefix is removed.
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const injectedEnvelope =
+      '<system-reminder>\nmanaged context\n</system-reminder>\n\n';
+    const userEnvelope =
+      '<system-reminder>\nuser pasted note\n</system-reminder>\n\n';
+    const modelText = `${injectedEnvelope}${userEnvelope}line1\nline2\nline3`;
+    const projection = `${userEnvelope}[Pasted Content 12 chars]`;
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: projection },
+      );
+    });
+
+    const expectedDisplay = `${userEnvelope}line1\nline2\nline3`;
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(expectedDisplay);
+    expect(userItems[0][0].modelText).toBe(modelText);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      expectedDisplay,
+    );
+  });
+
+  it("adopts the projection when an armed separator carries a member's leading whitespace", async () => {
+    // Two queued members, the second's buffer beginning with a space: the
+    // producer armed the run ending in '\n\n ' (the projection was
+    // trimmed) while the removal side consumed only '\n\n', so the
+    // adoption gate's equality could never hold and the mid-string
+    // envelope surfaced as the user's own words. The removal consumes
+    // exactly the separator the decomposition recorded.
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const envelope =
+      '<system-reminder>\nmanaged context\n</system-reminder>\n\n ';
+    const modelText = `first message\n\n${envelope}second message`;
+    const projection = 'first message\n\nsecond message';
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: projection, reminders: envelope },
+      );
+    });
+
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(projection);
+    expect(userItems[0][0].modelText).toBe(modelText);
+    expect(userItems[0][0].reminders).toBe(envelope);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      projection,
+    );
+  });
+
   it('keeps an attachment @ref prefix visible when provenance holds only the typed text', async () => {
     // '@src/a.ts\n\nexplain this file' is the model text; submittedPrompt
     // is 'explain this file'. Their difference is an attachment reference,

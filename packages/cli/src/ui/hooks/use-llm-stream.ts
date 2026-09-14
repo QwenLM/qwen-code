@@ -101,9 +101,9 @@ import {
 } from '../utils/commandUtils.js';
 import {
   findLastUserItemIndex,
-  hasUserAuthoredLeadingReminders,
   isOnlyLeadingSystemReminders,
   omitSystemReminderBlocks,
+  splitInjectedLeadingReminders,
   stripLeadingSystemReminders,
 } from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
@@ -1653,12 +1653,15 @@ export const useLlmStream = (
         // content) or differing from it by a pure leading-envelope prefix.
         // A collapsed large-paste placeholder or an attachment `@ref`
         // prefix is neither and would displace the real prompt on every
-        // read-back surface, so those fall back to the shape strip —
-        // unless the projection's own leading envelope run is one the
-        // model text carries too: that run is user-authored content (a
-        // pasted note), which the strip must not delete, so the model
-        // text stands as-is. The strip never returns empty for non-empty
-        // input, so an envelope-only prompt stays visible as-is.
+        // read-back surface, so those fall back — unless the projection
+        // leads with an envelope run of its own: injectors prepend, so a
+        // run the model text's own leading run ENDS with is user-authored
+        // content (a pasted note), and exactly the injected blocks ahead
+        // of it are removed. A membership test anywhere in the model text
+        // could not tell that run from an injected block sitting ahead of
+        // it and would keep both. Anything else falls to the leading
+        // shape strip, which never returns empty for non-empty input, so
+        // an envelope-only prompt stays visible as-is.
         const trimmedSubmittedPrompt = submittedPrompt?.trim() || undefined;
         const strippedQuery = stripLeadingSystemReminders(trimmedQuery);
         // A queue aggregate's injected envelope can sit mid-string (a
@@ -1673,6 +1676,13 @@ export const useLlmStream = (
             trimmedSubmittedPrompt
             ? producerReminders
             : undefined;
+        const injectedPrefix =
+          trimmedSubmittedPrompt !== undefined
+            ? splitInjectedLeadingReminders(
+                trimmedSubmittedPrompt,
+                trimmedQuery,
+              )
+            : undefined;
         const userVisibleQuery =
           trimmedSubmittedPrompt !== undefined &&
           (trimmedSubmittedPrompt === trimmedQuery ||
@@ -1685,12 +1695,8 @@ export const useLlmStream = (
               )) ||
             adoptedReminders !== undefined)
             ? trimmedSubmittedPrompt
-            : trimmedSubmittedPrompt !== undefined &&
-                hasUserAuthoredLeadingReminders(
-                  trimmedSubmittedPrompt,
-                  trimmedQuery,
-                )
-              ? trimmedQuery
+            : injectedPrefix !== undefined
+              ? omitSystemReminderBlocks(trimmedQuery, injectedPrefix)
               : strippedQuery;
 
         // Notification messages (e.g. background agent completions) are

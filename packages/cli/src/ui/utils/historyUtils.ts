@@ -254,11 +254,14 @@ export function prependMissingSystemReminders(
  * other block — including a user-authored one — in place. Provenance-driven
  * counterpart to the leading-only shape strip: a mid-string injected
  * envelope is dropped without touching identical-looking user content
- * elsewhere in the text. Each removed block takes the separator that
- * followed it, mirroring how the envelopes were prepended — exactly one
- * `\n\n` (the producer's separator), or a single whitespace char for a
- * hand-shaped envelope. A greedy `\s+` run would also eat the user's own
- * leading indentation on the line after the block.
+ * elsewhere in the text. Each removed block takes the separator the
+ * decomposition itself records after it — the exact inverse of the arming,
+ * whose accepted run includes the whitespace up to the (trimmed) projection.
+ * Re-deriving the separator from the text instead would break the adoption
+ * gate's byte-identity for any separator but a plain `\n\n`, and a greedy
+ * `\s+` run would eat display content past what was armed. When the text
+ * does not carry the recorded separator after the block, only the block is
+ * removed.
  */
 export function omitSystemReminderBlocks(
   text: string,
@@ -274,14 +277,15 @@ export function omitSystemReminderBlocks(
     if (close === -1) break;
     const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
     const block = rest.slice(0, blockEnd);
-    rest = rest.slice(blockEnd).replace(/^\s+/, '');
+    const afterBlock = rest.slice(blockEnd);
+    const trimmed = afterBlock.replace(/^\s+/, '');
+    const separator = afterBlock.slice(0, afterBlock.length - trimmed.length);
+    rest = trimmed;
     const at = result.indexOf(block);
     if (at === -1) continue;
     const after = result.slice(at + block.length);
-    const separator = after.startsWith('\n\n')
-      ? '\n\n'
-      : (after.match(/^\s/)?.[0] ?? '');
-    result = result.slice(0, at) + after.slice(separator.length);
+    const consumed = after.startsWith(separator) ? separator.length : 0;
+    result = result.slice(0, at) + after.slice(consumed);
   }
   return result;
 }
@@ -304,6 +308,28 @@ export function hasUserAuthoredLeadingReminders(
 ): boolean {
   const { reminders } = splitLeadingSystemReminders(displayText);
   return reminders !== '' && modelPartsText.includes(reminders);
+}
+
+/**
+ * The positional counterpart to {@link hasUserAuthoredLeadingReminders} for
+ * the live producer-provenance sites, where the CLI itself prepended any
+ * injected envelope two frames earlier and the ambiguity the membership
+ * test tolerates does not exist. Injectors prepend, so the display text's
+ * leading envelope run is user-authored exactly when the model text's own
+ * leading run ENDS with it; the blocks ahead of it are the injected prefix.
+ * Returns that prefix — the empty string when nothing was injected ahead —
+ * or undefined when the runs do not line up and the submit proves nothing
+ * about the projection's leading run.
+ */
+export function splitInjectedLeadingReminders(
+  displayText: string,
+  modelText: string,
+): string | undefined {
+  const projectionRun = splitLeadingSystemReminders(displayText).reminders;
+  if (projectionRun === '') return undefined;
+  const modelRun = splitLeadingSystemReminders(modelText).reminders;
+  if (!modelRun.endsWith(projectionRun)) return undefined;
+  return modelRun.slice(0, modelRun.length - projectionRun.length);
 }
 
 /**

@@ -98,6 +98,7 @@ export interface UseMessageQueueReturn {
     messages: string[],
     submittedPrompt?: string,
     deferUntilIdle?: boolean,
+    reminders?: string,
   ) => void;
   restorePeerMessage: (
     message: string,
@@ -112,6 +113,14 @@ interface QueuedMessage {
   key: string;
   text: string;
   submittedPrompt?: string;
+  /**
+   * The producer decomposition a restored aggregate carried (see
+   * `restoreMessages`): the entry's text is the joined model text, so a
+   * member's injected envelope can sit mid-string where the aggregation's
+   * leading-prefix arithmetic cannot re-derive it. Trusted verbatim — it
+   * was position-checked against this same text when first produced.
+   */
+  reminders?: string;
   deferUntilIdle: boolean;
   /**
    * A delivered cross-session envelope. Drained alone and submitted on a
@@ -160,6 +169,7 @@ function aggregateUserMessages(
     .map((message, index) => {
       const start = memberOffset;
       memberOffset += message.text.length + '\n\n'.length;
+      if (message.reminders !== undefined) return message.reminders;
       const projection = projections[index];
       if (!message.text.endsWith(projection)) return '';
       const prefix = message.text.slice(
@@ -413,7 +423,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   const restoreMessages = useCallback(
-    (messages: string[], submittedPrompt?: string, deferUntilIdle = false) => {
+    (
+      messages: string[],
+      submittedPrompt?: string,
+      deferUntilIdle = false,
+      reminders?: string,
+    ) => {
       const restored = messages
         .map((text) => text.trim())
         .filter(Boolean)
@@ -422,6 +437,9 @@ export function useMessageQueue(): UseMessageQueueReturn {
           text,
           ...(messages.length === 1 && submittedPrompt !== undefined
             ? { submittedPrompt }
+            : {}),
+          ...(messages.length === 1 && reminders !== undefined
+            ? { reminders }
             : {}),
           deferUntilIdle,
         }));
