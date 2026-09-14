@@ -36,6 +36,7 @@ import {
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
 import { listWorkspaceSessionsForResponse } from '../server/session-list.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { laterActivityTimestamp } from '../server/activity-timestamp.js';
 import {
   isCompatibleLiveSessionSource,
@@ -1261,6 +1262,14 @@ export class LiveTaskService {
         found = listed.sessions.find((item) => item.sessionId === threadId);
         cursor = listed.nextCursor;
         if (found || cursor === undefined) break;
+      }
+      if (!found && cursor !== undefined) {
+        // Cap exhausted with pages remaining: the thread may exist past the
+        // cap, so say so once ? otherwise "gave up" is indistinguishable
+        // from "does not exist" for whoever reads the daemon log.
+        writeStderrLine(
+          `qwen serve: locateTask scan truncated at ${MAX_TASK_SCAN_PAGES} pages for thread ${threadId}`,
+        );
       }
       if (!found) throw new SessionNotFoundError(threadId);
       summary = found;

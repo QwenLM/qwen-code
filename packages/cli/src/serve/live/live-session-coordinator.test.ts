@@ -1108,12 +1108,43 @@ describe('LiveSessionCoordinator', () => {
     );
     expect(listSessionsStub).toHaveBeenCalledTimes(3);
     expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
+    // The forwarded page cursor must stay the composite object: narrowing it
+    // to cursor.mtime would silently restore the tie-group loss on the resume
+    // path. And the scan must carry the call's abort signal so a stopped call
+    // cancels mid-scan.
+    expect(listSessionsStub).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        size: 100,
+        archiveState: 'active',
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(listSessionsStub).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        cursor: { mtime: 999, sessionId: incompatible(1).sessionId },
+      }),
+    );
+    expect(listSessionsStub).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        cursor: { mtime: 998, sessionId: incompatible(2).sessionId },
+      }),
+    );
   });
 
   it('bounds the resume scan when every page reports a fresh cursor', async () => {
+    // Fresh cursor per page, but only up to CAP_PROBE_PAGES: if the cap is
+    // removed the scan ends by exhaustion and the call-count assertion below
+    // fails as an assertion instead of dying on heap exhaustion.
+    const CAP_PROBE_PAGES = 150; // past MAX_SESSION_SCAN_PAGES (100)
     let pageNo = 0;
     listSessionsStub.mockImplementation(async () => {
       pageNo += 1;
+      if (pageNo > CAP_PROBE_PAGES) {
+        return { items: [], hasMore: false };
+      }
       return {
         items: [
           {
@@ -1133,21 +1164,78 @@ describe('LiveSessionCoordinator', () => {
       };
     });
 
+    // Install the sinks before start(): the truncation diagnostic fires
+    // inside the scan, which completes before start() resolves.
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubEnv('QWEN_LIVE_DIAGNOSTICS', '1');
     const harness = makeHarness({ useCoordinatorScan: true });
-    await harness.coordinator.start({
+    try {
+      await harness.coordinator.start({
+        epoch: 1,
+        callId: 'call-1',
+        mode: 'resume',
+      });
+      await waitFor(() =>
+        expect(harness.bridge.spawnOrAttach).toHaveBeenCalled(),
+      );
+      expect(listSessionsStub).toHaveBeenCalledTimes(100);
+      expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
+      // Cap exhaustion is diagnosable: exactly one truncation line naming the
+      // budget, so "gave up" never reads as "no compatible session exists".
+      const truncationLines = stderrSpy.mock.calls.filter(([chunk]) =>
+        String(chunk).includes('resume_scan_truncated'),
+      );
+      expect(truncationLines).toHaveLength(1);
+    } finally {
+      stderrSpy.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('aborts an in-flight resume scan when the call stops mid-scan', async () => {
+    let resolvePage:
+      | ((page: {
+          items: SessionListItem[];
+          hasMore: boolean;
+          nextCursor?: { mtime: number; sessionId: string };
+        }) => void)
+      | undefined;
+    listSessionsStub.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePage = resolve;
+        }),
+    );
+    const harness = makeHarness({
+      useCoordinatorScan: true,
+      gracefulStopDrainMs: 0,
+    });
+    const startPromise = harness.coordinator.start({
       epoch: 1,
       callId: 'call-1',
       mode: 'resume',
     });
 
-    // No compatible candidate anywhere: the scan must stop at the page cap
-    // (MAX_FILES_TO_PROCESS budget / SESSION_SCAN_SIZE) and fall through to a
-    // fresh session instead of walking forever.
-    await waitFor(() =>
-      expect(harness.bridge.spawnOrAttach).toHaveBeenCalled(),
-    );
-    expect(listSessionsStub).toHaveBeenCalledTimes(100);
+    // The scan is parked inside page 1; stop the call, then release the page.
+    // The loop must observe callAbort before requesting page 2, and the abort
+    // is swallowed by start()s inactive-context guard rather than reported.
+    await waitFor(() => expect(listSessionsStub).toHaveBeenCalledTimes(1));
+    await harness.coordinator.stop({ epoch: 1, callId: 'call-1' });
+    resolvePage?.({
+      items: [],
+      hasMore: true,
+      nextCursor: {
+        mtime: 999,
+        sessionId: '550e8400-e29b-41d4-a716-446655440001',
+      },
+    });
+    await startPromise;
+
+    expect(listSessionsStub).toHaveBeenCalledTimes(1);
     expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
+    expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
   });
 
   it('tracks a task session only from a completed built-in create_sub_session result', async () => {

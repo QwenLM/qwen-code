@@ -335,8 +335,12 @@ export function decodeSessionListCursor(
   if (
     mtimeText === '' ||
     !Number.isFinite(mtime) ||
-    mtime < 0 ||
-    mtime > Number.MAX_SAFE_INTEGER ||
+    // The composite branch must accept everything the encoder can emit;
+    // pre-epoch mtimes are real on bulk-copied/restored files (cp -p,
+    // rsync -a), and rejecting one here would make the daemon refuse a
+    // cursor it minted itself. The sign check stays on the legacy numeric
+    // branch only. Guard by magnitude, never truthiness: mtime 0 is valid.
+    Math.abs(mtime) > Number.MAX_SAFE_INTEGER ||
     !SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)
   ) {
     throw new InvalidSessionListCursorError(raw);

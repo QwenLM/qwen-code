@@ -225,6 +225,16 @@ describe('session-list cursor codec', () => {
     expect(decodeSessionListCursor(encoded)).toEqual(cursor);
   });
 
+  it.each([0, -1000, -2_147_483_648_000])(
+    'round-trips an encoder-producible non-positive mtime: %d',
+    (mtime) => {
+      const cursor = { mtime, sessionId: SESSION_ID };
+      expect(decodeSessionListCursor(encodeSessionListCursor(cursor))).toEqual(
+        cursor,
+      );
+    },
+  );
+
   it('decodes a legacy bare-mtime cursor to a number', () => {
     expect(decodeSessionListCursor('1755000000000')).toBe(1755000000000);
     expect(encodeSessionListCursor(1755000000000)).toBe('1755000000000');
@@ -239,6 +249,9 @@ describe('session-list cursor codec', () => {
     '1755000000000:not-a-session-id',
     '1755000000000:',
     ':550e8400-e29b-41d4-a716-446655440000',
+    'NaN:550e8400-e29b-41d4-a716-446655440000',
+    '9007199254740992:550e8400-e29b-41d4-a716-446655440000',
+    '-9007199254740992:550e8400-e29b-41d4-a716-446655440000',
     '-5',
     '99999999999999999999',
   ])('rejects malformed cursor %j', (raw) => {

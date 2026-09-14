@@ -639,6 +639,11 @@ export class LiveSessionCoordinator {
       seenCursors.add(cursorKey);
       cursor = page.nextCursor;
     }
+    // Fell out of the page cap with a live cursor: the scan is incomplete,
+    // so the "no compatible session" outcome below is really "gave up".
+    writeLiveDiagnostic('resume_scan_truncated', {
+      pages: MAX_SESSION_SCAN_PAGES,
+    });
     return undefined;
   }
 

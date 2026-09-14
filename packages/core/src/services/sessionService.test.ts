@@ -989,6 +989,51 @@ describe('SessionService', () => {
       expect(result.hasMore).toBe(false);
     });
 
+    it('orders an mtime tie group by file name regardless of readdir order', async () => {
+      const now = Date.now();
+
+      // readdir reports the tie group in DESCENDING name order; the sort must
+      // still order ascending by name, or the composite cursor filter loses
+      // every member that sorts before the page-1 entry.
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdC}.jsonl`,
+        `${sessionIdB}.jsonl`,
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdC)) {
+            return [{ ...recordA1, sessionId: sessionIdC }];
+          }
+          if (filePath.includes(sessionIdB)) {
+            return [{ ...recordA1, sessionId: sessionIdB }];
+          }
+          return [recordA1];
+        },
+      );
+
+      const page1 = await sessionService.listSessions({ size: 1 });
+      const page2 = await sessionService.listSessions({
+        size: 1,
+        cursor: page1.nextCursor,
+      });
+      const page3 = await sessionService.listSessions({
+        size: 1,
+        cursor: page2.nextCursor,
+      });
+
+      expect(page1.items[0]?.sessionId).toBe(sessionIdA);
+      expect(page2.items[0]?.sessionId).toBe(sessionIdB);
+      expect(page3.items[0]?.sessionId).toBe(sessionIdC);
+      expect(page3.hasMore).toBe(false);
+    });
+
     it('should skip files from different projects', async () => {
       readdirSyncSpy.mockReturnValue([
         `${sessionIdA}.jsonl`,
