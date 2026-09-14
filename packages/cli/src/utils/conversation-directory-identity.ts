@@ -17,10 +17,9 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
  * Neither value can be compared as an exact identity proof.
  *
  * This predicate is the shared verifiability semantics for the
- * conversation-identity checks that import it (the standalone deletion
- * journal, the ACP agent, and review/lib/same-file.ts). Two call sites keep
- * a deliberate local restatement — edit them in lockstep with this
- * predicate:
+ * conversation-identity checks that import it (the ACP agent, plus the
+ * identity flows in this module). Two call sites keep a deliberate local
+ * restatement — edit them in lockstep with this predicate:
  *
  * - `syncStandaloneRoot` (serve/conversations/conversation-workspace.ts)
  *   inlines the predicate and the root-identity composite around the open
@@ -31,8 +30,12 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
  *   from `inode !== 0`.
  *
  * Core's canonical predicate (core/src/utils/file-identity.ts) is
- * deliberately LOOSER (`Number(ino) !== 0`) — do not align the two; see the
- * same-file.ts import site for why.
+ * deliberately LOOSER (`Number(ino) !== 0`) — do not align the two. The
+ * comparators that must see through hard links and full directory-tree
+ * replacements stat with `{ bigint: true }` instead and gate on the exact
+ * id being non-zero (review/lib/same-file.ts and the standalone deletion
+ * journal, both tightened in #11848); see the same-file.ts header comment
+ * for why tightening this number-backed predicate is not the way.
  */
 export function hasVerifiableInode(ino: number): boolean {
   return Number.isSafeInteger(ino) && ino > 0;
