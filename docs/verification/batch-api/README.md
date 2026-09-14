@@ -62,6 +62,12 @@ P_OUT=4 CACHE_RATIO=0.2 node docs/verification/batch-api/02-cache.mjs
 - `out/03-queue-timing.summary.json`
 - 任何 `FAIL` 时对应 result 文件里的 `errors` / `raw` 段（含百炼的报错原文）
 
+## 用 `qwen batch` 代替脚本
+
+同一分支里 `qwen batch submit/status/fetch/cancel` 已经实现（`packages/cli/src/commands/batch.ts`），
+`00` 的管线验证也可以直接用它做：把 `out/00-plumbing.jsonl` 喂给 `qwen batch submit`，再 `status` / `fetch`。
+记得 body 里显式写 `enable_thinking: false`，否则新模型默认开 thinking。
+
 ## 判定
 
 | 01 | 02 | 结论 |

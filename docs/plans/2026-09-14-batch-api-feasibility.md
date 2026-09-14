@@ -270,7 +270,7 @@ UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度�
 | 本评估 | `docs/plans/2026-09-14-batch-api-feasibility.md` | §1-§8 完成 |
 | 探测脚本 + README | `docs/verification/batch-api/` | 语法检查过，无 key 路径跑过，**未对线上运行** |
 | 草稿 PR | https://github.com/QwenLM/qwen-code/pull/11874（分支 `docs/batch-api-feasibility`，基于 `origin/main` `85631a3d`） | 等测试结果 |
-| 运行时代码改动 | 无 | 刻意不动 `ContentGenerator` / `pipeline.ts` |
+| `qwen batch` 命令（形态 A） | `packages/cli/src/commands/batch.ts`（+ 同名测试，注册在 `config/config.ts`） | 已实现：`submit / status / fetch / cancel`，原生 `fetch`，无新依赖；不动 `ContentGenerator` / `pipeline.ts` |
 
 ### 9.2 立刻要做的事（按顺序）
 
@@ -321,14 +321,21 @@ nohup node docs/verification/batch-api/03-queue-timing.mjs --hours 24 \
 10. **测试**：现有 `pipeline.test.ts` 不动；新增一个小文件 mock `client.files` / `client.batches`，
     只盖 create→persist→poll→fetch、abort→cancel、resume 对账三条路径。
 
-### 9.5 如果走扇出（形态 A），改动点清单
+### 9.5 扇出（形态 A）——已实现，剩余项
 
-- `packages/cli/src/commands/batch.ts`：照 `commands/sessions.ts` 的 `CommandModule` 写 `submit / status / fetch`，
-  挂到 `packages/cli/src/config/config.ts:1088-1103` 那串 `.command(...)`。
-- 一个同名工具让模型能自己提交作业；JSONL 的 `body` 用 `converter.ts` 现成的 Content → ChatCompletion 转换。
-- 结果按 `custom_id` 映射回文件路径写回工作区。
-- 进度显示用 `request_counts.completed / total`（§7）；完成前拿不到部分结果。
-- 同样需要 9.4 的第 5、7、9 条（门禁、`enable_thinking`、删文件）。
+已落地（`packages/cli/src/commands/batch.ts`）：
+- `submit <file> [--window]`：每行可以是完整 batch 请求行，也可以是裸的 chat-completions body（自动补 `custom_id` / `url` / 默认模型）；上传后打印 batch id。
+- `status <id> [--json]`：一行输出 status、`completed/total`、按时间戳推出的 queued / running / ran 阶段、`expires_at` 死线（§7）。
+- `fetch <id> [--out dir] [--delete]`：未 settle 直接拒绝；写 `<id>.output.jsonl` / `<id>.error.jsonl`；`--delete` 顺手删远端输入/输出/错误文件（§8.1 D）。
+- `cancel <id>`。
+- 门禁：只接受 auth type `openai` + API key（QWEN_OAUTH 直接报错）；凭证解析复用 `resolveCliGenerationConfig`，和交互式一致。
+- 用原生 `fetch` + `FormData`，没有给 cli 加 `openai` 依赖（避免动 lockfile）。
+
+没做、刻意留着的：
+- 不做同名工具——模型通过 shell 调 `qwen batch` 即可。
+- 不自动生成 JSONL、不按 `custom_id` 回写工作区——agent 用 `custom_id` 自己映射。
+- 不显式发 `enable_thinking`——由写 body 的一方决定（9.4 第 7 条仍适用，README 里提醒）。
+- 未在本机跑 vitest / tsc（仓库约定），由 CI 验证；也未对线上接口跑过。
 
 ### 9.6 已知但未验证的假设
 
