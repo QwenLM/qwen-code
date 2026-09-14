@@ -214,6 +214,42 @@ describe('McpClientManager', () => {
     expect(acquireSpy).toHaveBeenCalledTimes(2);
   });
 
+  it('wasRefused reads the pool budget refusal record (R4-1 pool leg)', async () => {
+    // Pool-mode refusals are recorded by the pool's WorkspaceMcpBudget
+    // (`recordRefusal` → `lastRefusedServerNames`), not by the
+    // manager-local `refuseAndLog` list, whose only writers sit on the
+    // legacy discovery path. `wasRefused` feeds the registry's snapshot
+    // restore gate, so a pool-refused server must read true here or the
+    // gate restores a server the budget deliberately refused to spawn.
+    const fakeBudget = {
+      beginBulkPass: vi.fn(),
+      endBulkPass: vi.fn(),
+      getRefusedServerNames: vi
+        .fn()
+        .mockReturnValue(['srvC'] as readonly string[]),
+    };
+    const fakePool = {
+      acquire: vi
+        .fn()
+        .mockRejectedValue(
+          new (await import('./mcp-client-manager.js')).BudgetExhaustedError(
+            'srvC',
+            1,
+            1,
+          ),
+        ),
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(fakeBudget),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const manager = mkManager({ options: { pool: fakePool } });
+    expect(manager.isPooled()).toBe(true);
+    expect(manager.wasRefused('srvC')).toBe(true);
+    expect(manager.wasRefused('srvD')).toBe(false);
+    // Legacy leg still answers when no pool is injected.
+    const legacy = mkManager();
+    expect(legacy.wasRefused('srvC')).toBe(false);
+  });
+
   it('pool path skips a gated server pending approval — no acquire, no spawn (#4615, sub-task 3)', async () => {
     // Trust boundary: with a shared pool, discovery routes through the pool
     // path. Pre-fix it only checked `isMcpServerDisabled`, so a hot-reload

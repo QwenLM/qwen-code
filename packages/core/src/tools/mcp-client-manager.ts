@@ -754,9 +754,17 @@ export class McpClientManager {
    * policy (budget), rather than failing to connect. The refusal is
    * resolved-without-registering exactly like a dead server, so the
    * registry's restore gate must consult this record to tell them
-   * apart (R4-1 round 5). */
+   * apart (R4-1 round 5). In pool mode the pool's budget owns the
+   * refusal record — the manager-local list only has writers on the
+   * legacy path — so consult both. Between bulk passes the pool list
+   * holds the previous pass's set, which is exactly the "most recent
+   * pass" this method promises. */
   wasRefused(serverName: string): boolean {
-    return this.lastRefusedServerNames.includes(serverName);
+    if (this.lastRefusedServerNames.includes(serverName)) return true;
+    return (
+      this.pool?.getBudget()?.getRefusedServerNames().includes(serverName) ??
+      false
+    );
   }
 
   /** True after `stop()` until the next bulk fresh start. */
