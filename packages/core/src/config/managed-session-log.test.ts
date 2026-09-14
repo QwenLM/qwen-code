@@ -387,6 +387,8 @@ describe('managed session log activation', () => {
       const fixture = await activate({ managedSessionLog: true });
       const rebuilt: unknown[][] = [];
       const llmClient = fixture.config.getLlmClient();
+      const startNewSession = vi.spyOn(fixture.config, 'startNewSession');
+      const closeSessionWriter = vi.spyOn(fixture.config, 'closeSessionWriter');
       vi.spyOn(llmClient, 'isInitialized').mockReturnValue(true);
       vi.spyOn(llmClient, 'rebuildChatFromDurableHistory').mockImplementation(
         async (history) => {
@@ -459,6 +461,10 @@ describe('managed session log activation', () => {
           'activationId'
         ],
       ).toBe(secondActive['activationId']);
+
+      expect(fixture.config.getLlmClient()).toBe(llmClient);
+      expect(startNewSession).not.toHaveBeenCalled();
+      expect(closeSessionWriter).not.toHaveBeenCalled();
 
       await fixture.config.closeSessionWriter();
     });
