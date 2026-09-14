@@ -31279,11 +31279,11 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('folds a removed or falsy approvalMode key to AUTO for live sessions on reload', async () => {
+  it('folds a removed or falsy approvalMode key to DEFAULT for live sessions on reload', async () => {
     // Deleting tools.approvalMode from the settings file must reach live
-    // sessions: the reload folds a missing/falsy value to AUTO — the same
-    // default a fresh session derives — instead of skipping it and pinning a
-    // stale privileged mode until daemon restart.
+    // sessions: the reload folds a missing/falsy value to DEFAULT — the same
+    // default a fresh ACP session derives — instead of skipping it and pinning
+    // a stale privileged mode until daemon restart.
     let mergedSettings: Record<string, unknown> = {
       tools: { approvalMode: 'plan' },
     };
@@ -31350,11 +31350,11 @@ describe('sessionLanguage multi-session propagation', () => {
     approvalModes.splice(0, approvalModes.length, 'default', 'plan', 'auto');
     try {
       // The operator deletes the key (hand edit / dotfile sync): the live
-      // session leaves plan for AUTO on the next reload.
+      // session leaves plan for DEFAULT on the next reload.
       mergedSettings = {};
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
-      expect(setApprovalMode).toHaveBeenCalledWith('auto');
-      expect(approvalMode).toBe('auto');
+      expect(setApprovalMode).toHaveBeenCalledWith('default');
+      expect(approvalMode).toBe('default');
       expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
       expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
 
@@ -31372,8 +31372,8 @@ describe('sessionLanguage multi-session propagation', () => {
 
       mergedSettings = { tools: { approvalMode: null } };
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
-      expect(setApprovalMode).toHaveBeenCalledWith('auto');
-      expect(approvalMode).toBe('auto');
+      expect(setApprovalMode).toHaveBeenCalledWith('default');
+      expect(approvalMode).toBe('default');
       setApprovalMode.mockClear();
 
       // ...and an invalid value is never converged at all: boot rejects an
@@ -31957,8 +31957,8 @@ describe('sessionLanguage multi-session propagation', () => {
     await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
     expect(setApprovalMode).not.toHaveBeenCalled();
 
-    // ...nor a deleted key (which folds to AUTO for unrestricted sessions)
-    // may move the safe-mode session off DEFAULT.
+    // ...nor a deleted key (which folds to DEFAULT for unrestricted ACP
+    // sessions) may move the safe-mode session off DEFAULT.
     mergedSettings = {};
     await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
     expect(setApprovalMode).not.toHaveBeenCalled();
