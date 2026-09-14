@@ -961,6 +961,37 @@ given its first entry, or never emptied, is still being asserted turns later:
 draining without mirroring fails one assertion, pushing without it fails four,
 popping for editing two.
 
+## Decision 31 — a model dialog outcome is recorded as well as shown
+
+The row a `/model` dialog leaves behind — the model a pick settled on, or the
+one an escape kept — reached the transcript but not the session log, so resuming
+the session dropped it where ink keeps it. The dispatcher cannot carry it: that
+result phase closes while the dialog is still open, with an empty output list,
+and ink writes the same empty pair. So ink pairs each of its three outcome sites
+with a second result-phase record naming the command and carrying that one row.
+This renderer now makes the same pairing, over one object: the row shown and the
+row recorded are the same value, built once, so the two cannot drift apart.
+
+Two silences are deliberate. A pick that fails to apply records nothing — ink
+keeps the dialog open with the error, and a recorded row would replay a switch
+that never happened. And the dialog adds no invocation-phase record: the bare
+command's own invocation is already written, hidden, by the dispatcher, so a
+second one would double it.
+
+Coverage is unit-level plus one on-disk check. Three existing cases in the
+dialog suite now assert the recorder alongside the row — once for an escape that
+arrives twice, once for a pick still being applied, once for a repeat pick after
+it lands — and a new fourth asserts a failed pick leaves no trace in either. Five
+mutations — no record at all, the wrong phase, the wrong command name, an empty
+payload, a failure that reports anyway — each fail at least one test. On the
+real machine the slash-dialog scenario opens `/model` and escapes it on both
+legs: each session log now holds nine `slash_command` records, in the same order
+and with the same flags, the fifth being the dialog's own result carrying
+`Kept model as fake-model` on both sides. What is not shown on screen is the
+replay: the shared resume loader reads this payload shape and this renderer's
+session switch calls it, but no scenario resumed a session to watch the row come
+back.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
@@ -991,6 +1022,11 @@ What was verified, and how far the verification reaches:
   the deferral ink puts behind Ctrl+Q; this renderer does not bind that key, and
   no scenario presses it on either leg — so the texts, like the badge, exist
   only inside one turn.
+- **Decision 31's recorded row is verified on disk, not on screen.** The
+  scenario that opens `/model` and escapes it was run on both legs and the two
+  session logs compared record by record. No scenario resumed a session, so the
+  replay of that row back onto the screen — through the shared loader this
+  renderer's session switch calls — rests on source reading alone.
 - **The non-shrinkable row prefix and the per-item top margin are verified by
   re-capture only.** The unit-test runtime stubs the renderer's graphics
   surface, so it cannot exercise layout; a test there could only echo the prop
@@ -1175,6 +1211,30 @@ What was verified, and how far the verification reaches:
   affordance is now visible rather than merely documented. Its exit key also arms
   the two-press window with a non-empty draft and eats a character doing it,
   where ink declines to arm at all while the buffer holds text.
+- Most dialogs answer in a slot that does not persist. The arena select and
+  stop dialogs, the editor dialog, the output-style dialog and the auth
+  dialog's success report answer through the shell's notice slot, which the next
+  submit clears; the effort dialog's pick says nothing at all. ink adds a
+  transcript row for every one of those outcomes and records it, so a resumed
+  session replays them and this one cannot. Closing them is Decision 31's shape
+  twice over — the row has to be added as well as recorded, since a record with
+  no row would replay a line the user never saw. `/statusline` is further
+  behind: this renderer's statusline dialog only lists the presets and closes on
+  Escape, so it has no save action to record — a missing feature rather than a
+  missing record. ink's UI layer records at fifteen sites, thirteen of them
+  outside the dispatcher's own invocation/result pair. Three of those thirteen
+  need nothing here: the theme one carries only `/theme`'s `NO_COLOR` message,
+  which this renderer already routes through the dispatcher's recording wrapper
+  (a theme selection adds no row on either side), the arena command's recorder
+  is shared code this renderer runs the same way, and the away-summary site
+  sits in a hook only ink's own container mounts.
+- An auxiliary model pick is a different kind of row. ink reports a fast, voice
+  or vision selection as a success item — its own glyph and colour — while every
+  model outcome here, primary or auxiliary, goes through one info row, so the
+  pick reads plainer on screen and, since Decision 31 records the row that was
+  shown, in the session log too. Reachable on this renderer: the dispatcher
+  builds fast, voice and vision dialog requests. Fixing it means carrying a row
+  type out of the selection helper instead of a message string.
 - ink answers a typed free-text entry in its question dialog twice for one
   keystroke, because the dialog's key handler and the input widget it mounts
   both subscribe and the key layer has no focus stack to arbitrate between
