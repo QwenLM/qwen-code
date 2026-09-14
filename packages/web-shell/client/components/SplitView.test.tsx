@@ -115,6 +115,7 @@ vi.mock('./ChatPane', () => ({
         data-context-controls={
           props.registerContextUsageControls ? 'true' : 'false'
         }
+        data-open-context-usage={props.onOpenContextUsage ? 'true' : 'false'}
         data-before-context-compress={
           props.onBeforeContextCompress ? 'true' : 'false'
         }
@@ -518,10 +519,12 @@ describe('SplitView', () => {
       sessionIds: ['s1', 's2'],
       registerContextUsageControls: vi.fn(),
       onBeforeContextCompress: vi.fn(),
+      onOpenContextUsage: vi.fn(),
     });
     expect(panes()).toHaveLength(2);
     for (const pane of panes()) {
       expect(pane.getAttribute('data-context-controls')).toBe('true');
+      expect(pane.getAttribute('data-open-context-usage')).toBe('true');
       expect(pane.getAttribute('data-before-context-compress')).toBe('true');
     }
     expect(titles()).toEqual(['One', 'Two']);
