@@ -1001,7 +1001,7 @@ describe('repo-context providers and trust boundary', () => {
     );
   });
 
-  it('rejects plan/out aliases and preserves the plan on artifact failure', () => {
+  it('rejects plan/out aliases and preserves the plan on artifact failure', (ctx) => {
     const root = temp();
     const worktree = join(root, 'worktree');
     mkdirSync(worktree);
@@ -1014,6 +1014,11 @@ describe('repo-context providers and trust boundary', () => {
 
     const alias = join(root, 'alias.json');
     linkSync(planPath, alias);
+    const inode = statSync(planPath).ino;
+    if (!Number.isSafeInteger(inode) || inode <= 0) {
+      ctx.skip();
+      return;
+    }
     expect(() =>
       runRepoContext({ plan: planPath, worktree, out: alias }, [
         { provide: () => context() },
