@@ -504,7 +504,6 @@ jobs:
     outputs:
       review_completed: '${{ steps.review.outputs.review_completed }}'
       unchanged_diff: '${{ steps.review.outputs.unchanged_diff }}'
-      unchanged_anchor: '${{ steps.review.outputs.unchanged_anchor }}'
     steps:
       # The runner worker dies in FinalizeJob with EACCES when it loses write
       # access to its own directories (observed: '/home/github-runner' no
@@ -1553,7 +1552,6 @@ jobs:
                 {
                   echo "expected_head_sha=$EXPECTED_HEAD_SHA"
                   echo "unchanged_diff=true"
-                  echo "unchanged_anchor=$reviewed_anchor"
                 } >> "$GITHUB_OUTPUT"
                 exit 0
                 ;;
@@ -3169,12 +3167,12 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
-          ANCHOR: "${{ needs.review-pr.outputs.unchanged_anchor || '' }}"
+          UNCHANGED_DIFF: '${{ needs.review-pr.outputs.unchanged_diff }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -uo pipefail
-          if [ -n "$ANCHOR" ]; then
-            description="Diff unchanged since reviewed ${ANCHOR:0:7}; review skipped"
+          if [ "$UNCHANGED_DIFF" = "true" ]; then
+            description="Diff unchanged since a reviewed head; review skipped"
           else
             description="Reviewed by Qwen Code /review"
           fi

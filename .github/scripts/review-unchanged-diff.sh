@@ -38,27 +38,25 @@
 # review runs — that is the case a merge can break.
 #
 # Usage: review-unchanged-diff.sh <owner/repo> <pr-number> <head-sha> <base-ref>
-# Env:   GH_TOKEN                 read access for the commit status lookup
-#        REVIEWED_STATUS_CONTEXT  status context to look for (qwen-review/reviewed)
-#        REVIEWED_STATUS_CREATOR  the only creator trusted (github-actions[bot])
-#        REVIEW_SKIP_LOOKBACK     max ancestors to inspect (20)
-#        GIT_REMOTE               remote holding the PR and its base (origin)
+# Env:   GH_TOKEN  read access for the commit status lookup
 set -uo pipefail
 
 REPO="${1:-}"
 PR_NUMBER="${2:-}"
 HEAD_SHA="${3:-}"
 BASE_REF="${4:-}"
-STATUS_CONTEXT="${REVIEWED_STATUS_CONTEXT:-qwen-review/reviewed}"
-STATUS_CREATOR="${REVIEWED_STATUS_CREATOR:-github-actions[bot]}"
-LOOKBACK="${REVIEW_SKIP_LOOKBACK:-20}"
-REMOTE="${GIT_REMOTE:-origin}"
+# Constants, not environment knobs. STATUS_CREATOR in particular IS the trust
+# boundary: only statuses the workflow's own identity wrote may anchor a
+# skip, and nothing in the environment can widen that.
+STATUS_CONTEXT='qwen-review/reviewed'
+STATUS_CREATOR='github-actions[bot]'
+LOOKBACK=20
+REMOTE=origin
 TMP_REF="refs/qwen-review-skip/pr-${PR_NUMBER}"
 
 log() { printf '%s\n' "unchanged-diff: $*" >&2; }
 verdict() { printf '%s\n' "$*"; exit 0; }
 
-case "$LOOKBACK" in ''|*[!0-9]*) LOOKBACK=20 ;; esac
 if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ] || [ -z "$HEAD_SHA" ] || [ -z "$BASE_REF" ]; then
   verdict "changed missing-arguments"
 fi

@@ -4525,8 +4525,16 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     // An earlier revision published review-pr's reviewed head as a job output
     // and read it here. The guard no longer keys on the head at all, so the
     // wiring is gone rather than left as an untested chain whose silent
-    // breakage would restore the fresh-head comparison.
-    expect(doc.jobs['review-pr'].outputs).toBeUndefined();
+    // breakage would restore the fresh-head comparison. review-pr's only
+    // outputs are record-reviewed's two flags — no sha — and this job reads
+    // none of them.
+    expect(Object.keys(doc.jobs['review-pr'].outputs ?? {}).sort()).toEqual([
+      'review_completed',
+      'unchanged_diff',
+    ]);
+    expect(JSON.stringify(doc.jobs['fallback-comment'])).not.toContain(
+      'needs.review-pr.outputs',
+    );
     expect(step.env.REVIEWED_HEAD_SHA).toBeUndefined();
     expect(step.run).not.toContain('REVIEWED_HEAD_SHA');
     expect(inJobStep.run).not.toContain('commit_id ==');
