@@ -149,7 +149,7 @@ export function RunRowView({
             : quiet
               ? '等待新输出'
               : (stages[progress.stage] ?? '执行中')
-          : '执行中 · 暂无过程上报'
+          : '等待执行端确认'
         : row.state;
   const stateClass = row.outstanding
     ? `${styles.runState} ${styles.runStateOutstanding}`
@@ -208,7 +208,7 @@ export function RunRowView({
             <div>
               {row.run.status === 'queued'
                 ? '尚未启动模型，不是在思考。任务保留在队列中，无需重发。'
-                : '尚未收到执行过程；不能仅凭“执行中”判断模型仍在工作。'}
+                : '尚未收到启动或输出信号，暂不能确认模型已开始工作。无需重复发送。'}
             </div>
           )}
         </div>

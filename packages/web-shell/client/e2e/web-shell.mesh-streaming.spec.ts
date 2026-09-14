@@ -126,8 +126,13 @@ test('mesh shows growing replies before completion, survives reload, and replace
   agent.status = 'idle';
   agent.runtime.status = 'online';
   run.status = 'running';
+  const initialProgress = run.progress!;
+  run.progress = undefined;
+  await expect(activity).toContainText('等待执行端确认');
+  await expect(activity).not.toContainText('暂无过程上报');
+  await expect(activity).not.toContainText('思考中');
   run.progress = {
-    ...run.progress!,
+    ...initialProgress,
     stage: 'starting',
     receivedAt: Date.now(),
   };
