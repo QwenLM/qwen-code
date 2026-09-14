@@ -51,6 +51,11 @@ export class FireworksOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
+    if (
+      this.getReasoningCapabilities(request.model)?.profile ===
+      'qwen-chat-template'
+    )
+      return baseRequest;
 
     return {
       ...baseRequest,

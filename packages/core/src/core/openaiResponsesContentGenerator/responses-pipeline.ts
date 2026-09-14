@@ -8,6 +8,10 @@ import { GenerateContentResponse } from '@google/genai';
 import type { GenerateContentParameters } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { Config } from '../../config/config.js';
+import {
+  getEffectiveReasoning,
+  resolveReasoningForModel,
+} from '../reasoning-overrides.js';
 import type {
   ResponsesApiInputItem,
   ResponsesApiRequest,
@@ -528,7 +532,18 @@ export class ResponsesPipeline {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
     }
-    const r = this.config.reasoning;
+    const r =
+      this.config.reasoning === undefined &&
+      this.config.extra_body?.['reasoning'] !== undefined
+        ? undefined
+        : getEffectiveReasoning(
+            this.config,
+            resolveReasoningForModel(
+              this.cliConfig,
+              this.config,
+              request.model,
+            ),
+          );
     if (r === false) return undefined;
     // `extra_body.enable_thinking` is the DashScope/Qwen-specific on/off
     // toggle (predates the unified reasoning-effort ladder). It has no

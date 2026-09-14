@@ -10,6 +10,7 @@ import type {
   InputModalities,
 } from '../core/contentGenerator.js';
 import type { ConfigSources } from '../utils/configResolver.js';
+import type { ModelReasoningOverride } from '../core/reasoning-overrides.js';
 import type { ReasoningEffort } from '../core/reasoning-effort.js';
 
 export type ModelReasoningCapabilities = (
@@ -34,7 +35,7 @@ export interface ModelCapabilities {
   /** Can run the normal agent tool loop, not only transcription requests. */
   agent?: boolean;
   /** Declarative reasoning controls and wire behavior for this model route. */
-  reasoning?: ModelReasoningCapabilities;
+  reasoning?: ModelReasoningCapabilities | ModelReasoningOverride;
 }
 
 /**

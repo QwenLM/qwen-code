@@ -22,10 +22,8 @@ import {
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import {
-  clampReasoningEffort,
-  parseModelReasoningCapabilities,
-} from '../../reasoning-effort.js';
+import { getEffectiveReasoning } from '../../reasoning-overrides.js';
+import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
@@ -540,19 +538,15 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   private getConfiguredReasoning(model: string | undefined) {
-    const { authType, baseUrl } = this.contentGeneratorConfig;
-    const wireModel = model ?? this.contentGeneratorConfig.model;
-    const reasoning = authType
-      ? this.cliConfig.getResolvedModelConfig?.(authType, wireModel, baseUrl)
-          ?.capabilities.reasoning
-      : undefined;
-    return parseModelReasoningCapabilities(reasoning);
+    return this.getReasoningCapabilities(model);
   }
 
   private isTieredEffortModel(model: string | undefined): boolean {
+    const configured = this.getConfiguredReasoning(model);
+    if (configured?.profile) return configured.profile === 'dashscope-effort';
     return isTieredEffortWireModel(
       model ?? this.contentGeneratorConfig.model,
-      this.getConfiguredReasoning(model),
+      configured,
     );
   }
 
@@ -572,7 +566,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private buildQwenEffortConfig(
     model: string | undefined,
   ): Record<string, unknown> {
-    const reasoning = this.contentGeneratorConfig.reasoning;
+    const configured = this.getConfiguredReasoning(model);
+    if (configured?.profile) return {};
+    const reasoning = getEffectiveReasoning(
+      this.contentGeneratorConfig,
+      configured,
+    );
     if (!reasoning || reasoning.effort === undefined) {
       return {};
     }

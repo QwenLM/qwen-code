@@ -124,6 +124,65 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     }
   });
 
+  it('previews partial defaults and exact alias routes without losing invalid rows', async () => {
+    const reasoning = {
+      profile: 'openai-effort',
+      efforts: ['low', 'medium', 'high'],
+    };
+    await writeUserSettings({
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3.8-max',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            capabilities: { reasoning: { defaultEffort: 'medium' } },
+          },
+          {
+            id: 'alias',
+            name: 'Medium alias',
+            baseUrl: 'https://a.example/v1',
+            capabilities: {
+              reasoning: { ...reasoning, defaultEffort: 'medium' },
+            },
+          },
+          {
+            id: 'alias',
+            name: 'High alias',
+            baseUrl: 'https://b.example/v1',
+            capabilities: {
+              reasoning: { ...reasoning, defaultEffort: 'high' },
+            },
+          },
+          {
+            id: 'invalid-alias',
+            capabilities: { reasoning: { profile: 'not-a-profile' } },
+          },
+        ],
+      },
+    });
+    const status = await createWorkspaceProvidersStatusProvider({ env: {} })(
+      workspace,
+      false,
+    );
+    const models = status.providers.flatMap((provider) => provider.models);
+    for (const [id, expected] of [
+      ['qwen3.8-max', 'medium'],
+      ['Medium alias', 'medium'],
+      ['High alias', 'high'],
+    ]) {
+      const model = models.find(
+        (model) => model.baseModelId === id || model.name === id,
+      );
+      expect(model?.configOptions).toMatchObject([{ currentValue: expected }]);
+      expect(JSON.stringify(model?.configOptions)).not.toContain(
+        '"value":"default"',
+      );
+    }
+    expect(models.some((model) => model.baseModelId === 'invalid-alias')).toBe(
+      true,
+    );
+  });
+
   it('reads fresh default model settings on every request', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

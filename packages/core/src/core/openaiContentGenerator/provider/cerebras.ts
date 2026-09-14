@@ -47,6 +47,11 @@ export class CerebrasOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
+    if (
+      this.getReasoningCapabilities(request.model)?.profile ===
+      'deepseek-openai'
+    )
+      return baseRequest;
 
     return {
       ...baseRequest,

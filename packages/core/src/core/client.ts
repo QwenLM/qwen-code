@@ -2877,6 +2877,8 @@ export class LlmClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    if (messageType === SendMessageType.UserQuery)
+      this.config.applyReasoningOverrides?.();
     const startsInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Retry ||

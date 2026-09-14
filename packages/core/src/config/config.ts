@@ -6,6 +6,15 @@
 
 import type { SessionSourceService } from '../services/session-sources.js';
 
+import { resolveProviderProtocol } from '../models/modelRegistry.js';
+import {
+  captureReasoningSnapshot,
+  validateReasoningDeclaration,
+  resolveReasoningCapabilities,
+  resolveReasoningForModel,
+  type ReasoningSnapshot,
+} from '../core/reasoning-overrides.js';
+
 // Node built-ins
 import type { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
@@ -2897,6 +2906,8 @@ export class Config {
   private webSearchNoticeEmitted = false;
   private visionModel?: string;
   private compactionModel?: string;
+  private reasoningSnapshot?: ReasoningSnapshot;
+  private latestReasoningSnapshot?: ReasoningSnapshot;
   private imageModel?: string;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
@@ -4804,7 +4815,83 @@ export class Config {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+    this.captureLatestReasoning();
     this.baseLlmClient?.clearPerModelGeneratorCache();
+  }
+
+  getReasoningSnapshot(): ReasoningSnapshot {
+    return (this.reasoningSnapshot ??= captureReasoningSnapshot(
+      this.getAllConfiguredModels(),
+    ));
+  }
+
+  stageReasoningOverrides(
+    providers: ModelProvidersConfig | undefined,
+    protocols: ProviderProtocolConfig = {},
+  ): void {
+    const models = this.getAllConfiguredModels().map((model) => {
+      const configured = Object.entries(providers ?? {})
+        .flatMap(([provider, entries]) =>
+          resolveProviderProtocol(provider, protocols) === model.authType &&
+          Array.isArray(entries)
+            ? entries
+            : [],
+        )
+        .find(
+          (entry) =>
+            entry.id === model.id && entry.baseUrl === model.registryBaseUrl,
+        );
+      return {
+        ...model,
+        capabilities: {
+          ...model.capabilities,
+          reasoning: configured?.capabilities?.reasoning,
+        },
+      };
+    });
+    this.captureLatestReasoning(models);
+  }
+
+  private captureLatestReasoning(models = this.getAllConfiguredModels()): void {
+    try {
+      const next = captureReasoningSnapshot(models);
+      for (const row of next) {
+        validateReasoningDeclaration({ model: row.id }, row.reasoning);
+        if (row.registryBaseUrl || row.reasoning?.profile) {
+          resolveReasoningCapabilities(
+            { model: row.id, authType: row.authType, baseUrl: row.baseUrl },
+            row.reasoning,
+          );
+        }
+      }
+      const generation = this.getContentGeneratorConfig();
+      if (generation)
+        resolveReasoningForModel(this, {
+          ...generation,
+          reasoningSnapshot: next,
+        });
+      this.latestReasoningSnapshot = next;
+    } catch (error) {
+      this.debugLogger.error(
+        'Invalid reasoning configuration; keeping the previous reasoning settings',
+        error,
+      );
+    }
+  }
+
+  applyReasoningOverrides(): boolean {
+    if (!this.latestReasoningSnapshot) this.captureLatestReasoning();
+    const next = this.latestReasoningSnapshot;
+    if (
+      !next ||
+      JSON.stringify(next) === JSON.stringify(this.reasoningSnapshot)
+    )
+      return false;
+    this.reasoningSnapshot = next;
+    const generation = this.getContentGeneratorConfig();
+    if (generation) generation.reasoningSnapshot = next;
+    this.notifyModelChangeListeners();
+    return true;
   }
 
   /**
@@ -5800,10 +5887,7 @@ export class Config {
       return undefined;
     }
 
-    const configuredReasoning = cfg.authType
-      ? this.getResolvedModelConfig(cfg.authType, cfg.model, cfg.baseUrl)
-          ?.capabilities.reasoning
-      : undefined;
+    const configuredReasoning = resolveReasoningForModel(this, cfg);
     const tieredModel = isTieredEffortWireModel(cfg.model, configuredReasoning);
     if (!tieredModel) return undefined;
 
@@ -6074,6 +6158,8 @@ export class Config {
       // setReasoningEffort() below. Do not add `reasoning` here — that would
       // overwrite the live tier with the new model's default and make the
       // restore a no-op.
+      this.contentGeneratorConfig.reasoningRouteBaseUrl =
+        config.reasoningRouteBaseUrl;
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;

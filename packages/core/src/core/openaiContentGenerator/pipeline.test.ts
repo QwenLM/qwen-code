@@ -2261,6 +2261,103 @@ describe('ContentGenerationPipeline', () => {
     }
 
     it.each([
+      [
+        'openai-effort',
+        { reasoning_effort: 'medium' },
+        { reasoning_effort: 'none' },
+      ],
+      [
+        'openai-reasoning',
+        { reasoning: { effort: 'medium' } },
+        { reasoning: { enabled: false } },
+      ],
+      [
+        'deepseek-openai',
+        { thinking: { type: 'enabled' }, reasoning_effort: 'medium' },
+        { thinking: { type: 'disabled' } },
+      ],
+      [
+        'dashscope-effort',
+        { reasoning_effort: 'medium' },
+        { reasoning_effort: 'none' },
+      ],
+      [
+        'dashscope-thinking',
+        { enable_thinking: true },
+        { enable_thinking: false },
+      ],
+      [
+        'qwen-chat-template',
+        { chat_template_kwargs: { enable_thinking: true } },
+        { chat_template_kwargs: { enable_thinking: false } },
+      ],
+    ])(
+      'uses declared %s defaults and disable wire for an unknown alias',
+      async (profile, enabled, disabled) => {
+        (mockProvider.buildRequest as Mock).mockImplementation((request) =>
+          new DefaultOpenAICompatibleProvider(
+            mockContentGeneratorConfig,
+            mockCliConfig,
+          ).buildRequest(request, 'test'),
+        );
+        const capability = {
+          profile,
+          ...(profile === 'dashscope-thinking' ||
+          profile === 'qwen-chat-template'
+            ? {}
+            : { efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' }),
+        };
+        for (const [reasoning, expected] of [
+          [undefined, enabled],
+          [false, disabled],
+        ] as const) {
+          const wire = await executeWithCapability(
+            capability,
+            { reasoning },
+            'company-alias',
+          );
+          const actual = Object.fromEntries(
+            Object.entries(wire).filter(([key]) =>
+              [
+                'reasoning',
+                'reasoning_effort',
+                'thinking',
+                'enable_thinking',
+                'chat_template_kwargs',
+              ].includes(key),
+            ),
+          );
+          expect(actual).toEqual(expected);
+        }
+      },
+    );
+
+    it('keeps explicit sampling reasoning above a configured default', async () => {
+      const wire = await executeWithCapability(
+        {
+          profile: 'openai-reasoning',
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+        },
+        { samplingParams: { reasoning: { effort: 'minimal' } } },
+        'company-alias',
+      );
+      expect(wire['reasoning']).toEqual({ effort: 'minimal' });
+    });
+
+    it('resolves the known Qwen default override before shaping its request', async () => {
+      const wire = await executeWithCapability(
+        { defaultEffort: 'medium' },
+        {
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        },
+        'qwen3.8-max',
+      );
+      expect(wire['reasoning_effort']).toBe('medium');
+      expect(wire['reasoning']).toBeUndefined();
+    });
+
+    it.each([
       ['enable_thinking', false, undefined, undefined],
       ['reasoning_effort', undefined, 'none', undefined],
     ] as const)(
