@@ -793,6 +793,46 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(next.channels['bot']!['sessionRotation']).toBeNull();
   });
 
+  it('keeps an untouched stored sessionRotation valid on unrelated upserts but rejects a changed bad one', async () => {
+    // A store written by an older release can hold a shape this version's
+    // rule rejects; an unrelated write must not be blocked by it.
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "secret",
+    "sessionRotation": { "maxTurns": 0 }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: { maxTurns: 0 },
+        instructions: 'unrelated change',
+      },
+    });
+    expect(next.channels['bot']!['instructions']).toBe('unrelated change');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: next.revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          sessionRotation: { maxTurns: -5 },
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: expect.stringContaining('sessionRotation'),
+    });
+  });
+
   it('accepts a fractional maxAgeHours like the config parser', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
 

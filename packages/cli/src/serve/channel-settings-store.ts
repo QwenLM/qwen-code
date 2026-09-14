@@ -251,6 +251,21 @@ function assertSharedField(
             ? isValidRotationBound(nestedValue)
             : false;
       if (!validBound) {
+        // Match the neighbouring shared-field checks: an unchanged stored
+        // value keeps passing (a later version may have tightened the rule),
+        // so an unrelated upsert is never blocked by a field the user did
+        // not touch. A new or changed bad value is still rejected loudly.
+        if (
+          isRecord(previous) &&
+          Object.hasOwn(previous, nestedKey) &&
+          isDeepStrictEqual(
+            (previous as Record<string, unknown>)[nestedKey],
+            nestedValue,
+          ) &&
+          !containsUnsafeObjectKey(nestedValue)
+        ) {
+          continue;
+        }
         throw invalidConfig(`Channel field "${key}.${nestedKey}" is invalid.`);
       }
     }

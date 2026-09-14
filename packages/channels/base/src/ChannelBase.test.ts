@@ -15557,6 +15557,55 @@ describe('ChannelBase', () => {
       expect(ch.retiringSessions).toContain(sessionId);
     });
 
+    it('refunds the routing lease when dispatch throws on an unknown mode', async () => {
+      let settleFirst!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleFirst = resolve;
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp');
+      const ch = createChannel(
+        {
+          sessionRotation: { maxTurns: 2 },
+          // Nothing on the file-config path validates dispatchMode: an
+          // unknown value reaches the dispatch switch's exhaustive default.
+          dispatchMode: 'bogus' as ChannelConfig['dispatchMode'],
+        },
+        { router },
+      );
+
+      const firstTurn = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      const leases = router as unknown as {
+        sessionRoutingLeases: Map<string, number>;
+        toTurns: Map<string, number>;
+      };
+
+      // The second message resolves (lease + count taken) and then throws in
+      // the dispatch switch with a turn still active: the structural refund
+      // must return both, or rotation is deferred on this route forever.
+      await expect(ch.handleInbound(envelope({ text: 'second' }))).rejects.toThrow(
+        'Unknown dispatch mode',
+      );
+      expect(leases.sessionRoutingLeases.has(sessionId)).toBe(false);
+      expect(leases.toTurns.get(sessionId)).toBe(1);
+
+      // Rotation still fires exactly at the bound afterwards.
+      settleFirst('done');
+      await firstTurn;
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+      await ch.handleInbound(envelope({ text: 'fourth' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).not.toBe(sessionId);
+    });
+
     it('collect: buffered messages count once against maxTurns', async () => {
       let settleFirst!: (value: string) => void;
       let callCount = 0;

@@ -50,16 +50,34 @@ interface SessionOperation {
   lifecycleGeneration: number;
   routeToken: object;
   invalidationError?: Error;
+  // Set when the invalidation came from a deliberate route removal (/clear,
+  // removeSessionId, forgetManagedSession) rather than a supersession
+  // (rotation, a restore's reservation pass): a removal stays terminal for
+  // parked waiters even when a later message has already re-created the key.
+  removalInvalidation?: boolean;
   // Set on operations a restore's reservation pass created: only a successor
   // restore adopts the key's wipe state and rotation delta, so ownership
   // checks use this to tell one from a resolve()-created successor.
   restoreReservation?: boolean;
+  // The session id this operation already counted against its channel's
+  // maxTurns bound (loadOrReplaceSession counts before returning), so an
+  // invalidation-retry can give the count back instead of double-counting.
+  countedSessionId?: string;
 }
 
 type SessionLoadWindow = Set<string>;
 interface ResolveOptions {
   routingThreadId?: string;
 }
+
+/**
+ * Bound on one restore load. A wedged-but-alive ACP child can park
+ * bridge.loadSession forever (the stream stays open, nothing trips the stall
+ * watchdog); an unbounded wait would hold the restore's persist suspension
+ * for the rest of the process's life. On timeout the restore treats the
+ * bridge as unreachable and aborts, keeping every un-attempted route.
+ */
+const RESTORE_LOAD_TIMEOUT_MS = 60_000;
 
 export type SessionRecoveryMode = 'eager' | 'lazy';
 export type ManagedSessionIsolation = 'shared' | 'worktree';
@@ -164,6 +182,10 @@ export class SessionRouter {
   private persistPath: string | undefined;
   private persistSuspendDepth = 0;
   private persistRequestedWhileSuspended = false;
+  // A store mutation observed by a restore that finished while another was
+  // still running: only the last finisher flushes, so per-invocation
+  // `changed` locals are promoted here as each restore completes.
+  private persistDirtyWhileSuspended = false;
   // Rotation-state writes (countTurn, uncountTurn, leaseSession,
   // releaseRoutingLease) that land while a restore's reservation pass holds
   // the session wiped, keyed by the wiped session ID. The restore's carry
@@ -176,6 +198,11 @@ export class SessionRouter {
   // reaches disk at the last restore's flush, and any restore reading the
   // stale snapshot until then must skip them instead of resurrecting them.
   private readonly suspendedDeletionKeys = new Set<string>();
+  // Session ids deliberately removed (removeSessionId) while a restore's
+  // load for them was in flight: the load-window death marker tells the
+  // settle the session is gone, and this set tells it the removal was
+  // deliberate — parked waiters must fail terminal, not create fresh.
+  private readonly pendingRemovalIds = new Set<string>();
   // Live state a restore's reservation pass captured when it wiped a route,
   // keyed by routing key. An overlapping restore whose reservation pass lands
   // inside the wipe window finds no live route and adopts this capture, so
@@ -188,6 +215,7 @@ export class SessionRouter {
       wipedBridgeLive?: boolean;
       rotation?: { turns?: number; startedAt?: number; leases?: number };
       target?: SessionTarget;
+      managedMeta?: { isolation: 'worktree'; workspaceCwd: string };
     }
   >();
   private readonly recoveryMode: SessionRecoveryMode;
@@ -524,10 +552,15 @@ export class SessionRouter {
       // drop its late output — so the bound is enforced on the next message
       // instead. Each deferred message enqueues a turn of its own, so a route
       // whose messages never pause defers until the first idle gap; that
-      // limit is documented in the Session Rotation docs.
+      // limit is documented in the Session Rotation docs. Managed (worktree)
+      // routes are retired by the named-session machinery, never by rotation:
+      // a route store written while the channel ran multiSession can survive
+      // a reconfiguration to sessionRotation, and rotating one would discard
+      // a task's session and orphan its worktree checkout.
       if (
         existing &&
         !this.creatingSessions.has(key) &&
+        !this.toManagedMeta.has(existing) &&
         !this.isSessionActive(channelName, existing) &&
         !this.hasRoutingLease(existing) &&
         this.shouldRotate(channelName, existing)
@@ -573,10 +606,16 @@ export class SessionRouter {
           if (creating.invalidationError) {
             // A rotation or reload can hand the key to a successor operation
             // while this waiter is parked; route against the successor
-            // instead of failing the message. Without a successor the
-            // invalidation was a deliberate rejection (e.g. removeSession),
-            // which stays terminal.
-            if (this.creatingSessions.has(key) || this.toSession.has(key)) {
+            // instead of failing the message. A removal invalidation
+            // (/clear, removeSessionId, forgetManagedSession) stays terminal
+            // even when a later message has already re-created the key — the
+            // removed route's parked traffic must not land in the freshly
+            // cleared session. Any other invalidation retries only while a
+            // successor exists.
+            if (
+              creating.removalInvalidation !== true &&
+              (this.creatingSessions.has(key) || this.toSession.has(key))
+            ) {
               failedWaits++;
               if (failedWaits > 3) throw creating.invalidationError;
               continue;
@@ -623,11 +662,20 @@ export class SessionRouter {
         // A restore's reservation pass (or a deliberate removal) superseded
         // this operation: re-route against the successor like a waiter
         // would, instead of failing the message. Without a successor the
-        // invalidation was a deliberate rejection, which stays terminal.
+        // invalidation was a deliberate rejection, which stays terminal. A
+        // removal invalidation stays terminal even then: parked traffic must
+        // not land in a freshly re-created session after a /clear.
         if (
           operation.invalidationError &&
+          operation.removalInvalidation !== true &&
           (this.creatingSessions.has(key) || this.toSession.has(key))
         ) {
+          // Give back the turn the abandoned operation already counted
+          // (loadOrReplaceSession counts before resolve's currency check):
+          // the retry counts the successor exactly once instead.
+          if (operation.countedSessionId !== undefined) {
+            this.uncountTurn(channelName, operation.countedSessionId);
+          }
           failedWaits++;
           if (failedWaits > 3) throw operation.invalidationError;
           continue;
@@ -756,6 +804,9 @@ export class SessionRouter {
           }
         }
         this.countTurn(input.channelName, loadedSessionId);
+        // resolve() refunds this count if the operation is invalidated
+        // before its result passes the currency check.
+        operation.countedSessionId = loadedSessionId;
         this.liveSessionIds.add(loadedSessionId);
         return loadedSessionId;
       } catch (loadError) {
@@ -1048,18 +1099,26 @@ export class SessionRouter {
       this.toSession.set(key, newSessionId);
       changed = true;
     }
-    changed = this.toTarget.delete(oldSessionId) || changed;
-    changed = this.toCwd.delete(oldSessionId) || changed;
+    // The replacement continues the same conversation: rotation counters and
+    // the worktree restore metadata carry to the replacement id, while leases
+    // (in-flight turns on the superseded id) and pending deltas retire with
+    // the old id.
     const managedMeta = this.toManagedMeta.get(oldSessionId);
     if (managedMeta !== undefined) {
-      // The replacement owns the same worktree, so the route's restore
-      // metadata follows it.
       this.toManagedMeta.set(newSessionId, managedMeta);
-      this.toManagedMeta.delete(oldSessionId);
       changed = true;
     }
-    this.liveSessionIds.delete(oldSessionId);
-    this.staleBridgeBindings.delete(oldSessionId);
+    const turns = this.toTurns.get(oldSessionId);
+    if (turns !== undefined) {
+      this.toTurns.set(newSessionId, turns);
+      changed = true;
+    }
+    const startedAt = this.toStartedAt.get(oldSessionId);
+    if (startedAt !== undefined) {
+      this.toStartedAt.set(newSessionId, startedAt);
+      changed = true;
+    }
+    this.clearSessionState(oldSessionId);
     if (changed) this.persist();
   }
 
@@ -1236,7 +1295,7 @@ export class SessionRouter {
     let changed = false;
     for (const [key, mappedSessionId] of this.toSession) {
       if (mappedSessionId !== sessionId) continue;
-      this.invalidateRouteOperation(key);
+      this.invalidateRouteOperation(key, { removal: true });
       this.toSession.delete(key);
       // Same suspension protocol as the other removal paths: a restore
       // overlapping the forget must not resurrect the forgotten route from
@@ -1250,14 +1309,18 @@ export class SessionRouter {
     // and persists the forgotten route.
     for (const [key, wiped] of [...this.wipedRouteState]) {
       if (wiped.wipedSessionId !== sessionId) continue;
-      this.invalidateRouteOperation(key);
+      this.invalidateRouteOperation(key, { removal: true });
       this.tombstoneSuspendedKey(key);
     }
-    changed = this.toTarget.delete(sessionId) || changed;
-    changed = this.toCwd.delete(sessionId) || changed;
-    changed = this.toManagedMeta.delete(sessionId) || changed;
-    changed = this.liveSessionIds.delete(sessionId) || changed;
-    this.staleBridgeBindings.delete(sessionId);
+    if (
+      this.toTarget.has(sessionId) ||
+      this.toCwd.has(sessionId) ||
+      this.toManagedMeta.has(sessionId) ||
+      this.liveSessionIds.has(sessionId)
+    ) {
+      changed = true;
+    }
+    this.clearSessionState(sessionId);
     if (changed) this.persist();
   }
 
@@ -1290,7 +1353,7 @@ export class SessionRouter {
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     if (chatId) {
       const key = this.routingKey(channelName, senderId, chatId, threadId);
-      this.invalidateRouteOperation(key);
+      this.invalidateRouteOperation(key, { removal: true });
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
       this.tombstoneSuspendedKey(key);
@@ -1304,7 +1367,7 @@ export class SessionRouter {
           target?.channelName === channelName &&
           target.senderId === senderId
         ) {
-          this.invalidateRouteOperation(k);
+          this.invalidateRouteOperation(k, { removal: true });
           const sessionId = this.deleteByKey(k);
           if (sessionId) removedIds.push(sessionId);
           this.tombstoneSuspendedKey(k);
@@ -1315,7 +1378,7 @@ export class SessionRouter {
           operation.target.channelName === channelName &&
           operation.target.senderId === senderId
         ) {
-          this.invalidateRouteOperation(key);
+          this.invalidateRouteOperation(key, { removal: true });
           this.tombstoneSuspendedKey(key);
         }
       }
@@ -1325,11 +1388,11 @@ export class SessionRouter {
   }
 
   /** Remove a session mapping by daemon/ACP session ID. */
-  removeSessionId(sessionId: string): boolean {
+  removeSessionId(sessionId: string, options?: { deliberate?: boolean }): boolean {
     let removed = false;
     for (const [key, mappedSessionId] of [...this.toSession.entries()]) {
       if (mappedSessionId === sessionId) {
-        this.invalidateRouteOperation(key);
+        this.invalidateRouteOperation(key, { removal: true });
         this.toSession.delete(key);
         this.tombstoneSuspendedKey(key);
         removed = true;
@@ -1341,23 +1404,28 @@ export class SessionRouter {
     for (const [key, wiped] of this.wipedRouteState) {
       if (wiped.wipedSessionId === sessionId) this.tombstoneSuspendedKey(key);
     }
-    if (this.toTarget.delete(sessionId)) {
+    if (
+      this.toTarget.has(sessionId) ||
+      this.toCwd.has(sessionId) ||
+      this.toManagedMeta.has(sessionId) ||
+      this.liveSessionIds.has(sessionId)
+    ) {
       removed = true;
     }
-    if (this.toCwd.delete(sessionId)) {
-      removed = true;
-    }
-    this.toTurns.delete(sessionId);
-    this.toStartedAt.delete(sessionId);
-    this.sessionRoutingLeases.delete(sessionId);
-    if (this.toManagedMeta.delete(sessionId)) {
-      removed = true;
-    }
-    this.liveSessionIds.delete(sessionId);
+    this.clearSessionState(sessionId);
     if (!removed && this.sessionLoadWindows.size > 0) {
+      // An in-flight restore load for this session settles as deliberately
+      // removed (not merely dead) when the caller removed it: parked waiters
+      // fail terminal instead of creating a fresh session on the route.
+      if (options?.deliberate !== false) {
+        this.pendingRemovalIds.add(sessionId);
+      }
       for (const loadWindow of this.sessionLoadWindows) {
         loadWindow.add(sessionId);
       }
+      // The persisted store still holds the key: ask the restore's flush to
+      // write the removal out.
+      this.persist();
     }
     if (removed) {
       this.persist();
@@ -1367,7 +1435,7 @@ export class SessionRouter {
 
   handleSessionDied(sessionId: string): boolean {
     if (this.recoveryMode === 'eager') {
-      return this.removeSessionId(sessionId);
+      return this.removeSessionId(sessionId, { deliberate: false });
     }
     const known = this.toTarget.has(sessionId);
     this.liveSessionIds.delete(sessionId);
@@ -1377,11 +1445,13 @@ export class SessionRouter {
     return known;
   }
 
-  private deleteByKey(key: string): string | null {
-    this.wipedRouteState.delete(key);
-    const sessionId = this.toSession.get(key);
-    if (!sessionId) return null;
-    this.toSession.delete(key);
+  /**
+   * Drop every session-id-keyed map entry for a retired session id. The one
+   * shared clear: every retirement path calls this so no per-session
+   * bookkeeping can drift out of sync (a new map added without a clear here
+   * leaks on every path at once and gets caught once).
+   */
+  private clearSessionState(sessionId: string): void {
     this.toTarget.delete(sessionId);
     this.toCwd.delete(sessionId);
     this.toTurns.delete(sessionId);
@@ -1390,6 +1460,15 @@ export class SessionRouter {
     this.rotationDeltas.delete(sessionId);
     this.toManagedMeta.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
+    this.staleBridgeBindings.delete(sessionId);
+  }
+
+  private deleteByKey(key: string): string | null {
+    this.wipedRouteState.delete(key);
+    const sessionId = this.toSession.get(key);
+    if (!sessionId) return null;
+    this.toSession.delete(key);
+    this.clearSessionState(sessionId);
     return sessionId;
   }
 
@@ -1482,6 +1561,7 @@ export class SessionRouter {
           leases?: number;
         };
         liveTarget?: SessionTarget;
+        managedMeta?: { isolation: 'worktree'; workspaceCwd: string };
       }
     >();
 
@@ -1545,6 +1625,9 @@ export class SessionRouter {
         const liveTarget = liveSessionId
           ? this.toTarget.get(liveSessionId)
           : priorWipe?.target;
+        const managedMeta = liveSessionId
+          ? this.toManagedMeta.get(liveSessionId)
+          : priorWipe?.managedMeta;
         this.deleteByKey(key);
         if (wipedSessionId && !this.rotationDeltas.has(wipedSessionId)) {
           this.rotationDeltas.set(wipedSessionId, { turns: 0, leases: 0 });
@@ -1554,6 +1637,7 @@ export class SessionRouter {
           ...(wipedBridgeLive ? { wipedBridgeLive } : {}),
           ...(liveRotation !== undefined ? { rotation: liveRotation } : {}),
           ...(liveTarget !== undefined ? { target: liveTarget } : {}),
+          ...(managedMeta !== undefined ? { managedMeta } : {}),
         });
         const reservation = this.createSessionReservation();
         reservation.promise.catch(() => undefined);
@@ -1572,6 +1656,7 @@ export class SessionRouter {
           ...(wipedBridgeLive ? { wipedBridgeLive } : {}),
           ...(liveRotation !== undefined ? { liveRotation } : {}),
           ...(liveTarget !== undefined ? { liveTarget } : {}),
+          ...(managedMeta !== undefined ? { managedMeta } : {}),
         });
       }
 
@@ -1617,7 +1702,18 @@ export class SessionRouter {
                 // operation-keyed discard can never match here; release
                 // tokenless and roll back the maps the load committed.
                 // No persist — the loop's guarded final write owns the file.
-                if (![...this.toSession.values()].includes(managed.sessionId)) {
+                // A successor restore currently loading the same session id
+                // owns its outcome: rolling back would close the session the
+                // successor is about to route.
+                const successor = this.creatingSessions.get(key);
+                const superseded =
+                  successor !== undefined &&
+                  successor !== operation &&
+                  successor.restoreReservation === true;
+                if (
+                  !superseded &&
+                  ![...this.toSession.values()].includes(managed.sessionId)
+                ) {
                   void this.bridge
                     .discardSession?.(managed.sessionId)
                     .catch(() => undefined);
@@ -1628,27 +1724,30 @@ export class SessionRouter {
                 }
                 throw error;
               }
-              this.toSession.set(key, managed.sessionId);
+              // The same settle as the generic branch (rotation counters
+              // and the wipe capture included), plus the worktree metadata
+              // only the managed path can attest.
+              this.settleRestoredRoute(key, managed.sessionId, entry, reserved);
               this.toManagedMeta.set(managed.sessionId, {
                 isolation: 'worktree',
                 workspaceCwd: entry.workspaceCwd,
               });
-              // Same settle invariant as the generic branch: the reservation
-              // pass's wipe capture for this key is consumed here, or it
-              // outlives the restore and a later restore adopts it as
-              // priorWipe.
-              this.wipedRouteState.delete(key);
               reservation.resolve(managed.sessionId);
               if (managed.sessionId !== entry.sessionId) {
+                this.persistDirtyWhileSuspended = true;
                 changed = true;
               }
               restored++;
               continue;
             }
-            const sessionId = await this.bridge.loadSession(
-              entry.sessionId,
-              entry.cwd,
-              options,
+            const sessionId = await this.boundedRestoreLoad(
+              key,
+              this.bridge.loadSession(
+                entry.sessionId,
+                entry.cwd,
+                options,
+                operation,
+              ),
               operation,
             );
             // A removal landed after this restore reserved the key (/clear,
@@ -1661,9 +1760,10 @@ export class SessionRouter {
             // after the removal) must survive the settle.
             if (this.suspendedDeletionKeys.has(key)) {
               if (this.creatingSessions.get(key) === operation) {
-                this.invalidateRouteOperation(key);
+                this.invalidateRouteOperation(key, { removal: true });
               } else {
                 this.invalidateOperation(operation);
+                operation.removalInvalidation = true;
               }
             }
             try {
@@ -1689,25 +1789,27 @@ export class SessionRouter {
             }
             diedMidRestore = loadWindow.delete(sessionId);
             if (diedMidRestore) {
+              if (this.pendingRemovalIds.delete(sessionId)) {
+                // Deliberate removal, not a death: settle through the
+                // invalidation path so parked waiters fail terminal instead
+                // of creating a fresh session on the removed route. The load
+                // DID attach the session to the bridge: reclaim it here —
+                // this operation bound it, so the token guard matches.
+                this.scheduleDiscardInvalidatedSession(sessionId, operation);
+                this.invalidateOperation(operation);
+                operation.removalInvalidation = true;
+                throw operation.invalidationError!;
+              }
               throw new Error('Restored session died before routing completed');
             }
-            this.toSession.set(key, sessionId);
-            // A live target captured at the wipe wins over the persisted one:
-            // it can carry a group promotion newer than the snapshot.
-            this.toTarget.set(sessionId, reserved.liveTarget ?? entry.target);
-            this.toCwd.set(sessionId, entry.cwd);
-            this.liveSessionIds.add(sessionId);
-            this.restoreRotationState(sessionId, entry);
-            if (reserved.liveRotation && reserved.wipedSessionId) {
-              this.carryLiveRotationState(
-                sessionId,
-                reserved.liveRotation,
-                reserved.wipedSessionId,
-              );
-            }
-            this.wipedRouteState.delete(key);
+            this.settleRestoredRoute(key, sessionId, entry, reserved);
             reservation.resolve(sessionId);
             if (sessionId !== entry.sessionId) {
+              // Shared flag, not only the per-invocation local: with
+              // overlapping restores just the last finisher flushes, so a
+              // redirect seen solely by an earlier finisher must still reach
+              // disk.
+              this.persistDirtyWhileSuspended = true;
               changed = true;
             }
             restored++;
@@ -1753,6 +1855,49 @@ export class SessionRouter {
               this.readdAbortedRoute(key, entry, reserved);
               break;
             }
+            if (this.toSession.has(key)) {
+              // A successor restore already settled the key and left (its
+              // per-key finally removed it from creatingSessions): the route
+              // and the wipe capture now belong to it. Reject so this
+              // restore's waiters re-route, and touch nothing — tombstoning,
+              // dropping, or re-planting here would all fight the
+              // successor's finished settle. The capture was already
+              // consumed by that settle, so the cleanup below is a no-op for
+              // it; for a resolve()-created route (which never adopts the
+              // capture) it reclaims instead of leaking.
+              reservation.reject(err);
+              const wipedId = reserved.wipedSessionId;
+              this.wipedRouteState.delete(key);
+              if (wipedId) {
+                this.rotationDeltas.delete(wipedId);
+                if (reserved.wipedBridgeLive) {
+                  this.scheduleDiscardInvalidatedSession(wipedId);
+                }
+              }
+              continue;
+            }
+            if (this.suspendedDeletionKeys.has(key)) {
+              // The key was removed while its load was in flight (the settle
+              // never committed, so nothing saw the removal). The removal is
+              // terminal for the waiters parked on this reservation — the
+              // same shape as the settle-side tombstone hit — and the route
+              // stays gone. The wiped session has nothing riding on it
+              // anymore, so it is reclaimed, not kept.
+              this.invalidateOperation(operation);
+              operation.removalInvalidation = true;
+              reservation.reject(operation.invalidationError);
+              const wipedId = reserved.wipedSessionId;
+              this.wipedRouteState.delete(key);
+              if (wipedId) {
+                this.rotationDeltas.delete(wipedId);
+                if (reserved.wipedBridgeLive) {
+                  this.scheduleDiscardInvalidatedSession(wipedId);
+                }
+              }
+              failed++;
+              changed = true;
+              continue;
+            }
             const reason = err instanceof Error ? err.message : String(err);
             process.stderr.write(
               `[SessionRouter] Failed to restore session ${sanitizeLogText(entry.sessionId, 128)} for key ${sanitizeLogText(key, 256)}: ${sanitizeLogText(reason, 512)}\n`,
@@ -1792,6 +1937,9 @@ export class SessionRouter {
                 this.toSession.set(key, wipedId);
                 this.toTarget.set(wipedId, reserved.liveTarget ?? entry.target);
                 this.toCwd.set(wipedId, entry.cwd);
+                if (reserved.managedMeta) {
+                  this.toManagedMeta.set(wipedId, reserved.managedMeta);
+                }
                 this.liveSessionIds.add(wipedId);
                 this.carryLiveRotationState(
                   wipedId,
@@ -1803,9 +1951,12 @@ export class SessionRouter {
                 // Nothing rides on the wiped session: reclaim it so it
                 // cannot leak on the bridge. Skipped when the session was
                 // never attached to this bridge (a pre-restart leftover) —
-                // there is nothing to reclaim.
+                // there is nothing to reclaim. Tokenless: the wiped session
+                // was bound by its own (already-finished) operation, so this
+                // restore's operation token would never match the bridge's
+                // binding guard.
                 if (reserved.wipedBridgeLive) {
-                  this.scheduleDiscardInvalidatedSession(wipedId, operation);
+                  this.scheduleDiscardInvalidatedSession(wipedId);
                 }
               }
             }
@@ -1851,6 +2002,19 @@ export class SessionRouter {
           // clobber it. Un-attempted keys still hold this restore's own
           // operation — their per-key finally never ran.
           if (this.creatingSessions.get(key) !== reserved.operation) {
+            // No successor restore adopted this restore's wipe capture (its
+            // reservation pass would hold a restoreReservation operation):
+            // reclaim it here instead of leaking it past the aborted restore.
+            const successor = this.creatingSessions.get(key);
+            if (successor?.restoreReservation !== true) {
+              const wipedId =
+                this.wipedRouteState.get(key)?.wipedSessionId ??
+                reserved.wipedSessionId;
+              this.wipedRouteState.delete(key);
+              if (wipedId) {
+                this.rotationDeltas.delete(wipedId);
+              }
+            }
             continue;
           }
           this.readdAbortedRoute(key, entry, reserved);
@@ -1866,14 +2030,20 @@ export class SessionRouter {
       // was skipped to keep a truncated store from becoming durable. An
       // earlier finisher leaves the suspension and the pending flush to the
       // restore still running — flushing sooner would persist the other
-      // restore's partial prefix.
+      // restore's partial prefix. Its `changed` is promoted to the shared
+      // flag for the same reason: only the last finisher reads it.
+      if (completed) {
+        this.persistDirtyWhileSuspended ||= changed;
+      }
       if (
         completed &&
         this.persistSuspendDepth === 0 &&
-        (changed || this.persistRequestedWhileSuspended) &&
+        (this.persistDirtyWhileSuspended ||
+          this.persistRequestedWhileSuspended) &&
         restoreGeneration === this.lifecycleGeneration
       ) {
         this.persistRequestedWhileSuspended = false;
+        this.persistDirtyWhileSuspended = false;
         this.suspendedDeletionKeys.clear();
         this.persist();
       }
@@ -1903,12 +2073,22 @@ export class SessionRouter {
       this.toSession.set(key, entry.sessionId);
       this.toTarget.set(entry.sessionId, reserved.liveTarget ?? entry.target);
       this.toCwd.set(entry.sessionId, entry.cwd);
+      if (entry.isolation === 'worktree' && entry.workspaceCwd !== undefined) {
+        this.toManagedMeta.set(entry.sessionId, {
+          isolation: 'worktree',
+          workspaceCwd: entry.workspaceCwd,
+        });
+      }
       this.restoreRotationState(entry.sessionId, entry);
       if (reserved.liveRotation && reserved.wipedSessionId) {
         this.carryLiveRotationState(
           entry.sessionId,
           reserved.liveRotation,
           reserved.wipedSessionId,
+          // The bridge the captured leases ran against is gone (that is why
+          // the restore aborted): re-planting them would block rotation on
+          // this route forever.
+          { carryLeases: false },
         );
       }
     }
@@ -1918,11 +2098,56 @@ export class SessionRouter {
     this.wipedRouteState.delete(key);
   }
 
+  /**
+   * The one settle for a restored route, shared by the generic and the
+   * managed (worktree) branches: map the key to the session, seed the
+   * persisted rotation counters, then re-apply whatever the reservation's
+   * wipe captured (newer than the snapshot). Routing leases only carry when
+   * the wiped session was live on the current bridge — a lease claims a
+   * message is in flight against the bridge that took it; on a dead bridge
+   * the claim is meaningless and would block rotation forever. The wipe
+   * capture and the rotation delta are always consumed here, so neither
+   * outlives the settle.
+   */
+  private settleRestoredRoute(
+    key: string,
+    sessionId: string,
+    entry: PersistedEntry,
+    reserved: {
+      wipedSessionId?: string;
+      wipedBridgeLive?: boolean;
+      liveRotation?: { turns?: number; startedAt?: number; leases?: number };
+      liveTarget?: SessionTarget;
+    },
+  ): void {
+    this.toSession.set(key, sessionId);
+    this.toTarget.set(sessionId, reserved.liveTarget ?? entry.target);
+    this.toCwd.set(sessionId, entry.cwd);
+    this.liveSessionIds.add(sessionId);
+    this.restoreRotationState(sessionId, entry);
+    if (reserved.liveRotation && reserved.wipedSessionId) {
+      this.carryLiveRotationState(
+        sessionId,
+        reserved.liveRotation,
+        reserved.wipedSessionId,
+        { carryLeases: reserved.wipedBridgeLive === true },
+      );
+    }
+    this.wipedRouteState.delete(key);
+    if (reserved.wipedSessionId) {
+      this.rotationDeltas.delete(reserved.wipedSessionId);
+    }
+  }
+
   dispose(): void {
     this.lifecycleGeneration++;
     for (const operation of this.creatingSessions.values()) {
       this.invalidateOperation(operation);
     }
+    this.persistSuspendDepth = 0;
+    this.persistRequestedWhileSuspended = false;
+    this.persistDirtyWhileSuspended = false;
+    this.pendingRemovalIds.clear();
     this.toSession.clear();
     this.toTarget.clear();
     this.toCwd.clear();
@@ -2042,6 +2267,7 @@ export class SessionRouter {
       leases?: number;
     },
     wipedSessionId: string,
+    options?: { carryLeases?: boolean },
   ): void {
     const delta = this.rotationDeltas.get(wipedSessionId);
     this.rotationDeltas.delete(wipedSessionId);
@@ -2054,7 +2280,14 @@ export class SessionRouter {
     if (liveRotation.startedAt !== undefined) {
       this.toStartedAt.set(sessionId, liveRotation.startedAt);
     }
-    const leases = (liveRotation.leases ?? 0) + (delta?.leases ?? 0);
+    // A routing lease claims a message is in flight against the bridge that
+    // took it; when that bridge is gone (the wipe captured no live session,
+    // or the restore aborted on a dead bridge) the claim is meaningless and
+    // re-planting it would block rotation on the route forever.
+    const leases =
+      options?.carryLeases === false
+        ? 0
+        : (liveRotation.leases ?? 0) + (delta?.leases ?? 0);
     // releaseRoutingLease is always called with the id the routed message
     // resolved — the wiped one. Re-key the lease onto the loaded id only
     // when they match; otherwise leave it under the wiped id so the release
@@ -2208,6 +2441,52 @@ export class SessionRouter {
     return loadWindow;
   }
 
+  /**
+   * Bound one restore load: a wedged-but-alive bridge must not hold the
+   * restore's persist suspension open forever. A timeout rejects as a
+   * connectivity failure (the restore aborts, keeping every un-attempted
+   * route), and a load that still settles afterwards has its session
+   * reclaimed rather than leaked.
+   */
+  private async boundedRestoreLoad(
+    key: string,
+    load: Promise<string>,
+    operation: SessionOperation,
+  ): Promise<string> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    // Promise.resolve first: bridges may hand back a plain value.
+    const guarded = Promise.resolve(load).then(
+      (sessionId) => {
+        if (timedOut) {
+          this.scheduleDiscardInvalidatedSession(sessionId, operation);
+        }
+        return sessionId;
+      },
+      (error: unknown) => {
+        throw error;
+      },
+    );
+    try {
+      return await Promise.race([
+        guarded,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(
+              new BridgeConnectivityError(
+                `Session restore load for key ${sanitizeLogText(key, 256)} timed out after ${RESTORE_LOAD_TIMEOUT_MS}ms`,
+              ),
+            );
+          }, RESTORE_LOAD_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private createSessionOperation(
     key: string,
     target: SessionTarget,
@@ -2233,11 +2512,17 @@ export class SessionRouter {
     return operation;
   }
 
-  private invalidateRouteOperation(key: string): void {
+  private invalidateRouteOperation(
+    key: string,
+    options?: { removal?: boolean },
+  ): void {
     this.routeTokens.delete(key);
     const operation = this.creatingSessions.get(key);
     if (!operation) return;
     this.invalidateOperation(operation);
+    if (options?.removal) {
+      operation.removalInvalidation = true;
+    }
     this.creatingSessions.delete(key);
   }
 
@@ -2282,7 +2567,7 @@ export class SessionRouter {
 
   private scheduleDiscardInvalidatedSession(
     sessionId: string,
-    operation: SessionOperation,
+    operation?: SessionOperation,
   ): void {
     if ([...this.toSession.values()].includes(sessionId)) return;
     try {
