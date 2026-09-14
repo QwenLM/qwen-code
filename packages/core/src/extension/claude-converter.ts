@@ -663,8 +663,9 @@ export async function buildQwenExtensionFromPlugin(
       }
     }
 
-    // 声明的工作流保留原相对路径，避免不同目录下的同名文件互相覆盖。
-    // 用精确文件列表控制发现范围；未声明时沿用已复制的 workflows/。
+    // Declared workflows keep their relative paths, so same-named files in
+    // different directories do not overwrite each other, and the converted
+    // manifest lists the exact files. Undeclared, the copied workflows/ stays.
     const workflowPaths =
       mergedConfig.workflows === undefined
         ? undefined
@@ -821,9 +822,11 @@ export async function convertClaudePluginStandalone(
 }
 
 /**
- * 在目标扩展内按原相对路径收集声明的工作流，并返回 manifest 文件列表。
- * 只读取目录第一层的普通 .js 文件，且所有来源路径仍须限制在插件内。
- * 重新复制可恢复被 commands/skills/agents 重映射移除的工作流文件。
+ * Copies a plugin's declared workflow files into the converted extension at
+ * their relative paths and returns that file list for the manifest. Reads one
+ * directory level of regular `.js` files, every source confined to the plugin;
+ * re-copying restores a workflow file the commands/skills/agents remapping
+ * removed.
  */
 function collectWorkflowResources(
   resourcePaths: unknown,

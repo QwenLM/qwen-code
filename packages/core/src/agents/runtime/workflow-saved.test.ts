@@ -735,7 +735,7 @@ describe('workflow-saved — extension tier', () => {
     );
     expect(parseExtensionWorkflowName('My_Ext.v2:deep')).toEqual({
       extensionName: 'My_Ext.v2',
-      stem: 'deep',
+      workflowName: 'deep',
     });
     expect(parseExtensionWorkflowName('deep')).toBeNull();
     expect(parseExtensionWorkflowName('gcp:Deep')).toBeNull();

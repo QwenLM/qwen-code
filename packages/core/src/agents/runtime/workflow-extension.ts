@@ -45,7 +45,7 @@ export const MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES = 256 * 1024;
 
 /** One workflow script an active extension ships (metadata only). */
 export interface ExtensionWorkflowDefinition {
-  /** `<extensionName>:<meta.name>`，同时用于斜杠命令和 `workflow()` 调用。 */
+  /** `<extensionName>:<meta.name>` — the slash command name and `workflow()` address. */
   name: string;
   /** File name without `.js`. */
   stem: string;

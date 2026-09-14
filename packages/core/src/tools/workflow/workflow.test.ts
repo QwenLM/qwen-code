@@ -2535,6 +2535,25 @@ describe('WorkflowTool — extension workflow labels', () => {
     expect(details.permissionRules).toHaveLength(1);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'names an extension workflow reached through a symlinked ancestor',
+    async () => {
+      const scriptPath = await extensionScript();
+      // Discovery records real paths; the call spells the path through a
+      // symlink, the way macOS `/var` resolves to `/private/var`.
+      const alias = path.join(dir, 'alias');
+      await fs.symlink(path.join(dir, 'gcp'), alias);
+      const aliasedPath = path.join(alias, 'workflows', 'audit.js');
+      const tool = new WorkflowTool(
+        configWithExtensionWorkflow(scriptPath, true),
+      );
+
+      expect(tool.build({ scriptPath: aliasedPath }).getDescription()).toBe(
+        'Run extension workflow (gcp:audit)',
+      );
+    },
+  );
+
   it('falls back to the saved-workflow label once the extension is inactive', async () => {
     const scriptPath = await extensionScript();
     const tool = new WorkflowTool(

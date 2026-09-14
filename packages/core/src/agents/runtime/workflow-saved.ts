@@ -31,7 +31,7 @@
  * hands the user a command for a run that is already over.
  */
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
@@ -113,7 +113,7 @@ export function validateWorkflowName(name: string): string | null {
  */
 const EXTENSION_NAME_SOURCE = '[A-Za-z0-9._-]+';
 
-/** 扩展工作流通过 `<extension name>:<meta.name>` 寻址。 */
+/** `<extension name>:<meta.name>` — how an extension workflow is addressed. */
 export const EXTENSION_WORKFLOW_NAME_PATTERN = new RegExp(
   `^(${EXTENSION_NAME_SOURCE}):(${WORKFLOW_NAME_PATTERN.source.slice(1, -1)})$`,
 );
@@ -133,12 +133,12 @@ export function qualifyExtensionWorkflowName(
   return `${extensionName}:${workflowName}`;
 }
 
-/** 拆分 `<extension>:<meta.name>`；不符合格式时返回 `null`。 */
+/** Split `<extension>:<meta.name>`; `null` when the name does not have that shape. */
 export function parseExtensionWorkflowName(
   name: string,
-): { extensionName: string; stem: string } | null {
+): { extensionName: string; workflowName: string } | null {
   const match = EXTENSION_WORKFLOW_NAME_PATTERN.exec(name);
-  return match ? { extensionName: match[1], stem: match[2] } : null;
+  return match ? { extensionName: match[1], workflowName: match[2] } : null;
 }
 
 /**
@@ -159,19 +159,33 @@ export function getActiveExtensionWorkflows(
 }
 
 /**
- * The active extension workflow a `scriptPath` names, by lexical comparison.
- * No disk I/O, so it can back synchronous labels; the approval dialog uses
- * {@link findActiveExtensionWorkflowByPathCanonical}. Picks a label only —
- * the security check is the loader's allowlist.
+ * The active extension workflow a `scriptPath` names, for synchronous labels;
+ * the approval dialog uses {@link findActiveExtensionWorkflowByPathCanonical}.
+ * Picks a label only — the security check is the loader's allowlist.
+ *
+ * Discovered paths are real paths, so a spelling through a symlinked ancestor
+ * (macOS `/var` → `/private/var`) misses the lexical comparison and is retried
+ * against its real path. The disk is touched only when an active extension
+ * workflow exists and the lexical spelling did not match.
  */
 export function findActiveExtensionWorkflowByPath(
   config: Config,
   scriptPath: string,
 ): ExtensionWorkflowDefinition | undefined {
+  const workflows = getActiveExtensionWorkflows(config);
+  if (workflows.length === 0) return undefined;
   const resolved = path.resolve(scriptPath);
-  return getActiveExtensionWorkflows(config).find(
+  const lexical = workflows.find(
     (workflow) => path.resolve(workflow.scriptPath) === resolved,
   );
+  if (lexical) return lexical;
+  let real: string;
+  try {
+    real = realpathSync(scriptPath);
+  } catch {
+    return undefined;
+  }
+  return workflows.find((workflow) => workflow.scriptPath === real);
 }
 
 /** Like {@link findActiveExtensionWorkflowByPath}, comparing real paths. */
