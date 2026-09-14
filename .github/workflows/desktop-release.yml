@@ -174,7 +174,11 @@ jobs:
             # package.json, v0.22.3 is 24 manifests), none of the 30 stable
             # v0.2* tags is an annotated or signed object, and building the
             # parent instead would bundle the previous CLI version. Tightening
-            # who may tag is the lever that would change this.
+            # who may tag is the lever that would change this. The manual route
+            # when this check rejects a tag: land the release branch's commits
+            # on main and dispatch with qwen_code_ref=main, which bundles a
+            # main-reviewed commit; shipping a tag whose extra commits stay
+            # off main is a policy call this workflow does not make.
             ancestor="$sha"
             if [ "$FOLLOWS_RELEASE" = 'true' ]; then
               ancestor="$(git rev-parse "${sha}^")"
