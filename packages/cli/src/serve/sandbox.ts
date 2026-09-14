@@ -392,8 +392,8 @@ export interface BwrapWritableRoots {
 
 /**
  * Resolves the writable roots for an in-place Linux confinement: the same set
- * the Seatbelt permissive profile grants, plus the git directories a worktree
- * checkout keeps outside its workspace.
+ * the Seatbelt permissive profile grants, except global gitconfig, plus the
+ * git directories a worktree checkout keeps outside its workspace.
  *
  * Shared by the sandbox hop and `qwen sandbox` so the two derive their roots
  * the same way. They can still differ in what they feed in: the hop passes the
@@ -432,7 +432,6 @@ export function resolveBwrapWritableRoots(
     runtimeDir,
     ...resolveGitWritableRoots(targetDir),
     path.join(homeDir, '.npm'),
-    path.join(homeDir, '.gitconfig'),
   ]);
 
   // Extra workspace directories get a stricter floor than the built-in roots:
@@ -469,20 +468,30 @@ export function resolveBwrapWritableRoots(
   // launch re-reads, and QWEN_DIR itself must stay writable — so the file
   // gets a read-only bind layered over the writable root, keeping a confined
   // process from rewriting what the host next trusts.
-  const readOnlyOverrides: string[] = [];
   const qwenEnvFile = path.join(qwenDir, '.env');
+  let protectedEnvFile: string;
   try {
-    if (fs.statSync(qwenEnvFile).isFile()) {
-      readOnlyOverrides.push(fs.realpathSync(qwenEnvFile));
+    try {
+      // Reserve the missing path too, without truncating existing settings.
+      fs.writeFileSync(qwenEnvFile, '', { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
-  } catch {
-    // No `.env` yet — nothing to pin.
+    const stat = fs.lstatSync(qwenEnvFile);
+    if (!stat.isFile() || stat.nlink !== 1) {
+      throw new Error('Expected a regular file with a single link.');
+    }
+    protectedEnvFile = fs.realpathSync(qwenEnvFile);
+  } catch (error) {
+    throw new FatalSandboxError(
+      `Cannot protect sandbox configuration '${qwenEnvFile}': ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
   return {
     targetDir,
     roots: normalizeWritableRoots([...roots, ...extras]),
-    readOnlyOverrides,
+    readOnlyOverrides: [protectedEnvFile],
   };
 }
 

@@ -517,25 +517,81 @@ describe('resolveBwrapWritableRoots', () => {
     );
   });
 
-  it('pins the global .env read-only over the writable QWEN_DIR when it exists', () => {
+  it('reserves the global .env read-only and preserves later operator edits', () => {
     const ws = path.join(work, 'ws');
     fs.mkdirSync(ws);
     vi.spyOn(process, 'cwd').mockReturnValue(ws);
 
-    expect(resolveBwrapWritableRoots().readOnlyOverrides).toEqual([]);
-
     const envFile = path.join(storageDirs.qwen, '.env');
+    expect(resolveBwrapWritableRoots().readOnlyOverrides).toEqual([envFile]);
+    expect(fs.readFileSync(envFile, 'utf8')).toBe('');
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(envFile).mode & 0o777).toBe(0o600);
+    }
+
     fs.writeFileSync(envFile, 'KEY=1\n');
     const { roots, readOnlyOverrides } = resolveBwrapWritableRoots();
     expect(roots).toContain(fs.realpathSync(storageDirs.qwen));
     expect(readOnlyOverrides).toEqual([fs.realpathSync(envFile)]);
+    expect(fs.readFileSync(envFile, 'utf8')).toBe('KEY=1\n');
+  });
+
+  it.each(['directory', 'hardlink'])(
+    'refuses a global .env that is a %s',
+    (kind) => {
+      fs.mkdirSync(storageDirs.qwen);
+      const envFile = path.join(storageDirs.qwen, '.env');
+      if (kind === 'directory') {
+        fs.mkdirSync(envFile);
+      } else {
+        const original = path.join(work, 'original.env');
+        fs.writeFileSync(original, 'KEY=1\n');
+        fs.linkSync(original, envFile);
+      }
+      expect(() => resolveBwrapWritableRoots()).toThrow(
+        /Cannot protect sandbox configuration/,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked global .env without changing its target',
+    () => {
+      fs.mkdirSync(storageDirs.qwen);
+      const original = path.join(work, 'original.env');
+      fs.writeFileSync(original, 'KEY=1\n');
+      fs.symlinkSync(original, path.join(storageDirs.qwen, '.env'));
+      expect(() => resolveBwrapWritableRoots()).toThrow(
+        /Cannot protect sandbox configuration/,
+      );
+      expect(fs.readFileSync(original, 'utf8')).toBe('KEY=1\n');
+    },
+  );
+
+  it('fails closed when the global .env cannot be prepared', () => {
+    vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+      throw Object.assign(new Error('fixture write refused'), {
+        code: 'EACCES',
+      });
+    });
+    expect(() => resolveBwrapWritableRoots()).toThrow(
+      /Cannot protect sandbox configuration.*fixture write refused/,
+    );
   });
 });
 
 describe('start_sandbox bwrap branch', () => {
   const cliArgs = [process.execPath, '/path/to/cli.js', '--prompt', 'hi'];
+  let work: string;
 
   beforeEach(() => {
+    work = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'bwrap-hop-')),
+    );
+    storageDirs.qwen = path.join(work, 'qwen');
+    storageDirs.runtime = path.join(work, 'runtime');
+    fs.mkdirSync(storageDirs.qwen);
+    fs.mkdirSync(storageDirs.runtime);
     vi.stubEnv('DEBUG', undefined);
     vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
     vi.spyOn(fs, 'realpathSync').mockImplementation(
@@ -549,6 +605,7 @@ describe('start_sandbox bwrap branch', () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     spawnMock.mockReset();
+    fs.rmSync(work, { recursive: true, force: true });
   });
 
   async function run(

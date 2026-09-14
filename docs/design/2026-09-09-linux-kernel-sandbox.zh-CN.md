@@ -143,8 +143,8 @@ C 源码就放在旁边 `packages/core/vendor/landlock-run/src/qwen-landlock-run
 
 **决策。**
 
-- 每个后端探测都报告一个强制等级：bwrap ⇒ 按构造即 `full`（功能性探测已经
-  真实演练过 mount 命名空间与 bind 挂载）；landlock ⇒ 由内核 ABI 协商决定
+- 每个后端探测都报告一个强制等级：bwrap ⇒ 对所选挂载策略为 `full`
+  （功能性探测验证挂载建立，不验证与全部主机能力隔离）；landlock ⇒ 由内核 ABI 协商决定
   `full` 或 `partial`（旧 ABI 无法治理新的访问位——例如 ABI 3 之前的
   `truncate`）；容器 ⇒ `full`（其边界是运行时自己的问题）。
 - 显式请求的沙箱（`--sandbox`/`QWEN_SANDBOX` 指名某个 command，或 `=true`）
@@ -210,8 +210,8 @@ _存活_。结果是一个永远不会显示为已死的 owner，于是交接与
 **已接受的代价。** 受约束进程能看到并向主机进程发信号，procfs 魔法链接
 （`/proc/<pid>/root/…`）仍然是命名主机路径的一种方式。这条路径并不是只读的：
 内核会按*目标*任务的根挂载重新打开它，于是对一个同 uid 的主机进程而言，它到达
-的是主机的可写根，真正的闸门是 `ptrace_may_access` 与 Yama `ptrace_scope`，而不是
-本命名空间的只读 bind（见 § 安全考量）。在 Landlock 后端上，ruleset 同样治理被
+的是主机的可写根，受 `ptrace_may_access` 的 READ 检查约束，而不是本命名空间的
+只读 bind。Yama 的 ATTACH 限制不能证明这些链接受到保护（见 § 安全考量）。在 Landlock 后端上，ruleset 同样治理被
 重新打开的那个路径。
 
 **将来若要加它的前置条件。** owner 记录必须先携带命名空间身份，且读取方必须把
@@ -271,7 +271,6 @@ _存活_。结果是一个永远不会显示为已死的 owner，于是交接与
    | `RUNTIME_DIR`   | `Storage.getRuntimeBaseDir()`（mkdir -p，realpath）                                                                                      |
    | git 目录        | `git rev-parse --git-dir` 与 `--git-common-dir`，当它们解析到 `TARGET_DIR` 之外时                                                        |
    | npm 缓存        | `~/.npm`（若存在）                                                                                                                       |
-   | git 配置        | `~/.gitconfig`（若存在，按文件绑定）                                                                                                     |
    | `INCLUDE_DIR_n` | `workspaceContext.getDirectories()` 去掉 `TARGET_DIR`（无 5 个上限；argv 没有 profile 参数数量限制；解析到 home 目录内部的条目会被拒绝） |
 
    **为什么需要 git 那两个根。** 在 worktree 检出里 `.git` 是一个指向别处的文件，
@@ -423,7 +422,7 @@ CI 通道与 E2E 表也都要求这一点。
 - 检查命令传递显式 sandbox/image 参数；bare 模式跳过 settings 和 `.env` 加载，safe 模式忽略 settings。纯检查在无后端时可以成功退出；无法实际执行的验证或命令请求返回非零，包括已经处于沙箱内的情况。带自身参数的命令必须放在 `--` 后；之前的未知参数在解析时失败。
 - 透传命令直接继承 stdin、stdout、stderr。此模式的检查文本写入 stderr，从而保留大输出及管道中的结构化输出。验证电池继续捕获输出供各项断言使用。
 - bwrap 再执行将 Node 启动参数追加到继承参数后，保留子进程环境的优先级，并在 managed 启动标记要求时恢复 Electron 的 Node 模式。
-- `full` 描述文件系统挂载约束，不代表与主机服务隔离。检查报告与提示词说明：即使 closed 网络模式下主机 Unix socket 仍可访问，proxied 模式也不强制所有连接经过代理。可写 Git 配置/hooks 和 Qwen settings 能影响后续无约束启动；这一剩余能力随既有授权保留。改变该策略需要跨后端的独立决策。
+- `full` 描述文件系统挂载约束，不代表与主机服务隔离。检查报告与提示词说明：即使 closed 网络模式下主机 Unix socket 仍可访问，proxied 模式也不强制所有连接经过代理。可写 Git 配置/hooks 和 Qwen settings 能影响后续无约束启动；这一剩余能力随既有授权保留。收窄仓库元数据权限仍需独立决策；bwrap 默认不再授予全局 `~/.gitconfig` 写权限。
 - 回归验收：拒绝过宽根及其符号链接；环境 Git 选择变量和伪造 gitfile 无法授权无关仓库；未实际执行的请求返回非零；命令参数要么完整保留、要么被拒绝；透传输出不被捕获；继承的 Node 参数与 managed Electron 模式到达子进程。Linux 挂载约束及 procfs 边缘场景需要 Linux 主机，不能用 mock spawn 测试宣称已验证。
 
 ## Phase P1 —— `qwen-landlock-run` vendored 回退
@@ -526,41 +525,35 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
 后端与 macOS 不受影响。这张表是 P3 翻默认值时必须回答的；在那之前，它们是一个
 显式启用 flag 的既有后果。
 
-| 领域                                                                       | 影响                            | 机制                                                                                                                                                                                               | v1 中的处理                                                                                                      |
-| -------------------------------------------------------------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| worktree 检出里的 git                                                      | 会完全不可用                    | git dir 与 common dir 解析到 cwd 之外（布局已在 § Phase P0 核实）                                                                                                                                  | **已修** —— 两者都是可写根                                                                                       |
-| 跨进程 owner 存活性                                                        | 会静默挂起                      | `process.kill(pid, 0)` 返回非 `ESRCH` ⇒ 存活，而 PID 通过 `~/.qwen` 共享（`conversation-runtime-ownership.ts:44-65`、`serve/live/discovery.ts:147`、`worktreeSessionService.ts:424-446`）          | **已规避** —— 完全不用 PID 命名空间（D6）                                                                        |
-| GUI 启动（OAuth 登录、`artifact` 打开）                                    | 浏览器无法在约束下运行          | `xdg-open` 子进程继承约束，而 `~/.config/<browser>` 不是可写根                                                                                                                                     | 删除 display 变量 ⇒ 确定地走打印 URL 路径                                                                        |
-| `git push` 的 ssh-agent 认证                                               | 不受影响                        | agent socket 通常位于 `/run/user/$UID`（经只读主机绑定保持可达）；`/tmp/ssh-*` 下的 socket 也可用，因为主机 `/tmp` 保持绑定、没有被 tmpfs 替换 —— 共享 `/tmp` 暴露的面见 § 安全考量                | ——                                                                                                               |
-| 语音输入                                                                   | 不可用                          | `--dev /dev` 遮蔽 `/dev/snd`；`voice-availability.ts:50` 还需要 `PULSE_SERVER`                                                                                                                     | 已记录 —— 改用容器后端或无约束运行                                                                               |
-| 自更新                                                                     | 部分受影响                      | 受管更新根是 `~/.qwen/updates/npm`（`scripts/cli-entry.js:149-150`）——那是可写根，因此退出码 44 的受管流程可用；而 npm-global 的 `updateCommand`（`installationInfo.ts:350`）写全局 prefix，会失败 | 受管安装与独立安装正常更新；npm-global 用户从主机侧更新                                                          |
-| IDE companion、主机 `qwen serve`、localhost MCP                            | 仅在 `closed` 下不可达          | `--unshare-net` 移除 loopback（D5）                                                                                                                                                                | `open` / `proxied` 下仍可用                                                                                      |
-| 对 `~/.config`、`~/.kube`、`~/.ssh`、`/usr/local` 的写入                   | 被拒绝                          | 它们不是可写根 —— 这正是沙箱的意义                                                                                                                                                                 | 确有工作流需要时通过 `--include-directories` 单独加入                                                            |
-| 会话数据、检查点、worktree、Arena、IDE 锁文件、MCP OAuth token、token 账本 | 不受影响                        | 全部位于 `QWEN_DIR` / `RUNTIME_DIR` 之下（`storage.ts:193-241`、`gitWorktreeService.ts:419`、`ArenaManager.ts:136`）                                                                               | ——                                                                                                               |
-| `docker.sock`、D-Bus、Wayland 及其他主机 unix socket                       | 在 bwrap 上可达（实测）         | 内核的只读文件系统写检查豁免 `S_ISSOCK`（只有 `S_ISREG`/`S_ISDIR`/`S_ISLNK` 会返回 `EROFS`），因此 `--ro-bind / /` 之下的 socket 仍接受 `connect()`                                                | 在 bwrap 上**已核实** —— 位于所有可写根之外的 socket 仍接受 `connect()`；Landlock 后端留作 P1 的 `--verify` 用例 |
-| procfs 魔法链接（`/proc/<pid>/root/…`）                                    | `ptrace_scope=0` 主机上的写逃逸 | 链接按*目标*任务的根挂载重新打开，主机进程的链接到达主机可写根；只有 `ptrace_may_access`/Yama 把关                                                                                                 | **接受** —— Ubuntu 的 `ptrace_scope=1` 阻挡非后代；Debian/Fedora/Arch 默认放行同 uid 目标；收窄依赖 D6 前置条件  |
+| 领域                                                                       | 影响                    | 机制                                                                                                                                                                                               | v1 中的处理                                                                                                      |
+| -------------------------------------------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| worktree 检出里的 git                                                      | 会完全不可用            | git dir 与 common dir 解析到 cwd 之外（布局已在 § Phase P0 核实）                                                                                                                                  | **已修** —— 两者都是可写根                                                                                       |
+| 跨进程 owner 存活性                                                        | 会静默挂起              | `process.kill(pid, 0)` 返回非 `ESRCH` ⇒ 存活，而 PID 通过 `~/.qwen` 共享（`conversation-runtime-ownership.ts:44-65`、`serve/live/discovery.ts:147`、`worktreeSessionService.ts:424-446`）          | **已规避** —— 完全不用 PID 命名空间（D6）                                                                        |
+| GUI 启动（OAuth 登录、`artifact` 打开）                                    | 浏览器无法在约束下运行  | `xdg-open` 子进程继承约束，而 `~/.config/<browser>` 不是可写根                                                                                                                                     | 删除 display 变量 ⇒ 确定地走打印 URL 路径                                                                        |
+| `git push` 的 ssh-agent 认证                                               | 不受影响                | agent socket 通常位于 `/run/user/$UID`（经只读主机绑定保持可达）；`/tmp/ssh-*` 下的 socket 也可用，因为主机 `/tmp` 保持绑定、没有被 tmpfs 替换 —— 共享 `/tmp` 暴露的面见 § 安全考量                | ——                                                                                                               |
+| 语音输入                                                                   | 不可用                  | `--dev /dev` 遮蔽 `/dev/snd`；`voice-availability.ts:50` 还需要 `PULSE_SERVER`                                                                                                                     | 已记录 —— 改用容器后端或无约束运行                                                                               |
+| 自更新                                                                     | 部分受影响              | 受管更新根是 `~/.qwen/updates/npm`（`scripts/cli-entry.js:149-150`）——那是可写根，因此退出码 44 的受管流程可用；而 npm-global 的 `updateCommand`（`installationInfo.ts:350`）写全局 prefix，会失败 | 受管安装与独立安装正常更新；npm-global 用户从主机侧更新                                                          |
+| IDE companion、主机 `qwen serve`、localhost MCP                            | 仅在 `closed` 下不可达  | `--unshare-net` 移除 loopback（D5）                                                                                                                                                                | `open` / `proxied` 下仍可用                                                                                      |
+| 对 `~/.config`、`~/.kube`、`~/.ssh`、`/usr/local` 的写入                   | 被拒绝                  | 它们不是可写根 —— 这正是沙箱的意义                                                                                                                                                                 | 确有工作流需要时通过 `--include-directories` 单独加入                                                            |
+| 会话数据、检查点、worktree、Arena、IDE 锁文件、MCP OAuth token、token 账本 | 不受影响                | 全部位于 `QWEN_DIR` / `RUNTIME_DIR` 之下（`storage.ts:193-241`、`gitWorktreeService.ts:419`、`ArenaManager.ts:136`）                                                                               | ——                                                                                                               |
+| `docker.sock`、D-Bus、Wayland 及其他主机 unix socket                       | 在 bwrap 上可达（实测） | 内核的只读文件系统写检查豁免 `S_ISSOCK`（只有 `S_ISREG`/`S_ISDIR`/`S_ISLNK` 会返回 `EROFS`），因此 `--ro-bind / /` 之下的 socket 仍接受 `connect()`                                                | 在 bwrap 上**已核实** —— 位于所有可写根之外的 socket 仍接受 `connect()`；Landlock 后端留作 P1 的 `--verify` 用例 |
+| procfs 魔法链接（`/proc/<pid>/root/…`）                                    | 在挂载策略之外          | 访问使用 `PTRACE_MODE_READ_FSCREDS`，不是 Yama 的 ATTACH 进程关系限制                                                                                                                              | **保留的限制** —— 不能从 `ptrace_scope=1` 推导保护成立；更强隔离依赖 D6 前置条件                                 |
 
 ## 安全考量
 
 - **规范化**：每一个可写根在进入 profile 之前都经过 `realpathSync`；bwrap/Landlock
   比较的是解析后的路径。seatbelt 分支出于同一原因做同样的事。
-- **procfs 魔法链接**：**没有**被关闭，因为 profile 不 unshare PID 命名空间
-  （D6）—— `/proc/<pid>/root/…` 仍是命名主机路径的一种方式。它并不是只读路径：
-  链接按*目标*任务的根挂载解析，所以沿着某个主机进程的链接重新打开的文件位于
-  主机的可写根之上，唯一的闸门是 `ptrace_may_access`（同 uid、目标可 dump，外加
-  Yama 策略）。`kernel.yama.ptrace_scope=1`（Ubuntu 默认）把它限制为后代进程；
-  `0`——Debian/Fedora/Arch 的默认，CI 容器里也很常见——让受约束进程可以经任意
-  同 uid 主机进程的根写入。P2 的 seccomp `ptrace` 拒绝帮不上忙：跟随链接并不发起
-  `ptrace(2)` 调用。在 Landlock 后端上 ruleset 治理被重新打开的 inode，所以这条
-  残余只存在于 bwrap。要收窄它需要 D6 的 PID 命名空间前置条件，或者挂载
-  `hidepid=` 的 procfs（后者对同 uid 目标仍然无效）。同一道
-  `ptrace_may_access`/Yama 闸门——同样不经过任何 `ptrace(2)` 调用——还管着
-  `open("/proc/<pid>/environ")` 与 `process_vm_readv`/`process_vm_writev`，
-  所以在 `ptrace_scope=0` 的主机上，这条残余不止是文件写入：任意同 uid
-  主机进程环境变量里的凭据会被读取，未受约束的同级进程还会被内存读写
-  （即代码注入）。这两者都不是作用于 ruleset 覆盖 inode 的文件操作，
-  Landlock 同样管不到；P2 的拒绝列表因此把
-  `process_vm_readv`/`process_vm_writev` 与 `ptrace` 一并列出。
+- **procfs 魔法链接**：仍在这份挂载策略之外，因为 profile 与主机共享 PID
+  命名空间（D6）。链接按目标任务的挂载解析，访问受凭据、dumpability、
+  capabilities 和 LSM 检查约束。Linux 7.0 对 procfs 链接使用
+  `PTRACE_MODE_READ_FSCREDS`，Yama 的进程关系限制则作用于
+  `PTRACE_MODE_ATTACH`。因此，`kernel.yama.ptrace_scope=1` 不能证明这些
+  链接被阻断。参见 [procfs 访问检查](https://github.com/torvalds/linux/blob/v7.0/fs/proc/base.c#L708)
+  和 [Yama 访问检查](https://github.com/torvalds/linux/blob/v7.0/security/yama/yama_lsm.c#L349)。
+  跟随链接不会调用 `ptrace(2)`，仅禁止该系统调用无法关闭此路径。进程内存 API
+  使用不同的访问模式，必须分别评估。P0 不承诺与主机进程隔离；更强隔离留待
+  后续结合 D6 的 owner 记录前置条件处理。这些源码检查不等于对所有支持主机的
+  动态验证。
 - **只读文件系统语义比看起来更窄**：内核只对 `S_ISREG` / `S_ISDIR` / `S_ISLNK`
   的写访问返回 `EROFS`。`--ro-bind / /` 之下的 socket、FIFO 与设备节点都被豁免，
   因此主机 unix socket 仍然可连接——这是实测结论，不是假设（§ 证据）。这在这里
@@ -584,15 +577,15 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
   `PROJECT_ENV_HARDCODED_EXCLUSIONS` 之中，因此项目 `.env` 或 settings.env 无法
   挑选约束根或主机侧代理命令；只有操作者的启动环境或 home 作用域的 `.env` 可以。
   proxied 模式会在宿主机上、约束之外、agent 启动之前，用 `bash -c` 执行该命令。
-- **非目录授权**：文件授权（例如 `~/.gitconfig`）只保留与文件兼容的访问位
+- **非目录授权（P1 辅助程序）**：文件授权只保留与文件兼容的访问位
   （内核会对非目录上的仅目录访问返回 EINVAL —— 辅助程序据此做掩码）。
 - **可写的 Git 元数据随后会在主机上被执行**：git dir / common dir 授权
-  （以及 `~/.gitconfig` 文件授权）让受约束进程可以改写 `hooks/` 与
+  让受约束进程可以改写 `hooks/` 与
   `config`——`core.fsmonitor`、`core.hooksPath`、`core.pager`、别名、钩子
   脚本——而之后**未受约束**的 `git` 调用会以用户身份运行它们。保留该授权
-  是因为 worktree 提交需要 `objects/`/`refs/`/`logs/` 可写，且该集合与
-  Seatbelt profiles 对齐（见 § 审查跟进契约）；把它收窄到排除 hooks/config
-  已记录为一项独立的跨后端决策。
+  是因为 worktree 提交需要 `objects/`/`refs/`/`logs/` 可写；排除 hooks/config
+  的收窄仍是后续工作（见 § 审查跟进契约）。bwrap 默认不再授予
+  `~/.gitconfig` 写权限：只读的宿主根已经提供读取能力。Seatbelt profiles 不变。
 - **主机 `/tmp` 是共享的读写授权**：`os.tmpdir()` 保持绑定而不换成 tmpfs，
   因此其下的同用户 socket 与锁路径（`/tmp/.X11-unix`、`/tmp/ssh-*/agent.*`）
   可以从内部被 unlink 并替换——受约束进程可以顶替应答之后未受约束的
@@ -603,7 +596,14 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
   检查点、worktree、锁文件），但它的 `.env` 是每次后续启动都会重读的、
   操作者信任的执行输入——包括 proxied 模式会在主机上经 `bash -c` 执行的
   `QWEN_SANDBOX_PROXY_COMMAND`。在可写根之上叠一层只读绑定，受约束进程
-  就无法改写主机下一次信任的内容。
+  就无法经该路径改写主机下一次信任的内容。若文件不存在，根目录解析会先以
+  独占创建、0600 权限生成空文件，再进行只读绑定；已有内容绝不覆盖。空文件会
+  留在主机上，包括执行检查命令之后，以便后续解析使用同一路径。非普通文件、
+  符号链接、多个硬链接或准备文件失败都会终止操作，而不是省略保护。
+- **运行态标记由启动器提供**：项目和 home 作用域的 `.env` 以及 settings.env
+  均不能设置 `SANDBOX` 与 `SANDBOX_ENFORCEMENT`，包括重载与运行时快照。
+  启动器已有的值仍正常继承；通过独立的 `QWEN_SANDBOX` 操作者配置选择后端的
+  行为不变。
 - **启动器/命令失败的归因**：启动器失败以 125 退出并带 `qwen-landlock-run: `
   前缀；而一个成功 exec 的子进程也可能以 125 退出，所以消费方必须同时要求
   状态码 125 **且**有该前缀 —— 这与 dsh 的 CLI 契约钉下的规则相同。

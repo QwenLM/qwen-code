@@ -164,9 +164,9 @@ from source on both arches and fails if the committed bytes differ.
 
 **Decision.**
 
-- Every backend probe reports an enforcement level: bwrap ⇒ `full` by
-  construction (the functional probe exercised the real mount namespace and
-  bind mounts); landlock ⇒ `full` or `partial` by kernel ABI negotiation (older
+- Every backend probe reports an enforcement level: bwrap ⇒ `full` for
+  the selected mount policy (the functional probe exercises mount setup,
+  not isolation from all host capabilities); landlock ⇒ `full` or `partial` by kernel ABI negotiation (older
   ABIs cannot govern newer access bits — e.g. `truncate` before ABI 3);
   containers ⇒ `full` (their boundary is the runtime's problem).
 - Explicitly requested sandbox (`--sandbox`/`QWEN_SANDBOX` naming a command,
@@ -246,8 +246,9 @@ this design is actually for.
 procfs magic links (`/proc/<pid>/root/…`) remain a way to name a host path.
 That path is not read-only: the kernel reopens it against the _target_ task's
 root mount, so for a same-uid host process it reaches the host's writable root,
-gated by `ptrace_may_access` and Yama `ptrace_scope` rather than by this
-namespace's read-only bind (see § Security considerations). On the Landlock
+subject to `ptrace_may_access` READ checks rather than this namespace's
+read-only bind. Yama's ATTACH restrictions do not establish protection for
+these links (see § Security considerations). On the Landlock
 backend the ruleset governs the reopened path too.
 
 **Precondition for ever adding it.** The owner record must first carry a
@@ -317,7 +318,6 @@ the seatbelt branch (`sandbox.ts:229-389`):
    | `RUNTIME_DIR`   | `Storage.getRuntimeBaseDir()` (mkdir -p, realpath)                                                                                                              |
    | git dirs        | `git rev-parse --git-dir` and `--git-common-dir`, when they resolve outside `TARGET_DIR`                                                                        |
    | npm cache       | `~/.npm` if it exists                                                                                                                                           |
-   | git config      | `~/.gitconfig` if it exists (file bind)                                                                                                                         |
    | `INCLUDE_DIR_n` | `workspaceContext.getDirectories()` minus `TARGET_DIR` (no 5-cap; argv has no profile-parameter limit; entries resolving inside the home directory are refused) |
 
    **Why the git roots.** In a worktree checkout `.git` is a file pointing
@@ -485,7 +485,7 @@ what the CI lanes and the E2E table below call.
 - Inspection forwards the explicit sandbox and image flags, skips settings and `.env` loading in bare mode, and suppresses settings in safe mode. Plain inspection may exit successfully without a backend; a verification or command request that cannot run exits non-zero, including when already confined. Commands with their own flags must follow `--`; unknown flags before it fail parsing.
 - Pass-through commands inherit stdin, stdout, and stderr directly. Inspection text goes to stderr for this mode, so large output and piped structured output are preserved. The verification battery retains captured output for its predicates.
 - The bwrap re-exec appends Node launch options to the inherited options, preserves child-environment precedence, and restores Electron's Node mode when the managed launch marker requests it.
-- `full` describes filesystem mount enforcement, not isolation from host services. The inspection report and prompt state that host Unix sockets remain reachable, including in closed network mode, and that proxied mode does not enforce exclusive proxy use. Writable Git configuration/hooks and Qwen settings can affect later unconfined launches; this residual capability is retained with the existing grants. Changing that policy requires a separate decision across backends.
+- `full` describes filesystem mount enforcement, not isolation from host services. The inspection report and prompt state that host Unix sockets remain reachable, including in closed network mode, and that proxied mode does not enforce exclusive proxy use. Writable Git configuration/hooks and Qwen settings can affect later unconfined launches; this residual capability is retained with the existing grants. Narrowing repository metadata remains a separate decision; bwrap no longer grants global `~/.gitconfig` writes by default.
 - Regression acceptance: broad roots and symlinks are refused; ambient Git selectors and planted gitfiles cannot grant an unrelated repository; failed-to-run requests are non-zero; command flags are preserved or rejected; pass-through output is not captured; inherited Node options and managed Electron mode reach the child. Linux mount enforcement and the procfs edge case require a Linux host and are not claimed from mocked spawn tests.
 
 ## Phase P1 — `qwen-landlock-run` vendored fallback
@@ -602,46 +602,39 @@ applies to the two in-place backends only — container backends and macOS are
 unchanged. This is the table the P3 default flip must answer to; until then
 these are documented consequences of an opt-in flag.
 
-| Area                                                                                       | Impact                                 | Mechanism                                                                                                                                                                                                                                                                   | Handling in v1                                                                                                                                           |
-| ------------------------------------------------------------------------------------------ | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| git in a worktree checkout                                                                 | would break entirely                   | git dir and common dir resolve outside cwd (verified layout in § Phase P0)                                                                                                                                                                                                  | **fixed** — both are writable roots                                                                                                                      |
-| Cross-process owner liveness                                                               | would hang silently                    | `process.kill(pid, 0)` with non-`ESRCH` ⇒ alive, over PIDs shared through `~/.qwen` (`conversation-runtime-ownership.ts:44-65`, `serve/live/discovery.ts:147`, `worktreeSessionService.ts:424-446`)                                                                         | **avoided** — no PID namespace at all (D6)                                                                                                               |
-| GUI launch (OAuth login, `artifact` open)                                                  | browser cannot run confined            | `xdg-open` child inherits confinement and `~/.config/<browser>` is not a writable root                                                                                                                                                                                      | display vars deleted ⇒ deterministic print-the-URL path                                                                                                  |
-| ssh-agent auth for `git push`                                                              | unaffected                             | the agent socket usually lives under `/run/user/$UID` (kept reachable by the read-only host bind); a `/tmp/ssh-*` socket also keeps working because host `/tmp` stays bound rather than replaced by a tmpfs — see § Security considerations for what sharing `/tmp` exposes | —                                                                                                                                                        |
-| Voice input                                                                                | unavailable                            | `--dev /dev` masks `/dev/snd`; `voice-availability.ts:50` also needs `PULSE_SERVER`                                                                                                                                                                                         | documented — use a container backend or run unconfined                                                                                                   |
-| Self-update                                                                                | partly affected                        | the managed update root is `~/.qwen/updates/npm` (`scripts/cli-entry.js:149-150`) — a writable root, so the exit-code-44 managed flow works; the npm-global `updateCommand` (`installationInfo.ts:350`) writes the global prefix and fails                                  | managed and standalone installs update normally; npm-global users update from the host                                                                   |
-| IDE companion, host `qwen serve`, localhost MCP                                            | unreachable in `closed` only           | `--unshare-net` removes loopback (D5)                                                                                                                                                                                                                                       | `open` / `proxied` keep them working                                                                                                                     |
-| Writes to `~/.config`, `~/.kube`, `~/.ssh`, `/usr/local`                                   | denied                                 | not writable roots — this is the point of the sandbox                                                                                                                                                                                                                       | add one via `--include-directories` when a workflow genuinely needs it                                                                                   |
-| Session data, checkpoints, worktrees, Arena, IDE lock file, MCP OAuth tokens, token ledger | unaffected                             | all under `QWEN_DIR` / `RUNTIME_DIR` (`storage.ts:193-241`, `gitWorktreeService.ts:419`, `ArenaManager.ts:136`)                                                                                                                                                             | —                                                                                                                                                        |
-| `docker.sock`, D-Bus, Wayland and other host unix sockets                                  | reachable on bwrap (measured)          | the kernel's read-only-fs write check exempts `S_ISSOCK` (only `S_ISREG`/`S_ISDIR`/`S_ISLNK` yield `EROFS`), so a socket under `--ro-bind / /` still accepts `connect()`                                                                                                    | **verified** on bwrap — a socket outside every writable root still accepted `connect()`; the Landlock backend stays a P1 `--verify` case                 |
-| procfs magic links (`/proc/<pid>/root/…`)                                                  | write escape on `ptrace_scope=0` hosts | the link reopens on the _target_ task's root mount, so a host process's link reaches the host's writable root; only `ptrace_may_access`/Yama gates it                                                                                                                       | **accepted** — Ubuntu's `ptrace_scope=1` blocks non-descendants; Debian/Fedora/Arch defaults allow same-uid targets; narrowing needs the D6 precondition |
+| Area                                                                                       | Impact                        | Mechanism                                                                                                                                                                                                                                                                   | Handling in v1                                                                                                                           |
+| ------------------------------------------------------------------------------------------ | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| git in a worktree checkout                                                                 | would break entirely          | git dir and common dir resolve outside cwd (verified layout in § Phase P0)                                                                                                                                                                                                  | **fixed** — both are writable roots                                                                                                      |
+| Cross-process owner liveness                                                               | would hang silently           | `process.kill(pid, 0)` with non-`ESRCH` ⇒ alive, over PIDs shared through `~/.qwen` (`conversation-runtime-ownership.ts:44-65`, `serve/live/discovery.ts:147`, `worktreeSessionService.ts:424-446`)                                                                         | **avoided** — no PID namespace at all (D6)                                                                                               |
+| GUI launch (OAuth login, `artifact` open)                                                  | browser cannot run confined   | `xdg-open` child inherits confinement and `~/.config/<browser>` is not a writable root                                                                                                                                                                                      | display vars deleted ⇒ deterministic print-the-URL path                                                                                  |
+| ssh-agent auth for `git push`                                                              | unaffected                    | the agent socket usually lives under `/run/user/$UID` (kept reachable by the read-only host bind); a `/tmp/ssh-*` socket also keeps working because host `/tmp` stays bound rather than replaced by a tmpfs — see § Security considerations for what sharing `/tmp` exposes | —                                                                                                                                        |
+| Voice input                                                                                | unavailable                   | `--dev /dev` masks `/dev/snd`; `voice-availability.ts:50` also needs `PULSE_SERVER`                                                                                                                                                                                         | documented — use a container backend or run unconfined                                                                                   |
+| Self-update                                                                                | partly affected               | the managed update root is `~/.qwen/updates/npm` (`scripts/cli-entry.js:149-150`) — a writable root, so the exit-code-44 managed flow works; the npm-global `updateCommand` (`installationInfo.ts:350`) writes the global prefix and fails                                  | managed and standalone installs update normally; npm-global users update from the host                                                   |
+| IDE companion, host `qwen serve`, localhost MCP                                            | unreachable in `closed` only  | `--unshare-net` removes loopback (D5)                                                                                                                                                                                                                                       | `open` / `proxied` keep them working                                                                                                     |
+| Writes to `~/.config`, `~/.kube`, `~/.ssh`, `/usr/local`                                   | denied                        | not writable roots — this is the point of the sandbox                                                                                                                                                                                                                       | add one via `--include-directories` when a workflow genuinely needs it                                                                   |
+| Session data, checkpoints, worktrees, Arena, IDE lock file, MCP OAuth tokens, token ledger | unaffected                    | all under `QWEN_DIR` / `RUNTIME_DIR` (`storage.ts:193-241`, `gitWorktreeService.ts:419`, `ArenaManager.ts:136`)                                                                                                                                                             | —                                                                                                                                        |
+| `docker.sock`, D-Bus, Wayland and other host unix sockets                                  | reachable on bwrap (measured) | the kernel's read-only-fs write check exempts `S_ISSOCK` (only `S_ISREG`/`S_ISDIR`/`S_ISLNK` yield `EROFS`), so a socket under `--ro-bind / /` still accepts `connect()`                                                                                                    | **verified** on bwrap — a socket outside every writable root still accepted `connect()`; the Landlock backend stays a P1 `--verify` case |
+| procfs magic links (`/proc/<pid>/root/…`)                                                  | outside the mount policy      | access uses `PTRACE_MODE_READ_FSCREDS`, not Yama's ATTACH relationship restriction                                                                                                                                                                                          | **retained limitation** — do not infer protection from `ptrace_scope=1`; stronger isolation needs the D6 prerequisite                    |
 
 ## Security considerations
 
 - **Canonicalization**: every writable root is `realpathSync`'d before
   entering the profile; bwrap/Landlock compare resolved paths. The
   seatbelt branch does the same for the same reason.
-- **procfs magic links**: **not** closed, because the profile does not unshare
-  the PID namespace (D6) — `/proc/<pid>/root/…` remains a way to name a
-  host path. It is not a read-only path: the link resolves against the
-  _target_ task's root mount, so following a host process's link reopens files
-  on the host's writable root, and the only gate is `ptrace_may_access`
-  (same-uid, dumpable target, plus Yama). `kernel.yama.ptrace_scope=1` (the
-  Ubuntu default) limits that to descendants; `0` — the Debian/Fedora/Arch
-  default, and common in CI containers — lets a confined process write through
-  any same-uid host process's root. The P2 seccomp `ptrace` denial does not
-  help: following the link makes no `ptrace(2)` call. On the Landlock backend
-  the ruleset governs the reopened inode, so this residual is bwrap-only.
-  Narrowing it needs the D6 PID-namespace precondition or a `hidepid=` procfs
-  mount (which still does not hide same-uid targets). The same
-  `ptrace_may_access`/Yama gate — again without any `ptrace(2)` call — also
-  governs `open("/proc/<pid>/environ")` and `process_vm_readv` /
-  `process_vm_writev`, so on `ptrace_scope=0` hosts the residual is wider
-  than a file write: credential disclosure from any same-uid host process's
-  environment, plus memory read/write (code injection) into unconfined
-  siblings. Neither is a file operation on a ruleset-covered inode, so
-  Landlock does not govern them either; the P2 deny-list names
-  `process_vm_readv`/`process_vm_writev` alongside `ptrace` for that reason.
+- **procfs magic links**: remain outside this mount policy because the
+  profile shares the host PID namespace (D6). Links resolve against the
+  target task's mount, and access is subject to credentials, dumpability,
+  capabilities and LSM checks. Linux 7.0 checks procfs links with
+  `PTRACE_MODE_READ_FSCREDS`; Yama's relationship restrictions apply to
+  `PTRACE_MODE_ATTACH`. Therefore `kernel.yama.ptrace_scope=1` does not
+  establish that these links are blocked. See the [procfs access check](https://github.com/torvalds/linux/blob/v7.0/fs/proc/base.c#L708)
+  and [Yama access check](https://github.com/torvalds/linux/blob/v7.0/security/yama/yama_lsm.c#L349).
+  Following a link does not call `ptrace(2)`, so denying that syscall alone
+  does not close this path. Process-memory APIs use different access modes
+  and must be assessed separately. P0 does not claim isolation from host
+  processes; stronger isolation remains follow-up work with the D6 owner
+  record prerequisite. These source checks are not a dynamic verification
+  of every supported host.
 - **Read-only-fs semantics are narrower than they look**: the kernel returns
   `EROFS` for write access only to `S_ISREG` / `S_ISDIR` / `S_ISLNK`. Sockets,
   FIFOs, and device nodes under `--ro-bind / /` are exempt, so host unix
@@ -674,17 +667,18 @@ these are documented consequences of an opt-in flag.
   operator's launch environment or a home-scoped `.env` can. Proxied mode
   executes that command through `bash -c` on the host, outside the
   confinement, before the agent starts.
-- **Non-directory grants**: a file grant (e.g. `~/.gitconfig`) keeps only
+- **Non-directory grants (P1 helper)**: a file grant keeps only
   file-compatible access bits (the kernel rejects directory-only accesses
   on non-directories with EINVAL — the helper masks accordingly).
 - **Writable Git metadata is later executed on the host**: the git dir /
-  common-dir grant (and the `~/.gitconfig` file grant) let a confined
+  common-dir grant lets a confined
   process rewrite `hooks/` and `config` — `core.fsmonitor`, `core.hooksPath`,
   `core.pager`, aliases, hook scripts — which a later _unconfined_ `git`
   invocation runs as the user. The grant is retained because worktree
-  commits need `objects/`/`refs/`/`logs/` writable and the set mirrors the
-  Seatbelt profiles (§ Review follow-up contract); narrowing it to exclude
-  hooks/config is recorded there as a separate cross-backend decision.
+  commits need `objects/`/`refs/`/`logs/` writable; narrowing it to exclude
+  hooks/config remains follow-up work (§ Review follow-up contract). The
+  bwrap defaults do not grant writes to `~/.gitconfig`: the read-only host
+  root already provides read access. Seatbelt profiles are unchanged.
 - **Host `/tmp` is a shared read-write grant**: `os.tmpdir()` stays bound
   rather than replaced by a tmpfs, so same-user socket and lock paths under
   it (`/tmp/.X11-unix`, `/tmp/ssh-*/agent.*`) can be unlinked and replaced
@@ -699,7 +693,17 @@ these are documented consequences of an opt-in flag.
   later launch re-reads — including `QWEN_SANDBOX_PROXY_COMMAND`, which
   proxied mode executes through `bash -c` on the host. A read-only bind
   layered over the writable root keeps a confined process from rewriting
-  what the host next trusts.
+  what the host next trusts through that path. If absent, root resolution
+  creates an empty file exclusively with mode 0600 before binding it;
+  existing contents are never overwritten. The empty file remains on the
+  host, including after inspection, so later resolutions use the same path.
+  Non-regular files, symbolic links, multiple hard links, and failures to
+  prepare the file stop the operation rather than omit the protection.
+- **Runtime markers are launcher-owned**: `SANDBOX` and
+  `SANDBOX_ENFORCEMENT` are rejected from project and home `.env` files and
+  from settings.env, including reloads and runtime snapshots. Existing
+  launcher values remain inherited; backend selection through the separate
+  `QWEN_SANDBOX` operator setting is unchanged.
 - **Launcher/command failure attribution**: launcher failures exit 125
   with a `qwen-landlock-run: ` prefix; a successfully exec'd child may
   also exit 125, so consumers require status 125 **and** the prefix —
