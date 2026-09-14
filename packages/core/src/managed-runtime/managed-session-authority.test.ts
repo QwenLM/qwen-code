@@ -14,10 +14,12 @@ import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { Storage } from '../config/storage.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
+  assertManagedSessionRestoreBundle,
   LocalManagedSessionAuthority,
   ManagedSessionConflictError,
   ManagedSessionUncommittedTailError,
   type ManagedSessionCommand,
+  type ManagedSessionRestoreBundle,
 } from './managed-session-authority.js';
 import {
   createInitialHarnessCheckpoint,
@@ -28,6 +30,7 @@ import {
 } from './managed-harness-checkpoint.js';
 import {
   ManagedSessionRecordError,
+  MANAGED_SESSION_FORMAT_VERSION,
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
 
@@ -1539,6 +1542,15 @@ describe('managed session checkpoints', () => {
     );
     /* Accepted input is not execution continuation. */
     expect(harness.authority.restoreBasis()).toBe('initial');
+    await expect(harness.authority.restoreBundle()).resolves.toMatchObject({
+      formatVersion: MANAGED_SESSION_FORMAT_VERSION,
+      sessionKey: sessionKeyFor(harness.fixture),
+      engine: 'managed',
+      restoreBasis: 'initial',
+      checkpointRef: null,
+      restoreProofRef: null,
+      recoveryStatus: 'ok',
+    });
     await harness.close();
   });
 
@@ -1558,6 +1570,12 @@ describe('managed session checkpoints', () => {
       HOLDS,
     );
     expect(harness.authority.restoreBasis()).toBe('blocked');
+    await expect(harness.authority.restoreBundle()).resolves.toMatchObject({
+      restoreBasis: null,
+      checkpointRef: null,
+      restoreProofRef: null,
+      recoveryStatus: 'blocked',
+    });
     await harness.close();
   });
 
@@ -1684,6 +1702,12 @@ describe('managed session checkpoints', () => {
       reason: 'missing_state',
       message: expect.stringMatching(/is not present for session/),
     });
+    await expect(harness.authority.restoreBundle()).resolves.toMatchObject({
+      restoreBasis: 'checkpoint',
+      checkpointRef: committed.checkpoint.stateRef,
+      restoreProofRef: null,
+      recoveryStatus: 'blocked',
+    });
     await harness.close();
   });
 
@@ -1731,6 +1755,14 @@ describe('managed session checkpoints', () => {
       reason: 'opaque_state',
       message: expect.stringMatching(/JSON/),
     });
+    await expect(harness.authority.restoreBundle()).resolves.toMatchObject({
+      restoreBasis: 'checkpoint',
+      restoreProofRef: null,
+      recoveryStatus: 'blocked',
+    });
+    expect(
+      (await harness.authority.restoreBundle()).checkpointRef,
+    ).not.toBeNull();
     await harness.close();
   });
 
@@ -1767,6 +1799,12 @@ describe('managed session checkpoints', () => {
     await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
       status: 'runnable',
       checkpoint,
+    });
+    await expect(harness.authority.restoreBundle()).resolves.toMatchObject({
+      restoreBasis: 'checkpoint',
+      checkpointRef: committed.checkpoint.stateRef,
+      restoreProofRef: null,
+      recoveryStatus: 'ok',
     });
     await harness.close();
   });
@@ -2057,5 +2095,110 @@ describe('managed session checkpoints', () => {
         .some((event) => event.kind === 'turn.settled'),
     ).toBe(false);
     await harness.close();
+  });
+});
+
+describe('assertManagedSessionRestoreBundle', () => {
+  const sessionKey = {
+    tenantId: 't1',
+    workspaceId: 'w1',
+    sessionId: 's1',
+  };
+
+  function bundle(
+    overrides: Partial<ManagedSessionRestoreBundle>,
+  ): ManagedSessionRestoreBundle {
+    return {
+      formatVersion: MANAGED_SESSION_FORMAT_VERSION,
+      sessionKey,
+      engine: 'managed',
+      throughSequence: 0,
+      checkpointRef: null,
+      restoreBasis: 'initial',
+      restoreProofRef: null,
+      recoveryStatus: 'ok',
+      ...overrides,
+    };
+  }
+
+  it('accepts the legal initial, checkpoint, and history-maintenance combinations', () => {
+    expect(() => assertManagedSessionRestoreBundle(bundle({}))).not.toThrow();
+    expect(() =>
+      assertManagedSessionRestoreBundle(
+        bundle({
+          restoreBasis: 'checkpoint',
+          checkpointRef: ref(),
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertManagedSessionRestoreBundle(
+        bundle({
+          restoreBasis: 'checkpoint',
+          checkpointRef: ref(),
+          recoveryStatus: 'blocked',
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertManagedSessionRestoreBundle(
+        bundle({
+          restoreBasis: null,
+          recoveryStatus: 'blocked',
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertManagedSessionRestoreBundle(
+        bundle({
+          restoreBasis: 'history_rewind',
+          restoreProofRef: ref('managed-history-rewind'),
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects illegal restoreBasis/checkpointRef/restoreProofRef combinations', () => {
+    expect(() =>
+      assertManagedSessionRestoreBundle(bundle({ restoreBasis: 'checkpoint' })),
+    ).toThrow(/checkpoint restore requires checkpointRef/);
+    expect(() =>
+      assertManagedSessionRestoreBundle(
+        bundle({
+          restoreBasis: 'checkpoint',
+          checkpointRef: ref(),
+          restoreProofRef: ref(),
+        }),
+      ),
+    ).toThrow(/null restoreProofRef/);
+    expect(() =>
+      assertManagedSessionRestoreBundle(
+        bundle({ restoreBasis: 'initial', checkpointRef: ref() }),
+      ),
+    ).toThrow(/initial restore requires both refs null/);
+    expect(() =>
+      assertManagedSessionRestoreBundle(
+        bundle({ restoreBasis: 'initial', recoveryStatus: 'blocked' }),
+      ),
+    ).toThrow(/not a blocked downgrade/);
+    expect(() =>
+      assertManagedSessionRestoreBundle(
+        bundle({ restoreBasis: 'history_copy' }),
+      ),
+    ).toThrow(/history_copy restore requires restoreProofRef/);
+    expect(() =>
+      assertManagedSessionRestoreBundle(
+        bundle({
+          restoreBasis: 'history_copy',
+          checkpointRef: ref(),
+          restoreProofRef: ref(),
+        }),
+      ),
+    ).toThrow(/null checkpointRef/);
+    expect(() =>
+      assertManagedSessionRestoreBundle(
+        bundle({ restoreBasis: null, recoveryStatus: 'ok' }),
+      ),
+    ).toThrow(/without restoreBasis must be blocked/);
   });
 });

@@ -14,6 +14,7 @@ import {
   type HarnessRunAuthorization,
 } from './managed-harness-checkpoint.js';
 import {
+  assertManagedSessionRestoreBundle,
   ManagedSessionConflictError,
   type LocalManagedSessionAuthority,
 } from './managed-session-authority.js';
@@ -102,6 +103,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
   async ensureRunnable(): Promise<HarnessCheckpointV1> {
     this.assertNotDetached();
     this.assertCurrentActivation();
+    assertManagedSessionRestoreBundle(await this.authority.restoreBundle());
     let authorization = await this.authority.harnessRunAuthorization();
     if (authorization.status === 'initial') {
       await this.commitInitialBeforeModel();

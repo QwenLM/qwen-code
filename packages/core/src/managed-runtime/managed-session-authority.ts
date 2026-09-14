@@ -78,6 +78,83 @@ export interface ManagedSessionActor {
  */
 export type ManagedSessionRestoreBasis = 'checkpoint' | 'initial' | 'blocked';
 
+/**
+ * Storage §2.2 closed set. `blocked` is a recovery status, not a basis;
+ * a continuation without a checkpoint uses `restoreBasis=null`.
+ */
+export type ManagedSessionRestoreBundleBasis =
+  | 'checkpoint'
+  | 'initial'
+  | 'history_rewind'
+  | 'history_copy'
+  | 'format_upgrade';
+
+export type ManagedSessionRestoreRecoveryStatus = 'ok' | 'blocked';
+
+export interface ManagedSessionRestoreBundle {
+  readonly formatVersion: typeof MANAGED_SESSION_FORMAT_VERSION;
+  readonly sessionKey: ManagedSessionKey;
+  readonly engine: 'managed';
+  readonly throughSequence: number;
+  readonly checkpointRef: ManagedSessionDurableRef | null;
+  readonly restoreBasis: ManagedSessionRestoreBundleBasis | null;
+  readonly restoreProofRef: ManagedSessionDurableRef | null;
+  readonly recoveryStatus: ManagedSessionRestoreRecoveryStatus;
+}
+
+export function assertManagedSessionRestoreBundle(
+  bundle: ManagedSessionRestoreBundle,
+): void {
+  const hasCheckpoint = bundle.checkpointRef !== null;
+  const hasProof = bundle.restoreProofRef !== null;
+  const { restoreBasis, recoveryStatus } = bundle;
+
+  if (restoreBasis === null) {
+    if (recoveryStatus !== 'blocked' || hasCheckpoint || hasProof) {
+      throw new ManagedSessionRecordError(
+        'a restore bundle without restoreBasis must be blocked with both refs null.',
+      );
+    }
+    return;
+  }
+
+  if (restoreBasis === 'checkpoint') {
+    if (!hasCheckpoint || hasProof) {
+      throw new ManagedSessionRecordError(
+        'checkpoint restore requires checkpointRef and a null restoreProofRef.',
+      );
+    }
+    return;
+  }
+
+  if (restoreBasis === 'initial') {
+    if (hasCheckpoint || hasProof || recoveryStatus !== 'ok') {
+      throw new ManagedSessionRecordError(
+        'initial restore requires both refs null and is not a blocked downgrade.',
+      );
+    }
+    return;
+  }
+
+  if (
+    restoreBasis === 'history_rewind' ||
+    restoreBasis === 'history_copy' ||
+    restoreBasis === 'format_upgrade'
+  ) {
+    if (hasCheckpoint || !hasProof) {
+      throw new ManagedSessionRecordError(
+        `${restoreBasis} restore requires restoreProofRef and a null checkpointRef.`,
+      );
+    }
+    return;
+  }
+
+  const _exhaustive: never = restoreBasis;
+  throw new ManagedSessionRecordError(
+    `unknown restoreBasis ${String(_exhaustive)}.`,
+  );
+}
+
 export interface ManagedSessionCheckpoint {
   readonly checkpointId: string;
   readonly coveredSequence: number;
@@ -554,6 +631,58 @@ export class LocalManagedSessionAuthority {
   restoreBasis(): ManagedSessionRestoreBasis {
     if (this.checkpoint !== undefined) return 'checkpoint';
     return this.hasContinuation ? 'blocked' : 'initial';
+  }
+
+  /**
+   * Storage §2.2 package. `restoreBasis()` still reports `blocked` when
+   * continuation exists without a checkpoint; this bundle keeps that case as
+   * `restoreBasis=null` plus `recoveryStatus=blocked` so it cannot be renamed
+   * to `initial`. A stored checkpoint that fails authorization stays
+   * `restoreBasis=checkpoint` with its original ref.
+   */
+  async restoreBundle(): Promise<ManagedSessionRestoreBundle> {
+    const checkpoint = this.checkpoint;
+    const identity: Pick<
+      ManagedSessionRestoreBundle,
+      'formatVersion' | 'sessionKey' | 'engine' | 'throughSequence'
+    > = {
+      formatVersion: MANAGED_SESSION_FORMAT_VERSION,
+      sessionKey: this.sessionKey,
+      engine: 'managed',
+      throughSequence: this.committed,
+    };
+    if (checkpoint !== undefined) {
+      const authorization = await this.harnessRunAuthorization();
+      const bundle: ManagedSessionRestoreBundle = {
+        ...identity,
+        checkpointRef: checkpoint.stateRef,
+        restoreBasis: 'checkpoint',
+        restoreProofRef: null,
+        recoveryStatus: authorization.status === 'runnable' ? 'ok' : 'blocked',
+      };
+      assertManagedSessionRestoreBundle(bundle);
+      return bundle;
+    }
+    if (this.hasContinuation) {
+      const bundle: ManagedSessionRestoreBundle = {
+        ...identity,
+        checkpointRef: null,
+        restoreBasis: null,
+        restoreProofRef: null,
+        recoveryStatus: 'blocked',
+      };
+      assertManagedSessionRestoreBundle(bundle);
+      return bundle;
+    }
+    const bundle: ManagedSessionRestoreBundle = {
+      ...identity,
+      checkpointRef: null,
+      restoreBasis: 'initial',
+      restoreProofRef: null,
+      recoveryStatus: 'ok',
+    };
+    assertManagedSessionRestoreBundle(bundle);
+    return bundle;
   }
 
   /**
