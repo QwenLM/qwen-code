@@ -579,14 +579,29 @@ machine the hazard did not fire — a twenty-character answer survived intact in
 both legs — so the mirror is correctness by construction rather than the fix
 for an observed truncation.
 
+Answering a question schedules the tab swap after ink's pause rather than doing
+it inline, and a second answer landing inside that pause used to overwrite the
+scheduled swap's handle without clearing it. Both timers then fired, each
+advancing one tab, so the question between them was skipped without ever being
+drawn — the same failure this decision exists to remove, reached by a different
+route. ink cannot cancel that swap either: it calls `setTimeout` without keeping
+the handle, so it carries the orphan as well. The ref this renderer already holds
+to clear the timer on unmount makes the cancel one line. A test answers one
+question twice inside the pause and asserts the next question still arrives; it
+fails with the clear taken back out. Two Enters within 150 milliseconds is a fast
+typist rather than a stress case, though, and no leg of any run has been observed
+skipping a question this way — the cancel is correctness by construction.
+
 Eight checkpoints were compared. Every dialog row matches ink line for line and
 indent for indent, including the mark appearing on a chip as soon as its
 free-text box is checked and before anything is committed, the comma-and-space
 join of a multi-select answer with the typed entry counted into it, and the
 review tab's own hint, which drops the cancel clause exactly where ink drops
-it. The residuals are the three recorded elsewhere — where a long path wraps,
-which phase the loading spinner happens to be in, and the update notice this
-renderer words differently — plus vertical anchoring.
+it. Two residuals stand: where a long path wraps, and vertical anchoring. A third
+recorded here originally — which frame the waiting row shows — is closed by
+Decision 28, and a fourth, the startup update notice, was falsified: that notice
+comes from the runtime rather than this renderer, and the harness suppresses it on
+both legs.
 
 ## Decision 22 — the confirmation is drawn where the conversation is
 
@@ -839,6 +854,15 @@ had spelled out as a literal until now. Two tests cover the pair — the frame
 advances while a turn is in flight, and holds that one frame while a call is
 parked. Each is killed by its own mutation and by nothing else: removing the gate
 fails the parked test, removing the interval fails the in-flight one.
+
+Re-running the full matrix afterwards confirms it on the machine rather than in a
+test: eleven checkpoints taken while a dialog is parked each shed one row on both
+sides, from four divergent rows to three, and the rows left there are the
+long-path wrap break recorded under Decision 21. The overall divergent-row count
+goes from 221 ink-only and 265 opentui-only to 210 and 254. The number of
+checkpoints matching byte for byte stays at 22 of 69 — that wrap row is what keeps
+these from joining it, so the freeze closed a row everywhere and flipped no
+verdict.
 
 ## Coverage boundary
 

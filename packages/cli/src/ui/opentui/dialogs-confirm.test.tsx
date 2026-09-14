@@ -573,6 +573,23 @@ describe('OpenTuiToolConfirmation', () => {
       expect(onConfirm).not.toHaveBeenCalled();
     });
 
+    it('advances one tab when a second answer lands inside the pause', () => {
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(multiAskDetails(onConfirm));
+      press({ name: 'return', sequence: '\r' });
+      act(() => {
+        vi.advanceTimersByTime(50);
+      });
+      press({ name: 'down' });
+      press({ name: 'return', sequence: '\r' });
+      settleAdvance();
+      // Both keystrokes answered the first question, so only the pause scheduled
+      // by the second one may swap tabs.
+      expect(container.textContent ?? '').toContain('Pick a region?');
+      expect(container.textContent ?? '').toContain('Deploy ✓');
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
     it('joins the checked options and counts the typed entry on a multi-select', () => {
       const onConfirm = vi.fn(async () => {});
       const container = mount(multiAskDetails(onConfirm));

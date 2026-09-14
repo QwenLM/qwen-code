@@ -680,7 +680,11 @@ function AskUserQuestionFlow(props: {
     }
     if (tab >= totalTabs - 1) return;
     // ink's pause, so the ✓ on the row just answered is visible before the tab
-    // swap carries it up into the chip row.
+    // swap carries it up into the chip row. An answer landing inside that pause
+    // supersedes the swap scheduled by the previous keystroke: left running,
+    // both timers fire and the question between them is skipped without ever
+    // being drawn.
+    if (advanceTimer.current) clearTimeout(advanceTimer.current);
     advanceTimer.current = setTimeout(() => {
       setTab((prev) => Math.min(prev + 1, totalTabs - 1));
       setSelected(0);
