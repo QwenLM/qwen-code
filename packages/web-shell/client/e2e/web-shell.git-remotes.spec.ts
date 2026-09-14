@@ -24,7 +24,7 @@ async function openBranchPicker(page: Page, scenario: WebShellDaemonScenario) {
   const environment = page.getByTestId('environment-panel');
   await expect(environment).toBeVisible();
   const branchRow = environment.getByRole('button', {
-    name: 'main',
+    name: scenario.gitStatus?.branch ?? 'main',
     exact: true,
   });
   await expect(branchRow).toBeVisible({ timeout: 10_000 });
@@ -83,6 +83,10 @@ test('git picker manages remotes: list, add, remove @smoke', async ({
 
   // Remove uses a two-click confirm: the first click only arms the button.
   await originRow.click();
+  // Armed-state witness: the row button flips to the confirm label with
+  // no remove request yet — a single-click regression fails HERE, not
+  // as a click timeout on the second click.
+  await expect(originRow).toHaveText('Confirm');
   expect(remoteRequests(daemon, '/git/remote/remove')).toHaveLength(0);
   await originRow.click();
   await expect(originRow).toHaveCount(0);
@@ -135,6 +139,11 @@ test('remotes panel search filters by name and URL', async ({
   page,
 }, testInfo) => {
   const scenario = createGitWorkspaceScenario({
+    gitStatus: {
+      v: 2,
+      workspaceCwd: '/tmp/qwen-web-shell-e2e',
+      branch: 'feat/x',
+    },
     gitRemotes: [
       {
         name: 'origin',
