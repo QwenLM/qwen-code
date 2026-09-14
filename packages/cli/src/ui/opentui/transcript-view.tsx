@@ -20,6 +20,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 import { C, SYNTAX } from './theme.js';
 import {
+  ANSI_DEFAULT_HEIGHT,
   AnsiRows,
   TOOL_CARD_DESCRIPTION_ROWS,
   TodoRows,
@@ -29,6 +30,7 @@ import {
   hiddenTailLinesLabel,
   maxHistoryItemRows,
   pendingCardMaxRows,
+  physicalRowsTotal,
   selectionProps,
   STATUS_INDICATOR_WIDTH,
   tailWindow,
@@ -110,6 +112,275 @@ function itemMarginTop(kind: LiveHistoryItem['kind']): number {
   }
 }
 
+/** Physical rows `text` paints soft-wrapped at `cols` columns. */
+function paintedTextRows(text: string, cols: number): number {
+  return physicalRowsTotal(text.split('\n'), Math.max(cols, 10));
+}
+
+/** The settled-cap card a resolved call paints: name + (capped)
+ * description rows, the hidden-tail label, then the result body. */
+function toolItemRows(
+  item: LiveToolItem,
+  width: number,
+  maxRows: number,
+): number {
+  const cols = Math.max(width - STATUS_INDICATOR_WIDTH, 10);
+  const name = toolCardName(item.tool);
+  const description =
+    item.description ?? toolCardDescription(item.tool, item.args);
+  const text = toolCardText(description);
+  const cap = capToolCardDescription(
+    text,
+    name,
+    width,
+    TOOL_CARD_DESCRIPTION_ROWS,
+  );
+  const nameCols = getCachedStringWidth(name) + 1;
+  const suffix = toolCardSummarySuffix(item.done, item.summary);
+  let rows =
+    Math.max(
+      1,
+      Math.ceil(
+        (nameCols +
+          (cap.description ? getCachedStringWidth(cap.description) : 0) +
+          getCachedStringWidth(suffix)) /
+          cols,
+      ),
+    ) + (cap.hiddenRows > 0 ? 1 : 0);
+  // ToolCardBody, indented by the same status column.
+  if (item.todos) {
+    rows += item.todos.reduce(
+      (sum, todo) => sum + paintedTextRows(todo.content, cols - 3),
+      0,
+    );
+  } else if (item.ansi) {
+    const window = tailWindow(item.ansi.grid, ANSI_DEFAULT_HEIGHT);
+    rows +=
+      window.visible.length +
+      (window.hiddenCount > 0 ? 1 : 0) +
+      ((item.ansi.totalLines ?? 0) > ANSI_DEFAULT_HEIGHT ||
+      (item.ansi.totalBytes ?? 0) > 0
+        ? 1
+        : 0);
+  } else if (item.diff) {
+    const window = tailWindow(renderDiffBody(item.diff.fileDiff), maxRows);
+    rows +=
+      window.visible.reduce(
+        (sum, line) =>
+          sum + paintedTextRows(line.map((span) => span.text).join(''), cols),
+        0,
+      ) + (window.hiddenCount > 0 ? 1 : 0);
+  } else {
+    const output = truncateResultDisplayChars(item.output);
+    if (output) {
+      const window = tailWindow(
+        sanitizeTerminalText(output).split('\n'),
+        maxRows,
+      );
+      rows +=
+        window.visible.reduce(
+          (sum, line) => sum + paintedTextRows(line, cols),
+          0,
+        ) + (window.hiddenCount > 0 ? 1 : 0);
+      if (item.visionBridgeNotice) {
+        rows += paintedTextRows(
+          sanitizeTerminalText(item.visionBridgeNotice),
+          cols,
+        );
+      }
+    }
+  }
+  return rows;
+}
+
+/** GoalCard / LegacyGoalCard painted rows (describe* parity). */
+function goalItemRows(
+  item: Extract<LiveHistoryItem, { kind: 'goal' }>,
+  width: number,
+): number {
+  if (item.legacy) {
+    const view = describeLegacyGoalCard(item.legacy);
+    if (view.state === 'hidden') return 0;
+    let rows = 1 + paintedTextRows(view.condition, width - 2);
+    if (view.state === 'checking' && view.judgeReason) {
+      rows += paintedTextRows(view.judgeReason, width - 2);
+    }
+    if (view.state === 'card' && view.lastCheck) {
+      rows += paintedTextRows(view.lastCheck, width - 2);
+    }
+    return rows;
+  }
+  const view = describeGoalCard(item.snapshot, item.cause);
+  if (view.state === 'hidden') return 0;
+  if (view.state === 'cleared') return 1;
+  let rows = paintedTextRows(
+    `${view.icon} ${view.title}${view.subtitle ? ` · ${view.subtitle}` : ''}`,
+    width,
+  );
+  rows += paintedTextRows(view.objective, width - 2);
+  if (view.reason) rows += paintedTextRows(view.reason, width - 2);
+  if (view.checkpoint) rows += paintedTextRows(view.checkpoint, width - 2);
+  return rows;
+}
+
+/** ArenaSessionCard painted rows (ArenaSessionRow parity). */
+function arenaSessionRows(item: LiveArenaSessionItem, width: number): number {
+  const comparing =
+    item.sessionStatus === 'idle' || item.sessionStatus === 'completed';
+  if (!comparing) return 1;
+  const n = item.agents.length;
+  let rows = 6 + 2 * n + arenaFileGroups(item.agents).length;
+  for (const agent of item.agents) {
+    rows += paintedTextRows(
+      `${agent.label}: ${agent.approachSummary ?? 'No approach summary available.'}`,
+      width - 5,
+    );
+  }
+  return rows;
+}
+
+/**
+ * Painted-height model for one transcript item — the input
+ * pendingCardMaxRows's `rowsAbove` prices (R2-2): the reserve assumes a
+ * fresh session's transcript, so the budget can only shrink with the
+ * session if someone measures what the transcript actually paints. Mirrors
+ * the render row by row, margins included, and biases toward over-counting
+ * (an over-count only shrinks a card's description, while an under-count
+ * keeps budget rows the viewport no longer has and pushes the mounted
+ * dialog's outcome list off the alt screen). Known under-count gaps, each
+ * bounded by one card's height: a thought opened by mouse click (the view
+ * knows only the global ctrl+o toggle) and markdown block spacing the
+ * source-line measure cannot see. Pending cards are excluded by the caller:
+ * their chrome rides the reserve / sibling charge and their descriptions
+ * ARE the budget being priced.
+ */
+function transcriptItemRows(
+  item: LiveHistoryItem,
+  width: number,
+  maxRows: number,
+  thoughtsExpanded: boolean,
+): number {
+  const margin = itemMarginTop(item.kind);
+  switch (item.kind) {
+    case 'user':
+      return (
+        margin + paintedTextRows(sanitizeTerminalText(item.text), width - 2)
+      );
+    case 'assistant':
+      return (
+        margin +
+        paintedTextRows(
+          sanitizeTerminalText(
+            assistantMarkdownForRender(item.text, item.streaming),
+          ),
+          width - 2,
+        )
+      );
+    case 'thinking': {
+      // A live thought streams open; a committed one collapses to its
+      // header unless the global toggle is on.
+      const open = thoughtsExpanded || !item.done;
+      return (
+        margin +
+        1 +
+        (open && item.text
+          ? paintedTextRows(sanitizeTerminalText(item.text), width)
+          : 0)
+      );
+    }
+    case 'tool':
+      return margin + toolItemRows(item, width, maxRows);
+    case 'task':
+      return (
+        margin +
+        paintedTextRows(
+          sanitizeTerminalText(
+            `${item.name} ${item.description}${item.stats ? ` · ${item.stats}` : ''}`,
+          ),
+          width - 2,
+        ) +
+        item.progress.reduce(
+          (sum, line) =>
+            sum + paintedTextRows(sanitizeTerminalText(line), width),
+          0,
+        )
+      );
+    case 'image':
+      return margin + 1;
+    case 'compaction':
+      return (
+        margin +
+        paintedTextRows(getCompressionStatusText(item.compression), width - 2)
+      );
+    case 'info':
+    case 'warning':
+      return (
+        margin + paintedTextRows(sanitizeTerminalText(item.text), width - 2)
+      );
+    case 'error':
+      return (
+        margin +
+        paintedTextRows(
+          sanitizeTerminalText(item.text) +
+            (item.hint ? ` (${sanitizeTerminalText(item.hint)})` : ''),
+          width - 2,
+        )
+      );
+    case 'retry':
+      return (
+        margin +
+        paintedTextRows(
+          sanitizeTerminalText(
+            item.message ??
+              `Attempt ${item.attempt} of ${item.maxRetries} failed`,
+          ),
+          width,
+        ) +
+        1
+      );
+    case 'stop-hook':
+      return (
+        margin +
+        1 +
+        paintedTextRows(sanitizeTerminalText(item.message), width - 2)
+      );
+    case 'goal':
+      return margin + goalItemRows(item, width);
+    case 'away-recap':
+      return (
+        margin + paintedTextRows(sanitizeTerminalText(item.text), width - 9)
+      );
+    case 'user-shell':
+      return (
+        margin + paintedTextRows(sanitizeTerminalText(item.text), width - 2)
+      );
+    case 'advisor':
+      return (
+        margin + 1 + paintedTextRows(sanitizeTerminalText(item.text), width - 2)
+      );
+    case 'arena-agent': {
+      const { icon, text } = getArenaStatusLabel(item.agent.status);
+      return (
+        margin +
+        paintedTextRows(
+          `${icon} ${sanitizeTerminalText(item.agent.label)} · ${text} · ${formatDuration(item.agent.durationMs)}`,
+          width,
+        ) +
+        1 +
+        (item.agent.error
+          ? paintedTextRows(sanitizeTerminalText(item.agent.error), width - 2)
+          : 0)
+      );
+    }
+    case 'arena-session':
+      return margin + arenaSessionRows(item, width);
+    default: {
+      const exhaustive: never = item;
+      return exhaustive;
+    }
+  }
+}
+
 export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
@@ -127,6 +398,25 @@ export function OpenTuiTranscriptView({
       item.kind === 'tool' && item.confirm === 'pending' && !item.done,
   );
   const pendingCount = pendingItems.length;
+  // The painted rows the transcript spends outside the pending cards: the
+  // reserve pendingCardMaxRows prices against assumes a fresh session, so
+  // the budget can only shrink with the session when the grown transcript's
+  // height reaches it (R2-2). Rows below the cards count too — the
+  // confirmation dialog renders beneath the whole transcript.
+  const rowsAbove = useMemo(() => {
+    let total = 0;
+    for (const item of items) {
+      if (item.kind === 'tool' && item.confirm === 'pending' && !item.done)
+        continue;
+      total += transcriptItemRows(
+        item,
+        availableWidth,
+        maxRows,
+        thoughtsExpanded,
+      );
+    }
+    return total;
+  }, [items, availableWidth, maxRows, thoughtsExpanded]);
   // At most one TOOL confirmation dialog is ever mounted — the shell
   // renders waitingToolCalls[0] — but the gated-MCP approval dialog outranks
   // it in the shell's popup rank, and while it owns the slot no tool dialog
@@ -164,6 +454,7 @@ export function OpenTuiTranscriptView({
             pendingDialogType={pendingDialogType}
             pendingDialogBody={pendingDialogBody}
             pendingDialogExtra={pendingDialogExtra}
+            rowsAbove={rowsAbove}
             thoughtsExpanded={thoughtsExpanded}
           />
         </box>
@@ -181,6 +472,7 @@ function TranscriptItem({
   pendingDialogType,
   pendingDialogBody,
   pendingDialogExtra,
+  rowsAbove,
   thoughtsExpanded,
 }: {
   item: LiveHistoryItem;
@@ -191,6 +483,7 @@ function TranscriptItem({
   pendingDialogType?: string;
   pendingDialogBody?: string;
   pendingDialogExtra?: string;
+  rowsAbove: number;
   thoughtsExpanded: boolean;
 }) {
   switch (item.kind) {
@@ -211,6 +504,7 @@ function TranscriptItem({
           pendingDialogType={pendingDialogType}
           pendingDialogBody={pendingDialogBody}
           pendingDialogExtra={pendingDialogExtra}
+          rowsAbove={rowsAbove}
         />
       );
     case 'task':
@@ -356,6 +650,7 @@ function ToolCard({
   pendingDialogType,
   pendingDialogBody,
   pendingDialogExtra,
+  rowsAbove,
 }: {
   item: LiveToolItem;
   maxRows: number;
@@ -365,6 +660,7 @@ function ToolCard({
   pendingDialogType?: string;
   pendingDialogBody?: string;
   pendingDialogExtra?: string;
+  rowsAbove: number;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
@@ -411,6 +707,7 @@ function ToolCard({
               // name leaves the description far fewer columns than the
               // fixed 0.7 ceiling assumes.
               getCachedStringWidth(name) + 1,
+              rowsAbove,
             )
           : TOOL_CARD_DESCRIPTION_ROWS,
       ),
@@ -423,6 +720,7 @@ function ToolCard({
       pendingDialogType,
       pendingDialogBody,
       pendingDialogExtra,
+      rowsAbove,
       item.confirm,
       item.done,
     ],

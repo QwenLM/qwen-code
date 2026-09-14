@@ -436,6 +436,39 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect((5 * tall) / 0.7 + 2 * (5 - 1)).toBeLessThanOrEqual(80 - 26 - 20);
   });
 
+  it('shrinks the pending budget as the transcript above the card grows (R2-2)', () => {
+    // The reserve prices the region above the card at its FRESH-session
+    // height (the ≈ 5 transcript rows of startup notices and the prompt
+    // echo), so counts at or below it leave the price alone...
+    expect(pendingCardMaxRows(80, 0, 110, undefined, 1, 0, 5)).toBe(23);
+    expect(pendingCardMaxRows(80, 0, 110, undefined, 1, 0, 0)).toBe(23);
+    // ...but a grown session paints more above the card, and those rows
+    // spend from the same region: 25 painted rows charge the 20-row
+    // overage, so the collapsed bound drops from (80-26-20)*0.7 = 23 to
+    // (80-26-20-20)*0.7 = 9.
+    expect(pendingCardMaxRows(80, 0, 110, undefined, 1, 0, 25)).toBe(9);
+    // Both dialog bounds charge the overage: the fixed-body mcp arm goes
+    // from (80-26-5)*0.7 = 34 to (80-26-5-20)*0.7 = 20, and parked
+    // siblings divide what the overage leaves --
+    // floor((80-26-5-20-2)*0.7/2) = 9.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6, 25)).toBe(
+      20,
+    );
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 2, 6, 25)).toBe(
+      9,
+    );
+    // A transcript that floods the viewport on its own drops siblings to
+    // the one-row floor; a lone card keeps the settled-cap floor (the
+    // short-terminal fallback) -- card yielding alone cannot repair a
+    // transcript that already overruns the screen.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 2, 6, 200)).toBe(
+      1,
+    );
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6, 200)).toBe(
+      TOOL_CARD_DESCRIPTION_ROWS,
+    );
+  });
+
   it('falls back to the settled cap on short terminals', () => {
     expect(pendingCardMaxRows(24, 3900, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
     expect(pendingCardMaxRows(46, 0, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);

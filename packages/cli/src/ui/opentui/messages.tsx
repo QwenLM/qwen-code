@@ -119,7 +119,7 @@ function physicalRowCount(row: string, cols: number): number {
  * all clamp past a threshold: every larger total produces the identical
  * clamped outcome.
  */
-function physicalRowsTotal(
+export function physicalRowsTotal(
   rows: readonly string[],
   cols: number,
   stopAfter = Number.POSITIVE_INFINITY,
@@ -258,15 +258,10 @@ export const TOOL_CARD_DESCRIPTION_ROWS = 5;
  * the dialog's side; keep the two consistent when the dialog chrome
  * changes.
  *
- * Known limit: the transcript region above the card is priced at its
- * FRESH-session height (the ≈ 13 rows enumerated above); nothing recomputes
- * it as the session grows, so from the second exchange onward the card
- * keeps budget rows the viewport no longer has — measured on the mcp shape
- * at h=80 with 7 parked cards, 16 painted rows above the card already clip
- * the mounted dialog's bottom border and 20 put it off screen. Charging the
- * painted height needs a per-item transcript height model (or a
- * layout-level transcript window), a follow-up beyond this PR; until then
- * the padded reserve covers a fresh session only.
+ * The transcript share of this reserve prices only a FRESH session (the
+ * ≈ 5 rows of startup notices and prompt echo); a grown session's extra
+ * painted rows reach pendingCardMaxRows as `rowsAbove` and spend from the
+ * same region, so the card budget shrinks as the transcript grows.
  */
 export const DIALOG_EXPANDED_RESERVE_ROWS = 26;
 
@@ -287,6 +282,15 @@ export const CONFIRM_BODY_COLLAPSED_ROWS = 20;
  * so dialogBodyMeasure needs no collapsed/expanded gate.
  */
 const COLLAPSED_DIALOG_CHROME_ROWS = DIALOG_EXPANDED_RESERVE_ROWS;
+
+/**
+ * Transcript rows the reserve already prices: the startup notices a fresh
+ * session shows (≈ 3) and the prompt echo with its turn margin (2). A grown
+ * session's `rowsAbove` counts every painted transcript row outside the
+ * pending cards, so only the excess over this baseline spends from the
+ * shared region — charging the whole count would double-spend these five.
+ */
+const FRESH_TRANSCRIPT_ROWS = 5;
 
 /**
  * Collapsed body rows of an mcp confirmation dialog — the server and tool
@@ -416,7 +420,10 @@ function dialogBodyMeasure(
  * and both bounds are shared between the `pendingCount` cards awaiting
  * approval, since N parked calls each painting the full region push the
  * first call's dialog off the alt screen. `descriptionWidth` is the display
- * width of the text the card would print; a lone pending card never drops
+ * width of the text the card would print; `rowsAbove` is the transcript's
+ * painted height outside the pending cards (transcript-view's per-item
+ * model) — the reserve prices a fresh session's five rows, so only the
+ * overage spends from the region. A lone pending card never drops
  * below the settled cap (the short-terminal fallback), but once siblings
  * share the region the floor drops to one row — a floor at the settled cap
  * would lift the divided bound back up from the batch size where it falls
@@ -435,6 +442,7 @@ export function pendingCardMaxRows(
   dialog?: PendingDialogBody,
   pendingCount = 1,
   nameWidth = 0,
+  rowsAbove = 0,
 ): number {
   const h = Math.floor(terminalHeight);
   const cols = Math.max(width - STATUS_INDICATOR_WIDTH, 10);
@@ -475,6 +483,12 @@ export function pendingCardMaxRows(
   // shared region before it is divided (eight cards priced at 4 budget rows
   // would otherwise paint 7 rows each and overflow a 49-row region).
   const siblingChromeRows = Math.max(pendingCount - 1, 0) * 2;
+  // The reserve prices the transcript region at its fresh-session height;
+  // a grown session's extra painted rows (rowsAbove past the baseline)
+  // spend from the same region, or the card keeps budget rows the viewport
+  // no longer has and the mounted dialog's outcome list leaves the alt
+  // screen (R2-2).
+  const transcriptOverage = Math.max(rowsAbove - FRESH_TRANSCRIPT_ROWS, 0);
   const expandedDialogBound =
     body.expanded === null
       ? Number.POSITIVE_INFINITY
@@ -482,7 +496,8 @@ export function pendingCardMaxRows(
           ((h -
             DIALOG_EXPANDED_RESERVE_ROWS -
             body.expanded -
-            siblingChromeRows) *
+            siblingChromeRows -
+            transcriptOverage) *
             wrapRatio) /
             Math.max(pendingCount, 1),
         );
@@ -493,7 +508,8 @@ export function pendingCardMaxRows(
           ((h -
             COLLAPSED_DIALOG_CHROME_ROWS -
             body.collapsed -
-            siblingChromeRows) *
+            siblingChromeRows -
+            transcriptOverage) *
             wrapRatio) /
             Math.max(pendingCount, 1),
         );
@@ -780,7 +796,7 @@ function TodoItemRow({ todo }: { todo: TodoItem }) {
 }
 
 /** ink AnsiOutput DEFAULT_HEIGHT (components/AnsiOutput.tsx). */
-const ANSI_DEFAULT_HEIGHT = 24;
+export const ANSI_DEFAULT_HEIGHT = 24;
 
 /**
  * Line-level truncate (ink Text wrap="truncate" parity — a hard cut, no

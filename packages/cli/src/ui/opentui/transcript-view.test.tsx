@@ -69,7 +69,11 @@ vi.mock('./messages.js', async (importOriginal) => {
 });
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
-import type { LiveThinkingItem, LiveToolItem } from './live-session-model.js';
+import type {
+  LiveHistoryItem,
+  LiveThinkingItem,
+  LiveToolItem,
+} from './live-session-model.js';
 
 const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
   kind: 'tool',
@@ -835,5 +839,93 @@ describe('OpenTuiTranscriptView', () => {
       'INSPECTING_THE_REPOSITORY',
     );
     expect(expanded.container.textContent).toContain('ctrl+o to collapse');
+  });
+
+  it('shrinks the pending budget as the transcript above the card grows (R2-2)', () => {
+    // Control: on a fresh session the lone mcp card prices
+    // (80-26-5)*0.7 = 34 budget rows (~3544 visible description columns at
+    // 110), so MID_MARKER at ~2512 stays. Five user/assistant exchanges
+    // above the card paint 30 rows, and the same card prices
+    // (80-26-5-25)*0.7 = 16 rows (1600 visible columns): MID_MARKER leaves
+    // the screen while HEAD_MARKER (~612) stays — only the grown
+    // transcript's height can move the budget between the two renders.
+    const description =
+      '{"content":"' +
+      'a'.repeat(600) +
+      'HEAD_MARKER' +
+      'a'.repeat(1889) +
+      'MID_MARKER' +
+      'b'.repeat(1200) +
+      '"}';
+    const parked = toolItem({
+      id: 't1',
+      tool: 'mcp__fs__write_file',
+      description,
+      confirm: 'pending',
+      confirmType: 'mcp',
+    });
+    const fresh = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[parked]}
+      />,
+    );
+    expect(fresh.container.textContent).toContain('MID_MARKER');
+    fresh.unmount();
+
+    // Five user turns (margin + one row each) and five three-line
+    // assistant replies (margin + three rows each): 30 painted rows.
+    const history: LiveHistoryItem[] = [];
+    for (let i = 0; i < 5; i++) {
+      history.push({ kind: 'user', id: `u${i}`, text: `question ${i}` });
+      history.push({
+        kind: 'assistant',
+        id: `a${i}`,
+        text: 'line one\nline two\nline three',
+        streaming: false,
+      });
+    }
+    const grown = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[...history, parked]}
+      />,
+    );
+    const text = grown.container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    expect(text).toContain('HEAD_MARKER');
+    expect(text).not.toContain('MID_MARKER');
+  });
+
+  it('hands the painted transcript height to the pending budget (R2-2)', () => {
+    // Two exchanges (a user row with its margin and a one-row assistant
+    // reply: 2 + 2) above a parked card: the budget must see rowsAbove = 4,
+    // and the pending card itself stays out of the count.
+    const callsBefore = mocks.pendingSpy.mock.calls.length;
+    render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          { kind: 'user', id: 'u1', text: 'one' },
+          { kind: 'assistant', id: 'a1', text: 'two', streaming: false },
+          toolItem({
+            id: 't1',
+            description: 'x',
+            confirm: 'pending',
+            confirmType: 'mcp',
+          }),
+        ]}
+      />,
+    );
+    const rowsAboveArgs = mocks.pendingSpy.mock.calls
+      .slice(callsBefore)
+      .map((call) => call[6]);
+    expect(rowsAboveArgs.length).toBeGreaterThan(0);
+    for (const rowsAbove of rowsAboveArgs) {
+      expect(rowsAbove).toBe(4);
+    }
   });
 });
