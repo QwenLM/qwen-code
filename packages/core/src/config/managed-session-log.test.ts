@@ -24,6 +24,7 @@ import {
   SessionTranscriptSnapshotUnavailableError,
 } from '../services/session-transcript-reader.js';
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
+import { parseHarnessCheckpointV1 } from '../managed-runtime/managed-harness-checkpoint.js';
 import {
   MANAGED_SESSION_COMMIT_SUBTYPE,
   MANAGED_SESSION_EVENT_SUBTYPE,
@@ -117,6 +118,24 @@ function checkpointPayloads(
           'payload'
         ] as Record<string, unknown>,
     );
+}
+
+async function readCheckpointPhase(
+  fixture: Fixture,
+  payload: Record<string, unknown>,
+): Promise<string> {
+  const stateRef = payload['stateRef'] as {
+    kind: string;
+    resourceId: string;
+  };
+  const bytes = await readFile(
+    path.join(
+      managedSessionResourceRoot(fixture.runtimeBaseDir, sessionId),
+      stateRef.kind,
+      stateRef.resourceId,
+    ),
+  );
+  return parseHarnessCheckpointV1(bytes).continuation.phase;
 }
 
 function stubStoppedModelStream(
@@ -465,6 +484,62 @@ describe('managed session log activation', () => {
       expect(fixture.config.getLlmClient()).toBe(llmClient);
       expect(startNewSession).not.toHaveBeenCalled();
       expect(closeSessionWriter).not.toHaveBeenCalled();
+
+      await fixture.config.closeSessionWriter();
+    });
+  });
+
+  it('persists a durable approval wait without replacing the Harness handle', async () => {
+    await withWorkspace(async (activate) => {
+      const fixture = await activate({ managedSessionLog: true });
+      const recorder = fixture.config.getChatRecordingService()!;
+      recorder.recordUserMessage('needs permission');
+      await recorder.flush();
+      await fixture.config.ensureManagedHarnessRunnable();
+
+      await fixture.config.commitManagedDurableWait({
+        requestId: 'fc-wait-1',
+        kind: 'execute',
+        source: 'tool_call',
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        invocation: { toolCallId: 'fc-wait-1', kind: 'execute' },
+      });
+
+      const waiting = checkpointPayloads(
+        await transcriptRecords(fixture.transcriptPath),
+      );
+      expect(waiting).toHaveLength(2);
+      expect(waiting[1]).toMatchObject({ boundary: 'durable_wait' });
+      expect(await readCheckpointPhase(fixture, waiting[1])).toBe(
+        'await_action',
+      );
+
+      await expect(
+        fixture.config.ensureManagedHarnessRunnable(),
+      ).rejects.toMatchObject({ reason: 'invalid_state' });
+
+      await fixture.config.resolveManagedDurableWait();
+      await fixture.config.ensureManagedHarnessRunnable();
+
+      const after = await transcriptRecords(fixture.transcriptPath);
+      const payloads = checkpointPayloads(after);
+      expect(payloads).toHaveLength(3);
+      expect(payloads[2]['boundary']).toBeNull();
+      expect(await readCheckpointPhase(fixture, payloads[2])).toBe(
+        'model_output_committed',
+      );
+
+      const events = after
+        .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
+        .map((entry) => entry['managedSession'] as Record<string, unknown>);
+      expect(
+        events
+          .filter((event) => event['kind'] === 'activation.changed')
+          .map(
+            (event) =>
+              (event['payload'] as Record<string, unknown>)['phase'] as string,
+          ),
+      ).toEqual(['active']);
 
       await fixture.config.closeSessionWriter();
     });

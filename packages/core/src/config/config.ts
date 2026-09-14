@@ -286,6 +286,7 @@ import {
 import { HARNESS_TURN_COMPLETE_BOUNDARY } from '../managed-runtime/managed-harness-checkpoint.js';
 import {
   createManagedHarnessHandle,
+  type ManagedDurableWaitRequest,
   type ManagedHarnessHandle,
 } from '../managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
@@ -4963,7 +4964,8 @@ export class Config {
    * opaque or missing continuation is blocked. After a turn-complete safety
    * point the drained handle is replaced so the next turn uses a new
    * activation and a new LlmChat rebuilt from the durable log; the existing
-   * checkpoint is not rewritten.
+   * checkpoint is not rewritten. A `durable_wait` is not a finished turn, so
+   * this method leaves the handle in place.
    */
   async ensureManagedHarnessRunnable(): Promise<void> {
     const session = this.managedSession;
@@ -4993,6 +4995,58 @@ export class Config {
         buildApiHistoryFromConversation({ messages: records }),
       );
     }
+  }
+
+  /**
+   * Persists safety point B before a permission RPC. Legacy sessions no-op.
+   * Does not replace the handle: a wait is not a finished-turn safety point.
+   */
+  async commitManagedDurableWait(
+    request: ManagedDurableWaitRequest,
+  ): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    this.managedHarness ??= createManagedHarnessHandle(session);
+    const optionsBytes = Buffer.from(
+      JSON.stringify(request.options ?? null),
+      'utf8',
+    );
+    const optionsRef = await session.resources.publish(
+      'managed-approval',
+      optionsBytes,
+    );
+    const invocationRef =
+      request.source === 'tool_call'
+        ? await session.resources.publish(
+            'managed-invocation',
+            Buffer.from(JSON.stringify(request.invocation ?? null), 'utf8'),
+          )
+        : null;
+    const routeRef = await session.resources.publish(
+      'managed-route',
+      Buffer.from(JSON.stringify({ model: this.getModel() }), 'utf8'),
+    );
+    await this.managedHarness.commitDurableWait({
+      requestId: request.requestId,
+      kind: request.kind,
+      source: request.source,
+      optionsRef,
+      inputRevision: createHash('sha256').update(optionsBytes).digest('hex'),
+      invocationRef,
+      attemptId: `att-${request.requestId}`,
+      routeRef,
+    });
+  }
+
+  /**
+   * Restores a model-start phase after a permission RPC settles. Legacy
+   * sessions no-op. Leaves the handle in place so the same turn can continue.
+   */
+  async resolveManagedDurableWait(): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    this.managedHarness ??= createManagedHarnessHandle(session);
+    await this.managedHarness.resolveDurableWait();
   }
 
   /** Starts a new session and resets session-scoped services. */

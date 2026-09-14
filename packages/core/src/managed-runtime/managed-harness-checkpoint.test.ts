@@ -7,7 +7,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   authorizeParsedHarnessCheckpoint,
+  createAwaitActionHarnessCheckpoint,
   createInitialHarnessCheckpoint,
+  createModelOutputCommittedHarnessCheckpoint,
   createNextTurnReadyHarnessCheckpoint,
   encodeHarnessCheckpointV1,
   parseHarnessCheckpointV1,
@@ -344,5 +346,42 @@ describe('harness checkpoint v1', () => {
     expect(next.resume.throughSequence).toBe(4);
     expect(next.followUp.pendingInputIds).toEqual(['in-2']);
     expect(parseHarnessCheckpointV1(bytesOf(next))).toEqual(next);
+  });
+
+  it('builds await_action from a previous checkpoint and resumes to model_output_committed', () => {
+    const wait = createAwaitActionHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      approval: requestedUserApproval(),
+    });
+    expect(wait.continuation.phase).toBe('await_action');
+    expect(wait.approval?.state).toBe('requested');
+    expect(wait.resume.throughSequence).toBe(4);
+    expect(parseHarnessCheckpointV1(bytesOf(wait))).toEqual(wait);
+
+    const resumed = createModelOutputCommittedHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+    });
+    expect(resumed.continuation.phase).toBe('model_output_committed');
+    expect(resumed.approval).toBeNull();
+    expect(resumed.attempt).toEqual(wait.attempt);
+    expect(parseHarnessCheckpointV1(bytesOf(resumed))).toEqual(resumed);
+  });
+
+  it('rejects model_output_committed resume without the waited attempt', () => {
+    expect(() =>
+      createModelOutputCommittedHarnessCheckpoint({
+        previous: seed(),
+        checkpointId: 'ckpt-5',
+        coveredSequence: 4,
+        previousCheckpointId: 'ckpt-4',
+      }),
+    ).toThrow(/requires the waited attempt/);
   });
 });

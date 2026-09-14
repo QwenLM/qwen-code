@@ -10789,11 +10789,23 @@ export class Session implements SessionContext {
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
     const prior = permissionRequestTails.get(this.client) ?? Promise.resolve();
-    const transportRequest = prior.then(() =>
-      signal.aborted
-        ? requestPermissionWithAbort(this.client, params, signal)
-        : this.client.requestPermission(params),
-    );
+    const transportRequest = prior.then(async () => {
+      await this.#commitManagedDurableWait(params);
+      try {
+        const result = signal.aborted
+          ? await requestPermissionWithAbort(this.client, params, signal)
+          : await this.client.requestPermission(params);
+        await this.config.resolveManagedDurableWait?.();
+        return result;
+      } catch (error) {
+        try {
+          await this.config.resolveManagedDurableWait?.();
+        } catch {
+          // Keep the original permission error.
+        }
+        throw error;
+      }
+    });
     // Advance the queue when the transport settles OR when the caller's
     // signal aborts — an orphaned RPC must not wedge later requests.
     let abortListener: (() => void) | undefined;
@@ -10816,6 +10828,29 @@ export class Session implements SessionContext {
       params,
       signal,
     );
+  }
+
+  async #commitManagedDurableWait(
+    params: RequestPermissionRequest,
+  ): Promise<void> {
+    const toolCall = params.toolCall;
+    const meta =
+      toolCall._meta && typeof toolCall._meta === 'object'
+        ? (toolCall._meta as Record<string, unknown>)
+        : undefined;
+    const toolName = meta?.['toolName'];
+    await this.config.commitManagedDurableWait?.({
+      requestId: toolCall.toolCallId,
+      kind: toolCall.kind ?? 'tool_call',
+      source: 'tool_call',
+      options: params.options,
+      invocation: {
+        toolCallId: toolCall.toolCallId,
+        kind: toolCall.kind,
+        title: toolCall.title,
+        ...(typeof toolName === 'string' ? { toolName } : {}),
+      },
+    });
   }
 
   /**

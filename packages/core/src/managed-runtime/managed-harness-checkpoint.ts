@@ -48,6 +48,9 @@ export const HARNESS_MODEL_START_PHASES: ReadonlySet<HarnessCheckpointPhase> =
 /** Event-payload boundary for a finished turn with no pending Harness work. */
 export const HARNESS_TURN_COMPLETE_BOUNDARY = 'turn_complete';
 
+/** Event-payload boundary for an approval or in-flight Runtime wait. */
+export const HARNESS_DURABLE_WAIT_BOUNDARY = 'durable_wait';
+
 export const HARNESS_ACTION_SOURCES = [
   'tool_call',
   'automation_run',
@@ -1317,6 +1320,82 @@ export function createNextTurnReadyHarnessCheckpoint(input: {
       mediaRefs: [],
       parentHistory: input.previous.output.parentHistory,
     },
+    followUp: input.previous.followUp,
+  };
+}
+
+/**
+ * Approval wait (safety point B). Requires a committed model attempt and a
+ * requested approval; does not start or settle tools.
+ */
+export function createAwaitActionHarnessCheckpoint(input: {
+  readonly previous: HarnessCheckpointV1;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly previousCheckpointId: string | null;
+  readonly attempt: HarnessAttemptGroup;
+  readonly approval: HarnessApprovalGroup;
+}): HarnessCheckpointV1 {
+  return {
+    identity: {
+      ...input.previous.identity,
+      checkpointId: input.checkpointId,
+      coveredSequence: input.coveredSequence,
+      previousCheckpointId: input.previousCheckpointId,
+    },
+    resume: {
+      ...input.previous.resume,
+      throughSequence: input.coveredSequence,
+    },
+    continuation: {
+      phase: 'await_action',
+      pendingEventIds: [],
+    },
+    attempt: input.attempt,
+    tools: input.previous.tools,
+    runtime: input.previous.runtime,
+    approval: input.approval,
+    output: input.previous.output,
+    followUp: input.previous.followUp,
+  };
+}
+
+/**
+ * After a durable wait is resolved, the turn continues without a new model
+ * start reservation. Phase is `model_output_committed` so the next model
+ * request is allowed; the requested approval is cleared.
+ */
+export function createModelOutputCommittedHarnessCheckpoint(input: {
+  readonly previous: HarnessCheckpointV1;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly previousCheckpointId: string | null;
+}): HarnessCheckpointV1 {
+  if (input.previous.attempt === null) {
+    throw new ManagedSessionRecordError(
+      'model_output_committed requires the waited attempt.',
+    );
+  }
+  return {
+    identity: {
+      ...input.previous.identity,
+      checkpointId: input.checkpointId,
+      coveredSequence: input.coveredSequence,
+      previousCheckpointId: input.previousCheckpointId,
+    },
+    resume: {
+      ...input.previous.resume,
+      throughSequence: input.coveredSequence,
+    },
+    continuation: {
+      phase: 'model_output_committed',
+      pendingEventIds: [],
+    },
+    attempt: input.previous.attempt,
+    tools: input.previous.tools,
+    runtime: input.previous.runtime,
+    approval: null,
+    output: input.previous.output,
     followUp: input.previous.followUp,
   };
 }

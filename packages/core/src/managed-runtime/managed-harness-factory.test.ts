@@ -12,10 +12,12 @@ import { Storage } from '../config/storage.js';
 import {
   createManagedHarnessHandle,
   ManagedHarnessBlockedError,
+  type ManagedDurableWaitCommit,
 } from './managed-harness-factory.js';
 import {
   createNextTurnReadyHarnessCheckpoint,
   encodeHarnessCheckpointV1,
+  HARNESS_DURABLE_WAIT_BOUNDARY,
   HARNESS_TURN_COMPLETE_BOUNDARY,
   parseHarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
@@ -301,10 +303,10 @@ describe('managed harness factory', () => {
     const handle = createManagedHarnessHandle(session);
     await handle.ensureRunnable();
     await expect(handle.requestBoundary()).rejects.toThrow(
-      /not at a turn-complete safety point/,
+      /not at a turn-complete or durable-wait safety point/,
     );
     await expect(handle.detach()).rejects.toThrow(
-      /cannot detach before a turn-complete checkpoint/,
+      /cannot detach before a turn-complete or durable-wait checkpoint/,
     );
     await session.close();
   });
@@ -350,4 +352,94 @@ describe('managed harness factory', () => {
     );
     await session.close();
   });
+
+  it('commits an approval wait before the next model start is allowed', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const refs = await waitRefs(session);
+    const boundary = await handle.commitDurableWait(waitCommit(refs));
+    expect(boundary.kind).toBe('durable_wait');
+    expect(session.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_DURABLE_WAIT_BOUNDARY,
+    );
+    expect(
+      parseHarnessCheckpointV1((await session.authority.readCheckpointState())!)
+        .continuation.phase,
+    ).toBe('await_action');
+    await expect(handle.ensureRunnable()).rejects.toMatchObject({
+      reason: 'invalid_state',
+    });
+    await expect(handle.requestBoundary()).resolves.toMatchObject({
+      kind: 'durable_wait',
+      checkpointId: boundary.checkpointId,
+    });
+    await handle.detach();
+    await expect(handle.resolveDurableWait()).rejects.toThrow(/detached/);
+
+    const next = createManagedHarnessHandle(session);
+    const resumed = await next.resolveDurableWait();
+    expect(resumed?.continuation.phase).toBe('model_output_committed');
+    expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+    const runnable = await next.ensureRunnable();
+    expect(runnable.identity.checkpointId).toBe(resumed?.identity.checkpointId);
+    expect(runnable.continuation.phase).toBe('model_output_committed');
+    await session.close();
+  });
+
+  it('is idempotent for the same approval wait and rejects a second request', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const refs = await waitRefs(session);
+    const first = await handle.commitDurableWait(waitCommit(refs));
+    const second = await handle.commitDurableWait(waitCommit(refs));
+    expect(second.checkpointId).toBe(first.checkpointId);
+    await expect(
+      handle.commitDurableWait({
+        ...waitCommit(refs),
+        requestId: 'fc-2',
+        attemptId: 'att-fc-2',
+      }),
+    ).rejects.toThrow(/already waiting on a different approval/);
+    expect(await handle.resolveDurableWait()).not.toBeNull();
+    expect(await handle.resolveDurableWait()).toBeNull();
+    await session.close();
+  });
 });
+
+async function waitRefs(session: ManagedSession): Promise<{
+  optionsRef: ManagedSessionDurableRef;
+  invocationRef: ManagedSessionDurableRef;
+  routeRef: ManagedSessionDurableRef;
+}> {
+  return {
+    optionsRef: await session.resources.publish(
+      'managed-approval',
+      Buffer.from('[]', 'utf8'),
+    ),
+    invocationRef: await session.resources.publish(
+      'managed-invocation',
+      Buffer.from('{"toolCallId":"fc-1"}', 'utf8'),
+    ),
+    routeRef: await session.resources.publish(
+      'managed-route',
+      Buffer.from('{"model":"qwen3-coder-plus"}', 'utf8'),
+    ),
+  };
+}
+
+function waitCommit(
+  refs: Awaited<ReturnType<typeof waitRefs>>,
+): ManagedDurableWaitCommit {
+  return {
+    requestId: 'fc-1',
+    kind: 'execute',
+    source: 'tool_call',
+    optionsRef: refs.optionsRef,
+    inputRevision: 'rev-1',
+    invocationRef: refs.invocationRef,
+    attemptId: 'att-fc-1',
+    routeRef: refs.routeRef,
+  };
+}

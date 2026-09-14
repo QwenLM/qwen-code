@@ -6,10 +6,14 @@
 
 import { createHash } from 'node:crypto';
 import {
+  createAwaitActionHarnessCheckpoint,
   createInitialHarnessCheckpoint,
+  createModelOutputCommittedHarnessCheckpoint,
   encodeHarnessCheckpointV1,
+  HARNESS_DURABLE_WAIT_BOUNDARY,
   HARNESS_MODEL_START_PHASES,
   HARNESS_TURN_COMPLETE_BOUNDARY,
+  type HarnessActionSource,
   type HarnessCheckpointV1,
   type HarnessRunAuthorization,
 } from './managed-harness-checkpoint.js';
@@ -19,6 +23,7 @@ import {
   type LocalManagedSessionAuthority,
 } from './managed-session-authority.js';
 import type { ManagedSession } from './managed-session-assembly.js';
+import type { ManagedSessionDurableRef } from './managed-session-records.js';
 
 export class ManagedHarnessBlockedError extends Error {
   readonly code = 'managed_harness_blocked';
@@ -47,6 +52,37 @@ export interface HarnessTurnCompleteBoundary {
   readonly epoch: number;
 }
 
+export interface HarnessDurableWaitBoundary {
+  readonly kind: 'durable_wait';
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly activationId: string;
+  readonly epoch: number;
+}
+
+export type HarnessSafetyBoundary =
+  | HarnessTurnCompleteBoundary
+  | HarnessDurableWaitBoundary;
+
+export interface ManagedDurableWaitCommit {
+  readonly requestId: string;
+  readonly kind: string;
+  readonly source: HarnessActionSource;
+  readonly optionsRef: ManagedSessionDurableRef;
+  readonly inputRevision: string;
+  readonly invocationRef: ManagedSessionDurableRef | null;
+  readonly attemptId: string;
+  readonly routeRef: ManagedSessionDurableRef;
+}
+
+export interface ManagedDurableWaitRequest {
+  readonly requestId: string;
+  readonly kind: string;
+  readonly source: HarnessActionSource;
+  readonly options: unknown;
+  readonly invocation?: unknown;
+}
+
 export interface ManagedHarnessHandle {
   /** The activation this handle is allowed to present. */
   readonly activation: {
@@ -66,15 +102,29 @@ export interface ManagedHarnessHandle {
    */
   run<T>(agent: () => Promise<T>): Promise<T>;
   /**
-   * Observes an already-committed turn-complete checkpoint. Does not wait for
-   * an in-flight turn, and does not invent a boundary.
+   * Observes an already-committed turn-complete or durable-wait checkpoint.
+   * Does not wait for an in-flight turn, and does not invent a boundary.
    */
-  requestBoundary(): Promise<HarnessTurnCompleteBoundary>;
+  requestBoundary(): Promise<HarnessSafetyBoundary>;
   /**
-   * Drains this handle after a turn-complete checkpoint. Does not release the
-   * Session writer, Runtime, or activation; a later handle continues.
+   * Drains this handle after a turn-complete or durable-wait checkpoint. Does
+   * not release the Session writer, Runtime, or activation; a later handle
+   * continues. Waiter transfer and Runtime gate handover are not this method.
    */
   detach(): Promise<void>;
+  /**
+   * Commits safety point B: a requested approval as `await_action` with
+   * `durable_wait`. The next model request stays blocked until
+   * `resolveDurableWait`.
+   */
+  commitDurableWait(
+    request: ManagedDurableWaitCommit,
+  ): Promise<HarnessDurableWaitBoundary>;
+  /**
+   * Clears a durable approval wait so the turn may continue from
+   * `model_output_committed`. No-op when the handle is not waiting.
+   */
+  resolveDurableWait(): Promise<HarnessCheckpointV1 | null>;
 }
 
 /**
@@ -109,25 +159,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       await this.commitInitialBeforeModel();
       authorization = await this.authority.harnessRunAuthorization();
     }
-    if (authorization.status === 'blocked') {
-      throw new ManagedHarnessBlockedError(authorization);
-    }
-    if (authorization.status !== 'runnable') {
-      throw new ManagedHarnessBlockedError({
-        status: 'blocked',
-        reason: 'missing_checkpoint',
-      });
-    }
-    const phase = authorization.checkpoint.continuation.phase;
-    // Awaited approvals and in-flight Runtime work are R2.S3.
-    if (!HARNESS_MODEL_START_PHASES.has(phase)) {
-      throw new ManagedHarnessBlockedError({
-        status: 'blocked',
-        reason: 'invalid_state',
-        message: `${phase} is not a model-start phase for this Harness.`,
-      });
-    }
-    return authorization.checkpoint;
+    return this.requireModelStart(authorization);
   }
 
   async run<T>(agent: () => Promise<T>): Promise<T> {
@@ -141,27 +173,29 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     return agent();
   }
 
-  async requestBoundary(): Promise<HarnessTurnCompleteBoundary> {
+  async requestBoundary(): Promise<HarnessSafetyBoundary> {
     this.assertNotDetached();
     this.assertCurrentActivation();
     const latest = this.authority.latestCheckpoint;
-    if (latest?.boundary !== HARNESS_TURN_COMPLETE_BOUNDARY) {
+    if (latest === undefined || !isHarnessSafetyBoundary(latest.boundary)) {
       throw new ManagedSessionConflictError(
-        'harness is not at a turn-complete safety point.',
+        'harness is not at a turn-complete or durable-wait safety point.',
       );
     }
-    const authorization = await this.authority.harnessRunAuthorization();
-    if (authorization.status === 'blocked') {
-      throw new ManagedHarnessBlockedError(authorization);
-    }
-    if (authorization.status !== 'runnable') {
-      throw new ManagedHarnessBlockedError({
-        status: 'blocked',
-        reason: 'missing_checkpoint',
-      });
+    const authorization = await this.requireRunnableAuthorization();
+    if (
+      latest.boundary === HARNESS_DURABLE_WAIT_BOUNDARY &&
+      authorization.checkpoint.continuation.phase !== 'await_action'
+    ) {
+      throw new ManagedSessionConflictError(
+        'durable-wait checkpoint is not an await_action phase.',
+      );
     }
     return {
-      kind: 'turn_complete',
+      kind:
+        latest.boundary === HARNESS_DURABLE_WAIT_BOUNDARY
+          ? 'durable_wait'
+          : 'turn_complete',
       checkpointId: latest.checkpointId,
       coveredSequence: latest.coveredSequence,
       activationId: this.activation.activationId,
@@ -172,15 +206,110 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
   async detach(): Promise<void> {
     if (this.detached) return;
     this.assertCurrentActivation();
-    if (
-      this.authority.latestCheckpoint?.boundary !==
-      HARNESS_TURN_COMPLETE_BOUNDARY
-    ) {
+    if (!isHarnessSafetyBoundary(this.authority.latestCheckpoint?.boundary)) {
       throw new ManagedSessionConflictError(
-        'harness cannot detach before a turn-complete checkpoint.',
+        'harness cannot detach before a turn-complete or durable-wait checkpoint.',
       );
     }
     this.detached = true;
+  }
+
+  async commitDurableWait(
+    request: ManagedDurableWaitCommit,
+  ): Promise<HarnessDurableWaitBoundary> {
+    this.assertNotDetached();
+    this.assertCurrentActivation();
+    const latest = this.authority.latestCheckpoint;
+    if (latest?.boundary === HARNESS_DURABLE_WAIT_BOUNDARY) {
+      const authorization = await this.requireRunnableAuthorization();
+      const approval = authorization.checkpoint.approval;
+      if (
+        authorization.checkpoint.continuation.phase === 'await_action' &&
+        approval?.requestId === request.requestId
+      ) {
+        return {
+          kind: 'durable_wait',
+          checkpointId: latest.checkpointId,
+          coveredSequence: latest.coveredSequence,
+          activationId: this.activation.activationId,
+          epoch: this.activation.epoch,
+        };
+      }
+      throw new ManagedSessionConflictError(
+        'harness is already waiting on a different approval.',
+      );
+    }
+
+    const previous = await this.ensureRunnable();
+    const identity = this.nextCheckpointIdentity();
+    const checkpoint = createAwaitActionHarnessCheckpoint({
+      previous,
+      ...identity,
+      attempt: previous.attempt ?? {
+        attemptId: request.attemptId,
+        routeRef: request.routeRef,
+        capabilityRef: null,
+        samplingRef: null,
+        outputState: 'output_committed',
+        usageRef: null,
+        budgetConsumed: 0,
+      },
+      approval: {
+        requestId: request.requestId,
+        kind: request.kind,
+        source: request.source,
+        optionsRef: request.optionsRef,
+        inputRevision: request.inputRevision,
+        confirmationVersion: null,
+        state: 'requested',
+        decisionRef: null,
+        invocationRef: request.invocationRef,
+      },
+    });
+    await this.commitHarnessCheckpoint(
+      `harness:await_action:${this.activation.activationId}:${request.requestId}:${identity.coveredSequence}`,
+      checkpoint,
+      HARNESS_DURABLE_WAIT_BOUNDARY,
+    );
+    const committed = this.authority.latestCheckpoint;
+    if (committed === undefined) {
+      throw new ManagedSessionConflictError(
+        'durable wait was committed but no checkpoint was recorded.',
+      );
+    }
+    return {
+      kind: 'durable_wait',
+      checkpointId: committed.checkpointId,
+      coveredSequence: committed.coveredSequence,
+      activationId: this.activation.activationId,
+      epoch: this.activation.epoch,
+    };
+  }
+
+  async resolveDurableWait(): Promise<HarnessCheckpointV1 | null> {
+    this.assertNotDetached();
+    this.assertCurrentActivation();
+    const latest = this.authority.latestCheckpoint;
+    if (latest?.boundary !== HARNESS_DURABLE_WAIT_BOUNDARY) {
+      return null;
+    }
+    const previous = (await this.requireRunnableAuthorization()).checkpoint;
+    if (previous.continuation.phase !== 'await_action') {
+      throw new ManagedSessionConflictError(
+        'durable-wait checkpoint is not an await_action phase.',
+      );
+    }
+    const identity = this.nextCheckpointIdentity();
+    const checkpoint = createModelOutputCommittedHarnessCheckpoint({
+      previous,
+      ...identity,
+    });
+    await this.commitHarnessCheckpoint(
+      `harness:model_output_committed:${this.activation.activationId}:${identity.coveredSequence}`,
+      checkpoint,
+      null,
+    );
+    return checkpoint;
   }
 
   private assertNotDetached(): void {
@@ -206,33 +335,106 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     }
   }
 
+  private async requireRunnableAuthorization(): Promise<
+    Extract<HarnessRunAuthorization, { status: 'runnable' }>
+  > {
+    const authorization = await this.authority.harnessRunAuthorization();
+    if (authorization.status === 'blocked') {
+      throw new ManagedHarnessBlockedError(authorization);
+    }
+    if (authorization.status !== 'runnable') {
+      throw new ManagedHarnessBlockedError({
+        status: 'blocked',
+        reason: 'missing_checkpoint',
+      });
+    }
+    return authorization;
+  }
+
+  private requireModelStart(
+    authorization: HarnessRunAuthorization,
+  ): HarnessCheckpointV1 {
+    if (authorization.status === 'blocked') {
+      throw new ManagedHarnessBlockedError(authorization);
+    }
+    if (authorization.status !== 'runnable') {
+      throw new ManagedHarnessBlockedError({
+        status: 'blocked',
+        reason: 'missing_checkpoint',
+      });
+    }
+    const phase = authorization.checkpoint.continuation.phase;
+    if (!HARNESS_MODEL_START_PHASES.has(phase)) {
+      throw new ManagedHarnessBlockedError({
+        status: 'blocked',
+        reason: 'invalid_state',
+        message: `${phase} is not a model-start phase for this Harness.`,
+      });
+    }
+    return authorization.checkpoint;
+  }
+
+  private nextCheckpointIdentity(): {
+    checkpointId: string;
+    coveredSequence: number;
+    previousCheckpointId: string | null;
+  } {
+    const coveredSequence = this.authority.committedSequence;
+    return {
+      checkpointId: `ckpt-${coveredSequence + 1}`,
+      coveredSequence,
+      previousCheckpointId:
+        this.authority.latestCheckpoint?.checkpointId ?? null,
+    };
+  }
+
   private async commitInitialBeforeModel(): Promise<void> {
     const header = this.authority.sessionHeader;
-    const coveredSequence = this.authority.committedSequence;
-    const checkpointId = `ckpt-${coveredSequence + 1}`;
+    const identity = this.nextCheckpointIdentity();
     const checkpoint = createInitialHarnessCheckpoint({
       sessionKey: header.sessionKey,
-      checkpointId,
-      coveredSequence,
+      ...identity,
       activationId: this.activation.activationId,
       turnId: null,
       promptId: null,
       definitionRevision: header.definitionRef.resourceId,
       configRevision: header.rootSnapshotRef.resourceId,
       inputDigest: header.definitionRef.digest,
-      previousCheckpointId:
-        this.authority.latestCheckpoint?.checkpointId ?? null,
     });
+    await this.commitHarnessCheckpoint(
+      `harness:before_model:${this.activation.activationId}:${identity.coveredSequence}`,
+      checkpoint,
+      null,
+    );
+  }
+
+  private async commitHarnessCheckpoint(
+    commandId: string,
+    checkpoint: HarnessCheckpointV1,
+    boundary: string | null,
+  ): Promise<void> {
+    const header = this.authority.sessionHeader;
     const state = encodeHarnessCheckpointV1(checkpoint);
     await this.authority.commitCheckpoint(
       {
         operation: 'commitCheckpoint',
-        commandId: `harness:before_model:${this.activation.activationId}:${coveredSequence}`,
+        commandId,
         sessionKey: header.sessionKey,
         contentDigest: createHash('sha256').update(state).digest('hex'),
       },
-      { state, boundary: null },
+      { state, boundary },
       { class: 'harness', activation: this.activation },
     );
   }
+}
+
+function isHarnessSafetyBoundary(
+  boundary: string | null | undefined,
+): boundary is
+  | typeof HARNESS_TURN_COMPLETE_BOUNDARY
+  | typeof HARNESS_DURABLE_WAIT_BOUNDARY {
+  return (
+    boundary === HARNESS_TURN_COMPLETE_BOUNDARY ||
+    boundary === HARNESS_DURABLE_WAIT_BOUNDARY
+  );
 }
