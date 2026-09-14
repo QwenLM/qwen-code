@@ -25,7 +25,7 @@ pub struct WindowInfo {
 
 /// List top-level windows, optionally filtered by pid.
 pub fn list_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
-    match list_windows_inner(filter_pid) {
+    match try_list_windows(filter_pid) {
         Ok(w) => w,
         Err(_) => Vec::new(),
     }
@@ -50,7 +50,7 @@ fn window_owner_matches(owner: Option<u32>, requested_pid: u32) -> bool {
     owner == Some(requested_pid)
 }
 
-fn list_windows_inner(filter_pid: Option<u32>) -> Result<Vec<WindowInfo>> {
+pub fn try_list_windows(filter_pid: Option<u32>) -> Result<Vec<WindowInfo>> {
     let (conn, screen_num) = RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_num];
     let root = screen.root;

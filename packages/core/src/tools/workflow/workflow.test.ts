@@ -1914,7 +1914,7 @@ await agent('scan package.json')
       );
       expect(trailer).toContain('tokens: 0 spent (no cap)');
       expect(trailer).toContain(
-        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "${runId}" })`,
+        `resume: Workflow({ scriptPath: ${JSON.stringify(result.scriptPath)}, resumeFromRunId: "${runId}" })`,
       );
       // Named paths are real files, not a format the runtime never wrote.
       await expect(fs.readFile(result.scriptPath!, 'utf8')).resolves.toBe(
@@ -2405,7 +2405,7 @@ await agent('scan package.json')
       // A resume without the original args still runs — it just misses every
       // journal key, because the script bakes args into the agent prompts.
       expect(trailer).toContain(
-        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "`,
+        `resume: Workflow({ scriptPath: ${JSON.stringify(result.scriptPath)}, resumeFromRunId: "`,
       );
       expect(trailer).toContain('args: {"who":"world"}');
       expect(trailer).not.toContain('too large to inline');

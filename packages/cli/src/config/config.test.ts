@@ -3100,6 +3100,31 @@ describe('loadCliConfig', () => {
       expect(config.getWebSearchSettings()).toEqual({ timeoutMs: 45000 });
     });
 
+    it('lets WEB_SEARCH_MAX_PER_SESSION override tools.webSearch.maxPerSession', async () => {
+      vi.stubEnv('WEB_SEARCH_MAX_PER_SESSION', '50');
+      const config = await loadWithSettings({
+        tools: { webSearch: { maxPerSession: 10 } },
+      });
+      expect(config.getWebSearchSettings()?.maxPerSession).toBe(50);
+    });
+
+    it('ignores an empty, non-numeric, fractional or non-positive WEB_SEARCH_MAX_PER_SESSION', async () => {
+      for (const raw of ['', 'abc', '1.5', '-5', '0']) {
+        vi.stubEnv('WEB_SEARCH_MAX_PER_SESSION', raw);
+        const config = await loadWithSettings({
+          tools: { webSearch: { maxPerSession: 10 } },
+        });
+        expect(config.getWebSearchSettings()?.maxPerSession).toBe(10);
+      }
+    });
+
+    it('passes a cap-only setting through without other web search keys', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { maxPerSession: 10 } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({ maxPerSession: 10 });
+    });
+
     // Both modes must turn the tool off explicitly: leaving the settings
     // undefined would let the registry derive a backend from the provider.
     it('disables web search in safe mode', async () => {

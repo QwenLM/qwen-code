@@ -82,6 +82,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     GOAL_MAX_ACTIVE_MINUTES_CAP: 10_080,
     DEFAULT_WEB_SEARCH_TIMEOUT_MS: 120_000,
     MAX_WEB_SEARCH_TIMEOUT_MS: 600_000,
+    DEFAULT_WEB_SEARCH_MAX_PER_SESSION: 200,
+    MAX_WEB_SEARCH_MAX_PER_SESSION: 10_000,
     DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES: ['.agentignore', '.aiignore'],
     QWEN_DIR: '.qwen',
     Storage,
