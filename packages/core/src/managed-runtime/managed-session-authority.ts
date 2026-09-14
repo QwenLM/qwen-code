@@ -163,6 +163,22 @@ export interface ManagedSessionCheckpoint {
   readonly boundary: string | null;
 }
 
+export type ManagedSessionActionState =
+  | 'requested'
+  | 'decided'
+  | 'cancelled'
+  | 'expired';
+
+export interface ManagedSessionAction {
+  readonly requestId: string;
+  readonly kind: string;
+  readonly source: string;
+  readonly inputRevision: number;
+  readonly optionsRef: ManagedSessionDurableRef | null;
+  readonly state: ManagedSessionActionState;
+  readonly decisionRef: ManagedSessionDurableRef | null;
+}
+
 export interface ManagedSessionCheckpointReceipt {
   readonly receipt: ManagedSessionCommitReceipt;
   readonly checkpoint: ManagedSessionCheckpoint;
@@ -291,6 +307,7 @@ export class LocalManagedSessionAuthority {
     string,
     { revision: number; recordRef: ManagedSessionDurableRef }
   >();
+  private readonly actions = new Map<string, ManagedSessionAction>();
 
   get committedSequence(): number {
     return this.committed;
@@ -617,6 +634,140 @@ export class LocalManagedSessionAuthority {
         events.map(() => actor),
       ),
     );
+  }
+
+  /** The latest committed action for this request, if any. */
+  action(requestId: string): ManagedSessionAction | undefined {
+    return this.actions.get(requestId);
+  }
+
+  /**
+   * Harness-only: a tool_call permission ticket. Final decisions go through
+   * {@link resolveAction} as the trusted arbiter, not this method.
+   */
+  requestToolAction(
+    command: ManagedSessionCommand,
+    request: {
+      readonly requestId: string;
+      readonly kind: string;
+      readonly inputRevision: number;
+      readonly optionsRef: ManagedSessionDurableRef | null;
+    },
+    actor: ManagedSessionActor,
+  ): Promise<ManagedSessionAction> {
+    return this.runSerial(async () => {
+      const held = actor.activation;
+      if (actor.class !== 'harness' || held === undefined) {
+        throw new ManagedSessionConflictError(
+          'only the current harness may request a tool_call action.',
+        );
+      }
+      const existing = this.actions.get(request.requestId);
+      if (existing !== undefined) {
+        if (existing.state !== 'requested') {
+          throw new ManagedSessionConflictError(
+            `action ${request.requestId} is already ${existing.state}.`,
+          );
+        }
+        return existing;
+      }
+      await this.commit(
+        command,
+        [
+          {
+            v: MANAGED_SESSION_FORMAT_VERSION,
+            sequence: this.committed + 1,
+            eventId: `action:${request.requestId}:requested`,
+            sessionKey: command.sessionKey,
+            kind: 'action.changed',
+            occurredAt: this.now(),
+            subject: {
+              type: 'activation',
+              scopeId: held.activationId,
+              activationId: held.activationId,
+              epoch: held.epoch,
+            },
+            payload: {
+              requestId: request.requestId,
+              kind: request.kind,
+              source: 'tool_call',
+              inputRevision: request.inputRevision,
+              optionsRef: request.optionsRef,
+              state: 'requested',
+              decisionRef: null,
+            },
+          },
+        ],
+        [actor],
+      );
+      const committed = this.actions.get(request.requestId);
+      if (committed === undefined) {
+        throw new ManagedSessionRecordError(
+          `action ${request.requestId} was requested but not recorded.`,
+        );
+      }
+      return committed;
+    });
+  }
+
+  /**
+   * Arbiter-only final decision. A later conflicting outcome is rejected; the
+   * same outcome is idempotent so a duplicate client response is safe.
+   */
+  resolveAction(
+    command: ManagedSessionCommand,
+    request: {
+      readonly requestId: string;
+      readonly state: Exclude<ManagedSessionActionState, 'requested'>;
+      readonly decisionRef: ManagedSessionDurableRef | null;
+    },
+  ): Promise<ManagedSessionAction> {
+    return this.runSerial(async () => {
+      const existing = this.actions.get(request.requestId);
+      if (existing === undefined) {
+        throw new ManagedSessionConflictError(
+          `action ${request.requestId} has not been requested.`,
+        );
+      }
+      if (existing.state !== 'requested') {
+        if (actionDecisionsMatch(existing, request)) {
+          return existing;
+        }
+        throw new ManagedSessionConflictError(
+          `action ${request.requestId} already ${existing.state}.`,
+        );
+      }
+      await this.commit(
+        command,
+        [
+          {
+            v: MANAGED_SESSION_FORMAT_VERSION,
+            sequence: this.committed + 1,
+            eventId: `action:${request.requestId}:${request.state}`,
+            sessionKey: command.sessionKey,
+            kind: 'action.changed',
+            occurredAt: this.now(),
+            payload: {
+              requestId: existing.requestId,
+              kind: existing.kind,
+              source: existing.source,
+              inputRevision: existing.inputRevision,
+              optionsRef: existing.optionsRef,
+              state: request.state,
+              decisionRef: request.decisionRef,
+            },
+          },
+        ],
+        [{ class: 'trusted_entry' }],
+      );
+      const committed = this.actions.get(request.requestId);
+      if (committed === undefined) {
+        throw new ManagedSessionRecordError(
+          `action ${request.requestId} was resolved but not recorded.`,
+        );
+      }
+      return committed;
+    });
   }
 
   /** The newest committed checkpoint, if the session has one. */
@@ -1403,6 +1554,22 @@ export class LocalManagedSessionAuthority {
       };
       return;
     }
+    if (event.kind === 'action.changed') {
+      this.actions.set(event.payload['requestId'] as string, {
+        requestId: event.payload['requestId'] as string,
+        kind: event.payload['kind'] as string,
+        source: event.payload['source'] as string,
+        inputRevision: event.payload['inputRevision'] as number,
+        optionsRef: event.payload[
+          'optionsRef'
+        ] as ManagedSessionDurableRef | null,
+        state: event.payload['state'] as ManagedSessionActionState,
+        decisionRef: event.payload[
+          'decisionRef'
+        ] as ManagedSessionDurableRef | null,
+      });
+      return;
+    }
     if (
       event.kind === 'model.attempt' ||
       event.kind === 'tool.intent' ||
@@ -1539,6 +1706,20 @@ interface ManagedSessionLogScan {
   readonly foreignRecords: number;
   /** Engine ownership records, which a Managed log writes before its header. */
   readonly engineRecords: number;
+}
+
+function actionDecisionsMatch(
+  existing: ManagedSessionAction,
+  request: {
+    readonly state: ManagedSessionActionState;
+    readonly decisionRef: ManagedSessionDurableRef | null;
+  },
+): boolean {
+  if (existing.state !== request.state) return false;
+  const left = existing.decisionRef;
+  const right = request.decisionRef;
+  if (left === null || right === null) return left === right;
+  return left.digest === right.digest && left.byteLength === right.byteLength;
 }
 
 /**

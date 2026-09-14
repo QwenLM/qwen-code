@@ -83,6 +83,12 @@ export interface ManagedDurableWaitRequest {
   readonly invocation?: unknown;
 }
 
+export interface ManagedDurableWaitDecision {
+  readonly requestId: string;
+  readonly outcome: 'decided' | 'cancelled' | 'expired';
+  readonly body?: unknown;
+}
+
 export interface ManagedHarnessHandle {
   /** The activation this handle is allowed to present. */
   readonly activation: {
@@ -241,6 +247,25 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     }
 
     const previous = await this.ensureRunnable();
+    if (request.source === 'tool_call') {
+      await this.authority.requestToolAction(
+        {
+          operation: 'requestToolAction',
+          commandId: `requestToolAction:${request.requestId}`,
+          sessionKey: this.authority.sessionHeader.sessionKey,
+          contentDigest: createHash('sha256')
+            .update(request.optionsRef.digest)
+            .digest('hex'),
+        },
+        {
+          requestId: request.requestId,
+          kind: request.kind,
+          inputRevision: 1,
+          optionsRef: request.optionsRef,
+        },
+        { class: 'harness', activation: this.activation },
+      );
+    }
     const identity = this.nextCheckpointIdentity();
     const checkpoint = createAwaitActionHarnessCheckpoint({
       previous,
@@ -297,6 +322,14 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     if (previous.continuation.phase !== 'await_action') {
       throw new ManagedSessionConflictError(
         'durable-wait checkpoint is not an await_action phase.',
+      );
+    }
+    const requestId = previous.approval?.requestId;
+    const action =
+      requestId === undefined ? undefined : this.authority.action(requestId);
+    if (action === undefined || action.state === 'requested') {
+      throw new ManagedSessionConflictError(
+        'durable wait cannot resolve before a final action decision.',
       );
     }
     const identity = this.nextCheckpointIdentity();

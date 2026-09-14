@@ -354,7 +354,8 @@ describe('managed harness factory', () => {
   });
 
   it('commits an approval wait before the next model start is allowed', async () => {
-    const session = await open(await createWorkspace());
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
     const handle = createManagedHarnessHandle(session);
     await handle.ensureRunnable();
     const refs = await waitRefs(session);
@@ -374,9 +375,14 @@ describe('managed harness factory', () => {
       kind: 'durable_wait',
       checkpointId: boundary.checkpointId,
     });
+    await expect(handle.resolveDurableWait()).rejects.toThrow(
+      /before a final action decision/,
+    );
+    expect(session.authority.action('fc-1')?.state).toBe('requested');
     await handle.detach();
     await expect(handle.resolveDurableWait()).rejects.toThrow(/detached/);
 
+    await decideAction(session);
     const next = createManagedHarnessHandle(session);
     const resumed = await next.resolveDurableWait();
     expect(resumed?.continuation.phase).toBe('model_output_committed');
@@ -385,6 +391,57 @@ describe('managed harness factory', () => {
     expect(runnable.identity.checkpointId).toBe(resumed?.identity.checkpointId);
     expect(runnable.continuation.phase).toBe('model_output_committed');
     await session.close();
+
+    const reopened = await openManagedSession({
+      runtimeBaseDir: workspace.runtimeBaseDir,
+      sessionId,
+      transcriptPath: workspace.transcriptPath,
+      sessionKey,
+      cwd: workspace.projectRoot,
+      version: 'test',
+      workerId: 'worker-1',
+      activationLeaseDurationMs: 60_000,
+    });
+    expect(reopened.authority.action('fc-1')).toMatchObject({
+      state: 'decided',
+      requestId: 'fc-1',
+    });
+    expect(reopened.authority.action('fc-1')?.decisionRef).not.toBeNull();
+    await reopened.close();
+  });
+
+  it('authorizes the original wait after a crash between the decision and resolve', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    await handle.commitDurableWait(waitCommit(await waitRefs(session)));
+    await decideAction(session);
+    expect(session.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_DURABLE_WAIT_BOUNDARY,
+    );
+    await session.close();
+
+    const reopened = await openManagedSession({
+      runtimeBaseDir: workspace.runtimeBaseDir,
+      sessionId,
+      transcriptPath: workspace.transcriptPath,
+      sessionKey,
+      cwd: workspace.projectRoot,
+      version: 'test',
+      workerId: 'worker-1',
+      activationLeaseDurationMs: 60_000,
+    });
+    expect(reopened.authority.action('fc-1')?.state).toBe('decided');
+    expect(reopened.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_DURABLE_WAIT_BOUNDARY,
+    );
+    const next = createManagedHarnessHandle(reopened);
+    const resumed = await next.resolveDurableWait();
+    expect(resumed?.continuation.phase).toBe('model_output_committed');
+    const runnable = await next.ensureRunnable();
+    expect(runnable.continuation.phase).toBe('model_output_committed');
+    await reopened.close();
   });
 
   it('is idempotent for the same approval wait and rejects a second request', async () => {
@@ -402,8 +459,28 @@ describe('managed harness factory', () => {
         attemptId: 'att-fc-2',
       }),
     ).rejects.toThrow(/already waiting on a different approval/);
+    await expect(handle.resolveDurableWait()).rejects.toThrow(
+      /before a final action decision/,
+    );
+    await decideAction(session);
+    expect(session.authority.action('fc-1')?.state).toBe('decided');
     expect(await handle.resolveDurableWait()).not.toBeNull();
     expect(await handle.resolveDurableWait()).toBeNull();
+    await expect(
+      session.authority.resolveAction(
+        {
+          operation: 'resolveAction',
+          commandId: 'resolveAction:fc-1:other',
+          sessionKey,
+          contentDigest: DIGEST,
+        },
+        {
+          requestId: 'fc-1',
+          state: 'cancelled',
+          decisionRef: null,
+        },
+      ),
+    ).rejects.toThrow(/already decided/);
     await session.close();
   });
 });
@@ -442,4 +519,23 @@ function waitCommit(
     attemptId: 'att-fc-1',
     routeRef: refs.routeRef,
   };
+}
+
+async function decideAction(
+  session: ManagedSession,
+  requestId = 'fc-1',
+): Promise<void> {
+  const decisionRef = await session.resources.publish(
+    'managed-decision',
+    Buffer.from('{"optionId":"allow"}', 'utf8'),
+  );
+  await session.authority.resolveAction(
+    {
+      operation: 'resolveAction',
+      commandId: `resolveAction:${requestId}`,
+      sessionKey,
+      contentDigest: decisionRef.digest,
+    },
+    { requestId, state: 'decided', decisionRef },
+  );
 }

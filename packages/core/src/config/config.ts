@@ -286,6 +286,7 @@ import {
 import { HARNESS_TURN_COMPLETE_BOUNDARY } from '../managed-runtime/managed-harness-checkpoint.js';
 import {
   createManagedHarnessHandle,
+  type ManagedDurableWaitDecision,
   type ManagedDurableWaitRequest,
   type ManagedHarnessHandle,
 } from '../managed-runtime/managed-harness-factory.js';
@@ -5039,13 +5040,38 @@ export class Config {
   }
 
   /**
-   * Restores a model-start phase after a permission RPC settles. Legacy
-   * sessions no-op. Leaves the handle in place so the same turn can continue.
+   * Persists the permission decision, then restores a model-start phase.
+   * Legacy sessions no-op. The original tool is not authorized until the
+   * decision is in the log.
    */
-  async resolveManagedDurableWait(): Promise<void> {
+  async resolveManagedDurableWait(
+    decision: ManagedDurableWaitDecision,
+  ): Promise<void> {
     const session = this.managedSession;
     if (session === undefined) return;
     this.managedHarness ??= createManagedHarnessHandle(session);
+    const decisionRef =
+      decision.outcome === 'decided'
+        ? await session.resources.publish(
+            'managed-decision',
+            Buffer.from(JSON.stringify(decision.body ?? null), 'utf8'),
+          )
+        : null;
+    await session.authority.resolveAction(
+      {
+        operation: 'resolveAction',
+        commandId: `resolveAction:${decision.requestId}`,
+        sessionKey: session.authority.sessionHeader.sessionKey,
+        contentDigest:
+          decisionRef?.digest ??
+          createHash('sha256').update(decision.outcome).digest('hex'),
+      },
+      {
+        requestId: decision.requestId,
+        state: decision.outcome,
+        decisionRef,
+      },
+    );
     await this.managedHarness.resolveDurableWait();
   }
 

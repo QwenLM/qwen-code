@@ -675,6 +675,104 @@ describe('managed session authority activation fences', () => {
     expect(await readLines(fixture)).toEqual(before);
     await opened.release();
   });
+
+  it('records a tool_call request and recovers the trusted decision', async () => {
+    const fixture = await createFixture();
+    const opened = await withActivation(fixture);
+    const request = {
+      requestId: 'req-1',
+      kind: 'permission',
+      inputRevision: 1,
+      optionsRef: null,
+    };
+    await expect(
+      opened.authority.requestToolAction(
+        inputCommand(fixture, {
+          operation: 'requestToolAction',
+          commandId: 'cmd-action-trusted',
+        }),
+        request,
+        { class: 'trusted_entry' },
+      ),
+    ).rejects.toThrow(/only the current harness/);
+    await expect(
+      opened.authority.resolveAction(
+        inputCommand(fixture, {
+          operation: 'resolveAction',
+          commandId: 'cmd-action-early',
+        }),
+        { requestId: 'req-1', state: 'decided', decisionRef: ref() },
+      ),
+    ).rejects.toThrow(/has not been requested/);
+
+    const requested = await opened.authority.requestToolAction(
+      inputCommand(fixture, {
+        operation: 'requestToolAction',
+        commandId: 'cmd-action-request',
+      }),
+      request,
+      holds('act-1', 1),
+    );
+    expect(requested.state).toBe('requested');
+    expect(
+      await opened.authority.requestToolAction(
+        inputCommand(fixture, {
+          operation: 'requestToolAction',
+          commandId: 'cmd-action-request-again',
+        }),
+        request,
+        holds('act-1', 1),
+      ),
+    ).toEqual(requested);
+
+    const decided = await opened.authority.resolveAction(
+      inputCommand(fixture, {
+        operation: 'resolveAction',
+        commandId: 'cmd-action-decide',
+      }),
+      { requestId: 'req-1', state: 'decided', decisionRef: ref() },
+    );
+    expect(decided.state).toBe('decided');
+    expect(decided.decisionRef).toEqual(ref());
+    expect(
+      await opened.authority.resolveAction(
+        inputCommand(fixture, {
+          operation: 'resolveAction',
+          commandId: 'cmd-action-decide-again',
+        }),
+        { requestId: 'req-1', state: 'decided', decisionRef: ref() },
+      ),
+    ).toEqual(decided);
+
+    await expect(
+      opened.authority.resolveAction(
+        inputCommand(fixture, {
+          operation: 'resolveAction',
+          commandId: 'cmd-action-cancel',
+        }),
+        { requestId: 'req-1', state: 'cancelled', decisionRef: null },
+      ),
+    ).rejects.toThrow(/already decided/);
+    await expect(
+      opened.authority.requestToolAction(
+        inputCommand(fixture, {
+          operation: 'requestToolAction',
+          commandId: 'cmd-action-after',
+        }),
+        request,
+        holds('act-1', 1),
+      ),
+    ).rejects.toThrow(/already decided/);
+    await opened.release();
+
+    const reopened = await openAuthority(fixture, { create: false });
+    expect(reopened.authority.action('req-1')).toMatchObject({
+      requestId: 'req-1',
+      state: 'decided',
+    });
+    expect(reopened.authority.action('req-1')?.decisionRef).toEqual(ref());
+    await reopened.release();
+  });
 });
 
 describe('managed session authority log integrity', () => {

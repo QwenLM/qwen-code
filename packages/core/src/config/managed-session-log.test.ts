@@ -517,8 +517,13 @@ describe('managed session log activation', () => {
       await expect(
         fixture.config.ensureManagedHarnessRunnable(),
       ).rejects.toMatchObject({ reason: 'invalid_state' });
-
-      await fixture.config.resolveManagedDurableWait();
+      await expect(
+        fixture.config.resolveManagedDurableWait({
+          requestId: 'fc-wait-1',
+          outcome: 'decided',
+          body: { optionId: 'allow' },
+        }),
+      ).resolves.toBeUndefined();
       await fixture.config.ensureManagedHarnessRunnable();
 
       const after = await transcriptRecords(fixture.transcriptPath);
@@ -532,6 +537,24 @@ describe('managed session log activation', () => {
       const events = after
         .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
         .map((entry) => entry['managedSession'] as Record<string, unknown>);
+      const actions = events.filter(
+        (event) => event['kind'] === 'action.changed',
+      );
+      expect(
+        actions.map(
+          (event) =>
+            (event['payload'] as Record<string, unknown>)['state'] as string,
+        ),
+      ).toEqual(['requested', 'decided']);
+      const lastCheckpoint = events
+        .filter((event) => event['kind'] === 'checkpoint.committed')
+        .at(-1);
+      expect(actions[1]['sequence'] as number).toBeLessThan(
+        lastCheckpoint?.['sequence'] as number,
+      );
+      expect(
+        (actions[1]['payload'] as Record<string, unknown>)['decisionRef'],
+      ).not.toBeNull();
       expect(
         events
           .filter((event) => event['kind'] === 'activation.changed')

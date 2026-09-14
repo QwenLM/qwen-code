@@ -10791,20 +10791,21 @@ export class Session implements SessionContext {
     const prior = permissionRequestTails.get(this.client) ?? Promise.resolve();
     const transportRequest = prior.then(async () => {
       await this.#commitManagedDurableWait(params);
+      let result: RequestPermissionResponse;
       try {
-        const result = signal.aborted
+        result = signal.aborted
           ? await requestPermissionWithAbort(this.client, params, signal)
           : await this.client.requestPermission(params);
-        await this.config.resolveManagedDurableWait?.();
-        return result;
       } catch (error) {
         try {
-          await this.config.resolveManagedDurableWait?.();
+          await this.#resolveManagedDurableWait(params, undefined, error);
         } catch {
           // Keep the original permission error.
         }
         throw error;
       }
+      await this.#resolveManagedDurableWait(params, result);
+      return result;
     });
     // Advance the queue when the transport settles OR when the caller's
     // signal aborts — an orphaned RPC must not wedge later requests.
@@ -10851,6 +10852,30 @@ export class Session implements SessionContext {
         ...(typeof toolName === 'string' ? { toolName } : {}),
       },
     });
+  }
+
+  async #resolveManagedDurableWait(
+    params: RequestPermissionRequest,
+    result?: RequestPermissionResponse & { answers?: Record<string, string> },
+    error?: unknown,
+  ): Promise<void> {
+    const requestId = params.toolCall.toolCallId;
+    const selected =
+      error === undefined && result?.outcome.outcome === 'selected'
+        ? result.outcome
+        : undefined;
+    await this.config.resolveManagedDurableWait?.(
+      selected === undefined
+        ? { requestId, outcome: 'cancelled' }
+        : {
+            requestId,
+            outcome: 'decided',
+            body: {
+              optionId: selected.optionId,
+              answers: result?.answers ?? null,
+            },
+          },
+    );
   }
 
   /**
