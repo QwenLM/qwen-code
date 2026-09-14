@@ -400,8 +400,9 @@ describe('package scripts', () => {
     });
 
     it('ignores a range-scoped allowBuilds key, which decides nothing', () => {
-      // pnpm's isDepPathAllowBuildKey rejects a range, so `esbuild@^0.25.0`
-      // is filed under a package literally named that and approves no build.
+      // A range is not a version scope: pnpm's parseVersionPolicyRule throws
+      // INVALID_VERSION_UNION ('Use exact versions only') on `esbuild@^0.25.0`,
+      // so this key decides nothing and the gate stays red for that tree.
       const result = runCheckLockfile((fixtureRoot) =>
         mutatePnpmWorkspace(fixtureRoot, (workspace) => {
           delete workspace.allowBuilds.esbuild;
