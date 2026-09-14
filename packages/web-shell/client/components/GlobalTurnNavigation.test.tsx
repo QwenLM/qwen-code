@@ -341,3 +341,31 @@ it('falls back to the settled selection when no follow range is reported', async
       ?.getAttribute('data-turn-ordinal'),
   ).toBe('20');
 });
+
+it('edge-scrolls the rail to keep the current tick visible instead of centering it', async () => {
+  const { state, store, select } = await setup(500);
+  const scroll = container.querySelector<HTMLElement>('nav > div')!;
+  expect(scroll.scrollTop).toBe(500 * 16 - 360);
+  await act(async () =>
+    root.render(
+      <GlobalTurnNavigation
+        state={state}
+        store={store}
+        follow={{ start: 8, end: 12, current: 10 }}
+        onSelect={select}
+      />,
+    ),
+  );
+  expect(scroll.scrollTop).toBe(160);
+  await act(async () =>
+    root.render(
+      <GlobalTurnNavigation
+        state={state}
+        store={store}
+        follow={{ start: 11, end: 14, current: 13 }}
+        onSelect={select}
+      />,
+    ),
+  );
+  expect(scroll.scrollTop).toBe(160);
+});

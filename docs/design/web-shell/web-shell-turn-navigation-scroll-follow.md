@@ -36,8 +36,10 @@ the rail highlight — a regression in daily reading flow, not a code defect.
   viewport — so the marker reaches the first and last turns at the scroll
   extremes — and marks the turns
   spanning the visible rows as in-range, matching the in-list timeline.
-- When the highlighted turn changes, the rail scrolls itself to center the
-  current tick, matching the in-list timeline.
+- When the highlighted turn leaves the rail's window, the rail edge-scrolls
+  just enough to keep it visible (never re-centering), so the marker can ride
+  to the rail's top edge when reading upward and its bottom edge at the live
+  tail.
 - `aria-current` tracks the same effective current turn.
 
 ## Non-goals
@@ -81,8 +83,8 @@ The follow range recomputes:
 `sessionTimelineButtonCurrent` style and takes over `aria-current`. Ordinals
 inside `follow.start..end` additionally get `sessionTimelineButtonInRange`
 (and `data-in-current-range`), exactly like the in-list timeline. A layout
-effect re-centers the rail viewport on the current tick only when the current
-ordinal changes, so browsing the rail itself never fights the user.
+effect edge-scrolls the rail viewport only when the current tick leaves the
+visible window, so browsing the rail itself never fights the user.
 
 Coverage is self-healing: when scrolling deep history reaches turns whose index
 page is not loaded, the row-to-ordinal map has gaps and the highlight simply
@@ -116,7 +118,8 @@ for the visible ticks, which fills `locations`, and follow resumes.
 ## Acceptance criteria
 
 - Scrolling the transcript in either view moves the rail highlight in real
-  time, and the rail re-centers on the current tick when it changes.
+  time, and the rail keeps the current tick inside its window without
+  re-centering on it.
 - Clicking a tick shows immediate highlight feedback and the existing jump
   behavior is unchanged.
 - The legacy in-list timeline path renders byte-identical DOM to before.

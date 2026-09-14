@@ -88,14 +88,15 @@ export function GlobalTurnNavigation({
     if (currentOrdinal === undefined) return;
     const element = viewport.current;
     if (!element) return;
-    const target = Math.max(
-      0,
-      Math.min(
-        currentOrdinal * ROW_HEIGHT + ROW_HEIGHT / 2 - height / 2,
-        count * ROW_HEIGHT - height,
-      ),
-    );
-    if (element.scrollTop === target) return;
+    const topEdge = currentOrdinal * ROW_HEIGHT;
+    const bottomEdge = topEdge + ROW_HEIGHT;
+    const target =
+      topEdge < element.scrollTop
+        ? topEdge
+        : bottomEdge > element.scrollTop + height
+          ? bottomEdge - height
+          : undefined;
+    if (target === undefined) return;
     element.scrollTop = target;
     setTop(element.scrollTop);
   }, [currentOrdinal, count, height]);

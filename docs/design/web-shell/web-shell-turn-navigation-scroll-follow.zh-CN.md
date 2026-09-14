@@ -19,7 +19,7 @@
 ## 目标
 
 - 滚动 transcript（实时视图或历史视图）时，时间轴高亮阅读线（视口顶部往下三分之一处）上方最近行所属的轮次——使标记在滚动两端能到达第一轮和最后一轮——并把可见行跨越的轮次标记为 in-range，与内嵌时间轴行为一致。
-- 高亮轮次变化时，轨条自动滚动使当前刻度居中，与内嵌时间轴一致。
+- 高亮轮次离开轨条可视窗口时，轨条仅贴边滚动到刚好可见（不再居中），向上阅读时标记可以一直走到轨条顶部边缘，在实时尾部则停在下边缘。
 - `aria-current` 跟随同一个有效当前轮次。
 
 ## 非目标
@@ -40,7 +40,7 @@
 - transcript 滚动时（rAF 节流；恢复阅读锚点或定位跳转期间跳过，恢复循环结束时补算一次），
 - `messages`、view key 或序号映射变化后的布局阶段（流式增长、历史页载入、视图切换）。
 
-`GlobalTurnNavigation` 计算有效当前序号：点击选择仍在加载时取 `selected?.ordinal`，否则取 `follow?.current ?? selected?.ordinal`。当前刻度沿用现有 `sessionTimelineButtonCurrent` 样式并接管 `aria-current`。落在 `follow.start..end` 内的序号额外附加 `sessionTimelineButtonInRange`（及 `data-in-current-range`），与内嵌时间轴完全一致。仅当当前序号变化时，布局副作用才让轨条视口居中当前刻度，因此用户浏览轨条本身永远不会被争抢。
+`GlobalTurnNavigation` 计算有效当前序号：点击选择仍在加载时取 `selected?.ordinal`，否则取 `follow?.current ?? selected?.ordinal`。当前刻度沿用现有 `sessionTimelineButtonCurrent` 样式并接管 `aria-current`。落在 `follow.start..end` 内的序号额外附加 `sessionTimelineButtonInRange`（及 `data-in-current-range`），与内嵌时间轴完全一致。仅当当前刻度离开可视窗口时，布局副作用才让轨条视口贴边滚动到刚好可见，因此用户浏览轨条本身永远不会被争抢。
 
 覆盖能力是自愈的：滚动到深处历史时，若某轮的 index page 尚未加载，行到序号的映射会出现空洞，高亮只是暂时停住；轨条现有的缺页加载器会为可见刻度拉取 index page，回填 `locations` 后跟随即恢复。
 
@@ -61,7 +61,7 @@
 
 ## 验收标准
 
-- 任一视图中滚动 transcript 都会实时移动轨条高亮，且当前刻度变化时轨条自动居中。
+- 任一视图中滚动 transcript 都会实时移动轨条高亮，且轨条只把当前刻度保持在窗口内而不对其居中。
 - 点击刻度有即时高亮反馈，现有跳转行为不变。
 - legacy 内嵌时间轴路径渲染的 DOM 与之前逐字节一致。
 

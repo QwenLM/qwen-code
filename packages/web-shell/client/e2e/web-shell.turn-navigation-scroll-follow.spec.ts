@@ -45,6 +45,21 @@ function inRangeCount(page: Page): Promise<number> {
   );
 }
 
+function markerOffsetRatio(page: Page): Promise<number | null> {
+  return page.evaluate(() => {
+    const viewport = document.querySelector<HTMLElement>(
+      '[data-global-turn-navigation] div',
+    );
+    const current = document.querySelector<HTMLElement>(
+      '[data-global-turn-navigation] [aria-current]',
+    );
+    if (!viewport || !current) return null;
+    const rail = viewport.getBoundingClientRect();
+    const tick = current.getBoundingClientRect();
+    return (tick.top - rail.top) / rail.height;
+  });
+}
+
 async function scrollTranscriptTo(page: Page, ratio: number) {
   await page.evaluate((value) => {
     const el = document.querySelector<HTMLElement>(
@@ -126,15 +141,18 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   const atBottom = (await ariaOrdinal(page))!;
   expect(atBottom).toBeGreaterThanOrEqual(TURNS - 6);
   await expect.poll(() => inRangeCount(page)).toBeGreaterThan(0);
+  await expect.poll(() => markerOffsetRatio(page)).toBeGreaterThan(0.85);
 
   // Scrolling up moves the highlight to older turns.
   await scrollTranscriptTo(page, 0.3);
   await expect.poll(() => ariaOrdinal(page)).toBeLessThan(atBottom - 3);
   const inMiddle = (await ariaOrdinal(page))!;
 
-  // The highlight reaches the first turn at the scroll top.
+  // The highlight reaches the first turn at the scroll top and rides to the
+  // rail's top edge rather than being pinned to its middle.
   await scrollTranscriptTo(page, 0);
   await expect.poll(() => ariaOrdinal(page)).toBe(0);
+  await expect.poll(() => markerOffsetRatio(page)).toBeLessThan(0.15);
 
   // Scrolling back down moves it to newer turns again.
   await scrollTranscriptTo(page, 0.9);
