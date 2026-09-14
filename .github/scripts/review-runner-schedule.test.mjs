@@ -18,9 +18,10 @@ const runner = (id, labels, extra = {}) => ({
 });
 
 describe('review runner schedule', () => {
-  it('switches the entire online pool, including busy runners', () => {
+  it('switches online hk1 and hk2 runners, including busy runners', () => {
     const runners = Array.from({ length: 32 }, (_, i) =>
       runner(i + 1, ['ecs-qwen', 'ecs-agent', 'diagnostic'], {
+        name: `ecs-qwen-hk${(i % 2) + 1}-${i + 1}`,
         busy: i % 2 === 0,
         status: i < 2 ? 'offline' : 'online',
       }),
@@ -50,6 +51,7 @@ describe('review runner schedule', () => {
           runner(2, ['ecs-agent'], { name: 'ecs-qwen-hk1-2' }),
           runner(3, ['ecs-review'], { name: 'ecs-qwen-hk2-3-extra' }),
           runner(4, ['ecs-review'], { status: 'offline' }),
+          runner(5, ['ecs-review'], { name: 'ecs-qwen-hk3-5' }),
         ],
         'ci',
       ),
@@ -59,6 +61,12 @@ describe('review runner schedule', () => {
           name: 'ecs-qwen-hk2-1',
           add: ['ecs-qwen'],
           remove: ['ecs-review'],
+        },
+        {
+          id: 2,
+          name: 'ecs-qwen-hk1-2',
+          add: ['ecs-qwen'],
+          remove: ['ecs-agent'],
         },
       ],
     );

@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Switch all online hk2 runners between review and CI, twice a day.
+// Switch all online hk1/hk2 runners between review and CI, twice a day.
 // Offline runners are skipped; their labels stay unchanged.
 // Running jobs finish normally; labels only control which job starts next.
 
@@ -22,7 +22,9 @@ export function planLabels(runners, mode) {
   }
   const target = mode === 'review' ? 'ecs-review' : 'ecs-qwen';
   return runners
-    .filter((r) => r.status === 'online' && /^ecs-qwen-hk2-\d+$/.test(r.name))
+    .filter(
+      (r) => r.status === 'online' && /^ecs-qwen-hk[12]-\d+$/.test(r.name),
+    )
     .flatMap((r) => {
       const labels = r.labels.map((l) => l.name);
       const remove = labels.filter(
@@ -65,8 +67,8 @@ async function main() {
     ]),
   );
   const runners = pages.flatMap((page) => page.runners);
-  if (!runners.some((r) => /^ecs-qwen-hk2-\d+$/.test(r.name))) {
-    throw new Error('no ecs-qwen-hk2-<n> runner found');
+  if (!runners.some((r) => /^ecs-qwen-hk[12]-\d+$/.test(r.name))) {
+    throw new Error('no ecs-qwen-hk1-<n> or ecs-qwen-hk2-<n> runner found');
   }
   const actions = planLabels(runners, mode);
   const results = await Promise.all(
@@ -101,7 +103,7 @@ async function main() {
     }),
   );
   const summary = [
-    `### hk2 runner pool: ${mode}`,
+    `### hk1/hk2 runner pool: ${mode}`,
     `- ${actions.length} runners to switch`,
     ...results.map((r) => r.message),
   ].join('\n');
