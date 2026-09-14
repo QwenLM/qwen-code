@@ -17,12 +17,12 @@ on:
     inputs:
       pool:
         description: 'Pool for all online hk2 runners'
-        type: choice
+        type: 'choice'
         required: true
-        default: ci
+        default: 'ci'
         options:
-          - review
-          - ci
+          - 'review'
+          - 'ci'
 
 permissions:
   contents: 'read'
