@@ -57,6 +57,7 @@ function createManager() {
     isFavorite: vi.fn(() => false),
     getExtensionScope: vi.fn(() => 'user' as const),
     updateExtension: vi.fn(),
+    disableExtension: vi.fn(async () => ({ warnings: [] })),
   };
 }
 
@@ -73,6 +74,8 @@ function deferred<T>() {
 interface HarnessControls {
   /** Simulates leaving the detail view and re-entering it (a fresh mount). */
   remount: () => void;
+  /** The view's request to leave the detail view (InstalledTab's goToList). */
+  onExit: ReturnType<typeof vi.fn>;
 }
 
 /**
@@ -83,10 +86,13 @@ function Harness({
   manager,
   onStatus,
   controls,
+  onAdopt,
 }: {
   manager: ReturnType<typeof createManager>;
   onStatus: (status: StatusMessage | null) => void;
   controls: HarnessControls;
+  /** Observes what the view reports as the state the update settled on. */
+  onAdopt?: (name: string, state: string) => void;
 }) {
   const [map, dispatch] = useReducer(extensionUpdatesReducer, {
     ...initialExtensionUpdatesState,
@@ -115,10 +121,11 @@ function Harness({
         updateState={map.extensionStatuses.get(extension.name)?.status}
         onStatus={onStatus}
         onReload={vi.fn()}
-        onExit={vi.fn()}
-        onUpdateStateChange={(name, state) =>
-          dispatch({ type: 'SET_STATE', payload: { name, state } })
-        }
+        onExit={controls.onExit}
+        onUpdateStateChange={(name, state) => {
+          onAdopt?.(name, state);
+          dispatch({ type: 'SET_STATE', payload: { name, state } });
+        }}
       />
     </KeypressProvider>
   );
@@ -127,10 +134,16 @@ function Harness({
 function renderDetail(
   manager: ReturnType<typeof createManager>,
   onStatus: (status: StatusMessage | null) => void = vi.fn(),
+  onAdopt?: (name: string, state: string) => void,
 ) {
-  const controls: HarnessControls = { remount: () => {} };
+  const controls: HarnessControls = { remount: () => {}, onExit: vi.fn() };
   const { lastFrame, stdin } = render(
-    <Harness manager={manager} onStatus={onStatus} controls={controls} />,
+    <Harness
+      manager={manager}
+      onStatus={onStatus}
+      controls={controls}
+      onAdopt={onAdopt}
+    />,
   );
   return { lastFrame, stdin, controls };
 }
@@ -232,6 +245,7 @@ describe('ExtensionActionsView update flow', () => {
 
   it('keeps offering "Update Now" when the update fails', async () => {
     const manager = createManager();
+    const pending = deferred<void>();
     manager.updateExtension.mockImplementation(
       async (
         ext: Extension,
@@ -239,6 +253,9 @@ describe('ExtensionActionsView update flow', () => {
         callback: (name: string, state: ExtensionUpdateState) => void,
       ) => {
         callback(ext.name, ExtensionUpdateState.UPDATING);
+        // Keep the update in flight long enough for the busy line to paint, so
+        // the action list really is unmounted and remounted here.
+        await pending.promise;
         callback(ext.name, ExtensionUpdateState.ERROR);
         throw new Error('swap failed');
       },
@@ -249,11 +266,125 @@ describe('ExtensionActionsView update flow', () => {
     );
 
     await selectUpdateNow(stdin, lastFrame);
+    await waitFor(() => expect(lastFrame()).toContain('Updating demo...'));
 
+    await act(async () => {
+      pending.resolve();
+    });
     await waitFor(() =>
       expect(statuses).toContainEqual({ type: 'error', text: 'swap failed' }),
     );
     // The extension still has an update pending, so the menu must keep it.
-    expect(lastFrame()).toContain('Update Now');
+    await waitFor(() => expect(lastFrame()).toContain('Update Now'));
+
+    // The busy line unmounted the action list and it is remounted here with the
+    // same rows, so the cursor has to come back on "Update Now" too: a bare
+    // Enter retries the update instead of running the row that sits first.
+    stdin.write('\r');
+    await waitFor(() =>
+      expect(manager.updateExtension).toHaveBeenCalledTimes(2),
+    );
+    expect(manager.disableExtension).not.toHaveBeenCalled();
   });
+
+  it('ignores Escape while the update runs so it cannot be abandoned midway', async () => {
+    const manager = createManager();
+    const pending = deferred<{ warnings?: unknown[] }>();
+    manager.updateExtension.mockImplementation(
+      async (
+        ext: Extension,
+        _state: ExtensionUpdateState,
+        callback: (name: string, state: ExtensionUpdateState) => void,
+      ) => {
+        callback(ext.name, ExtensionUpdateState.UPDATING);
+        await pending.promise;
+        callback(ext.name, ExtensionUpdateState.UPDATED);
+        return {
+          name: ext.name,
+          originalVersion: '1.0.0',
+          updatedVersion: '1.0.1',
+        };
+      },
+    );
+    const { lastFrame, stdin, controls } = renderDetail(manager);
+
+    await selectUpdateNow(stdin, lastFrame);
+    await waitFor(() => expect(manager.updateExtension).toHaveBeenCalledOnce());
+    expect(lastFrame()).toContain('Updating demo...');
+
+    // Leaving the detail now would unmount the view while the update keeps
+    // running, and re-entering it would offer a second concurrent update. The
+    // wait gives the keypress the same window the control below needs.
+    stdin.write('\x1b');
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(controls.onExit).not.toHaveBeenCalled();
+    expect(lastFrame()).toContain('Updating demo...');
+
+    await act(async () => {
+      pending.resolve({});
+    });
+    await waitFor(() => expect(lastFrame()).not.toContain('Updating demo...'));
+
+    // Control: once the update has settled, Escape does reach the view and
+    // leaves the detail — so the assertion above is about the in-flight guard,
+    // not about a keypress that never arrived.
+    stdin.write('\x1b');
+    await waitFor(() => expect(controls.onExit).toHaveBeenCalledOnce());
+  });
+
+  it.each([
+    [
+      ExtensionUpdateState.UPDATED_WITH_WARNINGS,
+      'Updated "demo" with warnings: extension_reload_failed: boom.',
+    ],
+    [
+      ExtensionUpdateState.UPDATED_NEEDS_RESTART,
+      'Updated "demo" with warnings: extension_reload_failed: boom.',
+    ],
+  ])(
+    'adopts %s — the state the manager settled on — not a constant',
+    async (settledState, expectedStatus) => {
+      const manager = createManager();
+      manager.updateExtension.mockImplementation(
+        async (
+          ext: Extension,
+          _state: ExtensionUpdateState,
+          callback: (name: string, state: ExtensionUpdateState) => void,
+        ) => {
+          callback(ext.name, ExtensionUpdateState.UPDATING);
+          callback(ext.name, settledState);
+          return {
+            name: ext.name,
+            originalVersion: '1.0.0',
+            updatedVersion: '1.0.1',
+            warnings: [
+              { code: 'extension_reload_failed', error: 'boom' },
+            ] as unknown[],
+          };
+        },
+      );
+      const statuses: Array<StatusMessage | null> = [];
+      const adopted: Array<[string, string]> = [];
+      const { lastFrame, stdin } = renderDetail(
+        manager,
+        (status) => statuses.push(status),
+        (name, state) => adopted.push([name, state]),
+      );
+
+      await selectUpdateNow(stdin, lastFrame);
+
+      // The app-level map (and the parent) must record the manager's terminal
+      // state, not "updated": a restart/warning outcome that got flattened to
+      // "updated" would be rendered as a success and never flagged as needing
+      // attention.
+      await waitFor(() => expect(adopted).toEqual([['demo', settledState]]));
+      expect(statuses).toContainEqual({
+        type: 'warning',
+        text: expectedStatus,
+      });
+      await waitFor(() => expect(lastFrame()).not.toContain('Update Now'));
+    },
+  );
 });

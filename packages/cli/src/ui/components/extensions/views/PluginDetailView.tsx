@@ -31,6 +31,14 @@ interface PluginDetailViewProps {
   isFocused: boolean;
   /** Whether to offer the favorite toggle (hidden in the Sources tab). */
   showFavorite?: boolean;
+  /**
+   * Action the cursor starts on. A busy action replaces this view with a
+   * loading line, so it is remounted once the action settles and would
+   * otherwise re-seed the cursor to the first row — keep it on the action the
+   * user activated instead. Missing (or no longer offered) falls back to the
+   * first row.
+   */
+  initialAction?: PluginDetailAction;
   onAction: (action: PluginDetailAction) => void;
 }
 
@@ -73,6 +81,7 @@ export const PluginDetailView = ({
   hasUpdateAvailable,
   isFocused,
   showFavorite = true,
+  initialAction,
   onAction,
 }: PluginDetailViewProps) => {
   const ext = extension;
@@ -122,6 +131,14 @@ export const PluginDetailView = ({
     return items;
   }, [isActive, isFavorite, hasUpdateAvailable, showFavorite]);
 
+  // Index of `initialAction` in the rows actually offered right now, or the
+  // first row when it is absent (no request, or the action is gone after the
+  // action settled — e.g. "Update Now" disappearing after a successful update).
+  const initialIndex = useMemo(() => {
+    const index = actions.findIndex((item) => item.value === initialAction);
+    return index < 0 ? 0 : index;
+  }, [actions, initialAction]);
+
   return (
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="column">
@@ -153,6 +170,7 @@ export const PluginDetailView = ({
         <Text color={theme.text.secondary}>{t('Actions')}</Text>
         <RadioButtonSelect
           items={actions}
+          initialIndex={initialIndex}
           isFocused={isFocused}
           showNumbers={false}
           onSelect={onAction}

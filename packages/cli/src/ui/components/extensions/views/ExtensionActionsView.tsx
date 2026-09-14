@@ -102,8 +102,18 @@ export const ExtensionActionsView = ({
   // An update re-fetches the source, converts, stages, swaps the artifact and
   // reloads tools; surfaced as a loading line so the action doesn't look
   // ignored — the action list is also replaced while it runs, so a second
-  // Enter cannot start a concurrent update.
+  // Enter cannot start a concurrent update and Escape is ignored too (see the
+  // keypress guard below), which would otherwise unmount this view mid-update
+  // and let the user start a second one from a fresh mount.
   const [updateBusy, setUpdateBusy] = useState(false);
+  // The action the user last activated from the detail list. The busy branches
+  // unmount that list, so it is remounted when the action settles; without this
+  // the cursor would re-seed to the first row — and on a failed update, where
+  // the list comes back unchanged, the row under it would then be "Disable"
+  // rather than the "Update Now" the user just pressed.
+  const [lastActivatedAction, setLastActivatedAction] = useState<
+    PluginDetailAction | undefined
+  >(undefined);
 
   // Result of an in-view "check for updates" (Mark for Update), which takes
   // precedence over the background-checked state passed in via props so the
@@ -219,6 +229,7 @@ export const ExtensionActionsView = ({
             break;
           }
           case 'update': {
+            setLastActivatedAction(action);
             setUpdateBusy(true);
             try {
               // The manager's callback is a state transition, not a progress
@@ -356,10 +367,12 @@ export const ExtensionActionsView = ({
   );
 
   // Escape: from the detail leaves; from a sub-view returns to the detail.
-  // Ignored while a scope change is in flight so it can't be abandoned midway.
+  // Ignored while a scope change or an update is in flight so neither can be
+  // abandoned midway — leaving would unmount this view while the operation
+  // keeps running and let the user start a second one from a fresh mount.
   useKeypress(
     (key) => {
-      if (key.name === 'escape' && !scopeBusy) {
+      if (key.name === 'escape' && !scopeBusy && !updateBusy) {
         if (sub === 'detail') onExit();
         else setSub('detail');
       }
@@ -434,6 +447,7 @@ export const ExtensionActionsView = ({
       showFavorite={showFavorite}
       hasUpdateAvailable={hasUpdate}
       isFocused={isActive && sub === 'detail'}
+      initialAction={lastActivatedAction}
       onAction={handleAction}
     />
   );
