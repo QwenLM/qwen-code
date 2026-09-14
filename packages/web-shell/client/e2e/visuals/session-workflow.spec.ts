@@ -18,6 +18,7 @@ import {
 } from '../utils/mockDaemon';
 import {
   captureScreenshot,
+  clearFocus,
   gotoSession,
   installScenario,
   resolveBaseURL,
@@ -189,6 +190,13 @@ for (const theme of [
     await expect(
       page.locator('[data-testid="workflow-step-detail"]').getByText('1m 14s'),
     ).toBeVisible();
+    // The cockpit focuses its back button on mount, and whether Chrome paints
+    // the `:focus-visible` ring for that programmatic focus is a heuristic —
+    // so this view rendered with and without a ring off one unchanged tree,
+    // each flip scoring 0.05% against the 0.02% threshold (#11465). The ring is
+    // not the subject of the capture; drop it. See `clearFocus` for why this is
+    // per-scenario rather than inside `captureScreenshot`.
+    await clearFocus(page);
     await captureScreenshot(page, `session-workflow-cockpit-${theme}`);
   });
 }
