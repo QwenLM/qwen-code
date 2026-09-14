@@ -11,10 +11,10 @@ use crate::{
     ActionResult, ClickInput, ClipboardReadInput, ClipboardReadOutput, ClipboardWriteInput,
     ClipboardWriteOutput, CursorAction, CursorPositionOutput, CursorSemantics, DesktopStateOutput,
     DragInput, GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput,
-    GetWindowStateInput, HotkeyInput, InvokeMenuInput, MoveCursorInput,
+    GetWindowStateInput, HotkeyInput, InvokeMenuInput, MoveCursorInput, PasteInput,
     PerformSecondaryActionInput, Platform, PressKeyInput, SchemaMode, ScreenSizeOutput,
-    ScrollInput, SetValueInput, SetWindowFrameInput, ToolAnnotations, ToolContract, ToolInput,
-    ToolOutput, TypeTextInput, WindowStateOutput,
+    ScrollInput, SelectTextInput, SetValueInput, SetWindowFrameInput, ToolAnnotations,
+    ToolContract, ToolInput, ToolOutput, TypeTextInput, WindowStateOutput,
 };
 
 const ALL_PLATFORMS: [Platform; 3] = [Platform::Macos, Platform::Windows, Platform::Linux];
@@ -32,6 +32,8 @@ pub fn contracts() -> Vec<ToolContract> {
         drag(),
         scroll(),
         set_value(),
+        paste(),
+        select_text(),
         perform_secondary_action(),
         clipboard_read(),
         clipboard_write(),
@@ -327,6 +329,32 @@ fn set_value() -> ToolContract {
         },
         CursorAction::Text,
     )
+}
+
+fn paste() -> ToolContract {
+    let mut tool = contract::<PasteInput, ActionResult>(
+        "paste",
+        "Paste plain text, Markdown, or HTML into the exact app window, then restore the previous clipboard if no external change replaced it. macOS only.",
+        &["input.keyboard.paste", "clipboard.read", "clipboard.write"],
+        ToolAnnotations { read_only: false, destructive: true, idempotent: false, open_world: true },
+        CursorAction::Text,
+    );
+    tool.platforms = vec![Platform::Macos];
+    tool.schema_mode = SchemaMode::CanonicalRuntime;
+    tool
+}
+
+fn select_text() -> ToolContract {
+    let mut tool = contract::<SelectTextInput, ActionResult>(
+        "select_text",
+        "Select one unique text match in the exact accessibility element, optionally constrained by adjacent prefix/suffix, or place its caret before/after the match. macOS only.",
+        &["accessibility.text.select", "accessibility.element_tokens"],
+        ToolAnnotations { read_only: false, destructive: true, idempotent: true, open_world: true },
+        CursorAction::Text,
+    );
+    tool.platforms = vec![Platform::Macos];
+    tool.schema_mode = SchemaMode::CanonicalRuntime;
+    tool
 }
 
 fn perform_secondary_action() -> ToolContract {

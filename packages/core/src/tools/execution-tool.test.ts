@@ -259,12 +259,13 @@ describe('execution tool facade', () => {
     expect(release).not.toHaveBeenCalled();
   });
 
-  it('does not promote worker-owned paths to host artifacts or control metadata', async () => {
+  it('preserves output sizing while filtering worker paths and control metadata', async () => {
     const file = path.join(workspace, 'file.txt');
     await writeFile(file, 'content');
     vi.spyOn(environment, 'execute').mockResolvedValueOnce({
       llmContent: 'remote result',
       returnDisplay: 'remote result',
+      outputBudgetApplied: true,
       persistedOutputFiles: ['/host/private'],
       resultFilePaths: ['/host/private'],
       artifacts: [
@@ -285,6 +286,7 @@ describe('execution tool facade', () => {
     expect(await facade.build({ file_path: file }).execute(signal)).toEqual({
       llmContent: 'remote result',
       returnDisplay: 'remote result',
+      outputBudgetApplied: true,
       persistedOutputFiles: [],
       resultFilePaths: [],
     });

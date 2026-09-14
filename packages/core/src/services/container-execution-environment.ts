@@ -685,6 +685,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
         this.workers.delete(worker);
       } catch (error) {
         const notice = `\n\n[Container cleanup failed after tool execution: ${String(error)}. The tool result above is still valid; do not automatically retry the command.]`;
+        delete result.outputBudgetApplied;
         result.llmContent =
           typeof result.llmContent === 'string'
             ? result.llmContent + notice

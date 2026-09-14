@@ -218,6 +218,9 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
       return {
         llmContent: result.llmContent,
         returnDisplay: result.returnDisplay,
+        ...(result.outputBudgetApplied === true
+          ? { outputBudgetApplied: true }
+          : {}),
         ...(result.error ? { error: result.error } : {}),
         persistedOutputFiles: [],
         resultFilePaths: [],

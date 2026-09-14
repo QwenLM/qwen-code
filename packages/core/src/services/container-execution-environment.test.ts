@@ -67,15 +67,21 @@ describe('container execution boundary', () => {
   });
 
   it.each([
-    { llmContent: 'installed package', returnDisplay: 'installation complete' },
+    {
+      llmContent: 'installed package',
+      returnDisplay: 'installation complete',
+      outputBudgetApplied: true,
+    },
     {
       llmContent: [{ text: 'installed package' }],
       returnDisplay: 'installation complete',
+      outputBudgetApplied: true,
     },
     {
       llmContent: 'partial installation output',
       returnDisplay: 'installation failed',
-      error: { message: 'package installation failed' },
+      outputBudgetApplied: true,
+      error: { message: 'partial installation output' },
     },
   ] satisfies ToolResult[])(
     'preserves the tool result and cleanup ownership when installation cleanup fails: %j',
@@ -83,7 +89,10 @@ describe('container execution boundary', () => {
       const temporaryDirectory = await mkdtemp(
         join(tmpdir(), 'execution-cleanup-'),
       );
-      const failure = new ExecutionCleanupError('container removal failed');
+      const failure = new ExecutionCleanupError(
+        'container removal failed' +
+          (toolResult.error ? 'x'.repeat(35_000) : ''),
+      );
       const primary = { dispose: vi.fn().mockResolvedValue(undefined) };
       const install = {
         request: vi.fn().mockResolvedValue(structuredClone(toolResult)),
@@ -114,9 +123,12 @@ describe('container execution boundary', () => {
           'Container cleanup failed after tool execution',
         );
         expect(result.returnDisplay).toContain('do not automatically retry');
+        expect(result.outputBudgetApplied).not.toBe(true);
         if (toolResult.error) {
           expect(result.error?.message).toContain(toolResult.error.message);
           expect(result.error?.message).toContain('container removal failed');
+          expect(result.error?.message).toBe(result.llmContent);
+          expect(result.error?.message.length).toBeGreaterThan(30_000);
         } else {
           expect(result.error).toBeUndefined();
         }
