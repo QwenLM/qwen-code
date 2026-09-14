@@ -64,26 +64,30 @@ self.addEventListener('fetch', function (event) {
     return;
   }
 
-  // Public icon filenames are not content-addressed. Only the build chunks
-  // can safely outlive a deployment without revalidation.
+  // Only content-addressed build chunks can safely outlive a deployment.
+  // Any future unhashed file under /assets stays on the network by default.
   if (
     url.pathname.startsWith('/assets/') &&
-    !/^\/assets\/icon(?:-|\.)/.test(url.pathname)
+    /-[a-zA-Z0-9_-]{8,}\.[^/]+$/.test(url.pathname)
   ) {
     event.respondWith(readAsset(request, event));
     return;
   }
 
-  if (request.mode === 'navigate') {
+  if (
+    request.mode === 'navigate' &&
+    (request.destination === 'document' || !request.destination)
+  ) {
     event.respondWith(
       fetch(request).catch(function () {
         return new Response(
           '<!doctype html><html lang="en"><meta charset="utf-8">' +
             '<meta name="viewport" content="width=device-width,initial-scale=1">' +
             '<title>Qwen Code unavailable</title><body>' +
-            '<h1>Cannot reach Qwen Code</h1>' +
-            '<p>Reconnect to the daemon, then reload this page.</p>' +
-            '<a href="">Try again</a></body></html>',
+            '<h1>Cannot reach Qwen Code / <span lang="zh-CN">无法连接 Qwen Code</span></h1>' +
+            '<p>Reconnect to the daemon, then reload this page. / ' +
+            '<span lang="zh-CN">请重新连接守护进程，然后重新加载此页面。</span></p>' +
+            '<a href="">Try again / <span lang="zh-CN">重试</span></a></body></html>',
           {
             status: 503,
             headers: {

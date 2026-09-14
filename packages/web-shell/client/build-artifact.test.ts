@@ -6,6 +6,7 @@ import postcss, { type Rule } from 'postcss';
 const DIST_DIR = resolve(__dirname, '../dist');
 const DIST_PATH = resolve(DIST_DIR, 'index.js');
 const TRANSCRIPT_DIST_PATH = resolve(DIST_DIR, 'transcript.js');
+const SERVICE_WORKER_DIST_PATH = resolve(DIST_DIR, 'sw.js');
 
 function readBundle(): string {
   return readFileSync(DIST_PATH, 'utf8');
@@ -43,6 +44,12 @@ describe('build artifact — package boundary', () => {
   it('does not depend on @qwen-code/webui', () => {
     const bundle = readPackageJavascript();
     expect(bundle).not.toContain('@qwen-code/webui');
+  });
+
+  it('keeps standalone service-worker registration out of embedded bundles', () => {
+    expect(readPackageJavascript()).not.toContain(
+      'service worker registration failed',
+    );
   });
 
   it('owns the DaemonSessionProvider source code', () => {
@@ -304,6 +311,20 @@ describe('build artifact — package boundary', () => {
 
     expect(mathmlRule?.selector).toContain('[data-web-shell-root]');
     expect(hasInlineFont).toBe(true);
+  });
+});
+
+describe('build artifact — standalone PWA', () => {
+  it('emits a classic root service worker tied to the package version', () => {
+    const worker = readFileSync(SERVICE_WORKER_DIST_PATH, 'utf8');
+    const packageJson = JSON.parse(
+      readFileSync(resolve(__dirname, '../package.json'), 'utf8'),
+    ) as { version: string };
+
+    expect(worker).not.toMatch(/^\s*(?:import|export)\b/m);
+    expect(worker).not.toContain('import.meta');
+    expect(worker).toContain('qwen-code-shell-v1-');
+    expect(worker).toContain(JSON.stringify(packageJson.version));
   });
 });
 

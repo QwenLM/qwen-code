@@ -3,14 +3,6 @@
   "version": "0.23.3",
   "type": "module",
   "main": "./dist/index.js",
-  "browserslist": [
-    "Chrome >= 111",
-    "Edge >= 111",
-    "Firefox >= 128",
-    "Safari >= 16.4",
-    "iOS >= 16.4",
-    "and_chr >= 111"
-  ],
   "module": "./dist/index.js",
   "types": "./dist/types/index.d.ts",
   "exports": {

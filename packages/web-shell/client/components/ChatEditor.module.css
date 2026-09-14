@@ -899,6 +899,15 @@
   white-space: normal;
 }
 
+@supports (height: 100dvh) {
+  .tagTooltip {
+    max-height: min(
+      calc(100dvh - 16px),
+      var(--radix-tooltip-content-available-height, calc(100dvh - 16px))
+    );
+  }
+}
+
 .tagLabel,
 .tagValue {
   color: var(--chat-editor-text-primary);
@@ -2587,13 +2596,4 @@
   flex: 0 0 auto;
   margin-left: 8px;
   color: var(--muted-foreground);
-}
-
-@supports (height: 100dvh) {
-  .tagTooltip {
-    max-height: min(
-      calc(100dvh - 16px),
-      var(--radix-tooltip-content-available-height, calc(100dvh - 16px))
-    );
-  }
 }

@@ -4,8 +4,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 const source = readFileSync(new URL('./sw.js', import.meta.url), 'utf8');
 
-function basicResponse(body: string) {
-  const response = new Response(body);
+function basicResponse(body: string, init?: ResponseInit) {
+  const response = new Response(body, init);
   Object.defineProperty(response, 'type', { value: 'basic' });
   return response;
 }
@@ -64,12 +64,12 @@ describe('service worker shell assets', () => {
   it('keeps an independent cached body after the browser consumes the response', async () => {
     const w = worker();
     w.fetch.mockResolvedValueOnce(basicResponse('asset-v1'));
-    const first = w.fetchEvent('/assets/index-abc123.js');
+    const first = w.fetchEvent('/assets/index-abc12345.js');
     const response: Response = await first.respondWith.mock.calls[0][0];
     expect(await response.text()).toBe('asset-v1');
     await Promise.all(first.pending);
     for (let i = 0; i < 2; i++) {
-      const hit = w.fetchEvent('/assets/index-abc123.js');
+      const hit = w.fetchEvent('/assets/index-abc12345.js');
       const cached: Response = await hit.respondWith.mock.calls[0][0];
       expect(await cached.text()).toBe('asset-v1');
     }
@@ -81,7 +81,7 @@ describe('service worker shell assets', () => {
     const w = worker();
     w.caches.open.mockRejectedValueOnce(new Error('Storage disabled'));
     w.fetch.mockResolvedValueOnce(basicResponse('online'));
-    const event = w.fetchEvent('/assets/index-abc123.js');
+    const event = w.fetchEvent('/assets/index-abc12345.js');
     expect(await (await event.respondWith.mock.calls[0][0]).text()).toBe(
       'online',
     );
@@ -91,7 +91,7 @@ describe('service worker shell assets', () => {
     const w = worker();
     w.cache.put.mockRejectedValueOnce(new Error('Quota exceeded'));
     w.fetch.mockResolvedValueOnce(basicResponse('online'));
-    const event = w.fetchEvent('/assets/index-abc123.js');
+    const event = w.fetchEvent('/assets/index-abc12345.js');
     expect(await (await event.respondWith.mock.calls[0][0]).text()).toBe(
       'online',
     );
@@ -100,8 +100,8 @@ describe('service worker shell assets', () => {
 
   it('does not cache failed responses', async () => {
     const w = worker();
-    w.fetch.mockResolvedValueOnce(new Response('Not found', { status: 404 }));
-    const event = w.fetchEvent('/assets/missing.js');
+    w.fetch.mockResolvedValueOnce(basicResponse('Not found', { status: 404 }));
+    const event = w.fetchEvent('/assets/missing-abc12345.js');
     expect((await event.respondWith.mock.calls[0][0]).status).toBe(404);
     expect(w.cache.put).not.toHaveBeenCalled();
   });
@@ -119,10 +119,13 @@ describe('service worker bypass', () => {
     ['/assets/main.js', { method: 'POST' }],
     ['/', { method: 'POST' }],
     [
-      '/assets/index-abc123.js',
+      '/assets/index-abc12345.js',
       { headers: new Headers({ authorization: 'Bearer x' }) },
     ],
-    ['/', { headers: new Headers({ accept: 'text/event-stream' }) }],
+    [
+      '/assets/index-abc12345.js',
+      { headers: new Headers({ accept: 'text/event-stream' }) },
+    ],
     ['https://other.example/assets/index.js', {}],
   ])('leaves %s to the browser network stack (%j)', (path, overrides) => {
     const w = worker();
@@ -150,8 +153,20 @@ describe('service worker navigation', () => {
     expect(response.status).toBe(503);
     expect(response.headers.get('content-type')).toContain('text/html');
     expect(response.headers.get('cache-control')).toBe('no-store');
-    expect(await response.text()).toContain('<a href="">Try again</a>');
+    const html = await response.text();
+    expect(html).toContain('Try again');
+    expect(html).toContain('重试');
     expect(w.caches.open).not.toHaveBeenCalled();
+  });
+
+  it('leaves subframe navigations to the browser network stack', () => {
+    const w = worker();
+    const event = w.fetchEvent('/frame.html', {
+      mode: 'navigate',
+      destination: 'iframe',
+    });
+    expect(event.respondWith).not.toHaveBeenCalled();
+    expect(w.fetch).not.toHaveBeenCalled();
   });
 });
 

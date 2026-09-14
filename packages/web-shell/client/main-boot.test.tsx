@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const testState = vi.hoisted(() => ({
   containers: [] as Array<Element | null>,
   resolveToken: undefined as ((token: string) => void) | undefined,
+  removeTokenFromUrl: vi.fn(),
 }));
 
 vi.mock('react-dom/client', async (importOriginal) => ({
@@ -34,7 +35,7 @@ vi.mock('./config/daemon', () => ({
   // window in which the watchdog's grace period can expire.
   getDaemonToken: () => null,
   persistDaemonToken: vi.fn(),
-  removeDaemonTokenFromUrl: vi.fn(),
+  removeDaemonTokenFromUrl: testState.removeTokenFromUrl,
   waitForDaemonTokenMessage: () =>
     new Promise<string>((resolve) => {
       testState.resolveToken = resolve;
@@ -45,6 +46,7 @@ describe('web shell boot', () => {
   beforeEach(() => {
     testState.containers = [];
     testState.resolveToken = undefined;
+    testState.removeTokenFromUrl.mockClear();
     vi.resetModules();
   });
 
@@ -65,6 +67,7 @@ describe('web shell boot', () => {
     await import('./main');
     expect(testState.containers).toHaveLength(0);
     expect(testState.resolveToken).toBeUndefined();
+    expect(testState.removeTokenFromUrl).toHaveBeenCalledOnce();
     expect(document.querySelector('[data-boot-fallback]')?.textContent).toBe(
       'Update required',
     );
@@ -97,5 +100,6 @@ describe('web shell boot', () => {
     await vi.waitFor(() => expect(testState.containers).toHaveLength(1));
 
     expect(testState.containers[0]).toBe(root);
+    expect(testState.removeTokenFromUrl).toHaveBeenCalledOnce();
   });
 });

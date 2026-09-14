@@ -53,6 +53,9 @@ daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程�
 - `@qwen-code/sdk`：`>=0.1.8`
 - 浏览器环境需要能访问 Qwen Code daemon serve 的 HTTP 接口。
 
+组件包会自动注入自身的 CSS（包括 Tailwind 编译产物），接入方不需要配置
+Tailwind 或额外引入全局 CSS。
+
 ### Browser Support Matrix
 
 - Chrome / Edge 111+
@@ -68,9 +71,6 @@ daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程�
 仅带内容哈希的构建资源使用 worker 缓存；manifest、公开图标、API、令牌和
 事件流不缓存。HTML 连接失败时显示 503 重试页，不支持离线会话。
 安装入口由浏览器决定，不保证自动弹出安装提示。
-
-组件包会自动注入自身的 CSS（包括 Tailwind 编译产物），接入方不需要配置
-Tailwind 或额外引入全局 CSS。
 
 ## 浏览器任务通知
 

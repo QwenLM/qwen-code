@@ -9,12 +9,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import request from 'supertest';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   mountWebShellAssets,
   buildWebShellCsp,
   buildWebShellPermissionsPolicy,
 } from './web-shell-static.js';
+
+const stderr = vi.hoisted(() => ({ writeStderrLine: vi.fn() }));
+vi.mock('../utils/stdioHelpers.js', () => stderr);
 
 describe('Web Shell sandbox framing', () => {
   it('allows live previews and PDF blobs while retaining shell isolation', () => {
@@ -63,11 +66,12 @@ describe('public PWA HTTP routes', () => {
       'self.addEventListener("fetch", () => {});',
     );
     await writeFile(
-      path.join(directory, 'assets', 'index-abc123.js'),
+      path.join(directory, 'assets', 'index-abc12345.js'),
       'export {};',
     );
     await writeFile(path.join(directory, 'assets', 'icon-192.png'), 'icon');
     await writeFile(path.join(directory, 'assets', 'icon.svg'), '<svg/>');
+    await writeFile(path.join(directory, 'assets', 'future-config.json'), '{}');
     app = express();
     mountWebShellAssets(app, directory);
     app.use((_req, res) => {
@@ -86,6 +90,8 @@ describe('public PWA HTTP routes', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
+    stderr.writeStderrLine.mockReset();
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -129,10 +135,14 @@ describe('public PWA HTTP routes', () => {
       ],
     ).toBe('no-cache');
     expect(
-      (await request(app).get('/assets/index-abc123.js').expect(200)).headers[
+      (await request(app).get('/assets/index-abc12345.js').expect(200)).headers[
         'cache-control'
       ],
     ).toContain('immutable');
+    expect(
+      (await request(app).get('/assets/future-config.json').expect(200))
+        .headers['cache-control'],
+    ).toBe('no-cache');
   });
 
   it.each(['/sw.js', '/manifest.webmanifest'])(
@@ -144,6 +154,31 @@ describe('public PWA HTTP routes', () => {
       expect(response.text).toBe('Not found');
     },
   );
+
+  it('logs a route-specific error when a PWA file cannot be read', async () => {
+    vi.spyOn(express.response, 'sendFile').mockImplementation(function (
+      this: express.Response,
+      ...args: unknown[]
+    ) {
+      const callback = args.at(-1) as (
+        error: Error & { status: number },
+      ) => void;
+      callback(
+        Object.assign(new Error('EACCES: permission denied'), { status: 403 }),
+      );
+      return this;
+    });
+
+    await request(app)
+      .get('/sw.js')
+      .expect(500, 'Failed to load Web Shell asset');
+    expect(stderr.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('/sw.js'),
+    );
+    expect(stderr.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('EACCES: permission denied'),
+    );
+  });
 
   it('retains authentication for API requests and writes', async () => {
     await request(app).get('/capabilities').expect(401);

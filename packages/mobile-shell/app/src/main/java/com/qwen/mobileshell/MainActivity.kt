@@ -5,6 +5,8 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.webkit.JsResult
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -15,12 +17,15 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.webkit.WebViewCompat
 
 /** Development shell; production profiles and per-device credentials are Phase 2. */
 class MainActivity : AppCompatActivity() {
     private var webView: WebView? = null
+    private var activeJsConfirm: AlertDialog? = null
+    private var activeJsResult: JsResult? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -58,6 +63,41 @@ class MainActivity : AppCompatActivity() {
                 builtInZoomControls = true
                 displayZoomControls = false
             }
+            webChromeClient = object : WebChromeClient() {
+                override fun onJsConfirm(
+                    view: WebView,
+                    url: String,
+                    message: String,
+                    result: JsResult,
+                ): Boolean {
+                    // WebView does not provide a confirmation UI unless the host
+                    // handles this callback. Keep window.confirm() semantics for
+                    // destructive Web Shell actions instead of silently returning false.
+                    activeJsResult?.cancel()
+                    activeJsConfirm?.dismiss()
+                    activeJsResult = result
+                    activeJsConfirm = AlertDialog.Builder(this@MainActivity)
+                        .setMessage(message)
+                        .setPositiveButton(android.R.string.ok) { _, _ ->
+                            activeJsResult?.confirm()
+                            activeJsResult = null
+                            activeJsConfirm = null
+                        }
+                        .setNegativeButton(android.R.string.cancel) { _, _ ->
+                            activeJsResult?.cancel()
+                            activeJsResult = null
+                            activeJsConfirm = null
+                        }
+                        .setOnCancelListener {
+                            activeJsResult?.cancel()
+                            activeJsResult = null
+                            activeJsConfirm = null
+                        }
+                        .create()
+                        .also { it.show() }
+                    return true
+                }
+            }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     if (OriginPolicy.isSameOrigin(origin, request.url.toString())) return false
@@ -87,7 +127,6 @@ class MainActivity : AppCompatActivity() {
             override fun handleOnBackPressed() {
                 val view = webView
                 if (view != null && view.canGoBack()) {
-                    setContentView(view)
                     view.goBack()
                 } else {
                     isEnabled = false
@@ -122,6 +161,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        activeJsResult?.cancel()
+        activeJsResult = null
+        activeJsConfirm?.setOnCancelListener(null)
+        activeJsConfirm?.dismiss()
+        activeJsConfirm = null
         webView?.destroy()
         webView = null
         super.onDestroy()

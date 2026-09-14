@@ -28,11 +28,11 @@ function parseOnce() {
   return postcss.parse(sidebarCss);
 }
 
-function mediaBlocks(query: RegExp, nested: boolean): string[] {
+function mediaBlocks(query: RegExp): string[] {
   const blocks: string[] = [];
   parseOnce().walkAtRules('media', (rule) => {
     if (!query.test(rule.params)) return;
-    if (!nested && rule.parent?.type !== 'root') return;
+    if (rule.parent?.type !== 'root') return;
     blocks.push(rule.toString());
   });
   return blocks;
@@ -46,8 +46,8 @@ function withoutMedia(query: RegExp): string {
   return root.toString();
 }
 
-function mediaText(query: RegExp, nested = false): string {
-  return mediaBlocks(query, nested).join('\n');
+function mediaText(query: RegExp): string {
+  return mediaBlocks(query).join('\n');
 }
 
 const hoverMedia = mediaText(/hover: hover/);

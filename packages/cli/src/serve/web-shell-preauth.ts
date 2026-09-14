@@ -5,6 +5,9 @@
  */
 
 import type { Request } from 'express';
+import { WEB_SHELL_PWA_ASSETS } from '@qwen-code/sdk/daemon';
+
+export { WEB_SHELL_PWA_ASSETS } from '@qwen-code/sdk/daemon';
 
 /**
  * Dependency-light home of the pre-auth Web Shell request discriminators.
@@ -71,14 +74,11 @@ export function isPreAuthWebShellRequest(req: Request): boolean {
     reqPath === '/assets' ||
     reqPath.startsWith('/assets/') ||
     reqPath === '/mcp-app-sandbox' ||
-    // PWA files: manifest must be pre-auth (browser fetches it during link
-    // parsing before any Authorization header can be attached); sw.js is a
-    // subresource loaded by the browser's SW registration call. Mirror
-    // Express's optional trailing slash as well as its case-insensitive paths.
-    reqPath === '/manifest.webmanifest' ||
-    reqPath === '/manifest.webmanifest/' ||
-    reqPath === '/sw.js' ||
-    reqPath === '/sw.js/'
+    // Manifest and worker requests cannot attach Authorization. Express
+    // matches these routes case-insensitively with an optional trailing slash.
+    WEB_SHELL_PWA_ASSETS.some(
+      ({ route }) => reqPath === route || reqPath === `${route}/`,
+    )
   )
     return true;
   return SESSION_DEEP_LINK_PATH.test(reqPath) && isDocumentNavigation(req);

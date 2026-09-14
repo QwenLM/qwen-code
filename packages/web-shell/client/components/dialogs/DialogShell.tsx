@@ -198,7 +198,7 @@ export function DialogShell({
           aria-label={title}
           data-keyboard-scope
           data-web-shell-dialog
-          data-fullscreen={fullscreen || undefined}
+          data-fullscreen={fullscreen ? 'true' : undefined}
           data-web-shell-dialog-title={title}
           onPointerDownOutside={(event) => event.preventDefault()}
           onEscapeKeyDown={(event) => {

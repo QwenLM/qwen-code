@@ -2,6 +2,7 @@
 import './styles/globals.css';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import { scheduleServiceWorkerRegistration } from './pwa-registration.js';
 import { useCallback, useEffect, useState } from 'react';
 import {
   DaemonWorkspaceProvider,
@@ -355,12 +356,16 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
 }
 
 async function main() {
+  // Persist a URL token before removing it. The URL is scrubbed even when the
+  // browser floor rejects boot, so credentials never remain in the address bar.
+  const daemonToken = getDaemonToken();
+  removeDaemonTokenFromUrl();
   if (
     document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
   )
     return;
-  const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
-  removeDaemonTokenFromUrl();
+  const resolvedDaemonToken =
+    daemonToken ?? (await waitForDaemonTokenMessage());
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -374,7 +379,7 @@ async function main() {
     <React.StrictMode>
       <StandaloneAuth
         baseUrl={DAEMON_BASE_URL || window.location.origin}
-        initialToken={daemonToken}
+        initialToken={resolvedDaemonToken}
         language={getInitialLanguage()}
         theme={getInitialTheme()}
       >
@@ -395,21 +400,4 @@ void main();
 //
 // The SW is served at /sw.js by the daemon's static handler (pre-auth, no-cache)
 // with `Service-Worker-Allowed: /` so its scope covers the whole origin.
-if (
-  import.meta.env.PROD &&
-  !document.documentElement.hasAttribute(
-    'data-web-shell-unsupported-browser',
-  ) &&
-  typeof navigator !== 'undefined' &&
-  'serviceWorker' in navigator
-) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker
-      .register('/sw.js', { scope: '/' })
-      .catch((err: unknown) => {
-        // Non-fatal: the SW is a progressive enhancement. Log to console so a
-        // developer can diagnose a missing worker or a registration policy failure.
-        console.warn('qwen-code: service worker registration failed:', err);
-      });
-  });
-}
+scheduleServiceWorkerRegistration({ production: import.meta.env.PROD });

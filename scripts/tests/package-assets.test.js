@@ -73,6 +73,43 @@ describe('package asset scripts', () => {
     }
   });
 
+  it('warns and skips a missing service worker from a stale shell build', () => {
+    const rootDir = createFixtureRoot();
+    stubConsole();
+    writeFile(rootDir, 'packages/web-shell/dist/index.html', '<!doctype html>');
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/assets/index-abc.js',
+      'export {};',
+    );
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/manifest.webmanifest',
+      '{"name":"Qwen Code"}',
+    );
+
+    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+
+    expect(
+      readFileSync(
+        path.join(rootDir, 'dist/web-shell/manifest.webmanifest'),
+        'utf8',
+      ),
+    ).toBe('{"name":"Qwen Code"}');
+    expect(existsSync(path.join(rootDir, 'dist/web-shell/sw.js'))).toBe(false);
+    expect(
+      console.warn.mock.calls
+        .map(([message]) => String(message))
+        .some(
+          (message) =>
+            message.includes('PWA asset not found') &&
+            message.includes(
+              path.join(rootDir, 'packages/web-shell/dist/sw.js'),
+            ),
+        ),
+    ).toBe(true);
+  });
+
   it('emits an executable dist/cli.js — shebang plus the exec bit, once', () => {
     // shellContextEnv blanks a QWEN_CODE_CLI a POSIX shell cannot exec (no
     // shebang, or no exec bit), and `"${QWEN_CODE_CLI:-qwen}"` then silently

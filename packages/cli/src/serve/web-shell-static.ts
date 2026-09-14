@@ -9,7 +9,10 @@ import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
-import { isDocumentNavigation } from './web-shell-preauth.js';
+import {
+  isDocumentNavigation,
+  WEB_SHELL_PWA_ASSETS,
+} from './web-shell-preauth.js';
 export { resolveWebShellDir } from './web-shell-resolver.js';
 
 /**
@@ -126,10 +129,9 @@ function createSendIndex(
       { cacheControl: false, dotfiles: 'allow' },
       (err) => {
         if (!err) return;
-        // Only 5xx path in the serve app that would otherwise emit nothing —
-        // log it so an operator can see why the shell stopped loading
-        // (EACCES/ESTALE on a network mount, a perms change, a partial
-        // deploy).
+        // Log filesystem failures so an operator can see why the shell stopped
+        // loading (EACCES/ESTALE on a network mount, a permissions change, or
+        // a partial deploy).
         writeStderrLine(
           `qwen serve: Web Shell index send failed: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -178,12 +180,17 @@ export function mountWebShellAssets(
     '/assets',
     express.static(path.join(webShellDir, 'assets'), {
       index: false,
-      immutable: true,
-      maxAge: '1y',
+      maxAge: 0,
       setHeaders(res, filePath) {
-        if (/^icon(?:-|\.)/.test(path.basename(filePath))) {
-          res.setHeader('Cache-Control', 'no-cache');
-        }
+        const fileName = path.basename(filePath);
+        // Vite content hashes are the only safe basis for immutable caching.
+        // Future unhashed assets therefore revalidate by default instead of
+        // silently inheriting a one-year lifetime.
+        const contentAddressed = /-[a-zA-Z0-9_-]{8,}\.[^.]+$/u.test(fileName);
+        res.setHeader(
+          'Cache-Control',
+          contentAddressed ? 'public, max-age=31536000, immutable' : 'no-cache',
+        );
       },
     }),
   );
@@ -209,16 +216,17 @@ export function mountWebShellAssets(
     sendIndex(req, res);
   });
   // Process-global public PWA files carry no daemon credentials or workspace data.
-  for (const [route, contentType] of [
-    ['/manifest.webmanifest', 'application/manifest+json'],
-    ['/sw.js', 'application/javascript'],
-  ]) {
+  for (const {
+    route,
+    contentType,
+    serviceWorkerAllowed,
+  } of WEB_SHELL_PWA_ASSETS) {
     app.get(route, (_req: Request, res: Response) => {
       res
         .set('Content-Type', contentType)
         .set('Cache-Control', 'no-cache')
         .set('X-Content-Type-Options', 'nosniff');
-      if (route === '/sw.js') res.set('Service-Worker-Allowed', '/');
+      if (serviceWorkerAllowed) res.set('Service-Worker-Allowed', '/');
       res.sendFile(
         path.join(webShellDir, route.slice(1)),
         { cacheControl: false, dotfiles: 'allow' },
@@ -229,6 +237,11 @@ export function mountWebShellAssets(
             return;
           }
           const status = 'status' in err && err.status === 404 ? 404 : 500;
+          if (status === 500) {
+            writeStderrLine(
+              `qwen serve: Web Shell asset send failed (${route}): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
           res
             .status(status)
             .type('text/plain')

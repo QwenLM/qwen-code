@@ -35,7 +35,10 @@
           var ua = navigator.userAgent;
           var chromium = ua.match(/Chrom(?:e|ium)\/(\d+)/);
           var firefox = ua.match(/Firefox\/(\d+)/);
-          var safari = ua.match(/Version\/(\d+)(?:\.(\d+))?.*Safari\//);
+          // Android WebView also carries `Version/4.0 ... Safari/`, but its
+          // actual engine version is the Chromium token handled above.
+          var safari =
+            !chromium && ua.match(/Version\/(\d+)(?:\.(\d+))?.*Safari\//);
           var unsupported =
             (chromium && parseInt(chromium[1], 10) < 111) ||
             (firefox && parseInt(firefox[1], 10) < 128) ||
@@ -55,7 +58,7 @@
           if (unsupported) {
             document.documentElement.setAttribute(
               'data-web-shell-unsupported-browser',
-              'Please update your browser. Qwen Code requires Chrome/Edge or Android System WebView 111+, Firefox 128+, or Safari/iOS 16.4+.'
+              'Please update your browser. Qwen Code requires Chrome/Edge or Android System WebView 111+, Firefox 128+, or Safari/iOS 16.4+. / 请更新浏览器：Qwen Code 需要 Chrome/Edge 或 Android System WebView 111+、Firefox 128+ 或 Safari/iOS 16.4+。'
             );
           }
         } catch (e) {
@@ -224,6 +227,10 @@
         function show(reason) {
           var r = rootEl();
           if (!r || appMounted() || fallbackPresent()) return;
+          var unsupported = document.documentElement.getAttribute(
+            'data-web-shell-unsupported-browser'
+          );
+          if (unsupported) reason = unsupported;
           var dark = document.documentElement.classList.contains('theme-dark');
           var box = document.createElement('div');
           box.setAttribute('data-boot-fallback', '');
