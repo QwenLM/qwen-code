@@ -341,7 +341,10 @@ export class DaemonChannelBridge
   private readonly requestToSession = new Map<string, string>();
   private readonly respondedRequestToSession = new Map<string, string>();
   private readonly activePrompts = new Set<string>();
-  private readonly taskOutputs = new Map<string, { text?: string }>();
+  private readonly taskOutputs = new Map<
+    string,
+    { text?: string; turnId?: string; partial?: boolean }
+  >();
   private readonly activePromptControllers = new Map<
     string,
     Set<AbortController>
@@ -559,8 +562,9 @@ export class DaemonChannelBridge
       );
     }
     this.activePrompts.add(sessionId);
-    const taskOutput: { text?: string } | undefined =
-      options?.outputMode === 'per_task' ? {} : undefined;
+    const taskOutput:
+      | { text?: string; turnId?: string; partial?: boolean }
+      | undefined = options?.outputMode === 'per_task' ? {} : undefined;
     if (taskOutput) this.taskOutputs.set(sessionId, taskOutput);
 
     const controller = new AbortController();
@@ -761,6 +765,9 @@ export class DaemonChannelBridge
         result.stopReason === 'cancelled'
       ) {
         throw new ChannelPromptCancelledError();
+      }
+      if (taskOutput) {
+        options?.onTaskResult?.({ partial: taskOutput.partial === true });
       }
       const textResult =
         taskOutput?.text || chunks.join('') || slashCommandOutput;
@@ -1088,7 +1095,22 @@ export class DaemonChannelBridge
             meta[CHANNEL_TASK_OUTPUT_META_KEY] === true
           ) {
             const taskOutput = this.taskOutputs.get(sessionId);
-            if (taskOutput && text?.trim()) taskOutput.text = text;
+            if (taskOutput) {
+              const context = parseBackgroundResponseContext(
+                meta['backgroundTask'],
+              );
+              if (text?.trim()) {
+                taskOutput.text = text;
+                taskOutput.turnId = context?.turnId;
+                taskOutput.partial = context?.partial === true;
+              } else if (
+                context?.turnComplete &&
+                context.turnId !== undefined &&
+                context.turnId === taskOutput.turnId
+              ) {
+                taskOutput.partial = context.partial === true;
+              }
+            }
             break;
           }
           if (

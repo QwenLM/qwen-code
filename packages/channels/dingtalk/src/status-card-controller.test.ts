@@ -133,6 +133,31 @@ describe('StatusCardController', () => {
     expect(client.createAndDeliver).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['failed', false, '已失败'],
+    ['stopped', false, '已终止'],
+    ['cancelled', false, '已取消'],
+    ['running', true, '部分结果'],
+  ] as const)(
+    'localizes a %s standalone result',
+    async (status, partial, label) => {
+      const { client, controller } = createHarness({ language: 'zh-CN' });
+      await controller.deliverCompletedResult(target, 'Result', undefined, {
+        status,
+        partial,
+      });
+      expect(client.createAndDeliver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            statusLine: label,
+            flowStatus: 3,
+            stop_action: 'false',
+          }),
+        }),
+      );
+    },
+  );
+
   it('falls back when result-card delivery fails', async () => {
     const { client, controller } = createHarness();
     vi.mocked(client.createAndDeliver).mockRejectedValueOnce(

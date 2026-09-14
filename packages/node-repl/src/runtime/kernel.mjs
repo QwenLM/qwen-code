@@ -103,6 +103,8 @@ function describeThrown(error) {
     let name = 'Error';
     let message = '';
     let stack;
+    let code;
+    let details;
     try {
       if (typeof error.name === 'string') name = error.name;
     } catch {
@@ -119,10 +121,33 @@ function describeThrown(error) {
     } catch {
       // Stack is optional.
     }
+    try {
+      const value = Object.getOwnPropertyDescriptor(error, 'code')?.value;
+      if (typeof value === 'string') code = capText(value, 256);
+      const detail = Object.getOwnPropertyDescriptor(error, 'details')?.value;
+      if (detail !== undefined) {
+        details = capText(
+          inspect(detail, {
+            depth: 4,
+            maxArrayLength: 10,
+            maxStringLength: 256,
+            customInspect: false,
+            getters: false,
+            breakLength: Infinity,
+            compact: true,
+          }),
+          4096,
+        );
+      }
+    } catch {
+      // Optional diagnostics must not replace the original failure.
+    }
     return {
       name: capText(name, 1024),
       message: capText(message, MAX_ERROR_CHARS),
       stack: stack ? capText(stack, MAX_ERROR_CHARS) : undefined,
+      code,
+      details,
     };
   }
   return {
@@ -948,10 +973,11 @@ async function handleExec(message) {
       imagesDropped: activeExec.imagesDropped,
     });
   } catch (error) {
+    const described = describeThrown(error);
     const status =
       error instanceof CellCancelledError
         ? 'cancelled'
-        : error?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT'
+        : described.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT'
           ? 'timeout'
           : 'error';
     if (status === 'cancelled' || status === 'timeout') {
@@ -974,7 +1000,6 @@ async function handleExec(message) {
     } else {
       restoreBindings(entryBindings);
     }
-    const described = describeThrown(error);
     send({
       type: 'execResult',
       execId: message.execId,
@@ -985,6 +1010,8 @@ async function handleExec(message) {
       errorName: described.name,
       errorMessage: described.message,
       ...(described.stack ? { errorStack: described.stack } : {}),
+      ...(described.code ? { errorCode: described.code } : {}),
+      ...(described.details ? { errorDetails: described.details } : {}),
     });
   } finally {
     activeExec = null;

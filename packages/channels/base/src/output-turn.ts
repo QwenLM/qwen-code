@@ -1,3 +1,4 @@
+import { DEFAULT_CHANNEL_OUTPUT_MODE } from './output-mode.js';
 import type {
   ChannelOutputMode,
   ChannelOutputSegmentEndReason,
@@ -7,7 +8,7 @@ export type ChannelOutputDecision =
   | { kind: 'skip' }
   | { kind: 'failed' }
   | { kind: 'cancelled' }
-  | { kind: 'preview'; text: string; deferFallback: boolean }
+  | { kind: 'preview'; text: string }
   | { kind: 'complete'; text: string; rotate: boolean };
 
 /** Selects output within the completion boundary owned by the runtime. */
@@ -15,14 +16,16 @@ export class ChannelOutputTurn {
   private lastOutput?: string;
   private finished = false;
 
-  constructor(private readonly mode?: ChannelOutputMode) {}
+  constructor(
+    private readonly mode: ChannelOutputMode = DEFAULT_CHANNEL_OUTPUT_MODE,
+  ) {}
 
   private get latestOnly(): boolean {
     return this.mode === 'per_turn' || this.mode === 'per_task';
   }
 
   shouldPreview(text: string): boolean {
-    return !this.finished && (this.mode === undefined || text.trim() !== '');
+    return !this.finished && text.trim() !== '';
   }
 
   close(
@@ -35,7 +38,6 @@ export class ChannelOutputTurn {
       return { kind: reason };
     }
     if (
-      this.mode !== undefined &&
       !text.trim() &&
       (reason === 'response_boundary' || reason === 'completed')
     ) {
@@ -46,11 +48,10 @@ export class ChannelOutputTurn {
       if (!text.trim()) return { kind: 'skip' };
     }
     if (reason === 'response_boundary' && this.mode !== 'per_response') {
-      if (this.latestOnly) this.lastOutput = text;
+      this.lastOutput = text;
       return {
         kind: 'preview',
         text,
-        deferFallback: this.latestOnly,
       };
     }
     this.lastOutput = undefined;

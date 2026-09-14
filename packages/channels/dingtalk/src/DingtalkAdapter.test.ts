@@ -1,3 +1,4 @@
+import type { StatusCardController } from './status-card-controller.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import {
@@ -171,6 +172,11 @@ vi.mock('@qwen-code/channel-base', async () => {
       );
       onSessionDied(_sessionId: string): void {}
       protected getResponseSourceLabel(_sessionId: string): undefined {
+        return undefined;
+      }
+      protected getBackgroundResponseSourceLabel(
+        _sessionId: string,
+      ): undefined {
         return undefined;
       }
       protected getInboundErrorSourceLabel(
@@ -552,9 +558,11 @@ describe('turn-scoped output modes', () => {
       expect(create).toHaveBeenCalledOnce();
       expect(create.mock.calls[0]![0].cardParamMap).toEqual(
         expect.objectContaining({
-          content: expect.stringContaining(
+          content:
+            (kind === 'agent'
+              ? ''
+              : `## ✅ ${{ shell: 'Shell', monitor: 'Monitor', workflow: 'Workflow' }[kind]} · 后台任务\n\n`) +
             'Historical notices processed. HANDOFF_READY.',
-          ),
           flowStatus: 3,
           stop_action: 'false',
         }),
@@ -563,6 +571,175 @@ describe('turn-scoped output modes', () => {
         'Working on',
       );
       expect(stream).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['shell', 'failed', '## ❌ Shell · Worker\n\nTask output'],
+    ['workflow', 'stopped', '## ⏹️ Workflow · Worker\n\nTask output'],
+    ['agent', 'completed', '✅ 后台任务已完成'],
+    ['agent', 'failed', '❌ 后台任务失败'],
+    ['agent', 'stopped', '⏹️ 后台任务已停止'],
+  ] as const)(
+    'preserves the %s %s result header',
+    async (kind, status, expected) => {
+      const { channel, create } = createOutputChannel('per_turn');
+      if (kind === 'agent') {
+        vi.useFakeTimers();
+        await channel.dispatchBackgroundResponse(
+          'session-1',
+          'Earlier output',
+          {
+            taskId: 'task-1',
+            kind,
+            status: 'running',
+            turnComplete: false,
+          },
+        );
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        create.mockClear();
+        vi.useRealTimers();
+      }
+      await channel.dispatchBackgroundResponse(
+        'session-1',
+        kind === 'agent' ? '' : 'Task output',
+        {
+          taskId: 'task-1',
+          kind,
+          status,
+          turnComplete: true,
+          label: 'Worker',
+        },
+      );
+      expect(create).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({ content: expected }),
+        }),
+      );
+    },
+  );
+
+  it('waits for the background result card before disposing on disconnect', async () => {
+    const { channel, create } = createOutputChannel('per_turn');
+    const delivery = deferredPromise<void>();
+    create.mockReturnValue(delivery.promise);
+    const dispose = vi.spyOn(
+      (channel as unknown as { statusCardController: StatusCardController })
+        .statusCardController,
+      'dispose',
+    );
+    await channel.dispatchBackgroundResponse('session-1', 'Buffered result', {
+      taskId: 'task-1',
+      kind: 'agent',
+      status: 'running',
+      turnComplete: false,
+    });
+    channel.disconnect();
+    let settled = false;
+    const drained = channel.waitForDisconnect().then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
+    expect(dispose).not.toHaveBeenCalled();
+    expect(create.mock.calls[0]![0].cardParamMap.statusLine).toBe('Partial');
+    delivery.resolve();
+    await drained;
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it.each(['card', 'disabled'] as const)(
+    'labels a token-limited main reply partial with %s delivery',
+    async (delivery) => {
+      const { channel, update } = createOutputChannel('per_turn', {
+        interactiveCards: { enabled: delivery === 'card' },
+      });
+      const presenter = (
+        channel as unknown as {
+          interactionPresenter: DingtalkInteractionPresenter;
+        }
+      ).interactionPresenter;
+      const segment: ChannelOutputSegmentContext = {
+        channelName: 'test-dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        partial: true,
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'test-dingtalk',
+          chatId: 'cidGroup==',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      };
+      presenter.registerRun('run-1', 'owner-1', segment.target, 'session-1');
+      const send = vi
+        .spyOn(
+          channel as unknown as {
+            sendReply(...args: unknown[]): Promise<void>;
+          },
+          'sendReply',
+        )
+        .mockResolvedValue(undefined);
+      getChunkHook(channel)(
+        'cidGroup==',
+        'Answer prefix',
+        'session-1',
+        segment,
+      );
+      await getCompleteHook(channel)(
+        'cidGroup==',
+        'Answer prefix',
+        'session-1',
+        segment,
+      );
+      if (delivery === 'card') {
+        expect(update).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            cardParamMap: expect.objectContaining({
+              content: '（部分）\n\nAnswer prefix',
+              statusLine: expect.stringMatching(/^Partial · \d+s$/),
+              flowStatus: 3,
+            }),
+          }),
+        );
+        expect(send).not.toHaveBeenCalled();
+      } else {
+        expect(send).toHaveBeenCalledExactlyOnceWith(
+          'cidGroup==',
+          '（部分）\n\nAnswer prefix',
+          undefined,
+          undefined,
+        );
+      }
+    },
+  );
+
+  it.each([
+    ['completed', false, 'Completed'],
+    ['failed', false, 'Failed'],
+    ['stopped', false, 'Stopped'],
+    ['cancelled', false, 'Cancelled'],
+    ['running', true, 'Partial'],
+    ['completed', true, 'Partial'],
+  ] as const)(
+    'renders background %s partial=%s as %s',
+    async (status, partial, expected) => {
+      const { channel, create } = createOutputChannel('per_turn');
+      await channel.dispatchBackgroundResponse('session-1', 'Task output', {
+        taskId: 'task-1',
+        kind: 'agent',
+        status,
+        partial,
+        turnComplete: true,
+      });
+      expect(create).toHaveBeenCalledOnce();
+      expect(create.mock.calls[0]![0].cardParamMap).toMatchObject({
+        statusLine: expected,
+        flowStatus: 3,
+        stop_action: 'false',
+      });
     },
   );
 
@@ -764,6 +941,21 @@ describe('turn-scoped output modes', () => {
           final,
         );
         expect(uploads).toEqual(['@image-1', '@image-2']);
+        if (delivery !== 'disabled') {
+          expect(update).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              cardParamMap: expect.objectContaining({
+                content: 'Final ![image](@image-2)',
+                flowStatus: 3,
+              }),
+            }),
+          );
+        } else {
+          expect(messages).toEqual([
+            'Intermediate ![image](@image-1)',
+            'Final ![image](@image-2)',
+          ]);
+        }
         presenter.terminalizeRun('run-1', 'completed');
       } finally {
         rmSync(image.dir, { recursive: true, force: true });
@@ -3450,12 +3642,13 @@ describe('DingtalkChannel prompt reactions', () => {
 });
 
 describe('DingtalkChannel status cards', () => {
-  it('disposes status-card recovery when disconnected', () => {
+  it('disposes status-card recovery after disconnect drains', async () => {
     const channel = createChannel();
     const dispose = vi.fn();
     Object.assign(channel, { statusCardController: { dispose } });
 
     channel.disconnect();
+    await channel.waitForDisconnect();
 
     expect(dispose).toHaveBeenCalledOnce();
   });
@@ -9163,7 +9356,12 @@ describe('DingtalkChannel outbound file delivery', () => {
   });
 
   it('keeps the latest Agent turn result unchanged and delivers unscoped replies separately', async () => {
-    const channel = createChannel();
+    const channel = createChannel({ interactiveCards: { enabled: false } });
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(
+        new Error('Unexpected network request in aggregation fixture'),
+      );
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
       senderId: 'user-1',
@@ -9220,6 +9418,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       'Transitional result.',
       'Legacy result.',
     ]);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('delivers only the latest reply of a final-only turn through ordinary Markdown fallback', async () => {
@@ -11791,108 +11990,111 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
-  it('refreshes a DM retry while preserving attribution and sent files', async () => {
-    vi.useFakeTimers();
-    const file = createTempFile();
-    try {
-      const channel = createChannel({
-        cwd: file.dir,
-        outputMode: 'per_turn',
-        interactiveCards: undefined,
-        atSender: true,
-      });
-      seedWebhook(channel, 'dm-cid');
-      const target: SessionTarget = {
-        channelName: 'test-dingtalk',
-        senderId: 'dm-user-1',
-        chatId: 'dm-cid',
-        isGroup: false,
-      };
-      seedSessionTarget(channel, 'session-1', target);
-      const internals = channel as unknown as {
-        sessionMentionTargets: Map<string, string>;
-        resolveBackgroundResponseDelivery(
-          sessionId: string,
-        ): Promise<{ target: SessionTarget; sourceLabel?: string }>;
-      };
-      internals.sessionMentionTargets.set('session-1', 'staff-1');
-      vi.spyOn(
-        internals,
-        'resolveBackgroundResponseDelivery',
-      ).mockResolvedValue({
-        target,
-        sourceLabel: '（部分）',
-      });
-      let fileSends = 0;
-      const markdownTexts: string[] = [];
-      vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
-        const url = String(input);
-        if (url.includes('/gettoken?')) {
-          return Promise.resolve(
-            new Response(
-              JSON.stringify({
-                errcode: 0,
-                access_token: 'proactive-token',
-                expires_in: 7200,
-              }),
-            ),
-          );
-        }
-        if (url.includes('/media/upload')) {
-          return Promise.resolve(
-            new Response(
-              JSON.stringify({ errcode: 0, media_id: '@file-media-id' }),
-            ),
-          );
-        }
-        const body = JSON.parse(String((init as RequestInit).body)) as {
-          msgtype: string;
-          markdown?: { text: string };
+  it.each(['（部分）', 'Review session'])(
+    'refreshes a DM retry while preserving source %s and sent files',
+    async (sourceLabel) => {
+      vi.useFakeTimers();
+      const file = createTempFile();
+      try {
+        const channel = createChannel({
+          cwd: file.dir,
+          outputMode: 'per_turn',
+          interactiveCards: undefined,
+          atSender: true,
+        });
+        seedWebhook(channel, 'dm-cid');
+        const target: SessionTarget = {
+          channelName: 'test-dingtalk',
+          senderId: 'dm-user-1',
+          chatId: 'dm-cid',
+          isGroup: false,
         };
-        if (body.msgtype === 'file') {
-          fileSends++;
+        seedSessionTarget(channel, 'session-1', target);
+        const internals = channel as unknown as {
+          sessionMentionTargets: Map<string, string>;
+          resolveBackgroundResponseDelivery(
+            sessionId: string,
+          ): Promise<{ target: SessionTarget; sourceLabel?: string }>;
+        };
+        internals.sessionMentionTargets.set('session-1', 'staff-1');
+        vi.spyOn(
+          internals,
+          'resolveBackgroundResponseDelivery',
+        ).mockResolvedValue({
+          target,
+          sourceLabel,
+        });
+        let fileSends = 0;
+        const markdownTexts: string[] = [];
+        vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+          const url = String(input);
+          if (url.includes('/gettoken?')) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  errcode: 0,
+                  access_token: 'proactive-token',
+                  expires_in: 7200,
+                }),
+              ),
+            );
+          }
+          if (url.includes('/media/upload')) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({ errcode: 0, media_id: '@file-media-id' }),
+              ),
+            );
+          }
+          const body = JSON.parse(String((init as RequestInit).body)) as {
+            msgtype: string;
+            markdown?: { text: string };
+          };
+          if (body.msgtype === 'file') {
+            fileSends++;
+            return Promise.resolve(new Response('{}'));
+          }
+          markdownTexts.push(body.markdown!.text);
+          if (markdownTexts.length === 1) {
+            return Promise.reject(new TypeError('fetch failed'));
+          }
           return Promise.resolve(new Response('{}'));
-        }
-        markdownTexts.push(body.markdown!.text);
-        if (markdownTexts.length === 1) {
-          return Promise.reject(new TypeError('fetch failed'));
-        }
-        return Promise.resolve(new Response('{}'));
-      });
+        });
 
-      await channel.dispatchBackgroundResponse(
-        'session-1',
-        `[FILE: ${file.path}]\nWorking.`,
-        {
+        await channel.dispatchBackgroundResponse(
+          'session-1',
+          `[FILE: ${file.path}]\nWorking.`,
+          {
+            taskId: 'agent-1',
+            status: 'running',
+            kind: 'agent',
+            turnComplete: false,
+            label: 'Worker one',
+          },
+        );
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+        expect(fileSends).toBe(1);
+
+        await channel.dispatchBackgroundResponse('session-1', '', {
           taskId: 'agent-1',
-          status: 'running',
+          status: 'completed',
           kind: 'agent',
-          turnComplete: false,
+          turnComplete: true,
           label: 'Worker one',
-        },
-      );
-      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
-      expect(fileSends).toBe(1);
+        });
+        await vi.advanceTimersByTimeAsync(30 * 1000);
 
-      await channel.dispatchBackgroundResponse('session-1', '', {
-        taskId: 'agent-1',
-        status: 'completed',
-        kind: 'agent',
-        turnComplete: true,
-        label: 'Worker one',
-      });
-      await vi.advanceTimersByTimeAsync(30 * 1000);
-
-      expect(fileSends).toBe(1);
-      expect(markdownTexts).toEqual([
-        '@staff-1\n\n（部分）\n\n（部分）\n\n\nWorking.',
-        '@staff-1\n\n（部分）\n\n\nWorking.',
-      ]);
-    } finally {
-      vi.useRealTimers();
-      rmSync(file.dir, { recursive: true, force: true });
-    }
-  });
+        expect(fileSends).toBe(1);
+        expect(markdownTexts).toEqual([
+          `@staff-1\n\n${sourceLabel}\n\n（部分）\n\n\nWorking.`,
+          `@staff-1\n\n${sourceLabel}\n\n\nWorking.`,
+        ]);
+      } finally {
+        vi.useRealTimers();
+        rmSync(file.dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('retries only the unsent chunks of an aggregated DM', async () => {
     vi.useFakeTimers();
@@ -12545,6 +12747,50 @@ describe('DingtalkChannel outbound file delivery', () => {
       );
       await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
       expect(pushProactive).toHaveBeenCalledTimes(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops retrying when a proactive retry returns a permanent error', async () => {
+    vi.useFakeTimers();
+    try {
+      const channel = createChannel({
+        outputMode: 'per_turn',
+        interactiveCards: { enabled: false },
+      });
+      seedSessionTarget(channel, 'session-1', {
+        channelName: 'test-dingtalk',
+        senderId: 'user-1',
+        chatId: 'cidGroup==',
+        isGroup: true,
+      });
+      const send = vi
+        .spyOn(
+          channel as unknown as {
+            sendProactiveChunk(...args: unknown[]): Promise<void>;
+          },
+          'sendProactiveChunk',
+        )
+        .mockRejectedValueOnce(new Error('temporary failure'))
+        .mockRejectedValue(
+          new DingtalkCardRequestError('invalid credentials', false),
+        );
+      const fetch = vi
+        .spyOn(globalThis, 'fetch')
+        .mockRejectedValue(new Error('Unexpected network request'));
+      await channel.dispatchBackgroundResponse('session-1', 'Only result', {
+        taskId: 'task-1',
+        kind: 'agent',
+        status: 'completed',
+        turnComplete: true,
+      });
+      expect(send).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(send).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(fetch).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

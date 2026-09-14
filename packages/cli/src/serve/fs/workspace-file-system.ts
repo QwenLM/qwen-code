@@ -587,13 +587,13 @@ async function resolveSameHostToolWriteTarget(input: string): Promise<string> {
 
   let leaf: Awaited<ReturnType<typeof fsp.lstat>>;
   try {
-    leaf = await fsp.lstat(input);
+    leaf = await fsp.lstat(input, { bigint: true });
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
       throw err;
     }
     const parent = await fsp.realpath(path.dirname(input));
-    const parentStat = await fsp.lstat(parent);
+    const parentStat = await fsp.lstat(parent, { bigint: true });
     if (!parentStat.isDirectory()) {
       throw new FsError(
         'parse_error',
@@ -614,7 +614,7 @@ async function resolveSameHostToolWriteTarget(input: string): Promise<string> {
     throw new FsError('parse_error', `path is not a regular file: ${input}`);
   }
   const canonical = await fsp.realpath(input);
-  const canonicalStat = await fsp.lstat(canonical);
+  const canonicalStat = await fsp.lstat(canonical, { bigint: true });
   if (!canonicalStat.isFile()) {
     throw new FsError(
       'parse_error',

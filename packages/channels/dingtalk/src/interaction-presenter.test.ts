@@ -128,6 +128,7 @@ function createHarness(
   options: {
     language?: string;
     outputMode?: 'per_task' | 'per_turn' | 'per_response';
+    cardsEnabled?: boolean;
     prepareOutput?: (chatId: string, text: string) => Promise<string>;
   } = {},
 ) {
@@ -176,7 +177,7 @@ function createHarness(
   const presenter = new DingtalkInteractionPresenter({
     outputMode: options.outputMode,
     prepareOutput: options.prepareOutput,
-    statusCards,
+    statusCards: options.cardsEnabled === false ? undefined : statusCards,
     questionCards,
     permissionCards,
     ...(options.language ? { language: options.language } : {}),
@@ -201,6 +202,57 @@ afterEach(() => {
 });
 
 describe('DingtalkInteractionPresenter', () => {
+  it('prefers the run fallback over the default and preserves its source label', async () => {
+    const defaultFallback = vi.fn();
+    const runFallback = vi.fn();
+    const presenter = new DingtalkInteractionPresenter({
+      sendFallback: defaultFallback,
+    });
+    presenter.registerRun(
+      'run-1',
+      'owner-1',
+      target,
+      'session-1',
+      undefined,
+      'Review session',
+      runFallback,
+    );
+    presenter.appendOutput(segment('segment-1'), 'Final reply');
+    await presenter.closeOutput('segment-1', '', 'completed');
+    expect(runFallback).toHaveBeenCalledExactlyOnceWith(
+      'cid-1',
+      'Final reply',
+      'session-1',
+      'Review session',
+    );
+    expect(defaultFallback).not.toHaveBeenCalled();
+  });
+
+  it('bounds the card preview while preserving accumulated visibility and the full fallback', async () => {
+    const { presenter, statusCards, sendFallback } = createHarness();
+    const replace = vi.spyOn(statusCards, 'replace');
+    vi.spyOn(statusCards, 'complete').mockResolvedValue(false);
+    presenter.appendOutput(segment('segment-1'), ' ');
+    await Promise.resolve();
+    expect(replace).not.toHaveBeenCalled();
+    presenter.appendOutput(segment('segment-1'), 'hi');
+    await new Promise((resolve) => setImmediate(resolve));
+    const calls = replace.mock.calls.length;
+    presenter.appendOutput(segment('segment-1'), ' \n');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(replace).toHaveBeenCalledTimes(calls + 1);
+    const longText = 'x'.repeat(25_000);
+    presenter.appendOutput(segment('segment-1'), longText);
+    await presenter.closeOutput('segment-1', '', 'completed');
+    expect(replace.mock.calls.at(-1)![2].length).toBeLessThanOrEqual(20_000);
+    expect(sendFallback).toHaveBeenCalledExactlyOnceWith(
+      'cid-1',
+      ` hi \n${longText}`,
+      'session-1',
+    );
+    statusCards.dispose();
+  });
+
   it.each(['per_task', 'per_turn', 'per_response'] as const)(
     'preserves long replies for ordinary-message delivery in %s',
     async (outputMode) => {
@@ -243,6 +295,64 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  it.each(
+    ['whitespace', 'terminal', 'input'].flatMap((completion) => [
+      { completion, cardsEnabled: true },
+      { completion, cardsEnabled: false },
+    ]),
+  )(
+    'prepares retained media at $completion with cardsEnabled=$cardsEnabled',
+    async ({ completion, cardsEnabled }) => {
+      const prepareOutput = vi.fn(async (_chatId: string, text: string) =>
+        text.replace('[IMAGE: /tmp/chart.png]', '![image](@media-1)'),
+      );
+      const { client, presenter, sendFallback } = createHarness({
+        outputMode: 'per_turn',
+        prepareOutput,
+        cardsEnabled,
+      });
+      presenter.appendOutput(
+        segment('segment-1'),
+        'Chart [IMAGE: /tmp/chart.png]',
+      );
+      await presenter.closeOutput(
+        'segment-1',
+        '',
+        completion === 'input' ? 'input_requested' : 'response_boundary',
+      );
+      if (completion === 'whitespace') {
+        presenter.appendOutput(segment('segment-2'), ' \n');
+        await presenter.closeOutput('segment-2', ' \n', 'completed');
+      }
+      presenter.terminalizeRun('run-1', 'completed');
+      if (cardsEnabled) {
+        await vi.waitFor(() =>
+          expect(client.updateInstance).toHaveBeenCalledWith(
+            expect.objectContaining({
+              cardParamMap: expect.objectContaining({
+                content: 'Chart ![image](@media-1)',
+                flowStatus: 3,
+              }),
+            }),
+          ),
+        );
+      } else {
+        await vi.waitFor(() =>
+          expect(sendFallback).toHaveBeenCalledExactlyOnceWith(
+            'cid-1',
+            'Chart ![image](@media-1)',
+            'session-1',
+          ),
+        );
+        expect(client.createAndDeliver).not.toHaveBeenCalled();
+      }
+      expect(prepareOutput).toHaveBeenCalledExactlyOnceWith(
+        'cid-1',
+        'Chart [IMAGE: /tmp/chart.png]',
+      );
+    },
+  );
+
   it('does not create a process card for whitespace-only trailing output', async () => {
     const { client, presenter } = createHarness({
       outputMode: 'per_response',
@@ -258,23 +368,19 @@ describe('DingtalkInteractionPresenter', () => {
   });
 
   it.each(['failed', 'cancelled'] as const)(
-    'does not send retained final-only progress after %s',
+    'does not send withheld final-only progress after %s when cards never become live',
     async (terminal) => {
       const { client, presenter, sendFallback } = createHarness({
         outputMode: 'per_turn',
       });
-      const creation = deferred<void>();
-      vi.mocked(client.createAndDeliver).mockReturnValueOnce(creation.promise);
-      presenter.appendOutput(segment('segment-1'), 'Intermediate reply');
-      const boundary = presenter.closeOutput(
-        'segment-1',
-        '',
-        'response_boundary',
+      vi.mocked(client.createAndDeliver).mockRejectedValue(
+        new DingtalkCardRequestError('card unavailable', false),
       );
+      presenter.appendOutput(segment('segment-1'), 'Intermediate reply');
+      await presenter.closeOutput('segment-1', '', 'response_boundary');
       presenter.terminalizeRun('run-1', terminal);
-      creation.resolve();
-      await boundary;
-      await vi.waitFor(() => expect(client.updateInstance).toHaveBeenCalled());
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(client.updateInstance).not.toHaveBeenCalled();
       expect(sendFallback).not.toHaveBeenCalled();
     },
   );
@@ -368,7 +474,9 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('finishes preparing a process response before displaying the next segment', async () => {
     const prepared = deferred<string>();
-    const prepareOutput = vi.fn(() => prepared.promise);
+    const prepareOutput = vi
+      .fn(async (_chatId: string, text: string) => text)
+      .mockImplementationOnce(() => prepared.promise);
     const { client, presenter, sendFallback } = createHarness({
       outputMode: 'per_response',
       prepareOutput,
@@ -390,10 +498,10 @@ describe('DingtalkInteractionPresenter', () => {
     prepared.resolve('Intermediate ![image](@media-1)');
     await first;
     await last;
-    expect(prepareOutput).toHaveBeenCalledExactlyOnceWith(
-      'cid-1',
-      'Intermediate [IMAGE: /tmp/chart.png]',
-    );
+    expect(prepareOutput.mock.calls).toEqual([
+      ['cid-1', 'Intermediate [IMAGE: /tmp/chart.png]'],
+      ['cid-1', 'Final output'],
+    ]);
     expect(
       vi
         .mocked(client.updateInstance)
@@ -1017,13 +1125,18 @@ describe('DingtalkInteractionPresenter', () => {
   });
 
   it('falls back at response boundaries after a permanent card stream failure', async () => {
-    const { client, presenter, sendFallback } = createHarness();
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'per_response',
+    });
     presenter.appendOutput(segment('segment-1'), 'intermediate result');
     await vi.waitFor(() =>
       expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
     );
     vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
       new DingtalkCardRequestError('stream rejected', false),
+    );
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new DingtalkCardRequestError('terminal rejected', false),
     );
     presenter.appendOutput(segment('segment-1'), ' updated');
     await vi.waitFor(() =>
@@ -1039,7 +1152,9 @@ describe('DingtalkInteractionPresenter', () => {
       'intermediate result updated',
       'session-1',
     );
-    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ finalize: true }),
+    );
   });
 
   it.each(['failed', 'input_requested'] as const)(
@@ -1151,7 +1266,9 @@ describe('DingtalkInteractionPresenter', () => {
   });
 
   it('re-delivers boundary content when the run later fails', async () => {
-    const { client, presenter, sendFallback } = createHarness();
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'per_turn',
+    });
     presenter.appendOutput(segment('segment-1'), 'intermediate result');
     await presenter.closeOutput('segment-1', '', 'response_boundary');
     expect(sendFallback).not.toHaveBeenCalled();
@@ -1176,7 +1293,9 @@ describe('DingtalkInteractionPresenter', () => {
   });
 
   it('re-delivers boundary content when the run is later cancelled', async () => {
-    const { client, presenter, sendFallback } = createHarness();
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'per_task',
+    });
     presenter.appendOutput(segment('segment-1'), 'intermediate result');
     await presenter.closeOutput('segment-1', '', 'response_boundary');
     expect(sendFallback).not.toHaveBeenCalled();
@@ -1202,7 +1321,10 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('neutralizes partial image markers in text fallbacks', async () => {
     const sendFallback = vi.fn().mockResolvedValue(undefined);
-    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    const presenter = new DingtalkInteractionPresenter({
+      outputMode: 'per_response',
+      sendFallback,
+    });
     presenter.registerRun('run-1', 'owner-1', target);
     presenter.appendOutput(
       segment('segment-1'),
@@ -1222,7 +1344,10 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('keeps a bare trailing bracket out of text fallbacks', async () => {
     const sendFallback = vi.fn().mockResolvedValue(undefined);
-    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    const presenter = new DingtalkInteractionPresenter({
+      outputMode: 'per_response',
+      sendFallback,
+    });
     presenter.registerRun('run-1', 'owner-1', target);
     presenter.appendOutput(segment('segment-1'), 'result: arr[');
 
@@ -1239,7 +1364,10 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('keeps complete image markers uploadable in text fallbacks', async () => {
     const sendFallback = vi.fn().mockResolvedValue(undefined);
-    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    const presenter = new DingtalkInteractionPresenter({
+      outputMode: 'per_response',
+      sendFallback,
+    });
     presenter.registerRun('run-1', 'owner-1', target);
     presenter.appendOutput(
       segment('segment-1'),
@@ -1257,7 +1385,10 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('delivers pre-boundary content through the fallback without status cards', async () => {
     const sendFallback = vi.fn().mockResolvedValue(undefined);
-    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    const presenter = new DingtalkInteractionPresenter({
+      outputMode: 'per_response',
+      sendFallback,
+    });
     presenter.registerRun('run-1', 'owner-1', target);
     presenter.appendOutput(segment('segment-1'), 'intermediate result');
 
@@ -1273,7 +1404,9 @@ describe('DingtalkInteractionPresenter', () => {
   });
 
   it('falls back at response boundaries when card creation failed', async () => {
-    const { client, presenter, sendFallback } = createHarness();
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'per_response',
+    });
     vi.mocked(client.createAndDeliver).mockImplementation(async (request) => {
       if (request.templateId === STATUS_CARD_TEMPLATE_ID) {
         throw new Error('status template unavailable');
@@ -1319,7 +1452,9 @@ describe('DingtalkInteractionPresenter', () => {
   });
 
   it('falls back at a boundary when the in-flight card creation fails', async () => {
-    const { client, presenter, sendFallback, statusCards } = createHarness();
+    const { client, presenter, sendFallback, statusCards } = createHarness({
+      outputMode: 'per_response',
+    });
     const creation = deferred<void>();
     vi.mocked(client.createAndDeliver).mockImplementation(async (request) => {
       if (request.templateId === STATUS_CARD_TEMPLATE_ID) {
@@ -1346,7 +1481,9 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('abandons a creation retry after a response-boundary fallback', async () => {
     vi.useFakeTimers();
-    const { client, presenter, sendFallback } = createHarness();
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'per_response',
+    });
     vi.mocked(client.createAndDeliver).mockRejectedValueOnce(
       new Error('status template unavailable'),
     );
@@ -1368,16 +1505,22 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('abandons stream recovery after a response-boundary fallback', async () => {
     vi.useFakeTimers();
-    const { client, presenter, sendFallback } = createHarness();
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'per_response',
+    });
     let contentWrites = 0;
     vi.mocked(client.openOrUpdateStream).mockImplementation(async (request) => {
       if (request.finalize) return;
       contentWrites++;
       if (contentWrites === 2) throw new Error('stream blip');
     });
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new DingtalkCardRequestError('terminal rejected', false),
+    );
     presenter.startStatusCard('run-1');
     await vi.advanceTimersByTimeAsync(0);
     presenter.appendOutput(segment('segment-1'), 'answer more');
+    await vi.advanceTimersByTimeAsync(500);
 
     const closed = presenter.closeOutput('segment-1', '', 'response_boundary');
     await vi.advanceTimersByTimeAsync(0);
@@ -1391,39 +1534,23 @@ describe('DingtalkInteractionPresenter', () => {
     expect(contentWrites).toBe(2);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(contentWrites).toBe(2);
-    expect(client.updateInstance).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        cardParamMap: expect.objectContaining({ content: 'answer more' }),
-      }),
-    );
+    expect(client.updateInstance).toHaveBeenCalledOnce();
   });
 
-  it('retains card content when a response-boundary fallback fails', async () => {
+  it('surfaces fallback failure after a permanent terminal-card rejection', async () => {
     const { client, presenter, sendFallback } = createHarness();
-    presenter.startStatusCard('run-1');
-    await vi.waitFor(() =>
-      expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
-    );
-    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
-      new DingtalkCardRequestError('stream unavailable', false),
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new DingtalkCardRequestError('terminal unavailable', false),
     );
     sendFallback.mockRejectedValueOnce(new Error('fallback unavailable'));
     presenter.appendOutput(segment('segment-1'), 'only retained answer');
-
     await expect(
-      presenter.closeOutput('segment-1', '', 'response_boundary'),
+      presenter.closeOutput('segment-1', '', 'completed'),
     ).rejects.toThrow('fallback unavailable');
-    presenter.terminalizeRun('run-1', 'completed');
-
-    await vi.waitFor(() =>
-      expect(client.updateInstance).toHaveBeenCalledWith(
-        expect.objectContaining({
-          cardParamMap: expect.objectContaining({
-            content: 'only retained answer',
-            flowStatus: 3,
-          }),
-        }),
-      ),
+    expect(sendFallback).toHaveBeenCalledExactlyOnceWith(
+      'cid-1',
+      'only retained answer',
+      'session-1',
     );
   });
 
@@ -1533,7 +1660,9 @@ describe('DingtalkInteractionPresenter', () => {
   });
 
   it('keeps the card sender prefix out of a boundary fallback', async () => {
-    const { client, presenter, sendFallback } = createHarness();
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'per_response',
+    });
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
       senderName: 'Alice',
     });

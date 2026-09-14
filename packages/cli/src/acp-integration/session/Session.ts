@@ -253,6 +253,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TASK_RESULT_META_KEY,
+  CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
 } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
@@ -1564,6 +1565,8 @@ interface ChannelTaskResponseCapture {
   daemonPromptId?: string;
   workChainId?: string;
   finalText?: string;
+  finalResponseTurnId?: string;
+  partial?: boolean;
   controller: AbortController;
   signal: AbortSignal;
 }
@@ -4095,7 +4098,11 @@ export class Session implements SessionContext {
   }
 
   isTurnIdle(): boolean {
-    return !this.closing && !this.#hasActiveTurn();
+    return (
+      !this.closing &&
+      this.channelTaskCaptures.size === 0 &&
+      !this.#hasActiveTurn()
+    );
   }
 
   isIdle(): boolean {
@@ -4207,6 +4214,8 @@ export class Session implements SessionContext {
   }
 
   #hasActiveTurn(): boolean {
+    // Task captures wait for queued turns; a temporary close gate must drain
+    // only executing turns so it can reopen and let those queues progress.
     return Boolean(
       this.pendingPrompt ||
         this.historyMutationActive ||
@@ -4225,7 +4234,7 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
-    if (this.#hasActiveTurn()) {
+    if (!this.isTurnIdle()) {
       throw new RequestError(-32602, 'Session is busy processing a turn', {
         errorKind: 'session_busy',
       });
@@ -4510,7 +4519,7 @@ export class Session implements SessionContext {
       );
     }
 
-    if (this.closing || this.#hasActiveTurn()) {
+    if (!this.isTurnIdle()) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind while a prompt is running',
@@ -4593,7 +4602,7 @@ export class Session implements SessionContext {
   }
 
   restoreHistory(history: Content[]): void {
-    if (this.closing || this.#hasActiveTurn()) {
+    if (!this.isTurnIdle()) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot restore history while a prompt is running',
@@ -4849,7 +4858,10 @@ export class Session implements SessionContext {
             !isTerminalWorkflowStatus(task.status),
         ) ||
       this.notificationQueue.some(
-        (item) => item.todoWorkChainId === workChainId,
+        (item) =>
+          item.todoWorkChainId === workChainId &&
+          (!this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
+            this.#notificationContinuesTodoStopGuardWorkChain(item)),
       ) ||
       this.currentNotificationWorkChainId === workChainId
     );
@@ -4872,7 +4884,7 @@ export class Session implements SessionContext {
         // settles; its priority also keeps background notifications queued.
         capture.controller.abort(NEW_PROMPT_ABORT_REASON);
       }
-      if (capture.signal.aborted || this.disposed || this.closing) {
+      if (capture.signal.aborted || this.disposed) {
         return { ...result, stopReason: 'cancelled' };
       }
       if (
@@ -4898,6 +4910,7 @@ export class Session implements SessionContext {
           _meta: {
             ...result._meta,
             [CHANNEL_TASK_RESULT_META_KEY]: capture.finalText,
+            [CHANNEL_TASK_RESULT_PARTIAL_META_KEY]: capture.partial === true,
           },
         }
       : result;
@@ -10959,7 +10972,14 @@ export class Session implements SessionContext {
         capture.workChainId === item.todoWorkChainId &&
         !capture.signal.aborted
       ) {
-        if (text.trim()) capture.finalText = text;
+        if (text.trim()) {
+          capture.finalText = text;
+          capture.finalResponseTurnId = turnId;
+          capture.partial = false;
+        }
+        if (turnComplete && capture.finalResponseTurnId === turnId) {
+          capture.partial = partial;
+        }
         channelTaskOutput = true;
       }
     }

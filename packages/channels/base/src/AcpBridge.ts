@@ -22,6 +22,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_TASK_RESULT_META_KEY,
+  CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
   ChannelPromptCancelledError,
   parseBackgroundResponseContext,
@@ -354,6 +355,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         throw new ChannelPromptCancelledError();
       }
       const taskResult = result?._meta?.[CHANNEL_TASK_RESULT_META_KEY];
+      if (options?.outputMode === 'per_task') {
+        options.onTaskResult?.({
+          partial:
+            result?._meta?.[CHANNEL_TASK_RESULT_PARTIAL_META_KEY] === true,
+        });
+      }
       return options?.outputMode === 'per_task' &&
         typeof taskResult === 'string' &&
         taskResult.trim()

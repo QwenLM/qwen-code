@@ -46,6 +46,7 @@ function fixture(overrides: Partial<BackgroundOutputCoordinatorOptions> = {}) {
   const options = {
     outputMode: 'per_turn' as const,
     getTarget: vi.fn(() => target),
+    getSourceLabel: vi.fn(() => 'Named session'),
     resolveDelivery: vi.fn(async () => ({
       target,
       sourceLabel: 'Named session',
@@ -57,6 +58,20 @@ function fixture(overrides: Partial<BackgroundOutputCoordinatorOptions> = {}) {
   };
   const coordinator = new BackgroundOutputCoordinator(options);
   return { coordinator, target, packets, send, options };
+}
+
+function expectIdle(coordinator: BackgroundOutputCoordinator) {
+  const state = coordinator as unknown as {
+    backgroundResponseAggregations: Map<string, unknown>;
+    detachedBackgroundResponseAggregations: Set<unknown>;
+    pendingBackgroundResponseTerminals: Map<string, unknown>;
+    detachedPendingBackgroundResponseTerminals: Set<unknown>;
+  };
+  expect(state.backgroundResponseAggregations.size).toBe(0);
+  expect(state.detachedBackgroundResponseAggregations.size).toBe(0);
+  expect(state.pendingBackgroundResponseTerminals.size).toBe(0);
+  expect(state.detachedPendingBackgroundResponseTerminals.size).toBe(0);
+  expect(vi.getTimerCount()).toBe(0);
 }
 
 describe('BackgroundOutputCoordinator', () => {
@@ -105,7 +120,7 @@ describe('BackgroundOutputCoordinator', () => {
       await coordinator.dispatch(
         'session-1',
         'Latest output',
-        context({ kind }),
+        context({ kind, label: 'npm test' }),
       );
       await coordinator.dispatch('session-1', '  ', context({ kind }));
       expect(packets).toEqual([]);
@@ -121,7 +136,7 @@ describe('BackgroundOutputCoordinator', () => {
           kind,
           status: 'completed',
           text: 'Latest output',
-          label: undefined,
+          label: 'npm test',
           partial: false,
           turnComplete: true,
         },
@@ -130,9 +145,32 @@ describe('BackgroundOutputCoordinator', () => {
         target,
         sourceLabel: 'Named session',
       });
-      expect(vi.getTimerCount()).toBe(0);
+      expectIdle(coordinator);
     },
   );
+
+  it('aggregates unclaimed per-task background output until its turn completes', async () => {
+    const { coordinator, packets, options } = fixture({
+      outputMode: 'per_task',
+    });
+    await expect(
+      coordinator.dispatch('session-1', 'Earlier', context()),
+    ).resolves.toBe(true);
+    await expect(
+      coordinator.dispatch('session-1', 'Latest', context()),
+    ).resolves.toBe(true);
+    expect(options.resolveDelivery).toHaveBeenCalledOnce();
+    expect(packets).toEqual([]);
+    await coordinator.dispatch(
+      'session-1',
+      '',
+      context({ status: 'completed', turnComplete: true }),
+    );
+    expect(packets).toEqual([
+      expect.objectContaining({ text: 'Latest', turnComplete: true }),
+    ]);
+    expectIdle(coordinator);
+  });
 
   it('keeps separate task and turn results separate', async () => {
     const { coordinator, packets } = fixture();
@@ -193,7 +231,11 @@ describe('BackgroundOutputCoordinator', () => {
     await coordinator.dispatch(
       'session-1',
       '',
-      context({ status: 'completed', turnComplete: true }),
+      context({
+        status: 'completed',
+        turnComplete: true,
+        label: 'terminal label',
+      }),
     );
     expect(packets).toEqual([]);
     first.resolve({ target });
@@ -203,6 +245,7 @@ describe('BackgroundOutputCoordinator', () => {
         text: 'Latest',
         turnComplete: true,
         partial: false,
+        label: 'terminal label',
       }),
     ]);
   });
@@ -237,7 +280,11 @@ describe('BackgroundOutputCoordinator', () => {
     await coordinator.dispatch(
       'session-1',
       '',
-      context({ status: 'completed', turnComplete: true }),
+      context({
+        status: 'completed',
+        turnComplete: true,
+        label: 'terminal label',
+      }),
     );
     expect(send).toHaveBeenCalledTimes(2);
     expect(options.createDelivery).toHaveBeenCalledOnce();
@@ -246,6 +293,7 @@ describe('BackgroundOutputCoordinator', () => {
         text: 'Result',
         partial: false,
         turnComplete: true,
+        label: 'terminal label',
       }),
     ]);
     expect(vi.getTimerCount()).toBe(0);
@@ -301,7 +349,10 @@ describe('BackgroundOutputCoordinator', () => {
     await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
     expect(send).toHaveBeenCalledOnce();
     expect(options.createDelivery).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
+    expect(options.log).toHaveBeenCalledExactlyOnceWith(
+      'background response delivery failed (attempt 1): Permanent rejection\n',
+    );
+    expectIdle(coordinator);
   });
 
   it('bounds transient delivery retries', async () => {
@@ -319,7 +370,7 @@ describe('BackgroundOutputCoordinator', () => {
 
   it('drains pending output as partial without waiting for target resolution', async () => {
     const pending = deferred<BackgroundOutputTarget>();
-    const { coordinator, target, packets } = fixture({
+    const { coordinator, target, packets, options } = fixture({
       resolveDelivery: () => pending.promise,
     });
     const response = coordinator.dispatch(
@@ -327,8 +378,7 @@ describe('BackgroundOutputCoordinator', () => {
       'Held result',
       context(),
     );
-    coordinator.drain('session-1');
-    await vi.advanceTimersByTimeAsync(0);
+    await coordinator.drain('session-1');
     expect(packets).toEqual([
       expect.objectContaining({
         text: 'Held result',
@@ -336,10 +386,14 @@ describe('BackgroundOutputCoordinator', () => {
         turnComplete: true,
       }),
     ]);
+    expect(options.createDelivery).toHaveBeenCalledWith('session-1', {
+      target,
+      sourceLabel: 'Named session',
+    });
     pending.resolve({ target });
     await response;
     expect(packets).toHaveLength(1);
-    expect(vi.getTimerCount()).toBe(0);
+    expectIdle(coordinator);
   });
 
   it('does not deliver to a target whose session ownership changed while resolving', async () => {
@@ -359,4 +413,175 @@ describe('BackgroundOutputCoordinator', () => {
     expect(packets).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('waits for an in-flight delivery and its buffered tail when draining', async () => {
+    const first = deferred<{ turnComplete: boolean }>();
+    const tail = deferred<{ turnComplete: boolean }>();
+    const { coordinator, send } = fixture();
+    send.mockImplementationOnce(() => first.promise);
+    send.mockImplementationOnce(() => tail.promise);
+    await coordinator.dispatch('session-1', 'First', context());
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    await coordinator.dispatch('session-1', 'Tail', context());
+    let drained = false;
+    const drain = coordinator.drain('session-1').then(() => {
+      drained = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(drained).toBe(false);
+    first.resolve({ turnComplete: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1]?.[0]).toMatchObject({
+      text: 'Tail',
+      turnComplete: true,
+      partial: true,
+    });
+    expect(drained).toBe(false);
+    tail.resolve({ turnComplete: true });
+    await drain;
+    expect(drained).toBe(true);
+    expectIdle(coordinator);
+  });
+
+  it('reports pending output discarded during drain after ownership changes', async () => {
+    const pending = deferred<BackgroundOutputTarget>();
+    const { coordinator, target, packets, options } = fixture({
+      resolveDelivery: () => pending.promise,
+    });
+    const response = coordinator.dispatch('session-1', 'Result', context());
+    options.getTarget.mockReturnValue({ ...target, chatId: 'replacement' });
+    await coordinator.drain('session-1');
+    expect(packets).toEqual([]);
+    expect(options.log).toHaveBeenCalledExactlyOnceWith(
+      'background response target unavailable during drain; 1 buffered segment(s) discarded\n',
+    );
+    expectIdle(coordinator);
+    pending.resolve({ target });
+    await response;
+    expect(packets).toEqual([]);
+    expectIdle(coordinator);
+  });
+
+  it('logs a failed drain without leaving retries after shutdown', async () => {
+    const { coordinator, send, options } = fixture();
+    send.mockRejectedValue(new Error('Unavailable'));
+    await coordinator.dispatch('session-1', 'Result', context());
+    await coordinator.drain();
+    expect(send).toHaveBeenCalledOnce();
+    expect(options.log).toHaveBeenCalledExactlyOnceWith(
+      'background response delivery failed (attempt 1): Unavailable\n',
+    );
+    expectIdle(coordinator);
+    await vi.advanceTimersByTimeAsync(90 * 1000);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('reports the pre-clear buffered count when target resolution retries are exhausted', async () => {
+    const { coordinator, options, packets } = fixture({
+      resolveDelivery: vi.fn(async () => undefined),
+    });
+    await coordinator.dispatch('session-1', 'Result', context());
+    await coordinator.dispatch(
+      'session-1',
+      '',
+      context({ turnComplete: true }),
+    );
+    await vi.advanceTimersByTimeAsync(90 * 1000);
+    expect(options.resolveDelivery).toHaveBeenCalledTimes(3);
+    expect(options.log).toHaveBeenCalledExactlyOnceWith(
+      'background response target unresolved after 3 attempts; 1 buffered segment(s) discarded\n',
+    );
+    expect(packets).toEqual([]);
+    expectIdle(coordinator);
+  });
+
+  it.each([false, true])(
+    'recovers from a thrown target resolution with terminal=%s',
+    async (terminal) => {
+      const resolveDelivery =
+        vi.fn<BackgroundOutputCoordinatorOptions['resolveDelivery']>();
+      const { coordinator, target, packets } = fixture({ resolveDelivery });
+      resolveDelivery.mockRejectedValueOnce(new Error('Owner lock failed'));
+      resolveDelivery.mockResolvedValue({ target, sourceLabel: 'Recovered' });
+      await expect(
+        coordinator.dispatch('session-1', 'Result', context()),
+      ).rejects.toThrow('Owner lock failed');
+      if (terminal) {
+        await coordinator.dispatch(
+          'session-1',
+          '',
+          context({
+            status: 'completed',
+            turnComplete: true,
+            label: 'recovered label',
+          }),
+        );
+      }
+      await vi.advanceTimersByTimeAsync(30 * 1000);
+      if (!terminal) {
+        expect(packets).toEqual([]);
+        await coordinator.dispatch(
+          'session-1',
+          '',
+          context({
+            status: 'completed',
+            turnComplete: true,
+            label: 'recovered label',
+          }),
+        );
+      }
+      expect(resolveDelivery).toHaveBeenCalledTimes(2);
+      expect(packets).toEqual([
+        expect.objectContaining({
+          text: 'Result',
+          status: 'completed',
+          turnComplete: true,
+          label: 'recovered label',
+        }),
+      ]);
+      expectIdle(coordinator);
+    },
+  );
+
+  it.each(['throw', 'unavailable'] as const)(
+    'settles the existing aggregation when a concurrent resolver ends with %s',
+    async (failure) => {
+      const first = deferred<BackgroundOutputTarget | undefined>();
+      const resolveDelivery =
+        vi.fn<BackgroundOutputCoordinatorOptions['resolveDelivery']>();
+      const { coordinator, target, packets } = fixture({ resolveDelivery });
+      resolveDelivery.mockReturnValueOnce(first.promise);
+      resolveDelivery.mockResolvedValue({ target });
+      const earlier = coordinator.dispatch('session-1', 'Earlier', context());
+      await coordinator.dispatch(
+        'session-1',
+        'Latest',
+        context({ label: 'latest label' }),
+      );
+      await coordinator.dispatch(
+        'session-1',
+        '',
+        context({ status: 'completed', turnComplete: true }),
+      );
+      expect(packets).toEqual([]);
+      if (failure === 'throw') {
+        const rejected = expect(earlier).rejects.toThrow('Owner lock failed');
+        first.reject(new Error('Owner lock failed'));
+        await rejected;
+      } else {
+        first.resolve(undefined);
+        await earlier;
+      }
+      expect(packets).toEqual([
+        expect.objectContaining({
+          text: 'Latest',
+          label: 'latest label',
+          status: 'completed',
+          turnComplete: true,
+        }),
+      ]);
+      expectIdle(coordinator);
+    },
+  );
 });

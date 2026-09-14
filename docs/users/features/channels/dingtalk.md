@@ -113,6 +113,8 @@ The [shared `outputMode` setting](./overview#turn-output-mode) controls when Din
 - `per_response`: each complete assistant response gets its own completed result card. Token chunks update the current card; they do not create new cards. Background assistant responses are delivered separately too.
 - `per_turn`: the main status card completes with the turn's last non-empty assistant reply as soon as the main prompt ends. Each later background notification turn keeps its own last non-empty assistant reply and sends it as a separate completed card.
 
+Background shell, monitor, and workflow output in `per_turn` and `per_task` includes a heading with its kind, status, and task label when available. In `per_response`, the response body is delivered as-is. Background agent replies keep their original body in every mode.
+
 In the default `per_turn` mode, background tasks never extend the main card's lifetime, and a later callback cannot overwrite it. For example, a main result followed by eleven separate background notification turns produces a main result card and eleven follow-up result cards. Choose `per_task` to wait for that task's associated background work and receive one final result instead. The result comes from the assistant; no additional summary is generated and intermediate replies are not concatenated.
 
 ```json

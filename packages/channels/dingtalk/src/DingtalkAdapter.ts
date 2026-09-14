@@ -979,7 +979,7 @@ export class DingtalkChannel extends ChannelBase {
     string,
     Map<string, { messageId: string; chatId: string }>
   >();
-  /** Settles when the reaction cleanup queued by disconnect() has run. */
+  /** Settles after background output and reaction cleanup finish on disconnect. */
   private disconnectDrain: Promise<void> | undefined;
   /**
    * Real inbound message ids (insertion-ordered, size-capped). Unlike the
@@ -1042,13 +1042,16 @@ export class DingtalkChannel extends ChannelBase {
     this.backgroundOutputCoordinator = new BackgroundOutputCoordinator({
       outputMode: this.outputMode,
       getTarget: (sessionId) => this.router.getTarget(sessionId),
+      getSourceLabel: (sessionId) =>
+        this.getBackgroundResponseSourceLabel(sessionId),
       resolveDelivery: (sessionId) =>
         this.resolveBackgroundResponseDelivery(sessionId),
       createDelivery: (sessionId, target) =>
         this.createBackgroundOutputDelivery(sessionId, target),
       isRetryableError: (error) =>
         !(
-          error instanceof ProactiveTextDeliveryError &&
+          (error instanceof ProactiveTextDeliveryError ||
+            error instanceof DingtalkCardRequestError) &&
           error.retryable === false
         ),
       log: (message) =>
@@ -2214,8 +2217,7 @@ export class DingtalkChannel extends ChannelBase {
     for (const state of reactionStates) {
       this.finishReaction(state.chatId, state.messageId, state.sessionId);
     }
-    this.statusCardController?.dispose();
-    this.backgroundOutputCoordinator.drain();
+    const backgroundDrain = this.backgroundOutputCoordinator.drain();
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
     this.reactionStates.clear();
@@ -2225,9 +2227,12 @@ export class DingtalkChannel extends ChannelBase {
       this.client.disconnect();
     }
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
-    this.disconnectDrain = Promise.allSettled(
-      reactionStates.map((state) => state.tail),
-    ).then(() => undefined);
+    this.disconnectDrain = Promise.allSettled([
+      backgroundDrain,
+      ...reactionStates.map((state) => state.tail),
+    ]).then(() => {
+      this.statusCardController?.dispose();
+    });
   }
 
   override waitForDisconnect(): Promise<void> {
@@ -2815,7 +2820,17 @@ export class DingtalkChannel extends ChannelBase {
     ) {
       return;
     }
-    return super.dispatchBackgroundResponse(sessionId, text, context);
+    if (!text.trim()) return;
+    const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
+    if (!delivery || this.router.getTarget(sessionId) !== delivery.target)
+      return;
+    await this.deliverBackgroundResponseToTarget(
+      sessionId,
+      text,
+      delivery,
+      false,
+      context,
+    );
   }
 
   private createBackgroundOutputDelivery(
@@ -2883,6 +2898,7 @@ export class DingtalkChannel extends ChannelBase {
             preparedReplyBody ?? body,
             target,
             preparedReplyBody !== undefined,
+            output,
           );
         }
         return { turnComplete: composedTurnComplete };
@@ -2949,6 +2965,7 @@ export class DingtalkChannel extends ChannelBase {
     text: string,
     delivery: { target: SessionTarget; sourceLabel?: string },
     prepared = false,
+    result?: { status: string; partial?: boolean },
   ): Promise<void> {
     const { target, sourceLabel } = delivery;
     if (
@@ -2968,6 +2985,7 @@ export class DingtalkChannel extends ChannelBase {
           },
           text,
           sourceLabel,
+          result,
         )
       ) {
         return;
@@ -3058,7 +3076,14 @@ export class DingtalkChannel extends ChannelBase {
       ? this.fileProjectors.get(segment.runId)?.projector
       : undefined;
     if (segment) this.fileProjectors.delete(segment.runId);
-    const outgoingText = await this.prepareReplyOutput(chatId, text, streamed);
+    let outgoingText = await this.prepareReplyOutput(chatId, text, streamed);
+    if (
+      segment?.partial &&
+      outgoingText.trim() &&
+      !outgoingText.startsWith('（部分）')
+    ) {
+      outgoingText = `（部分）\n\n${outgoingText}`;
+    }
     if (segment && this.interactionPresenter) {
       if (
         await this.interactionPresenter.closeOutput(

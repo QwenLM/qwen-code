@@ -722,6 +722,87 @@ describe('ChannelBase', () => {
   });
 
   describe('gate integration', () => {
+    it('preserves the next prompt buffer when a runtime-cancelled turn has a late cancel RPC', async () => {
+      const ch = createChannel({
+        outputMode: 'per_task',
+        dispatchMode: 'collect',
+      });
+      ch.enableCancelCommand();
+      let rejectA!: (error: Error) => void;
+      let resolveB!: (text: string) => void;
+      let resolveCancel!: () => void;
+      const aGate = new Promise<string>((_resolve, reject) => {
+        rejectA = reject;
+      });
+      const bGate = new Promise<string>((resolve) => {
+        resolveB = resolve;
+      });
+      const cancelGate = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      bridge.prompt
+        .mockImplementationOnce(() => aGate)
+        .mockImplementationOnce(() => bGate)
+        .mockResolvedValue('buffered followup completed');
+      bridge.cancelSession.mockReturnValue(cancelGate);
+      const a = ch.handleInbound(envelope({ text: 'turn A', messageId: 'm1' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const cancel = ch.handleInbound(
+        envelope({ text: '/cancel', messageId: 'm2' }),
+      );
+      await vi.waitFor(() =>
+        expect(bridge.cancelSession).toHaveBeenCalledTimes(1),
+      );
+      vi.useFakeTimers();
+      let b: Promise<void> | undefined;
+      try {
+        rejectA(new ChannelPromptCancelledError());
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS + 1);
+        await a;
+        b = ch.handleInbound(envelope({ text: 'turn B', messageId: 'm3' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        await ch.handleInbound(
+          envelope({ text: 'next buffered message', messageId: 'm4' }),
+        );
+        const buffers = (
+          ch as unknown as { collectBuffers: Map<string, unknown[]> }
+        ).collectBuffers;
+        expect(buffers.get('s-1')).toHaveLength(1);
+        resolveCancel();
+        await cancel;
+        expect(ch.promptBufferDrops).toEqual([]);
+        expect(buffers.get('s-1')).toHaveLength(1);
+        resolveB('turn B complete');
+        await b;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(3));
+        expect(bridge.prompt.mock.calls[2]?.[1]).toContain(
+          'next buffered message',
+        );
+      } finally {
+        resolveCancel();
+        resolveB('cleanup');
+        await a.catch(() => undefined);
+        await b?.catch(() => undefined);
+        await cancel;
+        vi.useRealTimers();
+      }
+    });
+
+    it('passes retained task partiality to the final output segment', async () => {
+      const ch = createChannel({ outputMode: 'per_task' });
+      bridge.prompt.mockImplementation(async (_sessionId, _text, options) => {
+        options?.onTaskResult?.({ partial: true });
+        return 'Retained partial reply';
+      });
+      await ch.handleInbound(envelope({ text: 'inspect this' }));
+      expect(ch.responseCompletions).toEqual([
+        expect.objectContaining({
+          text: 'Retained partial reply',
+          segment: expect.objectContaining({ partial: true }),
+        }),
+      ]);
+    });
+
     it('terminalizes a remotely cancelled task without delivering retained output', async () => {
       const ch = createChannel({ outputMode: 'per_task' });
       bridge.prompt.mockImplementation(async (sessionId) => {
@@ -731,7 +812,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope({ text: 'inspect this' }));
       expect(
         ch.taskEvents.filter((event) => event.type === 'cancelled'),
-      ).toHaveLength(1);
+      ).toEqual([expect.objectContaining({ reason: 'runtime_cancelled' })]);
       expect(
         ch.taskEvents.some(
           (event) => event.type === 'completed' || event.type === 'failed',

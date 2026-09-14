@@ -9,7 +9,6 @@ describe('ChannelOutputTurn', () => {
       expect(turn.close('first', 'response_boundary')).toEqual({
         kind: 'preview',
         text: 'first',
-        deferFallback: true,
       });
       turn.close('last', 'response_boundary');
       expect(turn.shouldPreview(' \n')).toBe(false);
@@ -73,7 +72,7 @@ describe('ChannelOutputTurn', () => {
     expect(turn.finish('completed')).toBeUndefined();
   });
 
-  it.each(['per_task', 'per_turn', 'per_response', undefined] as const)(
+  it.each(['per_task', 'per_turn', 'per_response'] as const)(
     'completes the input boundary with mode %s',
     (mode) => {
       const turn = new ChannelOutputTurn(mode);
@@ -87,18 +86,20 @@ describe('ChannelOutputTurn', () => {
     },
   );
 
-  it('preserves omitted-mode boundary fallback and whitespace behavior', () => {
+  it('uses per-turn grouping when the mode is omitted', () => {
     const turn = new ChannelOutputTurn();
-    expect(turn.shouldPreview(' ')).toBe(true);
+    expect(turn.shouldPreview(' ')).toBe(false);
     expect(turn.close('process', 'response_boundary')).toEqual({
       kind: 'preview',
       text: 'process',
-      deferFallback: false,
     });
     expect(turn.close(' ', 'completed')).toEqual({
       kind: 'complete',
-      text: ' ',
+      text: 'process',
       rotate: false,
+    });
+    expect(new ChannelOutputTurn().close(' ', 'completed')).toEqual({
+      kind: 'skip',
     });
     expect(turn.finish('completed')).toBeUndefined();
   });

@@ -86,6 +86,45 @@ afterEach(() => {
 });
 
 describe('NodeReplKernelManager', () => {
+  it('preserves bounded error diagnostics without invoking getters or custom inspectors', async () => {
+    const result = await run(`
+      var invoked = 0;
+      var details = {
+        action: { operation: 'fill', performed: true },
+        verification: { status: 'failed', reason: 'value_mismatch' },
+        image: 'x'.repeat(100_000),
+        get unsafe() { invoked++; throw new Error('getter ran'); },
+        [Symbol.for('nodejs.util.inspect.custom')]() { invoked++; throw new Error('inspector ran'); },
+      };
+      details.self = details;
+      throw Object.assign(new Error('Verification failed'), { code: 'verification_failed', details });
+    `);
+    expect(result.status).toBe('error');
+    expect(result.error?.code).toBe('verification_failed');
+    expect(result.error?.details).toContain("operation: 'fill'");
+    expect(result.error?.details).toContain('performed: true');
+    expect(result.error?.details).toContain("reason: 'value_mismatch'");
+    expect(result.error?.details).toContain('Circular');
+    expect(result.error?.details?.length).toBeLessThan(4200);
+    const followUp = await run('nodeRepl.write(invoked);');
+    expect(followUp.error).toBeUndefined();
+    expect(texts(followUp)).toContain('0');
+  });
+
+  it('keeps the original error when optional diagnostics are unreadable', async () => {
+    const result = await run(`
+      var invoked = 0;
+      throw Object.defineProperties(new Error('original'), {
+        code: { get() { invoked++; throw new Error('code getter'); } },
+        details: { get() { invoked++; throw new Error('details getter'); } },
+      });
+    `);
+    expect(result.error?.message).toBe('original');
+    expect(result.error?.code).toBeUndefined();
+    expect(result.error?.details).toBeUndefined();
+    expect(texts(await run('nodeRepl.write(invoked);'))).toContain('0');
+  });
+
   it(
     'executes compact and nested await operands without merging tokens',
     async () => {
@@ -1296,6 +1335,56 @@ describe('NodeReplKernelManager', () => {
     TEST_TIMEOUT,
   );
 
+  it.each([
+    {
+      name: 'a timed-out cancellation barrier',
+      code: 'await nodeRepl.signal.waitUntil(new Promise(() => {}));',
+      status: 'timeout',
+    },
+    {
+      name: 'an explicitly cancelled barrier',
+      code: 'await nodeRepl.signal.waitUntil(new Promise(() => {}));',
+      status: 'cancelled',
+    },
+    {
+      name: 'a blocked event loop after an asynchronous boundary',
+      code: 'await new Promise(resolve => setTimeout(resolve, 1)); while (true) {}',
+      status: 'timeout',
+    },
+  ])(
+    'recovers from $name within a bounded cancellation interval',
+    async ({ code, status }) => {
+      await run('const retainedBeforeHang = 42;');
+      const pid = manager.getKernelPid();
+      const generation = manager.getGeneration();
+      const readyFile = path.join(workDir, 'hang-started');
+      const controller = new AbortController();
+      const pending = manager.exec({
+        code: `const fs = await import('node:fs'); fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready'); nodeRepl.write('before hang'); ${code}`,
+        timeoutMs: status === 'cancelled' ? 60_000 : 200,
+        signal: controller.signal,
+      });
+      await expect.poll(() => fs.existsSync(readyFile)).toBe(true);
+      if (status === 'cancelled') controller.abort();
+      const queued = run('nodeRepl.write(typeof retainedBeforeHang);');
+
+      const outcome = await pending;
+      expect(outcome.status).toBe(status);
+      expect(outcome.stats.kernelReplaced).toBe(true);
+      expect(outcome.stats.pid).toBe(pid);
+      expect(outcome.error?.message).toMatch(/bindings were lost/);
+      expect(outcome.error?.message).toMatch(/external.*state/i);
+      expect(texts(outcome)).toContain('before hang');
+
+      const recovered = await queued;
+      expect(recovered.status).toBe('ok');
+      expect(texts(recovered)).toEqual(['undefined']);
+      expect(manager.getKernelPid()).not.toBe(pid);
+      expect(manager.getGeneration()).toBeGreaterThan(generation);
+    },
+    10_000,
+  );
+
   it(
     'interrupts timed-out and cancelled cells without replacing the kernel',
     async () => {
@@ -1417,7 +1506,7 @@ describe('NodeReplKernelManager', () => {
       expect(
         texts(
           await run(
-            'nodeRepl.write(`${nativeLifecycle.operation}|${nativeLifecycle.userContinuation}`);',
+            'await new Promise(resolve => setTimeout(resolve, 5500)); nodeRepl.write(`${nativeLifecycle.operation}|${nativeLifecycle.userContinuation}`);',
           ),
         ),
       ).toEqual(['committed|false']);

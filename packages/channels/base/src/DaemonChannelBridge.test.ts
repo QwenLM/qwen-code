@@ -4170,6 +4170,74 @@ describe('DaemonChannelBridge', () => {
     },
   );
 
+  it.each(['same', 'unrelated', 'replaced'] as const)(
+    'keeps partiality attached to the selected background reply (%s)',
+    async (terminal) => {
+      const events = new EventQueue();
+      const session = createFakeSession(events);
+      session.prompt.mockImplementation(async () => {
+        const emit = (
+          text: string,
+          turnId: string,
+          turnComplete: boolean,
+          partial = false,
+        ) =>
+          events.push({
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionId: 'session-1',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text },
+                _meta: {
+                  qwenDiscreteMessage: true,
+                  source: 'background_notification_response',
+                  [CHANNEL_TASK_OUTPUT_META_KEY]: true,
+                  backgroundTask: {
+                    taskId: 'task-1',
+                    kind: 'agent',
+                    status: 'completed',
+                    turnId,
+                    turnComplete,
+                    partial,
+                  },
+                },
+              },
+            },
+          });
+        emit('Retained result', 'turn-1', false);
+        emit('', terminal === 'unrelated' ? 'turn-2' : 'turn-1', true, true);
+        if (terminal === 'replaced') emit('Complete result', 'turn-3', true);
+        events.push(turnCompleteEvent());
+        return { stopReason: 'end_turn' };
+      });
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn().mockResolvedValue(session),
+      });
+      const onTaskResult = vi.fn();
+      await bridge.start();
+      await bridge.newSession('/repo');
+      try {
+        await expect(
+          bridge.prompt('session-1', 'question', {
+            outputMode: 'per_task',
+            onTaskResult,
+          }),
+        ).resolves.toBe(
+          terminal === 'replaced' ? 'Complete result' : 'Retained result',
+        );
+        expect(onTaskResult).toHaveBeenCalledExactlyOnceWith({
+          partial: terminal === 'same',
+        });
+      } finally {
+        events.close();
+        bridge.stop();
+      }
+    },
+  );
+
   it('does not deliver captured task output after remote cancellation', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

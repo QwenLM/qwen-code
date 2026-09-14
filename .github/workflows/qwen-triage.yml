@@ -729,6 +729,9 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          # vars.QWEN_TRIAGE_EFFORT sets model.reasoningEffort in `settings`
+          # below (low|medium|high|xhigh|max; the CLI has no flag). Unset, it
+          # renders "", which the CLI ignores — the provider default.
           # Pin the action's unconditional global reinstall to the version
           # this job already runs. Left at `latest`, the action installs with
           # --prefer-offline and resolves the dist-tag from the runner's
@@ -788,6 +791,9 @@ jobs:
           # are also checked against the write_file path rules.
           settings: |-
             {
+              "model": {
+                "reasoningEffort": "${{ vars.QWEN_TRIAGE_EFFORT }}"
+              },
               "tools": {
                 "core": [
                   "run_shell_command",

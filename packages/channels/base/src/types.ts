@@ -259,6 +259,7 @@ export interface ChannelOutputSegmentContext {
   target: SessionTarget;
   sourceLabel?: string;
   messageId?: string;
+  partial?: boolean;
 }
 
 export type ChannelOutputSegmentEndReason =
@@ -300,6 +301,7 @@ export interface SanitizedToolCallEvent {
 /** 'dropped' = loop was disabled/deleted mid-run (not user-cancelled). */
 export type ChannelTaskCancellationReason =
   | 'cancel_command'
+  | 'runtime_cancelled'
   | 'clear'
   | 'steer'
   | 'timeout'

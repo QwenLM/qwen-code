@@ -610,6 +610,24 @@ export abstract class ChannelBase {
     await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
   }
 
+  protected getBackgroundResponseSourceLabel(
+    sessionId: string,
+  ): string | undefined {
+    const target = this.router.getTarget(sessionId);
+    const presentation = this.namedSessions?.presentation(sessionId);
+    if (
+      !target ||
+      target.channelName !== this.name ||
+      !this.router.isSessionLive(sessionId) ||
+      !presentation ||
+      presentation.status !== 'open' ||
+      !this.sameTaskOwner(target, presentation.target)
+    ) {
+      return undefined;
+    }
+    return this.createSourceLabel(presentation, target);
+  }
+
   protected async resolveBackgroundResponseDelivery(
     sessionId: string,
   ): Promise<BackgroundResponseDeliveryTarget | undefined> {
@@ -7219,10 +7237,16 @@ export abstract class ChannelBase {
       promptBridge.on('textChunk', onChunk);
       promptBridge.on('responseBoundary', onResponseBoundary);
 
+      let taskResultPartial = false;
       try {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
           ...(this.config.outputMode === 'per_task'
-            ? { outputMode: 'per_task' as const }
+            ? {
+                outputMode: 'per_task' as const,
+                onTaskResult: ({ partial }: { partial: boolean }) => {
+                  taskResultPartial = partial;
+                },
+              }
             : {}),
           ...(images.length > 0 ? { images } : {}),
           imageBase64,
@@ -7241,6 +7265,7 @@ export abstract class ChannelBase {
         if (!promptState.cancelled && response) {
           promptState.deliveryStarted = true;
           const segment = this.ensureOutputSegment(sessionId, promptState);
+          if (segment && taskResultPartial) segment.partial = true;
           await this.onResponseComplete(
             envelope.chatId,
             response,
@@ -7274,17 +7299,23 @@ export abstract class ChannelBase {
           });
         }
       } catch (err) {
+        const runtimeCancelled =
+          !promptState.deliveryStarted &&
+          err instanceof ChannelPromptCancelledError;
         // Mirror the try path: once delivery started, a late-settling cancel
         // must not suppress the failed emit (the /cancel handler declines to
         // emit its own terminal once deliveryStarted is set).
         if (!promptState.deliveryStarted) {
           await this.settleCancelRequested(promptState);
-          if (err instanceof ChannelPromptCancelledError) {
-            promptState.cancelled = true;
-            this.emitTaskCancellation(promptState, sessionId, 'cancel_command');
+          if (runtimeCancelled) {
+            this.emitTaskCancellation(
+              promptState,
+              sessionId,
+              'runtime_cancelled',
+            );
           }
         }
-        if (!promptState.cancelled) {
+        if (!promptState.cancelled && !runtimeCancelled) {
           releaseHeldChunks();
           const segment = this.closeOutputSegment(sessionId, promptState);
           void this.notifyOutputSegmentEnd(
@@ -7311,7 +7342,7 @@ export abstract class ChannelBase {
             `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
         }
-        if (promptState.cancelled) {
+        if (promptState.cancelled || runtimeCancelled) {
           return;
         }
         if (sourceLabel) {

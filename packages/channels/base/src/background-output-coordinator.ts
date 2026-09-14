@@ -31,6 +31,7 @@ export type BackgroundOutputDelivery = (
 export interface BackgroundOutputCoordinatorOptions {
   outputMode?: ChannelOutputMode;
   getTarget(sessionId: string): SessionTarget | undefined;
+  getSourceLabel?(sessionId: string): string | undefined;
   resolveDelivery(
     sessionId: string,
   ): Promise<BackgroundOutputTarget | undefined>;
@@ -56,7 +57,7 @@ interface BackgroundResponseAggregation {
   turnComplete?: boolean;
   completionPartial?: boolean;
   retiring?: boolean;
-  flushing?: boolean;
+  flushing?: Promise<void>;
   delivered?: boolean;
   /** Whether a result was already delivered after the turn completed. */
   completionDelivered?: boolean;
@@ -71,6 +72,7 @@ interface BackgroundResponseAggregation {
 interface PendingBackgroundResponseTerminal {
   sessionId: string;
   target: SessionTarget;
+  sourceLabel?: string;
   resolvers: number;
   held: Array<{
     text: string;
@@ -157,7 +159,13 @@ export class BackgroundOutputCoordinator {
       if (!parked.turnEnded) {
         this.detachedPendingBackgroundResponseTerminals.add(parked);
       }
-      parked = { sessionId, target, resolvers: 0, held: [] };
+      parked = {
+        sessionId,
+        target,
+        sourceLabel: this.options.getSourceLabel?.(sessionId),
+        resolvers: 0,
+        held: [],
+      };
       this.pendingBackgroundResponseTerminals.set(key, parked);
     }
     if (!current && text.trim().length === 0) {
@@ -194,7 +202,13 @@ export class BackgroundOutputCoordinator {
       return;
     }
     if (!current) {
-      parked ??= { sessionId, target, resolvers: 0, held: [] };
+      parked ??= {
+        sessionId,
+        target,
+        sourceLabel: this.options.getSourceLabel?.(sessionId),
+        resolvers: 0,
+        held: [],
+      };
       this.pendingBackgroundResponseTerminals.set(key, parked);
       this.holdPendingBackgroundResponse(parked, text, context);
       parked.resolvers++;
@@ -285,6 +299,7 @@ export class BackgroundOutputCoordinator {
           );
           return;
         }
+        parked.sourceLabel = delivery.sourceLabel;
         if (parked.retryTimer) {
           clearTimeout(parked.retryTimer);
           parked.retryTimer = undefined;
@@ -354,14 +369,28 @@ export class BackgroundOutputCoordinator {
     await this.completeBackgroundResponseAggregation(key, current);
   }
 
-  private async flushBackgroundResponseAggregation(
+  private flushBackgroundResponseAggregation(
+    key: string,
+    aggregation: BackgroundResponseAggregation,
+  ): Promise<void> {
+    if (aggregation.flushing) return Promise.resolve();
+    const flushing = this.flushBackgroundResponseAggregationInner(
+      key,
+      aggregation,
+    ).finally(() => {
+      if (aggregation.flushing === flushing) aggregation.flushing = undefined;
+    });
+    aggregation.flushing = flushing;
+    return flushing;
+  }
+
+  private async flushBackgroundResponseAggregationInner(
     key: string,
     aggregation: BackgroundResponseAggregation,
   ): Promise<void> {
     if (
-      (this.backgroundResponseAggregations.get(key) !== aggregation &&
-        !this.detachedBackgroundResponseAggregations.has(aggregation)) ||
-      aggregation.flushing
+      this.backgroundResponseAggregations.get(key) !== aggregation &&
+      !this.detachedBackgroundResponseAggregations.has(aggregation)
     ) {
       return;
     }
@@ -404,7 +433,6 @@ export class BackgroundOutputCoordinator {
       aggregation.delivery = delivery;
     }
 
-    aggregation.flushing = true;
     let error: unknown;
     let composedTurnComplete = false;
     try {
@@ -419,8 +447,6 @@ export class BackgroundOutputCoordinator {
       composedTurnComplete = result.turnComplete;
     } catch (caught) {
       error = caught;
-    } finally {
-      aggregation.flushing = false;
     }
 
     if (error === undefined) {
@@ -435,7 +461,7 @@ export class BackgroundOutputCoordinator {
         aggregation.completionDelivered = true;
       }
       if (aggregation.retiring || aggregation.turnComplete) {
-        await this.flushBackgroundResponseAggregation(key, aggregation);
+        await this.flushBackgroundResponseAggregationInner(key, aggregation);
       } else {
         // The turn is still open: keep the entry so its later segments re-join
         // this one (and stay partial), and re-arm the bounded wait
@@ -450,6 +476,7 @@ export class BackgroundOutputCoordinator {
       `background response delivery failed (attempt ${delivery.attempts}): ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
     );
     if (
+      aggregation.retiring ||
       delivery.attempts >= BACKGROUND_OUTPUT_MAX_RETRIES ||
       // A permanently rejected send cannot
       // succeed later; retrying it only spends the chat's send quota.
@@ -464,7 +491,7 @@ export class BackgroundOutputCoordinator {
           this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
         }
       } else if (aggregation.retiring || aggregation.turnComplete) {
-        await this.flushBackgroundResponseAggregation(key, aggregation);
+        await this.flushBackgroundResponseAggregationInner(key, aggregation);
       } else {
         this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
       }
@@ -526,7 +553,8 @@ export class BackgroundOutputCoordinator {
     this.detachedBackgroundResponseAggregations.delete(aggregation);
   }
 
-  drain(sessionId?: string): void {
+  drain(sessionId?: string): Promise<void> {
+    const flushes: Array<Promise<void>> = [];
     for (const [key, pending] of this.pendingBackgroundResponseTerminals) {
       if (sessionId !== undefined && pending.sessionId !== sessionId) continue;
       if (pending.retryTimer) clearTimeout(pending.retryTimer);
@@ -548,16 +576,12 @@ export class BackgroundOutputCoordinator {
         pending.held.length > 0 &&
         this.options.getTarget(pending.sessionId) === pending.target
       ) {
-        void this.flushDetachedBackgroundResponse(
-          '',
-          pending.sessionId,
-          pending,
-          { target: pending.target },
-        ).catch((error) => {
-          this.options.log(
-            `background response delivery failed during drain: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-          );
-        });
+        flushes.push(
+          this.flushDetachedBackgroundResponse('', pending.sessionId, pending, {
+            target: pending.target,
+            sourceLabel: pending.sourceLabel,
+          }),
+        );
       } else if (pending.held.length > 0) {
         this.options.log(
           `background response target unavailable during drain; ${pending.held.length} buffered segment(s) discarded\n`,
@@ -583,13 +607,21 @@ export class BackgroundOutputCoordinator {
       aggregation.retiring = true;
       aggregation.turnComplete = true;
       aggregation.completionPartial = true;
-      if (!aggregation.flushing) {
-        void this.flushBackgroundResponseAggregation(
-          aggregation.key,
-          aggregation,
-        );
-      }
+      flushes.push(
+        aggregation.flushing ??
+          this.flushBackgroundResponseAggregation(aggregation.key, aggregation),
+      );
     }
+    return Promise.allSettled(flushes).then((results) => {
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          const error = result.reason;
+          this.options.log(
+            `background response delivery failed during drain: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+          );
+        }
+      }
+    });
   }
 
   private createBackgroundResponseAggregation(
@@ -622,6 +654,9 @@ export class BackgroundOutputCoordinator {
     if (pending.retryTimer) return;
     pending.retryAttempts = (pending.retryAttempts ?? 0) + 1;
     if (pending.retryAttempts >= BACKGROUND_OUTPUT_MAX_RETRIES) {
+      this.options.log(
+        `background response target unresolved after ${pending.retryAttempts} attempts; ${pending.held.length} buffered segment(s) discarded\n`,
+      );
       pending.resolutionDropped = true;
       pending.turnEnded = pending.turnComplete === true;
       pending.held.length = 0;
