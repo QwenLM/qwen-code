@@ -90,6 +90,7 @@ function FootnoteCard({
   const content = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pinned = useRef(false);
+  const restoredFocus = useRef(false);
   const customIcon = useMemo(() => {
     try {
       const icon = iconResolver?.(
@@ -125,7 +126,7 @@ function FootnoteCard({
     if (pinned.current) return;
     timer.current = setTimeout(() => {
       if (
-        !trigger.current?.matches(':focus-within') &&
+        (restoredFocus.current || !trigger.current?.matches(':focus-within')) &&
         !content.current?.matches(':focus-within')
       ) {
         setOpen(false);
@@ -150,11 +151,15 @@ function FootnoteCard({
             timer.current = setTimeout(() => changeOpen(true), 150);
           }}
           onPointerLeave={leave}
-          onFocus={() => changeOpen(true)}
+          onFocus={() => {
+            restoredFocus.current = false;
+            changeOpen(true);
+          }}
           onBlur={leave}
           onKeyDown={(event) => {
             if (!['Enter', ' ', 'ArrowDown'].includes(event.key)) return;
             event.preventDefault();
+            restoredFocus.current = false;
             changeOpen(true);
             requestAnimationFrame(() => {
               const target = content.current?.querySelector<HTMLElement>(
@@ -194,7 +199,10 @@ function FootnoteCard({
         aria-describedby={undefined}
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
-        onEscapeKeyDown={() => trigger.current?.focus()}
+        onEscapeKeyDown={() => {
+          trigger.current?.focus({ preventScroll: true });
+          restoredFocus.current = true;
+        }}
         onPointerEnter={cancelTimer}
         onPointerLeave={leave}
         onFocusCapture={cancelTimer}

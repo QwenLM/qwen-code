@@ -119,6 +119,65 @@ describe('Markdown footnote cards', () => {
     }
   });
 
+  it('dismisses re-hovered cards after Escape while preserving keyboard focus', () => {
+    vi.useFakeTimers();
+    try {
+      render(<Markdown content={`Sources[^source-a].${definitions}`} />);
+      const trigger =
+        container.querySelector<HTMLButtonElement>(triggerSelector)!;
+      const hover = () => {
+        act(() => {
+          trigger.dispatchEvent(
+            new MouseEvent('pointerover', { bubbles: true }),
+          );
+          vi.advanceTimersByTime(150);
+        });
+      };
+      const leave = () => {
+        act(() => {
+          trigger.dispatchEvent(
+            new MouseEvent('pointerout', {
+              bubbles: true,
+              relatedTarget: document.body,
+            }),
+          );
+        });
+        act(() => vi.advanceTimersByTime(250));
+      };
+      hover();
+      leave();
+      expect(document.querySelector(cardSelector)).toBeNull();
+
+      act(() => trigger.focus());
+      act(() =>
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+          }),
+        ),
+      );
+      expect(document.querySelector(cardSelector)).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+      for (let i = 0; i < 2; i++) {
+        hover();
+        expect(document.querySelector(cardSelector)).not.toBeNull();
+        leave();
+        expect(document.querySelector(cardSelector)).toBeNull();
+        expect(document.activeElement).toBe(trigger);
+      }
+
+      act(() => trigger.blur());
+      act(() => trigger.focus());
+      hover();
+      leave();
+      expect(document.querySelector(cardSelector)).not.toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not merge across paragraphs, cells, or inline code', () => {
     render(
       <Markdown

@@ -234,6 +234,71 @@ it('returns keyboard focus to the trigger after activating a source', () => {
   expect(document.activeElement).toBe(trigger);
 });
 
+it.each(['Escape', 'source activation'])(
+  'dismisses re-hovered sources after %s without losing keyboard focus',
+  (action) => {
+    vi.useFakeTimers();
+    render(
+      <AssistantMessage
+        content="Report"
+        showFooterActions
+        turnSources={entries}
+        onSourceOpen={vi.fn()}
+      />,
+    );
+    const trigger = container.querySelector<HTMLButtonElement>(selector)!;
+    const hover = () =>
+      act(() => {
+        trigger.dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+      });
+    const leave = () => {
+      act(() =>
+        trigger.dispatchEvent(
+          new MouseEvent('pointerout', {
+            bubbles: true,
+            relatedTarget: document.body,
+          }),
+        ),
+      );
+      act(() => vi.advanceTimersByTime(250));
+    };
+    hover();
+    leave();
+    expect(document.querySelector(popup)).toBeNull();
+
+    act(() => trigger.focus());
+    const row = document.querySelector<HTMLButtonElement>(
+      '[aria-label="Open source Web source"]',
+    )!;
+    act(() => row.focus());
+    if (action === 'Escape') {
+      act(() =>
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        ),
+      );
+    } else {
+      click(row);
+    }
+    expect(document.querySelector(popup)).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    for (let i = 0; i < 2; i++) {
+      hover();
+      expect(document.querySelector(popup)).not.toBeNull();
+      leave();
+      expect(document.querySelector(popup)).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    }
+
+    act(() => trigger.blur());
+    act(() => trigger.focus());
+    hover();
+    leave();
+    expect(document.querySelector(popup)).not.toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  },
+);
+
 it('preserves focus when the host moves it into the source preview', () => {
   const target = document.createElement('button');
   document.body.append(target);

@@ -24,6 +24,7 @@ export function TurnSources({
   const trigger = useRef<HTMLButtonElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const pinned = useRef(false);
+  const restoredFocus = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const icon = useMemo(() => {
     try {
@@ -45,7 +46,7 @@ export function TurnSources({
     if (pinned.current) return;
     timer.current = setTimeout(() => {
       if (
-        !trigger.current?.matches(':focus-within') &&
+        (restoredFocus.current || !trigger.current?.matches(':focus-within')) &&
         !content.current?.matches(':focus-within')
       )
         setOpen(false);
@@ -72,7 +73,10 @@ export function TurnSources({
             if (event.pointerType !== 'touch') show();
           }}
           onPointerLeave={leave}
-          onFocus={show}
+          onFocus={() => {
+            restoredFocus.current = false;
+            show();
+          }}
           onBlur={leave}
           onClick={(event) => {
             event.preventDefault();
@@ -82,6 +86,7 @@ export function TurnSources({
           onKeyDown={(event) => {
             if (!['Enter', ' ', 'ArrowDown'].includes(event.key)) return;
             event.preventDefault();
+            restoredFocus.current = false;
             show();
             requestAnimationFrame(() =>
               content.current
@@ -115,7 +120,10 @@ export function TurnSources({
         aria-describedby={undefined}
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
-        onEscapeKeyDown={() => trigger.current?.focus()}
+        onEscapeKeyDown={() => {
+          trigger.current?.focus({ preventScroll: true });
+          restoredFocus.current = true;
+        }}
         onPointerEnter={cancel}
         onPointerLeave={leave}
         onFocusCapture={cancel}
@@ -138,8 +146,10 @@ export function TurnSources({
                       content.current?.contains(
                         getShadowAwareActiveElement(content.current),
                       )
-                    )
+                    ) {
                       trigger.current?.focus({ preventScroll: true });
+                      restoredFocus.current = true;
+                    }
                     pinned.current = false;
                     setOpen(false);
                   }
