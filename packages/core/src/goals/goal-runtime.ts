@@ -1318,12 +1318,17 @@ export function createGoalRuntime(
     attempt: CheckpointAttempt,
     checkpoint: NonNullable<GoalSnapshotV2['goal']>['evidenceCheckpoint'],
     stalled: boolean,
+    replay: boolean,
   ): Promise<void> => {
     if (!checkpoint) return;
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      // A restore replay is exempt on this arm as on the failure arm: one
+      // that comes back full on an overflowing window records what it ran
+      // into but keeps the streak it restored, so a session is not stopped at
+      // activation for a check no turn of its own earned.
       const checkpointStalls = stalled
-        ? (snapshot.goal.checkpointStalls ?? 0) + 1
+        ? (snapshot.goal.checkpointStalls ?? 0) + (replay ? 0 : 1)
         : 0;
       const health: CheckpointHealthUpdate = stalled
         ? FULL_CLAIM_LIST_FAILURE
@@ -1424,7 +1429,8 @@ export function createGoalRuntime(
       // checkpoint is kept: the cursor cannot move past records a later batch
       // failed to fold. Only the overflowing live check is split, because only
       // it can spend a stall: a window with room settles a failure as
-      // inconclusive and a restore replay is exempt, so splitting either would
+      // inconclusive and a restore replay spends none on either arm, so
+      // splitting either would
       // cost calls -- and, for the replay, hold up session activation -- without
       // changing an attempt the breaker counts.
       const batches = splitCheckpointEvidence(
@@ -1523,6 +1529,7 @@ export function createGoalRuntime(
         attempt,
         checkpoint!,
         isGoalCheckpointStalled(window, checkpoint!),
+        replay,
       );
     } catch (error) {
       if (attempt.controller.signal.aborted) return;

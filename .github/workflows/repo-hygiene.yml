@@ -431,6 +431,7 @@ jobs:
                   "write_file(**/tsconfig.*.json)",
                   "write_file(**/eslint.config.*)",
                   "write_file(**/eslint.legacy-filenames.*)",
+                  "write_file(**/eslint.legacy-core-barrel-imports.*)",
                   "write_file(**/vitest.config.*)",
                   "write_file(**/vite.config.*)",
                   "write_file(**/node_modules/**)"
