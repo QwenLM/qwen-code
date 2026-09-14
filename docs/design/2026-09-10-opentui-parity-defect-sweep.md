@@ -57,7 +57,7 @@ reconstruction.
 Each scenario runs twice, once per renderer, from the same bundle and the same
 boot arguments, and checkpoints are declared by the scenario rather than
 sampled on a timer, so both legs are captured at the same point in the script
-rather than at the same wall-clock moment. Twenty-one scenarios cover boot, a
+rather than at the same wall-clock moment. Twenty-two scenarios cover boot, a
 narrow terminal, typing and completion, `@` completion, mid-stream indicators,
 a tool run under auto-approval, a tool confirmation, the slash dialogs, the
 approval-mode cycle, the auto-mode boot notice, an error path, a resize, clear
@@ -65,18 +65,26 @@ and exit, a long hold that cycles the loading phrases, a to-do card, the
 question dialog on its own, the same dialog across three questions with a
 multi-select and a typed answer, the release of a parked confirmation when the
 approval mode changes, the approval of a gated server at startup, a tool call
-whose arguments are long enough to be capped, and a control arm that repeats
-that call with the arguments row switched off.
+whose arguments are long enough to be capped, a control arm that repeats that
+call with the arguments row switched off, and an answer long enough to overflow
+the terminal.
 
 Three properties of the comparison matter for reading the results.
 
-**Vertical anchoring is not comparable.** This renderer anchors the composer to
-the bottom of the terminal; ink places it under the conversation. Every
-absolute row index therefore differs by construction, and a diff that aligns on
-rows reports the anchoring choice on every capture instead of the defect under
-test. The comparison strips blank rows and diffs the two resulting sequences
-with a longest-common-subsequence pass, which is invariant to where the block
-sits and sensitive to what it contains.
+**Vertical anchoring is a property of the reconstruction, not of the two
+screens.** This renderer paints a window the size of the terminal, with the tail
+of the conversation above its input line. ink's live area occupies the same place
+in a real terminal, but the harness rebuilds ink's screen from what ink wrote, so
+the block lands wherever ink's own repaints put it: under a tall dialog that is
+rows 6 to 25 with the rest of the window blank, while this renderer sets the same
+dialog flush against the last row. Absolute row indices therefore still do not
+line up across the two legs in general, and a diff that aligns on rows would
+report the reconstruction instead of the defect under test. The comparison strips
+blank rows and diffs the two resulting sequences with a longest-common-subsequence
+pass, which is invariant to where the block sits and sensitive to what it
+contains. Where the content fills the window exactly the sequences do coincide,
+and the overflow arm of Decision 26 is compared row for row rather than as a
+sequence.
 
 **A divergence needs a control arm before it is attributed.** The OpenTUI leg
 runs under a different runtime than the ink leg, so any divergence is a
@@ -710,20 +718,97 @@ act on. The flag now comes from the first pending id, and a test asserts that a
 second pending call gets none — checked by removing the gate, which fails that
 test with both arrows on screen.
 
+## Decision 26 — the conversation gets the viewport, the chrome keeps its rows
+
+The app laid its own column out at the height of its content, so every row the
+conversation needed cost the input line a row of visibility. Reproduced at a
+hundred columns by thirty with a single answer of forty-nine lines: the banner
+held rows 1 to 6, the answer's opening line landed on row 15 and the fifteen
+below it filled the terminal to row 30, while the composer, the loading
+indicator and the footer were laid out past the last row and never painted. A
+second turn then proved the consequence rather than describing it — the script
+typed into the frame and nothing in it moved: the capture taken after that
+typing is byte-identical to the two before it, and the turn's marker never
+reached the byte stream, so the scenario's checkpoint timed out. The same
+mechanism clipped a dialog: at a hundred by forty the commands help page is
+thirty rows tall, and the frame that held it ended on its own footer hint with
+the closing border below the terminal.
+
+ink is immune to this without solving it. Its permanent output goes into the
+terminal's own scrollback and the terminal scrolls it; the live area holds only
+the current tail. The library has the equivalent — a screen mode that splits the
+terminal into a scrollback region and a fixed footer — and the reason it was set
+aside is in that mode's own geometry: the render tree is bounded to the footer
+band and the region above it is fed by captured stdout, so adopting it would
+mean rebuilding every transcript item outside of React. The accepted
+trade-offs of the migration itself had already recorded dropping that mode in
+favour of a single scroll region; the region was simply never connected. This
+closes a hole in the documented design rather than inventing a scheme.
+
+Four properties were needed, and none of them reads off the library's naming.
+The root column is bounded by the terminal height, since a flex child's height
+is otherwise its content's. Everything that flows — banner, transcript, the two
+notice rows — moved into a scroll region that grows and shrinks with what is
+left. That region carries a sticky bottom anchor, so it shows the tail and
+re-engages after each layout until the user scrolls away from the bottom; the
+anchor needs both of the library's two props, one of which is inert on its own,
+and that is also why an explicit scroll to the bottom on every update was
+rejected — it measures identically in a still frame and fights the wheel the
+moment the user touches it. And the rows below the region, every dialog along
+with the composer and the footer, are locked against shrinking: without that
+lock the layout distributes the region's content height across the whole column
+and squeezes the composer's three border rows into one row painted three times,
+because a text row cannot shrink below its own content and overwrites its
+neighbour instead of clipping. Each property was established on a synthetic
+fixture at the same size before it reached the app, and the shell tests now pin
+all four — verified by removing them one at a time, which fails one test each.
+
+On a machine the overflow arm is an exact match: all three of its frames agree
+with ink's row for row, from the answer's last line down to the footer's mode
+row, and differ in one character — the scrollbar indicator this renderer
+draws at the right edge. It stays on purpose. It is the only cue that anything
+above the fold is reachable, and the dialogs already carry one.
+
+The wheel was then measured on the same arm rather than assumed, since the
+decision to let the user scroll away from the anchor rests on it. Twenty injected
+notches moved the region back twenty rows, from the twenty-fifth of the answer's
+numbered lines back to the fifth, with the composer and the footer not moving a
+row; sixty notches the other way let the anchor take the tail again. That is the
+behaviour a per-frame scroll call would have destroyed and a keyboard binding has
+to match.
+
+Two divergences this document recorded as deliberate close as a side effect, and
+both are confirmed on frames. The banner is no longer persistent; it scrolls out
+of the region as the conversation grows, where ink commits it to scrollback. And
+a dialog now reflows the conversation: under the thirty-row help page the region
+shrank to ten rows, giving up the banner's first two, while the dialog itself
+fits entire. A region squeezed to no rows at all by a dialog as tall as the
+terminal is that same behaviour and not a new defect, since ink pushes those
+rows out of the viewport too. What is not here is scrolling the region with the
+keyboard.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
 
 - **Geometry, row content, row order, row count and glyph identity**, on a
-  reconstructed screen, for twenty-one scenarios at 100×40 and, for the narrow
+  reconstructed screen, for twenty-two scenarios at 100×40 and, for the narrow
   and resize scenarios, at 60×24. Both legs from one bundle and one set of
   boot arguments.
 - **Colour was not verified.** The reconstruction is text. Several rows are
   known to differ only in which theme token they use, and a styled capture
   exists that could settle it but was not read.
-- **The composer's one-row gap is source-grounded only.** Under bottom
-  anchoring it is not separable from the anchoring itself in a frame
-  comparison.
+- **The scrollbar costs the transcript no column.** Measured at a hundred
+  columns with two answer rows of 95 and 96 characters: this renderer fills 99
+  columns before it breaks a row where ink fills 98, so the one-column gap sits
+  in the same direction as the wrap divergence already on the list rather than
+  being a column the region takes away — and the row-length distribution over
+  the whole corpus is identical on both sides of this change.
+- **The composer's one-row gap is source-grounded, and frame-grounded only where
+  the two frames line up.** On the overflow arm of Decision 26 the blank row
+  above the composer is confirmed row for row against ink, because there the
+  content fills the window on both legs. Elsewhere it is not separable in a frame
+  comparison from where the reconstruction puts the block.
 - **The quit warning's queued segment is unit-tested only.** No scenario
   queues a message and then arms the warning. Nor does any scenario produce a
   durable queue at all: ink's badge survives only as a single transient of its
@@ -749,12 +834,13 @@ What was verified, and how far the verification reaches:
   which depends on how items happen to be grouped across renders rather than on
   any layout rule. Which of the two produces which row was not traced, and
   matching either would mean hardcoding a write-batching artifact.
-- **Two structural divergences are recorded and deliberately not fixed here.**
-  The banner is persistent in this renderer and scrolls out of the viewport in
-  ink, which is a product decision inherited from the restore work rather than
-  a defect introduced by it. The same overlay model has a second symptom: a
-  dialog here does not reflow the conversation, so rows that ink pushes out of
-  the viewport when a tall dialog opens stay visible underneath it here.
+- **Two structural divergences were recorded here as deliberate and have since
+  been closed.** The banner was persistent in this renderer while ink scrolls it
+  out of the viewport, and a dialog did not reflow the conversation, so rows that
+  ink pushes out when a tall dialog opens stayed visible underneath it here. Both
+  were inherited from the restore work rather than introduced by it. Decision 26
+  removed the overlay model they both came from, and its frames are the evidence
+  for the two closures.
 - **One divergence is intentional.** The update check reports a skipped check
   with its reason here, while ink reports a failed automatic update. Both
   renderers share the emission path; ink's subscriber is registered after the
@@ -844,6 +930,11 @@ What was verified, and how far the verification reaches:
 
 ## Follow-ups
 
+- The scroll region answers the mouse wheel and no key. What scrolls ink's
+  conversation is the terminal's own scrollback, and the alternate screen this
+  renderer takes over has none, so the page keys that work there reach nothing
+  here and a row above the fold comes back only by wheel. Binding those keys to
+  the region's own offset is its own change.
 - The `@` completion here asks only the file index. ink also completes
   sessions, MCP resources and extensions, and draws a category bar to switch
   between them. That is a feature gap rather than a parity defect and belongs

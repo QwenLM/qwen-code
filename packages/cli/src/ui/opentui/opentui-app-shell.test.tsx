@@ -102,16 +102,34 @@ const mocks = vi.hoisted(() => {
     ) => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
+      // Layout props are what the structural tests read, and the DOM nodes this
+      // mock maps to would drop them: keep the primitives as a JSON attribute.
+      const captured = JSON.stringify(
+        Object.fromEntries(
+          Object.entries(props ?? {}).filter(
+            ([, v]) =>
+              typeof v === 'string' ||
+              typeof v === 'number' ||
+              typeof v === 'boolean',
+          ),
+        ),
+      );
       if (type === 'box' || type === 'text') {
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          {
+            ...(key === undefined ? {} : { key }),
+            'data-p': captured,
+          },
           children,
         );
       }
       return React.createElement(
         type as React.ElementType,
-        config as Record<string, unknown>,
+        {
+          ...(config as Record<string, unknown>),
+          'data-p': captured,
+        },
         children,
       );
     };
@@ -1896,5 +1914,64 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
       onChanged(ApprovalMode.AUTO);
     });
     expect(mocks.state.emitAutoModeEntryNotices).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('OpenTuiApp transcript scroll region', () => {
+  const layoutOf = (
+    node: Element | null | undefined,
+  ): Record<string, unknown> =>
+    JSON.parse(node?.getAttribute('data-p') ?? '{}') as Record<string, unknown>;
+
+  const readLayout = () => {
+    const region = document.querySelector('scrollbox');
+    const column = region?.parentElement;
+    return { region, column, chrome: column?.lastElementChild };
+  };
+
+  const renderWithTranscript = async () => {
+    renderApp({
+      renderMain: () => <div data-testid="transcript">TRANSCRIPT-ROWS</div>,
+    });
+    await settle();
+  };
+
+  it('bounds the app column by the terminal and anchors the transcript region to its tail', async () => {
+    // ink needs no viewport maths: Static writes to the terminal's own
+    // scrollback, so the dynamic area always sits at the bottom row. Alt-screen
+    // OpenTUI has to say the same thing in layout. Without the bounded column a
+    // conversation longer than the terminal pushed the composer, the waiting row
+    // and the footer past the last row, where nothing repaints them.
+    await renderWithTranscript();
+    const { region, column, chrome } = readLayout();
+    expect(region).not.toBeNull();
+    expect(layoutOf(column)).toMatchObject({ height: 40 });
+    expect(layoutOf(region)).toMatchObject({
+      flexGrow: 1,
+      flexShrink: 1,
+      minHeight: 0,
+      stickyScroll: true,
+      stickyStart: 'bottom',
+    });
+    // The split is the fix: the conversation scrolls, the chrome does not.
+    expect(region?.textContent).toContain('TRANSCRIPT-ROWS');
+    expect(chrome?.textContent).toContain('input-prompt');
+    // And the chrome has to hold its own rows. Measured with the shrink unlocked,
+    // the scroll region took the composer's border rows and painted all three of
+    // them over one terminal row.
+    expect(layoutOf(chrome)).toMatchObject({ flexShrink: 0 });
+  });
+
+  it('keeps the dialog out of the scroll region', async () => {
+    await renderWithTranscript();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'theme' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/theme');
+    const { region, chrome } = readLayout();
+    expect(screen.getByText('dialog:theme')).toBeTruthy();
+    expect(region?.textContent).not.toContain('dialog:theme');
+    expect(chrome?.textContent).toContain('dialog:theme');
   });
 });

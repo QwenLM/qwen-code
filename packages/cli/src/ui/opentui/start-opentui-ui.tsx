@@ -238,7 +238,7 @@ function OpenTuiEntryApp({
   // --- seams handed to the shell ---------------------------------------------
   const renderMain = useCallback(
     () => (
-      <box flexDirection="column" flexGrow={1}>
+      <box flexDirection="column">
         {/* The transcript box carries two columns of margin on each side, so
             its content budget is 4 short of the terminal width. */}
         <OpenTuiTranscriptView
