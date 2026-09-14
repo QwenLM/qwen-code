@@ -42,6 +42,7 @@ import {
 import {
   buildInstallPlan,
   parseInsightMessage,
+  type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { isLogLevel, logger } from '../../utils/logger.js';
 import {
@@ -115,8 +116,6 @@ function isInsightCommand(command: string): boolean {
 }
 
 const WEB_SHELL_SESSION_STATE_PREFIX = 'qwenCode.webShellSessionId:';
-const WEB_SHELL_SESSION_SOURCE_STATE_PREFIX = 'qwenCode.webShellSessionSource:';
-type SessionHistorySource = 'vscode' | 'default';
 
 function getRestorableDaemonSessionId(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -135,13 +134,6 @@ function webShellSessionStateKey(workspaceCwd: string): string {
   return `${WEB_SHELL_SESSION_STATE_PREFIX}${workspaceCwd}`;
 }
 
-function webShellSessionSourceStateKey(
-  workspaceCwd: string,
-  sessionId: string,
-): string {
-  return `${WEB_SHELL_SESSION_SOURCE_STATE_PREFIX}${workspaceCwd}:${sessionId}`;
-}
-
 export class WebViewProvider {
   private panelManager: PanelManager;
   private messageHandler: MessageHandler;
@@ -156,7 +148,6 @@ export class WebViewProvider {
    * (a reload re-runs the bootstrap) while staying distinct per chat host.
    */
   private readonly daemonClientId = `vscode-${randomUUID()}`;
-  private webShellSessionHistorySource: SessionHistorySource = 'vscode';
   private disposables: vscode.Disposable[] = [];
   private agentInitialized = false; // Track if agent has been initialized
   private isSyncingToVSCode = false; // Guard to prevent config change loop
@@ -1496,8 +1487,26 @@ export class WebViewProvider {
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
-      const plan = buildInstallPlan(providerConfig, inputs);
+      const existingProviders = rollbackSnapshot?.['modelProviders'] as
+        | ModelProvidersConfig
+        | undefined;
+      const plan = buildInstallPlan(
+        providerConfig,
+        inputs,
+        existingProviders?.[inputs.protocol ?? providerConfig.protocol],
+      );
       await applyProviderInstallPlanToFile(plan);
+
+      if (!plan.modelSelection && !this.authState) {
+        this.sendMessageToWebView({
+          type: 'authState',
+          data: { authenticated: false },
+        });
+        void vscode.window.showInformationMessage(
+          'Service models saved. Configure a conversation model to start chatting.',
+        );
+        return;
+      }
 
       // Disconnect + reconnect
       if (this.agentInitialized) {
@@ -1966,46 +1975,15 @@ export class WebViewProvider {
         | {
             sessionId?: unknown;
             workspaceCwd?: unknown;
-            historySource?: unknown;
           }
         | undefined;
       const sessionId = getRestorableDaemonSessionId(data?.sessionId) ?? null;
-      this.webShellSessionHistorySource =
-        sessionId && data?.historySource === 'default' ? 'default' : 'vscode';
       this.messageHandler.setCurrentConversationId(sessionId);
       if (this.isViewHost && typeof data?.workspaceCwd === 'string') {
-        const sessionKey = webShellSessionStateKey(data.workspaceCwd);
-        const previousSessionId = getRestorableDaemonSessionId(
-          this.context.workspaceState.get<string>(sessionKey),
+        await this.context.workspaceState.update(
+          webShellSessionStateKey(data.workspaceCwd),
+          sessionId ?? undefined,
         );
-        if (sessionId) {
-          await this.context.workspaceState.update(
-            webShellSessionSourceStateKey(data.workspaceCwd, sessionId),
-            this.webShellSessionHistorySource,
-          );
-          await this.context.workspaceState.update(sessionKey, sessionId);
-        } else {
-          await this.context.workspaceState.update(sessionKey, undefined);
-        }
-        if (previousSessionId && previousSessionId !== sessionId) {
-          await this.context.workspaceState
-            .update(
-              webShellSessionSourceStateKey(
-                data.workspaceCwd,
-                previousSessionId,
-              ),
-              undefined,
-            )
-            .then(
-              () => undefined,
-              (error: unknown) => {
-                logger.warn(
-                  '[WebViewProvider] Failed to retire web-shell session source state:',
-                  error,
-                );
-              },
-            );
-        }
       }
       return true;
     }
@@ -2041,29 +2019,6 @@ export class WebViewProvider {
           ),
           canonicalWorkspaceCwd,
         );
-        // Pre-cutover companions recorded their conversations in globalState;
-        // their daemon transcripts carry no source attribution, so the
-        // vscode-scoped history query cannot surface them. Ship the legacy ids
-        // as an allowlist so the panel can claim its own sessions back from
-        // the daemon's unattributed catalog. Read-only: the store stays
-        // untouched for downgrade/recovery, and only ids cross the bridge —
-        // never the message snapshots.
-        let legacyConversationIds: string[] | undefined;
-        try {
-          const legacyIds = (await this.conversationStore.getAllConversations())
-            .map((conversation) =>
-              getRestorableDaemonSessionId(conversation.id),
-            )
-            .filter((id): id is string => id !== undefined);
-          if (legacyIds.length > 0) {
-            legacyConversationIds = legacyIds;
-          }
-        } catch (error) {
-          logger.warn(
-            '[WebViewProvider] Failed to read legacy conversations:',
-            error,
-          );
-        }
         const serializedSessionId = getRestorableDaemonSessionId(
           this.messageHandler.getCurrentConversationId(),
         );
@@ -2136,20 +2091,6 @@ export class WebViewProvider {
         const restoredSessionId = this.isViewHost
           ? viewSessionId
           : serializedSessionId;
-        const storedSessionSource =
-          this.isViewHost && restoredSessionId
-            ? this.context.workspaceState.get<unknown>(
-                webShellSessionSourceStateKey(
-                  canonicalWorkspaceCwd,
-                  restoredSessionId,
-                ),
-              )
-            : undefined;
-        const restoredSessionHistorySource = this.isViewHost
-          ? storedSessionSource === 'default'
-            ? 'default'
-            : 'vscode'
-          : this.webShellSessionHistorySource;
         await webview.postMessage({
           type: 'webShellBootstrap',
           data: {
@@ -2167,10 +2108,6 @@ export class WebViewProvider {
               : {}),
             hostKind: this.isViewHost ? 'view' : 'panel',
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
-            ...(restoredSessionId && restoredSessionHistorySource
-              ? { sessionHistorySource: restoredSessionHistorySource }
-              : {}),
-            ...(legacyConversationIds ? { legacyConversationIds } : {}),
           },
         });
         // A daemon that dies after a successful start — or that gets
