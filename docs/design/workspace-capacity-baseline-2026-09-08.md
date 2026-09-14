@@ -19,7 +19,7 @@
 - 使用现有 `VITEST_WORKER_ID` 开关关闭 primary 默认 ACP 预热，得到受控的零 child 基线；这不是默认启动行为。测试 preload 在所有场景隔离 home；仅资源诊断、churn 和边界场景（含 Git 变体）启用 `async_hooks` 计数。
 - “完整就绪”从 OS spawn 计时，到 `/health` 成功且完整 `/daemon/status` 报告全部注册 runtime；另核对实际 ACP mounts、trusted 数及 status issues。当前 bootstrap 状态不包含该 runtime 计数，且 registry 在启动 runtime 构建完成后创建。该判断不应直接推广为未来 dormant 模型的 readiness。轮询间隔 100 ms，未清空 OS 文件缓存。
 - 主内存矩阵顺序为 `1/25/256`、`256/1/25`、`25/256/1`，每档三轮。就绪后稳定 10 秒，再每 5 秒采样，共 5 次、20 秒窗口。表中 RSS/自然堆先取轮内中位数，再取三轮中位数；GC 后堆在自然采样后强制 GC 单独读取。
-- 内存/CPU 使用 loopback Node inspector 读取 `process.memoryUsage()` / `process.cpuUsage()`；所有对照同样带 inspector。CPU 为单逻辑核占比，100% 表示占满一个核。额外 idle 场景每档单轮，稳定 10 秒后连续采 80 秒，涵盖 [60 秒 session reaper](../../packages/cli/src/serve/types.ts#L337) 和 [session PR refresh 的首次扫描](../../packages/cli/src/serve/server/session-pr-refresh.ts#L42)（`FIRST_RUN_DELAY_MS`，daemon 启动后 60 秒触发一次，此后按 5 分钟周期），但未覆盖默认 10 分钟 cron keepalive 周期。CPU 窗口内不强制 GC。
+- 内存/CPU 使用 loopback Node inspector 读取 `process.memoryUsage()` / `process.cpuUsage()`；所有对照同样带 inspector。CPU 为单逻辑核占比，100% 表示占满一个核。额外 idle 场景每档单轮，稳定 10 秒后连续采 80 秒，涵盖 [60 秒 session reaper](../../packages/cli/src/serve/types.ts#L337)、[60 秒 ACP connection sweep](../../packages/cli/src/serve/acp-http/connection-registry.ts#L1495) 和 [session PR refresh 的首次扫描](../../packages/cli/src/serve/server/session-pr-refresh.ts#L42)（`FIRST_RUN_DELAY_MS`，daemon 启动后 60 秒触发一次，此后按 5 分钟周期），但未覆盖默认 10 分钟 cron keepalive 周期。CPU 窗口内不强制 GC。
 - 文件监听和 timer 用独立诊断轮的 Node `FSEVENTWRAP` / `Timeout` 活资源数，包含 unref 资源；FD 用 `lsof` 数字 descriptor 数。诊断轮开启 hooks 后的 RSS 不混入主内存表。资源计数只覆盖 daemon；child RSS 另用 OS 进程树读取，不代表 child 的 watcher 已被统计。
 - 所有性能场景串行，期间没有并行构建或其他本任务压力测试；这是普通开发机，不是独占性能实验室。
 
@@ -49,7 +49,7 @@ Git fixture 为每个目录执行隔离 Git 配置的 `git init` 和 empty commi
 
 源码确认，当前每个受信任的启动 workspace 会带来三个常驻 interval：session reaper 60 秒、cron keepalive 默认 10 分钟、ACP HTTP connection sweep 60 秒。总 Timeout 还包含全局及暂态 timer，不能把整个计数归因于 workspace。cron keepalive 即使无任务也会创建目录 watcher；Git reflog watcher 在首次 Git 查询时懒创建。FD 数和 watcher 数不是同一指标，空目录 FD 不增长不代表没有监听开销。
 
-相关代码： [session reaper](../../packages/acp-bridge/src/bridge.ts#L2730)、[keepalive interval](../../packages/cli/src/serve/scheduled-task-keepalive.ts#L430)、[cron watcher](../../packages/cli/src/serve/scheduled-task-keepalive.ts#L454)、[keepalive 默认周期](../../packages/cli/src/serve/server.ts#L738)、[ACP connection sweep](../../packages/cli/src/serve/acp-http/connection-registry.ts#L1495)、[启动 ACP mounts](../../packages/cli/src/serve/acp-http/index.ts#L1466)、[Git watcher](../../packages/core/src/utils/gitDirect.ts#L257)。
+相关代码： [session reaper](../../packages/acp-bridge/src/bridge.ts#L4103)、[keepalive interval](../../packages/cli/src/serve/scheduled-task-keepalive.ts#L430)、[cron watcher](../../packages/cli/src/serve/scheduled-task-keepalive.ts#L454)、[keepalive 默认周期](../../packages/cli/src/serve/server.ts#L738)、[ACP connection sweep](../../packages/cli/src/serve/acp-http/connection-registry.ts#L1495)、[启动 ACP mounts](../../packages/cli/src/serve/acp-http/index.ts#L1466)、[Git watcher](../../packages/core/src/utils/gitDirect.ts#L257)。
 
 ## 固定一个已初始化 ACP child
 
