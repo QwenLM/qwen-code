@@ -67,13 +67,17 @@ without interactive confirmations:
 YOLO mode auto-approves every tool call. Use it only for a trusted bot account
 and workspace.
 
-`senderPolicy` and `groupPolicy` default to `pairing` for a newly managed DWS channel. Approve a user or group with the code returned by the channel:
+`senderPolicy` and `groupPolicy` default to `pairing` for a newly managed DWS channel. `dmPolicy` defaults to `open`, including existing configurations that omit it. Approve a user or group with the code returned by the channel:
 
 ```bash
 qwen channel pairing approve dws-work CODE
 ```
 
 `senderPolicy` controls direct-message senders, document-notification authors, native-todo creators, and senders in `open` or `allowlist` groups. `groupPolicy` controls group conversations. An approved pairing group follows the shared channel behavior and authorizes its members; open and allowlist groups must also pass `senderPolicy`.
+
+Group and direct-message access can be configured independently. For a group-only channel, set `dmPolicy: "disabled"` and choose an enabled `groupPolicy`. For a direct-message-only channel, set `groupPolicy: "disabled"` and `dmPolicy: "open"`. Direct-message access also controls document notifications. Native todo polling remains controlled separately by `watchTodos`.
+
+Disabled chat sources are not subscribed to or polled, and their messages cannot start new tasks through late callbacks or persisted replay. Pending work and history cursors are retained: after re-enabling a source, the existing recovery mechanism may process older messages, including messages from the disabled interval. Sender authorization, group pairing, and mention requirements still apply.
 
 `groups` controls mention behavior. A concrete group ID overrides `"*"`. With `requireMention: true`, only an @ message wakes the channel. With `requireMention: false`, ordinary messages are also received after the group and sender policies pass.
 

@@ -68,7 +68,6 @@ import { QuestionCardController } from './question-card-controller.js';
 import { PermissionCardController } from './permission-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
-  BackgroundResponseContext,
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
@@ -2701,39 +2700,6 @@ export class DingtalkChannel extends ChannelBase {
   ): void {
     this.sessionMentionTargets.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
-  }
-
-  override async dispatchBackgroundResponse(
-    sessionId: string,
-    text: string,
-    context?: BackgroundResponseContext,
-  ): Promise<void> {
-    const target = this.router.getTarget(sessionId);
-    if (
-      !target ||
-      target.channelName !== this.name ||
-      (context !== undefined && context.kind !== 'agent') ||
-      !text.trim()
-    ) {
-      return super.dispatchBackgroundResponse(sessionId, text, context);
-    }
-    return super.dispatchBackgroundResponse(
-      sessionId,
-      this.formatBackgroundAgentResponse(text, context?.label),
-      context,
-    );
-  }
-
-  private formatBackgroundAgentResponse(text: string, label?: string): string {
-    return `## 🤖 Agent · ${this.formatBackgroundAgentLabel(label)}\n\n${text}`;
-  }
-
-  private formatBackgroundAgentLabel(label?: string): string {
-    const normalized = label
-      ?.replace(/\p{Cc}+/gu, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    return escapeDingTalkMarkdown(normalized || '后台任务');
   }
 
   protected override async sendResponseMessage(
