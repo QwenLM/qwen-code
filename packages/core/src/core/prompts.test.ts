@@ -326,6 +326,10 @@ describe('Core System Prompt (prompts.ts)', () => {
     vi.stubEnv('SANDBOX', 'bwrap');
     const prompt = getCoreSystemPrompt();
     expect(prompt).toContain('# Kernel Sandbox (bwrap)');
+    expect(prompt).toContain(
+      'repository Git metadata, including config and hooks, remains writable',
+    );
+    expect(prompt).toContain('later unconfined Git commands');
     expect(prompt).toContain("'Read-only file system' (EROFS)");
     expect(prompt).toContain(
       "'Permission denied' (EACCES) can instead come from ordinary file permissions",

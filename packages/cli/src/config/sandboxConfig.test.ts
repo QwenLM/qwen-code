@@ -35,6 +35,8 @@ vi.mock('../utils/package.js', () => ({
   })),
 }));
 
+const { getPackageJson } = await import('../utils/package.js');
+
 const { loadSandboxConfig, resetSandboxProbeCacheForTest } = await import(
   './sandboxConfig.js'
 );
@@ -118,6 +120,7 @@ describe('loadSandboxConfig sandbox command selection', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     delete process.env['SANDBOX'];
     delete process.env['QWEN_SANDBOX'];
   });
@@ -334,6 +337,53 @@ describe('loadSandboxConfig sandbox command selection', () => {
 
     expect(config?.command).toBe('sandbox-exec');
     expect(spawnSync).not.toHaveBeenCalled();
+  });
+
+  it.each(['bwrap', 'sandbox-exec'] as const)(
+    'keeps explicitly selected %s without a packaged image',
+    async (command) => {
+      installed(command);
+      spawnSync.mockReturnValue({ status: 0, stdout: '', stderr: '' });
+      vi.mocked(getPackageJson).mockResolvedValueOnce(undefined);
+      vi.stubEnv('QWEN_SANDBOX_IMAGE', undefined);
+      await expect(
+        loadSandboxConfig({}, { sandbox: command }),
+      ).resolves.toEqual({ command });
+      if (command === 'bwrap') {
+        expect(spawnSync).toHaveBeenCalledWith(
+          'bwrap',
+          [
+            '--ro-bind',
+            '/',
+            '/',
+            '--dev',
+            '/dev',
+            '--die-with-parent',
+            '--',
+            'true',
+          ],
+          expect.objectContaining({ timeout: 5000 }),
+        );
+      } else {
+        expect(spawnSync).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('reports an unusable bwrap functional probe and caches the failure', async () => {
+    installed('bwrap');
+    spawnSync.mockReturnValue({
+      status: 1,
+      stdout: '',
+      stderr: 'fixture mount refused',
+    });
+    await expect(loadSandboxConfig({}, { sandbox: 'bwrap' })).rejects.toThrow(
+      /installed but cannot run.*fixture mount refused/,
+    );
+    await expect(loadSandboxConfig({}, { sandbox: 'bwrap' })).rejects.toThrow(
+      /fixture mount refused/,
+    );
+    expect(spawnSync).toHaveBeenCalledTimes(1);
   });
 
   it('returns undefined when the sandbox is disabled', async () => {

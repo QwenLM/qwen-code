@@ -10,21 +10,23 @@
 各项参照点已于 2026-09-09 对照本仓库源码，以及三个同类 agent（Codex CLI、
 Claude Code、DeepSeek Harness）的公开源码逐一核实；见 § 证据。
 
-## Phase 0 —— 已核实的现状
+## Phase 0 —— 本 PR 实现前已核实的基线
 
-| 事实                                                                       | 证据                                                                                                  |
-| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| 沙箱是整个 CLI 的重新 exec（"hop"），从不是按命令粒度                      | `packages/cli/src/llm.tsx:573-727` 依次调用 `loadSandboxConfig` → `start_sandbox` → `process.exit(0)` |
-| 今天的后端只有 `docker`、`podman`、`sandbox-exec`                          | `packages/cli/src/config/sandboxConfig.ts:25-29`（`VALID_SANDBOX_COMMANDS`）                          |
-| 在 Linux 上，只有显式启用沙箱时容器后端才会成为候选                        | `sandboxConfig.ts:172-174` —— `sandbox === true` 才会 push docker/podman                              |
-| 仓库中不存在任何 landlock/seccomp/bwrap/unshare 隔离实现                   | 对 `packages/**/*.ts` 的 grep —— 只有无关的偶然命中                                                   |
-| macOS Seatbelt：6 个内置 `.sb` profile，`(allow default)` + 禁写白名单姿态 | `packages/cli/src/serve/sandbox-macos-*.sb`；`sandbox.ts:70-77`（`BUILTIN_SEATBELT_PROFILES`）        |
-| `start_sandbox` 的 sandbox-exec 分支是任何原地后端的结构模板               | `packages/cli/src/serve/sandbox.ts:229-389`                                                           |
-| `SANDBOX` 环境变量标记"已在沙箱内"，被 UI/警告/预连接逻辑消费              | `sandboxConfig.ts:116`、`headlessSafetyWarnings.ts:43`、`systemInfo.ts:141`                           |
-| `SandboxConfig.image` 目前对每个 command 都是必填                          | `packages/core/src/config/config.ts:776-779`、`sandboxConfig.ts:233`                                  |
-| 更新后重启的环境交接按 `command !== 'sandbox-exec'` 分支（容器 vs 非容器） | `packages/cli/src/llm.tsx:578-595`                                                                    |
-| vendor 平台二进制直接提交进 git，并通过 `files: [dist, vendor, ...]` 分发  | `packages/core/vendor/ripgrep/<arch>-<platform>/rg`、`git ls-files packages/core/vendor/`             |
-| 集成测试矩阵的默认值是 `QWEN_SANDBOX=false`                                | 根 `package.json:57,61,64`（`test:integration:*:sandbox:none`）                                       |
+本节记录 2026-09-09 调研时的实现前状态。下文 P0 描述已交付的 bwrap 改动；本节的基线陈述不代表当前分支。已修改代码的引用使用文件名与符号，避免沿用失效的行号。
+
+| 事实                                                                       | 证据                                                                                                                |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 沙箱是整个 CLI 的重新 exec（"hop"），从不是按命令粒度                      | `packages/cli/src/llm.tsx` (`main`, sandbox hop) 依次调用 `loadSandboxConfig` → `start_sandbox` → `process.exit(0)` |
+| 今天的后端只有 `docker`、`podman`、`sandbox-exec`                          | `packages/cli/src/config/sandboxConfig.ts` （`VALID_SANDBOX_COMMANDS`）                                             |
+| 在 Linux 上，只有显式启用沙箱时容器后端才会成为候选                        | `sandboxConfig.ts` (`getSandboxCommand`) —— `sandbox === true` 才会 push docker/podman                              |
+| 仓库中不存在任何 landlock/seccomp/bwrap/unshare 隔离实现                   | 对 `packages/**/*.ts` 的 grep —— 只有无关的偶然命中                                                                 |
+| macOS Seatbelt：6 个内置 `.sb` profile，`(allow default)` + 禁写白名单姿态 | `packages/cli/src/serve/sandbox-macos-*.sb`；`sandbox.ts` （`BUILTIN_SEATBELT_PROFILES`）                           |
+| `start_sandbox` 的 sandbox-exec 分支是任何原地后端的结构模板               | `packages/cli/src/serve/sandbox.ts` (`start_sandbox`, Seatbelt)                                                     |
+| `SANDBOX` 环境变量标记"已在沙箱内"，被 UI/警告/预连接逻辑消费              | `sandboxConfig.ts` (`getSandboxCommand`)、`headlessSafetyWarnings.ts:43`、`systemInfo.ts:141`                       |
+| `SandboxConfig.image` 目前对每个 command 都是必填                          | `packages/core/src/config/config.ts` (`SandboxConfig`)、`sandboxConfig.ts` (`loadSandboxConfig`)                    |
+| 更新后重启的环境交接按 `command !== 'sandbox-exec'` 分支（容器 vs 非容器） | `packages/cli/src/llm.tsx` (`main`, sandbox handoff)                                                                |
+| vendor 平台二进制直接提交进 git，并通过 `files: [dist, vendor, ...]` 分发  | `packages/core/vendor/ripgrep/<arch>-<platform>/rg`、`git ls-files packages/core/vendor/`                           |
+| 集成测试矩阵的默认值是 `QWEN_SANDBOX=false`                                | 根 `package.json:57,61,64`（`test:integration:*:sandbox:none`）                                                     |
 
 对照项事实（对照 Codex CLI 源码、dsh 源码与 Claude Code 二进制证据核实；细节见
 § 证据）：
@@ -107,7 +109,7 @@ network 命名空间；这里只用到 network 那一个——D6 解释为什么
 粒度约束才能买到的东西，所以 v1 只做缓解而非解决——而这个缓解是对既有机制的
 一次改动：
 
-`core/src/core/prompts.ts:406-427` 已经按 `process.env['SANDBOX']` 给系统提示
+`core/src/core/prompts.ts` (`getCoreSystemPrompt`) 已经按 `process.env['SANDBOX']` 给系统提示
 分支：`'sandbox-exec'` 给出 "# macOS Seatbelt" 段落，其他任何非空值给出
 "# Sandbox" 段落，未设置则给出 "# Outside of Sandbox"。两个后果：
 
@@ -189,7 +191,7 @@ profile 词汇表。
 递归的 `--ro-bind / /` 已经把主机 `/proc` 以只读方式带进来了——实测有 133 个可见
 的数字条目，这已是 Node 所需的全部——而一个新的 procfs 实例会以可读写挂载。
 
-**理由。** qwen-code 通过 PID 仲裁跨进程所有权，目前有三处：
+**理由。** qwen-code 通过 PID 仲裁跨进程所有权。以下只是示例，并非读取方的完整清单：
 
 - `cli/src/serve/conversations/conversation-runtime-ownership.ts:44-65` —— owner
   记录带 `pid`，而 `processIsAlive()` 把任何非 `ESRCH` 的结果都视为存活；
@@ -198,7 +200,9 @@ profile 词汇表。
   `status.hostname !== os.hostname()` 守卫，对另一台机器写下的记录保守地回答
   `active`。
 
-这些记录位于 `~/.qwen` 之下——那是一个可写根，因此跨越约束边界共享。
+其他读取方还包括 `packages/core/src/services/session-writer-lease.ts`（`isProcessAlive`）与 `packages/qwen-live/src/host/discovery.ts`（`processIsAlive`）。未来引入 PID 命名空间时，必须覆盖共享所有权记录的所有写入方和读取方，包括本清单之后新增的读取方。
+
+这些所有权记录可能通过可写的 Qwen 状态目录跨越约束边界共享。
 
 在私有 PID 命名空间内，受约束 CLI 自己的 PID 是命名空间局部的（1、2、3……）。
 把这个数字写进共享状态不只是没用，而是**主动错误**：主机 PID 2 是 `kthreadd`，
@@ -228,8 +232,8 @@ _存活_。结果是一个永远不会显示为已死的 owner，于是交接与
 用户零行为变化）。**P3** 把未指名情况下的 Linux 候选顺序翻成
 `bwrap` → `landlock` → `docker` → `podman`，并（在自己的 PR + 兼容性数据支撑下）
 让 Linux 沙箱像 macOS 上的 `sandbox-exec` 那样被自动检测
-（`sandboxConfig.ts:169-171`），以 `QWEN_SANDBOX=false` 作为逃生舱——这是既有的
-写法（`getSandboxCommand()` 在 `sandboxConfig.ts:126-132` 接受 `0` / `false` /
+（`sandboxConfig.ts` (`getSandboxCommand`)），以 `QWEN_SANDBOX=false` 作为逃生舱——这是既有的
+写法（`getSandboxCommand()` 在 `sandboxConfig.ts` (`getSandboxCommand`) 接受 `0` / `false` /
 空值；像 `off` 这种臆造的值会被当成 command 名而被拒绝）。
 
 **理由。** 在显式 `true` 下优先选内核后端，会改变 `--sandbox` 对 docker 用户的
@@ -256,11 +260,11 @@ _存活_。结果是一个永远不会显示为已死的 owner，于是交接与
 ### `start_sandbox` 的 bwrap 分支
 
 在 `packages/cli/src/serve/sandbox.ts` 中新增分支，结构上镜像 seatbelt 分支
-（`sandbox.ts:229-389`）：
+（`sandbox.ts` (`start_sandbox`, Seatbelt)）：
 
 1. **可写根** —— 与 Seatbelt permissive profile 授予的集合相同，每一个都经过
    `realpathSync`（内核比较的是解析后的路径；seatbelt 分支出于同一原因已经做了
-   规范化，`sandbox.ts:252-259`）：
+   规范化，`sandbox.ts` (`start_sandbox`, `TARGET_DIR`)）：
 
    | 根              | 值                                                                                                                                       |
    | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -298,7 +302,7 @@ _存活_。结果是一个永远不会显示为已死的 owner，于是交接与
    提供。
 
    容器分支以只读方式挂载的那些路径—— `~/.config/gcloud` 与
-   `GOOGLE_APPLICATION_CREDENTIALS` 指向的文件（`sandbox.ts:539-557`）——在这里
+   `GOOGLE_APPLICATION_CREDENTIALS` 指向的文件（`sandbox.ts` (`start_sandbox`, `GOOGLE_APPLICATION_CREDENTIALS`)）——在这里
    不需要对应物：`--ro-bind / /` 已经让它们可读，而它们在容器里本来也从不可写。
 
    Seatbelt profile 还额外授予 `/dev/stdout`、`/dev/stderr`、`/dev/null`、
@@ -341,8 +345,8 @@ _存活_。结果是一个永远不会显示为已死的 owner，于是交接与
      链接。
 
 4. **代理** —— proxied 模式按 seatbelt 分支的方式启动主机侧代理
-   （`sandbox.ts:321-375`：detached 方式 spawn、安装会杀掉进程组的
-   exit/SIGINT/SIGTERM 处理器、等待 `localhost:8877` 响应），并把
+   （`sandbox.ts` (`start_sandbox`, Seatbelt proxy)：detached 方式 spawn、安装会杀掉进程组的
+   exit/SIGINT/SIGTERM 处理器）。共用的 bwrap 执行器等待配置的代理 URL（默认 `http://localhost:8877`）响应，最多 30 秒，并把
    `HTTP(S)_PROXY` 注入**到 spawn 的 env 上**。
 
    驱动这个生命周期的两个键——`QWEN_SANDBOX_PROXY_COMMAND` 与
@@ -352,24 +356,21 @@ _存活_。结果是一个永远不会显示为已死的 owner，于是交接与
    `.env`，绝不能来自仓库内容。
 
    seatbelt 那段代码刻意*没有*被原样复用。它构造一个 `sandboxEnv` 对象、把代理
-   变量写进去（`sandbox.ts:325-341`），然后从不把它传给 `spawn`——那次调用用的是
-   `{ ...process.env, ...childEnv }`（`:376-388`）。因此在 macOS 上代理变量被
+   变量写进去（`sandbox.ts` (`start_sandbox`, Seatbelt `sandboxEnv`)），然后从不把它传给 `spawn`——那次调用用的是
+   `{ ...process.env, ...childEnv }`（`start_sandbox`）。因此在 macOS 上代理变量被
    算出来又被丢掉，于是 `QWEN_SANDBOX_PROXY_COMMAND` 启动了一个受约束进程根本
    不知道其存在的代理。`noUnusedLocals` 抓不到它，因为下标赋值算作一次使用。
 
    那是既有缺陷，不是本阶段引入的，而修它会改变 macOS 行为——不在本处范围内
-   （§ 非目标：不改动 Seatbelt 路径），改为记录在 § 待决问题 中。bwrap 分支复现
-   了代理的生命周期，但把变量通过子进程环境传下去，所以 `proxied` 在新后端上
-   是真的可用。抽出一个共享 helper 是 seatbelt 那个 bug 修好之后的跟进项——那时
-   两个调用方才终于想要完全相同的行为。
+   （§ 非目标：不改动 Seatbelt 路径），改为记录在 § 待决问题 中。bwrap 分支与 sandbox 子命令共享 `runBwrap` 和 `buildBwrapEnv`，通过子进程环境传递代理变量。与 Seatbelt 共享执行器仍留待其环境变量缺陷修复之后。
 
 5. **spawn 契约** —— `stdio: 'inherit'`，spawn 前 `process.stdin.pause()` /
    close 时 `resume()`，以子进程退出码 resolve ——与 seatbelt 分支一致
-   （`sandbox.ts:376-388`）。
+   （`sandbox.ts` (`start_sandbox`, Seatbelt spawn)）。
 
 ### `llm.tsx` 的交接
 
-`llm.tsx:578-595` 按 `sandboxConfig.command !== 'sandbox-exec'` 分支来决定更新后
+`llm.tsx` (`main`, sandbox handoff) 按 `sandboxConfig.command !== 'sandbox-exec'` 分支来决定更新后
 重启的环境交接（容器 vs 非容器）。把非容器那一侧放宽：`bwrap`/`landlock` 必须走
 sandbox-exec 分支（它们是原地 hop，不是镜像——没有
 `CUSTOM_SANDBOX_IMAGE_ENV_VAR`）。
@@ -385,7 +386,7 @@ sandbox-exec 分支（它们是原地 hop，不是镜像——没有
 
 ### 模型可见的边界
 
-`packages/core/src/core/prompts.ts:406-427`：为原地内核后端加一个分支。不加的话
+`packages/core/src/core/prompts.ts` (`getCoreSystemPrompt`)：为原地内核后端加一个分支。不加的话
 `SANDBOX=bwrap` 会落进通用分支，那会告诉模型它跑"在一个沙箱容器里"，并教它去找
 `Operation not permitted`——对 bwrap 的拒绝而言这是错的形状。新分支点明后端、
 说明可写根之外主机根是只读的、给出 `Read-only file system`（`EROFS`）拒绝，
@@ -404,7 +405,7 @@ sandbox-exec 分支（它们是原地 hop，不是镜像——没有
 新增 `packages/cli/src/commands/sandbox.ts`（+ 测试），与既有 command 模块并列
 注册。之所以拉进 P0 而不是延后：§ 已核实的兼容性影响 里的每一项影响，在任务
 中途出错之前都是不可见的，所以后端和证明它能工作的手段必须一起交付——下面的
-CI 通道与 E2E 表也都要求这一点。
+计划中的 CI 通道与 E2E 表也都要求这一点。本 PR 尚未实现 Linux bwrap CI 通道。
 
 - `qwen sandbox` —— 打印解析出的后端、探测结果、强制等级、可写根（含解析出的
   git 目录）与网络模式。
@@ -412,15 +413,15 @@ CI 通道与 E2E 表也都要求这一点。
   `codex sandbox`）。
 - `qwen sandbox --verify` —— 行为电池：工作区外的写入必须失败；工作区内的写入
   必须成功；主机 `/proc` 必须保持可见
-  （D6 的回归守卫）；网络在 `closed` 下必须不可达、在 `open`/`proxied` 下必须
-  可达。
+  （D6 的回归守卫）；网络检查只查看接口可见性：`closed` 必须仅有 `lo`，`open`/`proxied` 必须存在非 loopback 接口。这不验证互联网可达性、代理可用性或强制经由代理的路由；这些需要单独的集成检查。
 
 ### 审查跟进契约
 
 - 在启动 bwrap 前，拒绝规范化后等于 HOME 或其任意祖先（包括 `/`）的可写根。此规则也适用于符号链接和额外工作区目录，而额外工作区目录适用更严格的下限：任何解析到 home 目录内部的条目都会被拒绝，因为工作区范围的 settings（`context.includeDirectories`）是仓库内容，不能让它挑选 `~/.ssh` 或带有 `.git` 的兄弟检出这类 home 内部根。已被内建根覆盖的条目（工作区本身、缓存/运行时目录）仍然保留。应使用范围更小的工作区或缓存路径，不能静默授予整个 HOME 或主机文件系统。
-- 使用共享 `gitEnv()` 清理器派生 Git 根，防止环境中的仓库选择变量重定向探测。仅真实 `.git` 目录，或在 common 仓库下登记且反向指针匹配的 linked worktree，才能自动获得 Git 授权。符号链接元数据、伪造 gitfile、独立 Git 目录及没有该登记的 submodule gitfile 均不贡献根；用户必须显式添加所需的外部元数据目录。合法 linked worktree 继续保留 common Git 目录授权。
+- 使用共享 `gitEnv()` 清理器派生 Git 根，防止环境中的仓库选择变量重定向探测。仅真实 `.git` 目录，或在 common 仓库下登记且反向指针匹配的 linked worktree，才能自动获得 Git 授权。符号链接元数据、伪造 gitfile、独立 Git 目录及没有该登记的 submodule gitfile 均不贡献根；用户必须显式添加所需的外部元数据目录。合法 linked worktree 继续保留整个 common Git 目录授权。如果仓库根为 HOME、工作区是其子目录，也继续授予该仓库的 `.git`。这些布局有显式测试；检查报告与模型提示明确说明获授的 config/hooks 能影响之后未受约束的 Git 命令。这是保留的权限策略，并非缩小后的元数据白名单。
 - 检查命令传递显式 sandbox/image 参数；bare 模式跳过 settings 和 `.env` 加载，safe 模式忽略 settings。纯检查在无后端时可以成功退出；无法实际执行的验证或命令请求返回非零，包括已经处于沙箱内的情况。带自身参数的命令必须放在 `--` 后；之前的未知参数在解析时失败。
 - 透传命令直接继承 stdin、stdout、stderr。此模式的检查文本写入 stderr，从而保留大输出及管道中的结构化输出。验证电池继续捕获输出供各项断言使用。
+- 实际命令执行与正常 bwrap 启动共享执行器及子进程环境：设置运行时标记、移除 display 变量；proxied 模式启动配置的代理、统一代理环境变量、等待就绪，并在完成或失败时停止代理。代理启动或就绪检查失败时不启动命令；命令启动后代理退出会终止命令并报告失败。纯检查不启动这两个进程；捕获输出的验证使用相同环境策略并设置 `LC_ALL=C`，其中的接口检查不启动或验证代理。
 - bwrap 再执行将 Node 启动参数追加到继承参数后，保留子进程环境的优先级，并在 managed 启动标记要求时恢复 Electron 的 Node 模式。
 - `full` 描述文件系统挂载约束，不代表与主机服务隔离。检查报告与提示词说明：即使 closed 网络模式下主机 Unix socket 仍可访问，proxied 模式也不强制所有连接经过代理。可写 Git 配置/hooks 和 Qwen settings 能影响后续无约束启动；这一剩余能力随既有授权保留。收窄仓库元数据权限仍需独立决策；bwrap 默认不再授予全局 `~/.gitconfig` 写权限。
 - 回归验收：拒绝过宽根及其符号链接；环境 Git 选择变量和伪造 gitfile 无法授权无关仓库；未实际执行的请求返回非零；命令参数要么完整保留、要么被拒绝；透传输出不被捕获；继承的 Node 参数与 managed Electron 模式到达子进程。Linux 挂载约束及 procfs 边缘场景需要 Linux 主机，不能用 mock spawn 测试宣称已验证。
@@ -511,7 +512,7 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
 
 1. Linux 上未指名的 `--sandbox`/`QWEN_SANDBOX=true`：候选顺序变为
    `bwrap` → `landlock` → `docker` → `podman`。
-2. Linux 上自动检测沙箱（镜像 macOS 在 `sandboxConfig.ts:169-171` 的
+2. Linux 上自动检测沙箱（镜像 macOS 在 `sandboxConfig.ts` (`getSandboxCommand`) 的
    `sandbox-exec` 自动候选），前提是评审 § 已核实的兼容性影响 并有现场数据支撑
    ——不只是机制清单，还要有真实工作流命中每一行的频率。
    `QWEN_SANDBOX=false` 是文档化的逃生舱。
@@ -610,30 +611,19 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
 
 ## 测试计划
 
-按阶段拆分，因为各阶段作为独立 PR 交付。某个阶段的测试与它同批写就——下面没有
-任何一项被推到更后的阶段。
+以下分别列出已交付的 P0 单元测试与计划中的集成工作。P1 及后续阶段仍作为独立 PR 的计划。
 
-**P0 —— 单元测试（`packages/cli`，vitest）**
+**P0 —— 已交付的单元测试（vitest）**
 
-- `sandboxConfig.test.ts`：`bwrap` 按名被接受；非法名仍然 `FatalSandboxError`；
-  按 command 的探测 argv 选择；bwrap 功能性探测失败会以"已安装但无法运行"呈现；
-  探测缓存行为不变。
-- `sandbox.test.ts`：bwrap argv 构造 —— 根的顺序、嵌套根去重、缺失的根被跳过、
-  git dir / common dir 只在落到 `TARGET_DIR` 之外时加入且非仓库 cwd 下不加入、
-  任何配置下都没有 `--unshare-pid` / `--proc` / `--tmpfs`、`--unshare-net` 只在
-  closed 模式出现、子进程环境携带 `SANDBOX` / `SANDBOX_ENFORCEMENT`、proxied
-  模式下代理变量确实出现在子进程环境上（即避开的那个 seatbelt bug），以及三个
-  display 变量被删除。
-- `prompts.test.ts`：新的 `SANDBOX=bwrap` 分支被选中并点出 `EROFS`；既有的
-  `sandbox-exec` 与容器分支保持当前文本（快照）。
-- `sandbox.command.test.ts`：`qwen sandbox` 的输出形状；`--verify` 会把一个失败
-  用例报告为失败（无法失败的电池什么也证明不了）。
+- `packages/cli/src/config/sandboxConfig.test.ts`：无镜像时显式选择 bwrap、功能探测的 argv 与超时、探测失败与缓存、非法名称，以及 Seatbelt 不需要镜像的路径。
+- `packages/cli/src/serve/sandbox-bwrap.test.ts`：bind 的源/目标及顺序、规范化根去重与拒绝、Git 来源与包含关系、已登记 worktree 的反向指针、以 HOME 为根的 dotfiles 仓库、不出现 `--unshare-all` / `--unshare-pid` / `--proc` / `--tmpfs`、网络模式参数，以及正常启动的子进程环境与代理清理。Git fixture 同时隔离环境仓库选择变量和用户/系统 Git 配置；文件系统 fixture 将 HOME、临时存储、工作区彼此分离。
+- `packages/core/src/core/prompts.test.ts`：bwrap 文案涵盖 `EROFS`、保留的 Git 元数据能力与主机服务边界；其他后端保持预期文本。
+- `packages/cli/src/commands/sandbox.test.ts`：检查输出、最终 positional 与 `--` 命令的顺序、执行失败，以及缺少 loopback 等验证谓词的失败场景。
+- `packages/cli/src/commands/sandbox-command-runtime.test.ts`：真实 handler/执行器配合 mock 进程，验证标记、display 移除、继承的 stdio/argv/退出码、代理变量统一/启动/就绪/失败/清理，以及只诊断的检查模式。这些测试不证明 Linux 挂载约束。
 
-**P0 —— 集成测试**
+**P0 —— 集成跟进，本 PR 未交付**
 
-- `test:integration:sandbox:bwrap` 通道；GitHub workflow 在 ubuntu runner 上安装
-  `bubblewrap`。Fake-LLM-server 测试在约束内原样运行（工作区写入 + 到 fake
-  server 的网络）。
+本 PR 不包含计划中的 `test:integration:sandbox:bwrap` 脚本及在 Ubuntu workflow 中安装 `bubblewrap` 的配置。后续应在真实约束内运行 fake-LLM-server 测试（工作区写入、到 fake server 的连接）。§ 证据中带日期的 Linux 手动观测不能替代该 CI 通道；本地 mock 测试也不增加新的 Linux 约束证据。
 
 **P1 —— 单元测试**
 
@@ -719,8 +709,8 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
    dir，因此在 `--sandbox sandbox-exec` 下，worktree 检出里的 `git commit` 今天
    本就应该失败。若能复现，那是一个独立的 bug 修复（一个 profile 参数，不是设计
    变更），不应被打包进本项工作。
-7. **Seatbelt 的代理环境丢弃**：`sandbox.ts:325-341` 往一个 `sandboxEnv` 对象里
-   填了代理变量，而 `:376-388` 从不把它传给 `spawn`，因此 macOS 上的
+7. **Seatbelt 的代理环境丢弃**：`sandbox.ts` (`start_sandbox`, Seatbelt `sandboxEnv`) 往一个 `sandboxEnv` 对象里
+   填了代理变量，而 `start_sandbox` 从不把它传给 `spawn`，因此 macOS 上的
    `QWEN_SANDBOX_PROXY_COMMAND` 启动了一个受约束进程看不见的代理。这同样是独立
    修复 —— 它改变 macOS 行为、需要自己的回归测试，所以刻意不在此处打包。
 8. **`/proc` 下的可选缓存目录创建**：验证 VM 曾报告 Node 递归创建 `/proc/nope/cache` 时挂起。缓存路径现在只执行一次非递归 `mkdir`：不创建缺失的父目录，并丢弃该可选根；正常缺失的 `~/.cache` 末级目录仍会创建。本次跟进在 macOS 上检查了普通缺失父目录与首次创建场景；Linux procfs 场景仍需真实 Linux 验证。必需的 Qwen 与运行时目录创建保持原样。
@@ -741,10 +731,10 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
   `Unable to create '…/index.lock': Read-only file system` 失败，而一旦把 git dir
   与 common dir 也绑定进来就成功；`/dev/snd` 在内部被遮蔽而在主机上存在；
   `--unshare-net` 阻断出站解析。
-- 本仓库：Phase 0 中的 file:line 引用，均于 2026-09-09 在本分支核实。D2、D5、D6
+- 本仓库：Phase 0 记录 2026-09-09 的实现前调研。已修改代码的引用现使用当前文件/符号；下文保留的行号用于定位历史调研，不代表重新核实了当前分支。D2、D5、D6
   与 § 已核实的兼容性影响 背后的影响面排查于 2026-09-10 补充，覆盖
   `cli/src/serve/conversations/conversation-runtime-ownership.ts:44-65`、
-  `cli/src/serve/live/discovery.ts:147`、`core/src/core/prompts.ts:406-427`、
+  `cli/src/serve/live/discovery.ts:147`、`core/src/core/prompts.ts` (`getCoreSystemPrompt`)、
   `core/src/utils/browser.ts:25-70`、`core/src/utils/secure-browser-launcher.ts:151-181`、
   `core/src/ide/ide-client.ts:644-678`、`core/src/config/storage.ts:160-241`、
   `core/src/services/gitWorktreeService.ts:419`、

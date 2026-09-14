@@ -100,6 +100,8 @@ export const sandboxCommand: CommandModule = {
 
     const {
       buildBwrapArgs,
+      buildBwrapEnv,
+      runBwrap,
       resolveBwrapWritableRoots,
       resolveSandboxNetworkMode,
     } = sandboxModule;
@@ -221,6 +223,9 @@ export const sandboxCommand: CommandModule = {
     writeReportLine(
       'Boundary: filesystem mounts; host Unix sockets remain reachable',
     );
+    writeReportLine(
+      'Git metadata: granted repository config and hooks remain writable and can affect later unconfined Git commands.',
+    );
     writeReportLine(`Network: ${networkMode}`);
     if (networkMode === 'proxied') {
       writeReportLine(
@@ -258,9 +263,11 @@ export const sandboxCommand: CommandModule = {
         // under a non-English LC_ALL/LANG the EROFS message comes back
         // localized and a holding confinement would report FAIL. The C
         // locale pins the dialect for every message-based case at once.
-        // Only the probes get this; the requested-command spawn below runs
-        // the user's own argv and inherits the environment untouched.
-        { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } },
+        // Only the probes get this; requested commands keep the user's locale.
+        {
+          encoding: 'utf8',
+          env: { ...buildBwrapEnv(networkMode), LC_ALL: 'C' },
+        },
       );
       const stdout = result.stdout ?? '';
       return {
@@ -271,21 +278,20 @@ export const sandboxCommand: CommandModule = {
     };
 
     if (requestedCmd.length) {
-      const result = spawnSync(
-        'bwrap',
-        buildBwrapArgs({
+      try {
+        process.exitCode = await runBwrap({
           writableRoots: roots,
           targetDir,
           networkMode,
           cliArgs: requestedCmd,
           readOnlyOverrides,
-        }),
-        { stdio: 'inherit' },
-      );
-      if (result.error) {
-        writeStderrLine(`Sandbox command failed: ${result.error.message}`);
+        });
+      } catch (error) {
+        writeStderrLine(
+          `Sandbox command failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exitCode = 1;
       }
-      process.exitCode = result.status ?? 1;
       return;
     }
 

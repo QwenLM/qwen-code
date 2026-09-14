@@ -12,21 +12,23 @@ Reference points verified against source in this repo and against the
 published sources of three comparable agents (Codex CLI, Claude Code,
 DeepSeek Harness) on 2026-09-09; see § Evidence.
 
-## Phase 0 — Verified current state
+## Phase 0 — Verified baseline before this PR
 
-| Fact                                                                                           | Evidence                                                                                           |
-| ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Sandbox is a whole-CLI re-exec ("hop"), never per-command                                      | `packages/cli/src/llm.tsx:573-727` calls `loadSandboxConfig` → `start_sandbox` → `process.exit(0)` |
-| Backends today: `docker`, `podman`, `sandbox-exec` only                                        | `packages/cli/src/config/sandboxConfig.ts:25-29` (`VALID_SANDBOX_COMMANDS`)                        |
-| On Linux, container backends are only candidates when sandbox was enabled explicitly           | `sandboxConfig.ts:172-174` — `sandbox === true` gates the docker/podman push                       |
-| No landlock/seccomp/bwrap/unshare isolation implementation exists in the repo                  | grep over `packages/**/*.ts` — only incidental matches                                             |
-| macOS Seatbelt: 6 builtin `.sb` profiles, `(allow default)` + deny-write whitelist posture     | `packages/cli/src/serve/sandbox-macos-*.sb`; `sandbox.ts:70-77` (`BUILTIN_SEATBELT_PROFILES`)      |
-| The sandbox-exec branch of `start_sandbox` is the structural template for any in-place backend | `packages/cli/src/serve/sandbox.ts:229-389`                                                        |
-| `SANDBOX` env var marks "already inside the sandbox" and is consumed by UI/warnings/preconnect | `sandboxConfig.ts:116`, `headlessSafetyWarnings.ts:43`, `systemInfo.ts:141`                        |
-| `SandboxConfig.image` is currently required for every command                                  | `packages/core/src/config/config.ts:776-779`, `sandboxConfig.ts:233`                               |
-| Update-relaunch handoff branches on `command !== 'sandbox-exec'` (container vs non-container)  | `packages/cli/src/llm.tsx:578-595`                                                                 |
-| Vendored platform binaries are committed to git and shipped via `files: [dist, vendor, ...]`   | `packages/core/vendor/ripgrep/<arch>-<platform>/rg`, `git ls-files packages/core/vendor/`          |
-| Integration matrix default is `QWEN_SANDBOX=false`                                             | root `package.json:57,61,64` (`test:integration:*:sandbox:none`)                                   |
+This section records the pre-implementation state inspected on 2026-09-09. P0 below describes the delivered bwrap changes; the baseline statements are not claims about the current branch. References to changed code use file names and symbols rather than obsolete line offsets.
+
+| Fact                                                                                           | Evidence                                                                                                         |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Sandbox is a whole-CLI re-exec ("hop"), never per-command                                      | `packages/cli/src/llm.tsx` (`main`, sandbox hop) calls `loadSandboxConfig` → `start_sandbox` → `process.exit(0)` |
+| Backends today: `docker`, `podman`, `sandbox-exec` only                                        | `packages/cli/src/config/sandboxConfig.ts` (`VALID_SANDBOX_COMMANDS`)                                            |
+| On Linux, container backends are only candidates when sandbox was enabled explicitly           | `sandboxConfig.ts` (`getSandboxCommand`) — `sandbox === true` gates the docker/podman push                       |
+| No landlock/seccomp/bwrap/unshare isolation implementation exists in the repo                  | grep over `packages/**/*.ts` — only incidental matches                                                           |
+| macOS Seatbelt: 6 builtin `.sb` profiles, `(allow default)` + deny-write whitelist posture     | `packages/cli/src/serve/sandbox-macos-*.sb`; `sandbox.ts` (`BUILTIN_SEATBELT_PROFILES`)                          |
+| The sandbox-exec branch of `start_sandbox` is the structural template for any in-place backend | `packages/cli/src/serve/sandbox.ts` (`start_sandbox`, Seatbelt)                                                  |
+| `SANDBOX` env var marks "already inside the sandbox" and is consumed by UI/warnings/preconnect | `sandboxConfig.ts` (`getSandboxCommand`), `headlessSafetyWarnings.ts:43`, `systemInfo.ts:141`                    |
+| `SandboxConfig.image` is currently required for every command                                  | `packages/core/src/config/config.ts` (`SandboxConfig`), `sandboxConfig.ts` (`loadSandboxConfig`)                 |
+| Update-relaunch handoff branches on `command !== 'sandbox-exec'` (container vs non-container)  | `packages/cli/src/llm.tsx` (`main`, sandbox handoff)                                                             |
+| Vendored platform binaries are committed to git and shipped via `files: [dist, vendor, ...]`   | `packages/core/vendor/ripgrep/<arch>-<platform>/rg`, `git ls-files packages/core/vendor/`                        |
+| Integration matrix default is `QWEN_SANDBOX=false`                                             | root `package.json:57,61,64` (`test:integration:*:sandbox:none`)                                                 |
 
 Comparator facts (verified against Codex CLI source, dsh source, and Claude
 Code binary evidence; details in § Evidence):
@@ -122,7 +124,7 @@ one-shot escalation is exactly what per-command confinement buys, so v1
 mitigates rather than solves — and the mitigation is an edit to machinery that
 already exists:
 
-`core/src/core/prompts.ts:406-427` already branches the system prompt on
+`core/src/core/prompts.ts` (`getCoreSystemPrompt`) already branches the system prompt on
 `process.env['SANDBOX']`: `'sandbox-exec'` yields a "# macOS Seatbelt"
 section, any other non-empty value yields a "# Sandbox" section, and unset
 yields "# Outside of Sandbox". Two consequences:
@@ -219,8 +221,7 @@ brings the host `/proc` in read-only — measured at 133 visible numeric entries
 which is all Node needs — whereas a fresh procfs instance would be mounted
 read-write.
 
-**Rationale.** qwen-code arbitrates cross-process ownership by PID, in three
-places so far:
+**Rationale.** qwen-code arbitrates cross-process ownership by PID. The following are examples, not an exhaustive list of readers:
 
 - `cli/src/serve/conversations/conversation-runtime-ownership.ts:44-65` — an
   owner record carries `pid`, and `processIsAlive()` treats anything that is not
@@ -230,8 +231,9 @@ places so far:
   behind a `status.hostname !== os.hostname()` guard that conservatively answers
   `active` for a record written by another machine.
 
-Those records live under `~/.qwen` — a writable root, therefore shared across
-the confinement boundary.
+Additional readers include `packages/core/src/services/session-writer-lease.ts` (`isProcessAlive`) and `packages/qwen-live/src/host/discovery.ts` (`processIsAlive`). Any future PID-namespace change must account for every producer and reader of shared ownership records, including readers added after this inventory.
+
+These ownership records can be shared across the confinement boundary through the writable Qwen state directories.
 
 Inside a private PID namespace the confined CLI's own PID is namespace-local
 (1, 2, 3…). Writing that number into shared state is not merely useless, it is
@@ -268,9 +270,9 @@ P0–P2 (Linux: `docker`, `podman` only — no behavior change for existing
 users). **P3** flips the unnamed Linux candidate order to
 `bwrap` → `landlock` → `docker` → `podman`, and (behind its own PR +
 compatibility data) makes Linux sandbox auto-detected the way
-`sandbox-exec` already is on macOS (`sandboxConfig.ts:169-171`), with
+`sandbox-exec` already is on macOS (`sandboxConfig.ts` (`getSandboxCommand`)), with
 `QWEN_SANDBOX=false` (the existing spelling — `0` / `false` / empty are what
-`getSandboxCommand()` accepts at `sandboxConfig.ts:126-132`; an invented value
+`getSandboxCommand()` accepts at `sandboxConfig.ts` (`getSandboxCommand`); an invented value
 like `off` would be parsed as a command name and rejected) as the escape hatch.
 
 **Rationale.** Preferring the kernel backends under an explicit `true`
@@ -302,12 +304,12 @@ would be a behavior break. The flip is cheap once the backends are proven.
 ### `start_sandbox` bwrap branch
 
 New branch in `packages/cli/src/serve/sandbox.ts`, structurally mirroring
-the seatbelt branch (`sandbox.ts:229-389`):
+the seatbelt branch (`sandbox.ts` (`start_sandbox`, Seatbelt)):
 
 1. **Writable roots** — the same set the Seatbelt permissive profile
    grants, each `realpathSync`'d (the kernel compares resolved paths; the
    seatbelt branch already canonicalizes for the same reason,
-   `sandbox.ts:252-259`):
+   `sandbox.ts` (`start_sandbox`, `TARGET_DIR`)):
 
    | Root            | Value                                                                                                                                                           |
    | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -348,7 +350,7 @@ the seatbelt branch (`sandbox.ts:229-389`):
    switch.
 
    Paths the container branch mounts read-only — `~/.config/gcloud` and a
-   `GOOGLE_APPLICATION_CREDENTIALS` file (`sandbox.ts:539-557`) — need no
+   `GOOGLE_APPLICATION_CREDENTIALS` file (`sandbox.ts` (`start_sandbox`, `GOOGLE_APPLICATION_CREDENTIALS`)) — need no
    counterpart here: `--ro-bind / /` already makes them readable, and they were
    never writable in the container either.
 
@@ -395,9 +397,8 @@ the seatbelt branch (`sandbox.ts:229-389`):
      opens the link in their normal host browser.
 
 4. **Proxy** — proxied mode starts the host-side proxy the way the seatbelt
-   branch does (`sandbox.ts:321-375`: spawn it detached, install
-   exit/SIGINT/SIGTERM handlers that kill the process group, wait for
-   `localhost:8877` to answer) and injects `HTTP(S)_PROXY` **on the spawn env**.
+   branch does (`sandbox.ts` (`start_sandbox`, Seatbelt proxy): spawn it detached, install
+   exit/SIGINT/SIGTERM handlers that kill the process group). The common bwrap runner waits up to 30 seconds for the configured proxy URL (default `http://localhost:8877`) to answer and injects `HTTP(S)_PROXY` **on the spawn env**.
    Both keys that drive this lifecycle — `QWEN_SANDBOX_PROXY_COMMAND` and
    `QWEN_SANDBOX_NET` — are confinement decisions and sit in
    `PROJECT_ENV_HARDCODED_EXCLUSIONS`: the proxy command runs through
@@ -407,8 +408,8 @@ the seatbelt branch (`sandbox.ts:229-389`):
 
    The seatbelt block is deliberately _not_ shared as-is. It builds a
    `sandboxEnv` object, writes the proxy variables into it
-   (`sandbox.ts:325-341`), and then never passes it to `spawn` — that call uses
-   `{ ...process.env, ...childEnv }` (`:376-388`). On macOS the proxy variables
+   (`sandbox.ts` (`start_sandbox`, Seatbelt `sandboxEnv`)), and then never passes it to `spawn` — that call uses
+   `{ ...process.env, ...childEnv }` (`start_sandbox`). On macOS the proxy variables
    are therefore computed and dropped, so `QWEN_SANDBOX_PROXY_COMMAND` starts a
    proxy the confined process is never told about. `noUnusedLocals` does not
    catch it because indexed assignment counts as a use.
@@ -416,18 +417,15 @@ the seatbelt branch (`sandbox.ts:229-389`):
    That is a pre-existing defect rather than something this phase introduces,
    and fixing it changes macOS behavior — out of scope here (§ Non-goals: no
    change to the Seatbelt path), recorded in § Open questions instead. The bwrap
-   branch reproduces the proxy lifecycle but passes the variables through the
-   child env, so `proxied` actually works on the new backend. Extracting one
-   shared helper is a follow-up for after the seatbelt bug is fixed, when both
-   callers finally want identical behavior.
+   branch and the sandbox subcommand share `runBwrap` and `buildBwrapEnv`, passing the variables through the child env. Sharing this runner with Seatbelt remains a follow-up after its environment bug is fixed.
 
 5. **Spawn contract** — `stdio: 'inherit'`, `process.stdin.pause()` before
    spawn / `resume()` on close, resolve with the child's exit code —
-   identical to the seatbelt branch (`sandbox.ts:376-388`).
+   identical to the seatbelt branch (`sandbox.ts` (`start_sandbox`, Seatbelt spawn)).
 
 ### `llm.tsx` handoff
 
-`llm.tsx:578-595` branches on `sandboxConfig.command !== 'sandbox-exec'`
+`llm.tsx` (`main`, sandbox handoff) branches on `sandboxConfig.command !== 'sandbox-exec'`
 to decide the update-relaunch env handoff (container vs non-container).
 Widen the non-container side: `bwrap`/`landlock` must take the
 sandbox-exec branch (they are in-place hops, not images — no
@@ -446,7 +444,7 @@ surfaces the level where it is meaningful: `qwen sandbox` prints
 
 ### Model-visible boundary
 
-`packages/core/src/core/prompts.ts:406-427`: add a branch for the in-place
+`packages/core/src/core/prompts.ts` (`getCoreSystemPrompt`): add a branch for the in-place
 kernel backend. Without it `SANDBOX=bwrap` lands in the generic branch, which
 tells the model it runs "in a sandbox container" and teaches it to look for
 `Operation not permitted` — the wrong shape for a bwrap denial. The new branch
@@ -468,7 +466,7 @@ New `packages/cli/src/commands/sandbox.ts` (+ test), registered beside the
 existing command modules. Pulled into P0 rather than deferred: every impact in
 § Verified compatibility impacts is invisible until something fails mid-task, so
 the backend and the way to prove it works have to ship together — this is also
-what the CI lanes and the E2E table below call.
+what the proposed CI lanes and E2E table below call. The Linux bwrap CI lane is not implemented in this PR.
 
 - `qwen sandbox` — print resolved backend, probe result, enforcement level,
   writable roots (including the resolved git dirs), and network mode.
@@ -476,14 +474,15 @@ what the CI lanes and the E2E table below call.
   report the outcome (the `codex sandbox` equivalent).
 - `qwen sandbox --verify` — the behavior battery: write outside the workspace
   must fail; write inside must succeed; host `/proc` must stay visible (the regression guard for D6);
-  network must be unreachable in `closed` and reachable in `open`/`proxied`.
+  network checks inspect interface visibility: `closed` must expose only `lo`, while `open`/`proxied` must expose a non-loopback interface. They do not test Internet reachability, proxy availability, or exclusive proxy routing; those require separate integration checks.
 
 ### Review follow-up contract
 
 - Reject a canonical writable root equal to the home directory or any ancestor, including `/`, before spawning bwrap. The rule also applies through symlinks and to additional workspace directories, which get a stricter floor: any entry resolving inside the home directory is refused, because workspace-scope settings (`context.includeDirectories`) are repository content and must not pick home-internal roots such as `~/.ssh` or a sibling checkout carrying a `.git`. Entries already covered by a built-in root (the workspace itself, the cache/runtime dirs) stay admitted. Use a narrower workspace or cache path instead of silently granting the whole home or host filesystem.
-- Derive Git roots with the shared `gitEnv()` sanitizer so ambient repository selectors cannot redirect the probe. Only a real `.git` directory or a linked worktree registered under the common repository with a matching reverse pointer receives automatic Git grants. Symlinked metadata, planted gitfiles, separate Git directories, and submodule gitfiles without that registration contribute no roots; users must explicitly include any required external metadata directory. Legitimate linked worktrees retain their common Git directory grant.
+- Derive Git roots with the shared `gitEnv()` sanitizer so ambient repository selectors cannot redirect the probe. Only a real `.git` directory or a linked worktree registered under the common repository with a matching reverse pointer receives automatic Git grants. Symlinked metadata, planted gitfiles, separate Git directories, and submodule gitfiles without that registration contribute no roots; users must explicitly include any required external metadata directory. Legitimate linked worktrees retain their entire common Git directory grant. A repository rooted at HOME also retains its `.git` grant when a child directory is the workspace. These layouts have explicit tests; the inspection report and model prompt disclose that granted config and hooks can affect later unconfined Git commands. This is a retained permission policy, not a narrower metadata allowlist.
 - Inspection forwards the explicit sandbox and image flags, skips settings and `.env` loading in bare mode, and suppresses settings in safe mode. Plain inspection may exit successfully without a backend; a verification or command request that cannot run exits non-zero, including when already confined. Commands with their own flags must follow `--`; unknown flags before it fail parsing.
 - Pass-through commands inherit stdin, stdout, and stderr directly. Inspection text goes to stderr for this mode, so large output and piped structured output are preserved. The verification battery retains captured output for its predicates.
+- Actual command execution and the normal bwrap hop share the launcher and child environment: runtime markers are set, display variables are removed, and proxied mode starts the configured proxy, normalizes proxy variables, waits for readiness, and stops the proxy on completion or failure. Proxy startup/readiness failure prevents payload launch; proxy exit after launch terminates the payload and fails the request. Plain inspection starts neither process; captured verification uses the same environment policy plus `LC_ALL=C`, and its interface check does not start or validate the proxy.
 - The bwrap re-exec appends Node launch options to the inherited options, preserves child-environment precedence, and restores Electron's Node mode when the managed launch marker requests it.
 - `full` describes filesystem mount enforcement, not isolation from host services. The inspection report and prompt state that host Unix sockets remain reachable, including in closed network mode, and that proxied mode does not enforce exclusive proxy use. Writable Git configuration/hooks and Qwen settings can affect later unconfined launches; this residual capability is retained with the existing grants. Narrowing repository metadata remains a separate decision; bwrap no longer grants global `~/.gitconfig` writes by default.
 - Regression acceptance: broad roots and symlinks are refused; ambient Git selectors and planted gitfiles cannot grant an unrelated repository; failed-to-run requests are non-zero; command flags are preserved or rejected; pass-through output is not captured; inherited Node options and managed Electron mode reach the child. Linux mount enforcement and the procfs edge case require a Linux host and are not claimed from mocked spawn tests.
@@ -586,7 +585,7 @@ a release-notes callout and a `--verify` case per denied syscall class.
 1. Unnamed `--sandbox`/`QWEN_SANDBOX=true` on Linux: candidate order
    becomes `bwrap` → `landlock` → `docker` → `podman`.
 2. Auto-detected sandbox on Linux (mirror of the macOS `sandbox-exec`
-   auto-candidate at `sandboxConfig.ts:169-171`), gated behind a review of
+   auto-candidate at `sandboxConfig.ts` (`getSandboxCommand`)), gated behind a review of
    § Verified compatibility impacts with field data behind it — not just the
    mechanism list, but how often real workflows hit each row.
    `QWEN_SANDBOX=false` is the documented escape hatch.
@@ -711,33 +710,19 @@ these are documented consequences of an opt-in flag.
 
 ## Test plan
 
-Split by phase, because the phases ship as separate PRs. A phase's tests are
-written with it — nothing below is deferred to a later phase.
+The delivered P0 unit coverage and planned integration work are listed separately. P1 and later phases remain plans for separate PRs.
 
-**P0 — unit (`packages/cli`, vitest)**
+**P0 — delivered unit tests (vitest)**
 
-- `sandboxConfig.test.ts`: `bwrap` accepted by name; invalid names still
-  `FatalSandboxError`; per-command probe argv selection; bwrap functional-probe
-  failure surfaces as "installed but cannot run"; probe-cache behavior
-  unchanged.
-- `sandbox.test.ts`: bwrap argv construction — root ordering, dedupe of nested
-  roots, missing roots skipped, git dir / common dir added only when they fall
-  outside `TARGET_DIR` and omitted for a non-repo cwd, no `--unshare-pid` /
-  `--proc` / `--tmpfs` in any configuration, `--unshare-net` only in closed
-  mode, child env carrying `SANDBOX` / `SANDBOX_ENFORCEMENT`, the proxy
-  variables present on the child env in proxied mode (the seatbelt bug this
-  avoids), and the three display variables deleted.
-- `prompts.test.ts`: the new `SANDBOX=bwrap` branch is selected and names
-  `EROFS`; the existing `sandbox-exec` and container branches keep their current
-  text (snapshot).
-- `sandbox.command.test.ts`: `qwen sandbox` output shape; `--verify` reports a
-  failing case as failure (a battery that cannot fail proves nothing).
+- `packages/cli/src/config/sandboxConfig.test.ts`: explicit bwrap selection without an image, functional-probe argv and timeout, probe failure and caching, invalid names, and the Seatbelt no-image path.
+- `packages/cli/src/serve/sandbox-bwrap.test.ts`: bind source/destination and ordering, canonical root deduplication and refusal, Git provenance and containment, registered-worktree reverse pointers, HOME-rooted dotfiles repositories, absence of `--unshare-all` / `--unshare-pid` / `--proc` / `--tmpfs`, network-mode flags, and normal-hop child environment and proxy cleanup. Git fixtures isolate both ambient repository selectors and user/system Git configuration; filesystem fixtures keep HOME, temporary storage, and workspace separate.
+- `packages/core/src/core/prompts.test.ts`: bwrap wording includes `EROFS`, retained Git metadata capability, and host-service limits; other backends retain their expected text.
+- `packages/cli/src/commands/sandbox.test.ts`: inspection output, final positional plus `--` command ordering, execution failure, and failed verification predicates including missing loopback.
+- `packages/cli/src/commands/sandbox-command-runtime.test.ts`: real handler/runner with mocked processes verifies markers, display removal, inherited stdio/argv/exit status, proxy normalization/startup/readiness/failure/cleanup, and diagnostic-only inspection. These tests do not establish Linux mount enforcement.
 
-**P0 — integration**
+**P0 — integration follow-up, not delivered in this PR**
 
-- `test:integration:sandbox:bwrap` lane; the GitHub workflow installs
-  `bubblewrap` on the ubuntu runner. Fake-LLM-server tests run unchanged inside
-  the confinement (workspace write + network to the fake server).
+The proposed `test:integration:sandbox:bwrap` script and Ubuntu workflow installation of `bubblewrap` are absent from this PR. A follow-up should run fake-LLM-server tests inside the real confinement (workspace writes and connectivity to the fake server). The dated manual Linux observations in § Evidence do not substitute for that CI lane; local mocked tests do not add new Linux enforcement evidence.
 
 **P1 — unit**
 
@@ -832,8 +817,8 @@ CONTRIBUTING.md size thresholds.
    `--sandbox sandbox-exec` today. If that reproduces, it is a standalone bug
    fix (a profile parameter, not a design change) and should not be bundled into
    this work.
-7. **The Seatbelt proxy-env drop**: `sandbox.ts:325-341` fills a `sandboxEnv`
-   object with the proxy variables that `:376-388` never passes to `spawn`, so
+7. **The Seatbelt proxy-env drop**: `sandbox.ts` (`start_sandbox`, Seatbelt `sandboxEnv`) fills a `sandboxEnv`
+   object with the proxy variables that `start_sandbox` never passes to `spawn`, so
    `QWEN_SANDBOX_PROXY_COMMAND` on macOS starts a proxy the confined process
    cannot see. Also a standalone fix — it changes macOS behavior and wants its
    own regression test, so it is deliberately not bundled here.
@@ -858,11 +843,10 @@ CONTRIBUTING.md size thresholds.
   when only the worktree is bound and succeeds once the git dir and common dir
   are bound; `/dev/snd` is masked inside while present on the host;
   `--unshare-net` blocks outbound resolution.
-- This repo: file:line references in Phase 0, all verified 2026-09-09 on
-  this branch. The impact sweep behind D2, D5, D6 and § Verified compatibility
+- This repo: Phase 0 records the pre-implementation inspection from 2026-09-09. Changed-code references now use current file/symbol locations; remaining line references below identify that historical inspection, not a fresh verification of the current branch. The impact sweep behind D2, D5, D6 and § Verified compatibility
   impacts was added 2026-09-10 and covers
   `cli/src/serve/conversations/conversation-runtime-ownership.ts:44-65`,
-  `cli/src/serve/live/discovery.ts:147`, `core/src/core/prompts.ts:406-427`,
+  `cli/src/serve/live/discovery.ts:147`, `core/src/core/prompts.ts` (`getCoreSystemPrompt`),
   `core/src/utils/browser.ts:25-70`, `core/src/utils/secure-browser-launcher.ts:151-181`,
   `core/src/ide/ide-client.ts:644-678`, `core/src/config/storage.ts:160-241`,
   `core/src/services/gitWorktreeService.ts:419`,

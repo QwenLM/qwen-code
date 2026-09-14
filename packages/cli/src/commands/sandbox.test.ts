@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import yargs from 'yargs';
 
 const spawnSyncMock = vi.hoisted(() => vi.fn());
+const runBwrapMock = vi.hoisted(() => vi.fn());
 const loadSandboxConfigMock = vi.hoisted(() => vi.fn());
 const resolveBwrapWritableRootsMock = vi.hoisted(() => vi.fn());
 const buildBwrapArgsMock = vi.hoisted(() => vi.fn());
@@ -33,6 +34,8 @@ vi.mock('../config/sandboxConfig.js', () => ({
 vi.mock('../serve/sandbox.js', () => ({
   resolveBwrapWritableRoots: resolveBwrapWritableRootsMock,
   buildBwrapArgs: buildBwrapArgsMock,
+  buildBwrapEnv: () => ({ SANDBOX: 'bwrap', SANDBOX_ENFORCEMENT: 'full' }),
+  runBwrap: runBwrapMock,
   resolveSandboxNetworkMode: resolveSandboxNetworkModeMock,
 }));
 
@@ -72,6 +75,7 @@ describe('qwen sandbox', () => {
     buildBwrapArgsMock.mockImplementation(
       ({ cliArgs }: { cliArgs: string[] }) => ['--stub', '--', ...cliArgs],
     );
+    runBwrapMock.mockResolvedValue(0);
     spawnSyncMock.mockReturnValue({ status: 0, stdout: '', stderr: '' });
     process.exitCode = undefined;
   });
@@ -331,21 +335,52 @@ describe('qwen sandbox', () => {
 
   it('runs a command given after `--` and passes its exit code through', async () => {
     loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
-    spawnSyncMock.mockReturnValue({ status: 42, stdout: 'out', stderr: '' });
+    runBwrapMock.mockResolvedValue(42);
 
     await run({ '--': ['sh', '-c', 'exit 42'] });
 
-    expect(buildBwrapArgsMock.mock.calls[0]?.[0].cliArgs).toEqual([
+    expect(runBwrapMock.mock.calls[0]?.[0].cliArgs).toEqual([
       'sh',
       '-c',
       'exit 42',
     ]);
     expect(process.exitCode).toBe(42);
-    expect(spawnSyncMock).toHaveBeenCalledWith('bwrap', expect.any(Array), {
-      stdio: 'inherit',
-    });
+    expect(runBwrapMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        networkMode: 'open',
+        writableRoots: ['/ws', '/tmp', '/repo/.git'],
+      }),
+    );
+    expect(spawnSyncMock).not.toHaveBeenCalled();
     expect(writeStdoutLineMock).not.toHaveBeenCalled();
     expect(writeStderrLineMock).toHaveBeenCalledWith('Backend: bwrap');
+  });
+
+  it('keeps positional command arguments before arguments after the separator', async () => {
+    loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
+    await run({ cmd: ['sh'], '--': ['-c', 'echo fixture'] });
+    expect(runBwrapMock.mock.calls[0]?.[0].cliArgs).toEqual([
+      'sh',
+      '-c',
+      'echo fixture',
+    ]);
+  });
+
+  it('reports a failed command launch', async () => {
+    loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
+    runBwrapMock.mockRejectedValueOnce(new Error('fixture launch failed'));
+    await run({ '--': ['echo', 'fixture'] });
+    expect(process.exitCode).toBe(1);
+    expect(writeStderrLineMock).toHaveBeenCalledWith(
+      'Sandbox command failed: fixture launch failed',
+    );
+  });
+
+  it('discloses the retained repository configuration and hooks grant', async () => {
+    loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
+    await run();
+    expect(report()).toContain('repository config and hooks remain writable');
+    expect(report()).toContain('later unconfined Git commands');
   });
 
   describe('--verify', () => {
@@ -487,6 +522,26 @@ describe('qwen sandbox', () => {
       expect(report()).toContain('FAIL  host network is shared in open mode');
       expect(process.exitCode).toBe(1);
     });
+
+    it.each(['', 'eth0\n'])(
+      'fails closed mode when the interface listing omits loopback: %j',
+      async (stdout) => {
+        resolveSandboxNetworkModeMock.mockReturnValue('closed');
+        respond([
+          [/proc\/net\/dev/, { status: 0, stdout, stderr: '' }],
+          [
+            /usr\/local\/bin/,
+            { status: 1, stdout: '', stderr: 'Read-only file system' },
+          ],
+          [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+        ]);
+        await run({ verify: true });
+        expect(report()).toContain(
+          'FAIL  network namespace is private in closed mode',
+        );
+        expect(process.exitCode).toBe(1);
+      },
+    );
 
     it('fails the network check on a non-zero probe status', async () => {
       respond([

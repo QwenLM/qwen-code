@@ -544,6 +544,133 @@ export function buildBwrapArgs(options: BwrapArgsOptions): string[] {
   return args;
 }
 
+export function buildBwrapEnv(
+  networkMode: SandboxNetworkMode,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...baseEnv,
+    SANDBOX: 'bwrap',
+    SANDBOX_ENFORCEMENT: 'full',
+  };
+  // `shouldAttemptBrowserLaunch()` decides on Linux purely by the presence of
+  // these three. Left set, an OAuth login would xdg-open a browser as a
+  // confined child that cannot write its own profile directory, failing in a
+  // way that reads like an auth bug; dropping them makes the existing
+  // print-the-URL path deterministic and the user opens the link on the host.
+  delete env['DISPLAY'];
+  delete env['WAYLAND_DISPLAY'];
+  delete env['MIR_SOCKET'];
+  if (networkMode === 'proxied') {
+    const proxy =
+      env['HTTPS_PROXY'] ||
+      env['https_proxy'] ||
+      env['HTTP_PROXY'] ||
+      env['http_proxy'] ||
+      'http://localhost:8877';
+    env['HTTPS_PROXY'] =
+      env['https_proxy'] =
+      env['HTTP_PROXY'] =
+      env['http_proxy'] =
+        proxy;
+    const noProxy = env['NO_PROXY'] || env['no_proxy'];
+    if (noProxy) env['NO_PROXY'] = env['no_proxy'] = noProxy;
+  }
+  return env;
+}
+
+export function runBwrap(
+  options: BwrapArgsOptions,
+  env: NodeJS.ProcessEnv = buildBwrapEnv(options.networkMode),
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    let proxyProcess: ChildProcess | undefined;
+    let sandboxProcess: ChildProcess | undefined;
+    let finished = false;
+    let stdinPaused = false;
+    const readiness = new AbortController();
+    const stopProxy = () => {
+      if (proxyProcess?.pid) {
+        try {
+          process.kill(-proxyProcess.pid, 'SIGTERM');
+        } catch {
+          // The proxy may already have exited.
+        }
+      }
+    };
+    const finish = (error: Error | null, code = 1) => {
+      if (finished) return;
+      finished = true;
+      readiness.abort();
+      process.removeListener('exit', stopProxy);
+      process.removeListener('SIGINT', stopProxy);
+      process.removeListener('SIGTERM', stopProxy);
+      proxyProcess?.removeListener('error', proxyError);
+      proxyProcess?.removeListener('close', proxyClosed);
+      if (error) sandboxProcess?.kill('SIGTERM');
+      stopProxy();
+      if (stdinPaused) process.stdin.resume();
+      if (error) reject(error);
+      else resolve(code);
+    };
+    const proxyError = (error: Error) =>
+      finish(new FatalSandboxError(`Sandbox proxy failed: ${error.message}`));
+    const proxyClosed = (code: number | null, signal: NodeJS.Signals | null) =>
+      finish(
+        new FatalSandboxError(
+          `Sandbox proxy exited with code ${code}, signal ${signal}`,
+        ),
+      );
+    const launch = () => {
+      if (finished) return;
+      try {
+        process.stdin.pause();
+        stdinPaused = true;
+        sandboxProcess = spawn('bwrap', buildBwrapArgs(options), {
+          stdio: 'inherit',
+          env,
+        });
+        sandboxProcess.once('error', (error) => finish(error));
+        sandboxProcess.once('close', (code) => finish(null, code ?? 1));
+      } catch (error) {
+        finish(error as Error);
+      }
+    };
+    if (options.networkMode !== 'proxied') {
+      launch();
+      return;
+    }
+    try {
+      // Note: CodeQL flags this as js/shell-command-injection-from-environment.
+      // This is intentional - CLI tool executes user-provided proxy commands.
+      proxyProcess = spawn('bash', ['-c', env['QWEN_SANDBOX_PROXY_COMMAND']!], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+      });
+      proxyProcess.once('error', proxyError);
+      proxyProcess.once('close', proxyClosed);
+      // Proxy stdout is intentionally not piped — it disrupts ink rendering.
+      proxyProcess.stderr?.on('data', (data) =>
+        writeStderrLine(data.toString()),
+      );
+      process.once('exit', stopProxy);
+      process.once('SIGINT', stopProxy);
+      process.once('SIGTERM', stopProxy);
+      const proxy = env['HTTPS_PROXY'] || 'http://localhost:8877';
+      writeStderrLine('waiting for proxy to start ...');
+      void execAsync(
+        `until curl --noproxy '*' --max-time 0.25 -s -o /dev/null ${quote([proxy])}; do sleep 0.25; done`,
+        {
+          signal: readiness.signal,
+          timeout: 30_000,
+        },
+      ).then(launch, proxyError);
+    } catch (error) {
+      proxyError(error as Error);
+    }
+  });
+}
+
 export async function start_sandbox(
   config: SandboxConfig,
   nodeArgs: string[] = [],
@@ -717,10 +844,8 @@ export async function start_sandbox(
     if (process.env['BUILD_SANDBOX']) {
       throw new FatalSandboxError('Cannot BUILD_SANDBOX when using bwrap');
     }
-
     const networkMode = resolveSandboxNetworkMode();
     writeStderrLine(`using bwrap (network: ${networkMode}) ...`);
-
     const {
       targetDir,
       roots: writableRoots,
@@ -728,15 +853,6 @@ export async function start_sandbox(
     } = resolveBwrapWritableRoots(
       cliConfig ? cliConfig.getWorkspaceContext().getDirectories() : [],
     );
-
-    const args = buildBwrapArgs({
-      writableRoots,
-      targetDir,
-      networkMode,
-      cliArgs,
-      readOnlyOverrides,
-    });
-
     const nodeOptions = [
       childEnv?.['NODE_OPTIONS'] ?? process.env['NODE_OPTIONS'],
       ...(process.env['DEBUG'] ? ['--inspect-brk'] : []),
@@ -744,96 +860,15 @@ export async function start_sandbox(
     ]
       .filter(Boolean)
       .join(' ');
-
-    // Unlike the seatbelt branch — which prefixes its `sh -c` string with the
-    // assignments — the confined argv is exec'd directly, so everything the
-    // child needs has to travel on the spawn env.
-    const bwrapEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      ...childEnv,
-      SANDBOX: 'bwrap',
-      SANDBOX_ENFORCEMENT: 'full',
-    };
-    if (nodeOptions) {
-      bwrapEnv['NODE_OPTIONS'] = nodeOptions;
-    }
+    const env = buildBwrapEnv(networkMode, { ...process.env, ...childEnv });
+    if (nodeOptions) env['NODE_OPTIONS'] = nodeOptions;
     if (process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1') {
-      bwrapEnv['ELECTRON_RUN_AS_NODE'] = '1';
+      env['ELECTRON_RUN_AS_NODE'] = '1';
     }
-    // `shouldAttemptBrowserLaunch()` decides on Linux purely by the presence of
-    // these three. Left set, an OAuth login would xdg-open a browser as a
-    // confined child that cannot write its own profile directory, failing in a
-    // way that reads like an auth bug; dropping them makes the existing
-    // print-the-URL path deterministic and the user opens the link on the host.
-    delete bwrapEnv['DISPLAY'];
-    delete bwrapEnv['WAYLAND_DISPLAY'];
-    delete bwrapEnv['MIR_SOCKET'];
-
-    let proxyProcess: ChildProcess | undefined = undefined;
-    let sandboxProcess: ChildProcess | undefined = undefined;
-    if (networkMode === 'proxied') {
-      const proxyCommand = process.env['QWEN_SANDBOX_PROXY_COMMAND'] as string;
-      const proxy =
-        process.env['HTTPS_PROXY'] ||
-        process.env['https_proxy'] ||
-        process.env['HTTP_PROXY'] ||
-        process.env['http_proxy'] ||
-        'http://localhost:8877';
-      bwrapEnv['HTTPS_PROXY'] = proxy;
-      bwrapEnv['https_proxy'] = proxy; // lower-case can be required, e.g. for curl
-      bwrapEnv['HTTP_PROXY'] = proxy;
-      bwrapEnv['http_proxy'] = proxy;
-      const noProxy = process.env['NO_PROXY'] || process.env['no_proxy'];
-      if (noProxy) {
-        bwrapEnv['NO_PROXY'] = noProxy;
-        bwrapEnv['no_proxy'] = noProxy;
-      }
-      // Note: CodeQL flags this as js/shell-command-injection-from-environment.
-      // This is intentional - CLI tool executes user-provided proxy commands.
-      proxyProcess = spawn('bash', ['-c', proxyCommand], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: true,
-      });
-      const stopProxy = () => {
-        writeStderrLine('stopping proxy ...');
-        if (proxyProcess?.pid) {
-          process.kill(-proxyProcess.pid, 'SIGTERM');
-        }
-      };
-      process.on('exit', stopProxy);
-      process.on('SIGINT', stopProxy);
-      process.on('SIGTERM', stopProxy);
-
-      // Proxy stdout is intentionally not piped — it disrupts ink rendering.
-      proxyProcess.stderr?.on('data', (data) => {
-        writeStderrLine(data.toString());
-      });
-      proxyProcess.on('close', (code, signal) => {
-        if (sandboxProcess?.pid) {
-          process.kill(-sandboxProcess.pid, 'SIGTERM');
-        }
-        throw new FatalSandboxError(
-          `Proxy command '${proxyCommand}' exited with code ${code}, signal ${signal}`,
-        );
-      });
-      writeStderrLine('waiting for proxy to start ...');
-      await execAsync(
-        `until timeout 0.25 curl -s http://localhost:8877; do sleep 0.25; done`,
-      );
-    }
-
-    process.stdin.pause();
-    sandboxProcess = spawn(config.command, args, {
-      stdio: 'inherit',
-      env: bwrapEnv,
-    });
-    return new Promise((resolve, reject) => {
-      sandboxProcess?.on('error', reject);
-      sandboxProcess?.on('close', (code) => {
-        process.stdin.resume();
-        resolve(code ?? 1);
-      });
-    });
+    return runBwrap(
+      { writableRoots, targetDir, networkMode, cliArgs, readOnlyOverrides },
+      env,
+    );
   }
 
   writeStderrLine(`hopping into sandbox (command: ${config.command}) ...`);

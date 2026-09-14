@@ -8,14 +8,47 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { parse } from 'shell-quote';
 import { execFileSync } from 'node:child_process';
+import { gitEnv } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const execSyncMock = vi.hoisted(() => vi.fn());
+const execMock = vi.hoisted(() => vi.fn());
 const storageDirs = vi.hoisted(() => ({ qwen: '', runtime: '' }));
 
+function git(args: string[], cwd?: string): string {
+  return execFileSync(
+    'git',
+    [
+      '-c',
+      `core.hooksPath=${os.devNull}`,
+      '-c',
+      'commit.gpgSign=false',
+      '-c',
+      'init.templateDir=',
+      ...args,
+    ],
+    {
+      cwd,
+      encoding: 'utf8',
+      env: {
+        ...gitEnv(),
+        GIT_CONFIG_GLOBAL: os.devNull,
+        GIT_CONFIG_SYSTEM: os.devNull,
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_TEMPLATE_DIR: '',
+      },
+    },
+  ).trim();
+}
+
 beforeEach(() => {
+  execMock.mockImplementation((_command, _options, callback) => {
+    callback(null, '', '');
+    return new EventEmitter();
+  });
   vi.stubEnv('BUILD_SANDBOX', undefined);
   vi.stubEnv('QWEN_SANDBOX_NET', undefined);
   vi.stubEnv('QWEN_SANDBOX_PROXY_COMMAND', undefined);
@@ -52,8 +85,10 @@ vi.mock('node:child_process', async (importOriginal) => {
     default: {
       ...actual,
       execSync: execSyncMock,
+      exec: execMock,
       spawn: spawnMock,
     },
+    exec: execMock,
     execSync: execSyncMock,
     spawn: spawnMock,
   };
@@ -162,6 +197,7 @@ describe('buildBwrapArgs', () => {
       const args = buildBwrapArgs({ ...base, networkMode });
 
       expect(args).not.toContain('--unshare-pid');
+      expect(args).not.toContain('--unshare-all');
       expect(args).not.toContain('--proc');
       expect(args).not.toContain('--tmpfs');
     },
@@ -174,7 +210,14 @@ describe('buildBwrapArgs', () => {
       networkMode: 'open',
     });
 
-    expect(bindSources(args)).toEqual(['/ws', '/tmp', '/home/u/.qwen']);
+    const binds = args.flatMap((arg, i) =>
+      arg === '--bind' ? [[args[i + 1], args[i + 2]]] : [],
+    );
+    expect(binds).toEqual([
+      ['/ws', '/ws'],
+      ['/tmp', '/tmp'],
+      ['/home/u/.qwen', '/home/u/.qwen'],
+    ]);
   });
 
   it('layers read-only overrides after the writable binds they carve out of', () => {
@@ -294,6 +337,7 @@ describe('resolveGitWritableRoots', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(work, { recursive: true, force: true });
   });
 
@@ -304,7 +348,7 @@ describe('resolveGitWritableRoots', () => {
   it('does not grant an unrelated repository named by a planted gitfile', () => {
     const victim = path.join(work, 'victim');
     const planted = path.join(work, 'planted');
-    execFileSync('git', ['init', '-q', victim]);
+    git(['init', '-q', victim]);
     fs.mkdirSync(planted);
     fs.writeFileSync(
       path.join(planted, '.git'),
@@ -316,7 +360,7 @@ describe('resolveGitWritableRoots', () => {
   it('does not grant a symlinked Git directory', () => {
     const victim = path.join(work, 'victim');
     const planted = path.join(work, 'planted');
-    execFileSync('git', ['init', '-q', victim]);
+    git(['init', '-q', victim]);
     fs.mkdirSync(planted);
     fs.symlinkSync(
       path.join(victim, '.git'),
@@ -328,7 +372,7 @@ describe('resolveGitWritableRoots', () => {
 
   it('requires explicit grants for a separate Git directory', () => {
     const checkout = path.join(work, 'checkout');
-    execFileSync('git', [
+    git([
       'init',
       '-q',
       '--separate-git-dir',
@@ -342,14 +386,8 @@ describe('resolveGitWritableRoots', () => {
     const checkout = path.join(work, 'checkout');
     const metadata = path.join(work, 'metadata');
     const victim = path.join(work, 'victim');
-    execFileSync('git', ['init', '-q', victim]);
-    execFileSync('git', [
-      'init',
-      '-q',
-      '--separate-git-dir',
-      metadata,
-      checkout,
-    ]);
+    git(['init', '-q', victim]);
+    git(['init', '-q', '--separate-git-dir', metadata, checkout]);
     fs.writeFileSync(
       path.join(metadata, 'commondir'),
       path.join(victim, '.git'),
@@ -358,14 +396,9 @@ describe('resolveGitWritableRoots', () => {
       path.join(metadata, 'gitdir'),
       path.join(checkout, '.git'),
     );
-    expect(
-      path.resolve(
-        execFileSync('git', ['rev-parse', '--git-common-dir'], {
-          cwd: checkout,
-          encoding: 'utf8',
-        }).trim(),
-      ),
-    ).toBe(path.join(victim, '.git'));
+    expect(path.resolve(git(['rev-parse', '--git-common-dir'], checkout))).toBe(
+      path.join(victim, '.git'),
+    );
     expect(resolveGitWritableRoots(checkout)).toEqual([]);
   });
 
@@ -374,8 +407,8 @@ describe('resolveGitWritableRoots', () => {
     (variable) => {
       const main = path.join(work, 'main');
       const other = path.join(work, 'other');
-      execFileSync('git', ['init', '-q', main]);
-      execFileSync('git', ['init', '-q', other]);
+      git(['init', '-q', main]);
+      git(['init', '-q', other]);
       vi.stubEnv(variable, path.join(other, '.git'));
       expect(resolveGitWritableRoots(main)).toEqual([
         path.join(main, '.git'),
@@ -384,14 +417,52 @@ describe('resolveGitWritableRoots', () => {
     },
   );
 
+  it('rejects a registered worktree belonging to a different checkout', () => {
+    const main = path.join(work, 'main');
+    git(['init', '-q', main]);
+    git(['config', 'user.email', 'test@example.com'], main);
+    git(['config', 'user.name', 'test'], main);
+    git(['commit', '--allow-empty', '-qm', 'init'], main);
+    const worktree = path.join(work, 'wt');
+    git(['worktree', 'add', '-q', worktree, '-b', 'topic'], main);
+    const other = path.join(work, 'other');
+    fs.mkdirSync(other);
+    fs.copyFileSync(path.join(worktree, '.git'), path.join(other, '.git'));
+    expect(resolveGitWritableRoots(other)).toEqual([]);
+  });
+
+  it('rejects a gitfile whose configured worktree is outside the requested workspace', () => {
+    const main = path.join(work, 'main');
+    const other = path.join(work, 'other');
+    git(['init', '-q', main]);
+    git(['config', 'core.worktree', main], main);
+    fs.mkdirSync(other);
+    fs.writeFileSync(
+      path.join(other, '.git'),
+      `gitdir: ${path.join(main, '.git')}\n`,
+    );
+    expect(resolveGitWritableRoots(other)).toEqual([]);
+  });
+
+  it('retains the enclosing dotfiles repository metadata for a home subdirectory', () => {
+    const home = path.join(work, 'home');
+    git(['init', '-q', home]);
+    const notes = path.join(home, 'notes');
+    fs.mkdirSync(notes);
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    expect(resolveGitWritableRoots(notes)).toEqual([
+      path.join(home, '.git'),
+      path.join(home, '.git'),
+    ]);
+  });
+
   it('resolves the git dir and common dir of a worktree checkout', () => {
+    vi.stubEnv('GIT_DIR', path.join(work, 'ambient.git'));
     // The defect this guards: in a worktree `.git` is a file pointing
     // elsewhere, so index/HEAD/reflogs live outside the workspace and a
     // workspace-only bind leaves every `git add` failing EROFS.
     const main = path.join(work, 'main');
     fs.mkdirSync(main);
-    const git = (args: string[], cwd: string) =>
-      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
     git(['init', '-q', '.'], main);
     git(['config', 'user.email', 'test@example.com'], main);
     git(['config', 'user.name', 'test'], main);
@@ -430,8 +501,13 @@ describe('resolveBwrapWritableRoots', () => {
     // exactly what these tests check. Point tmpdir at a sibling instead so the
     // roots stay disjoint.
     const fakeTmp = path.join(work, 'tmp');
-    fs.mkdirSync(fakeTmp);
+    const fakeHome = path.join(work, 'operator-home');
+    const workspace = path.join(work, 'workspace');
+    for (const dir of [fakeTmp, fakeHome, workspace]) fs.mkdirSync(dir);
     vi.spyOn(os, 'tmpdir').mockReturnValue(fakeTmp);
+    vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    vi.spyOn(process, 'cwd').mockReturnValue(workspace);
+    vi.stubEnv('XDG_CACHE_HOME', '');
   });
 
   afterEach(() => {
@@ -447,8 +523,6 @@ describe('resolveBwrapWritableRoots', () => {
   it('includes the git dirs of a worktree checkout', () => {
     const main = path.join(work, 'main');
     fs.mkdirSync(main);
-    const git = (args: string[], cwd: string) =>
-      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
     git(['init', '-q', '.'], main);
     git(['config', 'user.email', 'test@example.com'], main);
     git(['config', 'user.name', 'test'], main);
@@ -592,6 +666,14 @@ describe('start_sandbox bwrap branch', () => {
     storageDirs.runtime = path.join(work, 'runtime');
     fs.mkdirSync(storageDirs.qwen);
     fs.mkdirSync(storageDirs.runtime);
+    const fakeHome = path.join(work, 'home');
+    const fakeTmp = path.join(work, 'tmp');
+    const workspace = path.join(work, 'workspace');
+    for (const dir of [fakeHome, fakeTmp, workspace]) fs.mkdirSync(dir);
+    vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    vi.spyOn(os, 'tmpdir').mockReturnValue(fakeTmp);
+    vi.spyOn(process, 'cwd').mockReturnValue(workspace);
+    vi.stubEnv('XDG_CACHE_HOME', '');
     vi.stubEnv('DEBUG', undefined);
     vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
     vi.spyOn(fs, 'realpathSync').mockImplementation(
@@ -614,7 +696,11 @@ describe('start_sandbox bwrap branch', () => {
   ): Promise<{ args: string[]; env: NodeJS.ProcessEnv }> {
     const child = new EventEmitter();
     spawnMock.mockClear();
-    spawnMock.mockReturnValue(child);
+    spawnMock.mockImplementation((command) =>
+      command === 'bash'
+        ? Object.assign(new EventEmitter(), { pid: 4321 })
+        : child,
+    );
     const result = start_sandbox(
       { command: 'bwrap' },
       nodeArgs,
@@ -622,7 +708,8 @@ describe('start_sandbox bwrap branch', () => {
       cliArgs,
       childEnv,
     );
-    const call = spawnMock.mock.calls[0];
+    await Promise.resolve();
+    const call = spawnMock.mock.calls.find((call) => call[0] === 'bwrap');
     // Without this, a branch that never spawns fails later as a TypeError on
     // `undefined.env` instead of saying what actually went wrong.
     expect(call, 'bwrap was never spawned').toBeDefined();
@@ -693,11 +780,20 @@ describe('start_sandbox bwrap branch', () => {
     );
   });
 
-  // Proxied mode is deliberately not unit-tested here: entering it spawns the
-  // user's proxy command and then polls `curl` until it answers, so a unit test
-  // would either hang or assert on a stubbed environment rather than on the
-  // injection. No integration lane currently covers this lifecycle. The property that
-  // matters — the variables reaching the *child env* rather than a discarded
-  // object, which is the seatbelt bug this branch avoids — is visible in the
-  // `env` assertions above, since they read what was handed to spawn.
+  it('passes proxy settings through the normal hop and releases its proxy', async () => {
+    vi.stubEnv('QWEN_SANDBOX_PROXY_COMMAND', 'fixture-proxy');
+    vi.stubEnv('HTTPS_PROXY', 'http://fixture.invalid:9988');
+    vi.stubEnv('NO_PROXY', 'fixture.internal');
+    vi.spyOn(process, 'kill').mockReturnValue(true);
+    const { env } = await run();
+    expect(spawnMock.mock.calls[0]?.[0]).toBe('bash');
+    expect(spawnMock.mock.calls[1]?.[0]).toBe('bwrap');
+    expect(env['HTTPS_PROXY']).toBe('http://fixture.invalid:9988');
+    expect(env['http_proxy']).toBe('http://fixture.invalid:9988');
+    expect(env['no_proxy']).toBe('fixture.internal');
+    expect(parse(execMock.mock.calls[0]?.[0])).toContain(
+      'http://fixture.invalid:9988',
+    );
+    expect(process.kill).toHaveBeenCalledWith(-4321, 'SIGTERM');
+  });
 });
