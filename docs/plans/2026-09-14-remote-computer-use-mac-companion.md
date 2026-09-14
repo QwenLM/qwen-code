@@ -68,6 +68,8 @@ qwen mcp add --scope user --transport http cua http://127.0.0.1:8765/mcp \
   -H "Authorization: Bearer <token>"
 ```
 
+注意：HTTP 端点只能通过守护进程的环境变量打开。但在 macOS 上，`qwen-cua-driver mcp` 和 `permissions grant` 通过 LaunchServices 拉起守护进程时不转发环境变量（事实 14），所以被自动拉起的守护进程不会开 HTTP 端点，而且不会报错。在终端里直接运行 `serve` 可以避开这个问题，但权限可能会记在终端名下。完整步骤和检查方法见 `docs/verification/remote-computer-use/README.md`。
+
 - 优点：不写代码，今天就能试。
 - 缺点：
   - 模型拿到的是驱动的底层工具，不是 skill 的 App API；
@@ -141,21 +143,24 @@ ACP 子进程：只在该会话里出现 mcp__computer__*    └─ 菜单栏状
 
 ## 5. 已核实的事实
 
-| #   | 事实                                                                                                                            | 证据                                                                         |
-| --- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| 1   | 设置了 `CUA_DRIVER_RS_MCP_HTTP_PORT` 时，cua-driver 会启动 HTTP MCP，只绑 `127.0.0.1`，端点是 `POST /mcp`                       | `mcp_http.rs`（`configured_port`、`spawn`）；`serve.rs:642`、`serve.rs:1364` |
-| 2   | HTTP MCP 必须配置 32–4096 字符的 Bearer token，否则启动失败；token 错误返回 401                                                 | `mcp_http.rs:324-347` 及其测试                                               |
-| 3   | 带 `Origin` 头的请求返回 403                                                                                                    | `mcp_http.rs` 的 `serve_conn`                                                |
-| 4   | 非 POST 请求返回 405，通知返回 202；Qwen 的 MCP 客户端把 GET 收到 405 当作"不支持 SSE"，退回只用 POST                           | `mcp_http.rs` 的 `serve_conn`；`packages/core/src/tools/mcp-client.ts:285`   |
-| 5   | 驱动的截图以 MCP image content 内联返回（base64 + `mimeType`），不是文件路径                                                    | `cua-driver-core/src/protocol.rs:281`                                        |
-| 6   | SDK 可以连接指定的守护进程，并继承它的身份与权限                                                                                | `computer-use/README.md:248`；`computer-use/index.d.ts:80`                   |
-| 7   | 驱动的 `--permission-mode` 取值为 standard（默认）、bounded、unrestricted                                                       | `cua-driver/src/cli.rs:516`                                                  |
-| 8   | 反向通道的帧类型是 `mcp_register` / `mcp_message` / `mcp_unregister`；每个连接最多注册 10 个 server                             | `client-mcp-ws.ts`                                                           |
-| 9   | 会话级注册带 `alwaysLoadTools: true`，工具不会藏在 `tool_search` 后面（文件桥设计文档里的事实 12 已经过时）                     | `client-mcp-sender-registry.ts:309`                                          |
-| 10  | `/acp` 的跨站检查只在请求带 `Origin` 时生效；非浏览器客户端可以用 `Authorization` 头；非回环地址且没有 token 的升级请求返回 403 | `acp-http/index.ts:1694-1755`                                                |
-| 11  | `/acp` WebSocket 单帧上限 10 MB                                                                                                 | `acp-http/index.ts:1568`                                                     |
-| 12  | live-host 的 daemon 发现只接受回环地址                                                                                          | `packages/live-host/src/main/discovery.ts:44`                                |
-| 13  | live-host 的原生能力是 AX 读树加 ScreenCaptureKit 截图，没有注入输入的代码                                                      | `packages/live-host/src/native/appshot.mm`                                   |
+| #   | 事实                                                                                                                                                                                                  | 证据                                                                         |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 1   | 设置了 `CUA_DRIVER_RS_MCP_HTTP_PORT` 时，cua-driver 会启动 HTTP MCP，只绑 `127.0.0.1`，端点是 `POST /mcp`                                                                                             | `mcp_http.rs`（`configured_port`、`spawn`）；`serve.rs:642`、`serve.rs:1364` |
+| 2   | HTTP MCP 必须配置 32–4096 字符的 Bearer token，否则启动失败；token 错误返回 401                                                                                                                       | `mcp_http.rs:324-347` 及其测试                                               |
+| 3   | 带 `Origin` 头的请求返回 403                                                                                                                                                                          | `mcp_http.rs` 的 `serve_conn`                                                |
+| 4   | 非 POST 请求返回 405，通知返回 202；Qwen 的 MCP 客户端把 GET 收到 405 当作"不支持 SSE"，退回只用 POST                                                                                                 | `mcp_http.rs` 的 `serve_conn`；`packages/core/src/tools/mcp-client.ts:285`   |
+| 5   | 驱动的截图以 MCP image content 内联返回（base64 + `mimeType`），不是文件路径                                                                                                                          | `cua-driver-core/src/protocol.rs:281`                                        |
+| 6   | SDK 可以连接指定的守护进程，并继承它的身份与权限                                                                                                                                                      | `computer-use/README.md:248`；`computer-use/index.d.ts:80`                   |
+| 7   | 驱动的 `--permission-mode` 取值为 standard（默认）、bounded、unrestricted                                                                                                                             | `cua-driver/src/cli.rs:516`                                                  |
+| 8   | 反向通道的帧类型是 `mcp_register` / `mcp_message` / `mcp_unregister`；每个连接最多注册 10 个 server                                                                                                   | `client-mcp-ws.ts`                                                           |
+| 9   | 会话级注册带 `alwaysLoadTools: true`，工具不会藏在 `tool_search` 后面（文件桥设计文档里的事实 12 已经过时）                                                                                           | `client-mcp-sender-registry.ts:309`                                          |
+| 10  | `/acp` 的跨站检查只在请求带 `Origin` 时生效；非浏览器客户端可以用 `Authorization` 头；非回环地址且没有 token 的升级请求返回 403                                                                       | `acp-http/index.ts:1694-1755`                                                |
+| 11  | `/acp` WebSocket 单帧上限 10 MB                                                                                                                                                                       | `acp-http/index.ts:1568`                                                     |
+| 12  | live-host 的 daemon 发现只接受回环地址                                                                                                                                                                | `packages/live-host/src/main/discovery.ts:44`                                |
+| 13  | live-host 的原生能力是 AX 读树加 ScreenCaptureKit 截图，没有注入输入的代码                                                                                                                            | `packages/live-host/src/native/appshot.mm`                                   |
+| 14  | macOS 上 `qwen-cua-driver mcp` 和 `permissions grant` 用 `open -n -g -a QwenCuaDriver --args serve` 拉起守护进程，只转发 `--socket` 和 `--grant`，不转发环境变量；全仓只有这两个调用点                | `cua-driver/src/cli.rs:1121-1235`、`:1332`、`:2837`                          |
+| 15  | HTTP 端口和 token 只从环境变量读取，没有命令行参数或配置文件入口                                                                                                                                      | `mcp_http.rs`（`configured_port`、`configured_auth_token`）                  |
+| 16  | 驱动发布形态：可执行文件 `qwen-cua-driver`，应用 `/Applications/QwenCuaDriver.app`，bundle id `com.qwencode.cua-driver`；macOS 默认 socket 是 `~/Library/Caches/qwen-cua-driver/qwen-cua-driver.sock` | `packages/cua-driver/README.md`；`cua-driver-core/src/daemon.rs:144`         |
 
 ## 6. 未决与需实测
 
@@ -170,13 +175,9 @@ ACP 子进程：只在该会话里出现 mcp__computer__*    └─ 菜单栏状
 
 **片0：真机验证方案 A（不改代码）**
 
-在 Mac 上按 §3 方案 A 操作，然后在远端让模型完成一个小任务，比如"在备忘录里新建一条，内容写 hello"。记录：
+完整步骤、预期输出和需要回报的内容见 `docs/verification/remote-computer-use/README.md`，结果写入同目录的 `results.md`。接手的 session 或 agent 先读 `docs/plans/2026-09-14-remote-computer-use-handoff.md`。
 
-- [ ] 握手成功：`qwen mcp list` 显示 `cua` 已连接，工具可见；
-- [ ] 观察、点击、输入各至少成功一次；
-- [ ] 单步往返耗时，以及一张截图的字节数；
-- [ ] token 错误时返回 401；不开隧道时连接失败；
-- [ ] 断开隧道后，远端的工具调用给出明确错误，而不是一直挂起。
+要回答的问题：握手能否完成；观察、点击、输入能否成功；单步往返耗时和截图大小；token 错误和断开隧道时的表现；守护进程的 HTTP 端点在 macOS 上怎样才能真正打开（事实 14）。
 
 **片1：Node 命令行原型伴侣**
 
