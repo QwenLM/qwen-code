@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, useRef, type ReactNode } from 'react';
+import { act, useRef, useState, type ReactNode } from 'react';
 import {
   Box,
   render,
@@ -14,7 +14,7 @@ import {
   useBoxMetrics,
 } from 'ink';
 import stripAnsi from 'strip-ansi';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * Regression coverage for the `useBoxMetrics` loop guard carried in the
@@ -90,8 +90,10 @@ async function mount(
       maxFps: 1_000,
       patchConsole: false,
     });
+    // Register before the flush so a mount that throws out of the commit phase
+    // is still unmounted by `afterEach`.
+    mounted.add(app);
   });
-  mounted.add(app);
   await app.waitUntilRenderFlush();
   return app;
 }
@@ -121,6 +123,34 @@ function OscillatingBox() {
   return (
     <Box ref={ref} width={hasMeasured && width >= 11 ? 10 : 11}>
       <Text>x</Text>
+    </Box>
+  );
+}
+
+// Same oscillator, but counting renders so a test can assert on how many
+// commits the guard let through before it stopped the cascade.
+function CountingOscillatingBox({ onRender }: { onRender: () => void }) {
+  onRender();
+  const ref = useRef<DOMElement>(null);
+  const { width, hasMeasured } = useBoxMetrics(ref);
+  return (
+    <Box ref={ref} width={hasMeasured && width >= 11 ? 10 : 11}>
+      <Text>x</Text>
+    </Box>
+  );
+}
+
+// A box whose size is driven from the outside. Every re-render is a genuine
+// new interaction, so it must keep reporting fresh metrics indefinitely.
+function ExternallySizedBox({ size }: { size: number }) {
+  const ref = useRef<DOMElement>(null);
+  const { width, hasMeasured } = useBoxMetrics(ref);
+  return (
+    <Box flexDirection="row">
+      <Box ref={ref}>
+        <Text>{'x'.repeat(size)}</Text>
+      </Box>
+      <Text>{hasMeasured ? `measured:${width}` : 'measured:pending'}</Text>
     </Box>
   );
 }
@@ -169,5 +199,71 @@ describe('ink useBoxMetrics loop guard', () => {
     const frame = lastFrame();
     expect(frame).not.toContain(':pending');
     expect(frame).toContain('box-39:20');
+  });
+
+  it('settles an oscillating box whose commits never fit inside one wall-clock window', async () => {
+    // #11817. The budget used to refill whenever 16ms of wall clock had passed.
+    // A cascade whose commits are slower than that refills on every measurement,
+    // so the budget never drains and React's own 50-nested-update cap fires
+    // first - which is what a loaded CI runner or a slower platform does.
+    // Advancing the clock on every read pins that machine speed, so the failure
+    // is deterministic instead of something you have to lose a race to see.
+    let clock = 0;
+    const now = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => (clock += 16));
+    try {
+      const { stdout, lastFrame } = createTestStdout();
+      await mount(<OscillatingBox />, stdout);
+
+      expect(lastFrame()).toContain('x');
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('stops an oscillation in far fewer commits than React tolerates', async () => {
+    // React throws #185 once 50 nested updates stack up, so the guard has to
+    // stop the cascade well inside that. A guard that never trips does not just
+    // fail this assertion - it takes the whole mount down with #185.
+    let renders = 0;
+    const { stdout } = createTestStdout();
+    await mount(
+      <CountingOscillatingBox
+        onRender={() => {
+          renders += 1;
+        }}
+      />,
+      stdout,
+    );
+
+    expect(renders).toBeGreaterThan(1);
+    expect(renders).toBeLessThan(50);
+  });
+
+  it('keeps measuring across far more external re-renders than one budget', async () => {
+    // The other half of the guard's contract: a render the hook did not cause is
+    // a new interaction and refills the budget. Without that refill a box which
+    // legitimately changes size while content streams in would go stale after
+    // the first budget's worth of changes.
+    let setSize!: (size: number) => void;
+    function Driver() {
+      const [size, setSizeState] = useState(1);
+      setSize = setSizeState;
+      return <ExternallySizedBox size={size} />;
+    }
+
+    const { stdout, lastFrame } = createTestStdout();
+    const app = await mount(<Driver />, stdout);
+    expect(lastFrame()).toContain('measured:1');
+
+    for (let size = 2; size <= 40; size += 1) {
+      await act(async () => {
+        setSize(size);
+      });
+    }
+    await app.waitUntilRenderFlush();
+
+    expect(lastFrame()).toContain('measured:40');
   });
 });
