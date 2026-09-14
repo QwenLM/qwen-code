@@ -326,15 +326,20 @@ export function navigateToDaemon(raw: string, token?: string): void {
   const previousDaemonOrigin = getDaemonBaseUrl() || window.location.origin;
   if (token !== undefined) persistDaemonToken(token.trim(), daemonOrigin);
   confirmDaemonTarget(daemonOrigin);
+  if (daemonOrigin === previousDaemonOrigin) {
+    // Reconnecting to the target already in use. `nextUrl` is built for a
+    // target CHANGE: it resets the pathname and drops `?workspace=`,
+    // `?context=`, `?split=` and the hash, so assigning it would reboot the
+    // shell out of the open session that a plain refresh keeps. The current URL
+    // already names this target, and boot has already scrubbed any `?token=`
+    // from it — so reloading is exactly the plain refresh this case means.
+    window.location.reload();
+    return;
+  }
   // The per-tab split set (App.tsx's refresh restore) is session-scoped state
   // for the daemon being left, and a switch back to the page origin leaves one
   // just the same: this navigation stays in the same tab, so the entry would
-  // survive and boot the next daemon into a split of sessions it has never
-  // had. Key it on the target changing, not on the next target being remote.
-  // Reconnecting to the target already in use keeps the set — that is the case
-  // a plain refresh relies on.
-  if (daemonOrigin !== previousDaemonOrigin) {
-    clearSplitSessions();
-  }
+  // survive and boot the next daemon into a split of sessions it has never had.
+  clearSplitSessions();
   window.location.assign(nextUrl);
 }

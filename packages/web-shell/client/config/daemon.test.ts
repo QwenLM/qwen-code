@@ -253,6 +253,7 @@ describe('navigateToDaemon', () => {
   function setupPage(href: string) {
     const url = new URL(href);
     const assign = vi.fn();
+    const reload = vi.fn();
     Object.defineProperty(window, 'location', {
       value: {
         origin: url.origin,
@@ -260,11 +261,12 @@ describe('navigateToDaemon', () => {
         href: url.href,
         search: url.search,
         assign,
+        reload,
       },
       writable: true,
       configurable: true,
     });
-    return assign;
+    return { assign, reload };
   }
 
   it('forgets the split set when switching to another daemon', async () => {
@@ -272,10 +274,11 @@ describe('navigateToDaemon', () => {
       'qwen-webshell-split-sessions',
       JSON.stringify(['old-daemon-session']),
     );
-    const assign = setupPage('http://localhost:5173/app');
+    const { assign, reload } = setupPage('http://localhost:5173/app');
     const mod = await import('./daemon');
     mod.navigateToDaemon('http://remote.example:4170');
     expect(assign).toHaveBeenCalledTimes(1);
+    expect(reload).not.toHaveBeenCalled();
     expect(
       window.sessionStorage.getItem('qwen-webshell-split-sessions'),
     ).toBeNull();
@@ -286,7 +289,7 @@ describe('navigateToDaemon', () => {
       'qwen-webshell-split-sessions',
       JSON.stringify(['remote-session']),
     );
-    const assign = setupPage(
+    const { assign } = setupPage(
       'http://localhost:5173/app?daemon=https%3A%2F%2Fremote.example',
     );
     const mod = await import('./daemon');
@@ -303,15 +306,47 @@ describe('navigateToDaemon', () => {
   it('keeps the split set when reconnecting to the daemon already in use', async () => {
     const saved = JSON.stringify(['remote-session']);
     window.sessionStorage.setItem('qwen-webshell-split-sessions', saved);
-    const assign = setupPage(
+    const { assign, reload } = setupPage(
       'http://localhost:5173/app?daemon=https%3A%2F%2Fremote.example',
     );
     const mod = await import('./daemon');
     mod.navigateToDaemon('https://remote.example');
-    expect(assign).toHaveBeenCalledTimes(1);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(assign).not.toHaveBeenCalled();
     expect(window.sessionStorage.getItem('qwen-webshell-split-sessions')).toBe(
       saved,
     );
+  });
+
+  // A changed target must keep the full scrub: `?split=`, `?workspace=` and the
+  // `/session/<id>` pathname all name state of the daemon being left behind.
+  it('scrubs the deep link when the target actually changes', async () => {
+    const { assign, reload } = setupPage(
+      'http://localhost:5173/app/session/abc?workspace=%2Fproj%2Ffoo&context=live',
+    );
+    const mod = await import('./daemon');
+    mod.navigateToDaemon('http://remote.example:4170');
+    expect(reload).not.toHaveBeenCalled();
+    expect(assign).toHaveBeenCalledTimes(1);
+    const assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.pathname).not.toContain('/session/abc');
+    expect(assigned.searchParams.get('workspace')).toBeNull();
+    expect(assigned.searchParams.get('context')).toBeNull();
+  });
+
+  // The Daemon Status address field is pre-filled with the current target, so
+  // this is the form's DEFAULT click — an operator rotating a bearer token must
+  // not be rebooted out of the session a plain F5 would have kept.
+  it('reloads in place on a same-target reconnect instead of assigning a scrubbed URL', async () => {
+    const { assign, reload } = setupPage(
+      'http://localhost:5173/app/session/abc?workspace=%2Fproj%2Ffoo&context=live',
+    );
+    const mod = await import('./daemon');
+    mod.navigateToDaemon('http://localhost:5173', 'rotated-token');
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(assign).not.toHaveBeenCalled();
+    // The persist half still ran, or the reload would boot the old credential.
+    expect(mod.getDaemonToken('http://localhost:5173')).toBe('rotated-token');
   });
 });
 
