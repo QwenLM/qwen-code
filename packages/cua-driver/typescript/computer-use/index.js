@@ -110,7 +110,7 @@ function captureStatus(structured) {
     ? [...new Set(details.filter((detail) => typeof detail === "string"))]
     : [];
   const isBudgetDetail = (detail) =>
-    /^walk: max_(elements truncated|depth exceeded)$/.test(detail);
+    /^(walk: max_(elements truncated|depth exceeded)|max_(elements|depth)_reached)$/.test(detail);
   return {
     complete: revision?.capture_complete ?? structured?.capture_complete,
     readComplete:

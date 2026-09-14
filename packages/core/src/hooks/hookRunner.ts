@@ -1572,18 +1572,32 @@ export class HookRunner {
   }
 
   /**
-   * Expand command with environment variables and input context
+   * Resolve project directory variables in a command string before launch.
+   *
+   * `QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `GEMINI_PROJECT_DIR` are
+   * always exported in the hook's environment. Bash expands exported
+   * variables itself, so a bash command is passed through unchanged: a text
+   * substitution would put shell quotes inside a double-quoted
+   * `"$CLAUDE_PROJECT_DIR/..."` and break the path. cmd.exe never expands
+   * `$VAR`, and PowerShell reads a bare `$VAR` as an undefined variable, so
+   * for those shells each variable is replaced with the quoted project
+   * directory. `$env:QWEN_PROJECT_DIR` in PowerShell does not match and is
+   * left for the shell to read.
    */
   private expandCommand(
     command: string,
     input: HookInput,
     shellType: ShellType,
   ): string {
+    if (shellType === 'bash') {
+      return command;
+    }
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     return command
-      .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility
+      .replace(/\$GEMINI_PROJECT_DIR\b/g, () => escapedCwd)
+      .replace(/\$CLAUDE_PROJECT_DIR\b/g, () => escapedCwd)
+      .replace(/\$QWEN_PROJECT_DIR\b/g, () => escapedCwd);
   }
 
   /**

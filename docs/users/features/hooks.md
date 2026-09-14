@@ -70,7 +70,7 @@ Command hooks execute commands via child processes. Input JSON is passed through
         "hooks": [
           {
             "type": "command",
-            "command": "$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh",
+            "command": "\"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh\"",
             "name": "security-check",
             "timeout": 10
           }
@@ -80,6 +80,10 @@ Command hooks execute commands via child processes. Input JSON is passed through
   }
 }
 ```
+
+`QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `GEMINI_PROJECT_DIR` are set to the project directory in the environment of every command hook. Bash hooks read them from the environment, so double-quote them like any other shell variable, as in `"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh"`. For cmd hooks, and for a bare `$QWEN_PROJECT_DIR` in PowerShell hooks, the variable is replaced with the quoted project directory before the command runs; `$env:QWEN_PROJECT_DIR` also works in PowerShell.
+
+Migration: bash hooks used to have these variables replaced in the command text before the shell ran, and that replacement has been removed. A bash hook that leaves the variable unquoted in a project path containing spaces, or writes it inside single quotes such as `'$QWEN_PROJECT_DIR/hook.sh'`, must now double-quote it: `"$QWEN_PROJECT_DIR/hook.sh"`.
 
 ### HTTP Hooks
 
@@ -383,7 +387,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 - A matcher is first compared exactly. In a `|`-separated list such as `permission_prompt | idle_prompt`, the matcher matches when any entry, ignoring spaces around it, is `*`, `.*`, or exactly the value, unless the whole matcher starts with `^` or `(`, in which case it is only a regular expression. Only a `|` outside `[...]` and groups, and not escaped with a backslash, separates entries: the pipes in `notes\|todo\.md`, `foo[ |]bar` and `a(b | c)` are part of the regular expression, and the spaces around them are kept. List entries are never read as regular expressions on their own
 - Otherwise the matcher is an unanchored regular expression (e.g., `^run_shell_command$`, `read_.*`, `(write_file|edit)`). For a list that does not start with `^` or `(`, the expression is built from the trimmed, non-empty entries, so a stray `|` as in `read_(file|edit)|` is ignored and never makes the matcher match everything, and a matcher of only `|` matches nothing. A matcher that starts with `^` or `(` is compiled exactly as written, so a trailing `|` there, as in `^write_file|`, does make it match everything. Because the expression is unanchored, `read` also matches `read_file` and `edit` also matches `notebook_edit`. Add `^` and `$` to match a whole value, and anchor exclusions as well: `^(?!write_file).*$` excludes `write_file`, while unanchored `(?!write_file).*` still matches it
 - The same rules apply to every event that supports a matcher, and to hooks registered by skills
-- Tool hooks receive the runtime tool id in `tool_name` (for example, `write_file`). Built-in display names such as `WriteFile` and `ReadFile` are also accepted as matcher aliases for compatibility, but new configs should prefer runtime ids. Aliases are only compared exactly, so anchor runtime ids (`^write_file$`), not display names.
+- Tool hooks receive the runtime tool id in `tool_name` (for example, `write_file`). Built-in display names such as `WriteFile` and `ReadFile` are also accepted as matcher aliases for compatibility, and so are the tool names permission rules accept, including Claude Code's `Bash`, `Read` and `Write`, so a matcher copied from a Claude Code config such as `"Bash"` or `"Write|Edit"` works unchanged. New configs should still prefer runtime ids. Aliases are only compared exactly, so anchor runtime ids (`^write_file$`), not display names. Each alias names exactly one tool: unlike a permission rule, a `Read` matcher does not also cover `grep_search` or `glob`, and a `Bash` matcher does not cover `monitor`.
 
 **Examples:**
 
@@ -1380,7 +1384,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
         "hooks": [
           {
             "type": "command",
-            "command": "$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh",
+            "command": "\"$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh\"",
             "async": true,
             "timeout": 300
           }
