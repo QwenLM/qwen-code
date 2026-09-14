@@ -789,5 +789,18 @@ describe('ripgrepUtils', () => {
       await expect(canUseRipgrep(false)).rejects.toThrow('system rg broken');
       expect(fileExists).not.toHaveBeenCalled();
     });
+
+    it('attaches probeFailureReason metadata to errors thrown by ensureRipgrepHealthy', async () => {
+      vi.mocked(fileExists).mockResolvedValue(true);
+      vi.mocked(execCommand).mockImplementation(async () => ({ stdout: 'not-ripgrep 1.0', stderr: '', code: 0 }));
+
+      try {
+        await canUseRipgrep(true);
+        expect.unreachable('Should have thrown an error');
+      } catch (err: unknown) {
+        const error = err as Error & { probeFailureReason?: string };
+        expect(error.probeFailureReason).toBe('unhealthy_probe');
+      }
+    });
   });
 });

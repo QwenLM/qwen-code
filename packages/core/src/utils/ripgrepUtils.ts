@@ -209,6 +209,17 @@ export async function resolveRipgrep(
   return null;
 }
 
+export type RipgrepProbeFailureReason =
+  | 'unhealthy_probe'
+  | 'command_not_found'
+  | 'binary_missing'
+  | 'probe_execution_failed';
+
+export type RipgrepError = Error & {
+  probeFailureReason?: RipgrepProbeFailureReason;
+  selectionMode?: RipgrepMode;
+};
+
 /**
  * Ensures that ripgrep is healthy by checking its version.
  * @param selection The ripgrep selection to check.
@@ -241,16 +252,23 @@ export async function ensureRipgrepHealthy(
     cachedHealth = { working, lastTested: Date.now(), selection };
   } catch (error) {
     cachedHealth = { working: false, lastTested: Date.now(), selection };
-    throw error;
+    const probeError =
+      error instanceof Error ? error : new Error(String(error));
+    (probeError as RipgrepError).probeFailureReason = 'probe_execution_failed';
+    (probeError as RipgrepError).selectionMode = selection.mode;
+    throw probeError;
   }
 
   // Callers only tell healthy from unhealthy by the throw, so a probe that
   // returns without identifying itself as ripgrep must not read as success.
   // Carry what it printed, so a wrapper or wrong tool is identifiable.
   if (!working) {
-    throw new Error(
+    const error: RipgrepError = new Error(
       `${selection.command} is not a working ripgrep binary (exit ${probeCode}): ${probeOutput.trim() || '(no output)'}`,
     );
+    error.probeFailureReason = 'unhealthy_probe';
+    error.selectionMode = selection.mode;
+    throw error;
   }
 }
 
