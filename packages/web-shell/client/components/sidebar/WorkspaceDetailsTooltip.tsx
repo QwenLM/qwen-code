@@ -1,3 +1,4 @@
+import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
 import {
   useEffect,
   useRef,
@@ -16,10 +17,15 @@ import {
   PlugIcon,
   RadioTowerIcon,
   SparklesIcon,
-  TerminalIcon,
+  SquareTerminalIcon,
   WebhookIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import {
+  deriveStatus,
+  gitStatusPhrases,
+  hasComputedTreeSummary,
+} from '../GitBranchIndicator';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
 import {
   formatOverviewValue,
@@ -50,6 +56,7 @@ interface WorkspaceDetailsTooltipProps {
   /** Real filesystem path; undefined for a synthetic fallback workspace. */
   cwd?: string;
   branch?: string | null;
+  gitStatus?: DaemonWorkspaceGitStatus;
   /** Session counts lifted out of the header into this popover. */
   sessions?: WorkspaceSessionStats;
   overview: WorkspaceOverviewSnapshot | undefined;
@@ -66,6 +73,7 @@ interface WorkspaceDetailsTooltipProps {
    * on the same machine; rejects when the host could not open it.
    */
   onOpenTerminalLocally?: () => Promise<void>;
+  onOpenChange?: (open: boolean) => void;
   children: ReactElement;
 }
 
@@ -142,11 +150,13 @@ export function WorkspaceDetailsTooltip({
   label,
   cwd,
   branch,
+  gitStatus,
   sessions,
   overview,
   items,
   onOpenPathLocally,
   onOpenTerminalLocally,
+  onOpenChange,
   children,
 }: WorkspaceDetailsTooltipProps) {
   const { t } = useI18n();
@@ -167,6 +177,15 @@ export function WorkspaceDetailsTooltip({
       window.clearTimeout(closeTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    onOpenChange?.(open);
+    return () => onOpenChange?.(false);
+  }, [open, onOpenChange]);
+
+  const gitSummary =
+    gitStatusPhrases(deriveStatus(gitStatus), t).join(' · ') ||
+    (hasComputedTreeSummary(gitStatus) ? t('git.clean') : '');
 
   const cancelClose = () => window.clearTimeout(closeTimerRef.current);
   const openAfterDelay = () => {
@@ -303,7 +322,7 @@ export function WorkspaceDetailsTooltip({
                   <OpenLocallyButton
                     label={t('sidebar.openWorkspaceTerminal')}
                     announcement={t('sidebar.openWorkspaceTerminalOpened')}
-                    icon={TerminalIcon}
+                    icon={SquareTerminalIcon}
                     onOpen={onOpenTerminalLocally}
                     testId="terminal"
                   />
@@ -316,6 +335,12 @@ export function WorkspaceDetailsTooltip({
           <div className={sidebarStyles.sessionDetailsRow}>
             <GitBranchIcon aria-hidden="true" />
             <span title={branch}>{branch}</span>
+            <span
+              className={sidebarStyles.sessionDetailsRowValue}
+              title={gitSummary || undefined}
+            >
+              {gitSummary}
+            </span>
           </div>
         )}
         {sessions && sessions.total > 0 && (

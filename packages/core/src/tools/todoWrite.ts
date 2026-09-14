@@ -274,7 +274,10 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
     this.operationType = operationType;
   }
 
-  private refreshActiveTodoReminder(todos: TodoItem[]): void {
+  private refreshActiveTodoReminder(
+    todos: TodoItem[],
+    recordWriter = false,
+  ): void {
     const promptId = promptIdContext.getStore();
     if (!promptId) return;
 
@@ -292,6 +295,10 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         ? `<system-reminder>\nThe current task still has unfinished todo items:\n${todoContext}${serializedTodos.length > todoContext.length ? '\n[truncated]' : ''}\nKeep the todo list current and continue the task. Do not treat a successful intermediate tool call as task completion.\n</system-reminder>`
         : undefined,
     );
+
+    if (recordWriter && unfinishedTodos.length > 0) {
+      this.config.recordActiveTodoPlanWriter?.(promptId);
+    }
   }
 
   getDescription(): string {
@@ -504,7 +511,7 @@ Your todo list was not modified because it is already current. Continue with you
       if (!continuesApprovedWorkflow) {
         this.config.clearSessionWorkflowPlanRevision?.();
       }
-      this.refreshActiveTodoReminder(finalTodos);
+      this.refreshActiveTodoReminder(finalTodos, true);
 
       // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
       // These hooks can now safely perform side effects knowing data is persisted

@@ -27,6 +27,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'retryMaxDelayMs',
   'retryErrorCodes',
   'enableCacheControl',
+  'enableRequestMetadata',
   'forceGlobalCacheScope',
   'cacheRetention',
   'cacheRetentionByBlock',

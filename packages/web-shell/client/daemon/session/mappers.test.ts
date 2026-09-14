@@ -286,12 +286,16 @@ describe('mapReasoningControls', () => {
           id: 'reasoning_effort',
           currentValue: 'minimal',
           options: [{ value: 'none' }, { value: 'low' }, { value: 'minimal' }],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'low' },
+          },
         },
       ]),
     ).toEqual({
       enabled: true,
       effort: 'default',
       efforts: ['low'],
+      defaultEffort: 'low',
     });
   });
 });

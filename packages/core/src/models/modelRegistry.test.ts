@@ -399,6 +399,18 @@ describe('ModelRegistry', () => {
   });
 
   describe('getDefaultModelForAuthType', () => {
+    it('does not use service-only entries when no conversation default exists', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          { id: 'asr', voiceOnly: true },
+          { id: 'image', imageOnly: true },
+        ],
+      });
+      expect(
+        registry.getDefaultModelForAuthType(AuthType.USE_OPENAI),
+      ).toBeUndefined();
+    });
+
     it('should return coder-model for qwen-oauth', () => {
       const registry = new ModelRegistry();
       const defaultModel = registry.getDefaultModelForAuthType(
@@ -1342,11 +1354,14 @@ describe('providerProtocol mapping (custom provider ids)', () => {
       { idealab: 'openai' },
     );
 
+    expect(registry.getProviderProtocolConfig()).toEqual({ idealab: 'openai' });
+
     // Hot reload carrying only modelProviders (the existing reload callers).
     registry.reloadModels({
       idealab: [{ id: 'qwen3.7-max' }, { id: 'qwen3.7-coder' }],
     } as unknown as ModelProvidersConfig);
 
+    expect(registry.getProviderProtocolConfig()).toEqual({ idealab: 'openai' });
     expect(
       registry
         .getModelsForAuthType(AuthType.USE_OPENAI)
@@ -1366,6 +1381,7 @@ describe('providerProtocol mapping (custom provider ids)', () => {
       { idealab: 'gemini' },
     );
 
+    expect(registry.getProviderProtocolConfig()).toEqual({ idealab: 'gemini' });
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
     expect(
       registry.getModelsForAuthType(AuthType.USE_GEMINI).map((m) => m.id),
@@ -1399,6 +1415,7 @@ describe('providerProtocol mapping (custom provider ids)', () => {
       {},
     );
 
+    expect(registry.getProviderProtocolConfig()).toEqual({});
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
   });
 

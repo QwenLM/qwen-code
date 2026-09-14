@@ -206,10 +206,11 @@ export function mapReasoningControls(
   const defaultEffort = effortValues.find(
     (value) => value === getString(reasoningMeta, 'defaultEffort'),
   );
-  const effort =
-    effortValues.find((value) => value === currentValue) ??
-    defaultEffort ??
-    'default';
+  const effort = parsedCurrentValue
+    ? (effortValues.find((value) => value === currentValue) ??
+      defaultEffort ??
+      'default')
+    : 'default';
   return {
     enabled: currentValue !== 'none',
     effort,

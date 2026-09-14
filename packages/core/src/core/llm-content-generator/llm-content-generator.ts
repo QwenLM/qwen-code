@@ -191,10 +191,14 @@ export class LlmContentGenerator implements ContentGenerator {
         0.95,
       ),
       topK: getParameterValue<number>(configSamplingParams?.top_k, 'topK', 64),
-      maxOutputTokens: getParameterValue<number>(
-        configSamplingParams?.max_tokens,
-        'maxOutputTokens',
-      ),
+      maxOutputTokens:
+        configSamplingParams?.max_tokens !== undefined &&
+        requestConfig.maxOutputTokens !== undefined
+          ? Math.min(
+              configSamplingParams.max_tokens,
+              requestConfig.maxOutputTokens,
+            )
+          : (configSamplingParams?.max_tokens ?? requestConfig.maxOutputTokens),
       presencePenalty: getParameterValue<number>(
         configSamplingParams?.presence_penalty,
         'presencePenalty',
@@ -387,6 +391,13 @@ export class LlmContentGenerator implements ContentGenerator {
     }
 
     const result = { ...part };
+
+    // `partMetadata` is client-side bookkeeping only (the reattach boundary
+    // from issue #11627), never part of the wire payload. The Gemini Developer
+    // API route (`partToMldev`) copies it through, but the Vertex AI route
+    // (`partToVertex`) rejects it unconditionally when building the request,
+    // so drop it before the SDK sees it.
+    delete result.partMetadata;
 
     // Strip displayName from inlineData
     if (result.inlineData) {

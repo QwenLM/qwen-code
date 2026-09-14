@@ -534,6 +534,34 @@ describe('LlmContentGenerator', () => {
     );
   });
 
+  it.each([
+    [1000000, 4096, 4096],
+    [2048, 4096, 2048],
+    [undefined, 4096, 4096],
+    [2048, undefined, 2048],
+  ])(
+    'respects both configured and request output ceilings (%s, %s)',
+    async (configured, requested, expected) => {
+      const limited = new LlmContentGenerator(
+        { apiKey: 'test' },
+        { model: 'gemini-test', samplingParams: { max_tokens: configured } },
+      );
+      await limited.generateContent(
+        {
+          model: 'gemini-test',
+          contents: [],
+          config: { maxOutputTokens: requested },
+        },
+        'prompt-id',
+      );
+      expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({ maxOutputTokens: expected }),
+        }),
+      );
+    },
+  );
+
   it('should map reasoning effort to thinkingConfig', async () => {
     const generatorWithReasoning = new LlmContentGenerator({ apiKey: 'test' }, {
       model: 'gemini-2.5-pro',
@@ -826,6 +854,47 @@ describe('LlmContentGenerator', () => {
     expect(
       calledWith.contents[0].parts[2].fileData.displayName,
     ).toBeUndefined();
+  });
+
+  it('strips partMetadata from reattach parts before the Vertex request is built', async () => {
+    // `vertexai: true` routes through the same `stripPartFields` path as the
+    // Gemini Developer API route, but the Vertex request builder rejects
+    // `partMetadata` unconditionally. The reattach boundary (issue #11627)
+    // must not crash the Vertex route, so the marker is dropped before the
+    // SDK builds the payload.
+    const vertexGenerator = new LlmContentGenerator({
+      apiKey: 'test-api-key',
+      vertexai: true,
+    });
+
+    const request = {
+      model: 'gemini-1.5-flash',
+      contents: [
+        {
+          role: 'user' as const,
+          parts: [
+            {
+              text: 'Recent images reattached',
+              partMetadata: { 'qwen-code:reattach-boundary': true },
+            },
+            {
+              inlineData: { mimeType: 'image/png', data: 'base64data' },
+            },
+          ],
+        },
+      ],
+    };
+
+    mockGoogleGenAI.models.generateContent.mockResolvedValue({});
+
+    await vertexGenerator.generateContent(request, 'prompt-id');
+
+    const calledWith = mockGoogleGenAI.models.generateContent.mock.calls[0][0];
+    expect(calledWith.contents[0].parts[0].partMetadata).toBeUndefined();
+    expect(calledWith.contents[0].parts[1].inlineData).toEqual({
+      mimeType: 'image/png',
+      data: 'base64data',
+    });
   });
 
   it('should strip displayName from functionResponse parts', async () => {

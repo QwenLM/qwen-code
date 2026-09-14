@@ -28,7 +28,17 @@ import { safeTarget } from '../../../utils/paths.js';
  * dies EISDIR there — AFTER the fetches — and exit-codes as a runtime
  * failure instead of the repairable-invocation class the caller keys on.
  */
-export function assertWritableOutPath(out: string): void {
+export function assertWritableOutPath(out: unknown): asserts out is string {
+  // yargs hands a repeated `--out` over as an array and `--no-out` as
+  // `false`: name the mistake, rather than `out.trim is not a function` — a
+  // usage error worded like a crash.
+  if (typeof out !== 'string') {
+    throw new TypeError(
+      Array.isArray(out)
+        ? '--out must be given once, as a file path'
+        : '--out must name a file path',
+    );
+  }
   if (out.trim() === '') {
     throw new TypeError('--out must name a file path');
   }

@@ -1904,6 +1904,7 @@ export async function buildAvailableCommandsSnapshot(
       isInactiveExtensionSkill(
         {
           name: cmd.skillDetail.name,
+          authoredName: cmd.skillDetail.authoredName,
           level: 'extension',
           extensionName:
             'extensionName' in cmd.skillDetail &&
@@ -3836,7 +3837,7 @@ export class Session implements SessionContext {
     }
   }
 
-  reloadModelProvidersFromDisk(): void {
+  async reloadModelProvidersFromDisk(): Promise<void> {
     if (
       !this.settings.reloadScopesFromDiskAtomically([
         SettingScope.User,
@@ -3849,6 +3850,7 @@ export class Session implements SessionContext {
       this.settings.merged.modelProviders,
       this.settings.merged.providerProtocol ?? {},
     );
+    this.config.stageImageModelReload(this.settings.merged.imageModel);
   }
 
   installPendingManagedConversationBinding(
@@ -4492,6 +4494,10 @@ export class Session implements SessionContext {
     llmClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.clearActiveTodoPlanRevision();
+    // Rewinding discards the timeline the active-todo reminder described:
+    // clear the chain head so the next turn starts fresh instead of
+    // continuing work that was rewound away.
+    this.activeTodoWorkChainPromptId = undefined;
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
       (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -4555,6 +4561,10 @@ export class Session implements SessionContext {
 
     this.config.getLlmClient()!.setHistory(structuredClone(history));
     this.clearActiveTodoPlanRevision();
+    // Restoring history discards the timeline the active-todo reminder
+    // described: clear the chain head so the next turn starts fresh instead
+    // of continuing work the restore removed.
+    this.activeTodoWorkChainPromptId = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
@@ -5936,9 +5946,22 @@ export class Session implements SessionContext {
             if (!continuesCurrentWorkChain && !this.todoStopGuard.enabled) {
               this.#resetTodoStopGuardBackgroundLineage();
             }
+            // A registered reminder means the previous chain's plan still
+            // has unfinished items (todo_write deletes it on completion):
+            // continue that chain instead of discarding its context with the
+            // very turn that may be asking about it (#10953).
+            const continuesTodoWorkChain =
+              continuesCurrentWorkChain ||
+              (this.activeTodoWorkChainPromptId !== undefined &&
+                this.config.getActiveTodoReminder(
+                  this.activeTodoWorkChainPromptId,
+                ) !== undefined &&
+                this.config.getActiveTodoWorkChainOwner(
+                  this.activeTodoWorkChainPromptId,
+                ) === this.config.getActiveTodoPlanWriterOwner());
             this.config.startActiveTodoWorkChain(
               promptId,
-              continuesCurrentWorkChain
+              continuesTodoWorkChain
                 ? this.activeTodoWorkChainPromptId
                 : undefined,
             );
@@ -6045,9 +6068,19 @@ export class Session implements SessionContext {
             // `parts` — the reminder would vanish and then stay suppressed
             // for ACTIVE_TODO_REMINDER_REFRESH_TURNS on the post-answer
             // continuation that actually needs it.
-            const activeTodoReminder = isRestoreAskUserQuestion
-              ? undefined
-              : this.config.takeActiveTodoReminder(promptId, true);
+            // Turn-start injection is for machine continuations, mirroring
+            // core's gate (packages/core/src/core/client.ts:3951-3957:
+            // Retry | Cron | Notification | Teammate). An ordinary user turn
+            // keeps the chain registered so the reminder stays live for the
+            // tool-result and Agent-result paths, without splicing
+            // model-authored plan text ahead of the user's own text into
+            // append-only history on every turn.
+            const isMachineContinuation =
+              isRetry || isContinue || isRuntimeContinuation;
+            const activeTodoReminder =
+              isRestoreAskUserQuestion || !isMachineContinuation
+                ? undefined
+                : this.config.takeActiveTodoReminder(promptId, true);
             if (
               activeTodoReminder &&
               !parts.some((part) => part.text === activeTodoReminder)
@@ -6634,6 +6667,10 @@ export class Session implements SessionContext {
   }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
+    // Whether the turn reaching the next Stop check was forced by a blocking
+    // Stop hook. Kept apart from the iteration count, which also drives the
+    // consecutive-block cap and continuation prompt ids.
+    let stopHookForcedTurn = false;
     let stopHookReasons: string[] = [];
     const onFullTurnModel = (model: string) => {
       if (modelOverride === model) {
@@ -6692,6 +6729,12 @@ export class Session implements SessionContext {
               this.todoStopGuard.blockUntilOrdinaryPromptStarts();
             }
           }
+          // User input replaces the turn: it is not hook-forced, and the
+          // consecutive-block count restarts (an intervening allow may have
+          // been discarded by the post-hook drain).
+          stopHookForcedTurn = false;
+          stopHookIterationCount = 0;
+          stopHookReasons = [];
           this.todoStopGuard.acceptMidTurnUserInput();
           blockGoalProposalSettlement();
           const continuation = await this.#runStopContinuation(
@@ -6757,7 +6800,7 @@ export class Session implements SessionContext {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
               eventName: 'Stop',
               input: {
-                stop_hook_active: true,
+                stop_hook_active: stopHookForcedTurn,
                 last_assistant_message: responseText,
                 ...contextUsage,
               },
@@ -6797,6 +6840,12 @@ export class Session implements SessionContext {
                 this.todoStopGuard.blockUntilOrdinaryPromptStarts();
               }
             }
+            // User input replaces the turn before this Stop decision is
+            // applied: not hook-forced, and the consecutive-block count
+            // restarts. Each such reset needs real queued user input.
+            stopHookForcedTurn = false;
+            stopHookIterationCount = 0;
+            stopHookReasons = [];
             this.todoStopGuard.acceptMidTurnUserInput();
             blockGoalProposalSettlement();
             const continuation = await this.#runStopContinuation(
@@ -6927,6 +6976,8 @@ export class Session implements SessionContext {
           stopHookCount,
         );
       }
+      // Only a continuation carrying a Stop hook's reason is hook-forced.
+      stopHookForcedTurn = Boolean(externalReason);
       const continuation = await this.#runStopContinuation(
         pendingSend,
         continuationPromptId,
@@ -6956,6 +7007,10 @@ export class Session implements SessionContext {
           ...(channelTurn ? { channelTurn: true } : {}),
         },
       );
+      if (continuation.supersededAutomaticContinuation) {
+        // Queued user input replaced the continuation.
+        stopHookForcedTurn = false;
+      }
       if (continuation.supersededAutomaticContinuation && externalReason) {
         stopHookIterationCount--;
         stopHookReasons = stopHookReasons.slice(0, -1);
@@ -8428,7 +8483,18 @@ export class Session implements SessionContext {
     if (hadMidTurnUserInput) {
       this.todoStopGuard.acceptMidTurnUserInput();
     }
-    const activeTodoReminder = this.config.takeActiveTodoReminder(promptId);
+    // A top-level Agent tool result means a delegated execution just
+    // returned (#10953): real work advanced while the parent earned a
+    // single tool turn, so the turn budget cannot come due on its own.
+    // Force the reminder exactly where the progress information arrives.
+    const carriesAgentToolResult = toolRun.parts.some(
+      (part) =>
+        canonicalToolName(part.functionResponse?.name ?? '') ===
+        ToolNames.AGENT,
+    );
+    const activeTodoReminder = carriesAgentToolResult
+      ? this.config.takeActiveTodoReminder(promptId, true)
+      : this.config.takeActiveTodoReminder(promptId);
     if (abortSignal.aborted) {
       return {
         message: {
@@ -14752,7 +14818,11 @@ export class Session implements SessionContext {
               },
             };
           } else {
-            return { text: `@${part.uri}` };
+            return {
+              text: part.name
+                ? `@${part.uri} (original filename: ${JSON.stringify(part.name)})`
+                : `@${part.uri}`,
+            };
           }
         }
         case 'resource': {
