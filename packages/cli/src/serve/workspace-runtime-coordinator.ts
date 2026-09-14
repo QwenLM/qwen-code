@@ -14,8 +14,11 @@ import {
   type ServeWorkspaceSkillsRefreshResult,
 } from '@qwen-code/acp-bridge/status';
 import {
+  ExtensionStore,
+  getExtensionStoreContentHash,
   redactUrlCredentials,
   stripAnsiAndControl,
+  type ExtensionStoreSnapshot,
 } from '@qwen-code/qwen-code-core';
 import type {
   AcpSessionBridge,
@@ -163,7 +166,9 @@ export class WorkspaceRuntimeCoordinator {
 
   private skillsReconcileDeferred = false;
 
-  private extensionsReconcileDeferred: { skillsOnly?: boolean } | undefined;
+  private extensionsReconcileDeferred:
+    | { generation: number; skillsOnly?: boolean }
+    | undefined;
 
   private extensionsEnsureAbandonedAtEpoch: number | undefined;
 
@@ -204,12 +209,18 @@ export class WorkspaceRuntimeCoordinator {
     if (this.disposed) return;
     this.draining = false;
     if (this.extensionsReconcileDeferred) {
-      const options = this.extensionsReconcileDeferred;
+      const deferred = this.extensionsReconcileDeferred;
       this.extensionsReconcileDeferred = undefined;
-      void this.reconcileExtensionGeneration(
-        this.desiredExtensionGeneration,
-        options,
-      ).catch(() => undefined);
+      void this.reconcileExtensionGeneration(this.desiredExtensionGeneration, {
+        // The narrowing certifies only the generation it was recorded for.
+        // If the desired generation moved while draining, a skills-only
+        // replay would skip the tools/MCP/commands the newer generation
+        // needs, so widen to a full apply (always safe).
+        skillsOnly:
+          deferred.generation === this.desiredExtensionGeneration
+            ? deferred.skillsOnly
+            : undefined,
+      }).catch(() => undefined);
     }
     if (this.skillsReconcileDeferred) {
       this.skillsReconcileDeferred = false;
@@ -505,7 +516,7 @@ export class WorkspaceRuntimeCoordinator {
     const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
     if (!snapshot.runtimeLive || this.draining || this.disposed) {
       if (snapshot.runtimeLive && this.draining && !this.disposed) {
-        this.deferExtensionsReconciliation(options);
+        this.deferExtensionsReconciliation(generation, options);
       }
       return {
         state: 'deferred',
@@ -562,7 +573,7 @@ export class WorkspaceRuntimeCoordinator {
       });
     } catch (error) {
       if (this.draining && !this.disposed) {
-        this.deferExtensionsReconciliation(options);
+        this.deferExtensionsReconciliation(generation, options);
         return {
           state: 'deferred',
           refreshed: 0,
@@ -632,10 +643,12 @@ export class WorkspaceRuntimeCoordinator {
     };
   }
 
-  private deferExtensionsReconciliation(options: {
-    skillsOnly?: boolean;
-  }): void {
+  private deferExtensionsReconciliation(
+    generation: number,
+    options: { skillsOnly?: boolean },
+  ): void {
     this.extensionsReconcileDeferred = {
+      generation,
       skillsOnly:
         (this.extensionsReconcileDeferred?.skillsOnly ?? true) &&
         options.skillsOnly === true,
@@ -896,7 +909,7 @@ export class WorkspaceRuntimeCoordinator {
           current.runtimeLive &&
           current.runtimeEpoch === runtimeEpoch
         ) {
-          this.deferExtensionsReconciliation(options);
+          this.deferExtensionsReconciliation(generation, options);
         }
         this.extensionsStatus = {
           state: 'stale',
@@ -1448,6 +1461,33 @@ export class WorkspaceRuntimeCoordinator {
       throw new WorkspaceDrainingError(this.runtime.workspaceCwd, cause);
     }
   }
+}
+
+/**
+ * `ensure()` certifies the coordinator's *observed* desired extension
+ * generation, but the coordinator is in-memory only: until the poller, a
+ * projection read, or a commit lands an observation, the in-memory zero
+ * generation would be certified even when the durable Extension Store has
+ * moved past it. Callers on an ensure path observe the store first. The
+ * revision sample must precede the read: an observation landing between the
+ * sample and this observe bumps the revision, and this observe is then
+ * conservatively dropped.
+ */
+export async function observeDurableExtensionStoreGeneration(
+  coordinator: WorkspaceRuntimeCoordinator,
+  readSnapshot?: () => Promise<ExtensionStoreSnapshot>,
+): Promise<void> {
+  const storeReadRevision =
+    coordinator.status().capabilities?.extensions?.revision;
+  const snapshot = await (
+    readSnapshot ?? (() => new ExtensionStore().readSnapshot())
+  )();
+  coordinator.observeExtensionGeneration(
+    snapshot.generation,
+    storeReadRevision,
+    getExtensionStoreContentHash(snapshot),
+    snapshot.recoveryId,
+  );
 }
 
 export function getWorkspaceRuntimeCoordinatorIfSupported(

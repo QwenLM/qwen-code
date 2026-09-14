@@ -558,6 +558,64 @@ describe('WorkspaceRuntimeCoordinator', () => {
     );
   });
 
+  it('widens a drain-queued skills-only deferral when the desired generation moves', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(7),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 7,
+      appliedGeneration: 7,
+    });
+
+    coordinator.beginDrain();
+    await expect(
+      coordinator.reconcileExtensionGeneration(7, { skillsOnly: true }),
+    ).resolves.toEqual({
+      state: 'deferred',
+      refreshed: 0,
+      failed: 0,
+      drainDeferred: true,
+    });
+
+    // An out-of-band store writer moves the desired generation while the
+    // drain is still holding the skills-only deferral.
+    coordinator.observeExtensionGeneration(
+      8,
+      coordinator.status().capabilities?.extensions?.revision,
+      'hash-8',
+    );
+
+    harness.invokeWorkspaceCommand.mockClear();
+    coordinator.cancelDrain();
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 8,
+        appliedGeneration: 8,
+      }),
+    );
+
+    // A skills-only replay cannot certify generation 8: it skips
+    // refreshTools, MCP discovery, and the command update. The moved
+    // generation must replay as a full apply.
+    const replays = harness.invokeWorkspaceCommand.mock.calls.filter(
+      (call) =>
+        (call as unknown[])[0] ===
+        'qwen/control/workspace/extensions/reconcile',
+    );
+    expect(replays).toHaveLength(1);
+    expect(replays[0]).toEqual([
+      'qwen/control/workspace/extensions/reconcile',
+      { cwd: '/workspace' },
+      { timeoutMs: 300_000 },
+    ]);
+  });
+
   it('re-certifies Skills/MCP when the initial Extension apply settles past the ensure budget', async () => {
     vi.useFakeTimers();
     try {

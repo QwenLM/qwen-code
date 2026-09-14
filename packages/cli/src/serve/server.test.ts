@@ -3103,7 +3103,11 @@ function makeWorkspaceRuntimeForTest(input: {
     trusted: input.trusted ?? true,
     env: { mode: 'parent-process', overlayKeys: [] },
     bridge: input.bridge,
-    workspaceService: input.workspaceService ?? ({} as DaemonWorkspaceService),
+    workspaceService:
+      input.workspaceService ??
+      ({
+        invalidateWorkspaceSkillsStatus: () => undefined,
+      } as unknown as DaemonWorkspaceService),
     routeFileSystemFactory: {} as WorkspaceFileSystemFactory,
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
     ...(input.generationGuard
