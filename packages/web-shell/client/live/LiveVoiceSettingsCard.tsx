@@ -26,15 +26,10 @@ import { Separator } from '../components/ui/separator';
 import { Spinner } from '../components/ui/spinner';
 import { Switch } from '../components/ui/switch';
 import { HotkeySetter } from './HotkeySetter';
-import type { UseLiveVoiceSetupResult } from './useLiveVoiceSetup';
-
-const INSTALLING_STATES = new Set([
-  'checking',
-  'downloading',
-  'verifying',
-  'installing',
-  'launching',
-]);
+import {
+  INSTALLING_STATES,
+  type UseLiveVoiceSetupResult,
+} from './useLiveVoiceSetup';
 
 function RequirementBadge({
   state,
@@ -69,7 +64,8 @@ export function LiveVoiceSettingsCard({
   const status = setup.status;
   const enabled = status?.enabled === true;
   const busy = setup.mutating || setup.loading;
-  const installBusy = INSTALLING_STATES.has(status?.install.state ?? '');
+  const installBusy =
+    status !== undefined && INSTALLING_STATES.has(status.install.state);
   const requirements = status?.live.requirements;
 
   const saveKey = async () => {
