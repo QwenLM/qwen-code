@@ -4800,6 +4800,80 @@ describe('WebShellSidebar session source switch', () => {
     expect(archived.unarchiveSession).toHaveBeenCalledWith('archived-ordinary');
   });
 
+  it('couples the guards to an ordinary session the daemon flags as task-bound', async () => {
+    // The cron tool's `sessionMode: 'current'` path binds a task to the
+    // caller's ORDINARY chat — no sourceType marker is stamped — and the
+    // daemon still disables/removes the task on archive/delete. The guards
+    // must key on the daemon-computed boundScheduledTaskId flag, not the
+    // session's own sourceType.
+    active.sessions.push(
+      {
+        sessionId: 'bound-chat',
+        displayName: 'Daily standup notes',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+        boundScheduledTaskId: 'task-9',
+      },
+      {
+        sessionId: 'plain-chat',
+        displayName: 'Plain chat',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    // Archiving silently disables the coupled task, so the row does not
+    // offer it; an unbound row still does.
+    const boundItems = await openSessionMenuItems('Daily standup notes');
+    expect(boundItems.some((item) => item.includes('Archive'))).toBe(false);
+    const plainItems = await openSessionMenuItems('Plain chat');
+    expect(plainItems.some((item) => item.includes('Archive'))).toBe(true);
+
+    // The delete confirm discloses the coupled task.
+    await selectSessionMenuItem('Daily standup notes', 'Delete');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain(
+      'Its scheduled task will also be deleted and stop running.',
+    );
+    await act(async () => {
+      click(
+        Array.from(document.querySelectorAll('button')).find(
+          (button) => button.textContent === 'cancel',
+        )!,
+      );
+      await Promise.resolve();
+    });
+    expect(active.deleteSession).not.toHaveBeenCalled();
+
+    // Restoring its archived row raises the confirm before unarchiving. The
+    // archived row gets a distinct label so the label-lookup helpers cannot
+    // resolve to the still-active row with the same sessionId.
+    archived.sessions.push({
+      sessionId: 'bound-chat',
+      displayName: 'Daily standup archived',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      boundScheduledTaskId: 'task-9',
+      isArchived: true,
+    });
+    renderSidebar();
+    await expandArchived();
+    await selectSessionMenuItem('Daily standup archived', 'Restore');
+    const restoreDialog = document.querySelector('[role="dialog"]');
+    expect(restoreDialog?.textContent).toContain(
+      'If its scheduled task was paused with the archive, it will start running again.',
+    );
+    expect(archived.unarchiveSession).not.toHaveBeenCalled();
+    await act(async () => {
+      click(dialogButton('Restore'));
+      await Promise.resolve();
+      await archived.unarchiveSession.mock.results.at(-1)?.value;
+    });
+    expect(archived.unarchiveSession).toHaveBeenCalledWith('bound-chat');
+  });
+
   it('groups scheduled-task runs under the task title and source icon', async () => {
     const scheduledRun: DaemonSessionSummary = {
       sessionId: 'scheduled-run',

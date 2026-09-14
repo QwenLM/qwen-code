@@ -235,8 +235,9 @@ describe('scheduledTaskRunContent drift vs CLI', () => {
     const cli = cliCleanMetadataLine();
     const disagreements: string[] = [];
     for (const input of CLEAN_CASES) {
-      // The local copy is not exported; reach it through the builder's
-      // `cron` line, which is cleanMetadataLine applied verbatim.
+      // Reach the local copy through the builder's `cron` line, which is
+      // cleanMetadataLine applied verbatim (it is also exported for
+      // dialogLabels, but the builder path is what the envelope pins).
       const viaLocal = buildScheduledTaskRunContent({
         id: 't',
         name: 'n',

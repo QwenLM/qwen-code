@@ -52,6 +52,7 @@ import {
 import { useI18n } from '../i18n';
 import { SessionPrBadge } from './SessionPrBadge';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
+import { isScheduledTaskCoupledSession } from '../utils/scheduledTaskCoupling';
 import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
 import { workspaceLabel, workspaceLabelForCwd } from '../utils/workspace';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
@@ -142,6 +143,8 @@ export interface SessionCard {
   workspaceCwd: string;
   /** Creator attribution; a `scheduled_task` controller is coupled to its task. */
   sourceType?: string;
+  /** Id of the scheduled task bound to this session, when one exists. */
+  boundScheduledTaskId?: string;
 }
 
 type SessionStatusFilter = 'all' | 'attention' | 'running' | 'idle';
@@ -165,11 +168,11 @@ function matchesStatus(
   );
 }
 
-// Archiving or deleting a scheduled-task controller silently disables or
-// deletes its coupled task daemon-side; the pause that names the task lives
-// on the sidebar row and the Tasks surface.
-function isScheduledTaskController(card: SessionCard): boolean {
-  return card.sourceType === 'scheduled_task';
+// Archiving or deleting a task-bound session silently disables or deletes
+// its coupled task daemon-side; the pause that names the task lives on the
+// sidebar row and the Tasks surface.
+function isScheduledTaskCoupledCard(card: SessionCard): boolean {
+  return isScheduledTaskCoupledSession(card);
 }
 
 type SessionIdentity = Pick<SessionCard, 'sessionId' | 'workspaceCwd'>;
@@ -245,6 +248,7 @@ export function deriveSessionCards(
       gitBranch: session.worktree?.branch ?? session.branch?.name,
       workspaceCwd: session.workspaceCwd,
       sourceType: session.sourceType,
+      boundScheduledTaskId: session.boundScheduledTaskId,
     };
   });
   cards.sort((a, b) => {
@@ -623,14 +627,14 @@ function SessionOverviewPanelInner({
     (card: SessionCard) =>
       sessionArchiveEnabled &&
       card.status === 'idle' &&
-      !isScheduledTaskController(card) &&
+      !isScheduledTaskCoupledCard(card) &&
       canUseSessionMutation(card),
     [canUseSessionMutation, sessionArchiveEnabled],
   );
   const canDeleteCard = useCallback(
     (card: SessionCard) =>
       card.status === 'idle' &&
-      !isScheduledTaskController(card) &&
+      !isScheduledTaskCoupledCard(card) &&
       canUseSessionMutation(card),
     [canUseSessionMutation],
   );

@@ -820,6 +820,14 @@ export interface BridgeSessionSummary {
   sourceType?: string;
   /** Optional source-specific identifier paired with `sourceType`. */
   sourceId?: string;
+  /**
+   * Id of the scheduled task bound to this session, present whenever any task
+   * carries this session's id — the daemon couples the session's
+   * archive/delete/restore to that task regardless of the session's own
+   * source (an ordinary chat can be a task's fixed session). Persisted
+   * catalog listings only.
+   */
+  boundScheduledTaskId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
   /** Per-session active-work observation. `idle` is emitted only from a

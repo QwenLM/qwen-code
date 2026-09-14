@@ -321,6 +321,39 @@ describe('DeleteSessionDialog selection', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('never offers an ordinary session the daemon flags as task-bound', async () => {
+    // The cron tool's `sessionMode: 'current'` path binds a task to an
+    // ordinary chat with no sourceType marker; deleting it still removes the
+    // recurring task. The dialog must exclude any session carrying the
+    // daemon-computed boundScheduledTaskId flag.
+    sessions = [
+      {
+        sessionId: 'bound-1',
+        workspaceCwd: '/work/repo',
+        displayName: 'Bound chat',
+        clientCount: 0,
+        updatedAt: '2026-01-01T00:00:00Z',
+        sourceType: 'default',
+        boundScheduledTaskId: 'task-9',
+      },
+      {
+        sessionId: 's-plain',
+        workspaceCwd: '/work/repo',
+        displayName: 'Ordinary chat',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+    ];
+    mount();
+
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].textContent).toContain('Ordinary chat');
+
+    // Even a filter matching the bound session must not surface it.
+    typeFilter('bound');
+    expect(rows()).toHaveLength(0);
+  });
+
   it('deletes the checked sessions via the batch API and closes', async () => {
     deleteSessionsMock.mockResolvedValue({
       removed: ['s0', 's1'],

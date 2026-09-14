@@ -1958,6 +1958,46 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     expect(dialog?.textContent).not.toMatch(/[“"]\s*[”"] will stop running/);
   });
 
+  it.each([
+    ['zero-width space', '\u200b'],
+    ['soft hyphen', '\u00ad'],
+    ['word joiner', '\u2060'],
+  ])(
+    'names the prompt in the delete confirm when the stored name is a lone %s',
+    async (_label, mark) => {
+      // The daemon's name check only rejects a zero-length trim(), and none
+      // of these are whitespace — each stores a truthy yet invisible name.
+      // The confirm must fall back to the prompt rather than name an empty
+      // pair of quotes.
+      await mount([
+        baseTask({ id: 'invisible', name: mark, prompt: 'summarize the day' }),
+      ]);
+      click(document.querySelector('[aria-label="Delete"]'));
+      const dialog = document.querySelector('[role="alertdialog"]');
+      expect(dialog).not.toBeNull();
+      expect(dialog?.textContent).toContain('summarize the day');
+      expect(dialog?.textContent).not.toContain(mark);
+    },
+  );
+
+  it('strips terminal escape sequences from the delete confirm label', async () => {
+    await mount([
+      baseTask({
+        id: 'ansi',
+        name: '\u001b[31mSummarize the overnight alerts\u001b[0m',
+        prompt: 'fallback prompt',
+      }),
+    ]);
+    click(document.querySelector('[aria-label="Delete"]'));
+    const dialog = document.querySelector('[role="alertdialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain('Summarize the overnight alerts');
+    // Sequence-aware cleaning removes the whole escape sequence; a raw
+    // control-byte strip would leave the printable payload behind.
+    expect(dialog?.textContent).not.toContain('[31m');
+    expect(dialog?.textContent).not.toContain('[0m');
+  });
+
   it('keeps the delete confirm dismissible while another task mutates', async () => {
     // busyId is one dialog-global slot shared by every mutating handler; the
     // confirm's dismissibility must key on the DELETE's own busy state, or an

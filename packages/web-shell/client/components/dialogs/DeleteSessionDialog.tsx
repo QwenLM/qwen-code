@@ -7,6 +7,7 @@ import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
+import { isScheduledTaskCoupledSession } from '../../utils/scheduledTaskCoupling';
 
 interface DeleteSessionDialogProps {
   onDeleted: (sessionIds: string[]) => void;
@@ -55,12 +56,12 @@ export function DeleteSessionDialog({
     if (sessionsError) setMessage(sessionsError.message);
   }, [sessionsError]);
 
-  // A scheduled task's controller session is task-coupled: the daemon
-  // deletes the recurring task together with the session, and this bulk
-  // dialog has no task-naming confirm — so controllers are managed from the
-  // sidebar (which carries that confirm), not offered here.
+  // A task-bound session is task-coupled: the daemon deletes the recurring
+  // task together with the session, and this bulk dialog has no task-naming
+  // confirm — so coupled sessions are managed from the sidebar (which
+  // carries that confirm), not offered here.
   const deletable = useMemo(
-    () => sessions.filter((s) => s.sourceType !== 'scheduled_task'),
+    () => sessions.filter((s) => !isScheduledTaskCoupledSession(s)),
     [sessions],
   );
 

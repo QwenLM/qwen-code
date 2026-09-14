@@ -2354,6 +2354,27 @@ describe('SessionOverviewPanel', () => {
     expect(rowActionButton(plainRow!, 'Delete').disabled).toBe(false);
   });
 
+  it('keeps archive and delete unavailable for an ordinary card flagged as task-bound', () => {
+    // The cron tool's `sessionMode: 'current'` path binds a task to an
+    // ordinary chat with no sourceType marker; the daemon still couples
+    // archive/delete to the task, so the card keys on the daemon-computed
+    // boundScheduledTaskId flag.
+    sessionsState.sessions = [
+      session('bound-1', {
+        displayName: 'Bound chat',
+        sourceType: 'default',
+        boundScheduledTaskId: 'task-9',
+      }),
+      session('plain-1', { displayName: 'Plain chat', sourceType: 'default' }),
+    ];
+    render();
+    const [boundRow, plainRow] = rows();
+    expect(rowActionButton(boundRow!, 'Archive').disabled).toBe(true);
+    expect(rowActionButton(boundRow!, 'Delete').disabled).toBe(true);
+    expect(rowActionButton(plainRow!, 'Archive').disabled).toBe(false);
+    expect(rowActionButton(plainRow!, 'Delete').disabled).toBe(false);
+  });
+
   it('archives the current session and clears it after success', async () => {
     connectionState.sessionId = 's1';
     sessionsState.sessions = [session('s1', { displayName: 'One' })];

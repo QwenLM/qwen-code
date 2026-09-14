@@ -24021,6 +24021,134 @@ describe('createServeApp', () => {
         expect(organizedExactTaskId.body.sessions).toEqual([]);
       });
 
+      it('flags every task-bound session with boundScheduledTaskId, whatever its source', async () => {
+        // The daemon couples a task to its session by the bound sessionId
+        // alone (disable/enable/removeTasksForSessions) — an ordinary chat
+        // bound via the cron tool's `sessionMode: 'current'` path, a
+        // dedicated controller, and a per_run task's retained session all
+        // archive/delete/restore with task side effects, so the catalog must
+        // flag each of them for the client's disclosure guards.
+        const ordinaryBoundId = '550e8400-e29b-41d4-a716-446655440211';
+        const controllerId = '550e8400-e29b-41d4-a716-446655440212';
+        const perRunBoundId = '550e8400-e29b-41d4-a716-446655440213';
+        const unboundId = '550e8400-e29b-41d4-a716-446655440214';
+        await writeStoredSession({
+          sessionId: ordinaryBoundId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'ordinary chat bound as a fixed session',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          sourceType: 'default',
+        });
+        await writeStoredSession({
+          sessionId: controllerId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:01:00.000Z',
+          prompt: 'dedicated controller',
+          mtime: new Date('2026-05-17T12:01:00.000Z'),
+          sourceType: 'scheduled_task',
+          sourceId: 'task-controller',
+        });
+        await writeStoredSession({
+          sessionId: perRunBoundId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:02:00.000Z',
+          prompt: 'per-run retained session',
+          mtime: new Date('2026-05-17T12:02:00.000Z'),
+          sourceType: 'default',
+        });
+        await writeStoredSession({
+          sessionId: unboundId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:03:00.000Z',
+          prompt: 'plain chat',
+          mtime: new Date('2026-05-17T12:03:00.000Z'),
+          sourceType: 'default',
+        });
+        await qwenCore.updateCronTasks(WS_BOUND, () => [
+          {
+            id: 'task-current',
+            cron: '0 9 * * *',
+            prompt: 'bound to an ordinary chat',
+            recurring: true,
+            createdAt: 1,
+            lastFiredAt: null,
+            enabled: true,
+            sessionMode: 'persistent',
+            sessionOwnedByTask: false,
+            sessionId: ordinaryBoundId,
+          },
+          {
+            id: 'task-controller',
+            cron: '0 9 * * *',
+            prompt: 'dedicated controller task',
+            recurring: true,
+            createdAt: 2,
+            lastFiredAt: null,
+            enabled: true,
+            sessionMode: 'persistent',
+            sessionId: controllerId,
+          },
+          {
+            id: 'task-per-run',
+            cron: '0 9 * * *',
+            prompt: 'per-run task retaining a sessionId',
+            recurring: true,
+            createdAt: 3,
+            lastFiredAt: null,
+            enabled: true,
+            sessionMode: 'per_run',
+            sessionId: perRunBoundId,
+          },
+        ]);
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+        );
+        const get = (query: string) =>
+          request(app)
+            .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?${query}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const flagById = (body: {
+          sessions: Array<{
+            sessionId: string;
+            boundScheduledTaskId?: string;
+          }>;
+        }) =>
+          new Map(
+            body.sessions.map((session) => [
+              session.sessionId,
+              session.boundScheduledTaskId,
+            ]),
+          );
+
+        // The metadata-filtered catalog (what the sidebar's default source
+        // queries)…
+        const filtered = flagById((await get('sourceType=default')).body);
+        expect(filtered.get(ordinaryBoundId)).toBe('task-current');
+        expect(filtered.get(controllerId)).toBe('task-controller');
+        // The flag ignores sessionMode: the lifecycle coupling
+        // (disableTasksForSessions & co.) matches on the bound sessionId
+        // alone, so a per_run task's retained session is flagged too.
+        expect(filtered.get(perRunBoundId)).toBe('task-per-run');
+        expect(filtered.get(unboundId)).toBeUndefined();
+
+        // …the organized view…
+        const organized = flagById(
+          (await get('view=organized&group=all&sourceType=default')).body,
+        );
+        expect(organized.get(ordinaryBoundId)).toBe('task-current');
+        expect(organized.get(unboundId)).toBeUndefined();
+
+        // …and the legacy unfiltered listing (no sourceType/view options).
+        const legacy = flagById((await get('size=20')).body);
+        expect(legacy.get(ordinaryBoundId)).toBe('task-current');
+        expect(legacy.get(controllerId)).toBe('task-controller');
+        expect(legacy.get(perRunBoundId)).toBe('task-per-run');
+        expect(legacy.get(unboundId)).toBeUndefined();
+      });
+
       it('includes a legacy fixed-session task controller in the default source filter', async () => {
         // A task created before `sessionMode` existed carries only a stored
         // `sessionId`; the absent mode means historical fixed-session

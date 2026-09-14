@@ -133,6 +133,7 @@ import {
   SESSION_ORGANIZATION_FEATURE,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
 } from '../../constants/sessions';
+import { isScheduledTaskCoupledSession } from '../../utils/scheduledTaskCoupling';
 import styles from './WebShellSidebar.module.css';
 import {
   useSessionCatalogController,
@@ -4372,10 +4373,10 @@ export function WebShellSidebar({
                             disabled={busy}
                             onSelect={() => {
                               if (standalone) standalone.onUnarchive?.();
-                              // Restoring a task-bound controller re-enables
-                              // its scheduled task daemon-side — pause first so
+                              // Restoring a task-bound session re-enables its
+                              // scheduled task daemon-side — pause first so
                               // that does not happen unnamed.
-                              else if (session.sourceType === 'scheduled_task')
+                              else if (isScheduledTaskCoupledSession(session))
                                 setUnarchiveCandidate(session);
                               else handleUnarchive(session);
                             }}
@@ -4430,10 +4431,10 @@ export function WebShellSidebar({
       const showArchive = standalone
         ? sessionActionItems.has('archive') && Boolean(standalone.onArchive)
         : sessionActionItems.has('archive') &&
-          // Archiving a task-bound controller silently disables its scheduled
+          // Archiving a task-bound session silently disables its scheduled
           // task (the daemon couples the two), with no confirmation — keep
           // that pause on the Tasks surface instead.
-          session.sourceType !== 'scheduled_task' &&
+          !isScheduledTaskCoupledSession(session) &&
           canMutateSessionArchive(session);
       const showRename = standalone
         ? sessionActionItems.has('rename')
@@ -5325,7 +5326,7 @@ export function WebShellSidebar({
           >
             <div className={styles.confirmContent}>
               <p className={styles.confirmDescription}>
-                {deleteCandidate.sourceType === 'scheduled_task'
+                {isScheduledTaskCoupledSession(deleteCandidate)
                   ? t('sidebar.deleteScheduledTaskConfirmDescription', {
                       name: deleteCandidateLabel,
                     })

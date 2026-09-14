@@ -318,6 +318,35 @@ async function loadPersistentScheduledTaskControllers(
   }
 }
 
+/**
+ * sessionId → taskId for EVERY task carrying a non-empty `sessionId`. The
+ * daemon's lifecycle coupling (scheduled-task-session-lifecycle.ts:
+ * disable/enable/removeTasksForSessions) matches on the bound sessionId
+ * alone — no source-type, ownership, or sessionMode condition — so the
+ * client-facing `boundScheduledTaskId` flag must be built from the same
+ * bound-test, or an ordinary chat session bound as a task's fixed session
+ * (the cron tool's `sessionMode: 'current'` path only accepts such sessions)
+ * would archive/delete/restore with no task disclosure.
+ */
+async function loadBoundScheduledTaskSessionIds(
+  workspaceCwd: string,
+): Promise<ReadonlyMap<string, string>> {
+  try {
+    const tasks = await readCronTasks(workspaceCwd);
+    const bound = new Map<string, string>();
+    for (const task of tasks) {
+      if (typeof task.sessionId === 'string' && task.sessionId.length > 0) {
+        bound.set(task.sessionId, task.id);
+      }
+    }
+    return bound;
+  } catch {
+    // Same contract as the controllers read: a task-store failure must not
+    // break the session catalog — rows simply render without the flag.
+    return new Map();
+  }
+}
+
 function matchesSessionMetadataSource(
   session: BridgeSessionSummary,
   filter: Pick<
@@ -1387,7 +1416,27 @@ export async function listWorkspaceSessionsForResponse(
       }),
   );
   readOptions.signal?.throwIfAborted();
-  return result;
+  // Flag every listed session a scheduled task is bound to. Applied here, on
+  // the single persisted-catalog choke point, so all three listing paths
+  // (default/organized/metadata) carry it. The live-only fallback never needs
+  // it: binding persists the session first (ensurePersisted in the bind
+  // route), and that fallback only serves workspaces with no active persisted
+  // sessions at all.
+  const boundTaskIdBySessionId =
+    await loadBoundScheduledTaskSessionIds(workspaceCwd);
+  readOptions.signal?.throwIfAborted();
+  if (boundTaskIdBySessionId.size === 0) return result;
+  return {
+    ...result,
+    sessions: result.sessions.map((session) => {
+      const boundScheduledTaskId = boundTaskIdBySessionId.get(
+        session.sessionId,
+      );
+      return boundScheduledTaskId === undefined
+        ? session
+        : { ...session, boundScheduledTaskId };
+    }),
+  };
 }
 
 async function listWorkspaceSessionsForResponseInRuntime(

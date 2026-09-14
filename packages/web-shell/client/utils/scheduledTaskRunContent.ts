@@ -20,7 +20,7 @@ const TERMINAL_OSC_REGEX = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
 const TERMINAL_CSI_REGEX = /\u001b\[[\d;?]*[a-zA-Z]/g;
 const TERMINAL_SHIFT_DCS_REGEX = /\u001b[NOP]/g;
 
-function cleanMetadataLine(value: string): string {
+export function cleanMetadataLine(value: string): string {
   return value
     .replace(TERMINAL_OSC_REGEX, ' ')
     .replace(TERMINAL_CSI_REGEX, ' ')
