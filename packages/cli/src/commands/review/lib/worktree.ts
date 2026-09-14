@@ -35,7 +35,15 @@ import {
   type Stats,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { isSubpath } from '@qwen-code/qwen-code-core';
 import { REVIEW_TMP_DIR } from './paths.js';
 import { readWorkspacePackages } from './workspaces.js';
@@ -1067,8 +1075,8 @@ export interface FilterScreen {
   /**
    * Every `filter.<name>.smudge|clean|process` key the repo-local config
    * graph defines, except keys delivered from an exact source-file spelling
-   * in the active global/system graph that lies outside repository-controlled
-   * paths. Canonical and in discovery order — the names a caller refuses on.
+   * in the active global/system graph that is not repository-delivered.
+   * Canonical and in discovery order — the names a caller refuses on.
    */
   filters: string[];
   /**
@@ -1146,8 +1154,9 @@ export interface FilterScreen {
  * config because the probe's planting surface is the repo-local files. An
  * included filter from the exact origin Git reaches through active global or
  * system config (git-lfs is the common one) is the user's own contract only
- * when that source lies outside repository-controlled paths, so it is
- * exempted from checkout refusal by origin, scope, and containment below.
+ * when Git does not identify that source as tracked content of this
+ * repository, so it is exempted from checkout refusal by origin and scope
+ * below.
  * Every other included source remains repository-delivered. The state cannot
  * be safely wiped, so what the caller does with a hit is the caller's:
  * scratch-tree checkouts refuse, while the residue measurement blanks both
@@ -1287,73 +1296,146 @@ export function filterCommandsIn(
       ? dirname(resolve(commonDir))
       : commonDir;
   })();
-  const controlledSpellings = [commonDir, gitDir, screenedTree].map((path) =>
-    resolve(path),
-  );
-  const commonLooksLikeGitDir =
-    existsSync(join(commonDir, 'HEAD')) &&
-    existsSync(join(commonDir, 'objects')) &&
-    existsSync(join(commonDir, 'refs'));
-  let mainWorktreeUnknown = false;
-  if (commonLooksLikeGitDir && basename(resolve(commonDir)) === '.git') {
-    controlledSpellings.push(dirname(resolve(commonDir)));
-  } else if (commonLooksLikeGitDir) {
-    const configuredWorktree = spawnSync(
-      'git',
-      [
-        'config',
-        '--file',
-        join(commonDir, 'config'),
-        '--path',
-        '--get',
-        'core.worktree',
-      ],
-      {
-        cwd: commonDir,
-        encoding: 'utf8',
-        env: sanitizedGitEnv(),
-      },
-    );
+  // Repository geometry cannot be closed by enumerating worktree roots: bare,
+  // separate-git-dir, submodule and linked-worktree layouts all spell them
+  // differently. Ask Git which repository owns the origin and whether that
+  // repository actually tracks it. `core.worktree` is the one layout with no
+  // discoverable `.git` marker at the worktree, so resolve that declared root
+  // separately using the includes Git itself honours.
+  const pathIdentity = (path: string): string => {
+    try {
+      return realpathSync.native(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  const samePath = (left: string, right: string): boolean =>
+    originKey(pathIdentity(left)) === originKey(pathIdentity(right));
+  const gitOutput = (cwd: string, args: string[]): string | null => {
+    const result = spawnSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
     if (
-      configuredWorktree.status === 0 &&
-      typeof configuredWorktree.stdout === 'string' &&
-      configuredWorktree.stdout.trim()
+      result.error ||
+      result.status !== 0 ||
+      typeof result.stdout !== 'string'
     ) {
-      controlledSpellings.push(
-        resolve(commonDir, configuredWorktree.stdout.trim()),
-      );
-    } else {
-      mainWorktreeUnknown = true;
+      return null;
     }
-  }
-  const controlledRealpaths = controlledSpellings.flatMap((path) => {
-    try {
-      return [realpathSync.native(path)];
-    } catch {
-      return [];
+    return result.stdout.endsWith('\n')
+      ? result.stdout.slice(0, -1)
+      : result.stdout;
+  };
+  const configuredWorktreeValue = gitOutput(commonDir, [
+    'config',
+    '--file',
+    join(commonDir, 'config'),
+    '--includes',
+    '--path',
+    '--get',
+    'core.worktree',
+  ]);
+  const configuredWorktree = configuredWorktreeValue
+    ? resolve(commonDir, configuredWorktreeValue)
+    : null;
+  const trackedAt = (
+    root: string,
+    file: string,
+    explicitGitDir = false,
+  ): boolean | null => {
+    const absoluteRoot = resolve(root);
+    const absoluteFile = resolve(file);
+    if (!isSubpath(absoluteRoot, absoluteFile)) return false;
+    const pathspec = relative(absoluteRoot, absoluteFile);
+    if (!pathspec) return false;
+    const args = explicitGitDir
+      ? [
+          '--literal-pathspecs',
+          '-c',
+          'core.fsmonitor=',
+          `--git-dir=${resolve(commonDir)}`,
+          `--work-tree=${absoluteRoot}`,
+          'ls-files',
+          '--error-unmatch',
+          '--',
+          pathspec,
+        ]
+      : [
+          '--literal-pathspecs',
+          '-c',
+          'core.fsmonitor=',
+          '-C',
+          absoluteRoot,
+          'ls-files',
+          '--error-unmatch',
+          '--',
+          pathspec,
+        ];
+    const result = spawnSync('git', args, {
+      cwd: commonDir,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (result.error || (result.status !== 0 && result.status !== 1)) {
+      return null;
     }
-  });
-  const repositoryControl = (file: string): 'controlled' | 'outside' => {
-    // A separate git dir does not encode a discoverable main worktree. Fail
-    // closed: without a complete containment set no origin can gain authority.
-    if (mainWorktreeUnknown) return 'controlled';
+    return result.status === 0;
+  };
+  const adminRoots = [resolve(commonDir), resolve(gitDir)];
+  const adminRealpaths = adminRoots.map(pathIdentity);
+  const repositoryControlCache = new Map<
+    string,
+    'controlled' | 'outside' | 'unknown'
+  >();
+  const repositoryControl = (
+    file: string,
+  ): 'controlled' | 'outside' | 'unknown' => {
+    const cached = repositoryControlCache.get(originKey(file));
+    if (cached !== undefined) return cached;
     const spelled = resolve(file);
-    if (controlledSpellings.some((root) => isSubpath(root, spelled))) {
-      return 'controlled';
+    const real = pathIdentity(file);
+    let verdict: 'controlled' | 'outside' | 'unknown';
+    if (
+      adminRoots.some((root) => isSubpath(root, spelled)) ||
+      adminRealpaths.some((root) => isSubpath(root, real))
+    ) {
+      verdict = 'controlled';
+    } else {
+      const discoveredCommon = gitOutput(dirname(file), [
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-common-dir',
+      ]);
+      const discoveredTop = gitOutput(dirname(file), [
+        'rev-parse',
+        '--path-format=absolute',
+        '--show-toplevel',
+      ]);
+      if (
+        discoveredCommon !== null &&
+        discoveredTop !== null &&
+        samePath(discoveredCommon, commonDir)
+      ) {
+        const tracked = trackedAt(discoveredTop, file);
+        verdict =
+          tracked === null ? 'unknown' : tracked ? 'controlled' : 'outside';
+      } else if (configuredWorktree !== null) {
+        const tracked = trackedAt(configuredWorktree, file, true);
+        verdict =
+          tracked === null ? 'unknown' : tracked ? 'controlled' : 'outside';
+      } else {
+        verdict = 'outside';
+      }
     }
-    try {
-      const real = realpathSync.native(file);
-      return controlledRealpaths.some((root) => isSubpath(root, real))
-        ? 'controlled'
-        : 'outside';
-    } catch {
-      return 'controlled';
-    }
+    repositoryControlCache.set(originKey(file), verdict);
+    return verdict;
   };
 
   // A local include of a file already reached through the active global or
   // system graph is the user's existing contract only when that file is
-  // outside every path the reviewed repository controls. The query runs in
+  // outside content the reviewed repository delivers. The query runs in
   // the screened tree so `includeIf.gitdir:` has the same answer as the Git
   // operation being authorised. The list read identifies trusted include-only
   // files too, allowing the local walk to stop at that source boundary.

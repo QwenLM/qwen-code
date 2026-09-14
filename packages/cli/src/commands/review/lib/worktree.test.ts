@@ -2304,7 +2304,8 @@ describe('filterCommandsIn — the include walk', () => {
     git(main, 'worktree', 'add', '--detach', '-q', linked, 'HEAD');
     writeFileSync(
       join(gitIsolation.home, '.gitconfig'),
-      `[include]\n\tpath = ${JSON.stringify(payload)}\n`,
+      '[filter "lfs"]\n\tclean = cat\n' +
+        `[include]\n\tpath = ${JSON.stringify(payload)}\n`,
     );
     const gitDir = git(
       linked,
@@ -2314,6 +2315,192 @@ describe('filterCommandsIn — the include walk', () => {
     );
 
     const screen = filterCommandsIn(common, gitDir, linked);
+    expect(screen.filters).toEqual(['filter.team.clean']);
+    expect(screen.exempt).toEqual(['filter.lfs.clean']);
+  });
+
+  it('keeps a bare repository from claiming the user global filter', () => {
+    const source = join(dir, 'bare-source');
+    const bare = join(dir, 'bare.git');
+    const linked = join(dir, 'bare-linked');
+    mkdirSync(source);
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    git(source, 'init', '-q', '-b', 'main');
+    git(source, 'config', 'user.email', 't@t.t');
+    git(source, 'config', 'user.name', 't');
+    writeFileSync(join(source, 'seed'), 'x\n');
+    git(source, 'add', 'seed');
+    git(source, 'commit', '-qm', 'seed');
+    execFileSync('git', ['clone', '--bare', '-q', source, bare]);
+    git(bare, 'worktree', 'add', '--detach', '-q', linked, 'HEAD');
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      '[filter "lfs"]\n\tclean = cat\n',
+    );
+    const gitDir = git(
+      linked,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+
+    const screen = filterCommandsIn(bare, gitDir, linked);
+    expect(screen.filters).toEqual([]);
+    expect(screen.exempt).toEqual(['filter.lfs.clean']);
+  });
+
+  it('does not claim an untracked global config in a repository at HOME', () => {
+    const home = gitIsolation.home;
+    const linked = join(dir, 'home-linked');
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    writeFileSync(
+      join(home, '.gitconfig'),
+      '[user]\n\temail = t@t.t\n\tname = t\n' +
+        '[filter "lfs"]\n\tclean = cat\n',
+    );
+    git(home, 'init', '-q', '-b', 'main');
+    writeFileSync(join(home, 'seed'), 'x\n');
+    git(home, 'add', 'seed');
+    git(home, 'commit', '-qm', 'seed');
+    expect(git(home, 'ls-files')).toBe('seed');
+    git(home, 'worktree', 'add', '--detach', '-q', linked, 'HEAD');
+    const commonDir = git(
+      linked,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    const gitDir = git(
+      linked,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+
+    const screen = filterCommandsIn(commonDir, gitDir, linked);
+    expect(screen.filters).toEqual([]);
+    expect(screen.exempt).toEqual(['filter.lfs.clean']);
+  });
+
+  it('reads an included core.worktree before classifying tracked content', () => {
+    const source = join(dir, 'included-worktree-source');
+    const common = join(dir, 'included-worktree.git');
+    const worktree = join(dir, 'included-worktree');
+    mkdirSync(source);
+    mkdirSync(worktree);
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    git(source, 'init', '-q', '-b', 'main');
+    git(source, 'config', 'user.email', 't@t.t');
+    git(source, 'config', 'user.name', 't');
+    writeFileSync(
+      join(source, 'team-filter.cfg'),
+      '[filter "team"]\n\tclean = cat\n',
+    );
+    git(source, 'add', 'team-filter.cfg');
+    git(source, 'commit', '-qm', 'tracked filter source');
+    execFileSync('git', ['clone', '--bare', '-q', source, common]);
+    writeFileSync(
+      join(common, 'worktree.inc'),
+      `[core]\n\tworktree = ${JSON.stringify(worktree)}\n`,
+    );
+    git(common, 'config', 'include.path', 'worktree.inc');
+    execFileSync('git', [
+      `--git-dir=${common}`,
+      `--work-tree=${worktree}`,
+      'checkout',
+      '-fq',
+    ]);
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      '[filter "lfs"]\n\tclean = cat\n' +
+        `[include]\n\tpath = ${JSON.stringify(join(worktree, 'team-filter.cfg'))}\n`,
+    );
+
+    const screen = filterCommandsIn(common, common, worktree);
+    expect(screen.filters).toEqual(['filter.team.clean']);
+    expect(screen.exempt).toEqual(['filter.lfs.clean']);
+  });
+
+  it('honours core.worktree even when the common dir is named .git', () => {
+    const shell = join(dir, 'shell');
+    const worktree = join(dir, 'elsewhere');
+    const common = join(shell, '.git');
+    mkdirSync(shell);
+    mkdirSync(worktree);
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    git(shell, 'init', '-q', '-b', 'main');
+    git(shell, 'config', 'user.email', 't@t.t');
+    git(shell, 'config', 'user.name', 't');
+    git(shell, 'config', 'core.worktree', worktree);
+    const payload = join(worktree, 'team-filter.cfg');
+    writeFileSync(payload, '[filter "team"]\n\tclean = cat\n');
+    execFileSync('git', [
+      `--git-dir=${common}`,
+      `--work-tree=${worktree}`,
+      'add',
+      'team-filter.cfg',
+    ]);
+    execFileSync('git', [
+      `--git-dir=${common}`,
+      `--work-tree=${worktree}`,
+      '-c',
+      'user.email=t@t.t',
+      '-c',
+      'user.name=t',
+      'commit',
+      '-qm',
+      'tracked filter source',
+    ]);
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      `[include]\n\tpath = ${JSON.stringify(payload)}\n`,
+    );
+
+    const screen = filterCommandsIn(common, common, worktree);
+    expect(screen.filters).toEqual(['filter.team.clean']);
+    expect(screen.exempt).toEqual([]);
+  });
+
+  it('recognises tracked content in a sibling linked worktree', () => {
+    const repo = join(dir, 'siblings');
+    const screened = join(dir, 'screened');
+    const sibling = join(dir, 'sibling');
+    mkdirSync(repo);
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'config', 'user.email', 't@t.t');
+    git(repo, 'config', 'user.name', 't');
+    writeFileSync(
+      join(repo, 'team-filter.cfg'),
+      '[filter "team"]\n\tclean = cat\n',
+    );
+    git(repo, 'add', 'team-filter.cfg');
+    git(repo, 'commit', '-qm', 'tracked filter source');
+    git(repo, 'worktree', 'add', '--detach', '-q', screened, 'HEAD');
+    git(repo, 'worktree', 'add', '--detach', '-q', sibling, 'HEAD');
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      `[include]\n\tpath = ${JSON.stringify(join(sibling, 'team-filter.cfg'))}\n`,
+    );
+    const commonDir = git(
+      screened,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    const gitDir = git(
+      screened,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+
+    const screen = filterCommandsIn(commonDir, gitDir, screened);
     expect(screen.filters).toEqual(['filter.team.clean']);
     expect(screen.exempt).toEqual([]);
   });
