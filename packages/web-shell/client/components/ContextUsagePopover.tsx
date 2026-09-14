@@ -66,7 +66,7 @@ export function ContextUsagePopover({
   const close = () => {
     cancelOpen();
     cancelClose();
-    setDismissedResult(controls?.result);
+    if (open) setDismissedResult(controls?.result);
     setOpen(false);
   };
   const containsFocus = (target: EventTarget | null) =>
@@ -119,7 +119,8 @@ export function ContextUsagePopover({
         onPointerMove={(event) => {
           if (event.pointerType === 'touch') return;
           cancelClose();
-          if (open || openTimer.current !== undefined) return;
+          if (event.buttons !== 0 || open || openTimer.current !== undefined)
+            return;
           openTimer.current = setTimeout(() => {
             openTimer.current = undefined;
             setOpen(true);
@@ -220,7 +221,11 @@ export function ContextUsagePopover({
             const first = actions[0];
             const last = actions[actions.length - 1];
             // Radix sees the portal host as activeElement in a shadow root.
-            if (getActiveElement() === (event.shiftKey ? first : last)) {
+            const active = getActiveElement();
+            if (
+              active === (event.shiftKey ? first : last) ||
+              active === event.currentTarget
+            ) {
               event.preventDefault();
               (event.shiftKey ? last : first).focus();
             }

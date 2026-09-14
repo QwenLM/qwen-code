@@ -123,8 +123,10 @@ for (const theme of ['light', 'dark']) {
     await expect(editor).toBeFocused();
     expect(reads).toBe(readsBeforeHover);
     expect(submitted).toHaveLength(0);
+    await hover.hover();
     await page.mouse.move(5, 5);
     await expect(hover).not.toBeVisible();
+    await expect(editor).toBeFocused();
     await ring.hover();
     await expect(hover).toBeVisible();
     await ring.focus();
@@ -200,6 +202,11 @@ for (const theme of ['light', 'dark']) {
     });
     await hoverCompress.press('Enter');
     await expect(hover).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(secondAction).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(secondAction).toBeFocused();
+    await hover.focus();
     await page.keyboard.press('Enter');
     await expect(page.locator('body')).not.toHaveAttribute(
       'data-context-host-enter',
@@ -220,6 +227,7 @@ for (const theme of ['light', 'dark']) {
     ).toBeDisabled();
     await expect(editor).toHaveText('Keep this draft while compressing');
     await expect(panel.getByRole('status')).toHaveCSS('color', feedbackColor);
+    await expect(hover.getByRole('status')).toHaveCSS('color', feedbackColor);
     await page.screenshot({
       path: testInfo.outputPath(`context-compressing-${theme}.png`),
     });
@@ -237,6 +245,7 @@ for (const theme of ['light', 'dark']) {
       'Compression completed. Context usage refreshed.',
     );
     await expect(panel.getByRole('status')).toHaveCSS('color', feedbackColor);
+    await expect(hover.getByRole('status')).toHaveCSS('color', feedbackColor);
     await expect.poll(() => reads).toBeGreaterThan(readsBeforeCompletion);
     await expect(ring).toHaveAttribute('aria-label', '20.0% context used');
     await expect(hover).toContainText('20,000 tokens');
@@ -311,5 +320,89 @@ for (const theme of ['light', 'dark']) {
     await expect(historical.locator('[class*="percentage"]')).toHaveText(
       '64.0%',
     );
+  });
+}
+
+for (const key of ['Enter', 'Space']) {
+  test(`@smoke context card keeps a settled btw answer when activated with ${key}`, async ({
+    page,
+  }, testInfo) => {
+    const answer = 'Keep this side answer while managing context.';
+    const scenario = createWebShellDaemonScenario({
+      btwAnswer: answer,
+      supportedCommands: {
+        availableCommands: [
+          {
+            name: 'compress',
+            description: 'Compress context',
+            input: null,
+            _meta: { source: 'builtin-command' },
+          },
+        ],
+      },
+    });
+    const daemon = await installMockDaemon(page, scenario, {
+      baseURL: String(testInfo.project.use.baseURL),
+    });
+    const submitted: unknown[] = [];
+    await page.route(/\/session\/[^/]+\/prompt$/, (route) => {
+      submitted.push(route.request().postDataJSON());
+      return route.fulfill({
+        status: 202,
+        json: { promptId: 'btw-compression', lastEventId: 20 },
+      });
+    });
+    await page.goto(`/session/${scenario.sessionId}`);
+    await daemon.sse.waitForConnection(scenario.sessionId);
+    await daemon.sendEvent(
+      replayCompleteEvent({ sessionId: scenario.sessionId }),
+    );
+    await daemon.sendEvent({
+      id: 20,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { usage: { inputTokens: 10_000 } },
+        },
+      },
+    });
+    const editor = page.locator(
+      '[data-web-shell-composer-surface] .cm-content[contenteditable="true"]',
+    );
+    await editor.fill('/btw keep this answer');
+    await editor.press('Enter');
+    await expect(page.getByText(answer, { exact: true })).toBeVisible();
+    await expect(editor.locator('.cm-placeholder')).toBeVisible();
+    const ring = page.locator('[data-web-shell-context-usage]');
+    const card = page.locator('[data-web-shell-context-popover]');
+    const compress = card.getByRole('button', {
+      name: 'Compress context',
+      exact: true,
+    });
+    await ring.focus();
+    await ring.press('ArrowDown');
+    await expect(compress).toBeFocused();
+    await compress.press('Escape');
+    await expect(card).not.toBeVisible();
+    await expect(ring).toBeFocused();
+    await expect(page.getByText(answer, { exact: true })).toBeVisible();
+    await ring.press('ArrowDown');
+    await expect(compress).toBeFocused();
+    await compress.press(key);
+    await expect.poll(() => submitted.length).toBe(1);
+    expect(submitted[0]).toMatchObject({
+      prompt: [{ type: 'text', text: '/compress' }],
+    });
+    await expect(page.getByText(answer, { exact: true })).toBeVisible();
+    await expect(card).toBeFocused();
+    await page.keyboard.press(key);
+    expect(submitted).toHaveLength(1);
+    await expect(page.getByText(answer, { exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(card).not.toBeVisible();
+    await expect(ring).toBeFocused();
   });
 }

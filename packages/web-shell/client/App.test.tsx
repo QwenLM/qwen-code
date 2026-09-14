@@ -26921,6 +26921,51 @@ describe('App session callbacks', () => {
     expect(container.querySelector('button[title="Side task"]')).toBeNull();
   });
 
+  it.each([false, true])(
+    'preserves a settled btw answer for context-card keys with an empty composer (shadow: %s)',
+    async (shadow) => {
+      const { container } = renderApp();
+      await flush();
+      testState.prompt = '/btw keep this answer';
+      await clickSubmit(container);
+      await flush();
+      testState.prompt = '';
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      const btw = () => container.querySelector('[class*="btwPanel"]');
+      expect(btw()).not.toBeNull();
+
+      const host = document.createElement('div');
+      const parent = shadow ? host.attachShadow({ mode: 'open' }) : host;
+      const card = document.createElement('div');
+      card.setAttribute('data-web-shell-context-popover', '');
+      const action = document.createElement('button');
+      card.append(action);
+      parent.append(card);
+      container.append(host);
+      for (const key of ['Enter', ' ', 'Escape']) {
+        const event = new KeyboardEvent('keydown', {
+          key,
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+        });
+        act(() => action.dispatchEvent(event));
+        expect(event.defaultPrevented).toBe(false);
+        expect(btw()).not.toBeNull();
+      }
+      act(() =>
+        container.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      );
+      expect(btw()).toBeNull();
+    },
+  );
+
   it('settles visible recap after a same-id attachment replacement', async () => {
     const recap = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);

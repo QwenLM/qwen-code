@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createRef } from 'react';
+import { act, createRef, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonWorkspaceGitStatus,
@@ -370,7 +370,11 @@ afterEach(() => {
   latestComposerCoreOptions.current = null;
 });
 
-interface ChatEditorRenderProps {
+interface ChatEditorRenderProps
+  extends Pick<
+    ComponentProps<typeof ChatEditor>,
+    'contextUsageAlwaysVisible' | 'contextUsageControls' | 'onOpenContextUsage'
+  > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
   pastedFiles?: Array<{
@@ -1011,6 +1015,8 @@ describe('ChatEditor context usage ring', () => {
     await act(async () => ring(container)!.focus());
     const card = document.querySelector('[data-web-shell-context-popover]')!;
     expect(card.querySelector('dl')).toBeNull();
+    expect(ring(container)!.hasAttribute('aria-describedby')).toBe(false);
+    expect(container.querySelector('[id$="-description"]')).toBeNull();
     const buttons = Array.from(card.querySelectorAll('button'));
     const compression = buttons.find(
       (button) => button.textContent === 'Compress context',

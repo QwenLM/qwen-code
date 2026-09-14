@@ -104,14 +104,16 @@ function pointer(
   type: string,
   relatedTarget: Element | null = null,
   pointerType = 'mouse',
+  buttons = 0,
 ) {
-  const event = new MouseEvent(type, { bubbles: true, relatedTarget });
+  const event = new MouseEvent(type, { bubbles: true, relatedTarget, buttons });
   Object.defineProperty(event, 'pointerType', { value: pointerType });
   act(() => node.dispatchEvent(event));
 }
-function key(node: Element, value: string) {
+function key(node: Element, value: string, shiftKey = false) {
   const event = new KeyboardEvent('keydown', {
     key: value,
+    shiftKey,
     bubbles: true,
     composed: true,
     cancelable: true,
@@ -148,6 +150,7 @@ describe('ContextUsagePopover', () => {
     expect(h.ancestorClick).not.toHaveBeenCalled();
     expect(h.snapshot).not.toHaveBeenCalled();
     expect(h.draft.value).toBe('Keep this draft');
+    expect(document.activeElement).toBe(h.draft);
   });
 
   it('opens only after a mouse movement and dismisses when the pointer leaves', async () => {
@@ -178,6 +181,181 @@ describe('ContextUsagePopover', () => {
     await act(async () => h.draft.focus());
     await act(async () => h.trigger.focus());
     expect(h.card).not.toBeNull();
+  });
+
+  it('keeps the original hover deadline through movement and cancels closing on returning to the ring', async () => {
+    const h = await mount();
+    pointer(h.trigger, 'pointermove');
+    await advance(200);
+    pointer(h.trigger, 'pointermove');
+    await advance(100);
+    expect(h.card).not.toBeNull();
+    pointer(h.trigger, 'pointerout', document.body);
+    await advance(100);
+    pointer(h.trigger, 'pointermove');
+    await advance(100);
+    expect(h.card).not.toBeNull();
+    expect(document.activeElement).toBe(h.draft);
+  });
+
+  it('cancels every pending hover after repeated movement leaves the ring', async () => {
+    const h = await mount();
+    pointer(h.trigger, 'pointermove');
+    await advance(100);
+    pointer(h.trigger, 'pointermove');
+    pointer(h.trigger, 'pointerout', document.body);
+    await advance(350);
+    expect(h.card).toBeNull();
+  });
+
+  it('closes after moving from ring to card to transcript with focus still in the draft', async () => {
+    const h = await mount();
+    pointer(h.trigger, 'pointermove');
+    await advance(300);
+    pointer(h.trigger, 'pointerout', document.body);
+    pointer(h.card!, 'pointerover', document.body);
+    await advance(200);
+    expect(h.card).not.toBeNull();
+    pointer(h.card!, 'pointerout', document.body);
+    await advance(151);
+    expect(h.card).toBeNull();
+    expect(document.activeElement).toBe(h.draft);
+  });
+
+  it('cancels a pending hover on press before focus or click', async () => {
+    const h = await mount();
+    pointer(h.trigger, 'pointermove');
+    await advance(100);
+    pointer(h.trigger, 'pointerdown');
+    await advance(250);
+    expect(h.card).toBeNull();
+    expect(h.snapshot).not.toHaveBeenCalled();
+  });
+
+  it.each(['ring', 'outside'])(
+    'does not open during a moving press started on the %s',
+    async (origin) => {
+      const h = await mount();
+      if (origin === 'ring') pointer(h.trigger, 'pointerdown');
+      pointer(h.trigger, 'pointermove', null, 'mouse', 1);
+      await advance(350);
+      expect(h.card).toBeNull();
+      if (origin === 'ring') pointer(h.trigger, 'pointercancel');
+      pointer(h.trigger, 'pointermove');
+      await advance(300);
+      expect(h.card).not.toBeNull();
+    },
+  );
+
+  it.each(['cancel', 'click'])(
+    'allows focus opening after a pointer gesture ends by %s without focus',
+    async (ending) => {
+      const h = await mount();
+      pointer(h.trigger, 'pointerdown');
+      if (ending === 'cancel') pointer(h.trigger, 'pointercancel');
+      else await act(async () => h.trigger.click());
+      await act(async () => h.trigger.focus());
+      expect(h.card).not.toBeNull();
+    },
+  );
+
+  it('allows keyboard focus opening after a press loses focus without clicking', async () => {
+    const h = await mount();
+    pointer(h.trigger, 'pointerdown');
+    await act(async () => h.trigger.focus());
+    await act(async () => h.draft.focus());
+    await act(async () => h.trigger.focus());
+    expect(h.card).not.toBeNull();
+    expect(h.snapshot).not.toHaveBeenCalled();
+  });
+
+  it('retains native reverse Tab from the ring', async () => {
+    const h = await mount();
+    await act(async () => h.trigger.focus());
+    expect(key(h.trigger, 'Tab', true).defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(h.trigger);
+  });
+
+  it.each(['ArrowDown', 'Tab'])(
+    'skips unavailable compression and enters details with %s',
+    async (entry) => {
+      const h = await mount();
+      await h.update({ canCompress: false });
+      await act(async () => h.trigger.focus());
+      expect(key(h.trigger, entry).defaultPrevented).toBe(true);
+      expect(document.activeElement?.textContent).toBe('View details');
+    },
+  );
+
+  it.each([false, true])(
+    'keeps both Tab directions in the card after starting compression (shadow: %s)',
+    async (shadowPortal) => {
+      const h = await mount({ shadowPortal });
+      await act(async () => h.trigger.focus());
+      key(h.trigger, 'ArrowDown');
+      await act(async () => h.card!.querySelector('button')!.click());
+      await h.update({ canCompress: false, compressing: true });
+      for (const shift of [true, false]) {
+        await act(async () => h.card!.focus());
+        expect(key(h.card!, 'Tab', shift).defaultPrevented).toBe(true);
+        const active = shadowPortal
+          ? (h.portalRoot as ShadowRoot).activeElement
+          : document.activeElement;
+        expect(active?.textContent).toBe('View details');
+      }
+    },
+  );
+
+  it('enters actions from a closed card once, then preserves draft focus on later hover', async () => {
+    const h = await mount();
+    await act(async () => h.trigger.focus());
+    key(h.trigger, 'Escape');
+    await advance(200);
+    expect(h.card).toBeNull();
+    key(h.trigger, 'ArrowDown');
+    await advance(1);
+    expect(document.activeElement?.textContent).toBe('Compress context');
+    key(document.activeElement!, 'Escape');
+    await advance(200);
+    expect(h.card).toBeNull();
+    await act(async () => h.draft.focus());
+    pointer(h.trigger, 'pointermove');
+    await advance(300);
+    expect(h.card).not.toBeNull();
+    expect(document.activeElement).toBe(h.draft);
+  });
+
+  it.each(['pass-by', 'snapshot click'])(
+    'preserves an unseen compression failure after a closed-ring %s',
+    async (gesture) => {
+      const h = await mount();
+      await h.update({ result: { kind: 'failed' } });
+      if (gesture === 'pass-by') {
+        pointer(h.trigger, 'pointermove');
+        await advance(100);
+        pointer(h.trigger, 'pointerout', document.body);
+        await advance(151);
+      } else {
+        await act(async () => h.trigger.click());
+      }
+      expect(h.card).toBeNull();
+      await act(async () => h.trigger.focus());
+      expect(h.card!.querySelector('[role="alert"]')?.textContent).toBe(
+        'Compression failed. You can try again.',
+      );
+    },
+  );
+
+  it('does not replay settled feedback when its owner remounts', async () => {
+    const h = await mount();
+    await h.update({ result: { kind: 'failed' } });
+    await h.switchSession();
+    await act(async () => h.trigger.focus());
+    expect(h.card!.querySelector('[role="alert"]')).toBeNull();
+    await h.update({ result: { kind: 'failed' } });
+    expect(h.card!.querySelector('[role="alert"]')?.textContent).toBe(
+      'Compression failed. You can try again.',
+    );
   });
 
   it('preserves editor focus when Escape dismisses a pointer-only hover', async () => {

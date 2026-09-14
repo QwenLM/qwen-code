@@ -10967,6 +10967,12 @@ export function App({
     const onBtwShortcut = (e: KeyboardEvent) => {
       if (interactionBlocked || pendingApproval || isWebTerminalTarget(e))
         return;
+      const target = e.composedPath()[0] ?? e.target;
+      if (
+        target instanceof Element &&
+        target.closest('[data-web-shell-context-popover]')
+      )
+        return;
       const message = btwMessage;
       if (!message || message.role !== 'btw') return;
 

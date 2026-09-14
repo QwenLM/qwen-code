@@ -15,13 +15,13 @@ change the compression algorithm, daemon API, or shared operation lifecycle.
 Use the existing scoped nonmodal Popover primitive for an interactive card.
 Hover opens it after 300 ms; focus opens it without a delay. Moving between the
 ring and card has a short close grace period. Hover does not steal editor focus
-or fetch context. Require pointer movement to start the hover delay, and suppress focus-open during a pointer click so the snapshot action does not flash the card. Keep the card open while focus is inside it. Leaving both
+or fetch context. Require pointer movement to start the hover delay, and suppress focus-open and movement-triggered hover while a pointer button is held so the snapshot action does not flash the card. Keep the card open while focus is inside it. Leaving both
 surfaces, moving focus outside, clicking outside, or Escape dismisses it.
 
 The ring retains its snapshot click action. Down Arrow, or Tab while its card
 is open, moves keyboard focus into enabled actions. If none is enabled, retain native Tab navigation. Escape from the card returns
 focus to the ring without reopening it. Use an accessible dialog name and
-expanded/controls attributes and a concise localized used/window description on the ring. Loop Tab at the enabled action boundaries using the actual focused element inside shadow portals; if all actions become unavailable after entry, Tab dismisses the card. View details also restores ring focus unless the user or panel has already selected another target. Preserve portal-root scoping and existing theme
+expanded/controls attributes and a concise localized used/window description on the ring. Keep card keys out of the global BTW dismissal shortcut. Loop Tab from the card container during compression and at the enabled action boundaries using the actual focused element inside shadow portals; if all actions become unavailable after entry, Tab dismisses the card. View details also restores ring focus unless the user or panel has already selected another target. Preserve portal-root scoping and existing theme
 and ring attributes; reuse stable CSS and shared buttons.
 
 The card retains exact used, total, and remaining counts, a proportional meter,
@@ -39,7 +39,7 @@ completion result. Active work, plan preparation, approval, recovery, Goal state
 and missing builtin command metadata keep their current restrictions.
 
 Display pending and settled feedback with the same wording and semantics as the
-right panel. Closing the card dismisses its settled feedback; an operation that finishes after closing remains available on the next open. Previously settled feedback is not replayed when the card’s owner remounts. The panel keeps its existing Refresh dismissal. Completion already synchronizes the live counter. Failure,
+right panel. Closing an open card dismisses its settled feedback; passing over or clicking a closed ring does not discard an unseen result; an operation that finishes after closing remains available on the next open. Previously settled feedback is not replayed when the card’s owner remounts. The panel keeps its existing Refresh dismissal. Completion already synchronizes the live counter. Failure,
 cancellation, or a changed connection must never claim refreshed usage. The
 View details action provides the existing Refresh recovery path. Opening the
 card does not issue a read or retry a compression.
