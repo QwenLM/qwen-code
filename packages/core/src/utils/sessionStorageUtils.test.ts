@@ -428,6 +428,7 @@ describe('sessionStorageUtils', () => {
     });
 
     afterEach(() => {
+      vi.restoreAllMocks();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
@@ -556,8 +557,10 @@ describe('sessionStorageUtils', () => {
       const oNofollow: number | undefined = fs.constants?.O_NOFOLLOW;
       const identityFstats = oNofollow === undefined ? 1 : 0;
       let fstatCalls = 0;
-      vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
-        const stats = originalFstatSync(fd);
+      vi.spyOn(fs, 'fstatSync').mockImplementation(((
+        ...args: Parameters<typeof fs.fstatSync>
+      ) => {
+        const stats = originalFstatSync(...args);
         if (fstatCalls++ === identityFstats) stats.size = initialSize;
         return stats;
       }) as typeof fs.fstatSync);
@@ -581,8 +584,10 @@ describe('sessionStorageUtils', () => {
       const oNofollow: number | undefined = fs.constants?.O_NOFOLLOW;
       const identityFstats = oNofollow === undefined ? 1 : 0;
       let fstatCalls = 0;
-      vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
-        const stats = originalFstatSync(fd);
+      vi.spyOn(fs, 'fstatSync').mockImplementation(((
+        ...args: Parameters<typeof fs.fstatSync>
+      ) => {
+        const stats = originalFstatSync(...args);
         if (fstatCalls++ === identityFstats) stats.size = initialSize;
         return stats;
       }) as typeof fs.fstatSync);
@@ -621,6 +626,7 @@ describe('sessionStorageUtils', () => {
     });
 
     afterEach(() => {
+      vi.restoreAllMocks();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
@@ -1029,6 +1035,7 @@ describe('sessionStorageUtils', () => {
     });
 
     afterEach(() => {
+      vi.restoreAllMocks();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 

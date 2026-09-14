@@ -225,25 +225,27 @@ describe('MonitorDebugStore', () => {
       text: 'Reply [redacted]',
       result: 'reply',
     });
-    for (const path of [
-      root,
-      archive.directory,
-      join(archive.directory, 'requests'),
-      directory,
-    ]) {
-      expect((await lstat(path)).mode & 0o777).toBe(0o700);
-    }
-    for (const path of [
-      join(archive.directory, 'monitor.json'),
-      ...[
-        'request.json',
-        'response.json',
-        'image-0001.jpg',
-        'image-0002.jpg',
-        'input.wav',
-      ].map((file) => join(directory, file)),
-    ]) {
-      expect((await lstat(path)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      for (const path of [
+        root,
+        archive.directory,
+        join(archive.directory, 'requests'),
+        directory,
+      ]) {
+        expect((await lstat(path)).mode & 0o777).toBe(0o700);
+      }
+      for (const path of [
+        join(archive.directory, 'monitor.json'),
+        ...[
+          'request.json',
+          'response.json',
+          'image-0001.jpg',
+          'image-0002.jpg',
+          'input.wav',
+        ].map((file) => join(directory, file)),
+      ]) {
+        expect((await lstat(path)).mode & 0o777).toBe(0o600);
+      }
     }
     expect(log).toHaveBeenCalledWith(
       'proactive.monitor_request_saved',
@@ -406,10 +408,12 @@ describe('MonitorDebugStore', () => {
 
   it('rejects shared or symlink archive roots without touching their contents', async () => {
     await mkdir(root, { mode: 0o700 });
-    await chmod(root, 0o755);
     await writeFile(join(root, 'keep.txt'), 'keep');
-    expect(await store.initialize()).toBe(false);
-    expect(store.create(INFO)).toBeUndefined();
+    if (process.platform !== 'win32') {
+      await chmod(root, 0o755);
+      expect(await store.initialize()).toBe(false);
+      expect(store.create(INFO)).toBeUndefined();
+    }
     const linked = new MonitorDebugStore(
       log,
       join(temporary, 'linked-archives'),
