@@ -1018,6 +1018,66 @@ describe('HookRunner', () => {
       expect(command).toContain('/test/project');
     });
 
+    it('should expand QWEN_PROJECT_DIR placeholder', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo $QWEN_PROJECT_DIR',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: '/test/project' });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      const command = spawnCall[1][spawnCall[1].length - 1]; // Last arg is the command
+      expect(command).toBe('echo /test/project');
+    });
+
+    it('should expand QWEN_PROJECT_DIR to a quoted path with spaces for bash', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command:
+          '$QWEN_PROJECT_DIR/.qwen/hooks/check.sh && cd $QWEN_PROJECT_DIR',
+        source: HooksConfigSource.Project,
+        shell: 'bash',
+      };
+      const input = createMockInput({ cwd: '/tmp/my project' });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      const command = spawnCall[1][spawnCall[1].length - 1]; // Last arg is the command
+      expect(command).toBe(
+        "'/tmp/my project'/.qwen/hooks/check.sh && cd '/tmp/my project'",
+      );
+    });
+
+    it('should expand QWEN_PROJECT_DIR to a PowerShell-quoted path for powershell', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'Write-Output $QWEN_PROJECT_DIR',
+        source: HooksConfigSource.Project,
+        shell: 'powershell',
+      };
+      const input = createMockInput({ cwd: "C:\\Users\\O'Brien\\my project" });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[0]).toBe('powershell');
+      const command = spawnCall[1][spawnCall[1].length - 1]; // Last arg is the command
+      expect(command).toBe("Write-Output 'C:\\Users\\O''Brien\\my project'");
+    });
+
     it('should not modify command without placeholders', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);

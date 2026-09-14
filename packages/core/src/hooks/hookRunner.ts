@@ -1583,7 +1583,8 @@ export class HookRunner {
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     return command
       .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility
+      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd) // For compatibility
+      .replace(/\$QWEN_PROJECT_DIR/g, () => escapedCwd);
   }
 
   /**

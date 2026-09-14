@@ -81,6 +81,8 @@ Command hooks execute commands via child processes. Input JSON is passed through
 }
 ```
 
+In the `command` string, `$QWEN_PROJECT_DIR`, `$CLAUDE_PROJECT_DIR` and `$GEMINI_PROJECT_DIR` are replaced with the quoted project directory before the command runs, in both bash and PowerShell hooks, so the example above keeps working when the project path contains spaces.
+
 ### HTTP Hooks
 
 HTTP hooks send hook input as POST requests to specified URLs. They support URL whitelists, DNS-level SSRF protection, environment variable interpolation, and other security features.
