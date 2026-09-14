@@ -568,6 +568,59 @@ describe('managed session log activation', () => {
     });
   });
 
+  it('rebuilds a still-requested approval wait after the original waiter is gone', async () => {
+    await withWorkspace(async (activate) => {
+      const options = [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+      ];
+      const invocation = { toolCallId: 'fc-wait-1', kind: 'execute' };
+      const first = await activate({ managedSessionLog: true });
+      first.config
+        .getChatRecordingService()!
+        .recordUserMessage('needs permission');
+      await first.config.getChatRecordingService()!.flush();
+      await first.config.ensureManagedHarnessRunnable();
+      await first.config.commitManagedDurableWait({
+        requestId: 'fc-wait-1',
+        kind: 'execute',
+        source: 'tool_call',
+        options,
+        invocation,
+      });
+      await expect(
+        first.config.readPendingManagedApprovalWait(),
+      ).resolves.toMatchObject({
+        requestId: 'fc-wait-1',
+        kind: 'execute',
+        source: 'tool_call',
+        options,
+        invocation,
+      });
+      await first.config.closeSessionWriter();
+
+      const second = await activate({ managedSessionLog: true });
+      await expect(
+        second.config.readPendingManagedApprovalWait(),
+      ).resolves.toMatchObject({
+        requestId: 'fc-wait-1',
+        kind: 'execute',
+        source: 'tool_call',
+        options,
+        invocation,
+      });
+      await second.config.resolveManagedDurableWait({
+        requestId: 'fc-wait-1',
+        outcome: 'decided',
+        body: { optionId: 'allow' },
+      });
+      await expect(
+        second.config.readPendingManagedApprovalWait(),
+      ).resolves.toBeNull();
+      await second.config.ensureManagedHarnessRunnable();
+      await second.config.closeSessionWriter();
+    });
+  });
+
   it('attributes records to the activation it installed and releases it', async () => {
     await withWorkspace(async (activate) => {
       const fixture = await activate({ managedSessionLog: true });

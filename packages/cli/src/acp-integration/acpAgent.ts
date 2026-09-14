@@ -451,6 +451,7 @@ import {
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   LOAD_REPLAY_BULK_MODE,
@@ -4862,6 +4863,37 @@ class QwenAgent implements Agent {
     };
   }
 
+  private async withManagedApprovalRestoreHint<
+    T extends { _meta?: Record<string, unknown> | null },
+  >(session: Session | undefined, response: T): Promise<T> {
+    if (!session) return response;
+    if (!(await session.shouldHintManagedApprovalRestore?.())) {
+      return response;
+    }
+    return {
+      ...response,
+      _meta: {
+        ...(response._meta && typeof response._meta === 'object'
+          ? response._meta
+          : {}),
+        [DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY]: true,
+      },
+    };
+  }
+
+  private async withRestoreHints<
+    T extends { _meta?: Record<string, unknown> | null },
+  >(
+    session: Session | undefined,
+    response: T,
+    suppressRestoreAskUserQuestion: boolean,
+  ): Promise<T> {
+    const withAuq = suppressRestoreAskUserQuestion
+      ? response
+      : this.withAskUserQuestionRestoreHint(session, response);
+    return this.withManagedApprovalRestoreHint(session, withAuq);
+  }
+
   private async retryPendingConfigCleanup(
     runtimeBaseDir: string,
     requiredSessionId?: string,
@@ -5942,10 +5974,8 @@ class QwenAgent implements Agent {
     >(
       session: Session | undefined,
       response: T,
-    ): T =>
-      suppressRestoreAskUserQuestion
-        ? response
-        : this.withAskUserQuestionRestoreHint(session, response);
+    ): Promise<T> =>
+      this.withRestoreHints(session, response, suppressRestoreAskUserQuestion);
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>
@@ -6434,10 +6464,8 @@ class QwenAgent implements Agent {
     >(
       session: Session | undefined,
       response: T,
-    ): T =>
-      suppressRestoreAskUserQuestion
-        ? response
-        : this.withAskUserQuestionRestoreHint(session, response);
+    ): Promise<T> =>
+      this.withRestoreHints(session, response, suppressRestoreAskUserQuestion);
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>

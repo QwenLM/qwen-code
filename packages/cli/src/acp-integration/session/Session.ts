@@ -80,7 +80,9 @@ import {
   findPlanModeEntryBatchBoundaryIndex,
   findRepeatedDuplicateProviderToolCall,
   findRestorableAskUserQuestion,
+  findRestorableManagedApproval,
   restorableAskUserQuestionCallIds,
+  restorableManagedApprovalCallIds,
   markDuplicateProviderToolCallResponseSent,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createDebugLogger,
@@ -265,6 +267,7 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -2221,6 +2224,12 @@ export class Session implements SessionContext {
    * dangling call so a later load can re-hang it again.
    */
   private restoringAskUserQuestionCallIds: Set<string> | undefined;
+  /**
+   * Call ids of a general Managed approval being re-hung by the current
+   * restore turn. Same unattended-cancel rule as AskUserQuestion: do not
+   * persist cancelled on the durable ticket.
+   */
+  private restoringManagedApprovalCallIds: Set<string> | undefined;
   /** Once any restored call is unattended-terminated, remaining batch skips follow. */
   private restoredAskUserQuestionSkipPersistence = false;
 
@@ -2971,7 +2980,14 @@ export class Session implements SessionContext {
     const isContinue = metadata?.[DAEMON_CONTINUE_META_KEY] === true;
     const isRestoreAskUserQuestion =
       metadata?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
-    if (isRetry || isContinue || isRestoreAskUserQuestion) {
+    const isRestoreManagedApproval =
+      metadata?.[DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY] === true;
+    if (
+      isRetry ||
+      isContinue ||
+      isRestoreAskUserQuestion ||
+      isRestoreManagedApproval
+    ) {
       this.#clearTodoStopGuardQueuedPromptWait();
       if (this.todoStopGuard.hasTrustedUnfinishedState) {
         this.todoStopGuard.resumeTrustedPrompt();
@@ -4002,6 +4018,20 @@ export class Session implements SessionContext {
     );
   }
 
+  async shouldHintManagedApprovalRestore(): Promise<boolean> {
+    if (this.pendingPrompt && !this.pendingPrompt.signal.aborted) return false;
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient?.isInitialized()) return false;
+    const pending = await this.config.readPendingManagedApprovalWait?.();
+    if (pending === undefined || pending === null) return false;
+    return (
+      findRestorableManagedApproval(
+        llmClient.getChat().peekLastHistoryEntry(),
+        pending.requestId,
+      ) !== undefined
+    );
+  }
+
   async assertCanStartTurn(): Promise<void> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
@@ -4415,12 +4445,26 @@ export class Session implements SessionContext {
     options?: Parameters<HistoryReplayer['replay']>[2],
   ): Promise<void> {
     this.primeTurnFromHistory(records);
-    const skipFinalizeCallIds =
+    let skipFinalizeCallIds =
       this.config.getRestoreAskUserQuestion?.() === true
         ? restorableAskUserQuestionCallIds(
             this.#getCurrentChat().peekLastHistoryEntry(),
           )
         : undefined;
+    const pendingManagedApproval =
+      await this.config.readPendingManagedApprovalWait?.();
+    if (pendingManagedApproval) {
+      const managedIds = restorableManagedApprovalCallIds(
+        this.#getCurrentChat().peekLastHistoryEntry(),
+        pendingManagedApproval.requestId,
+      );
+      if (managedIds !== undefined) {
+        skipFinalizeCallIds = new Set([
+          ...(skipFinalizeCallIds ?? []),
+          ...managedIds,
+        ]);
+      }
+    }
     try {
       await this.historyReplayer.replay(records, gaps, {
         ...(skipFinalizeCallIds ? { skipFinalizeCallIds } : {}),
@@ -5143,6 +5187,17 @@ export class Session implements SessionContext {
     ) {
       return { accepted: false, interruption: 'none' };
     }
+    const pendingManagedApproval =
+      await this.config.readPendingManagedApprovalWait?.();
+    if (
+      pendingManagedApproval &&
+      findRestorableManagedApproval(
+        chat.peekLastHistoryEntry(),
+        pendingManagedApproval.requestId,
+      ) !== undefined
+    ) {
+      return { accepted: false, interruption: 'none' };
+    }
     const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       apiHistory:
@@ -5532,6 +5587,21 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY
               ] === true;
+            const wantsManagedApprovalRestore =
+              (params as { _meta?: Record<string, unknown> })._meta?.[
+                DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY
+              ] === true;
+            const pendingManagedApproval = wantsManagedApprovalRestore
+              ? ((await this.config.readPendingManagedApprovalWait?.()) ?? null)
+              : null;
+            const isRestoreManagedApproval =
+              pendingManagedApproval !== null &&
+              findRestorableManagedApproval(
+                this.#getCurrentChat().peekLastHistoryEntry(),
+                pendingManagedApproval.requestId,
+              ) !== undefined;
+            const isRestorePendingTool =
+              isRestoreAskUserQuestion || isRestoreManagedApproval;
             if (
               isRestoreAskUserQuestion &&
               !findRestorableAskUserQuestion(
@@ -5546,10 +5616,13 @@ export class Session implements SessionContext {
               // restore doesn't persist phantom records.
               return { stopReason: 'end_turn' };
             }
+            if (wantsManagedApprovalRestore && !isRestoreManagedApproval) {
+              return { stopReason: 'end_turn' };
+            }
             if (
               !isRetry &&
               !isContinue &&
-              !isRestoreAskUserQuestion &&
+              !isRestorePendingTool &&
               goalTurn?.origin !== 'runtime'
             ) {
               const interactionSpan = getActiveInteractionSpan();
@@ -5566,9 +5639,7 @@ export class Session implements SessionContext {
             );
             const inputText = firstTextBlock?.text || '';
             const isSlashInput =
-              !isContinue &&
-              !isRestoreAskUserQuestion &&
-              isSlashCommand(inputText);
+              !isContinue && !isRestorePendingTool && isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
@@ -5624,7 +5695,7 @@ export class Session implements SessionContext {
             if (goalTurn?.origin === 'runtime') {
               // The automatic Goal turn was recorded above with its runtime
               // provenance and must not also appear as real user input.
-            } else if (isContinue || isRestoreAskUserQuestion) {
+            } else if (isContinue || isRestorePendingTool) {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
@@ -5657,7 +5728,7 @@ export class Session implements SessionContext {
             if (
               !isSlashInput &&
               !isContinue &&
-              !isRestoreAskUserQuestion &&
+              !isRestorePendingTool &&
               !isRetry
             ) {
               this.refreshContextFilesOnWrite = false;
@@ -5676,7 +5747,7 @@ export class Session implements SessionContext {
               return true;
             };
 
-            if (isRestoreAskUserQuestion) {
+            if (isRestorePendingTool) {
               parts = [];
             } else if (isContinue) {
               // Non-null here: the `none` case returned early above, and both
@@ -5798,7 +5869,7 @@ export class Session implements SessionContext {
             const isFreshUserTurn =
               !isRetry &&
               !isContinue &&
-              !isRestoreAskUserQuestion &&
+              !isRestorePendingTool &&
               !isRuntimeContinuation;
             // Channel markers cover both automated and human messages. Keep
             // that class excluded until its producers distinguish them; see
@@ -5806,7 +5877,7 @@ export class Session implements SessionContext {
             const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
             if (
               !isContinue &&
-              !isRestoreAskUserQuestion &&
+              !isRestorePendingTool &&
               !isRuntimeContinuation &&
               hooksEnabled &&
               messageBus &&
@@ -5883,7 +5954,7 @@ export class Session implements SessionContext {
             // don't create phantom snapshots that desync the snapshot index.
             // Restore continuations record no user message; rewindToTurn()
             // indexes snapshots by user-turn position, so skip them.
-            if (!isRestoreAskUserQuestion) {
+            if (!isRestorePendingTool) {
               try {
                 await this.config.makeFileHistorySnapshot(promptId);
               } catch (e) {
@@ -5905,7 +5976,7 @@ export class Session implements SessionContext {
                 systemReminders.unshift({ text: memory.prompt });
               }
             }
-            if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
+            if (systemReminders.length > 0 && !isRestorePendingTool) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on
               // the original send. Re-inserting would show the model duplicate
@@ -5939,7 +6010,7 @@ export class Session implements SessionContext {
             // Restore of ask_user_question never sends these `parts` (it
             // replaces nextMessage with the functionResponse), so leave the
             // notice pending until that post-answer message is built.
-            if (this.pendingWorktreeNotice && !isRestoreAskUserQuestion) {
+            if (this.pendingWorktreeNotice && !isRestorePendingTool) {
               const noticePart = {
                 text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
               };
@@ -5950,7 +6021,7 @@ export class Session implements SessionContext {
             if (
               this.pendingRecoveredAgentsNotice &&
               !isContinue &&
-              !isRestoreAskUserQuestion &&
+              !isRestorePendingTool &&
               !isSlashInput
             ) {
               const noticePart = {
@@ -5965,7 +6036,7 @@ export class Session implements SessionContext {
             // `parts` — the reminder would vanish and then stay suppressed
             // for ACTIVE_TODO_REMINDER_REFRESH_TURNS on the post-answer
             // continuation that actually needs it.
-            const activeTodoReminder = isRestoreAskUserQuestion
+            const activeTodoReminder = isRestorePendingTool
               ? undefined
               : this.config.takeActiveTodoReminder(promptId, true);
             if (
@@ -5994,18 +6065,27 @@ export class Session implements SessionContext {
             // (use-llm-stream.ts, which only emits in YOLO) this is
             // intentionally emitted for every mode.
             try {
-              if (isRestoreAskUserQuestion) {
-                const restorable = findRestorableAskUserQuestion(
-                  this.#getCurrentChat().peekLastHistoryEntry(),
-                );
+              if (isRestorePendingTool) {
+                const last = this.#getCurrentChat().peekLastHistoryEntry();
+                const restorable = isRestoreAskUserQuestion
+                  ? findRestorableAskUserQuestion(last)
+                  : findRestorableManagedApproval(
+                      last,
+                      pendingManagedApproval!.requestId,
+                    );
                 if (!restorable) {
                   return { stopReason: 'end_turn' };
                 }
-                this.restoringAskUserQuestionCallIds = new Set(
+                const restoredIds = new Set(
                   restorable.functionCalls
                     .map((call) => call.id)
                     .filter((id): id is string => typeof id === 'string'),
                 );
+                if (isRestoreAskUserQuestion) {
+                  this.restoringAskUserQuestionCallIds = restoredIds;
+                } else {
+                  this.restoringManagedApprovalCallIds = restoredIds;
+                }
                 this.restoredAskUserQuestionSkipPersistence = false;
                 // The permission-timeout persistence skip only needs to
                 // cover the run itself — the durable record is written on
@@ -6025,6 +6105,7 @@ export class Session implements SessionContext {
                   );
                 } finally {
                   this.restoringAskUserQuestionCallIds = undefined;
+                  this.restoringManagedApprovalCallIds = undefined;
                   this.restoredAskUserQuestionSkipPersistence = false;
                 }
                 if (
@@ -8143,12 +8224,19 @@ export class Session implements SessionContext {
     this.restoredAskUserQuestionSkipPersistence = true;
   }
 
+  #isRestoringPermissionCall(callId: string | undefined): boolean {
+    return (
+      typeof callId === 'string' &&
+      (this.restoringAskUserQuestionCallIds?.has(callId) === true ||
+        this.restoringManagedApprovalCallIds?.has(callId) === true)
+    );
+  }
+
   #shouldSkipRestoredAskUserQuestionPersistence(
     callId: string | undefined,
   ): boolean {
     return (
-      typeof callId === 'string' &&
-      this.restoringAskUserQuestionCallIds?.has(callId) === true &&
+      this.#isRestoringPermissionCall(callId) &&
       this.restoredAskUserQuestionSkipPersistence
     );
   }
@@ -10881,8 +10969,8 @@ export class Session implements SessionContext {
     );
   }
 
-  // Restored AskUserQuestion re-hangs from transcript. Persisting cancelled
-  // here would make the next load see an already-final ticket.
+  // Restored permission waiters re-hang from the durable ticket. Persisting
+  // cancelled here would make the next load see an already-final ticket.
   #shouldRetainManagedPermissionTicket(
     params: RequestPermissionRequest,
     result:
@@ -10891,7 +10979,7 @@ export class Session implements SessionContext {
     error: unknown,
   ): boolean {
     const callId = params.toolCall.toolCallId;
-    if (this.restoringAskUserQuestionCallIds?.has(callId) !== true) {
+    if (!this.#isRestoringPermissionCall(callId)) {
       return false;
     }
     if (error !== undefined) return true;
@@ -12319,7 +12407,7 @@ export class Session implements SessionContext {
       toolName = fc.name ?? 'unknown_tool',
     ) => {
       if (!activeToolAbortSignal.aborted) return undefined;
-      if (this.restoringAskUserQuestionCallIds?.has(callId) === true) {
+      if (this.#isRestoringPermissionCall(callId)) {
         this.#markUnattendedRestoredAskUserQuestion();
       }
       return earlyErrorResponse(
@@ -13393,10 +13481,7 @@ export class Session implements SessionContext {
                   if (!wasAborted) {
                     onStopAfterPermissionCancel?.();
                   }
-                  if (
-                    wasAborted &&
-                    this.restoringAskUserQuestionCallIds?.has(callId) === true
-                  ) {
+                  if (wasAborted && this.#isRestoringPermissionCall(callId)) {
                     this.#markUnattendedRestoredAskUserQuestion();
                   }
                   const permissionFailureMessage = isExitPlanModeTool
@@ -13565,8 +13650,7 @@ export class Session implements SessionContext {
                     )._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
                     const unattendedRestore =
                       isUnattendedRestorePermissionCancel(cancelReason) &&
-                      this.restoringAskUserQuestionCallIds?.has(callId) ===
-                        true;
+                      this.#isRestoringPermissionCall(callId);
                     if (unattendedRestore) {
                       this.#markUnattendedRestoredAskUserQuestion();
                     }

@@ -283,7 +283,10 @@ import {
   openManagedSession,
   type ManagedSession,
 } from '../managed-runtime/managed-session-assembly.js';
-import { HARNESS_TURN_COMPLETE_BOUNDARY } from '../managed-runtime/managed-harness-checkpoint.js';
+import {
+  HARNESS_DURABLE_WAIT_BOUNDARY,
+  HARNESS_TURN_COMPLETE_BOUNDARY,
+} from '../managed-runtime/managed-harness-checkpoint.js';
 import {
   createManagedHarnessHandle,
   type ManagedDurableWaitDecision,
@@ -5073,6 +5076,57 @@ export class Config {
       },
     );
     await this.managedHarness.resolveDurableWait();
+  }
+
+  /**
+   * Reconstructs a still-requested approval wait from the log. Used to hang a
+   * new connection waiter; the old Promise is not restored. Null when there
+   * is no await_action ticket, or it is already final.
+   */
+  async readPendingManagedApprovalWait(): Promise<ManagedDurableWaitRequest | null> {
+    const session = this.managedSession;
+    if (session === undefined) return null;
+    if (
+      session.authority.latestCheckpoint?.boundary !==
+      HARNESS_DURABLE_WAIT_BOUNDARY
+    ) {
+      return null;
+    }
+    const authorization = await session.authority.harnessRunAuthorization();
+    if (
+      authorization.status !== 'runnable' ||
+      authorization.checkpoint.continuation.phase !== 'await_action'
+    ) {
+      return null;
+    }
+    const approval = authorization.checkpoint.approval;
+    if (approval === null) return null;
+    const action = session.authority.action(approval.requestId);
+    if (action === undefined || action.state !== 'requested') return null;
+    let options: unknown = [];
+    let invocation: unknown;
+    try {
+      options = JSON.parse(
+        (await session.resources.read(approval.optionsRef)).toString('utf8'),
+      ) as unknown;
+      invocation =
+        approval.invocationRef === null
+          ? undefined
+          : (JSON.parse(
+              (await session.resources.read(approval.invocationRef)).toString(
+                'utf8',
+              ),
+            ) as unknown);
+    } catch {
+      // Still identify the waited call so replay can skip finalize.
+    }
+    return {
+      requestId: approval.requestId,
+      kind: approval.kind,
+      source: approval.source,
+      options,
+      invocation,
+    };
   }
 
   /** Starts a new session and resets session-scoped services. */

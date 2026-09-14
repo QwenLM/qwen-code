@@ -1048,6 +1048,8 @@ export interface BridgeClientRequestContext {
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
 export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.restoreAskUserQuestion';
+export const DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY =
+  'qwen.daemon.restoreManagedApproval';
 /**
  * Response `_meta` key on `session/request_permission` cancellations telling
  * the child WHY the bridge resolved a cancel (`timeout` / `agent_cancelled`

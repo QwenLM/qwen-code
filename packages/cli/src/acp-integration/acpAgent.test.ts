@@ -25856,6 +25856,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         sendUpdate: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
         shouldHintAskUserQuestionRestore?: ReturnType<typeof vi.fn>;
+        shouldHintManagedApprovalRestore?: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -26118,6 +26119,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     recoveredGoalSendError?: Error;
     primeTurnStateImpl?: (...args: unknown[]) => unknown;
     hintAskUserQuestionRestore?: boolean;
+    hintManagedApprovalRestore?: boolean;
   }) {
     const innerConfig = makeRestoreInnerConfig({
       resumedConversation: opts.resumedConversation,
@@ -26235,6 +26237,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         shouldHintAskUserQuestionRestore: vi
           .fn()
           .mockReturnValue(opts.hintAskUserQuestionRestore === true),
+        shouldHintManagedApprovalRestore: vi
+          .fn()
+          .mockResolvedValue(opts.hintManagedApprovalRestore === true),
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi
@@ -26609,6 +26614,41 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         ).toBe(true);
       } finally {
         mockArgv.restoreAskUserQuestion = undefined;
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s attaches the managed approval restore hint when a pending wait is restorable',
+    async (action) => {
+      bindRestoreMocks({
+        sessionExists: true,
+        hintManagedApprovalRestore: true,
+      });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        };
+        const response =
+          action === 'load'
+            ? await agent.loadSession(params)
+            : await agent.unstable_resumeSession(params);
+
+        expect(
+          lastSessionMock?.shouldHintManagedApprovalRestore,
+        ).toHaveBeenCalledOnce();
+        expect(
+          (response as { _meta?: Record<string, unknown> })._meta?.[
+            'qwen.daemon.restoreManagedApproval'
+          ],
+        ).toBe(true);
+      } finally {
         mockConnectionState.resolve();
         await agentPromise;
       }

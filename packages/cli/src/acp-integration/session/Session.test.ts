@@ -941,6 +941,9 @@ describe('Session', () => {
       // The restore-ask_user_question prompt path is gated on this flag;
       // the restore describe block overrides to true.
       getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
+      readPendingManagedApprovalWait: vi.fn().mockResolvedValue(null),
+      commitManagedDurableWait: vi.fn().mockResolvedValue(undefined),
+      resolveManagedDurableWait: vi.fn().mockResolvedValue(undefined),
       setActiveTodoReminder: vi.fn(),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
@@ -5769,6 +5772,186 @@ describe('Session', () => {
       expect(
         mockChatRecordingService.recordFileHistorySnapshot,
       ).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('restoreManagedApproval prompt', () => {
+    it('re-hangs permission for the waited tool and then executes it', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'run ls' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'fc-wait-1',
+                name: 'run_shell_command',
+                args: { command: 'ls' },
+              },
+            },
+          ],
+        },
+      ]);
+      vi.mocked(mockConfig.readPendingManagedApprovalWait).mockResolvedValue({
+        requestId: 'fc-wait-1',
+        kind: 'execute',
+        source: 'tool_call',
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        invocation: { toolCallId: 'fc-wait-1', kind: 'execute' },
+      });
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('run_shell_command', execute, 'exec'),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'listed' }] } }],
+            },
+          },
+        ]),
+      );
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreManagedApproval': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(result).toEqual({ stopReason: 'end_turn' });
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            toolCallId: 'fc-wait-1',
+          }),
+        }),
+      );
+      expect(execute).toHaveBeenCalled();
+      expect(mockConfig.resolveManagedDurableWait).toHaveBeenCalledWith({
+        requestId: 'fc-wait-1',
+        outcome: 'decided',
+        body: { optionId: 'proceed_once', answers: null },
+      });
+      const sent = firstSentMessage();
+      expect(sent[0]?.functionResponse?.id).toBe('fc-wait-1');
+    });
+
+    it('does not cancel the durable ticket when a restored wait times out', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'run ls' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'fc-wait-1',
+                name: 'run_shell_command',
+                args: { command: 'ls' },
+              },
+            },
+          ],
+        },
+      ]);
+      vi.mocked(mockConfig.readPendingManagedApprovalWait).mockResolvedValue({
+        requestId: 'fc-wait-1',
+        kind: 'execute',
+        source: 'tool_call',
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        invocation: { toolCallId: 'fc-wait-1', kind: 'execute' },
+      });
+      const execute = vi.fn();
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('run_shell_command', execute, 'exec'),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+        _meta: { 'qwen.daemon.permissionCancelReason': 'timeout' },
+      });
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreManagedApproval': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(execute).not.toHaveBeenCalled();
+      expect(mockConfig.resolveManagedDurableWait).not.toHaveBeenCalled();
+    });
+
+    it('does not classify a still-requested wait as an interrupted turn', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'run ls' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'fc-wait-1',
+                name: 'run_shell_command',
+                args: { command: 'ls' },
+              },
+            },
+          ],
+        },
+      ]);
+      vi.mocked(mockConfig.readPendingManagedApprovalWait).mockResolvedValue({
+        requestId: 'fc-wait-1',
+        kind: 'execute',
+        source: 'tool_call',
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({ accepted: false, interruption: 'none' });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op when the managed ticket is no longer requested', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'run ls' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'fc-wait-1',
+                name: 'run_shell_command',
+                args: { command: 'ls' },
+              },
+            },
+          ],
+        },
+      ]);
+      vi.mocked(mockConfig.readPendingManagedApprovalWait).mockResolvedValue(
+        null,
+      );
+      const execute = vi.fn();
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('run_shell_command', execute, 'exec'),
+      );
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreManagedApproval': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(result).toEqual({ stopReason: 'end_turn' });
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
     });
   });
 
