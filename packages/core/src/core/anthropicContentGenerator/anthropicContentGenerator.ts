@@ -687,9 +687,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
       if (thinking && sampling.temperature !== undefined)
         sampling.temperature = 1;
     }
-    const isDeepSeek = profile
-      ? profile === 'deepseek-anthropic'
-      : isDeepSeekAnthropicProvider(this.contentGeneratorConfig);
+    const isDeepSeek =
+      isDeepSeekAnthropicHostname(this.contentGeneratorConfig) ||
+      (profile
+        ? profile === 'deepseek-anthropic'
+        : isDeepSeekAnthropicProvider(this.contentGeneratorConfig));
 
     // On DeepSeek the converter must keep history aligned with the top-level
     // `thinking` parameter to avoid HTTP 400:
@@ -957,6 +959,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return clamped;
   }
 
+  private getReasoningCapabilities() {
+    return resolveReasoningForModel(
+      this.cliConfig,
+      this.contentGeneratorConfig,
+    );
+  }
+
   /**
    * Check if the current model supports adaptive thinking (type: 'adaptive').
    * Claude 4.6+ models require adaptive thinking; older models use the
@@ -965,13 +974,6 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * stay in lockstep — a model parsed for effort gating is parsed identically
    * here for the thinking shape.
    */
-  private getReasoningCapabilities() {
-    return resolveReasoningForModel(
-      this.cliConfig,
-      this.contentGeneratorConfig,
-    );
-  }
-
   private modelSupportsAdaptiveThinking(history = false): boolean {
     const profile = this.getReasoningCapabilities()?.profile;
     if (profile === 'anthropic-adaptive') return true;

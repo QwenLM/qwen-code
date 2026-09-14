@@ -867,6 +867,16 @@ describe('external reasoning controls', () => {
         ...declaration,
         profile,
       });
+      expect(
+        getGptReasoningOverrideState(
+          {
+            ...generation,
+            baseUrl: 'https://openrouter.ai/api/v1',
+            extra_body: { reasoning: { enabled: false } },
+          },
+          reasoning,
+        )?.enabled,
+      ).toBe(false);
       const extra_body =
         profile === 'openai-effort'
           ? { reasoning_effort: 'high' }

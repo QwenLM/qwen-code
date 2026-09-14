@@ -174,9 +174,8 @@ export function getGptReasoningOverrideState(
     | false
     | null
     | undefined;
-  const openRouter = profile
-    ? profile === 'openai-reasoning'
-    : isOpenRouterHostname(generation);
+  const openRouter =
+    profile === 'openai-reasoning' || isOpenRouterHostname(generation);
   const removedFlatNone =
     (generation.thinkingMandatory === true ||
       reasoning?.canDisable === false ||

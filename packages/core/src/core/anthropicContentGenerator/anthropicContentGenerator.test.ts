@@ -129,9 +129,19 @@ describe('AnthropicContentGenerator', () => {
     ['anthropic-manual', { type: 'enabled', budget_tokens: 31999 }],
     ['anthropic-adaptive', { type: 'adaptive', display: 'summarized' }],
     ['deepseek-anthropic', { type: 'enabled', budget_tokens: 32000 }],
+    [
+      'deepseek-anthropic',
+      { type: 'enabled' },
+      'https://api.deepseek.com/anthropic',
+    ],
+    [
+      'anthropic-manual',
+      { type: 'enabled' },
+      'https://api.deepseek.com/anthropic',
+    ],
   ])(
     'uses %s for an unknown alias with its default effort',
-    async (profile, thinking) => {
+    async (profile, thinking, baseUrl = 'https://example.test') => {
       const { AnthropicContentGenerator } = await importGenerator();
       mockConfig.getResolvedModelConfig = vi.fn().mockReturnValue({
         capabilities: {
@@ -152,7 +162,7 @@ describe('AnthropicContentGenerator', () => {
           model: 'company-alias',
           authType: 'anthropic' as ContentGeneratorConfig['authType'],
           apiKey: 'dummy',
-          baseUrl: 'https://example.test',
+          baseUrl,
           samplingParams: { max_tokens: 32000, temperature: 0 },
         },
         mockConfig,

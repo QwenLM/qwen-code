@@ -13,7 +13,10 @@
  */
 
 import type { Config } from '../config/config.js';
-import { resolveReasoningForModel } from '../core/reasoning-overrides.js';
+import {
+  resolveReasoningForModel,
+  resolveReasoningCapabilities,
+} from '../core/reasoning-overrides.js';
 import {
   createContentGenerator,
   type AuthType,
@@ -28,7 +31,6 @@ import type { ResolvedModelConfig } from './types.js';
 import {
   clampReasoningEffort,
   getGptReasoningCapabilities,
-  parseModelReasoningCapabilities,
   REASONING_EFFORT_TIERS,
   reasoningEffortsForCapability,
   setGeneratorReasoningEffort,
@@ -166,7 +168,8 @@ function offeredReasoningEfforts(
       (target.baseUrl !== undefined
         ? models.getResolvedModel(target.authType, target.model, target.baseUrl)
         : undefined) ?? models.getResolvedModel(target.authType, target.model);
-    const declared = parseModelReasoningCapabilities(
+    const declared = resolveReasoningCapabilities(
+      target,
       resolved?.capabilities?.reasoning,
     );
     if (declared) return reasoningEffortsForCapability(declared);
@@ -268,7 +271,11 @@ function buildInheritedAgentContentGeneratorConfig(
     authOverrides.authType,
     'apiKey',
   );
-  if (modelId !== parentConfig.model || authOverrides.baseUrl !== undefined)
+  if (
+    !sameProvider ||
+    nextConfig.model !== parentConfig.model ||
+    authOverrides.baseUrl !== undefined
+  )
     nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
   nextConfig.baseUrl =
     authOverrides.baseUrl ??

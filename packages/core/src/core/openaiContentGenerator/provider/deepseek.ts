@@ -122,7 +122,11 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
 
     const profile = this.getReasoningCapabilities(request.model)?.profile;
     const reshaped =
-      !profile && isDeepSeekHostname(this.contentGeneratorConfig)
+      (!profile ||
+        this.contentGeneratorConfig.samplingParams?.['reasoning'] !==
+          undefined ||
+        this.contentGeneratorConfig.extra_body?.['reasoning'] !== undefined) &&
+      isDeepSeekHostname(this.contentGeneratorConfig)
         ? translateReasoningEffort(baseRequest)
         : baseRequest;
     if (!reshaped.messages?.length) {

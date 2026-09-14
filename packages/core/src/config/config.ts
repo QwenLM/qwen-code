@@ -4829,9 +4829,18 @@ export class Config {
     providers: ModelProvidersConfig | undefined,
     protocols: ProviderProtocolConfig = {},
   ): void {
+    const previous =
+      this.latestReasoningSnapshot ?? this.getReasoningSnapshot();
     const models = this.getAllConfiguredModels().map((model) => {
+      const prior = previous.find(
+        (row) =>
+          row.id === model.id &&
+          row.authType === model.authType &&
+          row.registryBaseUrl === model.registryBaseUrl,
+      );
       const configured = Object.entries(providers ?? {})
         .flatMap(([provider, entries]) =>
+          model.authType !== AuthType.QWEN_OAUTH &&
           resolveProviderProtocol(provider, protocols) === model.authType &&
           Array.isArray(entries)
             ? entries
@@ -4839,13 +4848,17 @@ export class Config {
         )
         .find(
           (entry) =>
-            entry.id === model.id && entry.baseUrl === model.registryBaseUrl,
+            entry?.id === model.id && entry.baseUrl === model.registryBaseUrl,
         );
       return {
         ...model,
         capabilities: {
           ...model.capabilities,
-          reasoning: configured?.capabilities?.reasoning,
+          reasoning: configured
+            ? configured.capabilities?.reasoning
+            : prior
+              ? prior.reasoning
+              : model.capabilities?.reasoning,
         },
       };
     });
@@ -4895,6 +4908,7 @@ export class Config {
     this.reasoningSnapshot = next;
     const generation = this.getContentGeneratorConfig();
     if (generation) generation.reasoningSnapshot = next;
+    this.baseLlmClient?.clearPerModelGeneratorCache();
     this.notifyModelChangeListeners();
     return true;
   }

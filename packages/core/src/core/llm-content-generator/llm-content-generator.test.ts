@@ -73,7 +73,11 @@ describe('LlmContentGenerator', () => {
           model: 'company-alias',
           contents: [],
           ...(off
-            ? { config: { thinkingConfig: { includeThoughts: false } } }
+            ? {
+                config: {
+                  thinkingConfig: { includeThoughts: false, thinkingBudget: 0 },
+                },
+              }
             : {}),
         },
         'prompt',
@@ -82,7 +86,7 @@ describe('LlmContentGenerator', () => {
         expect.objectContaining({
           config: expect.objectContaining({
             thinkingConfig: off
-              ? { includeThoughts: false }
+              ? { includeThoughts: false, thinkingBudget: 0 }
               : { includeThoughts: true, thinkingLevel: 'MEDIUM' },
           }),
         }),

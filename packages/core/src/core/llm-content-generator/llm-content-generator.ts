@@ -207,10 +207,7 @@ export class LlmContentGenerator implements ContentGenerator {
         'frequencyPenalty',
       ),
       thinkingConfig: getParameterValue(
-        this.buildThinkingConfig(
-          request.model,
-          requestConfig.thinkingConfig?.includeThoughts === false,
-        ),
+        this.buildThinkingConfig(request.model, requestConfig.thinkingConfig),
         'thinkingConfig',
         {
           includeThoughts: true,
@@ -222,14 +219,15 @@ export class LlmContentGenerator implements ContentGenerator {
 
   private buildThinkingConfig(
     model?: string,
-    optOut = false,
-  ): { includeThoughts: boolean; thinkingLevel?: ThinkingLevel } | undefined {
+    requestThinking?: GenerateContentConfig['thinkingConfig'],
+  ): GenerateContentConfig['thinkingConfig'] {
     const generation = this.contentGeneratorConfig;
     const resolved =
       generation && this.cliConfig
         ? resolveReasoningForModel(this.cliConfig, generation, model)
         : undefined;
-    if (resolved && optOut) return { includeThoughts: false };
+    if (resolved && requestThinking?.includeThoughts === false)
+      return requestThinking;
     const reasoning = generation
       ? getEffectiveReasoning(generation, resolved)
       : undefined;

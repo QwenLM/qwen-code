@@ -49,7 +49,8 @@ export class MiMoOpenAICompatibleProvider extends DefaultOpenAICompatibleProvide
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
     if (
-      this.getReasoningCapabilities(request.model)?.profile ||
+      (this.getReasoningCapabilities(request.model)?.profile &&
+        !isMiMoProvider({ ...this.contentGeneratorConfig, model: '' })) ||
       !baseRequest.messages?.length
     ) {
       return baseRequest;

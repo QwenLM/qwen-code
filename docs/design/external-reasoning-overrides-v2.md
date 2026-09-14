@@ -137,8 +137,9 @@ reload still sees the parent prompt's version. Reuse route identity helpers.
 
 Settings observation prepares the latest valid reasoning table. At the existing
 user-prompt admission boundary, replace the active table once. A changed table
-does not create a generator, call `refreshAuth`, switch models, update tools or
-replace a registry. Normal authentication refresh carries the current active
+does not replace the current generator, call `refreshAuth`, switch models, update tools or
+replace a registry. Cached side-model views are invalidated on adoption; existing
+views retain their captured table. Normal authentication refresh carries the current active
 reasoning table forward; it cannot promote pending reasoning changes.
 
 Adapters read the captured table, not live registry reasoning. A derived agent
@@ -168,11 +169,11 @@ Use direct core-module imports in CLI production code. No unrelated cleanup.
 
 | Group                                                 | Changed-line budget |
 | ----------------------------------------------------- | ------------------: |
-| Production implementation                             |               1,500 |
-| Focused unit tests                                    |               1,000 |
-| Local E2E harness and scenarios                       |                 300 |
-| Both design languages, user docs and generated schema |                 450 |
-| Review reserve                                        |                 250 |
+| Production implementation                             |               1,450 |
+| Focused unit tests                                    |               1,350 |
+| Local E2E harness and scenarios                       |                 270 |
+| Both design languages, user docs and generated schema |                 430 |
+| Review reserve                                        |                   0 |
 | Total hard limit                                      |               3,500 |
 
 Count additions plus deletions in the final PR diff against its main merge base,

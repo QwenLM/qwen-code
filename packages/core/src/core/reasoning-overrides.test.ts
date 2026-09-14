@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, expect, it, vi } from 'vitest';
-import { AuthType, type ContentGeneratorConfig } from './contentGenerator.js';
+import {
+  AuthType,
+  type ContentGeneratorConfig,
+  type ContentGenerator,
+} from './contentGenerator.js';
+import { BaseLlmClient } from './baseLlmClient.js';
+import { LlmClient, SendMessageType } from './client.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { Config } from '../config/config.js';
 import {
   captureReasoningSnapshot,
@@ -36,6 +43,35 @@ const model = (
   registryBaseUrl: route.baseUrl,
   capabilities: { reasoning: { ...declaration, defaultEffort } },
 });
+
+function snapshotConfig(
+  rows: AvailableModel[],
+  marker: string | null = route.baseUrl!,
+) {
+  const generation = {
+    ...route,
+    apiKey: 'dummy',
+    reasoningRouteBaseUrl: marker,
+    reasoningSnapshot: captureReasoningSnapshot(rows),
+  };
+  const config = Object.create(Config.prototype) as Config;
+  Object.assign(config, {
+    reasoningSnapshot: generation.reasoningSnapshot,
+    getAllConfiguredModels: () => rows,
+    getContentGeneratorConfig: () => generation,
+    getModel: () => route.model,
+    getFastModel: () => undefined,
+    getModelsConfig: () => ({
+      getResolvedModel: (_auth: string, id: string) => ({
+        ...rows.find((row) => row.id === id),
+        generationConfig: {},
+      }),
+    }),
+    notifyModelChangeListeners: vi.fn(),
+    debugLogger: { error: vi.fn() },
+  });
+  return { config, generation };
+}
 
 describe('reasoning declarations', () => {
   it('overrides a known default without persisting a user choice', () => {
@@ -126,12 +162,16 @@ describe('reasoning declarations', () => {
     ).toMatchObject({ defaultEffort: 'high' });
   });
 
-  it('inherits Claude native tiers and adaptive mode for a default-only override', () => {
+  it.each([
+    'claude-opus-4-6',
+    'us.anthropic.claude-opus-4-6-v1:0',
+    'anthropic.claude-opus-4.6',
+  ])('inherits native Claude tiers for %s', (model) => {
     expect(
       resolveReasoningCapabilities(
         {
           ...route,
-          model: 'claude-opus-4-6',
+          model,
           authType: AuthType.USE_ANTHROPIC,
         },
         { defaultEffort: 'medium' },
@@ -193,6 +233,19 @@ describe('reasoning declarations', () => {
     ).toBeUndefined();
   });
 
+  it('infers OpenRouter nested reasoning for a partial GPT override', () => {
+    expect(
+      resolveReasoningCapabilities(
+        {
+          ...route,
+          model: 'openai/gpt-5.4',
+          baseUrl: 'https://openrouter.ai/api/v1',
+        },
+        { defaultEffort: 'medium' },
+      ),
+    ).toMatchObject({ profile: 'openai-reasoning', defaultEffort: 'medium' });
+  });
+
   it('ignores misleading Qwen hosts during inference', () => {
     expect(
       resolveReasoningCapabilities(
@@ -208,6 +261,127 @@ describe('reasoning declarations', () => {
 });
 
 describe('prompt reasoning snapshots', () => {
+  it('retains staged reasoning across unmatched route edits and tolerates malformed entries', () => {
+    const { config, generation } = snapshotConfig([model()]);
+    config.stageReasoningOverrides({
+      openai: [
+        {
+          id: 'alias',
+          baseUrl: route.baseUrl,
+          capabilities: {
+            reasoning: { ...declaration, defaultEffort: 'high' },
+          },
+        },
+      ],
+    });
+    config.stageReasoningOverrides({ openai: [null] } as unknown as Parameters<
+      Config['stageReasoningOverrides']
+    >[0]);
+    config.applyReasoningOverrides();
+    expect(resolveReasoningForModel(config, generation)).toMatchObject({
+      defaultEffort: 'high',
+    });
+    config.stageReasoningOverrides({
+      openai: [{ id: 'alias', baseUrl: route.baseUrl }],
+    });
+    config.applyReasoningOverrides();
+    expect(resolveReasoningForModel(config, generation)).toBeUndefined();
+  });
+
+  it('refreshes cached side-model views only on adoption while existing views retain their table', async () => {
+    const { config, generation } = snapshotConfig([
+      model(),
+      model('child', 'low'),
+    ]);
+    const client = new BaseLlmClient({} as ContentGenerator, config);
+    Object.assign(config, { baseLlmClient: client });
+    const first = await client.resolveForModel('child', { failClosed: true });
+    config.stageReasoningOverrides({
+      openai: [
+        {
+          id: 'child',
+          baseUrl: route.baseUrl,
+          capabilities: {
+            reasoning: { ...declaration, defaultEffort: 'high' },
+          },
+        },
+      ],
+    });
+    config.applyReasoningOverrides();
+    const second = await client.resolveForModel('child', { failClosed: true });
+    expect(
+      resolveReasoningForModel(config, first.contentGeneratorConfig),
+    ).toMatchObject({ defaultEffort: 'low' });
+    expect(second.contentGeneratorConfig.reasoningSnapshot).toBe(
+      generation.reasoningSnapshot,
+    );
+    expect(
+      resolveReasoningForModel(config, second.contentGeneratorConfig),
+    ).toMatchObject({ defaultEffort: 'high' });
+    expect(config.applyReasoningOverrides()).toBe(false);
+    expect(
+      (await client.resolveForModel('child', { failClosed: true }))
+        .contentGenerator,
+    ).toBe(second.contentGenerator);
+  });
+
+  it.each([
+    [false, 'high'],
+    [true, 'medium'],
+  ] as const)(
+    'owns promotion only for a primary user prompt (concurrent=%s)',
+    async (isConcurrentSideQuery, expected) => {
+      const { config, generation } = snapshotConfig([model()]);
+      config.stageReasoningOverrides({
+        openai: [
+          {
+            id: 'alias',
+            baseUrl: route.baseUrl,
+            capabilities: {
+              reasoning: { ...declaration, defaultEffort: 'high' },
+            },
+          },
+        ],
+      });
+      const cutoff = new Error('post-admission cutoff');
+      Object.assign(config, {
+        assertCanStartTurn: () => {
+          throw cutoff;
+        },
+        getTelemetryIncludeSensitiveSpanAttributes: () => false,
+      });
+      const client = Object.create(LlmClient.prototype) as LlmClient;
+      Object.assign(client, { config });
+      const stream = client.sendMessageStream(
+        'probe',
+        new AbortController().signal,
+        'probe',
+        { type: SendMessageType.UserQuery, isConcurrentSideQuery },
+      );
+      await expect(stream.next()).rejects.toBe(cutoff);
+      expect(resolveReasoningForModel(config, generation)).toMatchObject({
+        defaultEffort: expected,
+      });
+    },
+  );
+
+  it('preserves the implicit route when a child inherits its model', () => {
+    const { config } = snapshotConfig(
+      [
+        { ...model('alias', 'low'), registryBaseUrl: undefined },
+        model('alias', 'high'),
+      ],
+      null,
+    );
+    const child = buildAgentContentGeneratorConfig(config, undefined, {
+      authType: AuthType.USE_OPENAI,
+    });
+    expect(child.reasoningRouteBaseUrl).toBeNull();
+    expect(resolveReasoningForModel(config, child)).toMatchObject({
+      defaultEffort: 'low',
+    });
+  });
+
   it('degrades invalid initial declarations without losing healthy routes', () => {
     const invalid = model('invalid');
     invalid.capabilities = { reasoning: { ...declaration, efforts: ['low'] } };
@@ -343,15 +517,8 @@ describe('prompt reasoning snapshots', () => {
     expect(resolveReasoningForModel(config, child)).toMatchObject({
       defaultEffort: 'low',
     });
-    models[0]!.capabilities = {
-      reasoning: { ...declaration, efforts: ['low'], defaultEffort: 'high' },
-    };
-    expect(config.applyReasoningOverrides()).toBe(false);
-    expect(resolveReasoningForModel(config, generation)).toMatchObject({
-      defaultEffort: 'high',
-    });
   });
-  it.each([false, true])(
+  it.each([false, true, 'unknown'])(
     'retains a valid observed update after invalid input (inactive implicit route: %s)',
     (inactive) => {
       let models = [model('alias', 'low')];
@@ -375,7 +542,10 @@ describe('prompt reasoning snapshots', () => {
           ...model('child'),
           registryBaseUrl: undefined,
           capabilities: {
-            reasoning: { efforts: ['low'], defaultEffort: 'high' },
+            reasoning:
+              inactive === 'unknown'
+                ? { defaultEffort: 'medium' }
+                : { efforts: ['low'], defaultEffort: 'high' },
           },
         });
       } else {

@@ -129,7 +129,9 @@ function applyConfiguredReasoningEffort(
   if (capabilities?.profile) {
     const loose = request as unknown as Record<string, unknown>;
     const { reasoning, ...rest } = loose;
+    const { effort: _effort, ...siblings } = asObject(reasoning) ?? {};
     return {
+      ...(Object.keys(siblings).length ? { reasoning: siblings } : {}),
       ...profileReasoning(
         capabilities.profile,
         reasoning as ContentGeneratorConfig['reasoning'],
@@ -1055,7 +1057,8 @@ export class ContentGenerationPipeline {
     if (
       reasoningCapabilities &&
       !('reasoning' in baseRequest) &&
-      effectiveReasoning
+      effectiveReasoning &&
+      request.config?.thinkingConfig?.includeThoughts !== false
     ) {
       baseRequest = {
         ...baseRequest,
@@ -1067,6 +1070,8 @@ export class ContentGenerationPipeline {
     // mapping must leave it for the provider hook to translate.
     if (
       this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
+      (!reasoningCapabilities?.profile ||
+        this.contentGeneratorConfig.extra_body?.['reasoning'] === undefined) &&
       (reasoningCapabilities?.profile ||
         !isOpenRouterHostname(this.contentGeneratorConfig))
     ) {
@@ -1147,11 +1152,28 @@ export class ContentGenerationPipeline {
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
     if (reasoningDisabled && profile) {
-      if (!thinkingMandatory) {
-        const typed = providerRequest as unknown as Record<string, unknown>;
+      const typed = providerRequest as unknown as Record<string, unknown>;
+      if (request.config?.thinkingConfig?.includeThoughts === false) {
         delete typed['reasoning'];
         delete typed['reasoning_effort'];
+      }
+      if (!thinkingMandatory) {
+        delete typed['reasoning'];
+        delete typed['reasoning_effort'];
+        if (isDashScope && profile === 'dashscope-effort')
+          delete typed['thinking_budget'];
+        const template = asObject(typed['chat_template_kwargs']);
         Object.assign(typed, profileReasoning(profile, false));
+        if (profile === 'qwen-chat-template') {
+          delete typed['enable_thinking'];
+          typed['chat_template_kwargs'] = {
+            ...template,
+            enable_thinking: false,
+          };
+        } else if (reasoningCapabilities?.disableField === 'enable_thinking') {
+          delete typed['reasoning_effort'];
+          typed['enable_thinking'] = false;
+        }
       }
     } else if (reasoningDisabled) {
       const typed = providerRequest as unknown as Record<string, unknown>;

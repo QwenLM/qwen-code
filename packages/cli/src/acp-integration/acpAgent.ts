@@ -15457,7 +15457,8 @@ class QwenAgent implements Agent {
 
     if (
       activeRuntimeSnapshot ||
-      currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
+      (currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+        !modelReasoning?.profile) ||
       !isReasoningSelectionSupported(
         rawCurrentModelId,
         REASONING_EFFORT_DEFAULT,

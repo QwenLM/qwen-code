@@ -12,6 +12,7 @@ import type {
 } from '../models/types.js';
 import { ALL_PROVIDERS } from '../providers/all-providers.js';
 import { normalize } from './tokenLimits.js';
+import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
 import {
   parseClaudeModelVersion,
   anthropicSupportedEffortTiers,
@@ -123,6 +124,19 @@ export function validateReasoningDeclaration(
       (input.efforts && !input.efforts.includes(input.defaultEffort)))
   )
     return fail();
+  if (
+    !input.profile &&
+    !getGptReasoningCapabilities(route.model) &&
+    !(route.authType === 'anthropic' && parseClaudeModelVersion(route.model)) &&
+    !ALL_PROVIDERS.some((provider) =>
+      provider.models?.some(
+        (model) =>
+          model.capabilities?.reasoning &&
+          (model.id === route.model || model.id === normalize(route.model)),
+      ),
+    )
+  )
+    return fail();
   return input;
 }
 
@@ -163,7 +177,9 @@ export function validateReasoningCapabilities(
   const inherited = parseModelReasoningCapabilities(known);
   const gpt = getGptReasoningCapabilities(model);
   const claude =
-    route.authType === 'anthropic' ? parseClaudeModelVersion(model) : undefined;
+    route.authType === 'anthropic'
+      ? parseClaudeModelVersion(route.model)
+      : undefined;
   if (!inherited && !gpt && !claude && !input.profile) return fail();
   const auth = route.authType;
   let host = '';
@@ -184,26 +200,29 @@ export function validateReasoningCapabilities(
       ? 'gemini'
       : auth === 'openai-responses'
         ? 'openai-reasoning'
-        : auth === 'anthropic'
-          ? model.includes('deepseek')
-            ? 'deepseek-anthropic'
-            : claude &&
-                (claude.major > 4 || (claude.major === 4 && claude.minor >= 6))
-              ? 'anthropic-adaptive'
-              : 'anthropic-manual'
-          : inherited?.toggleOnly
-            ? dashscope
-              ? 'dashscope-thinking'
-              : 'qwen-chat-template'
-            : model.startsWith('qwen')
+        : auth === 'openai' && isOpenRouterHostname(route)
+          ? 'openai-reasoning'
+          : auth === 'anthropic'
+            ? model.includes('deepseek')
+              ? 'deepseek-anthropic'
+              : claude &&
+                  (claude.major > 4 ||
+                    (claude.major === 4 && claude.minor >= 6))
+                ? 'anthropic-adaptive'
+                : 'anthropic-manual'
+            : inherited?.toggleOnly
               ? dashscope
-                ? inherited?.disableField === 'reasoning_effort'
-                  ? 'dashscope-effort'
-                  : 'dashscope-thinking'
+                ? 'dashscope-thinking'
                 : 'qwen-chat-template'
-              : inherited?.disableField === 'thinking'
-                ? 'deepseek-openai'
-                : 'openai-effort');
+              : model.startsWith('qwen')
+                ? dashscope
+                  ? inherited?.disableField === 'reasoning_effort'
+                    ? 'dashscope-effort'
+                    : 'dashscope-thinking'
+                  : 'qwen-chat-template'
+                : inherited?.disableField === 'thinking'
+                  ? 'deepseek-openai'
+                  : 'openai-effort');
   const protocol =
     profile === 'gemini'
       ? 'gemini'
@@ -223,16 +242,18 @@ export function validateReasoningCapabilities(
     return fail();
   const toggleOnly =
     profile === 'dashscope-thinking' || profile === 'qwen-chat-template';
-  const disableField = toggleOnly
-    ? 'enable_thinking'
-    : profile === 'openai-effort' || profile === 'dashscope-effort'
-      ? 'reasoning_effort'
-      : 'thinking';
+  const disableField =
+    (!input.profile && inherited?.disableField) ||
+    (toggleOnly
+      ? 'enable_thinking'
+      : profile === 'openai-effort' || profile === 'dashscope-effort'
+        ? 'reasoning_effort'
+        : 'thinking');
   const inheritedEfforts =
     inherited && !inherited.toggleOnly
       ? inherited.efforts
       : (gpt?.efforts ??
-        (claude ? anthropicSupportedEffortTiers(model) : undefined));
+        (claude ? anthropicSupportedEffortTiers(route.model) : undefined));
   const efforts = input.efforts ?? inheritedEfforts;
   const inheritedDefault =
     inherited && !inherited.toggleOnly
