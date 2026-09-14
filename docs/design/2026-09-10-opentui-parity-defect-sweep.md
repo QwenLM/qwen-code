@@ -861,12 +861,17 @@ What was verified, and how far the verification reaches:
   were inherited from the restore work rather than introduced by it. Decision 26
   removed the overlay model they both came from, and its frames are the evidence
   for the two closures.
-- **One divergence is intentional.** The update check reports a skipped check
-  with its reason here, while ink reports a failed automatic update. Both
-  renderers share the emission path; ink's subscriber is registered after the
-  background task emits, so ink loses the soft warning and shows the later
-  hard failure instead. Removing a legitimate warning to match a subscription
-  race is not what aligning to ink means, so the warning stays.
+- **The startup update-check notice belongs to the runtime, and what this
+  document said about it before was wrong.** The notice appeared on every
+  OpenTUI leg's frames and on no ink leg's — a divergence that belongs to either
+  the renderer or the runtime until a control arm says which. One ran: ink under
+  the same runtime as the OpenTUI leg reproduces the notice, so it leaves the
+  renderer's column. The same run falsifies the explanation recorded here
+  originally, that ink loses the soft warning to a subscription race and shows a
+  later hard update failure instead; no arm of any run shows a hard failure at
+  all. Why the check's own outcome differs between the two runtimes is not
+  something this sweep chased. The harness now suppresses the update check on
+  both legs, so the notice contributes no rows to the frame comparison.
 - **One cosmetic divergence is recorded, not fixed.** The two renderers break a
   long row at different columns. ink's default wrap is a word wrap that hard
   breaks whatever still overflows and trims nothing, so a row fills to the edge
