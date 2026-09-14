@@ -40,7 +40,10 @@ import {
   clearPersistedAuth,
 } from '../../services/settingsWriter.js';
 import {
+  AuthType,
   buildInstallPlan,
+  resolveModelSelectionAuthType,
+  resolveOwnsModel,
   parseInsightMessage,
   type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
@@ -1490,10 +1493,45 @@ export class WebViewProvider {
       const existingProviders = rollbackSnapshot?.['modelProviders'] as
         | ModelProvidersConfig
         | undefined;
+      const protocol = inputs.protocol ?? providerConfig.protocol;
+      let installInputs = inputs;
+      if (
+        protocol === AuthType.USE_OPENAI &&
+        !providerConfig.protocolOptions &&
+        inputs.wireApi === undefined
+      ) {
+        const owns = resolveOwnsModel(providerConfig);
+        const existingModels = existingProviders?.openai?.filter(
+          (model) => owns?.(model) && model.baseUrl === inputs.baseUrl,
+        );
+        const saved = rollbackSnapshot as {
+          model?: { name?: string; baseUrl?: string };
+          security?: { auth?: { selectedType?: string } };
+        } | null;
+        const selectedId = saved?.model?.name;
+        const isSavedSelection =
+          selectedId !== undefined &&
+          inputs.modelIds.includes(selectedId) &&
+          existingModels?.some((model) => model.id === selectedId) &&
+          (!saved?.model?.baseUrl || saved.model.baseUrl === inputs.baseUrl);
+        const selectedAuth = saved?.security?.auth?.selectedType;
+        const authType = resolveModelSelectionAuthType(
+          isSavedSelection && selectedAuth === AuthType.USE_OPENAI_RESPONSES
+            ? selectedAuth
+            : AuthType.USE_OPENAI,
+          isSavedSelection ? selectedId : inputs.modelIds[0],
+          { openai: existingModels ?? [] },
+          undefined,
+          inputs.baseUrl,
+        );
+        if (authType === AuthType.USE_OPENAI_RESPONSES) {
+          installInputs = { ...inputs, wireApi: 'responses' };
+        }
+      }
       const plan = buildInstallPlan(
         providerConfig,
-        inputs,
-        existingProviders?.[inputs.protocol ?? providerConfig.protocol],
+        installInputs,
+        existingProviders?.[protocol],
       );
       await applyProviderInstallPlanToFile(plan);
 

@@ -41,6 +41,59 @@ function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
 }
 
 describe('buildInstallPlan', () => {
+  it.each(['generated', 'prebuilt', 'preserved'] as const)(
+    'rejects a final Responses voice model (%s)',
+    (source) => {
+      const inputs = {
+        protocol: AuthType.USE_OPENAI,
+        wireApi: 'responses' as const,
+        baseUrl: 'https://voice.example/v1',
+        apiKey: 'test-only',
+        modelIds: ['qwen3-asr-flash'],
+      };
+      const model = {
+        id: 'qwen3-asr-flash',
+        baseUrl: inputs.baseUrl,
+        envKey: generateCustomEnvKey(AuthType.USE_OPENAI, inputs.baseUrl),
+        wireApi: 'responses' as const,
+        voiceOnly: true,
+      };
+      expect(() =>
+        buildInstallPlanSrc(
+          customProvider,
+          {
+            ...inputs,
+            ...(source === 'generated'
+              ? { advancedConfig: { purpose: 'voice' as const } }
+              : {}),
+            ...(source === 'prebuilt' ? { prebuiltModels: [model] } : {}),
+          },
+          source === 'preserved' ? [model] : [],
+        ),
+      ).toThrow('Voice transcription requires the OpenAI Chat Completions API');
+    },
+  );
+
+  it.each([
+    { purpose: 'voice' as const, wireApi: undefined },
+    { purpose: 'voice' as const, wireApi: 'chat-completions' as const },
+    { purpose: 'image' as const, wireApi: 'responses' as const },
+    { purpose: undefined, wireApi: 'responses' as const },
+  ])(
+    'accepts supported purpose/wire combinations: %j',
+    ({ purpose, wireApi }) => {
+      expect(() =>
+        buildInstallPlanSrc(customProvider, {
+          baseUrl: 'https://media.example/v1',
+          apiKey: 'test-only',
+          modelIds: ['qwen3-asr-flash'],
+          wireApi,
+          advancedConfig: { purpose },
+        }),
+      ).not.toThrow();
+    },
+  );
+
   it.each(['chat-completions', 'responses'] as const)(
     'clears explicitly submitted advanced controls without losing unrelated settings (%s)',
     (wireApi) => {

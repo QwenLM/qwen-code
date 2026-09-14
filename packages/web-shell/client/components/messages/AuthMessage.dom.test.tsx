@@ -367,7 +367,7 @@ function fillInput(label: string, value: string) {
   return input;
 }
 
-async function openAdvanced() {
+async function openAdvanced(wireApi?: 'responses' | 'chat-completions') {
   actions.getAuthProviders.mockResolvedValue({
     v: 1,
     workspaceCwd: '/workspace',
@@ -378,7 +378,13 @@ async function openAdvanced() {
         description: '',
         protocol: 'openai',
         showAdvancedConfig: true,
-        steps: ['baseUrl', 'apiKey', 'models', 'advancedConfig'],
+        steps: [
+          ...(wireApi ? ['wireApi'] : []),
+          'baseUrl',
+          'apiKey',
+          'models',
+          'advancedConfig',
+        ],
       },
     ],
     groups: [
@@ -402,16 +408,61 @@ async function openAdvanced() {
     ),
   );
   await clickButton('Custom');
+  if (wireApi)
+    await clickButton(
+      wireApi === 'responses' ? 'Responses' : 'Chat Completions',
+    );
   fillInput('Base URL', 'https://models.example/v1');
   await clickButton('Next');
   fillInput('API Key', 'test-secret-do-not-display');
   await clickButton('Next');
-  fillInput('Model IDs', 'model-a, model-b, model-a');
+  fillInput(
+    'Model IDs',
+    wireApi ? 'qwen3-asr-flash' : 'model-a, model-b, model-a',
+  );
   await clickButton('Next');
   return { onClose };
 }
 
 describe('AuthMessage model configuration', () => {
+  it.each(['responses', 'chat-completions'] as const)(
+    'validates the voice API before saving (%s)',
+    async (wireApi) => {
+      await openAdvanced(wireApi);
+      const trigger =
+        container!.querySelector<HTMLElement>('[role="combobox"]')!;
+      await act(async () =>
+        trigger.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        ),
+      );
+      const voice = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).find((option) => option.textContent?.trim() === 'Voice transcription');
+      expect(voice).toBeDefined();
+      await act(async () =>
+        voice!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        ),
+      );
+      await clickButton('Next');
+      if (wireApi === 'responses') {
+        expect(
+          container!.querySelector('[role="alert"]')?.textContent,
+        ).toContain('OpenAI Chat Completions');
+        expect(actions.installAuthProvider).not.toHaveBeenCalled();
+      } else {
+        await clickButton('Save');
+        expect(actions.installAuthProvider).toHaveBeenCalledWith(
+          expect.objectContaining({
+            wireApi: 'chat-completions',
+            advancedConfig: expect.objectContaining({ purpose: 'voice' }),
+          }),
+        );
+      }
+    },
+  );
+
   it('reviews and saves token limits without exposing credentials or inventing settings', async () => {
     await openAdvanced();
     fillInput('Context window', '131072');

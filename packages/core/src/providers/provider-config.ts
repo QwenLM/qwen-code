@@ -464,7 +464,16 @@ export function buildInstallPlan(
   const ownsModel = config.mergeModelsByIdentity
     ? undefined
     : resolveOwnsModel(config);
-  for (const model of models) resolveModelProtocol(savedProtocol, model);
+  for (const model of models) {
+    const modelProtocol = resolveModelProtocol(savedProtocol, model);
+    if (model.voiceOnly && modelProtocol !== AuthType.USE_OPENAI) {
+      throw new ProviderInstallError(
+        'Voice transcription requires the OpenAI Chat Completions API.',
+        'modelPurpose',
+        protocol,
+      );
+    }
+  }
   const firstModel = models.find(
     (model) => !model.imageOnly && !model.voiceOnly,
   );

@@ -2167,6 +2167,90 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
     expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      name: 'Responses-only reconnect',
+      sibling: false,
+      savedAuth: undefined,
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai-responses',
+    },
+    {
+      name: 'selected Responses beside Chat',
+      sibling: true,
+      savedAuth: 'openai-responses',
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai-responses',
+    },
+    {
+      name: 'selected Chat beside Responses',
+      sibling: true,
+      savedAuth: 'openai',
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai',
+    },
+    {
+      name: 'new endpoint',
+      sibling: false,
+      savedAuth: 'openai-responses',
+      otherEndpoint: true,
+      explicitChat: false,
+      expected: 'openai',
+    },
+    {
+      name: 'explicit Chat choice',
+      sibling: false,
+      savedAuth: 'openai-responses',
+      otherEndpoint: false,
+      explicitChat: true,
+      expected: 'openai',
+    },
+  ])(
+    'preserves only the identified preset wire: $name',
+    async ({ sibling, savedAuth, otherEndpoint, explicitChat, expected }) => {
+      const model = {
+        id: inputs.modelIds[0],
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+        name: '[DeepSeek] Tuned',
+        wireApi: 'responses',
+        generationConfig: { contextWindowSize: 32000 },
+      };
+      mockSnapshotSettingsForRollback.mockReturnValue({
+        modelProviders: {
+          openai: [
+            ...(sibling ? [{ ...model, wireApi: undefined }] : []),
+            model,
+          ],
+        },
+        model: { name: model.id },
+        security: { auth: { selectedType: savedAuth } },
+      });
+      const provider = makeProvider();
+      (
+        provider as unknown as {
+          doInitializeAgentConnection: () => Promise<void>;
+        }
+      ).doInitializeAgentConnection = vi.fn(async () => {
+        (provider as unknown as { authState: boolean }).authState = true;
+      });
+      await provider['handleAuthInteractive'](providerConfig, {
+        ...inputs,
+        ...(otherEndpoint ? { baseUrl: 'https://another.example/v1' } : {}),
+        ...(explicitChat ? { wireApi: 'chat-completions' as const } : {}),
+      });
+      expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+      const plan = mockApplyProviderInstallPlanToFile.mock.calls[0][0];
+      expect(plan.authType).toBe(expected);
+      if (expected === 'openai-responses') {
+        expect(plan.modelProviders[0].models).toEqual([model]);
+      }
+    },
+  );
+
   it('restores the snapshot when the reconnect leaves authState !== true', async () => {
     const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
     mockSnapshotSettingsForRollback.mockReturnValue(snapshot);

@@ -7639,6 +7639,59 @@ describe('Server Config (config.ts)', () => {
       expect(config.getAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
     });
 
+    it.each(['retry', 'install', 'switch', 'invalid-switch'] as const)(
+      'honors %s after initial Responses authentication fails',
+      async (action) => {
+        const baseUrl = 'https://gateway.example/v1';
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'same',
+          modelProvidersConfig: {
+            openai: [{ id: 'same', baseUrl, wireApi: 'responses' }],
+          },
+        });
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          (_config, authType, generationConfig) => ({
+            config: { ...generationConfig, model: 'same', authType },
+            sources: {},
+          }),
+        );
+        vi.mocked(createContentGenerator).mockRejectedValueOnce(
+          new Error('missing key'),
+        );
+        await expect(
+          config.refreshAuth(AuthType.USE_OPENAI, true),
+        ).rejects.toThrow('missing key');
+        config.reloadModelProvidersConfig({
+          openai: [
+            { id: 'same', baseUrl },
+            { id: 'same', baseUrl, wireApi: 'responses' },
+          ],
+        });
+        if (action === 'install') {
+          config.syncModelSelection(AuthType.USE_OPENAI, 'same', baseUrl);
+        } else if (action === 'switch') {
+          await config.switchModel(AuthType.USE_OPENAI, 'same', { baseUrl });
+        } else if (action === 'invalid-switch') {
+          await expect(
+            config.switchModel(AuthType.USE_OPENAI, 'missing', { baseUrl }),
+          ).rejects.toThrow();
+        }
+        await config.refreshAuth(AuthType.USE_OPENAI, true);
+        const expectedAuth =
+          action === 'install' || action === 'switch'
+            ? AuthType.USE_OPENAI
+            : AuthType.USE_OPENAI_RESPONSES;
+        expect(createContentGenerator).toHaveBeenLastCalledWith(
+          expect.objectContaining({ model: 'same', authType: expectedAuth }),
+          config,
+          true,
+        );
+        expect(config.getAuthType()).toBe(expectedAuth);
+      },
+    );
+
     it('does not redirect an OpenAI retry after the first Gemini refresh fails', async () => {
       const config = new Config({
         ...baseParams,

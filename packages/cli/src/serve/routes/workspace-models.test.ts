@@ -201,15 +201,18 @@ describe('DELETE /workspace/models', () => {
     ['imageOnly', 'voiceOnly', 'fastOnly', 'visionOnly'].flatMap(
       (purpose) =>
         [
-          [purpose, false],
-          [purpose, true],
+          [purpose, false, undefined],
+          [purpose, true, undefined],
+          [purpose, false, 'openai'],
+          [purpose, true, 'openai'],
         ] as const,
     ),
   )(
-    'clears primary selection when the winning alias is %s (shadowed chat: %s)',
-    async (purpose, shadowedChat) => {
+    'clears primary selection when the winning alias is %s (shadowed chat: %s, auth: %s)',
+    async (purpose, shadowedChat, selectedType) => {
       const model = { id: 'shared', baseUrl: 'https://models.example/v1' };
       writeUserSettings({
+        security: { auth: { selectedType } },
         providerProtocol: { service: 'openai', spare: 'openai' },
         modelProviders: {
           openai: [model, { id: 'fallback' }],
@@ -948,9 +951,47 @@ describe('DELETE /workspace/models', () => {
         .send({ authType: 'openai-responses', modelId: 'same', baseUrl });
       expect(res.status).toBe(200);
       expect(res.body.clearedActiveModel).toBe(false);
-      expect(readUserSettings()['model']).toMatchObject({ name: 'same' });
+      expect(readUserSettings()['model']).toEqual({ name: '', baseUrl: '' });
+      expect(readWorkspaceSettings()['model']).toMatchObject({ name: 'same' });
+      const current = loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        workspaceTrusted: true,
+      }).merged;
+      expect(current.model?.name).toBe('same');
+      expect(current.security?.auth?.selectedType).toBe('openai');
+      const otherWorkspace = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-empty-workspace-'),
+      );
+      try {
+        expect(
+          loadSettings(otherWorkspace, {
+            skipLoadEnvironment: true,
+            workspaceTrusted: true,
+          }).merged.model?.name,
+        ).toBe('');
+      } finally {
+        fs.rmSync(otherWorkspace, { recursive: true, force: true });
+      }
     },
   );
+
+  it('preserves an unpinned Chat route with no configured URL when deleting another endpoint', async () => {
+    const baseUrl = 'https://responses.example/v1';
+    writeUserSettings({
+      modelProviders: {
+        openai: [{ id: 'same' }, { id: 'same', baseUrl, wireApi: 'responses' }],
+      },
+      model: { name: 'same' },
+      security: { auth: { selectedType: 'openai' } },
+    });
+    const { app } = makeApp();
+    const response = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai-responses', modelId: 'same', baseUrl });
+    expect(response.status).toBe(200);
+    expect(response.body.clearedActiveModel).toBe(false);
+    expect(readUserSettings()['model']).toEqual({ name: 'same' });
+  });
 
   it('clears the selection when the surviving sibling cannot carry its Responses route', async () => {
     const baseUrl = 'https://api.example/v1';

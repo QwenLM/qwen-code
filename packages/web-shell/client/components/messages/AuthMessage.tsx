@@ -368,6 +368,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     if (
       purpose === 'voice' &&
       (protocol !== 'openai' ||
+        wireApi === 'responses' ||
         !normalizeModelIds(models).every(isVoiceModelId))
     ) {
       setError(t('auth.purpose.voiceHint'));
@@ -407,6 +408,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   }, [
     purpose,
     protocol,
+    wireApi,
     models,
     baseUrl,
     steps,

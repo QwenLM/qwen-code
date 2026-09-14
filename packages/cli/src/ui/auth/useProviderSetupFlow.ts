@@ -16,6 +16,7 @@ import {
 import type {
   InputModalities,
   ModelWireApi,
+  ModelProvidersConfig,
   ProviderConfig,
   ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
@@ -111,6 +112,7 @@ export function useProviderSetupFlow(
     config: ProviderConfig,
     inputs: ProviderSetupInputs,
   ) => Promise<void>,
+  modelProviders?: ModelProvidersConfig,
 ) {
   const [provider, setProvider] = useState<ProviderConfig | null>(null);
   const [visibleSteps, setVisibleSteps] = useState<SetupStep[]>([]);
@@ -478,10 +480,11 @@ export function useProviderSetupFlow(
   const getPreviewJson = (): string => {
     if (!provider) return '';
     const inputs = buildCurrentInputs();
-    const plan = buildInstallPlan(provider, {
-      ...inputs,
-      apiKey: maskApiKey(inputs.apiKey),
-    });
+    const plan = buildInstallPlan(
+      provider,
+      { ...inputs, apiKey: maskApiKey(inputs.apiKey) },
+      modelProviders?.[inputs.protocol ?? provider.protocol],
+    );
     return JSON.stringify(
       {
         env: plan.env,

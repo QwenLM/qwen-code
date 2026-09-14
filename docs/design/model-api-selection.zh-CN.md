@@ -83,6 +83,18 @@ VS Code 和 Web Shell 提供相同选择。Web Shell 使用带标签的确认摘
 ACP 对两种运行时 API 使用同一个 OpenAI Key 认证入口。删除模型
 时逐项匹配实际协议，删除另一 API 的同名配置不能清除当前活跃选择。
 
+初次认证失败后的普通重试保留已经解析的启动 wire。成功执行显式模型选择或
+提供商安装后，启动映射即结束，即使此时尚未创建第一个 generator。
+ACP 持久化 User 自己的 OpenAI wire 选择，与 Workspace 推导出的运行时认证分开。
+删除时按每个可写作用域自己的有效设置校验选择；清空 User 选择时，保留仍有效且
+继承了其字段的 Workspace 选择。剩余条目必须是注册顺序中真正胜出的路由，且可用于对话。
+
+预览与提交读取同一个新格式已有模型 bucket。预设提供商重连没有 API 选择步骤时，
+保留同一端点上已确定的保存路由；通用自定义提供商入口继续显式选择 API。
+`protocolOptions` 控制 SDK 协议选择，不限制模型能否设置 `wireApi`。
+当前语音转写只支持 Chat Completions：Responses 语音配置必须在写入前拒绝，
+包括预构建模型和保留的服务元数据。对话和图片模型仍可选择两种 wire。
+
 实现涉及：core 模型类型、registry、配置和 provider 安装；CLI 配置、认证查找和
 热重载；配置界面；ACP 与 daemon 安装契约；SDK daemon 请求类型；settings schema
 和用户文档。不改变 daemon 路由归属或 workspace 解析规则。
@@ -94,6 +106,9 @@ ACP 对两种运行时 API 使用同一个 OpenAI Key 认证入口。删除模�
 - 配置测试覆盖初始 `openai` 选择解析至 Responses、精确路由优先、模型切换和会话恢复。
 - 配置流程测试覆盖 API 选择、预览与保存一致性、共享凭据、新格式配置检查、请求校验，
   以及仅删除目标 API 配置。
+- 回归覆盖认证失败重试与显式选择的区别、User/Workspace 相反的认证选择、
+  继承模型字段时的删除、服务别名遮蔽对话路由、保存元数据的预览、预设提供商重连，
+  以及持久化前的语音/wire 校验。
 - 隔离的 localhost 服务记录实际 CLI 请求路径和负载：隐式 Chat、显式 Chat、新格式
   Responses、自定义提供商 Responses、在请求前拒绝非法 API 与旧提供商配置，
   以及两种 API 的工具调用续接。

@@ -344,6 +344,7 @@ export function parseAuthProviderInstallRequest(
   if (
     purpose === 'voice' &&
     ((protocol ?? 'openai') !== 'openai' ||
+      wireApi === 'responses' ||
       !baseUrl ||
       !modelIds?.length ||
       modelIds.some((id) => resolveVoiceTransport(id) === 'unsupported'))
@@ -352,7 +353,7 @@ export function parseAuthProviderInstallRequest(
       ok: false,
       code: 'invalid_voice_model',
       error:
-        'Voice transcription requires OpenAI protocol and a supported ASR model ID',
+        'Voice transcription requires OpenAI Chat Completions and a supported ASR model ID',
     };
   }
   if (

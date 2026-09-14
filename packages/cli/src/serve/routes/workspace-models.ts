@@ -17,7 +17,11 @@ import {
   resolveModelId,
   tryResolveModelProtocol,
 } from '@qwen-code/qwen-code-core';
-import { loadSettings, SettingScope } from '../../config/settings.js';
+import {
+  LoadedSettings,
+  loadSettings,
+  SettingScope,
+} from '../../config/settings.js';
 import {
   getOwnKeyScope,
   getWritableScopes,
@@ -287,6 +291,7 @@ export function registerWorkspaceModelsRoutes(
         'Model settings changed. Reload and try again.',
       );
       let writes: WorkspaceSettingsWrite[];
+      let clearedActiveModel = false;
       try {
         const workspaceTrusted = deps.isWorkspaceTrusted?.();
         const loaded = loadSettings(boundWorkspace, {
@@ -352,100 +357,105 @@ export function registerWorkspaceModelsRoutes(
 
         writes = [{ scope, key: 'modelProviders', value: next }];
 
-        // `model.name`/`model.baseUrl` are scoped independently of
-        // `modelProviders`, so clear the active selection in EVERY writable
-        // scope whose own selection points at the removed model — a tombstone
-        // written only to the providers-owner scope wouldn't override a
-        // higher-precedence scope that still names the deleted model. Compare
-        // against the removed entry's stored (unsanitized) baseUrl, since the
-        // request's baseUrl is sanitized and would miss a credential-bearing
-        // stored URL.
         const activeTarget: RemoveModelTarget = {
           authType: parsed.authType,
           modelId: removedModelId,
           ...(removedBaseUrl ? { baseUrl: removedBaseUrl } : {}),
         };
-        // Whether the persisted selection survives the removal is decided by
-        // matching its pre-removal effective route against the remaining
-        // config: with per-model `wireApi` the wire is a property of the model
-        // entry, so a survivor must carry the selection's effective protocol
-        // at the selection's own endpoint — an api-less sibling can never
-        // carry an `openai-responses` selection, and an unpinned selection
-        // must not latch onto a same-id entry at a different endpoint.
         const isOpenAiFamily = (authType: string | undefined): boolean =>
           authType === AuthType.USE_OPENAI ||
           authType === AuthType.USE_OPENAI_RESPONSES;
-        const remainingRoute = remaining.find(
-          ({ model, authType }) =>
-            authType === parsed.authType &&
-            (model.baseUrl ?? '') === (removedBaseUrl ?? ''),
-        )?.model;
-        const validProviders = Object.fromEntries(
-          Object.entries(loaded.merged.modelProviders ?? {}).map(
-            ([providerId, models]) => [
-              providerId,
-              Array.isArray(models)
-                ? models.filter(
-                    (model) =>
-                      tryResolveModelProtocol(
-                        providerId,
-                        model,
-                        loaded.merged.providerProtocol,
-                      ) !== undefined,
-                  )
-                : models,
-            ],
-          ),
-        );
+        // A User selection must also work outside this workspace. Resolve it
+        // without Workspace overrides, using the same settings merge policies.
+        const userSettings = new LoadedSettings(
+          loaded.system,
+          loaded.systemDefaults,
+          loaded.user,
+          { ...loaded.workspace, settings: {}, originalSettings: {} },
+          false,
+          new Set(),
+        ).merged;
+        let workspaceSelectionSurvives = false;
         for (const activeScope of getWritableScopes(loaded)) {
+          const settings =
+            activeScope === SettingScope.User ? userSettings : loaded.merged;
           const scopeModel = loaded.forScope(activeScope).settings.model;
+          const validProviders = Object.fromEntries(
+            Object.entries(settings.modelProviders ?? {}).map(
+              ([providerId, models]) => [
+                providerId,
+                Array.isArray(models)
+                  ? models.filter(
+                      (model) =>
+                        tryResolveModelProtocol(
+                          providerId,
+                          model,
+                          settings.providerProtocol,
+                        ) !== undefined,
+                    )
+                  : models,
+              ],
+            ),
+          );
           const selectedAuthType =
-            loaded.merged.security?.auth?.selectedType ??
+            settings.security?.auth?.selectedType ??
             getAuthTypeFromEnv(deps.env ?? {});
           const activeSelection = selectedAuthType
             ? resolveCliGenerationConfig({
                 argv: {},
-                settings: {
-                  ...loaded.merged,
-                  modelProviders: validProviders,
-                  model: scopeModel,
-                },
+                settings: { ...settings, modelProviders: validProviders },
                 selectedAuthType,
                 env: deps.env ?? {},
               })
             : undefined;
           const activeAuthType = activeSelection?.authType;
-          const selectionSurvivesRemoval =
-            isOpenAiFamily(activeAuthType) &&
-            Object.entries(remainingProviders).some(
-              ([providerId, models]) =>
-                Array.isArray(models) &&
-                models.some(
-                  (model) =>
-                    model.id === scopeModel?.name &&
-                    tryResolveModelProtocol(
-                      providerId,
-                      model,
-                      loaded.merged.providerProtocol,
-                    ) === activeAuthType &&
-                    (model.baseUrl ?? null) ===
-                      activeSelection?.registryBaseUrl,
-                ),
-            );
+          const providersAfterRemoval = { ...settings.modelProviders };
+          if (scope === SettingScope.User || activeScope === scope) {
+            providersAfterRemoval[configuration.provider] =
+              remainingProviders[configuration.provider];
+          }
+          // Match the registry's first-wins route before checking its purpose.
+          // A later conversation alias cannot override an earlier service model.
+          const survivor = Object.entries(providersAfterRemoval)
+            .flatMap(([providerId, models]) =>
+              Array.isArray(models)
+                ? models.map((model) => ({ providerId, model }))
+                : [],
+            )
+            .find(
+              ({ providerId, model }) =>
+                model?.id === settings.model?.name &&
+                tryResolveModelProtocol(
+                  providerId,
+                  model,
+                  settings.providerProtocol,
+                ) === (activeAuthType ?? parsed.authType) &&
+                (model.baseUrl ?? null) ===
+                  (activeSelection
+                    ? activeSelection.registryBaseUrl
+                    : (removedBaseUrl ?? null)),
+            )?.model;
+          const selectionAffected =
+            !survivor || !isConversationModelConfiguration(survivor);
+          const selectionMatches = isActiveModelSelection(
+            settings.model?.name,
+            settings.model?.baseUrl,
+            activeTarget,
+            isOpenAiFamily(activeAuthType) ? undefined : activeAuthType,
+          );
+          if (activeScope === SettingScope.Workspace) {
+            workspaceSelectionSurvives =
+              !selectionAffected || !selectionMatches;
+            clearedActiveModel = !workspaceSelectionSurvives;
+          } else if (!loaded.isTrusted) {
+            clearedActiveModel = selectionAffected && selectionMatches;
+          }
           if (
-            (!remainingRoute ||
-              !isConversationModelConfiguration(remainingRoute)) &&
-            !selectionSurvivesRemoval &&
+            selectionAffected &&
             isActiveModelSelection(
               scopeModel?.name,
               scopeModel?.baseUrl,
               activeTarget,
-              // The wire veto spares a selection that belongs to a different
-              // provider family (e.g. an env-only Anthropic runtime sharing an
-              // id+baseUrl with the deleted OpenAI entry). Within the OpenAI
-              // family the wire follows the model entry, so survival above is
-              // the whole test — vetoing here would leave a genuinely dangling
-              // selection untombstoned.
               isOpenAiFamily(activeAuthType) ? undefined : activeAuthType,
             )
           ) {
@@ -455,6 +465,22 @@ export function registerWorkspaceModelsRoutes(
               key: 'model.baseUrl',
               value: '',
             });
+            if (
+              activeScope === SettingScope.User &&
+              workspaceSelectionSurvives
+            ) {
+              // Pin inherited fields before clearing their User source; the
+              // Workspace auth override may still have a valid route for them.
+              for (const field of ['name', 'baseUrl'] as const) {
+                if (loaded.workspace.settings.model?.[field] === undefined) {
+                  writes.push({
+                    scope: SettingScope.Workspace,
+                    key: `model.${field}`,
+                    value: loaded.merged.model?.[field] ?? '',
+                  });
+                }
+              }
+            }
           }
         }
 
@@ -674,7 +700,6 @@ export function registerWorkspaceModelsRoutes(
         }
       }
 
-      const clearedActiveModel = writes.some((w) => w.key === 'model.name');
       // Surface restart-required so the UI can prompt (e.g. modelFallbacks).
       const requiresRestart = writes.some(
         (w) => getSettingDefinition(w.key)?.requiresRestart === true,

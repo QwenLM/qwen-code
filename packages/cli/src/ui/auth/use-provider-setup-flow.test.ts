@@ -66,6 +66,54 @@ describe('useProviderSetupFlow API selection', () => {
     expect(result.current.state.previewJson).not.toContain(inputs.apiKey);
   });
 
+  it('uses the saved canonical model metadata in both preview and submit', () => {
+    const inputs = {
+      protocol: AuthType.USE_OPENAI,
+      wireApi: 'responses' as const,
+      baseUrl: 'https://gateway.example/v1',
+      apiKey: 'test-secret',
+      modelIds: ['same'],
+    };
+    const models = buildInstallPlan(customProvider, inputs).modelProviders![0]!
+      .models;
+    models[0] = {
+      ...models[0]!,
+      name: 'Saved name',
+      generationConfig: {
+        contextWindowSize: 32000,
+        samplingParams: { temperature: 0.25 },
+      },
+    };
+    const submit = vi.fn().mockResolvedValue(undefined);
+    const { result } = renderHook(() =>
+      useProviderSetupFlow(submit, { openai: models }),
+    );
+    act(() => result.current.start(customProvider));
+    act(() => result.current.selectProtocol(AuthType.USE_OPENAI));
+    act(() => result.current.selectWireApi('responses'));
+    act(() => result.current.changeBaseUrl(inputs.baseUrl));
+    act(() => result.current.submitBaseUrl());
+    act(() => result.current.submitApiKey(inputs.apiKey));
+    act(() => result.current.changeModelIds('same'));
+    act(() => result.current.submitModelIds());
+    act(() => result.current.submitAdvancedConfig());
+    const preview = JSON.parse(result.current.state.previewJson);
+    act(() => result.current.submit());
+    const [provider, submittedInputs] = submit.mock.calls[0]!;
+    expect(preview.modelProviders.openai).toEqual(
+      buildInstallPlan(provider, submittedInputs, models).modelProviders![0]!
+        .models,
+    );
+    expect(preview.modelProviders.openai[0]).toMatchObject({
+      name: 'Saved name',
+      generationConfig: {
+        contextWindowSize: 32000,
+        samplingParams: { temperature: 0.25 },
+      },
+    });
+    expect(result.current.state.previewJson).not.toContain(inputs.apiKey);
+  });
+
   it('prefills saved Responses and clears API when switching to Anthropic', () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     const { result } = renderHook(() => useProviderSetupFlow(submit));

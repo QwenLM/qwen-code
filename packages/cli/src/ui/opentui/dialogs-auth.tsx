@@ -860,9 +860,7 @@ function AuthDialogFlow({
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
           syncAuthState: (authType, modelId, baseUrl) =>
-            config
-              .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId, baseUrl),
+            config.syncModelSelection(authType, modelId, baseUrl),
           refreshAuth: (authType) => config.refreshAuth(authType),
         });
         if (!plan.modelSelection && !config.getAuthType()) {
@@ -897,7 +895,10 @@ function AuthDialogFlow({
     [settings, config, notify, onClose],
   );
 
-  const setupFlow = useProviderSetupFlow(handleProviderSubmit);
+  const setupFlow = useProviderSetupFlow(
+    handleProviderSubmit,
+    settings.merged.modelProviders,
+  );
 
   // -- Navigation (AuthDialog parity) ---------------------------------------
 

@@ -185,9 +185,7 @@ export const useAuthCommand = (
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
           syncAuthState: (authType, modelId, baseUrl) =>
-            config
-              .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId, baseUrl),
+            config.syncModelSelection(authType, modelId, baseUrl),
           refreshAuth: (authType) => config.refreshAuth(authType),
         });
 

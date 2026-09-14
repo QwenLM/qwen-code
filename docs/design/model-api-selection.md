@@ -100,6 +100,24 @@ show the selected API without inventing generated settings or defaults. ACP and 
 one shared OpenAI key method for both runtime APIs. Model removal matches each entry's effective protocol and must not
 clear the active selection when deleting its other-API sibling.
 
+Initial authentication retries retain the resolved startup wire even after a
+failed attempt. A successful explicit model selection or provider installation
+ends that startup mapping, including before the first generator is created.
+ACP persists User's own OpenAI wire choice independently of Workspace-derived
+runtime authentication. Deletion validates each writable scope against its own
+effective settings and preserves valid Workspace selections that inherit fields
+from a cleared User selection. A survivor must be the first registered route
+and eligible for conversation use.
+
+Preview and submission use the same canonical existing-model bucket. Preset
+reconnection without an API picker preserves the identified saved route at the
+same endpoint; generic custom-provider setup keeps its visible API choice.
+`protocolOptions` controls SDK protocol selection, not whether a model may use
+`wireApi`. Voice transcription currently supports Chat Completions only:
+Responses voice configurations are rejected before writes, including prebuilt
+models and preserved service metadata. Conversation and image models retain
+both wire choices.
+
 Implementation areas: core model types/registry/config and provider install;
 CLI configuration/auth lookup and hot reload; setup views; ACP and daemon
 installation contracts; SDK daemon request types; settings schema and user
@@ -114,6 +132,10 @@ documentation. No daemon route ownership or workspace-resolution rules change.
   explicit route precedence, model switching, and recorded session restoration.
 - Setup tests cover API selection, preview/write parity, shared credentials,
   canonical inspection, request validation, and deletion of only the intended API.
+- Regressions cover failed-auth retries versus explicit selection, opposite
+  User/Workspace auth choices, deletion with inherited model fields, service
+  aliases shadowing conversation routes, saved preview metadata, preset
+  reconnection, and voice/wire validation before persistence.
 - An isolated localhost server records actual CLI endpoint paths and payloads:
   implicit Chat, explicit Chat, canonical Responses, custom-provider Responses,
   invalid API and old provider configuration rejection before any request, and

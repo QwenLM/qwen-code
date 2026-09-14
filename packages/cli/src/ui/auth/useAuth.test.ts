@@ -75,6 +75,7 @@ const createConfig = (recordSlashCommand = vi.fn()) => {
     getAuthType: vi.fn(() => AuthType.USE_OPENAI),
     getUsageStatisticsEnabled: vi.fn(() => false),
     reloadModelProvidersConfig: vi.fn(),
+    syncModelSelection: vi.fn(),
     refreshAuth: vi.fn(async () => undefined),
     getModelsConfig: vi.fn(() => modelsConfig),
     getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),

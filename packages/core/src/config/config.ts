@@ -2558,7 +2558,7 @@ export class Config {
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
   private contentGenerator!: ContentGenerator;
   private readonly initialAuthType?: AuthType;
-  private readonly initialResolvedAuthType?: AuthType;
+  private initialResolvedAuthType?: AuthType;
   private readonly embeddingModel: string;
 
   private modelsConfig!: ModelsConfig;
@@ -4824,6 +4824,15 @@ export class Config {
     return this.modelsConfig.getProviderProtocolConfig();
   }
 
+  syncModelSelection(
+    authType: AuthType,
+    modelId: string,
+    baseUrl?: string,
+  ): void {
+    this.modelsConfig.syncAfterAuthRefresh(authType, modelId, baseUrl);
+    this.initialResolvedAuthType = undefined;
+  }
+
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
@@ -6038,6 +6047,7 @@ export class Config {
     authType: AuthType,
     requiresRefresh: boolean,
   ): Promise<void> {
+    this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
       return;
     }

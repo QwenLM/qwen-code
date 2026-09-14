@@ -194,6 +194,7 @@ function createMockConfig(authType?: AuthType): Config {
       syncAfterAuthRefresh: vi.fn(),
     })),
     reloadModelProvidersConfig: vi.fn(),
+    syncModelSelection: vi.fn(),
     refreshAuth: vi.fn(),
   } as unknown as Config;
 }

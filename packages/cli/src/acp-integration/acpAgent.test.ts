@@ -2384,6 +2384,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
       reloadModelProvidersConfig: vi.fn(),
+      syncModelSelection: vi.fn(),
       getModelProvidersConfig: vi.fn(),
       getProviderProtocolConfig: vi.fn().mockReturnValue({}),
       setImageModel: vi.fn(),
@@ -20338,6 +20339,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it.each([
     {
       label: 'canonical Responses only',
+      userAuthType: undefined,
       providerId: 'openai',
       initialAuthType: AuthType.USE_OPENAI,
       withChat: false,
@@ -20346,6 +20348,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
     {
       label: 'Responses with a Chat sibling',
+      userAuthType: undefined,
       providerId: 'openai',
       initialAuthType: AuthType.USE_OPENAI_RESPONSES,
       withChat: true,
@@ -20354,6 +20357,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
     {
       label: 'selected Chat with a Responses sibling',
+      userAuthType: undefined,
       providerId: 'gateway',
       initialAuthType: AuthType.USE_OPENAI,
       withChat: true,
@@ -20362,15 +20366,50 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
     {
       label: 'explicit legacy Responses method',
+      userAuthType: undefined,
       providerId: 'openai',
       initialAuthType: AuthType.USE_OPENAI,
       withChat: true,
       methodId: AuthType.USE_OPENAI_RESPONSES,
       expected: AuthType.USE_OPENAI_RESPONSES,
     },
+    {
+      label: 'User Responses preserved',
+      userAuthType: AuthType.USE_OPENAI_RESPONSES,
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI_RESPONSES,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI_RESPONSES,
+    },
+    {
+      label: 'Workspace Responses does not leak to User Chat',
+      userAuthType: AuthType.USE_OPENAI,
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI_RESPONSES,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI_RESPONSES,
+    },
+    {
+      label: 'Workspace Chat does not overwrite User Responses',
+      userAuthType: AuthType.USE_OPENAI_RESPONSES,
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI,
+    },
   ])(
     'authenticate preserves API routing for $label',
-    async ({ initialAuthType, providerId, withChat, methodId, expected }) => {
+    async ({
+      initialAuthType,
+      userAuthType,
+      providerId,
+      withChat,
+      methodId,
+      expected,
+    }) => {
       const actual = await vi.importActual<
         typeof import('@qwen-code/qwen-code-core')
       >('@qwen-code/qwen-code-core');
@@ -20404,6 +20443,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       } as unknown as Config;
       const settings = {
         ...makeSessionSettings({ modelProviders, providerProtocol }),
+        forScope: vi.fn((scope: SettingScope) => ({
+          settings: {
+            security: {
+              auth: {
+                selectedType:
+                  scope === SettingScope.User ? userAuthType : initialAuthType,
+              },
+            },
+          },
+        })),
         setValue: vi.fn(),
       } as unknown as LoadedSettings;
       const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
@@ -20425,7 +20474,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect(settings.setValue).toHaveBeenCalledWith(
           SettingScope.User,
           'security.auth.selectedType',
-          methodId,
+          userAuthType === AuthType.USE_OPENAI_RESPONSES
+            ? userAuthType
+            : methodId,
         );
       } finally {
         mockConnectionState.resolve();

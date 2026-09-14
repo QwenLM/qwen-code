@@ -5213,8 +5213,7 @@ class QwenAgent implements Agent {
     // modelProviders; re-authentication is the repair path, so tolerate the
     // failure instead of rejecting it outright. The fallback must preserve
     // the wire the session is actually on — falling back to the requested
-    // method would re-authenticate onto a wire that may hold no models and
-    // persist that downgrade to security.auth.selectedType.
+    // method could re-authenticate onto a wire that holds no models.
     let authType = method;
     if (method === AuthType.USE_OPENAI) {
       const seeded =
@@ -5256,7 +5255,11 @@ class QwenAgent implements Agent {
       this.settings.setValue(
         SettingScope.User,
         'security.auth.selectedType',
-        method,
+        method === AuthType.USE_OPENAI &&
+          this.settings.forScope(SettingScope.User).settings.security?.auth
+            ?.selectedType === AuthType.USE_OPENAI_RESPONSES
+          ? AuthType.USE_OPENAI_RESPONSES
+          : method,
       );
     } finally {
       if (method === AuthType.QWEN_OAUTH) {
@@ -9081,9 +9084,7 @@ class QwenAgent implements Agent {
           reloadModelProviders: (modelProviders) =>
             this.config.reloadModelProvidersConfig(modelProviders),
           syncAuthState: (authType, modelId, baseUrl) =>
-            this.config
-              .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId, baseUrl),
+            this.config.syncModelSelection(authType, modelId, baseUrl),
           refreshAuth: (authType) =>
             this.refreshAuthWithPersistedReasoning(
               this.config,

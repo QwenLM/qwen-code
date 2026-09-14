@@ -137,7 +137,10 @@ export function AuthDialog(): React.JSX.Element {
   const [mainIndex, setMainIndex] = useState<number | null>(null);
   const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
 
-  const setupFlow = useProviderSetupFlow(handleProviderSubmit);
+  const setupFlow = useProviderSetupFlow(
+    handleProviderSubmit,
+    settings.merged.modelProviders,
+  );
 
   // -- Navigation -----------------------------------------------------------
 
