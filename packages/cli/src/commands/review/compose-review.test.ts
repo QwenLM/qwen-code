@@ -3328,7 +3328,7 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       're-launched delta territories under the ordinary retirement rules (a twice-dry one only on its cold-check rounds)',
     );
     expect(r.body).toContain(
-      'a yield, an uncertified receipt, or no audit history keeps a chunk in the wave; a dry receipt returns it to the ordinary retirement rules when it shares its launch with a yield or uncertified receipt — rounds 1 and 2, the convergence pair, are one launch — was built on the same findings-list bytes as one, or ran in a different session from some earlier return that was not dry, or beside one no session stamped',
+      'a yield, an uncertified receipt, or no audit history keeps a chunk in the wave; a dry receipt returns it to the ordinary retirement rules when it shares its launch with a yield or uncertified receipt — rounds 1 and 2, the convergence pair, are one launch — was built on the same findings-list bytes as one, was built before one came back, or ran in a different session from some earlier return that was not dry, or beside one no session stamped',
     );
     expect(r.body).not.toContain('chunks whose previous wave yielded');
   });
@@ -3361,6 +3361,9 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     );
     expect(r.body).toContain(
       '出过发现、收据未认证或无审计历史，都会让 chunk 留在波内；干燥收据若与出过发现或未认证的收据属于同一次启动',
+    );
+    expect(r.body).toContain(
+      '使用字节完全相同的发现清单，或构建于这类收据返回之前，',
     );
     expect(r.body).toContain(
       '又或与此前某个非干燥返回不在同一个会话里（或该返回没有会话戳），则该 chunk 回到普通退役规则',

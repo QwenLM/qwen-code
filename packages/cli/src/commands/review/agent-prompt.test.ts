@@ -5997,7 +5997,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     );
     expect(out).toContain('uncertified (unknown)');
     expect(out).toContain(
-      'shares its launch with a yield or an uncertified receipt (rounds 1 and 2, the convergence pair, are one launch), was built on the same findings-list bytes as one, or ran in a different session from some return on record that was not dry (or beside one no session stamped) returns to the ordinary retirement rules',
+      'shares its launch with a yield or an uncertified receipt (rounds 1 and 2, the convergence pair, are one launch), was built on the same findings-list bytes as one, was built before one came back, or ran in a different session from some return on record that was not dry (or beside one no session stamped) returns to the ordinary retirement rules',
     );
     expect(out).toContain('under the ordinary retirement rules');
     expect(out).toContain('returns to the ordinary retirement rules');

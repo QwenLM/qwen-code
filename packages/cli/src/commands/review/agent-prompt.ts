@@ -3421,7 +3421,8 @@ function runAllChunks(
             `the wave, and one whose dry receipt shares its launch with a ` +
             `yield or an uncertified receipt (rounds 1 and 2, the ` +
             `convergence pair, are one launch), was built on the same ` +
-            `findings-list bytes as one, or ran in a different session from ` +
+            `findings-list bytes as one, was built before one came back, or ` +
+            `ran in a different session from ` +
             `some return on record that was not dry (or beside one no ` +
             `session stamped) returns to the ordinary retirement rules; a ` +
             `chunk holding no delta file leaves the schedule after ` +

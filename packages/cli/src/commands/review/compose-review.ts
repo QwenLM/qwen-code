@@ -7934,6 +7934,7 @@ function composeReviewBody(
             `retirement rules when it shares its launch with a yield or ` +
             `uncertified receipt — rounds 1 and 2, the convergence pair, are ` +
             `one launch — was built on the same findings-list bytes as one, ` +
+            `was built before one came back, ` +
             `or ran in a different session from some earlier return that was ` +
             `not dry, or beside one no session stamped). ` +
             `${fixAuditFloorEn}${planLicenceEn}`,
@@ -7947,7 +7948,7 @@ function composeReviewBody(
             `领地（两次干燥的只在其冷检轮重发），并重发此前各波未能证实干燥的非 delta ` +
             `chunk（出过发现、收据未认证或无审计历史，` +
             `都会让 chunk 留在波内；干燥收据若与出过发现或未认证的收据属于同一次启动` +
-            `——第 1、2 轮的收敛对算作一次启动——或与之使用字节完全相同的发现清单，` +
+            `——第 1、2 轮的收敛对算作一次启动——或与之使用字节完全相同的发现清单，或构建于这类收据返回之前，` +
             `又或与此前某个非干燥返回不在同一个会话里（或该返回没有会话戳），则该 chunk 回到普通退役规则）。` +
             `${fixAuditFloorZh}${planLicenceZh}`,
         },
