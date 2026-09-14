@@ -22,10 +22,8 @@ import {
   getHomeEnvFallbackVars,
   LoadedSettings,
 } from './settings.js';
-import {
-  AuthType,
-  preserveModelProviderPlaceholders,
-} from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { preserveModelProviderPlaceholders } from '@qwen-code/qwen-code-core/providers/model-config-serialization.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import { getPersistScopeForModelSelection } from './modelProvidersScope.js';
 import { getNestedProperty } from './settingsUtils.js';
