@@ -26,7 +26,7 @@ When first used, the skill runs these commands itself:
 
 ```bash
 qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.4
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.6
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.7
 ```
 
 Restart Qwen Code after the MCP server is first added. The skill then resumes
