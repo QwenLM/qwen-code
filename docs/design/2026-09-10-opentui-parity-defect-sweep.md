@@ -592,13 +592,35 @@ conversation, and the box pushed the question and its options several columns
 past where ink puts them.
 
 The chrome is gone, and the body, the question and the outcome list sit at the
-columns ink uses. Two consequences were checked rather than assumed. The row
-budgets that had reserved space for the removed chrome shrink with it, and those
-bounds turn out to be inert at the viewport heights the harness uses, so the
-change was verified against ink's frames at a hundred columns instead of against
-the arithmetic: the confirmation's row sequence now matches ink line for line.
-And while a call is parked, the loading indicator swaps to ink's waiting phrase
-and drops its elapsed-time, token and cancel suffixes — there is no in-flight
+columns ink uses, and the confirmation's row sequence now matches ink's line for
+line at a hundred columns.
+
+One claim made about this change here was wrong, and the merge caught it: the
+row budget that had reserved space for the removed chrome was described as inert
+at the viewport heights the harness uses. It is not inert, and the harness never
+exercised the height where it binds. Upstream raised that same reserve after a
+long confirmation on an 80-row terminal pushed the payload's tail and the
+outcome list past the bottom edge, so what was being approved could not be read
+and the options could not be reached. That fix merged first, and this change was
+rebased onto it.
+
+The reserve was then re-derived rather than copied, from what the inline
+confirmation still spends around its body: the banner, the startup notices a
+fresh session shows, the prompt echo with its turn margin, the card's own hidden
+tail row, the question row, the outcome list, and the waiting row. The border,
+title, body margins and footer hint that the earlier version counted are gone
+with the chrome, so the number lands below the one it replaces by roughly what
+those rows cost. It was then checked both ways. The long-confirmation scenario,
+which drives this renderer at 80 rows and 110 columns, is green at the value
+that shipped and times out waiting for the payload's tail at zero, so that
+scenario does still bound the number. It does not bound it tightly — a value
+four rows smaller passes as well — so the threshold sits below the range that
+mattered here, and the arithmetic is what pins the shipped value rather than
+the scenario.
+
+One further consequence was checked rather than assumed. While a call is parked,
+the loading indicator swaps to ink's waiting phrase and drops its elapsed-time,
+token and cancel suffixes — there is no in-flight
 request to cancel and no tokens to count. That waiting row renders for a tool
 confirmation only: the server-startup approval, the trust gate and the action
 confirmations all arrive while the session is idle, where ink's own indicator
