@@ -1040,10 +1040,14 @@ export class ContentGenerationPipeline {
           // (2013)` when a zero-argument tool ships without `parameters`
           // (#11834), which the always-registered `list_agents` does by
           // default. Gateways that proxy MiniMax under their own host are
-          // caught via the model id, since their hostname carries no hint.
+          // caught via the model id, since their hostname carries no hint —
+          // and the model id must be the *wire* model (`context.model`), the
+          // same source the `enable_thinking` gate below uses: a request-level
+          // model override decides which backend answers.
           keepParameterlessParameters:
             MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
               this.contentGeneratorConfig,
+              context.model,
             ),
         },
       );

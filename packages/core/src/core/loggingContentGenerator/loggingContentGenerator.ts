@@ -1049,10 +1049,12 @@ export class LoggingContentGenerator implements ContentGenerator {
           {
             // Mirror the pipeline's serialization (see pipeline.ts) so the
             // logged body is the body actually sent — the MiniMax routing
-            // keeps `parameters` on zero-argument tools (#11834).
+            // keeps `parameters` on zero-argument tools (#11834). Pass the
+            // request-level model so a model override logs what it sends.
             keepParameterlessParameters:
               MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
                 this.generatorConfig,
+                request.model,
               ),
           },
         );

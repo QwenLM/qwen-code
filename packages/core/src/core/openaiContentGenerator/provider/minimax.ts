@@ -43,11 +43,19 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
    * gateways proxy MiniMax backends under their own host and forward the
    * `invalid params, function parameters is empty (2013)` rejection verbatim,
    * leaving the model id as the only usable signal (#11834).
+   *
+   * `wireModel` is the model actually sent (`request.model ||
+   * contentGeneratorConfig.model`). A request-level override decides which
+   * backend answers, so gating on the config model alone would desync from
+   * the request — same reasoning as the `enable_thinking` gate in pipeline.ts.
    */
-  static isMiniMaxRouting(config: ContentGeneratorConfig): boolean {
+  static isMiniMaxRouting(
+    config: ContentGeneratorConfig,
+    wireModel?: string,
+  ): boolean {
     return (
       MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config) ||
-      /minimax/i.test(config.model ?? '')
+      /minimax/i.test(wireModel ?? config.model ?? '')
     );
   }
 
