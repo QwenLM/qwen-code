@@ -353,7 +353,7 @@ export function sandboxVerdict(
  *   the phase has committed to producing a verdict, and a per-command refusal
  *   would read as a build failure rather than as absent evidence;
  * - one of them is not even on the path. When the toolchain cannot be scoped
- *   (a yarn/pnpm/bun repo, no `package-lock.json` — `unsupportedReport`), the
+ *   (a yarn/bun repo, no npm or pnpm lockfile — `unsupportedReport`), the
  *   pipeline hands the install/build/test to the AGENT's own shell, which
  *   never passes through `run()` at all. A gate at the spawn would leave that
  *   route wide open under the very policy that forbids it.

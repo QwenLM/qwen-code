@@ -1047,7 +1047,8 @@ export const buildTestCommand: CommandModule = {
         type: 'boolean',
         default: true,
         describe:
-          'Fetch dependencies first: `npm ci` when node_modules is absent',
+          'Fetch dependencies first: `npm ci`, or `corepack pnpm install` for a ' +
+          'pnpm lockfile, when node_modules is absent',
       })
       .option('build-only', {
         type: 'boolean',

@@ -436,7 +436,9 @@ export const baseTreeCommand: CommandModule = {
       .option('install', {
         type: 'boolean',
         default: true,
-        describe: 'Run `npm ci` first when node_modules is absent',
+        describe:
+          'Run `npm ci` (or `corepack pnpm install` for a pnpm lockfile) ' +
+          'first when node_modules is absent',
       }),
   handler: (argv) => {
     const args = argv as unknown as BaseTreeArgs;
