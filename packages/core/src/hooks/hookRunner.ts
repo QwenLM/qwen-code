@@ -40,19 +40,14 @@ import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
-// PowerShell probe: pwsh preferred, powershell (5.1) fallback. Cached
-// per-process, negative cache included; throws when neither is on PATH.
-let cachedPowerShell: string | null | undefined;
+// PowerShell probe: pwsh preferred, powershell (5.1) fallback. Hits are
+// cached per-process; a miss is re-probed on the next call.
+let cachedPowerShell: string | undefined;
 export function __resetPowerShellCacheForTests(): void {
   cachedPowerShell = undefined;
 }
 export function resolvePowerShellExecutable(): string {
   if (cachedPowerShell !== undefined) {
-    if (cachedPowerShell === null) {
-      throw new Error(
-        'No PowerShell executable found on PATH (looked for pwsh, powershell)',
-      );
-    }
     return cachedPowerShell;
   }
   for (const name of ['pwsh', 'powershell']) {
@@ -62,7 +57,6 @@ export function resolvePowerShellExecutable(): string {
       return name;
     }
   }
-  cachedPowerShell = null;
   throw new Error(
     'No PowerShell executable found on PATH (looked for pwsh, powershell)',
   );
@@ -1242,9 +1236,11 @@ export class HookRunner {
             `Example: & ${stripAnsiAndControl(hookConfig.command)}`,
         );
       }
+      // powershell -Command flattens native exit codes; propagate after the
+      // command so an explicit exit in the hook wins.
       const command =
         shellConfig.shell === 'powershell'
-          ? `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; ${hookConfig.command}`
+          ? `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; ${hookConfig.command}\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }`
           : hookConfig.command;
 
       const env: NodeJS.ProcessEnv = {
@@ -1630,6 +1626,12 @@ export class HookRunner {
     exitCode: number,
     stdoutEvent?: HookEventName,
   ): HookOutput {
+    // Terminal escapes must not reach the model or transcript through any
+    // promoted field; strip per line so newlines survive.
+    const cleanText = text
+      .split('\n')
+      .map((line) => stripAnsiAndControl(line))
+      .join('\n');
     if (exitCode === EXIT_CODE_SUCCESS) {
       if (stdoutEvent && PLAIN_TEXT_CONTEXT_EVENTS.has(stdoutEvent)) {
         return {
@@ -1637,32 +1639,27 @@ export class HookRunner {
           reason: 'Hook executed successfully',
           hookSpecificOutput: {
             hookEventName: stdoutEvent,
-            // Terminal escapes from colored tool output must not reach the
-            // model; strip per line so newlines survive.
-            additionalContext: text
-              .split('\n')
-              .map((line) => stripAnsiAndControl(line))
-              .join('\n'),
+            additionalContext: cleanText,
           },
         };
       }
       return {
         decision: 'allow',
         reason: 'Hook executed successfully',
-        systemMessage: text,
+        systemMessage: cleanText,
       };
     } else if (exitCode === EXIT_CODE_NON_BLOCKING_ERROR) {
       // Non-blocking error (EXIT_CODE_NON_BLOCKING_ERROR = 1)
       return {
         decision: 'allow',
-        reason: `Non-blocking error: ${text}`,
-        systemMessage: `Warning: ${text}`,
+        reason: `Non-blocking error: ${cleanText}`,
+        systemMessage: `Warning: ${cleanText}`,
       };
     } else {
       // All other non-zero exit codes (including 2) are blocking
       return {
         decision: 'deny',
-        reason: text,
+        reason: cleanText,
       };
     }
   }

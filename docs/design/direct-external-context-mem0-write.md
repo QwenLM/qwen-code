@@ -235,9 +235,10 @@ directory, and an environment allowlist; refusing user arguments, headless,
 ACP, `serve`, resume/continue, and startup YOLO; and disabling native memory,
 speculation, chat recording, telemetry, and usage statistics. These measures
 do not create process isolation. On Windows, the allowlisted `PATH` must
-resolve `powershell` to the system executable, and PowerShell profiles must be
-absent or administrator-controlled because Core invokes the configured shell
-by name.
+resolve both `pwsh` and `powershell` to administrator-controlled
+executables (`pwsh` wins when both are present), and PowerShell profiles
+must be absent or administrator-controlled because Core invokes the
+configured shell by name.
 
 Each repository security domain requires a distinct Mem0 Project and
 Project-specific credential. `app_id` is classification inside that Project,

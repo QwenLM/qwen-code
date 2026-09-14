@@ -2675,7 +2675,7 @@ describe('HookRunner', () => {
       expect(spawnArgs[1]).toEqual([
         '-NoProfile',
         '-Command',
-        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output test",
+        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output test\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }",
       ]);
       expect(spawnArgs[2].shell).toBe(false);
     });
@@ -2698,7 +2698,7 @@ describe('HookRunner', () => {
         expect(spawnArgs[1]).toEqual([
           '-NoProfile',
           '-Command',
-          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; echo test",
+          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; echo test\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }",
         ]);
         // #8649's literal repro shape: shell prefix + quoted path with a
         // space + argument. cmd.exe keeps the inner quotes, PowerShell does
@@ -2716,7 +2716,7 @@ describe('HookRunner', () => {
         expect(mockSpawn.mock.calls[1][1]).toEqual([
           '-NoProfile',
           '-Command',
-          `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; bash "C:/Program Files/app/script.sh" arg`,
+          `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; bash "C:/Program Files/app/script.sh" arg\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }`,
         ]);
       } finally {
         spy.mockRestore();
@@ -2738,7 +2738,7 @@ describe('HookRunner', () => {
       const spawnArgs = mockSpawn.mock.calls[0];
       expect(spawnArgs[0]).toBe('powershell');
       expect(spawnArgs[1][2]).toBe(
-        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $env:CLAUDE_PROJECT_DIR/scripts/validate.cmd",
+        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $env:CLAUDE_PROJECT_DIR/scripts/validate.cmd\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }",
       );
     });
 
@@ -2771,10 +2771,10 @@ describe('HookRunner', () => {
         expect(mockSpawn.mock.calls[1][0]).toBe(mockSpawn.mock.calls[0][0]);
         expect(fallbackArgs.slice(0, 2)).toEqual(explicitArgs.slice(0, 2));
         expect(explicitArgs[2]).toBe(
-          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output explicit",
+          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output explicit\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }",
         );
         expect(fallbackArgs[2]).toBe(
-          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output fallback",
+          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output fallback\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }",
         );
       } finally {
         spy.mockRestore();
@@ -2902,7 +2902,7 @@ describe('HookRunner', () => {
         createMockProcess(
           1,
           '',
-          "The variable '$CLAUDE_PROJECT_DIR' cannot be retrieved because it has not been set.\n" +
+          "\u001b[31;1mThe variable '$CLAUDE_PROJECT_DIR' cannot be retrieved because it has not been set.\u001b[0m\n" +
             'At line:1 char:1\n' +
             '+ $CLAUDE_PROJECT_DIR\n' +
             '+ ~~~~~~~~~~~~~~~~~~~\n' +
@@ -2923,7 +2923,7 @@ describe('HookRunner', () => {
       const spawnArgs = mockSpawn.mock.calls[0];
       // Pin: dropping either flag must fail here, not only the wrapping tests.
       expect(spawnArgs[1][2]).toMatch(
-        /^Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$CLAUDE_PROJECT_DIR$/,
+        /^Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$CLAUDE_PROJECT_DIR\nif \(\(Test-Path -LiteralPath variable:\\LASTEXITCODE\)\) \{ exit \$LASTEXITCODE \}$/,
       );
       expect(result.success).toBe(false);
       expect(result.exitCode).toBe(1);
@@ -2936,6 +2936,8 @@ describe('HookRunner', () => {
       expect(output.systemMessage).toMatch(
         /cannot be retrieved|VariableIsUndefined/,
       );
+      expect(output.systemMessage).not.toContain('\u001b');
+      expect(output.reason).not.toContain('\u001b');
     });
   });
 
@@ -2978,12 +2980,16 @@ describe('HookRunner', () => {
       expect(execSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('fast-fails subsequent calls when neither executable is on PATH (negative cache)', () => {
+    it('re-probes after a failed lookup instead of latching the failure', () => {
       execSpy.mockImplementation((() => ({ path: null })) as never);
-      expect(() => resolvePowerShellExecutable()).toThrow();
-      expect(() => resolvePowerShellExecutable()).toThrow();
-      // One probe per candidate name; the negative cache absorbs later calls.
-      expect(execSpy).toHaveBeenCalledTimes(2);
+      expect(() => resolvePowerShellExecutable()).toThrow(
+        'No PowerShell executable found on PATH (looked for pwsh, powershell)',
+      );
+      execSpy.mockImplementation(((name: string) =>
+        name === 'pwsh' ? { path: '/usr/bin/pwsh' } : { path: null }) as never);
+      expect(resolvePowerShellExecutable()).toBe('pwsh');
+      // Two failed candidates, then the next call re-probes and recovers.
+      expect(execSpy).toHaveBeenCalledTimes(3);
     });
   });
 });
