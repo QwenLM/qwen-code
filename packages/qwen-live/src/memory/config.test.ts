@@ -51,13 +51,12 @@ describe('memory configuration', () => {
   });
 
   it('resolves relative and tilde paths without requiring the directory to exist', () => {
+    const separateDir = join(tmpdir(), 'separate-memories');
     expect(resolve({ dir: 'saved' }).dir).toBe(join(dataDir, 'saved'));
     expect(resolve({ dir: '~/qwen-memory-config-tests' }).dir).toBe(
       join(homedir(), 'qwen-memory-config-tests'),
     );
-    expect(resolve({ dir: '/tmp/separate-memories' }).dir).toBe(
-      '/tmp/separate-memories',
-    );
+    expect(resolve({ dir: separateDir }).dir).toBe(separateDir);
   });
 
   it.each(['retrieve', 'preload', 'updater', 'observer', 'wm', 'segment'])(
