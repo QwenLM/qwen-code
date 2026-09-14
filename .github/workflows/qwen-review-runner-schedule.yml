@@ -1,118 +1,45 @@
 name: 'Qwen Review Runner Schedule'
 
-# Sizes the PR review runner pool by time of day. The review job
-# (qwen-code-pr-review.yml → review-pr) runs on the `ecs-review` label; this
-# workflow decides how many runners on the managed ECS hosts carry that label:
-# a handful while the model API is at daytime prices, all of them in the
-# night window. Reviews that find no runner queue in GitHub — the PR-scoped
-# concurrency group already collapses several pushes into one pending run —
-# and drain when the pool grows again.
-#
-# Every tick CONVERGES to the target (no "switch at 22:00" edge): GitHub's
-# cron is late or skipped often enough that an edge-triggered switch would be
-# missed, and a converging tick is also what re-places a re-registered runner
-# whose labels were reset. Removing a label never interrupts a running job,
-# so the day switch lets in-flight reviews finish and only stops new ones.
-# Growth is ramped (QWEN_REVIEW_RAMP_STEP per tick) so the night pool does
-# not start every review's prebuild on one host in the same minute.
-#
-# By day the released runners are lent to the shared CI pool (`ecs-qwen`)
-# instead of idling; `ecs-agent` (autofix) is kept OFF the managed hosts so
-# the night review burst never shares a box with autofix rounds. Logic and
-# tests: .github/scripts/review-runner-schedule.mjs.
+# Sizes the PR review pool (`ecs-review`, used by qwen-code-pr-review.yml's
+# review-pr job) by time of day: QWEN_REVIEW_DAY_RUNNERS hk2 runners by day,
+# every hk2 runner between QWEN_REVIEW_NIGHT_START and QWEN_REVIEW_NIGHT_END
+# (Asia/Shanghai, defaults 22 and 3). Reviews that find no runner queue and
+# drain at night. Logic: .github/scripts/review-runner-schedule.mjs.
 #
 # The runner-label API needs repository Administration: write, which no
-# GITHUB_TOKEN grants. RUNNER_ADMIN_PAT is a fine-grained PAT scoped to this
-# repository with Administration read+write only, stored in the
-# `qwen-review-runner-schedule` environment (restrict it to `main`). The job
-# runs on a hosted runner, checks out the trusted event commit only, and
-# never touches pull request code. A missing or expired PAT FAILS the run —
-# a silent no-op would freeze the labels in whichever phase they were in.
-#
-# Repository variables (all optional; defaults in the script):
-#   QWEN_REVIEW_SCHEDULE_MODE   auto | day | night | off   (off = kill switch)
-#   QWEN_REVIEW_NIGHT_START     hour the night pool opens   (22)
-#   QWEN_REVIEW_NIGHT_END       hour the day pool returns   (3)
-#   QWEN_REVIEW_DAY_RUNNERS     ecs-review runners by day   (2)
-#   QWEN_REVIEW_NIGHT_RUNNERS   ecs-review runners at night (32)
-#   QWEN_REVIEW_RAMP_STEP       runners added per tick      (8)
-#   QWEN_REVIEW_RUNNER_HOSTS    managed hosts, comma list   (hk2)
-#   QWEN_REVIEW_DAY_LEND_CI     lend released runners to CI (true)
-#   QWEN_REVIEW_TIMEZONE        IANA zone for the window    (Asia/Shanghai)
+# GITHUB_TOKEN grants: RUNNER_ADMIN_PAT is a fine-grained PAT for this
+# repository with only that permission, stored in the environment below
+# (restrict it to `main`). To pause the schedule, disable this workflow.
 
 on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
-    inputs:
-      mode:
-        description: 'Override the phase for this tick only (auto follows the clock)'
-        required: false
-        default: 'auto'
-        type: 'choice'
-        options:
-          - 'auto'
-          - 'day'
-          - 'night'
-      dry_run:
-        description: 'Plan and report, but change no labels'
-        required: false
-        default: false
-        type: 'boolean'
 
 permissions:
   contents: 'read'
-  # Queue-depth line in the summary: counts live runs of the review workflow.
-  actions: 'read'
 
 concurrency:
   group: 'qwen-review-runner-schedule'
   cancel-in-progress: false
 
-env:
-  QWEN_REVIEW_SCHEDULE_MODE: "${{ vars.QWEN_REVIEW_SCHEDULE_MODE || 'auto' }}"
-  QWEN_REVIEW_NIGHT_START: "${{ vars.QWEN_REVIEW_NIGHT_START || '22' }}"
-  QWEN_REVIEW_NIGHT_END: "${{ vars.QWEN_REVIEW_NIGHT_END || '3' }}"
-  QWEN_REVIEW_DAY_RUNNERS: "${{ vars.QWEN_REVIEW_DAY_RUNNERS || '2' }}"
-  QWEN_REVIEW_NIGHT_RUNNERS: "${{ vars.QWEN_REVIEW_NIGHT_RUNNERS || '32' }}"
-  QWEN_REVIEW_RAMP_STEP: "${{ vars.QWEN_REVIEW_RAMP_STEP || '8' }}"
-  QWEN_REVIEW_RUNNER_HOSTS: "${{ vars.QWEN_REVIEW_RUNNER_HOSTS || 'hk2' }}"
-  QWEN_REVIEW_DAY_LEND_CI: "${{ vars.QWEN_REVIEW_DAY_LEND_CI || 'true' }}"
-  QWEN_REVIEW_TIMEZONE: "${{ vars.QWEN_REVIEW_TIMEZONE || 'Asia/Shanghai' }}"
-
 jobs:
   converge:
-    name: 'Converge review runner labels'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     environment: 'qwen-review-runner-schedule'
     steps:
-      - name: 'Checkout trusted event commit'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.sha }}'
           persist-credentials: false
           sparse-checkout: '.github/scripts/review-runner-schedule.mjs'
           sparse-checkout-cone-mode: false
 
-      - name: 'Set up Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
-        with:
-          node-version: '22'
-
-      - name: 'Converge labels'
+      - name: 'Converge review runner labels'
         env:
           RUNNER_ADMIN_TOKEN: '${{ secrets.RUNNER_ADMIN_PAT }}'
-          GH_TOKEN: '${{ github.token }}'
-          MODE_INPUT: "${{ github.event.inputs.mode || '' }}"
-          DRY_RUN: "${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}"
-        run: |-
-          set -euo pipefail
-          mode_args=()
-          if [ -n "$MODE_INPUT" ] && [ "$MODE_INPUT" != "auto" ]; then
-            mode_args=(--mode "$MODE_INPUT")
-          fi
-          # shellcheck disable=SC2086 — DRY_RUN is either empty or one flag.
-          node .github/scripts/review-runner-schedule.mjs \
-            --repo "$GITHUB_REPOSITORY" "${mode_args[@]}" $DRY_RUN
+          QWEN_REVIEW_NIGHT_START: '${{ vars.QWEN_REVIEW_NIGHT_START }}'
+          QWEN_REVIEW_NIGHT_END: '${{ vars.QWEN_REVIEW_NIGHT_END }}'
+          QWEN_REVIEW_DAY_RUNNERS: '${{ vars.QWEN_REVIEW_DAY_RUNNERS }}'
+        run: 'node .github/scripts/review-runner-schedule.mjs "$GITHUB_REPOSITORY"'
