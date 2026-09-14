@@ -103,6 +103,15 @@ function sanitizeRemoteDisplay(value: string): string {
   return value.replace(DISPLAY_INVISIBLE_CHARS, '');
 }
 
+// U+FFFC OBJECT REPLACEMENT CHARACTER and U+FFFD REPLACEMENT CHARACTER:
+// VISIBLE Common-script placeholder glyphs, so neither the invisible
+// class above (So, not Cc/Cf/ignorable) nor the script-mixing arm
+// (Common mixes with nothing) fires on them — yet a name carrying one
+// renders as a stand-in for whatever glyph a sibling name carries for
+// real. The marking predicate treats them as unusual on their own.
+// Escaped via RegExp because the raw chars are invisible in source.
+const PLACEHOLDER_CHAR = new RegExp('[\\uFFFC\\uFFFD]');
+
 // Git's error text in the single-line footer: the invisible class strips
 // — but a stripped \n FUSES two of git's sentences (a lock line runs
 // straight into the write failure). Collapse whitespace to one space
@@ -1268,24 +1277,44 @@ export function BranchPickerPopover({
         allAscii: boolean;
         skeletonAscii: boolean;
         allCanonical: boolean;
+        caseTwins: Map<string, number>;
       }
     >();
     for (const r of remotes ?? []) {
-      const skeleton = remoteNameSkeleton(r.name);
-      const group = groups.get(skeleton) ?? {
+      // The group key is the CASEFOLDED skeleton: the fold itself stays
+      // case-sensitive (its table hits `I`→`l` ahead of any casefold,
+      // which the search's three case forms rely on), but a collision
+      // group is a case-insensitive class — `0rigin` beside `origin`
+      // must collide even though their skeletons differ by case.
+      const skeletonKey = remoteNameSkeleton(r.name).toLowerCase();
+      const group = groups.get(skeletonKey) ?? {
         count: 0,
         allAscii: true,
-        skeletonAscii: !/[^ -~]/.test(skeleton),
+        skeletonAscii: !/[^ -~]/.test(skeletonKey),
         allCanonical: true,
+        caseTwins: new Map<string, number>(),
       };
       group.count += 1;
       if (/[^ -~]/.test(r.name)) group.allAscii = false;
-      // A member whose NFC form IS the skeleton varies only canonically
-      // (NFD/NFC twins); a table fold leaves the raw name different from
-      // its NFC form's skeleton, so allCanonical stays true only for
-      // pure canonical variance.
-      if (r.name.normalize('NFC') !== skeleton) group.allCanonical = false;
-      groups.set(skeleton, group);
+      // A member whose NFC form IS the group key (casefold space)
+      // varies only canonically (NFD/NFC twins); a table fold leaves
+      // the NFC form different from the key, so allCanonical stays true
+      // only for pure canonical variance — which keeps arm 4 off
+      // canonical twins (single-row polarity) while the
+      // prototype-script twin (`öö` beside `ةة`) flips it and marks
+      // both. Case-only prototype pairs (`ẞ`/`ß`) read canonical here;
+      // arm 3 (caseTwins) owns them.
+      if (r.name.normalize('NFC').toLowerCase() !== skeletonKey)
+        group.allCanonical = false;
+      // caseTwins: raw names sharing one casefolded spelling within
+      // the group (`café` beside `CAFÉ`, `ẞ` beside `ß`) are a
+      // case-only pair: neither row carries visible evidence, the same
+      // evidentiary failure as the all-ASCII arm, at any script (arm
+      // 3 below). Per-PAIR, not per-group: an unrelated third member
+      // (`οrigin` joining `origin`/`Origin`) must not disarm the pair.
+      const lowerRaw = r.name.toLowerCase();
+      group.caseTwins.set(lowerRaw, (group.caseTwins.get(lowerRaw) ?? 0) + 1);
+      groups.set(skeletonKey, group);
     }
     return groups;
   }, [remotes]);
@@ -1909,6 +1938,7 @@ function RemotesView({
       allAscii: boolean;
       skeletonAscii: boolean;
       allCanonical: boolean;
+      caseTwins: ReadonlyMap<string, number>;
     }
   >;
   loading: boolean;
@@ -1973,19 +2003,20 @@ function RemotesView({
               // two lookalikes never present one identity. CSS also
               // collapses edge and repeated whitespace out of the inked
               // text, so a name differing only by whitespace (origin vs
-              // "origin ") flags the same way. Three more structural
+              // "origin ") flags the same way. Four more structural
               // arms, because the class list alone has no last corner:
               // canonical-equivalence twins (an NFD name inks like its
               // NFC twin), a name mixing scripts (any Latin + non-Latin
               // mix — the Cyrillic-`о` homoglyph is the motivating
               // shape, but the arm is script-mixing generally, in the
-              // conservative direction), and the TR39
+              // conservative direction), a name carrying U+FFFC/U+FFFD
+              // (VISIBLE Common-script stand-ins both per-property
+              // arms miss), and the TR39
               // skeleton collision below (an ink-identical twin INSIDE
               // Latin/Common, like a ligature — the table closes what
-              // per-property arms cannot enumerate). The first two mark
-              // the UNUSUAL row; the collision marks the row carrying
-              // the non-canonical spelling — a plain sibling row stays
-              // unmarked either way.
+              // per-property arms cannot enumerate). The first three
+              // mark the UNUSUAL row; the collision marks per its four
+              // disjuncts — a plain sibling row stays unmarked.
               // URLs are a bounded ASCII-only surface (RFC 3986: anything
               // else is percent-encoded/punycoded), so a non-ASCII byte in
               // one is a homoglyph or garbage — fail closed: the row
@@ -1998,13 +2029,19 @@ function RemotesView({
                 /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(
                   r.name,
                 );
+              // U+FFFC OBJECT REPLACEMENT CHARACTER is the corner both
+              // per-property arms miss: a VISIBLE Common-script symbol,
+              // so neither the invisible class nor script-mixing fires,
+              // yet it renders as a stand-in glyph a sibling name may
+              // carry the real character for.
+              const placeholderChar = PLACEHOLDER_CHAR.test(r.name);
               // The table-driven fold's half: a sibling's skeleton
               // matches while the raw name differs (the ligature twin).
               // The row carrying the non-canonical spelling marks — raw
               // ≠ skeleton — keeping the house polarity: the canonical
               // sibling row stays plain.
               const skeleton = remoteNameSkeleton(r.name);
-              const group = skeletonGroups.get(skeleton);
+              const group = skeletonGroups.get(skeleton.toLowerCase());
               // For an all-printable-ASCII group the "raw ≠ skeleton"
               // test carries no evidence about which spelling is the
               // impostor (the table's `m → rn` expansion makes the
@@ -2017,11 +2054,15 @@ function RemotesView({
               // Arabic ةة against Latin öö) carries no visible oddity
               // either, so the same evidentiary failure applies and
               // both rows mark. Pure canonical variance (NFD/NFC
-              // twins) keeps the single-row polarity.
+              // twins) keeps the single-row polarity. Both halves read
+              // in CASEFOLD space, matching the group key: a row whose
+              // skeleton differs from its raw name only by case is the
+              // canonical spelling of its class, not an impostor.
               const skeletonCollision =
                 (group?.count ?? 0) > 1 &&
-                (skeleton !== r.name ||
+                (skeleton.toLowerCase() !== r.name.toLowerCase() ||
                   (group?.allAscii ?? false) ||
+                  (group?.caseTwins?.get(r.name.toLowerCase()) ?? 0) > 1 ||
                   (!(group?.skeletonAscii ?? true) &&
                     !(group?.allCanonical ?? false)));
               const nameUnusual =
@@ -2029,6 +2070,7 @@ function RemotesView({
                 r.name.replace(/\s+/g, ' ').trim() !== r.name ||
                 nfcName !== r.name ||
                 mixedScripts ||
+                placeholderChar ||
                 skeletonCollision;
               const hiddenChars = nameUnusual || fetchNonAscii || pushNonAscii;
               // The marker copy keys on the evidence: a row marked ONLY
@@ -2045,6 +2087,19 @@ function RemotesView({
                 !fetchNonAscii &&
                 !pushNonAscii &&
                 !/[^\x20-\x7E]/.test(r.name);
+              // A row marked ONLY by the placeholder arm carries a
+              // VISIBLE stand-in glyph (U+FFFC/U+FFFD), not an invisible
+              // character — "(lookalike name)" names that evidence, and
+              // the tooltip's escapes spell the glyph out.
+              const placeholderOnly =
+                placeholderChar &&
+                displayName === r.name &&
+                r.name.replace(/\s+/g, ' ').trim() === r.name &&
+                nfcName === r.name &&
+                !mixedScripts &&
+                !fetchNonAscii &&
+                !pushNonAscii &&
+                !skeletonCollision;
               // The marker's visible part shows the name as CSS inks it
               // (whitespace collapsed, edges trimmed) so the raw name's
               // padding does not double the separator before the marker;
@@ -2052,7 +2107,11 @@ function RemotesView({
               const visibleName = displayName.replace(/\s+/g, ' ').trim();
               const rowName = hiddenChars
                 ? visibleName
-                  ? `${visibleName} ${t(asciiSkeletonOnly ? 'branchPicker.remotes.lookalikeName' : 'branchPicker.remotes.hiddenChars')}`
+                  ? `${visibleName} ${t(
+                      asciiSkeletonOnly || placeholderOnly
+                        ? 'branchPicker.remotes.lookalikeName'
+                        : 'branchPicker.remotes.hiddenChars',
+                    )}`
                   : t('branchPicker.remotes.invisibleName')
                 : displayName;
               // The escaped tail exists to disambiguate the NAME; a row
@@ -2067,7 +2126,10 @@ function RemotesView({
                   ? skeletonEscape !== r.name
                     ? skeletonEscape
                     : undefined
-                  : escapeNameChars(r.name, nfcName !== r.name || mixedScripts)
+                  : escapeNameChars(
+                      r.name,
+                      nfcName !== r.name || mixedScripts || placeholderChar,
+                    )
                 : undefined;
               const ariaName = escapedName
                 ? `${rowName} ${escapedName}`

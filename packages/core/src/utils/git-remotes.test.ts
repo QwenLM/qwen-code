@@ -1827,6 +1827,158 @@ describe('repository-scope listing and removal', () => {
     );
   });
 
+  it('refuses up front a removal whose name a pushInsteadOf alias still resolves push-side', async () => {
+    const dir = makeRepo();
+    // The push-side alias keeps the bare name resolving as a push
+    // destination whatever the section says — and a POST-destruction
+    // refusal would wedge the upstream keys the certify sweep can no
+    // longer reach (the retry's 404 converge arm skips over the same
+    // alias), so the refusal lands BEFORE git's rm: the section and
+    // every pointing key survive untouched.
+    git(dir, 'remote', 'add', 'word', 'https://example.com/w/r.git');
+    git(dir, 'config', '--local', 'branch.feat.remote', 'word');
+    git(
+      dir,
+      'config',
+      '--local',
+      'url.https://real.example/x.pushinsteadof',
+      'word',
+    );
+    await expect(gitRemoteRemove(dir, 'word', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/i,
+    );
+    expect(git(dir, 'config', '--local', '--list')).toContain(
+      'remote.word.url',
+    );
+    expect(git(dir, 'config', '--local', '--get', 'branch.feat.remote')).toBe(
+      'word\n',
+    );
+  });
+
+  it('keeps the inherited-only 404 doctrine despite a matching pushInsteadOf alias', async () => {
+    const dir = makeRepo();
+    // An INHERITED-only section means nothing repository-scoped to
+    // destroy: the block check falls through to git's 404 (the answer
+    // the client's stale-row convergence keys on), and the pre-flight
+    // alias refusal must not swallow that doctrine — the alias alone
+    // destroys nothing either.
+    git(dir, 'config', '--global', 'remote.origin.url', 'https://g/o.git');
+    git(
+      dir,
+      'config',
+      '--global',
+      'url.https://real.example/x.pushinsteadof',
+      'origin',
+    );
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /no such remote/i,
+    );
+    expect(git(dir, 'config', '--global', '--get', 'remote.origin.url')).toBe(
+      'https://g/o.git\n',
+    );
+  });
+
+  it('refuses up front a worktree-scope section whose name a pushInsteadOf alias matches', async () => {
+    const dir = makeRepo();
+    // A config.worktree-held section is a destroyable repository half:
+    // the pre-flight alias refusal must cover the worktree scope too,
+    // or git's rm destroys refs and branch keys before dying on the
+    // section write, and the wedge returns through the 404 converge
+    // arm's sweep skip.
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    git(
+      dir,
+      'config',
+      '--worktree',
+      'remote.word.url',
+      'https://example.com/w/r.git',
+    );
+    git(dir, 'config', '--local', 'branch.feat.remote', 'word');
+    git(
+      dir,
+      'config',
+      '--local',
+      'url.https://real.example/x.pushinsteadof',
+      'word',
+    );
+    await expect(gitRemoteRemove(dir, 'word', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/i,
+    );
+    expect(git(dir, 'config', '--worktree', '--list')).toContain(
+      'remote.word.url',
+    );
+    expect(git(dir, 'config', '--local', '--get', 'branch.feat.remote')).toBe(
+      'word\n',
+    );
+  });
+
+  it('refuses up front a name a pushInsteadOf alias only PREFIXES', async () => {
+    const dir = makeRepo();
+    // The alias rewrite is a byte-prefix match in git: a remote whose
+    // name merely STARTS with the alias value is still a live push
+    // destination after removal, so the refusal covers strict
+    // prefixes, not only exact alias-equal names.
+    git(dir, 'remote', 'add', 'wordbook', 'https://example.com/w/r.git');
+    git(
+      dir,
+      'config',
+      '--local',
+      'url.https://real.example/x.pushinsteadof',
+      'word',
+    );
+    await expect(gitRemoteRemove(dir, 'wordbook', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/i,
+    );
+    expect(git(dir, 'config', '--local', '--list')).toContain(
+      'remote.wordbook.url',
+    );
+  });
+
+  it('keeps the inherited refusal ahead of the pushInsteadOf refusal', async () => {
+    const dir = makeRepo();
+    // Both pre-destruction refusals can co-fire (inherited section AND
+    // a push-side alias): the inherited cause names a survivor scope,
+    // so it wins the message.
+    git(dir, 'remote', 'add', 'word', 'https://example.com/w/r.git');
+    git(dir, 'config', '--global', 'remote.word.url', 'https://g/o.git');
+    git(
+      dir,
+      'config',
+      '--global',
+      'url.https://real.example/x.pushinsteadof',
+      'word',
+    );
+    await expect(gitRemoteRemove(dir, 'word', fixtureEnv)).rejects.toThrow(
+      /inherited scope/i,
+    );
+    // Nothing was destroyed: the local section survives the refusal.
+    expect(git(dir, 'config', '--local', '--list')).toContain(
+      'remote.word.url',
+    );
+  });
+
+  it('keeps the included-file refusal ahead of the pushInsteadOf refusal', async () => {
+    const dir = makeRepo();
+    // Both pre-flight refusals are pre-destruction; the included-file
+    // cause names the file git cannot edit, so it wins the message.
+    const inc = path.join(dir, 'included.gitconfig');
+    fs.writeFileSync(
+      inc,
+      '[remote "word"]\n\turl = https://example.com/w.git\n',
+    );
+    git(dir, 'config', 'include.path', inc);
+    git(
+      dir,
+      'config',
+      '--local',
+      'url.https://real.example/x.pushinsteadof',
+      'word',
+    );
+    await expect(gitRemoteRemove(dir, 'word', fixtureEnv)).rejects.toThrow(
+      /remote section lives in an included config file/i,
+    );
+  });
+
   it('answers no-such-remote for a bare-word path upstream from a SUBDIRECTORY cwd', async () => {
     const dir = makeRepo();
     // git's path transport resolves the bare word against the worktree

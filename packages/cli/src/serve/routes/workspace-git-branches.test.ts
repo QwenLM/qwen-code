@@ -839,6 +839,19 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
         expect(String(outPad.body['message'])).not.toContain(wtGit);
         expect(String(outPad.body['message'])).toContain('<workspace>');
 
+        // The prefix-token arm consumes the key's WHOLE whitespace-
+        // delimited token: a glued non-whitespace tail (git echoes the
+        // target verbatim; sideband glue can extend the run) must not
+        // survive on the wire, and a key-less long run must not cost
+        // the daemon's single event loop a quadratic scan.
+        const glued = classifyAt(
+          padWt,
+          `error: could not lock config file ${wtGit}${'a'.repeat(100_000)}`,
+        );
+        const gluedText = String(glued.body['message']);
+        expect(gluedText).not.toContain(wtGit);
+        expect(gluedText).not.toContain('aaaa');
+
         // The commondir pointer gets the same C-string NUL truncation:
         // a NUL-bearing pointer to a sibling outside the worktrees
         // heuristic must still redact the path git resolves.

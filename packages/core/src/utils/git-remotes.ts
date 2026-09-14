@@ -433,15 +433,43 @@ export async function gitRemoteRemove(
   // any record of the section lives outside the two files a removal
   // edits; the post-removal gates stay as the backstop for everything
   // the pre-flight cannot foresee.
-  const sectionBlock = await remoteSectionRemovalBlock(cwd, name, env);
+  const sectionCheck = await remoteSectionRemovalBlock(cwd, name, env);
   // No name in either message: sendGitError classifies on message text,
   // and a config-chosen name could carry a keyword another branch
   // claims.
-  if (sectionBlock === 'inherited') {
+  if (sectionCheck.block === 'inherited') {
     throw new Error('remote already configured in an inherited scope');
   }
-  if (sectionBlock === 'included') {
+  if (sectionCheck.block === 'included') {
     throw new Error('remote section lives in an included config file');
+  }
+  // A `url.<base>.pushInsteadOf` prefix keeps the bare name resolving
+  // PUSH-side even after any removal (the `gh:` alias pattern): nothing
+  // fetch-side answers it (git has no push-side resolver probe), so the
+  // config dump answers — the one the block check just read, so this
+  // costs no second spawn. Refuse up front, BEFORE git's rm destroys
+  // anything — a post-destruction refusal would wedge exactly the
+  // upstream keys the certify path's sweep can no longer reach (a
+  // retry lands on the 404 converge arm, which skips over the same
+  // alias), and post-removal the bare name silently redirects to the
+  // alias base (pushInsteadOf rewrites the NAME only once no
+  // `remote.<name>.url` resolves first), so a "removed" name stays a
+  // live push destination. Only a name WITH a
+  // REPOSITORY-scope section: an inherited-only record means nothing
+  // repository-scoped to destroy (the block check's own doctrine —
+  // fall through to git's 404, the answer the client's stale-row
+  // convergence keys on), and a never-configured alias-shaped name
+  // keeps the 404 + converge-skip doctrine (nothing to sweep). The
+  // converge arm keeps its own copy of the check to skip its sweep.
+  if (
+    [...remoteSectionScopesFromRaw(sectionCheck.raw, name, true)].some(
+      (scope) => REPOSITORY_SCOPES.has(scope),
+    ) &&
+    pushInsteadOfAliasesFromRaw(sectionCheck.raw, true).some((alias) =>
+      name.startsWith(alias),
+    )
+  ) {
+    throw new Error('remote still configured after removal');
   }
   // Snapshot the branches pointing at `name` BEFORE git rm unsets the
   // local-scope keys: a branch whose `remote` key lives at local scope
@@ -601,7 +629,8 @@ export async function gitRemoteRemove(
   // no-match fall-through), and git's own resolver catches the
   // non-config sources — `ls-remote --get-url` expands the name without
   // contacting the remote and echoes the input verbatim only when
-  // nothing answers it.
+  // nothing answers it. (The push-side alias shape is refused up front,
+  // pre-destruction — see the pre-flight.)
   if (
     (await remoteSectionScopes(cwd, name, env)).size > 0 ||
     (await remoteStillResolves(cwd, name, env))
@@ -752,7 +781,7 @@ async function remoteSectionRemovalBlock(
   cwd: string,
   name: string,
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<'inherited' | 'included' | null> {
+): Promise<{ block: 'inherited' | 'included' | null; raw: string }> {
   let raw: string;
   try {
     raw = await runGit(
@@ -761,7 +790,7 @@ async function remoteSectionRemovalBlock(
       env,
     );
   } catch (err) {
-    if (isNoMatchConfigError(err)) return null;
+    if (isNoMatchConfigError(err)) return { block: null, raw: '' };
     stripConfigDump(err);
     throw err;
   }
@@ -804,8 +833,8 @@ async function remoteSectionRemovalBlock(
   // The inherited refusal protects the DESTRUCTION case — a repository
   // half existing to be destroyed. Nothing repository-scoped means
   // nothing to destroy: fall through to git's own no-such-remote.
-  if (repoRecordSeen && inheritedSeen) return 'inherited';
-  return included ? 'included' : null;
+  if (repoRecordSeen && inheritedSeen) return { block: 'inherited', raw };
+  return { block: included ? 'included' : null, raw };
 }
 
 // Whether git still RESOLVES the name after the section is gone — the
@@ -889,8 +918,18 @@ async function pushInsteadOfAliases(
     stripConfigDump(err);
     throw err;
   }
+  return pushInsteadOfAliasesFromRaw(raw, false);
+}
+
+// The same parse over a dump the caller already holds (the removal
+// pre-flight's `--show-origin` read), so the alias check costs no
+// second spawn.
+function pushInsteadOfAliasesFromRaw(
+  raw: string,
+  withOrigin: boolean,
+): string[] {
   const out: string[] = [];
-  for (const record of iterConfigRecords(raw)) {
+  for (const record of iterConfigRecords(raw, withOrigin)) {
     // An empty value would prefix-match EVERY name (`startsWith('')`),
     // making the converge arm unreachable and the unmask push arms
     // never-refusing — the opposite of both gates' polarity.
@@ -942,7 +981,6 @@ async function remoteSectionScopes(
   name: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<Set<string>> {
-  const scopes = new Set<string>();
   let raw: string;
   try {
     raw = await runGit(cwd, ['config', '--list', '--show-scope', '-z'], env);
@@ -951,12 +989,21 @@ async function remoteSectionScopes(
     // polarity ("no survivor"), so only a true no-match may be read as
     // empty: a killed or failed read must surface, or the add pre-flight
     // and the removal verification would certify past their own guard.
-    if (isNoMatchConfigError(err)) return scopes;
+    if (isNoMatchConfigError(err)) return new Set();
     stripConfigDump(err);
     throw err;
   }
+  return remoteSectionScopesFromRaw(raw, name, false);
+}
+
+function remoteSectionScopesFromRaw(
+  raw: string,
+  name: string,
+  withOrigin: boolean,
+): Set<string> {
+  const scopes = new Set<string>();
   const prefix = `remote.${name}.`;
-  for (const record of iterConfigRecords(raw)) {
+  for (const record of iterConfigRecords(raw, withOrigin)) {
     const { scope, key } = record;
     if (!key.startsWith(prefix)) continue;
     // Section identity, not prefix: a sibling remote whose name extends

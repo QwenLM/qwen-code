@@ -105,3 +105,15 @@ describe('remoteNameSkeleton NFKC fallback', () => {
     expect(remoteNameSkeleton('¹')).toBe(remoteNameSkeleton('1'));
   });
 });
+
+// The skeleton keeps the table's case: case-INSENSITIVITY lives one level
+// up, in the picker's collision-group key (a casefolded skeleton), because
+// casefolding inside the fold would let `Ö` casefold to `ö` and re-hit the
+// table mid-pass, splitting the very classes the generator closes.
+describe('remoteNameSkeleton case sensitivity', () => {
+  it('keeps the case-sensitive table hit in the skeleton', () => {
+    expect(remoteNameSkeleton('0rigin')).toBe('Origin');
+    expect(remoteNameSkeleton('0rigin')).not.toBe(remoteNameSkeleton('origin'));
+    expect(remoteNameSkeleton('Istanbul')).toBe('lstanbul');
+  });
+});

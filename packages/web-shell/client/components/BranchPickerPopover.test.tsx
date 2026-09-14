@@ -2980,6 +2980,230 @@ describe('BranchPickerPopover remotes view', () => {
     ).toContain('\\u{17f}');
   });
 
+  it('marks mixed-case homoglyph twins the casefolded skeleton collides', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        // The skeleton itself stays case-SENSITIVE (`0rigin` folds to
+        // `Origin`); the collision GROUP KEY casefolds the skeleton's
+        // output, so `0rigin`, `origin` and `Origin` share one group
+        // and, being an all-printable-ASCII group, ALL mark (lookalike
+        // copy). A case-sensitive group key would leave `origin`
+        // unmarked beside its case twins.
+        remote('origin'),
+        remote('0rigin'),
+        remote('Origin'),
+        // An unrelated row stays plain.
+        remote('upstream'),
+      ],
+    });
+    await openRemotesView();
+
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('origin')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('0rigin')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('Origin')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('upstream')?.textContent).not.toContain('(lookalike name)');
+    expect(rowOf('upstream')?.textContent).not.toContain('(hidden characters)');
+  });
+
+  it('marks a name carrying a U+FFFC/U+FFFD placeholder glyph', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        // U+FFFC/U+FFFD are VISIBLE Common-script symbols: the
+        // invisible class and the script-mixing arm both miss them, so
+        // the placeholder arm is the only thing standing between them
+        // and an unmarked row.
+        remote('ori\u{fffc}gin'),
+        remote('ori\u{fffd}gin'),
+        remote('origin'),
+      ],
+    });
+    await openRemotesView();
+
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('ori\u{fffc}gin')?.textContent).toContain('(lookalike name)');
+    expect(
+      rowOf('ori\u{fffc}gin')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{fffc}');
+    expect(rowOf('ori\u{fffd}gin')?.textContent).toContain('(lookalike name)');
+    expect(
+      rowOf('ori\u{fffd}gin')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{fffd}');
+    expect(rowOf('origin')?.textContent).not.toContain('(hidden characters)');
+    expect(rowOf('origin')?.textContent).not.toContain('(lookalike name)');
+  });
+
+  it('marks case-only prototype twins the case-twin arm owns', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        // `ẞ`→`ß` is a case-only prototype pair: both raw skeletons
+        // are `ß`, so the group collides even under a case-sensitive
+        // key, and the per-pair case-twin arm (arm 3) marks both rows
+        // — removing the arm leaves BOTH unmarked, the wrong-remote
+        // outcome the marker exists to prevent. (The casefolded GROUP
+        // KEY is pinned by the mixed-case test above; the
+        // prototype-script twin test pins arm 4; the mixed-case
+        // canonical twin below pins arm 1's single-row polarity.)
+        remote('ẞ'),
+        remote('ß'),
+      ],
+    });
+    await openRemotesView();
+
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('ẞ')?.textContent).toContain('(hidden characters)');
+    expect(rowOf('ß')?.textContent).toContain('(hidden characters)');
+  });
+
+  it('keeps single-row polarity for uppercase canonical twins', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        // The casefolded group key collides the pair, but pure
+        // canonical variance keeps the house polarity at any case: the
+        // NFC row is its class's canonical spelling and stays plain.
+        remote('CAFÉ'),
+        remote('CAFE\u0301'),
+      ],
+    });
+    await openRemotesView();
+
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('CAFÉ')?.textContent).not.toContain('(hidden characters)');
+    expect(rowOf('CAFE\u0301')?.textContent).toContain('(hidden characters)');
+  });
+
+  it('keeps a case-only pair marked when an unrelated member joins', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        // The case-twin arm is per-PAIR: a non-ASCII member joining the
+        // group must not disarm the ASCII case-only pair (a group-level
+        // fold would leave `Origin` plain, a regression vs HEAD).
+        remote('origin'),
+        remote('Origin'),
+        remote('0rigin'),
+        remote('οrigin'),
+      ],
+    });
+    await openRemotesView();
+
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('origin')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('Origin')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('0rigin')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('οrigin')?.textContent).toContain('(hidden characters)');
+  });
+
+  it('marks non-ASCII case-only twins the case-twin arm owns', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        // Same evidentiary failure as the all-ASCII arm, at a
+        // non-ASCII script: the group's ONLY variance is case, so
+        // neither row carries visible evidence and BOTH mark.
+        remote('café'),
+        remote('CAFÉ'),
+      ],
+    });
+    await openRemotesView();
+
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('café')?.textContent).toContain('(hidden characters)');
+    expect(rowOf('CAFÉ')?.textContent).toContain('(hidden characters)');
+  });
+
   it('keeps the hidden-characters marker when a URL homoglyph co-fires with a skeleton collision', async () => {
     const remote = (name: string, url: string) => ({
       name,

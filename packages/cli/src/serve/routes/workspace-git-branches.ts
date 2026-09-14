@@ -54,12 +54,11 @@ function redactGitPaths(detail: string, cwd: string): string {
   }
   for (const key of externals.truncatedKeys) {
     // A target longer than the read head: git echoes it whole, so the
-    // head is redacted as a PREFIX TOKEN — an exact split would leave
-    // the tail of the absolute path on the wire.
-    message = message.replace(
-      new RegExp(`${escapeRegExp(key)}\\S*`, 'g'),
-      '<workspace>',
-    );
+    // head is redacted as a PREFIX up to the end of its whitespace-
+    // delimited token — an exact split would leave the tail of the
+    // absolute path on the wire. Per-token discipline, matching the
+    // /etc/gitconfig arm below.
+    message = replaceTruncatedKey(message, key);
   }
   // Inherited-scope config files git echoes by absolute path when one is
   // malformed or unreadable (`fatal: bad config line N in file <path>`,
@@ -158,8 +157,27 @@ function redactGitPaths(detail: string, cwd: string): string {
   return message;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// Same semantics as the old `new RegExp(escapeRegExp(key) + '\\S*', 'g')`
+// replace — redact the key and the rest of its whitespace-delimited
+// token, wherever the key occurs (a quoted echo glues it mid-token) —
+// with the same per-token discipline the /etc/gitconfig arm below uses:
+// indexOf locates the literal key and only matched tokens are scanned,
+// so the arm never walks the payload per position the way a prefix
+// regex would.
+function replaceTruncatedKey(message: string, key: string): string {
+  let out = '';
+  let cursor = 0;
+  for (
+    let at = message.indexOf(key);
+    at !== -1;
+    at = message.indexOf(key, cursor)
+  ) {
+    const runLength = /^\S*/.exec(message.slice(at + key.length))![0].length;
+    const end = at + key.length + runLength;
+    out += message.slice(cursor, at) + '<workspace>';
+    cursor = end;
+  }
+  return out + message.slice(cursor);
 }
 
 // The absolute dirs outside a `.git`-FILE repo's own tree whose paths git
@@ -362,8 +380,11 @@ export function sendGitError(
     res.status(404).json({ error: 'no_such_remote', message });
     return;
   }
-  // Our own removal-verification throw (a plain Error, no git prefix): a
-  // remote NAMED after this text must not be claimed by it.
+  // Our own removal-verification throw (a plain Error, no git prefix):
+  // a remote NAMED after this text must not be claimed by it. The
+  // pushInsteadOf pre-flight reuses this message pre-destruction (the
+  // row is still listed, so the panel's stale-list re-read is a
+  // harmless no-op there).
   if (/^remote still configured after removal$/i.test(fullMessage)) {
     res.status(409).json({ error: 'remote_still_configured', message });
     return;
