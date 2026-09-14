@@ -7,16 +7,16 @@
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   fetchGitBranches,
-  findGitRoot,
   gitCheckout,
   gitCreateBranch,
   gitPush,
   gitPull,
   GitPullFailure,
   gitCommit,
-  isValidRefName,
   isValidCheckoutRef,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/git-branches.js';
+import { isValidRefName } from '@qwen-code/qwen-code-core/utils/gitDirect.js';
+import { findGitRoot } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { SendBridgeError } from '../server/error-response.js';

@@ -12,7 +12,7 @@ import {
   isRemovableRemoteName,
   isValidRemoteName,
   isValidRemoteUrl,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/git-remotes.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
