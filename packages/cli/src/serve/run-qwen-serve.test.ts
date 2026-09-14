@@ -13258,7 +13258,7 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
-  it('reports the wildcard bound address, not the inet_aton spelling', async () => {
+  it('reports what the socket bound, not what the operator typed', async () => {
     mockRemoteQuickstart.print.mockClear();
     vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-aton-pin');
     tmpDir = fs.realpathSync(
@@ -13269,7 +13269,7 @@ describe('runQwenServe channel worker supervisor', () => {
       started = await runQwenServe(
         {
           port: 0,
-          hostname: '0',
+          hostname: '0.0.0.0',
           mode: 'http-bridge',
           serveWebShell: false,
           workspace: tmpDir,
@@ -13278,10 +13278,21 @@ describe('runQwenServe channel worker supervisor', () => {
       );
       expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
       const arg = mockRemoteQuickstart.print.mock.calls[0][0];
-      // The operator spelling and the socket address differ here, so this
-      // pins that boot reports what the socket bound, not what was typed.
-      expect(arg.bind).toBe('0');
-      expect(arg.boundAddress).toBe('0.0.0.0');
+      const socket = started.server.address() as {
+        address: string;
+        port: number;
+      };
+      // This case used to bind the inet_aton spelling '0' so the typed value
+      // and the socket address differed, but Windows answers that with
+      // `getaddrinfo ENOTFOUND 0`. remote-quickstart.test.ts already pins the
+      // spelling normalisation ('0', '0.0', '::0', …) platform-independently,
+      // so what is left to witness here is the port: the operator typed 0, so
+      // a report echoing its own input would show 0 rather than the ephemeral
+      // port the listener actually got.
+      expect(arg.bind).toBe('0.0.0.0');
+      expect(arg.boundAddress).toBe(socket.address);
+      expect(arg.port).toBe(socket.port);
+      expect(arg.port).not.toBe(0);
     } finally {
       vi.unstubAllEnvs();
       await started?.close();

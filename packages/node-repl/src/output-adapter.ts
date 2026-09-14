@@ -211,6 +211,12 @@ export function convertOutcomeToMcpResult(
       message: `node_repl execution ${outcome.status}`,
     };
     errorText = `${capChars(error.name, 1024)}: ${capChars(error.message, MAX_ERROR_CHARS)}`;
+    if (error.code || error.details) {
+      errorText = capChars(errorText, 4096);
+      if (error.code) errorText += `\nCode: ${capChars(error.code, 256)}`;
+      if (error.details)
+        errorText += `\nDetails: ${capChars(error.details, 4096)}`;
+    }
     if (outcome.status === 'error' && error.stack) {
       errorText += `\n${capChars(error.stack, 2048)}`;
     }
