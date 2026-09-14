@@ -250,6 +250,36 @@ export async function freezeLoopingAnimations(page: Page): Promise<void> {
 }
 
 /**
+ * Drop focus from whatever holds it. Which element is focused is part of what a
+ * capture shows — Chrome paints a `:focus-visible` ring around it — and a
+ * scenario that does not drive focus itself inherits whatever the app happened
+ * to autofocus. The cockpit focuses its back button on mount
+ * (`SessionWorkflowCockpit.tsx`), and whether the UA draws a ring for a
+ * *programmatic* `.focus()` is a heuristic, so one unchanged tree rendered both
+ * ways: across five captures the ring appeared in three of the five light
+ * renders and three of the five dark ones, and every appearance flipped
+ * `session-workflow-cockpit-*` to CHANGED at 0.05% — 2.5× the threshold, with
+ * all 499 differing pixels inside the ring's own box and the button's border
+ * and label byte-identical (#11465). `blur()` moves focus to `<body>`, which
+ * matches no focus selector, so no ring can be painted.
+ *
+ * Deliberately NOT called from `captureScreenshot`: several captures are of a
+ * focused state on purpose, and blurring all of them moved 11 of 68 views —
+ * `slash-menu-dark` by 30.1%, since its menu is open *because* the composer has
+ * focus. Scenarios whose focus is ambient rather than the subject call this
+ * themselves, before `captureScreenshot`.
+ */
+export async function clearFocus(page: Page): Promise<void> {
+  await page.evaluate(
+    /* global document */
+    () => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement) active.blur();
+    },
+  );
+}
+
+/**
  * Record a continuous flow to `<output>/video/<name>.webm`. A dedicated
  * browser context owns the video lifecycle so the file can be saved under a
  * stable name (the CI job converts it to an inline GIF).

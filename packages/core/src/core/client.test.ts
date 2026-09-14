@@ -730,7 +730,16 @@ describe('Gemini Client (client.ts)', () => {
 
   describe('initialize', () => {
     it('initializes from the selective runtime projection without the full transcript', async () => {
-      const restoreLoadedSkillsFromHistory = vi.fn();
+      // Crossing a macrotask boundary is what makes this an oracle for the
+      // `await`: a mock that returns `undefined` (or resolves in the same
+      // tick) leaves a bare call indistinguishable from an awaited one, and
+      // the restored skills' hooks and allow rules have to be in force
+      // before the resumed session takes its first turn.
+      let skillsRestored = false;
+      const restoreLoadedSkillsFromHistory = vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        skillsRestored = true;
+      });
       vi.mocked(mockConfig.getToolRegistry().getTool).mockImplementation(
         (name: string) =>
           name === ToolNames.SKILL
@@ -775,11 +784,25 @@ describe('Gemini Client (client.ts)', () => {
       );
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
       expect(restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(apiHistory);
+      expect(skillsRestored).toBe(true);
     });
 
     it.each(['selective', 'legacy'])(
       'does not borrow another session token count during %s restore without usage',
       async (restore) => {
+        // Both call sites must finish restoring skills before initialize()
+        // resolves.
+        let skillsRestored = false;
+        const restoreLoadedSkillsFromHistory = vi.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          skillsRestored = true;
+        });
+        vi.mocked(mockConfig.getToolRegistry().getTool).mockImplementation(
+          (name: string) =>
+            name === ToolNames.SKILL
+              ? ({ restoreLoadedSkillsFromHistory } as never)
+              : undefined,
+        );
         if (restore === 'selective') {
           vi.mocked(mockConfig.getSessionRestoreRuntime).mockReturnValue({
             apiHistory: [
@@ -808,6 +831,7 @@ describe('Gemini Client (client.ts)', () => {
 
         expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(0);
         expect(resumedClient.getChat().getLastOutputTokenCount()).toBe(0);
+        expect(skillsRestored).toBe(true);
       },
     );
 
