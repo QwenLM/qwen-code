@@ -223,7 +223,7 @@ export function applyUpdates(
   return result;
 }
 
-function stripBom(content: string): string {
+export function stripBom(content: string): string {
   return content.startsWith('\uFEFF') ? content.slice(1) : content;
 }
 
