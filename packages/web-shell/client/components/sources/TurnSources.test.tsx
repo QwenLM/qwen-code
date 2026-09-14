@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, type ReactNode } from 'react';
+import { act, StrictMode, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
 import type {
@@ -14,6 +14,8 @@ import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import { AssistantMessage } from '../messages/AssistantMessage';
 import { WebShellTranscript } from '../WebShellTranscript';
+import { MessageList } from '../MessageList';
+import type { Message } from '../../adapters/types';
 import { getSourceEntries } from './sourceEntries';
 
 const web: SessionSource = {
@@ -58,8 +60,133 @@ afterEach(() => {
   if (root) act(() => root.unmount());
   container?.remove();
   container = undefined!;
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
+
+it('does not revisit historical sources or redraw their icons for streaming text', async () => {
+  vi.useFakeTimers();
+  const readLocator = vi.fn(() => web.locator);
+  const source = {
+    ...web,
+    get locator() {
+      return readLocator();
+    },
+  };
+  const sources = getSourceEntries([source], []);
+  const icon = vi.fn(() => '/sources.svg');
+  const customization = {
+    getAssistantSourcesIcon: icon,
+    sourceReferences: [
+      { sessionId: 'session', turnId: 'first', sourceId: web.id },
+    ],
+  };
+  const history: Message[] = [
+    { id: 'first', role: 'user', content: 'First question' },
+    { id: 'done', role: 'assistant', content: 'Completed report' },
+    { id: 'second', role: 'user', content: 'Second question' },
+  ];
+  const tree = (text: string) => (
+    <StrictMode>
+      <WebShellCustomizationProvider value={customization}>
+        <MessageList
+          messages={[
+            ...history,
+            { id: 'live', role: 'assistant', content: text, isStreaming: true },
+          ]}
+          isResponding
+          pendingApproval={null}
+          sourceEntries={sources}
+          sourceSessionId="session"
+        />
+      </WebShellCustomizationProvider>
+    </StrictMode>
+  );
+  render(tree('Partial'));
+  await act(async () => vi.advanceTimersByTimeAsync(100));
+  expect(container.querySelector(selector)?.textContent).toBe('1 source');
+  expect(icon).toHaveBeenCalled();
+  readLocator.mockClear();
+  icon.mockClear();
+  render(tree('Partial report'));
+  render(tree('Partial report continues'));
+  await act(async () => vi.advanceTimersByTimeAsync(100));
+  expect(container.textContent).toContain('Partial report continues');
+  expect(readLocator).not.toHaveBeenCalled();
+  expect(icon).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['inventory', []],
+  ['references', [file.id]],
+  ['session', [file.id]],
+  ['workspace', [web.id]],
+] as const)(
+  'refreshes streaming sources when %s changes',
+  (changed, expected) => {
+    let sources = getSourceEntries([web, file], []);
+    let references = [
+      { sessionId: 'session', turnId: 'first', sourceId: web.id },
+    ];
+    let sessionId = 'session';
+    let workspaceCwd = '/workspace';
+    const icon = vi.fn<WebShellSourceIconResolver>(() => '/sources.svg');
+    const history: Message[] = [
+      { id: 'first', role: 'user', content: 'First question' },
+      {
+        id: 'registration',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'register',
+            toolName: 'record_source',
+            status: 'completed',
+            args: { locator: file.locator },
+          },
+        ],
+      },
+      { id: 'done', role: 'assistant', content: 'Completed report' },
+      { id: 'second', role: 'user', content: 'Second question' },
+    ];
+    const tree = (text: string) => (
+      <WebShellCustomizationProvider
+        value={{ getAssistantSourcesIcon: icon, sourceReferences: references }}
+      >
+        <MessageList
+          messages={[
+            ...history,
+            { id: 'live', role: 'assistant', content: text, isStreaming: true },
+          ]}
+          isResponding
+          pendingApproval={null}
+          sourceEntries={sources}
+          sourceSessionId={sessionId}
+          workspaceCwd={workspaceCwd}
+        />
+      </WebShellCustomizationProvider>
+    );
+    render(tree('Partial'));
+    expect(container.querySelector(selector)?.textContent).toBe('2 sources');
+    if (changed === 'inventory') sources = [];
+    if (changed === 'references') references = [];
+    if (changed === 'session') sessionId = 'other';
+    if (changed === 'workspace') workspaceCwd = '/other';
+    render(tree('Partial report'));
+    if (!expected.length) expect(container.querySelector(selector)).toBeNull();
+    else {
+      expect(container.querySelector(selector)?.textContent).toBe('1 source');
+      expect(
+        icon.mock.calls
+          .at(-1)?.[0]
+          .map((entry) =>
+            entry.type === 'source'
+              ? entry.source.id
+              : entry.attachment.attachmentId,
+          ),
+      ).toEqual(expected);
+    }
+  },
+);
 
 it('shows real source entries on a report without footnotes and reuses its open action', () => {
   const open = vi.fn();

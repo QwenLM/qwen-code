@@ -109,6 +109,8 @@ At the Web Shell customization level, `getAssistantSourcesIcon` receives the com
 
 Hover/focus/click opens a scrollable read-only source list. Selecting a row follows the existing Sources-panel preview action. The footer cannot add, edit or remove sources. Embedded read-only transcripts receive sources, attachment entries, session identity, explicit source references and an open callback from their host. Session/workspace owner guards and existing source preview rules remain authoritative; a foreign or stale source set must never be borrowed to populate a turn.
 
+Tail-only streaming text updates reuse the last committed source associations, preserving completed turns’ source-list identities. Inventory, host references, session/workspace changes and structural transcript updates recompute the associations. Publishing the cache after commit prevents StrictMode replays or abandoned renders from replacing the committed value.
+
 Acceptance covers source counts independent of footnote counts, cross-turn reuse, attachment deduplication, failed/unknown/deleted registrations, fork-locator fallback, explicit host associations, owner isolation, source preview handoff, independent icon customization, hover/focus and ordinary footnote behavior.
 
 Host configuration example (the user-message ID identifies the turn; it is not the daemon prompt ID):

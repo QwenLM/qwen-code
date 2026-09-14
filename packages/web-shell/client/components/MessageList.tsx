@@ -3431,23 +3431,64 @@ export const MessageList = memo(
     // `visibleItems` is what actually renders.
     const { collapseCompletedTurns, sourceReferences } =
       useWebShellCustomization();
-    const sourcesByTurn = useMemo(
-      () =>
-        getSourcesByTurn(
-          messages,
-          sourceEntries ?? [],
-          workspaceCwd,
-          sourceSessionId,
-          sourceReferences,
-        ),
-      [
-        messages,
+    const sourcesByTurnCache = useRef<
+      | {
+          sourceMessages: readonly Message[];
+          dependencies: readonly unknown[];
+          value: ReadonlyMap<string, readonly WebShellSource[]>;
+        }
+      | undefined
+    >(undefined);
+    const sourcesByTurn = useMemo(() => {
+      const dependencies = [
         sourceEntries,
         workspaceCwd,
         sourceSessionId,
         sourceReferences,
-      ],
-    );
+      ] as const;
+      const cached = sourcesByTurnCache.current;
+      return streamingTailContentOnly &&
+        isResponding &&
+        cached &&
+        cached.sourceMessages === previousMessagesRef.current &&
+        sameIdentities(cached.dependencies, dependencies)
+        ? cached.value
+        : getSourcesByTurn(
+            messages,
+            sourceEntries ?? [],
+            workspaceCwd,
+            sourceSessionId,
+            sourceReferences,
+          );
+    }, [
+      messages,
+      sourceEntries,
+      workspaceCwd,
+      sourceSessionId,
+      sourceReferences,
+      streamingTailContentOnly,
+      isResponding,
+    ]);
+    useLayoutEffect(() => {
+      // Keep StrictMode replays and abandoned renders out of the cache.
+      sourcesByTurnCache.current = {
+        sourceMessages: messages,
+        dependencies: [
+          sourceEntries,
+          workspaceCwd,
+          sourceSessionId,
+          sourceReferences,
+        ],
+        value: sourcesByTurn,
+      };
+    }, [
+      messages,
+      sourceEntries,
+      workspaceCwd,
+      sourceSessionId,
+      sourceReferences,
+      sourcesByTurn,
+    ]);
     const collapseEnabled = collapseCompletedTurns ?? true;
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
