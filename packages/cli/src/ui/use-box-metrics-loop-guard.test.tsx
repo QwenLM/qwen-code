@@ -4,13 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  act,
-  StrictMode,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react';
+import { act, StrictMode, useRef, useState, type ReactNode } from 'react';
 import {
   Box,
   render,
