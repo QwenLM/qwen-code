@@ -190,6 +190,21 @@ describe('Desktop OSS mirror workflow', () => {
       source.indexOf('ancestor="$(git rev-parse "${sha}^")"'),
     ).toBeLessThan(source.indexOf('git merge-base --is-ancestor "$ancestor"'));
   });
+
+  it('says what the release arm actually establishes', () => {
+    // The release arm checks the tag's parent while the build consumes the
+    // tag commit, so the step cannot claim the bundled commit is reachable
+    // from main. Narrowing it further was measured and abandoned — real tags
+    // carry no single delta shape and none is a signed object — which leaves
+    // the wording as the remediation. Pin it: an error message that overstates
+    // what ran is the thing this whole thread was about.
+    const source = getWorkflowStep(
+      getWorkflowJob(releaseWorkflow, 'prepare'),
+      'Resolve Qwen Code source',
+    );
+    expect(source).toContain('::error::This release was not cut from main');
+    expect(source).toContain('whoever can tag and publish a release');
+  });
 });
 
 describe('Desktop release sync caller', () => {
