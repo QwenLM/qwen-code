@@ -3299,6 +3299,65 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(transportEnv['GH_TOKEN']).toBe('gh-abc');
     });
 
+    it('strips the AppImage Python environment from stdio children only under the desktop shell (#11718)', async () => {
+      process.env = {
+        ...ORIGINAL_ENV,
+        QWEN_CODE_DESKTOP: '1',
+        PYTHONHOME: '/tmp/.mount_qwen/usr/',
+        PYTHONPATH: '/tmp/.mount_qwen/usr/share/pyshared/',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport('test-server', { command: 'test-command' }, false);
+
+      const transportEnv = mockedTransport.mock.calls[0]?.[0]?.env ?? {};
+      expect(transportEnv['PYTHONHOME']).toBeUndefined();
+      expect(transportEnv['PYTHONPATH']).toBeUndefined();
+    });
+
+    it('keeps an explicit PYTHONHOME from the server config under the desktop shell (#11718)', async () => {
+      process.env = {
+        ...ORIGINAL_ENV,
+        QWEN_CODE_DESKTOP: '1',
+        PYTHONHOME: '/tmp/.mount_qwen/usr/',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport(
+        'test-server',
+        {
+          command: 'test-command',
+          env: { PYTHONHOME: '/home/user/py313' },
+        },
+        false,
+      );
+
+      const transportEnv = mockedTransport.mock.calls[0]?.[0]?.env ?? {};
+      // An explicit per-server override still wins — the strip only covers
+      // the inherited (AppImage) value, not an operator's deliberate setting.
+      expect(transportEnv['PYTHONHOME']).toBe('/home/user/py313');
+    });
+
+    it('leaves a user-provided PYTHONHOME untouched outside the desktop shell (#11718)', async () => {
+      process.env = {
+        ...ORIGINAL_ENV,
+        PYTHONHOME: '/home/user/py313',
+      };
+      delete process.env['QWEN_CODE_DESKTOP'];
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport('test-server', { command: 'test-command' }, false);
+
+      const transportEnv = mockedTransport.mock.calls[0]?.[0]?.env ?? {};
+      expect(transportEnv['PYTHONHOME']).toBe('/home/user/py313');
+    });
+
     it('should normalize PATH-like env keys on Windows for stdio transport', async () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       process.env = {

@@ -39,6 +39,8 @@ The easiest way to configure a status line is the `/statusline` command. It open
 
 This opens the preset mode configurator. Use arrow keys to navigate, space to toggle items, and enter to confirm. Your selection is saved to settings automatically.
 
+When fewer than 16 rows are available, the dialog switches to a compact list-only layout without search or preview.
+
 You can also give `/statusline` specific instructions to have it generate a command-mode configuration:
 
 ```
