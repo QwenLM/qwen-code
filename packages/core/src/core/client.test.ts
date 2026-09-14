@@ -1008,6 +1008,60 @@ describe('Gemini Client (client.ts)', () => {
       expect(resumedClient['recentCompletedToolNames']).toEqual(['web_fetch']);
     });
 
+    it('keeps a refused bridged call under the tool_call envelope on resume', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_refused_bridge',
+                      name: 'tool_call',
+                      args: {
+                        name: 'mcp__refused__tool',
+                        arguments: {},
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'call_refused_bridge',
+                      name: 'tool_call',
+                      response: { error: 'execution denied' },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient['recentCompletedToolNames']).toEqual(['tool_call']);
+      expect(resumedClient['recentCompletedToolNames']).not.toContain(
+        'mcp__refused__tool',
+      );
+    });
+
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {
       const hookSystem = {
         fireSessionStartEvent: vi.fn().mockResolvedValue(

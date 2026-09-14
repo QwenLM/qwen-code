@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import {
+  buildInheritedForkExecutionToolNames,
   EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
 } from '../../agents/runtime/agent-core.js';
@@ -1716,20 +1717,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       getCurrentAgentConfiguredToolAllowlist();
     const keepOffParentBlocklist = (toolName: string): boolean =>
       !matchesAgentToolBlocklist(parentDisallowedTools, toolName);
-    const keepWithinParentConfiguredAllowlist = (toolName: string): boolean =>
-      parentConfiguredToolAllowlist === undefined ||
-      parentConfiguredToolAllowlist.includes(toolName);
-    const defaultExecutionToolNames = Array.from(
-      new Set([
-        ...parentToolNames,
-        ...agentConfig.getToolRegistry().getAllToolNames(),
-      ]),
-    ).filter(
-      (toolName) =>
-        !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
-        keepOffParentBlocklist(toolName) &&
-        keepWithinParentConfiguredAllowlist(toolName),
-    );
+    const defaultExecutionToolNames = buildInheritedForkExecutionToolNames(
+      parentToolNames,
+      agentConfig.getToolRegistry().getAllToolNames(),
+      parentConfiguredToolAllowlist,
+    ).filter(keepOffParentBlocklist);
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
     const requestedTools = this.forkProfile?.tools ?? this.params.fork_tools;
     const isRequestedByFork = (toolName: string): boolean => {
@@ -1774,6 +1766,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         return buildForkExecutionAllowlist(
           requestedTools,
           fallbackTools,
+          parentToolNames,
         ).filter(keepOffParentBlocklist);
       }
       return fallbackTools.filter(
@@ -1781,7 +1774,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           toolName !== ToolNames.ASK_USER_QUESTION &&
           !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
           keepOffParentBlocklist(toolName) &&
-          isRequestedByFork(toolName),
+          (isRequestedByFork(toolName) ||
+            ((toolName === ToolNames.TOOL_SEARCH ||
+              toolName === ToolNames.TOOL_CALL) &&
+              parentToolNames.includes(toolName))),
       );
     };
     const requestedExecutionAllowedTools =

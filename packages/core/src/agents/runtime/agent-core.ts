@@ -221,6 +221,27 @@ export function extractParentToolNames(
 }
 
 /**
+ * Build the executable fork surface shared by launch and resume. Deferred
+ * tools are absent from the parent's declarations but remain reachable
+ * through tool_search/tool_call, so the live registry is part of this
+ * surface. A configured positive allowlist remains the outer bound.
+ */
+export function buildInheritedForkExecutionToolNames(
+  advertisedToolNames: readonly string[],
+  registeredToolNames: readonly string[],
+  configuredToolAllowlist: readonly string[] | undefined,
+): string[] {
+  return Array.from(
+    new Set([...advertisedToolNames, ...registeredToolNames]),
+  ).filter(
+    (toolName) =>
+      !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
+      (configuredToolAllowlist === undefined ||
+        configuredToolAllowlist.includes(toolName)),
+  );
+}
+
+/**
  * Prefix applied to each external message injected into a background agent's
  * reasoning loop via getExternalMessages. Kept here so tests and any future
  * parsers can import the same literal.

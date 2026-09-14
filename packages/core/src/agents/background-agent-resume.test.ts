@@ -2377,7 +2377,11 @@ describe('BackgroundAgentResumeService', () => {
         | undefined,
       includeDisplayImage: false,
       deniedTool: 'Edit',
-      expectedExecutionAllowedTools: ['Read'],
+      expectedExecutionAllowedTools: [
+        'Read',
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ],
     },
     {
       format: 'history-only bootstrap',
@@ -2385,7 +2389,13 @@ describe('BackgroundAgentResumeService', () => {
       executionAllowedTools: undefined as string[] | undefined,
       includeDisplayImage: false,
       deniedTool: ToolNames.ASK_USER_QUESTION,
-      expectedExecutionAllowedTools: ['Read', 'Edit'],
+      expectedExecutionAllowedTools: [
+        'Read',
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+        'Edit',
+        'mcp__docs__search',
+      ],
     },
     {
       format: 'legacy fork without a persisted display policy',
@@ -2393,7 +2403,13 @@ describe('BackgroundAgentResumeService', () => {
       executionAllowedTools: undefined as string[] | undefined,
       includeDisplayImage: true,
       deniedTool: ToolNames.DISPLAY_IMAGE,
-      expectedExecutionAllowedTools: ['Read', 'Edit'],
+      expectedExecutionAllowedTools: [
+        'Read',
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+        'Edit',
+        'mcp__docs__search',
+      ],
     },
   ])(
     'resumes fork agents with the current parent prompt and live tool registry ($format)',
@@ -2532,6 +2548,14 @@ describe('BackgroundAgentResumeService', () => {
           systemInstruction: currentSystemInstruction,
           advertisedTools: [
             { name: 'Read', description: 'advertised current schema' },
+            {
+              name: ToolNames.TOOL_SEARCH,
+              description: 'advertised deferred tool search',
+            },
+            {
+              name: ToolNames.TOOL_CALL,
+              description: 'advertised deferred tool call',
+            },
             ...(includeDisplayImage
               ? [
                   {
@@ -2549,6 +2573,14 @@ describe('BackgroundAgentResumeService', () => {
           ],
           registeredTools: [
             { name: 'Read', description: 'registered current schema' },
+            {
+              name: ToolNames.TOOL_SEARCH,
+              description: 'registered deferred tool search',
+            },
+            {
+              name: ToolNames.TOOL_CALL,
+              description: 'registered deferred tool call',
+            },
             ...(includeDisplayImage
               ? [
                   {
@@ -2561,6 +2593,10 @@ describe('BackgroundAgentResumeService', () => {
             {
               name: ToolNames.ASK_USER_QUESTION,
               description: 'registered interactive question schema',
+            },
+            {
+              name: 'mcp__docs__search',
+              description: 'registered deferred MCP target',
             },
           ],
         },
@@ -2592,6 +2628,8 @@ describe('BackgroundAgentResumeService', () => {
       expect(createArgs?.[5]).toEqual({
         tools: [
           'Read',
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
           ...(includeDisplayImage ? [ToolNames.DISPLAY_IMAGE] : []),
           'Edit',
           ToolNames.ASK_USER_QUESTION,

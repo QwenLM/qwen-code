@@ -2805,11 +2805,16 @@ export class LlmClient {
 
   private seedRecentCompletedToolNamesFromHistory(history: Content[]): void {
     const completedCallIds = new Set<string>();
+    const erroredCallIds = new Set<string>();
     for (const message of history) {
       for (const part of message.parts ?? []) {
-        const responseId = part.functionResponse?.id;
+        const response = part.functionResponse;
+        const responseId = response?.id;
         if (responseId) {
           completedCallIds.add(responseId);
+          if (response.response?.['error'] !== undefined) {
+            erroredCallIds.add(responseId);
+          }
         }
       }
     }
@@ -2830,7 +2835,9 @@ export class LlmClient {
         const callArgs = call.args as Record<string, unknown> | undefined;
         const bridgedName = callArgs?.['name'];
         this.rememberCompletedToolName(
-          call.name === ToolNames.TOOL_CALL && typeof bridgedName === 'string'
+          call.name === ToolNames.TOOL_CALL &&
+            typeof bridgedName === 'string' &&
+            !(call.id && erroredCallIds.has(call.id))
             ? bridgedName
             : call.name,
         );

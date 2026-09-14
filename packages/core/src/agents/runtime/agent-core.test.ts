@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import type { FunctionDeclaration, GenerateContentConfig } from '@google/genai';
 import {
   AgentCore,
+  buildInheritedForkExecutionToolNames,
   extractParentToolNames,
   type ReasoningLoopResult,
 } from './agent-core.js';
@@ -2418,5 +2419,34 @@ describe('extractParentToolNames', () => {
     expect(extractParentToolNames({} as GenerateContentConfig)).toEqual([]);
     expect(extractParentToolNames(configWithTools([]))).toEqual([]);
     expect(extractParentToolNames(configWithTools([{}]))).toEqual([]);
+  });
+});
+
+describe('buildInheritedForkExecutionToolNames', () => {
+  it('unions deferred registry tools without escaping a configured allowlist', () => {
+    expect(
+      buildInheritedForkExecutionToolNames(
+        [ToolNames.READ_FILE, ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+        [
+          ToolNames.READ_FILE,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+          'mcp__docs__search',
+          ToolNames.TASK_LIST,
+        ],
+        [
+          ToolNames.READ_FILE,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+          'mcp__docs__search',
+          ToolNames.TASK_LIST,
+        ],
+      ),
+    ).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.TOOL_SEARCH,
+      ToolNames.TOOL_CALL,
+      'mcp__docs__search',
+    ]);
   });
 });

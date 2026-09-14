@@ -4625,6 +4625,58 @@ describe('AgentTool', () => {
       ]);
     });
 
+    it('keeps both bridge tools when fork_tools grants a deferred target', async () => {
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_SEARCH,
+          description: 'Review a deferred tool',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_CALL,
+          description: 'Invoke a deferred tool',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+        'mcp__docs__search',
+      ]);
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'inspect deferred sources',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+        fork_tools: ['mcp__docs__search'],
+      });
+      await invocation.execute();
+
+      const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      expect(toolConfig?.executionAllowedTools).toEqual([
+        'mcp__docs__search',
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ]);
+    });
+
     it("keeps the parent subagent's disallowedTools out of the fork execution allowlist", async () => {
       // R24-1: the fork's execution allowlist unions the parent's declared
       // tools with the live registry. A tool the parent's own disallowedTools
