@@ -54,6 +54,33 @@ describe('privateDirectoryStat', () => {
     expect(await privateDirectoryStat(target, 'none')).toBeDefined();
   });
 
+  it('enforces current-user ownership at every strictness level', async () => {
+    if (process.platform === 'win32') return;
+    const getuid = process.getuid;
+    if (!getuid) return;
+    const target = join(temporary, 'target');
+    await mkdir(target, { mode: 0o700 });
+    const originalDescriptor = Object.getOwnPropertyDescriptor(
+      process,
+      'getuid',
+    );
+    Object.defineProperty(process, 'getuid', {
+      configurable: true,
+      value: () => getuid() + 1,
+    });
+    try {
+      expect(await privateDirectoryStat(target, 'none')).toBeUndefined();
+      expect(await privateDirectoryStat(target, 'owner-only')).toBeUndefined();
+      expect(await privateDirectoryStat(target, 'exact-0700')).toBeUndefined();
+    } finally {
+      if (originalDescriptor) {
+        Object.defineProperty(process, 'getuid', originalDescriptor);
+      } else {
+        Reflect.deleteProperty(process, 'getuid');
+      }
+    }
+  });
+
   it('skips the mode and ownership checks where the bits are synthetic', async () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform');
     Object.defineProperty(process, 'platform', { value: 'win32' });

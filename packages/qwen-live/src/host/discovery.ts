@@ -296,22 +296,14 @@ async function ensureDirectory(
 }
 
 async function assertLockShapeIfPresent(lockPath: string): Promise<void> {
-  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  let stat: Awaited<ReturnType<typeof privateDirectoryStat>>;
   try {
-    stat = await fs.lstat(lockPath);
+    stat = await privateDirectoryStat(lockPath, 'none');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
   }
-  if (
-    !stat.isDirectory() ||
-    stat.isSymbolicLink() ||
-    (process.platform !== 'win32' &&
-      typeof process.getuid === 'function' &&
-      stat.uid !== process.getuid())
-  ) {
-    throw new LiveDiscoveryStateError();
-  }
+  if (!stat) throw new LiveDiscoveryStateError();
 }
 
 async function prepareDirectory(
