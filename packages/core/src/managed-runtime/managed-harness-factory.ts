@@ -7,8 +7,10 @@
 import { createHash } from 'node:crypto';
 import {
   createAwaitActionHarnessCheckpoint,
+  createAwaitRuntimeHarnessCheckpoint,
   createInitialHarnessCheckpoint,
   createModelOutputCommittedHarnessCheckpoint,
+  createResultsReadyHarnessCheckpoint,
   encodeHarnessCheckpointV1,
   HARNESS_DURABLE_WAIT_BOUNDARY,
   HARNESS_MODEL_START_PHASES,
@@ -17,6 +19,7 @@ import {
   type HarnessCheckpointV1,
   type HarnessRunAuthorization,
 } from './managed-harness-checkpoint.js';
+import { managedRuntimeDispatchGate } from './managed-runtime-dispatch-gate.js';
 import {
   assertManagedSessionRestoreBundle,
   ManagedSessionConflictError,
@@ -89,6 +92,29 @@ export interface ManagedDurableWaitDecision {
   readonly body?: unknown;
 }
 
+export interface ManagedAwaitRuntimeCommit {
+  readonly functionCallId: string;
+  readonly executionCallId: string;
+  readonly invocationBindingId: string;
+  readonly capabilityVersion: string;
+  readonly policyVersion: string;
+  readonly mediaVersion: string | null;
+  readonly modelMessageId: string;
+  readonly partIndex: number;
+  readonly ordinal: number;
+  readonly inputDigest: string;
+  readonly progressCursor: string | null;
+  readonly attemptId: string;
+  readonly routeRef: ManagedSessionDurableRef;
+}
+
+export interface ManagedAwaitRuntimeRequest {
+  readonly functionCallId: string;
+  readonly executionCallId: string;
+  readonly invocationBindingId?: string;
+  readonly modelMessageId?: string;
+}
+
 export interface ManagedHarnessHandle {
   /** The activation this handle is allowed to present. */
   readonly activation: {
@@ -115,7 +141,8 @@ export interface ManagedHarnessHandle {
   /**
    * Drains this handle after a turn-complete or durable-wait checkpoint. Does
    * not release the Session writer, Runtime, or activation; a later handle
-   * continues. Waiter transfer and Runtime gate handover are not this method.
+   * continues. At `await_runtime` this hands the original invocation to the
+   * coordinator gate instead of cancelling it.
    */
   detach(): Promise<void>;
   /**
@@ -131,6 +158,20 @@ export interface ManagedHarnessHandle {
    * `model_output_committed`. No-op when the handle is not waiting.
    */
   resolveDurableWait(): Promise<HarnessCheckpointV1 | null>;
+  /**
+   * Commits safety point C: an admitted Runtime tool as `await_runtime` with
+   * `durable_wait`. The original executionCallId is dispatched at most once.
+   */
+  commitAwaitRuntime(
+    request: ManagedAwaitRuntimeCommit,
+  ): Promise<HarnessDurableWaitBoundary>;
+  /**
+   * Settles admitted Runtime work so the turn may continue from
+   * `results_ready`. No-op when the handle is not waiting on Runtime.
+   */
+  resolveAwaitRuntime(
+    outcomeRef: ManagedSessionDurableRef,
+  ): Promise<HarnessCheckpointV1 | null>;
 }
 
 /**
@@ -189,12 +230,14 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       );
     }
     const authorization = await this.requireRunnableAuthorization();
+    const phase = authorization.checkpoint.continuation.phase;
     if (
       latest.boundary === HARNESS_DURABLE_WAIT_BOUNDARY &&
-      authorization.checkpoint.continuation.phase !== 'await_action'
+      phase !== 'await_action' &&
+      phase !== 'await_runtime'
     ) {
       throw new ManagedSessionConflictError(
-        'durable-wait checkpoint is not an await_action phase.',
+        'durable-wait checkpoint is not an await_action or await_runtime phase.',
       );
     }
     return {
@@ -216,6 +259,18 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       throw new ManagedSessionConflictError(
         'harness cannot detach before a turn-complete or durable-wait checkpoint.',
       );
+    }
+    const authorization = await this.authority.harnessRunAuthorization();
+    if (
+      authorization.status === 'runnable' &&
+      authorization.checkpoint.continuation.phase === 'await_runtime'
+    ) {
+      const gate = managedRuntimeDispatchGate(
+        this.authority.sessionHeader.sessionKey,
+      );
+      for (const binding of authorization.checkpoint.runtime?.bindings ?? []) {
+        gate.handoff(binding.executionCallId);
+      }
     }
     this.detached = true;
   }
@@ -339,6 +394,154 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     });
     await this.commitHarnessCheckpoint(
       `harness:model_output_committed:${this.activation.activationId}:${identity.coveredSequence}`,
+      checkpoint,
+      null,
+    );
+    return checkpoint;
+  }
+
+  async commitAwaitRuntime(
+    request: ManagedAwaitRuntimeCommit,
+  ): Promise<HarnessDurableWaitBoundary> {
+    this.assertNotDetached();
+    this.assertCurrentActivation();
+    const latest = this.authority.latestCheckpoint;
+    if (latest?.boundary === HARNESS_DURABLE_WAIT_BOUNDARY) {
+      const authorization = await this.requireRunnableAuthorization();
+      const waiting = (authorization.checkpoint.tools?.items ?? []).some(
+        (item) =>
+          item.executionCallId === request.executionCallId &&
+          item.state === 'in_progress',
+      );
+      if (
+        authorization.checkpoint.continuation.phase === 'await_runtime' &&
+        waiting === true
+      ) {
+        return {
+          kind: 'durable_wait',
+          checkpointId: latest.checkpointId,
+          coveredSequence: latest.coveredSequence,
+          activationId: this.activation.activationId,
+          epoch: this.activation.epoch,
+        };
+      }
+      throw new ManagedSessionConflictError(
+        authorization.checkpoint.continuation.phase === 'await_action'
+          ? 'approval wait must resolve before Runtime dispatch.'
+          : 'harness is already waiting on a different Runtime invocation.',
+      );
+    }
+
+    const previous = await this.ensureRunnable();
+    const gate = managedRuntimeDispatchGate(
+      this.authority.sessionHeader.sessionKey,
+    );
+    gate.claim(request.executionCallId);
+    try {
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint = createAwaitRuntimeHarnessCheckpoint({
+        previous,
+        ...identity,
+        attempt: previous.attempt ?? {
+          attemptId: request.attemptId,
+          routeRef: request.routeRef,
+          capabilityRef: null,
+          samplingRef: null,
+          outputState: 'output_committed',
+          usageRef: null,
+          budgetConsumed: 0,
+        },
+        tools: {
+          batchId: previous.tools?.batchId ?? `batch-${request.functionCallId}`,
+          items: [
+            ...(previous.tools?.items ?? []).filter(
+              (item) => item.state === 'settled',
+            ),
+            {
+              functionCallId: request.functionCallId,
+              executionCallId: request.executionCallId,
+              modelMessageId: request.modelMessageId,
+              partIndex: request.partIndex,
+              ordinal: request.ordinal,
+              inputDigest: request.inputDigest,
+              outcomeSource: 'runtime',
+              state: 'in_progress',
+              outcomeRef: null,
+              consumed: false,
+            },
+          ],
+        },
+        runtime: {
+          bindings: [
+            ...(previous.runtime?.bindings ?? []).filter(
+              (binding) => binding.state !== 'dispatch',
+            ),
+            {
+              executionCallId: request.executionCallId,
+              invocationBindingId: request.invocationBindingId,
+              capabilityVersion: request.capabilityVersion,
+              policyVersion: request.policyVersion,
+              mediaVersion: request.mediaVersion,
+              state: 'dispatch',
+              progressCursor: request.progressCursor,
+            },
+          ],
+        },
+      });
+      await this.commitHarnessCheckpoint(
+        `harness:await_runtime:${this.activation.activationId}:${request.executionCallId}:${identity.coveredSequence}`,
+        checkpoint,
+        HARNESS_DURABLE_WAIT_BOUNDARY,
+      );
+    } catch (error) {
+      gate.unclaim(request.executionCallId);
+      throw error;
+    }
+    const committed = this.authority.latestCheckpoint;
+    if (committed === undefined) {
+      gate.unclaim(request.executionCallId);
+      throw new ManagedSessionConflictError(
+        'Runtime wait was committed but no checkpoint was recorded.',
+      );
+    }
+    return {
+      kind: 'durable_wait',
+      checkpointId: committed.checkpointId,
+      coveredSequence: committed.coveredSequence,
+      activationId: this.activation.activationId,
+      epoch: this.activation.epoch,
+    };
+  }
+
+  async resolveAwaitRuntime(
+    outcomeRef: ManagedSessionDurableRef,
+  ): Promise<HarnessCheckpointV1 | null> {
+    this.assertNotDetached();
+    this.assertCurrentActivation();
+    const latest = this.authority.latestCheckpoint;
+    if (latest?.boundary !== HARNESS_DURABLE_WAIT_BOUNDARY) {
+      return null;
+    }
+    const previous = (await this.requireRunnableAuthorization()).checkpoint;
+    if (previous.continuation.phase !== 'await_runtime') {
+      throw new ManagedSessionConflictError(
+        'durable-wait checkpoint is not an await_runtime phase.',
+      );
+    }
+    const gate = managedRuntimeDispatchGate(
+      this.authority.sessionHeader.sessionKey,
+    );
+    for (const binding of previous.runtime?.bindings ?? []) {
+      gate.settle(binding.executionCallId);
+    }
+    const identity = this.nextCheckpointIdentity();
+    const checkpoint = createResultsReadyHarnessCheckpoint({
+      previous,
+      ...identity,
+      outcomeRef,
+    });
+    await this.commitHarnessCheckpoint(
+      `harness:results_ready:${this.activation.activationId}:${identity.coveredSequence}`,
       checkpoint,
       null,
     );

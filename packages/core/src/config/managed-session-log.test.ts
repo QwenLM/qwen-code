@@ -31,6 +31,10 @@ import {
   MANAGED_SESSION_HEADER_SUBTYPE,
 } from '../managed-runtime/managed-session-records.js';
 import {
+  managedRuntimeDispatchGate,
+  resetManagedRuntimeDispatchGatesForTest,
+} from '../managed-runtime/managed-runtime-dispatch-gate.js';
+import {
   isManagedSessionTranscriptSync,
   localManagedSessionKey,
   managedSessionResourceRoot,
@@ -44,6 +48,7 @@ afterEach(async () => {
     await rm(directory, { recursive: true, force: true });
   }
   temporaryDirectories.clear();
+  resetManagedRuntimeDispatchGatesForTest();
   vi.restoreAllMocks();
 });
 
@@ -618,6 +623,82 @@ describe('managed session log activation', () => {
       ).resolves.toBeNull();
       await second.config.ensureManagedHarnessRunnable();
       await second.config.closeSessionWriter();
+    });
+  });
+
+  it('persists admitted Runtime work without replacing the Harness handle', async () => {
+    await withWorkspace(async (activate) => {
+      const fixture = await activate({ managedSessionLog: true });
+      const recorder = fixture.config.getChatRecordingService()!;
+      recorder.recordUserMessage('run a remote tool');
+      await recorder.flush();
+      await fixture.config.ensureManagedHarnessRunnable();
+
+      await fixture.config.commitManagedAwaitRuntime({
+        functionCallId: 'fc-rt-1',
+        executionCallId: 'ex-rt-1',
+        invocationBindingId: 'bind-rt-1',
+        modelMessageId: 'msg-rt-1',
+      });
+
+      const waiting = checkpointPayloads(
+        await transcriptRecords(fixture.transcriptPath),
+      );
+      expect(waiting).toHaveLength(2);
+      expect(waiting[1]).toMatchObject({ boundary: 'durable_wait' });
+      expect(await readCheckpointPhase(fixture, waiting[1])).toBe(
+        'await_runtime',
+      );
+      await expect(
+        fixture.config.ensureManagedHarnessRunnable(),
+      ).rejects.toMatchObject({ reason: 'invalid_state' });
+      expect(
+        fixture.config.shouldRetainManagedRuntimeInvocation('ex-rt-1'),
+      ).toBe(false);
+
+      const sessionKey = localManagedSessionKey(
+        fixture.config.getProjectRoot(),
+        sessionId,
+      );
+      managedRuntimeDispatchGate(sessionKey).handoff('ex-rt-1');
+      expect(
+        fixture.config.shouldRetainManagedRuntimeInvocation('ex-rt-1'),
+      ).toBe(true);
+
+      await expect(
+        fixture.config.resolveManagedAwaitRuntime({
+          functionCallId: 'fc-rt-1',
+          executionCallId: 'ex-rt-1',
+          outcome: 'completed',
+          body: { output: 'ok' },
+        }),
+      ).resolves.toBeUndefined();
+      await fixture.config.ensureManagedHarnessRunnable();
+
+      const after = await transcriptRecords(fixture.transcriptPath);
+      const payloads = checkpointPayloads(after);
+      expect(payloads).toHaveLength(3);
+      expect(payloads[2]['boundary']).toBeNull();
+      expect(await readCheckpointPhase(fixture, payloads[2])).toBe(
+        'results_ready',
+      );
+      expect(
+        fixture.config.shouldRetainManagedRuntimeInvocation('ex-rt-1'),
+      ).toBe(false);
+
+      const events = after
+        .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
+        .map((entry) => entry['managedSession'] as Record<string, unknown>);
+      expect(
+        events
+          .filter((event) => event['kind'] === 'activation.changed')
+          .map(
+            (event) =>
+              (event['payload'] as Record<string, unknown>)['phase'] as string,
+          ),
+      ).toEqual(['active']);
+
+      await fixture.config.closeSessionWriter();
     });
   });
 

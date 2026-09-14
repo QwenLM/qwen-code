@@ -12,6 +12,7 @@ import { Storage } from '../config/storage.js';
 import {
   createManagedHarnessHandle,
   ManagedHarnessBlockedError,
+  type ManagedAwaitRuntimeCommit,
   type ManagedDurableWaitCommit,
 } from './managed-harness-factory.js';
 import {
@@ -30,6 +31,10 @@ import {
   type ManagedSessionCommand,
 } from './managed-session-authority.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import {
+  managedRuntimeDispatchGate,
+  resetManagedRuntimeDispatchGatesForTest,
+} from './managed-runtime-dispatch-gate.js';
 
 const DIGEST = '9'.repeat(64);
 const sessionId = '550e8400-e29b-41d4-a716-4466554400bb';
@@ -37,6 +42,7 @@ const sessionKey = { tenantId: 't1', workspaceId: 'w1', sessionId };
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
+  resetManagedRuntimeDispatchGatesForTest();
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -520,6 +526,127 @@ describe('managed harness factory', () => {
     ).rejects.toThrow(/already decided/);
     await session.close();
   });
+
+  it('commits admitted Runtime work as await_runtime and settles to results_ready', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const commit = await runtimeCommit(session);
+    const boundary = await handle.commitAwaitRuntime(commit);
+    expect(boundary.kind).toBe('durable_wait');
+    expect(session.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_DURABLE_WAIT_BOUNDARY,
+    );
+    expect(
+      parseHarnessCheckpointV1((await session.authority.readCheckpointState())!)
+        .continuation.phase,
+    ).toBe('await_runtime');
+    await expect(handle.ensureRunnable()).rejects.toMatchObject({
+      reason: 'invalid_state',
+    });
+    await expect(handle.requestBoundary()).resolves.toMatchObject({
+      kind: 'durable_wait',
+      checkpointId: boundary.checkpointId,
+    });
+    expect(managedRuntimeDispatchGate(sessionKey).state('ex-1')).toBe(
+      'dispatch',
+    );
+
+    const same = await handle.commitAwaitRuntime(commit);
+    expect(same.checkpointId).toBe(boundary.checkpointId);
+    await expect(
+      handle.commitAwaitRuntime({ ...commit, executionCallId: 'ex-2' }),
+    ).rejects.toThrow(/already waiting on a different Runtime invocation/);
+
+    await handle.detach();
+    expect(managedRuntimeDispatchGate(sessionKey).isHandedOff('ex-1')).toBe(
+      true,
+    );
+    await expect(handle.resolveAwaitRuntime(commit.routeRef)).rejects.toThrow(
+      /detached/,
+    );
+
+    const next = createManagedHarnessHandle(session);
+    const again = await next.commitAwaitRuntime(commit);
+    expect(again.checkpointId).toBe(boundary.checkpointId);
+    expect(() => managedRuntimeDispatchGate(sessionKey).claim('ex-1')).toThrow(
+      /already dispatched/,
+    );
+
+    const outcomeRef = await session.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from('{"outcome":"completed"}', 'utf8'),
+    );
+    const ready = await next.resolveAwaitRuntime(outcomeRef);
+    expect(ready?.continuation.phase).toBe('results_ready');
+    expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+    const runnable = await next.ensureRunnable();
+    expect(runnable.continuation.phase).toBe('results_ready');
+    expect(managedRuntimeDispatchGate(sessionKey).state('ex-1')).toBe(
+      'settled',
+    );
+    await expect(next.commitAwaitRuntime(commit)).rejects.toThrow(
+      /already dispatched/,
+    );
+    await session.close();
+  });
+
+  it('keeps await_runtime across a cold reopen until results are settled', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    await handle.commitAwaitRuntime(await runtimeCommit(session));
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+
+    const reopened = await openManagedSession({
+      runtimeBaseDir: workspace.runtimeBaseDir,
+      sessionId,
+      transcriptPath: workspace.transcriptPath,
+      sessionKey,
+      cwd: workspace.projectRoot,
+      version: 'test',
+      workerId: 'worker-1',
+      activationLeaseDurationMs: 60_000,
+    });
+    expect(reopened.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_DURABLE_WAIT_BOUNDARY,
+    );
+    expect(
+      parseHarnessCheckpointV1(
+        (await reopened.authority.readCheckpointState())!,
+      ).continuation.phase,
+    ).toBe('await_runtime');
+    const next = createManagedHarnessHandle(reopened);
+    await expect(next.ensureRunnable()).rejects.toMatchObject({
+      reason: 'invalid_state',
+    });
+    expect(
+      managedRuntimeDispatchGate(sessionKey).state('ex-1'),
+    ).toBeUndefined();
+    const outcomeRef = await reopened.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from('{"outcome":"completed"}', 'utf8'),
+    );
+    const ready = await next.resolveAwaitRuntime(outcomeRef);
+    expect(ready?.continuation.phase).toBe('results_ready');
+    const runnable = await next.ensureRunnable();
+    expect(runnable.continuation.phase).toBe('results_ready');
+    await reopened.close();
+  });
+
+  it('rejects Runtime dispatch while an approval wait is still open', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    await handle.commitDurableWait(waitCommit(await waitRefs(session)));
+    await expect(
+      handle.commitAwaitRuntime(await runtimeCommit(session)),
+    ).rejects.toThrow(/approval wait must resolve before Runtime dispatch/);
+    await session.close();
+  });
 });
 
 async function waitRefs(session: ManagedSession): Promise<{
@@ -575,4 +702,27 @@ async function decideAction(
     },
     { requestId, state: 'decided', decisionRef },
   );
+}
+
+async function runtimeCommit(
+  session: ManagedSession,
+): Promise<ManagedAwaitRuntimeCommit> {
+  return {
+    functionCallId: 'fc-1',
+    executionCallId: 'ex-1',
+    invocationBindingId: 'bind-1',
+    capabilityVersion: 'cap-1',
+    policyVersion: 'pol-1',
+    mediaVersion: null,
+    modelMessageId: 'msg-1',
+    partIndex: 0,
+    ordinal: 0,
+    inputDigest: DIGEST,
+    progressCursor: null,
+    attemptId: 'att-fc-1',
+    routeRef: await session.resources.publish(
+      'managed-route',
+      Buffer.from('{"model":"qwen3-coder-plus"}', 'utf8'),
+    ),
+  };
 }

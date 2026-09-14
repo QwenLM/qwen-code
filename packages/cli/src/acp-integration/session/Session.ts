@@ -12187,8 +12187,19 @@ export class Session implements SessionContext {
     let managedDrain: Promise<void> | undefined;
     let managedPostHookConsumed = false;
     let managedFailureHookConsumed = false;
+    let managedRuntimeWaitCommitted = false;
     const drainManagedInvocation = async () => {
       if (managedInvocation) {
+        if (
+          !abortSignal.aborted &&
+          this.config.shouldRetainManagedRuntimeInvocation?.(
+            managedInvocation.toolUseId,
+          ) === true
+        ) {
+          // Detach at await_runtime hands the original invocation to the
+          // coordinator; cancelAndDrain would cancel the in-flight tool.
+          return;
+        }
         managedDrain ??= managedInvocation.cancelAndDrain();
         await managedDrain;
       }
@@ -13834,6 +13845,15 @@ export class Session implements SessionContext {
             const staleTodoPlanApproval = await cancelStaleTodoPlanApproval();
             if (staleTodoPlanApproval) return staleTodoPlanApproval;
             invocation.managed?.authorize();
+            if (invocation.managed && this.config.commitManagedAwaitRuntime) {
+              await this.config.commitManagedAwaitRuntime({
+                functionCallId: callId,
+                executionCallId: invocation.managed.toolUseId,
+                invocationBindingId: invocation.managed.toolUseId,
+                modelMessageId: promptId,
+              });
+              managedRuntimeWaitCommitted = true;
+            }
 
             const continuedAgentId =
               toolName === ToolNames.SEND_MESSAGE &&
@@ -14620,6 +14640,27 @@ export class Session implements SessionContext {
         executionStatus,
       });
     } finally {
+      if (managedInvocation && managedRuntimeWaitCommitted) {
+        if (
+          abortSignal.aborted ||
+          this.config.shouldRetainManagedRuntimeInvocation?.(
+            managedInvocation.toolUseId,
+          ) !== true
+        ) {
+          const outcome =
+            abortSignal.aborted || terminalStatus === 'cancelled'
+              ? 'cancelled'
+              : terminalStatus === 'success'
+                ? 'completed'
+                : 'failed';
+          await this.config.resolveManagedAwaitRuntime?.({
+            functionCallId: callId,
+            executionCallId: managedInvocation.toolUseId,
+            outcome,
+            body: managedInvocation.result ?? null,
+          });
+        }
+      }
       if (managedInvocation) await drainManagedInvocation();
       if (terminalStatus && terminalStatus !== 'cancelled') {
         this.config.getLlmClient().recordCompletedToolCall(toolName, args);

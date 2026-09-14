@@ -1361,6 +1361,111 @@ export function createAwaitActionHarnessCheckpoint(input: {
 }
 
 /**
+ * Safety point C: an admitted Runtime tool is in progress. Coordinator owns
+ * dispatch; the next model request stays blocked until results_ready.
+ */
+export function createAwaitRuntimeHarnessCheckpoint(input: {
+  readonly previous: HarnessCheckpointV1;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly previousCheckpointId: string | null;
+  readonly attempt: HarnessAttemptGroup;
+  readonly tools: HarnessToolsGroup;
+  readonly runtime: HarnessRuntimeGroup;
+}): HarnessCheckpointV1 {
+  if (input.previous.approval?.state === 'requested') {
+    throw new ManagedSessionRecordError(
+      'await_runtime cannot keep a requested approval.',
+    );
+  }
+  return {
+    identity: {
+      ...input.previous.identity,
+      checkpointId: input.checkpointId,
+      coveredSequence: input.coveredSequence,
+      previousCheckpointId: input.previousCheckpointId,
+    },
+    resume: {
+      ...input.previous.resume,
+      throughSequence: input.coveredSequence,
+    },
+    continuation: {
+      phase: 'await_runtime',
+      pendingEventIds: [],
+    },
+    attempt: input.attempt,
+    tools: input.tools,
+    runtime: input.runtime,
+    approval: null,
+    output: input.previous.output,
+    followUp: input.previous.followUp,
+  };
+}
+
+/**
+ * After admitted Runtime work settles, the turn may start the next model
+ * request from `results_ready`. Dispatch bindings are no longer in flight.
+ */
+export function createResultsReadyHarnessCheckpoint(input: {
+  readonly previous: HarnessCheckpointV1;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly previousCheckpointId: string | null;
+  readonly outcomeRef: ManagedSessionDurableRef;
+}): HarnessCheckpointV1 {
+  if (input.previous.continuation.phase !== 'await_runtime') {
+    throw new ManagedSessionRecordError(
+      'results_ready resume requires an await_runtime checkpoint.',
+    );
+  }
+  if (input.previous.attempt === null || input.previous.tools === null) {
+    throw new ManagedSessionRecordError(
+      'results_ready requires the waited attempt and tools.',
+    );
+  }
+  return {
+    identity: {
+      ...input.previous.identity,
+      checkpointId: input.checkpointId,
+      coveredSequence: input.coveredSequence,
+      previousCheckpointId: input.previousCheckpointId,
+    },
+    resume: {
+      ...input.previous.resume,
+      throughSequence: input.coveredSequence,
+    },
+    continuation: {
+      phase: 'results_ready',
+      pendingEventIds: [],
+    },
+    attempt: input.previous.attempt,
+    tools: {
+      batchId: input.previous.tools.batchId,
+      items: input.previous.tools.items.map((item) =>
+        item.state === 'in_progress'
+          ? {
+              ...item,
+              state: 'settled',
+              outcomeRef: input.outcomeRef,
+              consumed: false,
+            }
+          : item,
+      ),
+    },
+    runtime: {
+      bindings: runtimeBindings(input.previous.runtime).map((binding) =>
+        binding.state === 'dispatch'
+          ? { ...binding, state: 'settled' }
+          : binding,
+      ),
+    },
+    approval: null,
+    output: input.previous.output,
+    followUp: input.previous.followUp,
+  };
+}
+
+/**
  * After a durable wait is resolved, the turn continues without a new model
  * start reservation. Phase is `model_output_committed` so the next model
  * request is allowed; the requested approval is cleared.

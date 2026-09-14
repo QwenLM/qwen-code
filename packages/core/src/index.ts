@@ -160,6 +160,7 @@ export * from './managed-runtime/managed-session-inbox.js';
 export * from './managed-runtime/managed-session-assembly.js';
 export * from './managed-runtime/managed-harness-checkpoint.js';
 export * from './managed-runtime/managed-harness-factory.js';
+export * from './managed-runtime/managed-runtime-dispatch-gate.js';
 export * from './managed-runtime/managed-session-authority.js';
 export * from './managed-runtime/managed-session-message-projection.js';
 export * from './managed-runtime/managed-session-record-sink.js';

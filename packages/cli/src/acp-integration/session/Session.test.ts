@@ -944,6 +944,9 @@ describe('Session', () => {
       readPendingManagedApprovalWait: vi.fn().mockResolvedValue(null),
       commitManagedDurableWait: vi.fn().mockResolvedValue(undefined),
       resolveManagedDurableWait: vi.fn().mockResolvedValue(undefined),
+      commitManagedAwaitRuntime: vi.fn().mockResolvedValue(undefined),
+      resolveManagedAwaitRuntime: vi.fn().mockResolvedValue(undefined),
+      shouldRetainManagedRuntimeInvocation: vi.fn().mockReturnValue(false),
       setActiveTodoReminder: vi.fn(),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
@@ -34938,6 +34941,18 @@ describe('Session', () => {
           output: 'remote output',
         });
         expect(remote.tool.build).toHaveBeenCalledTimes(1);
+        expect(mockConfig.commitManagedAwaitRuntime).toHaveBeenCalledWith({
+          functionCallId: 'managed-call',
+          executionCallId: 'runtime-tool-use-id',
+          invocationBindingId: 'runtime-tool-use-id',
+          modelMessageId: 'managed-prompt',
+        });
+        expect(mockConfig.resolveManagedAwaitRuntime).toHaveBeenCalledWith({
+          functionCallId: 'managed-call',
+          executionCallId: 'runtime-tool-use-id',
+          outcome: 'completed',
+          body: { executionStatus: 'success' },
+        });
         expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
           expect.objectContaining({
             update: expect.objectContaining({
@@ -34945,6 +34960,61 @@ describe('Session', () => {
               locations: [{ path: '/remote/workspace/file.txt', line: null }],
             }),
           }),
+        );
+      });
+
+      it('keeps a handed-off Runtime invocation instead of draining it', async () => {
+        mockConfig.shouldRetainManagedRuntimeInvocation = vi
+          .fn()
+          .mockReturnValue(true);
+        const remote = managedTool();
+        mockToolRegistry.getTool.mockReturnValue(remote.tool);
+        const result = await run();
+        expect(remote.events).toEqual([
+          'prepare',
+          'permission',
+          'preflight',
+          'authorize',
+          'execute',
+        ]);
+        expect(remote.managed.cancelAndDrain).not.toHaveBeenCalled();
+        expect(mockConfig.commitManagedAwaitRuntime).toHaveBeenCalled();
+        expect(mockConfig.resolveManagedAwaitRuntime).not.toHaveBeenCalled();
+        expect(result.parts[0].functionResponse?.response).toEqual({
+          output: 'remote output',
+        });
+      });
+
+      it('still drains a handed-off Runtime invocation when the user aborts', async () => {
+        mockConfig.shouldRetainManagedRuntimeInvocation = vi
+          .fn()
+          .mockReturnValue(true);
+        const remote = managedTool();
+        const controller = new AbortController();
+        remote.invocation.execute.mockImplementation(async () => {
+          if (controller.signal.aborted) throw new Error('aborted');
+          await new Promise<void>((_, reject) => {
+            controller.signal.addEventListener(
+              'abort',
+              () => reject(new Error('aborted')),
+              { once: true },
+            );
+          });
+          return {
+            llmContent: 'late',
+            returnDisplay: 'late',
+          };
+        });
+        mockToolRegistry.getTool.mockReturnValue(remote.tool);
+        const pending = run(controller.signal);
+        await vi.waitFor(() =>
+          expect(remote.invocation.execute).toHaveBeenCalled(),
+        );
+        controller.abort();
+        await pending;
+        expect(remote.managed.cancelAndDrain).toHaveBeenCalled();
+        expect(mockConfig.resolveManagedAwaitRuntime).toHaveBeenCalledWith(
+          expect.objectContaining({ outcome: 'cancelled' }),
         );
       });
 

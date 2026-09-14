@@ -289,10 +289,12 @@ import {
 } from '../managed-runtime/managed-harness-checkpoint.js';
 import {
   createManagedHarnessHandle,
+  type ManagedAwaitRuntimeRequest,
   type ManagedDurableWaitDecision,
   type ManagedDurableWaitRequest,
   type ManagedHarnessHandle,
 } from '../managed-runtime/managed-harness-factory.js';
+import { managedRuntimeDispatchGate } from '../managed-runtime/managed-runtime-dispatch-gate.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
 import type {
   ManagedSessionDurableRef,
@@ -5076,6 +5078,76 @@ export class Config {
       },
     );
     await this.managedHarness.resolveDurableWait();
+  }
+
+  async commitManagedAwaitRuntime(
+    request: ManagedAwaitRuntimeRequest,
+  ): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    this.managedHarness ??= createManagedHarnessHandle(session);
+    const routeRef = await session.resources.publish(
+      'managed-route',
+      Buffer.from(JSON.stringify({ model: this.getModel() }), 'utf8'),
+    );
+    await this.managedHarness.commitAwaitRuntime({
+      functionCallId: request.functionCallId,
+      executionCallId: request.executionCallId,
+      invocationBindingId:
+        request.invocationBindingId ?? request.executionCallId,
+      capabilityVersion: 'runtime-v1',
+      policyVersion: 'policy-v1',
+      mediaVersion: null,
+      modelMessageId: request.modelMessageId ?? request.functionCallId,
+      partIndex: 0,
+      ordinal: 0,
+      inputDigest: createHash('sha256')
+        .update(request.functionCallId)
+        .update('\0')
+        .update(request.executionCallId)
+        .digest('hex'),
+      progressCursor: null,
+      attemptId: `att-${request.functionCallId}`,
+      routeRef,
+    });
+  }
+
+  async resolveManagedAwaitRuntime(request: {
+    functionCallId: string;
+    executionCallId: string;
+    outcome: 'completed' | 'failed' | 'cancelled';
+    body?: unknown;
+  }): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    this.managedHarness ??= createManagedHarnessHandle(session);
+    const resultRef = await session.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from(
+        JSON.stringify({
+          functionCallId: request.functionCallId,
+          executionCallId: request.executionCallId,
+          outcome: request.outcome,
+          body: request.body ?? null,
+        }),
+        'utf8',
+      ),
+    );
+    await this.managedHarness.resolveAwaitRuntime(resultRef);
+  }
+
+  shouldRetainManagedRuntimeInvocation(executionCallId: string): boolean {
+    const session = this.managedSession;
+    if (
+      session === undefined ||
+      session.authority.latestCheckpoint?.boundary !==
+        HARNESS_DURABLE_WAIT_BOUNDARY
+    ) {
+      return false;
+    }
+    return managedRuntimeDispatchGate(
+      session.authority.sessionHeader.sessionKey,
+    ).isHandedOff(executionCallId);
   }
 
   /**

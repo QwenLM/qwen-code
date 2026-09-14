@@ -8,9 +8,11 @@ import { describe, expect, it } from 'vitest';
 import {
   authorizeParsedHarnessCheckpoint,
   createAwaitActionHarnessCheckpoint,
+  createAwaitRuntimeHarnessCheckpoint,
   createInitialHarnessCheckpoint,
   createModelOutputCommittedHarnessCheckpoint,
   createNextTurnReadyHarnessCheckpoint,
+  createResultsReadyHarnessCheckpoint,
   encodeHarnessCheckpointV1,
   parseHarnessCheckpointV1,
   tryParseHarnessCheckpointV1,
@@ -95,6 +97,41 @@ function requestedUserApproval() {
     state: 'requested' as const,
     decisionRef: null,
     invocationRef: null,
+  };
+}
+
+function inProgressRuntime() {
+  return {
+    tools: {
+      batchId: 'batch-1',
+      items: [
+        {
+          functionCallId: 'fc-1',
+          executionCallId: 'ex-1',
+          modelMessageId: 'msg-1',
+          partIndex: 0,
+          ordinal: 0,
+          inputDigest: DIGEST,
+          outcomeSource: 'runtime' as const,
+          state: 'in_progress' as const,
+          outcomeRef: null,
+          consumed: false,
+        },
+      ],
+    },
+    runtime: {
+      bindings: [
+        {
+          executionCallId: 'ex-1',
+          invocationBindingId: 'bind-1',
+          capabilityVersion: 'cap-1',
+          policyVersion: 'pol-1',
+          mediaVersion: null,
+          state: 'dispatch' as const,
+          progressCursor: null,
+        },
+      ],
+    },
   };
 }
 
@@ -383,5 +420,71 @@ describe('harness checkpoint v1', () => {
         previousCheckpointId: 'ckpt-4',
       }),
     ).toThrow(/requires the waited attempt/);
+  });
+
+  it('builds await_runtime from a previous checkpoint and resumes to results_ready', () => {
+    const wait = createAwaitRuntimeHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      ...inProgressRuntime(),
+    });
+    expect(wait.continuation.phase).toBe('await_runtime');
+    expect(wait.approval).toBeNull();
+    expect(wait.tools?.items[0]?.state).toBe('in_progress');
+    expect(wait.runtime?.bindings[0]?.state).toBe('dispatch');
+    expect(parseHarnessCheckpointV1(bytesOf(wait))).toEqual(wait);
+
+    const outcomeRef = ref('managed-tool-outcome');
+    const ready = createResultsReadyHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      outcomeRef,
+    });
+    expect(ready.continuation.phase).toBe('results_ready');
+    expect(ready.tools?.items[0]).toMatchObject({
+      state: 'settled',
+      outcomeRef,
+      consumed: false,
+    });
+    expect(ready.runtime?.bindings[0]?.state).toBe('settled');
+    expect(parseHarnessCheckpointV1(bytesOf(ready))).toEqual(ready);
+  });
+
+  it('rejects await_runtime that still has a requested approval', () => {
+    const previous = createAwaitActionHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      approval: requestedUserApproval(),
+    });
+    expect(() =>
+      createAwaitRuntimeHarnessCheckpoint({
+        previous,
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        attempt: committedAttempt(),
+        ...inProgressRuntime(),
+      }),
+    ).toThrow(/cannot keep a requested approval/);
+  });
+
+  it('rejects results_ready resume without an await_runtime checkpoint', () => {
+    expect(() =>
+      createResultsReadyHarnessCheckpoint({
+        previous: seed(),
+        checkpointId: 'ckpt-5',
+        coveredSequence: 4,
+        previousCheckpointId: 'ckpt-4',
+        outcomeRef: ref('managed-tool-outcome'),
+      }),
+    ).toThrow(/requires an await_runtime checkpoint/);
   });
 });
