@@ -86,6 +86,45 @@ afterEach(() => {
 });
 
 describe('NodeReplKernelManager', () => {
+  it('preserves bounded error diagnostics without invoking getters or custom inspectors', async () => {
+    const result = await run(`
+      var invoked = 0;
+      var details = {
+        action: { operation: 'fill', performed: true },
+        verification: { status: 'failed', reason: 'value_mismatch' },
+        image: 'x'.repeat(100_000),
+        get unsafe() { invoked++; throw new Error('getter ran'); },
+        [Symbol.for('nodejs.util.inspect.custom')]() { invoked++; throw new Error('inspector ran'); },
+      };
+      details.self = details;
+      throw Object.assign(new Error('Verification failed'), { code: 'verification_failed', details });
+    `);
+    expect(result.status).toBe('error');
+    expect(result.error?.code).toBe('verification_failed');
+    expect(result.error?.details).toContain("operation: 'fill'");
+    expect(result.error?.details).toContain('performed: true');
+    expect(result.error?.details).toContain("reason: 'value_mismatch'");
+    expect(result.error?.details).toContain('Circular');
+    expect(result.error?.details?.length).toBeLessThan(4200);
+    const followUp = await run('nodeRepl.write(invoked);');
+    expect(followUp.error).toBeUndefined();
+    expect(texts(followUp)).toContain('0');
+  });
+
+  it('keeps the original error when optional diagnostics are unreadable', async () => {
+    const result = await run(`
+      var invoked = 0;
+      throw Object.defineProperties(new Error('original'), {
+        code: { get() { invoked++; throw new Error('code getter'); } },
+        details: { get() { invoked++; throw new Error('details getter'); } },
+      });
+    `);
+    expect(result.error?.message).toBe('original');
+    expect(result.error?.code).toBeUndefined();
+    expect(result.error?.details).toBeUndefined();
+    expect(texts(await run('nodeRepl.write(invoked);'))).toContain('0');
+  });
+
   it(
     'executes compact and nested await operands without merging tokens',
     async () => {

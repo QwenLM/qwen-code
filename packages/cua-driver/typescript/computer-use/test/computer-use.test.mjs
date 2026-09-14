@@ -448,6 +448,8 @@ for (const nested of [false, true]) {
 for (const [readComplete, details] of [
   [undefined, ["AXTitle: ax_error -25204", "walk: max_elements truncated"]],
   [false, ["walk: max_elements truncated"]],
+  [undefined, ["provider_unresponsive", "max_elements_reached"]],
+  [undefined, ["walk_deadline_reached", "max_depth_reached"]],
 ]) {
   test(`mixed read failure and truncation retries once (read flag ${readComplete})`, async () => {
     let reads = 0;
@@ -481,6 +483,26 @@ for (const [readComplete, details] of [
     assert.equal(observation.diagnostics.captureReadComplete, true);
     assert.equal(observation.diagnostics.captureComplete, false);
     assert.equal(observation.elements[0].element_token, "rv1:bounded:0");
+  });
+}
+
+for (const detail of ["max_elements_reached", "max_depth_reached"]) {
+  test(`legacy Linux budget capture is not retried: ${detail}`, async () => {
+    const driver = fakeDriver({ results: {
+      getWindowState: toolResult({ structured: {
+        tree_markdown: "[637] Button",
+        elements: [{ element_index: 637, element_token: "s00000001:637" }],
+        capture_complete: false, capture_truncated: true,
+        capture_incomplete_details: [detail],
+        observation_revision: { mode: "full", stable_element_ids: false,
+          revision_id: "transient:r1", resync_reason: "capture_incomplete" },
+      } }),
+    } });
+    const computer = new ComputerUse(driver, { sdk: fakeSdk });
+    const observation = await computer.observeWindow({ pid: 42, windowId: 7, maxElements: 1 });
+    assert.equal(driver.calls.length, 1);
+    assert.equal(observation.elements[0].element_token, "s00000001:637");
+    assert.match(observation.text, /traversal limit/);
   });
 }
 

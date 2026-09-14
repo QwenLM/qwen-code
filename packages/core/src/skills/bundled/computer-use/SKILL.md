@@ -11,6 +11,35 @@ description: Control local desktop applications through Computer Use for tasks t
 - `node_repl` state is persistent across calls.
 - For text output, use `nodeRepl.write(...)`. `nodeRepl.write(...)` takes a string. If you would like to read a whole object, wrap it with `JSON.stringify(...)`.
 
+## Forwarding results in Codex code mode
+
+When calling `node_repl` through `tools.*` inside Codex's outer `functions.exec`,
+forward each returned `content` block by its type. `nodeRepl.emitImage(...)`
+produces an MCP image block; the outer script must pass that block to `image()`
+for the model to receive an image. Use the tool name exposed by your MCP server:
+
+```js
+const result = await tools.mcp__node_repl__node_repl({ code });
+for (const block of result.content ?? []) {
+  if (block.type === 'text') {
+    text(block.text);
+  } else if (block.type === 'image') {
+    image(block);
+  }
+}
+```
+
+Here `code` is the JavaScript to run in the persistent Node REPL. Keep the
+forwarding loop in the outer code-mode script, outside that `code` string.
+Apply the same loop to `node_repl_wait` results: images may arrive only when a
+running cell completes. Forward text blocks too, including running-cell IDs and
+errors. Direct MCP tool calls do not need this outer forwarding loop.
+
+Do not use `text(result)`, `text(block)`, or `JSON.stringify(result)` to forward
+an MCP result containing images: this turns image base64 into text, consuming
+context without showing the image. `image()` accepts one image block, not the
+whole result, so do not use `image(result)` either.
+
 ## Bootstrap
 
 If `node_repl` is unavailable, run:

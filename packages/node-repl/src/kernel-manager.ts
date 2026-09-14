@@ -69,7 +69,13 @@ export interface NodeReplExecOutcome {
   events: NodeReplOutputEvent[];
   rawTextTruncated: boolean;
   imagesDropped: number;
-  error?: { name: string; message: string; stack?: string };
+  error?: {
+    name: string;
+    message: string;
+    stack?: string;
+    code?: string;
+    details?: string;
+  };
   stats: {
     durationMs: number;
     generation: number;
@@ -505,6 +511,10 @@ export class NodeReplKernelManager {
                   ? `Execution exceeded the ${effectiveTimeout}ms timeout.`
                   : 'JavaScript execution failed.'),
             ...(terminal.errorStack ? { stack: terminal.errorStack } : {}),
+            ...(terminal.errorCode ? { code: terminal.errorCode } : {}),
+            ...(terminal.errorDetails
+              ? { details: terminal.errorDetails }
+              : {}),
           }
         : undefined;
     return this.outcomeFromInflight(inflight, status, startedAt, error, false);
@@ -759,6 +769,13 @@ export class NodeReplKernelManager {
       !(
         message.errorStack === undefined ||
         typeof message.errorStack === 'string'
+      ) ||
+      !(
+        message.errorCode === undefined || typeof message.errorCode === 'string'
+      ) ||
+      !(
+        message.errorDetails === undefined ||
+        typeof message.errorDetails === 'string'
       )
     ) {
       this.handleProtocolError(handle, new Error('invalid exec result'));
@@ -1068,7 +1085,7 @@ export class NodeReplKernelManager {
     inflight: InflightExec | undefined,
     status: NodeReplExecStatus,
     startedAt: number,
-    error?: { name: string; message: string; stack?: string },
+    error?: NodeReplExecOutcome['error'],
     kernelReplaced = false,
   ): NodeReplExecOutcome {
     const outcome: NodeReplExecOutcome = {

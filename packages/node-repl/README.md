@@ -85,6 +85,30 @@ Environment:
 - `QWEN_NODE_REPL_ROOTS` — extra readable roots (path-list, OS delimiter).
 - `QWEN_NODE_REPL_DEBUG` — set truthy for stderr debug logging.
 
+### Linux desktop sessions
+
+When using the CUA SDK, start the MCP server with the environment of the desktop
+session it will control. The kernel inherits the server's environment at startup;
+variables removed by the MCP client cannot be recovered by the SDK. For Codex,
+add the following allowlist to the existing server entry in `config.toml`:
+
+```toml
+[mcp_servers.node_repl]
+command = "npx"
+args = ["-y", "@qwen-code/node-repl-mcp"]
+env_vars = ["DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "GTK_MODULES", "QT_ACCESSIBILITY", "QT_LINUX_ACCESSIBILITY_ALWAYS_ON"]
+```
+
+The client process must already have the correct values. For hosts that use an
+explicit `env` map, populate it from that same desktop session; display numbers,
+authentication paths, and bus addresses vary by machine and user. Restart the
+MCP server after changing its environment. An X11 connection failure is reported
+as `desktop_unavailable` by CUA discovery, rather than as an empty desktop.
+
+Uncaught errors preserve a string `code` and bounded `details` text in MCP output,
+including action and verification diagnostics. External side effects may already
+have happened when an error is thrown; use those diagnostics before retrying.
+
 ## Build & test
 
 ```bash
