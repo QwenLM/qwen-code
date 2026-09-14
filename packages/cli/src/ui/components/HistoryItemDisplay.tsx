@@ -250,25 +250,30 @@ export const CollapsibleToolGroupMessage: React.FC<
 > = ({ expansionKey, ...props }) => {
   const settings = useSettings();
   const [locallyExpanded, setLocallyExpanded] = useState(false);
-  const { expandedBatchIds, expandBatch } = useToolDetailsExpanded();
+  const { expandedBatchIds, toggleBatch } = useToolDetailsExpanded();
   const ref = useRef<DOMElement>(null);
   const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
+  const { stdout } = useStdout();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
+  const { menu: contextMenu } = useContextMenu();
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
     mouseTrackingEnabled;
-  const collapsed =
+  const canToggle =
     settings.merged.ui?.showToolCallDetails === false &&
-    !locallyExpanded &&
-    !(expansionKey && expandedBatchIds.has(expansionKey)) &&
     !props.fullDetail &&
     !hasRequiredToolInteraction(props);
+  const isActive = canToggle && contextMenu === null;
+  const expanded = expansionKey
+    ? expandedBatchIds.has(expansionKey)
+    : locallyExpanded;
+  const collapsed = canToggle && !expanded;
 
   useMouseEvents(
     useCallback(
       (event: MouseEvent) => {
-        if (!collapsed || !ref.current) return;
+        if (!canToggle || !ref.current) return;
         if (event.name === 'move') {
           if (
             pressRef.current &&
@@ -300,19 +305,32 @@ export const CollapsibleToolGroupMessage: React.FC<
         const press = pressRef.current;
         pressRef.current = null;
         if (isInside && press?.col === event.col && press.row === event.row) {
+          const url = hyperlinkAtCell(
+            getScreenBuffer(stdout)?.frame ?? null,
+            col,
+            row,
+          );
+          if (url) return;
           if (expansionKey) {
-            expandBatch(expansionKey);
+            toggleBatch(expansionKey);
           } else {
-            setLocallyExpanded(true);
+            setLocallyExpanded((value) => !value);
           }
         }
       },
-      [collapsed, terminalHeight, expansionKey, expandBatch],
+      [canToggle, terminalHeight, stdout, expansionKey, toggleBatch],
     ),
-    { isActive: collapsed && clickable },
+    { isActive: isActive && clickable },
   );
 
-  if (!collapsed) return <ToolGroupMessage {...props} />;
+  if (!collapsed) {
+    if (!canToggle) return <ToolGroupMessage {...props} />;
+    return (
+      <Box ref={isActive ? ref : undefined} flexDirection="column">
+        <ToolGroupMessage {...props} />
+      </Box>
+    );
+  }
 
   return (
     <ToolGroupMessage

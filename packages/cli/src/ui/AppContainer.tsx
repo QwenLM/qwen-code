@@ -969,11 +969,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const [expandedToolBatchIds, setExpandedToolBatchIds] = useState<
     ReadonlySet<string>
   >(() => new Set<string>());
-  const expandToolBatch = useCallback((batchId: string) => {
+  const toggleToolBatch = useCallback((batchId: string) => {
     setExpandedToolBatchIds((prev) => {
-      if (prev.has(batchId)) return prev;
       const next = new Set(prev);
-      next.add(batchId);
+      if (next.has(batchId)) {
+        next.delete(batchId);
+      } else {
+        next.add(batchId);
+      }
       return next;
     });
   }, []);
@@ -5486,9 +5489,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const toolDetailsExpandedValue = useMemo(
     () => ({
       expandedBatchIds: expandedToolBatchIds,
-      expandBatch: expandToolBatch,
+      toggleBatch: toggleToolBatch,
     }),
-    [expandedToolBatchIds, expandToolBatch],
+    [expandedToolBatchIds, toggleToolBatch],
   );
 
   return (

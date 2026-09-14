@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act } from 'react';
+import { act, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { Box } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -142,6 +142,82 @@ describe('<CollapsibleToolGroupMessage />', () => {
     expect(lastFrame()).toContain('very long result');
   });
 
+  it('collapses after clicking the expanded tool group again', () => {
+    const { handler, lastFrame } = renderCollapsedTool();
+
+    act(() => {
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+    });
+    expect(lastFrame()).toContain('very long result');
+
+    const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+    act(() => {
+      expandedHandler?.(mouseEvent('left-press', 5));
+      expandedHandler?.(mouseEvent('left-release', 5));
+    });
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('click to expand');
+    expect(frame).not.toContain('veryLongSource');
+    expect(frame).not.toContain('very long result');
+  });
+
+  it('toggles a batch-linked tool group through shared state', () => {
+    const StatefulBatch = () => {
+      const [expandedBatchIds, setExpandedBatchIds] = useState<
+        ReadonlySet<string>
+      >(() => new Set<string>());
+      const toggleBatch = (batchId: string) => {
+        setExpandedBatchIds((previous) => {
+          const next = new Set(previous);
+          if (next.has(batchId)) {
+            next.delete(batchId);
+          } else {
+            next.add(batchId);
+          }
+          return next;
+        });
+      };
+
+      return (
+        <ToolDetailsExpandedProvider value={{ expandedBatchIds, toggleBatch }}>
+          <VirtualViewportContext.Provider value={true}>
+            <Box width={100}>
+              <CollapsibleToolGroupMessage
+                toolCalls={[tool]}
+                groupId={1}
+                contentWidth={96}
+                isPending={false}
+                expansionKey="tool-batch-test-1"
+              />
+            </Box>
+          </VirtualViewportContext.Provider>
+        </ToolDetailsExpandedProvider>
+      );
+    };
+    const { lastFrame } = renderWithProviders(<StatefulBatch />, {
+      settings: collapsedSettings,
+      config: {} as Config,
+    });
+    const collapsedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+
+    act(() => {
+      collapsedHandler?.(mouseEvent('left-press', 5));
+      collapsedHandler?.(mouseEvent('left-release', 5));
+    });
+    expect(lastFrame()).toContain('very long result');
+
+    const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+    act(() => {
+      expandedHandler?.(mouseEvent('left-press', 5));
+      expandedHandler?.(mouseEvent('left-release', 5));
+    });
+
+    expect(lastFrame()).toContain('click to expand');
+    expect(lastFrame()).not.toContain('very long result');
+  });
+
   it('keeps a live tool expanded when its history row remounts', () => {
     vi.mocked(measureElementPosition).mockReturnValue({
       x: 0,
@@ -150,11 +226,11 @@ describe('<CollapsibleToolGroupMessage />', () => {
       height: 1,
     });
     vi.mocked(layoutRowForEvent).mockImplementation((_node, row) => row - 1);
-    const expandBatch = vi.fn();
+    const toggleBatch = vi.fn();
     vi.mocked(useMouseEvents).mockClear();
     const pending = renderWithProviders(
       <ToolDetailsExpandedProvider
-        value={{ expandedBatchIds: new Set<string>(), expandBatch }}
+        value={{ expandedBatchIds: new Set<string>(), toggleBatch }}
       >
         <VirtualViewportContext.Provider value={true}>
           <HistoryItemDisplay
@@ -178,7 +254,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
       handler?.(mouseEvent('left-release', 5));
     });
 
-    expect(expandBatch).toHaveBeenCalledWith('tool-batch-test-1');
+    expect(toggleBatch).toHaveBeenCalledWith('tool-batch-test-1');
     pending.unmount();
     vi.mocked(useMouseEvents).mockClear();
 
@@ -186,7 +262,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
       <ToolDetailsExpandedProvider
         value={{
           expandedBatchIds: new Set(['tool-batch-test-1']),
-          expandBatch,
+          toggleBatch,
         }}
       >
         <VirtualViewportContext.Provider value={true}>
@@ -207,7 +283,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
 
     expect(committed.lastFrame()).toContain('very long result');
     expect(vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1]).toMatchObject({
-      isActive: false,
+      isActive: true,
     });
   });
 
