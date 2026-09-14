@@ -221,16 +221,20 @@ export async function startInteractiveUI(
           isCrossSessionMessagingEnabled(settings.merged)
         ) {
           const failure = getLastPeerInboxFailure();
-          // The switch is on by default, so a platform with no inbox
-          // transport would otherwise greet every one of its users with a
-          // failure about a feature they never asked for. That one is said
-          // only to a user who turned the switch on by hand. A bind that
-          // failed where it should have worked is said to everyone: they
-          // are unreachable, and this line is the only place they learn it.
+          // A different question from the helper above: not "is messaging
+          // on", which an unset key also answers yes, but "did the user
+          // write `true` themselves". The switch is on by default, so a
+          // platform with no inbox transport would otherwise greet every
+          // one of its users with a failure about a feature they never
+          // asked for; that one is said only to a user who opted in by
+          // hand. A bind that failed where it should have worked is said to
+          // everyone: they are unreachable, and this line is the only place
+          // they learn it.
+          const optedInByHand =
+            settings.merged.agents?.crossSessionMessaging === true;
           if (
             failure !== null &&
-            (failure.cause !== 'unsupported_platform' ||
-              settings.merged.agents?.crossSessionMessaging === true)
+            (failure.cause !== 'unsupported_platform' || optedInByHand)
           ) {
             setPeerInboxFailure(failure);
           }
