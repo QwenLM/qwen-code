@@ -960,6 +960,40 @@ describe('standalone release packaging', () => {
     }
   });
 
+  it('reports every missing archive under the runtime display label', async () => {
+    const { downloadRuntimeChecksums } = await import(
+      standaloneReleaseScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const checksumsPath = path.join(tmpDir, 'node-SHASUMS256.txt');
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(`${'a'.repeat(64)}  node-v22.0.0-mac-arm64.tar.gz\n`),
+    );
+
+    try {
+      await expect(
+        downloadRuntimeChecksums({
+          runtime: 'node',
+          distUrl: 'https://nodejs.org/dist/v22.0.0',
+          checksumsPath,
+          expectedArchives: [
+            'node-v22.0.0-linux-x64.tar.xz',
+            'node-v22.0.0-win-x64.zip',
+          ],
+          fetchImpl,
+          sleepImpl: async () => {},
+        }),
+      ).rejects.toThrow(
+        'ERROR: Node.js SHASUMS256.txt does not list ' +
+          'node-v22.0.0-linux-x64.tar.xz, node-v22.0.0-win-x64.zip',
+      );
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('derives the runtime archive name per flavor', async () => {
     const { runtimeArchiveName } = await import(standaloneReleaseScriptUrl);
     const target = {
@@ -983,6 +1017,12 @@ describe('standalone release packaging', () => {
     // calling it, so pin the wiring and the retry constants by source.
     expect(releaseScript.match(/await downloadWithRetry\(/g)).toHaveLength(2);
     expect(releaseScript.match(/await downloadFile\(/g)).toHaveLength(1);
+    // Counts alone never observe the archive leg's verifier: deleting the
+    // `verify:` option, or hoisting the check back out of the retry loop,
+    // leaves both counts — and the whole suite — green.
+    expect(releaseScript).toMatch(
+      /await downloadWithRetry\([\s\S]{0,200}?verify: \(\) =>[\s\S]{0,40}?verifyNodeArchive\(/,
+    );
     expect(releaseScript).toContain('const MAX_DOWNLOAD_ATTEMPTS = 3;');
     expect(releaseScript).toContain(
       'const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;',

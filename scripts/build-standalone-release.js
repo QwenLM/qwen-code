@@ -196,6 +196,10 @@ function runtimeArchiveName({
     : `node-v${nodeVersion}-${nodeTarget}.${nodeArchiveExtension}`;
 }
 
+function runtimeLabel(runtime) {
+  return runtime === 'bun' ? 'Bun' : 'Node.js';
+}
+
 async function packageTarget({
   qwenTarget,
   nodeTarget,
@@ -228,7 +232,7 @@ async function packageTarget({
         archivePath,
         archiveName,
         checksums,
-        runtime === 'bun' ? 'Bun' : 'Node.js',
+        runtimeLabel(runtime),
       ),
   });
 
@@ -436,10 +440,13 @@ async function downloadRuntimeChecksums({
   await downloadWithRetry(`${distUrl}/SHASUMS256.txt`, checksumsPath, {
     verify: () => {
       checksums = parseChecksums(fs.readFileSync(checksumsPath, 'utf8'));
-      for (const archiveName of expectedArchives) {
-        if (!checksums.has(archiveName)) {
-          fail(`${runtime} SHASUMS256.txt does not list ${archiveName}`);
-        }
+      const missing = expectedArchives.filter(
+        (archiveName) => !checksums.has(archiveName),
+      );
+      if (missing.length > 0) {
+        fail(
+          `${runtimeLabel(runtime)} SHASUMS256.txt does not list ${missing.join(', ')}`,
+        );
       }
     },
     fetchImpl,
@@ -460,10 +467,10 @@ function parseChecksums(content) {
 }
 
 async function verifyNodeArchive(archivePath, archiveName, checksums, label) {
-  const runtimeLabel = label || 'Node.js';
+  const displayLabel = label || 'Node.js';
   const expected = checksums.get(archiveName);
   if (!expected) {
-    fail(`${runtimeLabel} SHASUMS256.txt does not list ${archiveName}`);
+    fail(`${displayLabel} SHASUMS256.txt does not list ${archiveName}`);
   }
 
   const actual = await sha256File(archivePath);
@@ -471,7 +478,7 @@ async function verifyNodeArchive(archivePath, archiveName, checksums, label) {
     fail(`Checksum verification failed for ${archiveName}`);
   }
 
-  console.log(`Verified ${runtimeLabel} runtime checksum for ${archiveName}`);
+  console.log(`Verified ${displayLabel} runtime checksum for ${archiveName}`);
 }
 
 async function sha256File(filePath) {
