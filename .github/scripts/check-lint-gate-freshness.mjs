@@ -48,6 +48,7 @@ export const GATE_FILES = [
   'scripts/lint.js',
   'eslint.config.js',
   'eslint.legacy-filenames.mjs',
+  'eslint.legacy-core-barrel-imports.mjs',
   '.prettierrc.json',
   '.prettierignore',
   '.github/workflows/ci.yml',
