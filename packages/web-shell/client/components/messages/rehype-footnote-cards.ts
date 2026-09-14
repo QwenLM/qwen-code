@@ -92,7 +92,10 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
       let source: string | undefined;
       let href: string | undefined;
       let image: string | undefined;
+      let nestedReference = false;
       visit(node, (child) => {
+        if (child.properties.dataFootnoteRef !== undefined)
+          nestedReference = true;
         if (
           child.tagName === 'a' &&
           !link &&
@@ -114,6 +117,7 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
           if (options.safeImage(url)) image = url;
         }
       });
+      if (nestedReference) continue;
       definitions.set(`#${id}`, {
         id: logicalId,
         number,

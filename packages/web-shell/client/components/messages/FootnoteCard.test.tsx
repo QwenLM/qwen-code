@@ -352,6 +352,27 @@ describe('Markdown footnote cards', () => {
     ).toBeNull();
   });
 
+  it('retains nested definitions and their forward navigation paths', () => {
+    render(
+      <Markdown
+        source="assistant"
+        content={'Body[^1].\n\n[^1]: See also[^2].\n[^2]: Inner note.'}
+      />,
+    );
+    expect(container.querySelectorAll(triggerSelector)).toHaveLength(0);
+    expect(container.querySelectorAll('[data-footnotes] li')).toHaveLength(2);
+    const refs = container.querySelectorAll<HTMLAnchorElement>(
+      '[data-footnote-ref]',
+    );
+    expect(refs).toHaveLength(2);
+    for (const ref of refs) {
+      const target = document.getElementById(ref.hash.slice(1));
+      expect(target).not.toBeNull();
+      click(ref);
+      expect(document.activeElement).toBe(target);
+    }
+  });
+
   it('routes source links through the host component with the locator intact', () => {
     const locator =
       'https://citation.invalid/dataworks-knowledge#v=1&kind=content&kbInstanceId=instance-1&sourceFileId=file-2&citationId=citation-3&relativePath=docs%2Forder.md&anchor=definition%20one';

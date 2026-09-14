@@ -56,7 +56,7 @@ Missing callbacks, empty/null results, invalid URLs and thrown exceptions fall b
 - Pure-text notes have a localized “Footnote n” title, the full explanation and no navigation. Long descriptions are scrollable, including with the keyboard.
 - Hover, focus and click open the preview. Paging or clicking the trigger pins it until Escape or an outside click. Hover-only previews close after leaving. A page represents one definition.
 - The Assistant footer shows “N sources” beside copy, branch and time, using Sources-panel entries explicitly associated with that turn. It follows existing message hover/focus and touch visibility rules. It never substitutes the footnote count, and no separate Markdown footnote summary is rendered.
-- Unresolved definitions keep literal references. A definition is removed from the ordinary footer only when every occurrence was converted. References that cannot be converted (for example inside a link) retain their ordinary target and return navigation.
+- Unresolved definitions keep literal references. A definition is removed from the ordinary footer only when every occurrence was converted. References that cannot be converted (for example inside a link) retain their ordinary target and return navigation. Definitions containing nested footnote references also keep the ordinary list, preserving the path to the nested note.
 - Definition extraction shares the existing AST pipeline; it does not reparse Markdown. Stable component identities preserve open cards through streaming updates. Message instances keep isolated DOM anchor namespaces.
 - Markdown copy and static document export preserve standard footnotes. Custom `components.sup` continues to opt out of aggregation. Advanced-table copy keeps original reference text.
 

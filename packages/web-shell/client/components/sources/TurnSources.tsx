@@ -5,6 +5,7 @@ import {
 } from '../../customization';
 import { useI18n } from '../../i18n';
 import { cssUrlValue } from '../../utils/cssUrlVar';
+import { getShadowAwareActiveElement } from '../../utils/dom';
 import knowledgeIcon from '../../assets/icons/knowledge.svg';
 import { isSafeImageSrc } from '../messages/Markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -22,6 +23,7 @@ export function TurnSources({
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const content = useRef<HTMLDivElement>(null);
+  const pinned = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const icon = useMemo(() => {
     try {
@@ -40,6 +42,7 @@ export function TurnSources({
   };
   const leave = () => {
     cancel();
+    if (pinned.current) return;
     timer.current = setTimeout(() => {
       if (
         !trigger.current?.matches(':focus-within') &&
@@ -55,6 +58,7 @@ export function TurnSources({
       open={open}
       onOpenChange={(value) => {
         cancel();
+        if (!value) pinned.current = false;
         setOpen(value);
       }}
     >
@@ -72,6 +76,7 @@ export function TurnSources({
           onBlur={leave}
           onClick={(event) => {
             event.preventDefault();
+            pinned.current = true;
             show();
           }}
           onKeyDown={(event) => {
@@ -120,7 +125,7 @@ export function TurnSources({
           {t('sources.currentTurn')}
         </div>
         <div
-          className="max-h-[min(50vh,320px)] overflow-y-auto overscroll-contain"
+          className="-mx-1.5 max-h-[min(50vh,320px)] overflow-y-auto overscroll-contain px-1.5"
           tabIndex={0}
         >
           <SourceList
@@ -129,6 +134,13 @@ export function TurnSources({
               onOpen
                 ? (source) => {
                     onOpen(source);
+                    if (
+                      content.current?.contains(
+                        getShadowAwareActiveElement(content.current),
+                      )
+                    )
+                      trigger.current?.focus({ preventScroll: true });
+                    pinned.current = false;
                     setOpen(false);
                   }
                 : undefined

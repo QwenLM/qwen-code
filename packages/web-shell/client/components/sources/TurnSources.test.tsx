@@ -11,6 +11,7 @@ import {
   type WebShellSourceIconResolver,
 } from '../../customization';
 import { I18nProvider } from '../../i18n';
+import { WebShellPortalRootContext } from '../../portalRoot';
 import { AssistantMessage } from '../messages/AssistantMessage';
 import { WebShellTranscript } from '../WebShellTranscript';
 import { getSourceEntries } from './sourceEntries';
@@ -82,6 +83,84 @@ it('shows real source entries on a report without footnotes and reuses its open 
   expect(list.querySelector('[data-web-shell-footnote-card]')).toBeNull();
   click(list.querySelector('[aria-label="Open source Web source"]'));
   expect(open).toHaveBeenCalledWith(entries[0]);
+});
+
+it('returns keyboard focus to the trigger after activating a source', () => {
+  const open = vi.fn();
+  render(
+    <AssistantMessage
+      content="Report"
+      showFooterActions
+      turnSources={entries}
+      onSourceOpen={open}
+    />,
+  );
+  const trigger = container.querySelector<HTMLButtonElement>(selector)!;
+  click(trigger);
+  const row = document.querySelector<HTMLButtonElement>(
+    '[aria-label="Open source Web source"]',
+  )!;
+  act(() => row.focus());
+  click(row);
+  expect(open).toHaveBeenCalledWith(entries[0]);
+  expect(document.querySelector(popup)).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+});
+
+it('preserves focus when the host moves it into the source preview', () => {
+  const target = document.createElement('button');
+  document.body.append(target);
+  try {
+    render(
+      <AssistantMessage
+        content="Report"
+        showFooterActions
+        turnSources={entries}
+        onSourceOpen={() => target.focus()}
+      />,
+    );
+    click(container.querySelector(selector));
+    const row = document.querySelector<HTMLButtonElement>(
+      '[aria-label="Open source Web source"]',
+    )!;
+    act(() => row.focus());
+    click(row);
+    expect(document.querySelector(popup)).toBeNull();
+    expect(document.activeElement).toBe(target);
+  } finally {
+    target.remove();
+  }
+});
+
+it('returns focus after activating a source inside a shadow portal', () => {
+  const host = document.createElement('div');
+  document.body.append(host);
+  const portal = document.createElement('div');
+  host.attachShadow({ mode: 'open' }).append(portal);
+  try {
+    render(
+      <WebShellPortalRootContext.Provider value={portal}>
+        <AssistantMessage
+          content="Report"
+          showFooterActions
+          turnSources={entries}
+          onSourceOpen={vi.fn()}
+        />
+      </WebShellPortalRootContext.Provider>,
+    );
+    const trigger = container.querySelector<HTMLButtonElement>(selector)!;
+    click(trigger);
+    const row = portal.querySelector<HTMLButtonElement>(
+      '[aria-label="Open source Web source"]',
+    )!;
+    act(() => row.focus());
+    expect(document.activeElement).toBe(host);
+    click(row);
+    expect(portal.querySelector(popup)).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  } finally {
+    host.remove();
+  }
 });
 
 it('never substitutes footnote counts when turn sources are absent', () => {

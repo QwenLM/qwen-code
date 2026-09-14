@@ -128,6 +128,11 @@ test('turn sources count explicit reuse independently of footnotes and open the 
   await expect(list).toContainText(shared.title);
   await expect(list).toContainText(current.title);
   await expect(list).not.toContainText(unrelated.title);
+  expect(
+    await list
+      .locator('[tabindex="0"]')
+      .evaluate((element) => element.scrollWidth - element.clientWidth),
+  ).toBe(0);
   await expect(page.locator('[data-web-shell-footnote-trigger]')).toHaveCount(
     1,
   );
@@ -136,15 +141,44 @@ test('turn sources count explicit reuse independently of footnotes and open the 
     fullPage: true,
     animations: 'disabled',
   });
-  await list
-    .getByRole('button', { name: 'Open source Shared source', exact: true })
-    .click();
+  await button.focus();
+  await button.press('ArrowDown');
+  const row = list.getByRole('button', {
+    name: 'Open source Shared source',
+    exact: true,
+  });
+  await expect(row).toBeFocused();
+  await row.press('Enter');
+  await expect(button).toBeFocused();
+  await expect(list).toHaveCount(0);
   await expect(
     page.getByRole('heading', { name: shared.title, exact: true }),
   ).toBeVisible();
   await expect(
     page.getByText(shared.description!, { exact: true }),
   ).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('click-opened turn sources stay open when clicking does not transfer focus', async ({
+  page,
+}, info) => {
+  const { errors } = await openSources(page, info);
+  const button = page.locator(footer).last();
+  await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+  await button.evaluate((element) =>
+    element.addEventListener('mousedown', (event) => event.preventDefault(), {
+      once: true,
+    }),
+  );
+  await button.click();
+  await expect(button).not.toBeFocused();
+  await expect(page.locator(popup)).toBeVisible();
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(350);
+  await expect(page.locator(popup)).toBeVisible();
+  await page.locator('body').click({ position: { x: 1, y: 1 } });
+  await expect(page.locator(popup)).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
