@@ -328,4 +328,26 @@ describe('Desktop release sync caller', () => {
       "permissions:\n  actions: 'read'\n  contents: 'write'",
     );
   });
+
+  it('reports a release-following publish that failed', () => {
+    // This path is unattended: a CLI release fires it, nobody watches, and a
+    // failure is invisible everywhere else — the feed simply keeps offering
+    // the previous desktop version, which looks the same as no release being
+    // due. The ECS fleet updater failed five times over three days before its
+    // own reporter surfaced it; this is the same guard for the same shape.
+    const report = getWorkflowJob(syncCallerWorkflow, 'report_failure');
+    expect(report).toContain(
+      "if: \"${{ always() && needs.publish.result == 'failure' && github.repository == 'QwenLM/qwen-code' }}\"",
+    );
+    // Hosted, not the desktop matrix: reporting that the publish path broke
+    // must not queue behind the path it is reporting on.
+    expect(report).toContain("runs-on: 'ubuntu-latest'");
+    expect(report).toContain("issues: 'write'");
+    expect(report).toContain(
+      'bash .github/scripts/desktop-sync-failure-issue.sh',
+    );
+    expect(report).toContain(
+      "RELEASE_TAG: '${{ github.event.release.tag_name }}'",
+    );
+  });
 });
