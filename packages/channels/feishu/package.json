@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-feishu",
-  "version": "0.23.4",
+  "version": "0.23.4-nightly.20260914.f024b37689",
   "description": "Feishu (Lark) channel adapter for Qwen Code",
   "repository": {
     "type": "git",
@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.73.0",
-    "@qwen-code/channel-base": "0.23.4"
+    "@qwen-code/channel-base": "0.23.4-nightly.20260914.f024b37689"
   },
   "devDependencies": {
     "typescript": "^5.0.0"
