@@ -787,6 +787,26 @@ terminal is that same behaviour and not a new defect, since ink pushes those
 rows out of the viewport too. What is not here is scrolling the region with the
 keyboard.
 
+## Decision 27 — a long shell card is compacted for the screen, verbatim for the model
+
+ink writes a shell command's output out twice. The transcript row goes through
+the shared history-retention compaction; the string handed to the model stays
+verbatim. This renderer put the raw accumulation on the card at both of its
+write sites — the throttled streaming snapshot and the final result — so one
+long-running command pinned its entire output in the transcript for the rest of
+the session. On this branch that stopped being a cosmetic difference: Decision
+26 bounds the region by the terminal, so rows that ink would have compacted now
+push everything earlier above the fold.
+
+Both sites call the same helper ink's history fold uses, so the retention limit
+has one owner rather than a copy that can drift. No scenario in the harness
+produces output that long, so this is pinned by unit tests rather than by a
+frame: each of the two write sites asserts the card display stays within the
+retained budget while the history write still receives the whole string.
+Removing the compaction fails exactly those two tests and no other, with
+over-length displays of forty-one thousand and thirty-seven thousand characters
+named in the failing assertions.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
@@ -954,12 +974,6 @@ What was verified, and how far the verification reaches:
   The diagnostics are not lost, but they are unreachable here because this
   renderer never binds the library's console toggle. Whether to expose that
   console is an open question.
-- The shell card keeps the whole output where ink shortens it. Both renderers
-  write the same raw string to the model's history, but ink compacts the copy
-  it puts on screen once that copy passes a retention limit. No scenario here
-  produces output that long, so the gap is reasoned rather than observed, and
-  closing it also raises whether the intermediate streaming snapshots should
-  exist at all — ink discards shell progress instead of showing it.
 - The help dialog's reserved-row constant does not describe the rows actually
   observed on screen, and the window height this renderer shows below a 42-row
   terminal is bounded rather than matched.
