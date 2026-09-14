@@ -383,6 +383,22 @@ describe('package scripts', () => {
       expect(result.stderr).toContain('- keytar@7.9.0');
     });
 
+    it('accepts a union of exact versions', () => {
+      // pnpm writes this shape itself when it merges version-scoped rules:
+      // the name once, then bare exact versions joined by `||`.
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
+          delete workspace.allowBuilds.keytar;
+          workspace.allowBuilds['keytar@7.0.0 || 7.9.0'] = true;
+        }),
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(
+        'pnpm build approvals cover every install script.',
+      );
+    });
+
     it('ignores a range-scoped allowBuilds key, which decides nothing', () => {
       // pnpm's isDepPathAllowBuildKey rejects a range, so `esbuild@^0.25.0`
       // is filed under a package literally named that and approves no build.
