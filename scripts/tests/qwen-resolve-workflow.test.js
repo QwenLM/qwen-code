@@ -705,10 +705,10 @@ describe('qwen resolve workflow', () => {
       'if [ "$CURRENT_HEAD_SHA" != "$EVENT_HEAD_SHA" ]; then',
     );
     expect(runStep).toContain(
-      'PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq \'[.state, .headRefOid] | @tsv\')"',
+      'PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid,baseRefName --jq \'[.state, .headRefOid, .baseRefName] | @tsv\')"',
     );
     expect(runStep).toContain(
-      'IFS=$\'\\t\' read -r PR_STATE CURRENT_HEAD_SHA <<< "$PR_DATA"',
+      'IFS=$\'\\t\' read -r PR_STATE CURRENT_HEAD_SHA BASE_REF_NAME <<< "$PR_DATA"',
     );
     expect(staleHeadCheck).toContain(
       'Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current',
