@@ -339,6 +339,8 @@ describe('GitWorktreeService', () => {
     expect(diff).toBe('diff --git a/a.ts b/a.ts');
     expect(hoistedMockAdd).toHaveBeenCalledWith(['--all']);
     expect(hoistedMockDiff).toHaveBeenCalledWith([
+      '--no-ext-diff',
+      '--no-textconv',
       '--binary',
       '--cached',
       'main',
@@ -361,6 +363,8 @@ describe('GitWorktreeService', () => {
     expect(hoistedMockAdd).toHaveBeenCalledWith(['--all']);
     // Should diff against the baseline commit, not merge-base
     expect(hoistedMockDiff).toHaveBeenCalledWith([
+      '--no-ext-diff',
+      '--no-textconv',
       '--binary',
       '--cached',
       'baseline-sha',

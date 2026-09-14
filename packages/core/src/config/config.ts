@@ -20,7 +20,10 @@ import type {
   InputModalities,
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
-import type { ReasoningEffort } from '../core/reasoning-effort.js';
+import {
+  setGeneratorReasoningEffort,
+  type ReasoningEffort,
+} from '../core/reasoning-effort.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
@@ -2695,6 +2698,7 @@ export class Config {
   private activeTodoReminders = new Map<string, string>();
   private activeTodoWorkChainOwners = new Map<string, string>();
   private activeTodoReminderTurns = new Map<string, number>();
+  private activeTodoPlanWriterOwner: string | undefined;
   private llmClient!: LlmClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -4812,6 +4816,10 @@ export class Config {
     return this.modelsConfig.getModelProvidersConfig();
   }
 
+  getProviderProtocolConfig(): ProviderProtocolConfig {
+    return this.modelsConfig.getProviderProtocolConfig();
+  }
+
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
@@ -5087,9 +5095,7 @@ export class Config {
     }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
-    this.getOwnActiveTodoReminders().clear();
-    this.getOwnActiveTodoWorkChainOwners().clear();
-    this.getOwnActiveTodoReminderTurns().clear();
+    this.clearActiveTodoReminders();
     // ACP session rotation runs inside sessionIdContext; only the
     // single-session CLI owns the process-wide fallback.
     if (sessionIdContext.getStore() === undefined) {
@@ -5745,11 +5751,14 @@ export class Config {
    */
   async setImageModel(model: string | undefined): Promise<void> {
     this.imageModel = model || undefined;
-    if (!this.initialized || !this.isImageGenerationEnabled()) {
+    if (!this.initialized || !this.toolRegistry) {
       return;
     }
-    await this.registerImageGenerationTool(this.toolRegistry);
-    await this.toolRegistry.ensureTool(ToolNames.IMAGE_GEN);
+    if (this.isImageGenerationEnabled()) {
+      await this.registerImageGenerationTool(this.toolRegistry);
+      await this.toolRegistry.ensureTool(ToolNames.IMAGE_GEN);
+    }
+    await this.llmClient.setTools();
   }
 
   /**
@@ -5848,26 +5857,12 @@ export class Config {
    * cannot silently re-enable it.
    */
   setReasoningEffort(effort: ReasoningEffort | undefined): void {
+    // One rule for every config that carries the tier; a workflow agent's own
+    // config goes through the same helper (see setGeneratorReasoningEffort).
     const applyEffort = (
       cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
     ): void => {
-      if (!cfg || cfg.reasoning === false) {
-        return;
-      }
-      const next: { effort?: ReasoningEffort; budget_tokens?: number } = {
-        ...(cfg.reasoning ?? {}),
-      };
-      if (effort) {
-        next.effort = effort;
-      } else {
-        delete next.effort;
-      }
-      // Clearing the last key (e.g. setReasoningEffort(undefined) with no
-      // sibling budget_tokens) collapses `reasoning` back to undefined rather
-      // than leaving an empty `{}` — an empty object is truthy, so downstream
-      // `if (cfg.reasoning)` checks would treat reasoning as active and the
-      // pipeline would emit `reasoning: {}` as wire noise.
-      cfg.reasoning = Object.keys(next).length > 0 ? next : undefined;
+      setGeneratorReasoningEffort(cfg, effort);
     };
     // The main session and a runtime (sub-agent) content generator may hold
     // distinct config objects; update whichever the request path reads.
@@ -8298,12 +8293,36 @@ export class Config {
   }
 
   /**
+   * The owner of the prompt id that last WROTE the session-scoped plan file
+   * (i.e. a real, non-no-op `todo_write`). The continuation guard only
+   * carries a registered reminder when the foreground head still owns the
+   * authoritative plan; an isolated cron/notification/Goal turn that rewrites
+   * the plan under its own owner must not re-deliver the foreground's stale
+   * snapshot.
+   */
+  getActiveTodoPlanWriterOwner(): string | undefined {
+    return this.activeTodoPlanWriterOwner;
+  }
+
+  /**
+   * Records the owner of the prompt id that just wrote the session plan file.
+   * Called only from the real write path of `todo_write` (never the no-op
+   * `isDeepStrictEqual` short-circuit), so a foreign no-op write cannot
+   * suppress a still-accurate continuation.
+   */
+  recordActiveTodoPlanWriter(promptId: string): void {
+    this.activeTodoPlanWriterOwner = this.getActiveTodoWorkChainOwner(promptId);
+  }
+
+  /**
    * Reads the reminder for injection, re-issuing it only every
    * ACTIVE_TODO_REMINDER_REFRESH_TURNS tool turns: each injected copy lands in
    * chat history permanently, so per-turn injection would grow the context
    * linearly with tool turns. `force` is for turn-start injections (retry /
-   * related automatic turns), which always need the context and reset the
-   * cadence.
+   * related automatic turns) and for the mid-turn injection when a top-level
+   * Agent tool result returns (delegation advanced the plan while the parent
+   * earned only one tool turn, so the cadence cannot come due on its own).
+   * Both always need the context and reset the cadence.
    */
   takeActiveTodoReminder(promptId: string, force = false): string | undefined {
     const owner = this.getActiveTodoWorkChainOwner(promptId);
@@ -8327,8 +8346,16 @@ export class Config {
       // The todo_write result itself just presented the full state.
       this.getOwnActiveTodoReminderTurns().set(owner, 0);
     } else {
-      reminders.delete(owner);
-      this.getOwnActiveTodoReminderTurns().delete(owner);
+      // `todo_write` passes `undefined` only once the list has no unfinished
+      // items, and the plan file it just wrote is session-scoped. Clearing
+      // only the caller's owner strands the foreground reminder when a
+      // related automatic turn (cron/notification/subagent/Goal) completes
+      // the shared plan, so the next ordinary turn re-chains a finished plan
+      // (#10953). A non-completion write always passes a reminder string, so
+      // `undefined` here is unambiguous completion: clear session-wide.
+      reminders.clear();
+      this.getOwnActiveTodoReminderTurns().clear();
+      this.activeTodoPlanWriterOwner = undefined;
     }
   }
 
@@ -8347,7 +8374,23 @@ export class Config {
     for (const reminderOwner of reminders.keys()) {
       if (reminderOwner !== owner) reminders.delete(reminderOwner);
     }
-    owners.clear();
+    // Re-point the chain to `promptId` without dropping still-live related
+    // automatic turns that resolve to `owner`: their completion todo_write
+    // must still reach the shared owner to delete a finished plan.
+    // `owners.clear()` orphans those mappings (and their release call is
+    // already skipped once a UserQuery cleared the automatic-turn id set), so
+    // a completed plan's reminder survives and keeps reporting unfinished
+    // work. Drop only entries whose mapped owner is being discarded.
+    for (const [mappedPromptId, mappedOwner] of owners) {
+      if (mappedOwner !== owner) owners.delete(mappedPromptId);
+    }
+    // Drop the superseded foreground head: every continuing ordinary turn
+    // re-points the chain, and without pruning the previous head each of them
+    // would accumulate as a dead `promptId -> owner` entry for the life of
+    // the session. Still-live related automatic turns mapping to `owner` are
+    // preserved by the loop above, so their completion todo_write still
+    // reaches the shared owner.
+    owners.delete(continuedFrom);
     owners.set(promptId, owner);
   }
 
@@ -8371,6 +8414,21 @@ export class Config {
     if (![...owners.values()].includes(owner)) {
       this.getOwnActiveTodoReminders().delete(owner);
     }
+  }
+
+  /**
+   * Clears all active-todo reminder state (reminders, work-chain owners, and
+   * cadence counters) without a session transition. Used when history is
+   * discarded (rewind / restore / setHistory) so a reminder describing the
+   * discarded timeline cannot survive and steer the model back to work that
+   * no longer exists. `startNewSession` funnels its per-session clear through
+   * here too.
+   */
+  clearActiveTodoReminders(): void {
+    this.getOwnActiveTodoReminders().clear();
+    this.getOwnActiveTodoWorkChainOwners().clear();
+    this.getOwnActiveTodoReminderTurns().clear();
+    this.activeTodoPlanWriterOwner = undefined;
   }
 
   /**

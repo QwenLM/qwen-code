@@ -56,6 +56,16 @@ export type PromptCacheSharingParameters = GenerateContentParameters & {
    * final message is deliberately excluded from cache breakpoints.
    */
   promptCacheSharing?: boolean;
+  /**
+   * Local control signal, never sent on the wire: true when a streaming send
+   * is a transport-continuation attempt resuming an answer whose prefix was
+   * already delivered (LlmChat's transportContinuationPrefix). The OpenAI
+   * pipeline seeds its per-stream delivered-content flag from it, because
+   * with a continuation in flight the turn's replay gate is already shut by
+   * the accumulated prefix — so a parked tool-call finish must be released
+   * rather than withheld for a replay that can no longer happen.
+   */
+  continuationInFlight?: boolean;
 };
 
 /**
