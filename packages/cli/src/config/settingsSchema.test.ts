@@ -12,6 +12,8 @@ import {
   GOAL_MAX_TURNS_CAP,
   HELD_EXPIRY_OPTIONS,
   HookEventName,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
+  MAX_WEB_SEARCH_TIMEOUT_MS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
@@ -257,6 +259,33 @@ describe('SettingsSchema', () => {
         getSettingsSchema().tools.properties.sandbox.jsonSchemaOverride,
       ).toEqual({
         anyOf: [{ type: 'boolean' }, { type: 'string' }],
+      });
+    });
+
+    // Type and bounds mirror resolveWebSearchTimeoutMs, which accepts only
+    // whole numbers in range: without them the write paths accept values the
+    // runtime silently replaces with the default. The maximum is core's
+    // constant so the schema cannot drift from the runtime contract.
+    it('should bound tools.webSearch.timeoutMs to the runtime contract', () => {
+      expect(
+        getSettingsSchema().tools.properties.webSearch.properties.timeoutMs,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_WEB_SEARCH_TIMEOUT_MS,
+        showInDialog: true,
+      });
+    });
+
+    it('should bound tools.webSearch.maxPerSession to the runtime contract', () => {
+      expect(
+        getSettingsSchema().tools.properties.webSearch.properties.maxPerSession,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_WEB_SEARCH_MAX_PER_SESSION,
+        requiresRestart: true,
+        showInDialog: true,
       });
     });
 

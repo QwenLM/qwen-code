@@ -33,13 +33,14 @@ function loadComputerUseSkill() {
 }
 
 describe('bundled computer-use skill', () => {
-  it('routes one entrypoint by the connected driver platform to an existing resource', () => {
+  it('routes one entrypoint by the connected driver platform', () => {
     const { config, body } = loadComputerUseSkill();
     expect(config.name).toBe('computer-use');
     expect(body).toContain('ComputerUse.create()');
     expect(body).toContain('await computer.getPlatform()');
     expect(body).toContain('references/macos.md');
     expect(body).toContain('references/windows-linux.md');
+    expect(body).not.toContain('references/linux.md');
     expect(body).toContain('Read exactly one resource with `read_file`');
     expect(body).toContain('Skill base directory');
     expect(body).toContain('not the CLI or Node host operating system');
@@ -47,8 +48,20 @@ describe('bundled computer-use skill', () => {
     expect(body).toContain("if (platform === 'macos') {");
     expect(body).toContain("computer.getApp('App named by the task')");
     expect(body).toContain('before any editing or input');
-    expect(body).not.toContain('computer.observeWindow(');
     expect(config.allowedTools).toBeUndefined();
+  });
+
+  it('includes the full Linux workflow in the fixed skill entrypoint', () => {
+    const { body } = loadComputerUseSkill();
+    const linux = body.split('## Linux Computer Use')[1];
+    expect(linux).toContain('computer.listWindows(');
+    expect(linux).toContain('computer.observeWindow(target)');
+    expect(linux).toContain('elementToken: string');
+    expect(linux).toContain('Input delivery is\nmanaged by the runtime');
+    expect(linux).toContain('nodeRepl.write(state.text)');
+    expect(linux).toContain('nodeRepl.emitImage(');
+    expect(linux).toContain('Observe the current windows and state');
+    expect(linux).not.toMatch(/deliveryMode|delivery_mode|references\//);
   });
 
   it('exposes the macOS app workflow without native targeting or routing choices', () => {
@@ -109,7 +122,7 @@ describe('bundled computer-use skill', () => {
     expect(macos).toContain('newer external clipboard change');
   });
 
-  it('retains exact-window targeting and full actionable tokens for Windows/Linux', () => {
+  it('retains exact-window targeting and full actionable tokens for Windows', () => {
     const { legacy } = loadComputerUseSkill();
     expect(legacy).toContain('computer.listWindows(');
     expect(legacy).toContain('computer.observeWindow(target)');

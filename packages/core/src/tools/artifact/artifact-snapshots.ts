@@ -184,11 +184,10 @@ export async function retainArtifactSnapshot(
     if (!dir) return;
     const references = path.join(dir, 'references');
     const owner = snapshotReference(sessionId);
+    const entries = await fs.readdir(references);
     if (
       !operationId &&
-      (await fs.readdir(references)).some(
-        (entry) => entry === owner || entry.startsWith(`${owner}-`),
-      )
+      entries.some((entry) => entry === owner || entry.startsWith(`${owner}-`))
     )
       return;
     await fs.writeFile(

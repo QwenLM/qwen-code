@@ -441,6 +441,14 @@ interface WebShellSidebarProps {
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   /**
+   * Open the working-tree Changes dialog for a workspace. Forwarded to each
+   * trusted workspace's hover details, where the branch row fires it from the
+   * workspace's Git picker. Omit it and the row stays a plain-text summary.
+   */
+  onOpenGitDiff?: (workspaceCwd: string) => void;
+  /** Commit entry for the same picker; the row still opens without it. */
+  onOpenCommit?: (workspaceCwd: string) => void;
+  /**
    * Opens the shared App-owned Add Workspace dialog. Omit this callback when
    * registration is unavailable; locked workspaces hide the action separately.
    */
@@ -949,6 +957,8 @@ export function WebShellSidebar({
   onMobileClose,
   selectedWorkspaceCwd,
   onSelectWorkspace,
+  onOpenGitDiff,
+  onOpenCommit,
   onOpenAddWorkspace,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
@@ -5943,6 +5953,12 @@ export function WebShellSidebar({
                         mapSession={applyOptimisticPin}
                         limitSessions={editingSessionIdentity === null}
                         isPinnedSectionMember={isPinnedSectionMember}
+                        onOpenGitDiff={
+                          projectFeaturesEnabled ? onOpenGitDiff : undefined
+                        }
+                        onOpenCommit={
+                          projectFeaturesEnabled ? onOpenCommit : undefined
+                        }
                         searchQuery={searchQuery}
                         expanded={ws.primary ? projectExpanded : undefined}
                         autoExpandKey={

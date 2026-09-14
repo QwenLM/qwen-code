@@ -539,6 +539,21 @@ const EN: Messages = {
       : `Vision bridge (${v?.target ?? ''}) failed: the vision bridge could not run. The image was not interpreted.`,
   'visionBridge.ok': (v) =>
     `Converted ${v?.convertedCount ?? 0} image(s)${Number(v?.omittedCount ?? 0) > 0 ? ` (${v?.omittedCount ?? 0} image(s) omitted)` : ''} to text via ${v?.target ?? ''}.${v?.egressOccurred === 1 ? ' Your image and prompt/context were sent to that model.' : ''}`,
+  'approval.goal.title': 'Confirm session goal',
+  'approval.goal.overview': 'Goal overview',
+  'approval.goal.full': 'Full content',
+  'approval.goal.outcome': 'Outcome',
+  'approval.goal.doneWhen': 'Completion criteria',
+  'approval.goal.mustNot': 'Constraints',
+  'approval.goal.budget': 'Budget',
+  'approval.goal.onBlock': 'When blocked',
+  'approval.goal.context': 'Context',
+  'approval.goal.confirm': 'Set goal and continue',
+  'approval.goal.reject': 'Not now',
+  'approval.goal.hint':
+    'Setting this goal continues execution and checks progress after each turn. Blockers will be reported.',
+  'approval.goal.pending': 'Submitting…',
+  'approval.goal.failed': 'Could not submit your choice. Please try again.',
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
@@ -856,7 +871,7 @@ const EN: Messages = {
   'contextUsage.builtinTools': 'Built-in tools',
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
-  'contextUsage.estimatedOverhead': 'Estimated pre-conversation overhead',
+  'contextUsage.estimatedOverhead': 'Estimated base overhead',
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
@@ -866,15 +881,14 @@ const EN: Messages = {
   'contextUsage.model': 'Model',
   'contextUsage.noSession':
     'No active session yet. Send your first message before viewing context usage.',
-  'contextUsage.noApiResponse':
-    'No API response yet. Send a message to see actual usage.',
+  'contextUsage.usageUnavailable':
+    'Current context usage is unavailable. The estimates below cover base overhead only, excluding conversation messages.',
   'contextUsage.overLimit':
     'Context exceeds limit! Use /compress or /clear to reduce.',
   'contextUsage.skills': 'Skills',
   'contextUsage.systemPrompt': 'System prompt',
   'contextUsage.title': 'Context Usage',
   'contextUsage.tokens': 'tokens',
-  'contextUsage.usageByCategory': 'Usage by category',
   'contextUsage.used': 'Used',
   'contextUsage.accessibleUsage': (v) =>
     `${v?.used} of ${v?.total} tokens used`,
@@ -2823,8 +2837,26 @@ const EN: Messages = {
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
   'contextUsage.refresh': 'Refresh',
+  'contextUsage.remaining': 'Remaining',
+  'contextUsage.advanced': 'Advanced · usage by category',
+  'contextUsage.snapshot': 'Snapshot',
+  'contextUsage.viewCurrent': 'View current context',
+  'contextUsage.compress': 'Compress context',
+  'contextUsage.compressing': 'Compressing…',
+  'contextUsage.compressed': 'Compression completed. Context usage refreshed.',
+  'contextUsage.compressCancelled':
+    'Cancellation requested. Refresh to check current usage.',
+  'contextUsage.compressInterrupted':
+    'Connection changed during compression. Refresh to check current usage.',
+  'contextUsage.compressFailed': 'Compression failed. You can try again.',
+  'contextUsage.compressRefreshFailed':
+    'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
+  'contextUsage.compressUnavailable':
+    'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
   'contextUsage.retry': 'Retry',
   'contextUsage.loadError': 'Failed to load context usage.',
+  'contextUsage.previousReading':
+    'Could not refresh. Showing a previous reading.',
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
@@ -2904,6 +2936,8 @@ const EN: Messages = {
   'planExecution.unblocks': 'Unblocks:',
   'planExecution.unassigned': 'Unassigned executions',
   'planExecution.attention': 'Needs attention',
+  'planExecution.agentCount': (v) =>
+    `${v?.count ?? 0} ${Number(v?.count ?? 0) === 1 ? 'agent' : 'agents'}`,
   'planExecution.status.running': 'Running',
   'planExecution.status.paused': 'Paused',
   'planExecution.status.completed': 'Completed',
@@ -2943,6 +2977,7 @@ const EN: Messages = {
   'workflow.dependencies.unblocks': 'Unblocks',
   'workflow.dependencies.noDownstream': 'No downstream steps',
   'workflow.activity.empty': 'No Agent runs are linked to a Todo yet.',
+  'workflow.activity.showAll': (v) => `Show all ${v?.count ?? 0} runs`,
   'workflow.deliverables.title': 'Session deliverables',
   'workflow.deliverables.none': 'No artifacts have been published yet',
   'workflow.status.running': 'Running',
@@ -3517,6 +3552,14 @@ const EN: Messages = {
   'channels.editor.secret.clearHint':
     'This credential will be removed when you save.',
   'channels.editor.field.shared.senderPolicy': 'Direct message policy',
+  'channels.editor.field.dws.senderPolicy': 'Sender policy',
+  'channels.editor.field.dws.senderPolicy.description':
+    'Controls which users can start tasks. Group pairing and chat access are checked separately.',
+  'channels.editor.field.dws.dmPolicy': 'Direct message access',
+  'channels.editor.field.dws.dmPolicy.description':
+    'Allow direct messages and document notifications to start tasks, subject to the existing authorization rules.',
+  'channels.editor.field.dws.dmPolicy.option.open': 'Open',
+  'channels.editor.field.dws.dmPolicy.option.disabled': 'Disabled',
   'channels.editor.field.shared.senderPolicy.description':
     'Choose who can start a direct conversation with this Channel.',
   'channels.editor.field.shared.senderPolicy.option.pairing': 'Pairing',
@@ -4313,6 +4356,21 @@ const ZH: Messages = {
       : `视觉桥接（${v?.target ?? ''}）失败：视觉桥接无法运行。图片未被解析。`,
   'visionBridge.ok': (v) =>
     `已通过 ${v?.target ?? ''} 将 ${v?.convertedCount ?? 0} 张图片转换为文本${Number(v?.omittedCount ?? 0) > 0 ? `（已忽略 ${v?.omittedCount ?? 0} 张图片）` : ''}。${v?.egressOccurred === 1 ? '你的图片及提示词/上下文已发送至该模型。' : ''}`,
+  'approval.goal.title': '确认会话目标',
+  'approval.goal.overview': '目标概览',
+  'approval.goal.full': '完整内容',
+  'approval.goal.outcome': '目标',
+  'approval.goal.doneWhen': '完成条件',
+  'approval.goal.mustNot': '执行边界',
+  'approval.goal.budget': '预算',
+  'approval.goal.onBlock': '遇到阻塞时',
+  'approval.goal.context': '上下文',
+  'approval.goal.confirm': '设置并继续',
+  'approval.goal.reject': '暂不设置',
+  'approval.goal.hint':
+    '设置后将继续执行，并在每轮结束时检查目标进展；遇到阻塞会说明原因。',
+  'approval.goal.pending': '正在提交…',
+  'approval.goal.failed': '提交失败，请重试。',
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
@@ -4595,7 +4653,7 @@ const ZH: Messages = {
   'contextUsage.builtinTools': '内置工具',
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
-  'contextUsage.estimatedOverhead': '预估的对话前开销',
+  'contextUsage.estimatedOverhead': '基础开销估算',
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
@@ -4605,15 +4663,14 @@ const ZH: Messages = {
   'contextUsage.model': '模型',
   'contextUsage.noSession':
     '当前还没有会话。请先发送第一条消息，再查看上下文使用情况。',
-  'contextUsage.noApiResponse':
-    '尚无 API 响应。发送一条消息后可查看实际使用量。',
+  'contextUsage.usageUnavailable':
+    '当前上下文用量暂不可用。下方仅为基础开销估算，不含对话消息。',
   'contextUsage.overLimit':
     '上下文已超过限制！请使用 /compress 或 /clear 减少占用。',
   'contextUsage.skills': 'Skills',
   'contextUsage.systemPrompt': '系统提示词',
   'contextUsage.title': '上下文使用情况',
   'contextUsage.tokens': 'tokens',
-  'contextUsage.usageByCategory': '按类别统计',
   'contextUsage.used': '已用',
   'contextUsage.accessibleUsage': (v) => `已用 ${v?.used} / ${v?.total} tokens`,
   'contextUsage.viewDetails': '查看明细',
@@ -6413,8 +6470,24 @@ const ZH: Messages = {
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
   'contextUsage.refresh': '刷新',
+  'contextUsage.remaining': '剩余',
+  'contextUsage.advanced': '高级 · 用量分类',
+  'contextUsage.snapshot': '历史快照',
+  'contextUsage.viewCurrent': '查看当前上下文',
+  'contextUsage.compress': '手动压缩',
+  'contextUsage.compressing': '正在压缩…',
+  'contextUsage.compressed': '压缩完成，已刷新上下文用量。',
+  'contextUsage.compressCancelled': '已请求取消压缩，请刷新确认当前用量。',
+  'contextUsage.compressInterrupted':
+    '压缩期间连接发生变化，请刷新查看当前使用量。',
+  'contextUsage.compressFailed': '压缩失败，可以重试。',
+  'contextUsage.compressRefreshFailed':
+    '压缩已完成，但用量刷新失败。请点击刷新重试。',
+  'contextUsage.compressUnavailable':
+    '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
   'contextUsage.retry': '重试',
   'contextUsage.loadError': '上下文使用情况加载失败。',
+  'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
@@ -6493,6 +6566,7 @@ const ZH: Messages = {
   'planExecution.unblocks': '解锁：',
   'planExecution.unassigned': '未关联的执行',
   'planExecution.attention': '需要关注',
+  'planExecution.agentCount': (v) => `${v?.count ?? 0} 个 Agent`,
   'planExecution.status.running': '运行中',
   'planExecution.status.paused': '已暂停',
   'planExecution.status.completed': '已完成',
@@ -6531,6 +6605,7 @@ const ZH: Messages = {
   'workflow.dependencies.unblocks': '解除阻塞',
   'workflow.dependencies.noDownstream': '没有下游步骤',
   'workflow.activity.empty': '还没有关联到待办的 Agent 执行。',
+  'workflow.activity.showAll': (v) => `查看全部 ${v?.count ?? 0} 条执行`,
   'workflow.deliverables.title': '会话交付物',
   'workflow.deliverables.none': '尚未发布产物',
   'workflow.status.running': '运行中',
@@ -7058,6 +7133,14 @@ const ZH: Messages = {
   'channels.editor.secret.placeholder': (v) => `请输入${v?.label ?? '密钥'}`,
   'channels.editor.secret.clearHint': '保存后将移除此凭据。',
   'channels.editor.field.shared.senderPolicy': '私聊策略',
+  'channels.editor.field.dws.senderPolicy': '发送者策略',
+  'channels.editor.field.dws.senderPolicy.description':
+    '控制哪些用户可以启动任务。群聊配对和聊天访问分别检查。',
+  'channels.editor.field.dws.dmPolicy': '私聊访问',
+  'channels.editor.field.dws.dmPolicy.description':
+    '允许私聊消息和文档通知启动任务，仍遵守现有授权规则。',
+  'channels.editor.field.dws.dmPolicy.option.open': '开放',
+  'channels.editor.field.dws.dmPolicy.option.disabled': '禁用',
   'channels.editor.field.shared.senderPolicy.description':
     '选择哪些用户可以通过私聊使用此频道。',
   'channels.editor.field.shared.senderPolicy.option.pairing': '配对',
