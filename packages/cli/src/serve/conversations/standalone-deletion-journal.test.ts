@@ -141,19 +141,14 @@ describe('StandaloneDeletionJournal', () => {
     }
   });
 
-  // This skip is NOT a portability artifact, and should not be read as one.
-  // The Windows red it replaced was witnessing a real production gap:
-  // `sameDirectoryIdentity` compares EQUAL for a complete private replacement
-  // of the journal tree when `inodeVerifiable` is false on both sides, so on
-  // NTFS the swap detection is inert and `hasRecord` answers `false` over an
-  // attacker-created empty tree instead of rejecting with `reason:
-  // 'compromised'`. Measured on two independent Windows self-hosted arms at
-  // the base of #11787 (`25 tests | 5 failed`, `promise resolved "false"
-  // instead of rejecting`); the root cause is `fs.lstat(directory)` at
-  // `standalone-deletion-journal.ts:678` asking for a number-backed `Stats`,
-  // which rounds a 64-bit NTFS file index. Tracked in #11848 — converting that
-  // call to `{ bigint: true }` is what lets this gate come off.
-  it.skipIf(process.platform === 'win32').each(['base', 'state'] as const)(
+  // Regression cover for #11848: this swap detection was inert on NTFS
+  // volumes whose 64-bit file ids exceed 2^53 — the journal statted with a
+  // number-backed Stats, the strict number predicate withheld verifiability
+  // from both sides, and a complete private replacement compared equal.
+  // Measured on two Windows self-hosted arms at the base of #11787
+  // (`promise resolved "false" instead of rejecting`). The comparators now
+  // stat with `{ bigint: true }`, so the replacement is detected there too.
+  it.each(['base', 'state'] as const)(
     'rejects a complete private replacement %s tree on every operation',
     async (parent) => {
       const root = await workspace.getRoot();
@@ -390,7 +385,12 @@ describe('StandaloneDeletionJournal', () => {
     openMock.mockImplementationOnce(async (filePath: PathLike) => {
       expect(filePath.toString()).toBe(ownerDirectory);
       return {
-        stat: async () => ownerStats,
+        // The journal identities are bigint-shaped; a number stat here would
+        // trip the identity check before the sync failure under test.
+        stat: async (options?: { bigint?: boolean }) =>
+          options?.bigint === true
+            ? fs.stat(ownerDirectory, { bigint: true })
+            : ownerStats,
         sync: async () => Promise.reject(syncError),
         close: async () => undefined,
       } as unknown as fs.FileHandle;
@@ -446,8 +446,11 @@ describe('StandaloneDeletionJournal', () => {
     const prepared = await makeRecord('prepared');
     await journal.writePrepared(prepared, root);
     const journalDirectory = path.dirname(journalPath('prepared'));
-    const journalStats = await fs.lstat(journalDirectory);
-    if (!Number.isSafeInteger(journalStats.ino) || journalStats.ino <= 0) {
+    // The identity this replacement test rides on is exact under the
+    // journal's bigint stats; the only unverifiable case left is a volume
+    // reporting no inode numbers at all (FAT/exFAT/SMB).
+    const journalStats = await fs.lstat(journalDirectory, { bigint: true });
+    if (journalStats.ino === 0n) {
       ctx.skip();
       return;
     }

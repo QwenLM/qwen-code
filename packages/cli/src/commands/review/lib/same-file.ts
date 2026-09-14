@@ -5,23 +5,25 @@
  */
 
 import { realpathSync, statSync } from 'node:fs';
-import type { Stats } from 'node:fs';
+import type { BigIntStats } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-// Verifiability is the shared strict predicate from the conversation
-// identity module — tighter than core's canonical `hasVerifiableInode`
-// (`Number(ino) !== 0`) on purpose: `Stats.ino` carries the 64-bit NTFS
-// file index rounded at the JS boundary, so two DISTINCT Windows files
-// whose indices land in one double-rounding bucket surface with equal
-// `ino` and would compare as one file here. Only safe positive values are
-// exact identity proof; everything else degrades to the canonical-spelling
-// comparison below. Core's looser predicate is deliberately left alone —
-// tightening it would also flip `assertVerifiableTranscriptIdentity` on
-// >2^53 Windows transcript inodes.
-import { hasVerifiableInode } from '../../../utils/conversation-directory-identity.js';
 
-function tryStat(path: string): Stats | undefined {
+// Stats are read with `{ bigint: true }` so the 64-bit NTFS file index
+// arrives EXACTLY. A number-backed `Stats` rounds it at the JS boundary, and
+// the strict number predicate in conversation-directory-identity.ts
+// (`Number.isSafeInteger(ino) && ino > 0`) then withholds verifiability from
+// every id above 2^53 — degrading this comparator to canonical spellings on
+// exactly the volumes where hard links must be seen through (#11848). With
+// exact bigints the only unverifiable case left is `ino === 0n` (FAT/exFAT
+// and some SMB mounts), which keeps the canonical-spelling fallback below.
+// Both shared predicates are deliberately left alone: core's canonical one
+// (core/src/utils/file-identity.ts, `Number(ino) !== 0`) stays looser, and
+// the CLI's strict number one keeps its `(ino: number)` signature for its
+// remaining number-backed consumers — this comparator's gate is local.
+
+function tryStat(path: string): BigIntStats | undefined {
   try {
-    return statSync(path);
+    return statSync(path, { bigint: true });
   } catch {
     return undefined;
   }
@@ -52,13 +54,13 @@ function identityOfAbsent(path: string): string {
 
 /**
  * True when two paths name the same file. Where both exist and the
- * filesystem exposes verifiable inode numbers, filesystem identity (dev/ino)
- * decides: hard links and case-variant spellings are one file under names no
- * string compare sees through, and statSync follows a symlinked directory
- * component on the way to the file. Where inodes are unverifiable
- * (`hasVerifiableInode`: FAT/exFAT-style volumes reporting `ino === 0`, or
- * Windows file IDs rounded past the safe-integer range), dev/ino would
- * collapse unrelated files onto one identity, so the
+ * filesystem exposes inode numbers, filesystem identity (dev/ino) decides:
+ * hard links and case-variant spellings are one file under names no string
+ * compare sees through, and statSync follows a symlinked directory component
+ * on the way to the file. The stats are read as bigints, so a 64-bit NTFS
+ * file index is compared exactly rather than after double-rounding. Where
+ * inodes are unverifiable (FAT/exFAT/SMB-style volumes reporting `ino ===
+ * 0n`), dev/ino would collapse unrelated files onto one identity, so the
  * comparison falls back to canonical spellings — losing hard-link identity
  * there, but never equating distinct files. Where a side is absent, the
  * deepest existing ancestor is canonicalised instead, keeping the comparison
@@ -69,7 +71,7 @@ export function isSameFile(left: string, right: string): boolean {
   const leftStat = tryStat(left);
   const rightStat = tryStat(right);
   if (leftStat !== undefined && rightStat !== undefined) {
-    if (hasVerifiableInode(leftStat.ino) && hasVerifiableInode(rightStat.ino)) {
+    if (leftStat.ino !== 0n && rightStat.ino !== 0n) {
       return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
     }
     // realpathSync.native canonicalises case the way the volume does
