@@ -55,6 +55,30 @@ function splitListEntries(pattern: string): string[] {
 }
 
 /**
+ * Removes padding whitespace around the whole matcher without eating
+ * whitespace the expression escapes: a trailing whitespace char preceded by
+ * an odd number of backslashes is part of the regular expression (`\.env\ `
+ * matches "a.env "), so trimming it would leave a trailing backslash that
+ * fails to compile. An even number of backslashes is an escaped backslash, so
+ * the whitespace after it stays padding. Leading escaped whitespace starts
+ * with a backslash, so `trimStart` can never touch it.
+ */
+function trimMatcherEdges(matcher: string): string {
+  let end = matcher.length;
+  while (end > 0 && /\s/.test(matcher[end - 1])) {
+    let backslashes = 0;
+    for (let i = end - 2; i >= 0 && matcher[i] === '\\'; i--) {
+      backslashes++;
+    }
+    if (backslashes % 2 === 1) {
+      break;
+    }
+    end--;
+  }
+  return matcher.slice(0, end).trimStart();
+}
+
+/**
  * Tests a hook `matcher` against the value an event is matched on, using the
  * same rules for every event and for both settings and session hooks:
  *
@@ -79,7 +103,7 @@ export function matchesHookPattern(
   subject: string,
   options: HookPatternOptions = {},
 ): boolean {
-  const pattern = matcher.trim();
+  const pattern = trimMatcherEdges(matcher);
   if (pattern === '' || pattern === '*' || pattern === '.*') {
     return true;
   }
