@@ -58,6 +58,12 @@ export const BRAND_ROUTE_PROXY = '^/brand/?$';
 // bridge hangs in `connecting`.
 export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
 
+// Shared with vite.lib.config.ts so the app and lib builds can never drift
+// onto different syntax floors: esbuild miscompiles xterm's logical
+// assignments below ES2021 (#11643), and the lib build bundles the same
+// xterm for npm hosts.
+export const WEB_SHELL_BUILD_TARGET = 'es2021';
+
 export default defineConfig(({ command }) => ({
   root: 'client',
   plugins: [react(), tailwindcss()],
@@ -89,7 +95,7 @@ export default defineConfig(({ command }) => ({
   },
   build: {
     // Avoid esbuild lowering xterm's logical assignments into invalid code.
-    target: 'es2021',
+    target: WEB_SHELL_BUILD_TARGET,
     outDir: '../dist',
     emptyOutDir: true,
   },
