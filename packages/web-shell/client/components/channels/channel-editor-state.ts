@@ -94,6 +94,7 @@ function initialFieldValue(
     if (instance) {
       if (field.key === 'senderPolicy') return 'allowlist';
       if (field.key === 'groupPolicy') return 'disabled';
+      if (field.key === 'dmPolicy') return 'open';
       if (field.key !== 'sessionScope') return '';
     }
     if (field.key === 'sessionScope' && field.default === 'thread') {
