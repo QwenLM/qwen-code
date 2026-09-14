@@ -327,6 +327,21 @@ describe('runBaseTree', () => {
     }
   };
 
+  /**
+   * Run `fn` with `dir` as HOME — the way a throwaway GLOBAL git config
+   * reaches the spawns under test: `GIT_CONFIG_GLOBAL` would not survive
+   * `sanitizedGitEnv`, by design.
+   */
+  const withHome = <T>(dir: string, fn: () => T): T => {
+    const saved = process.env['HOME'];
+    process.env['HOME'] = dir;
+    try {
+      return fn();
+    } finally {
+      process.env['HOME'] = saved;
+    }
+  };
+
   /** Push the repository config past the filter screen's include fan-out. */
   const fanOutIncludes = (): void => {
     const config = join(repo, '.git', 'config');
@@ -2386,6 +2401,119 @@ describe('runBaseTree', () => {
       execFileSync('git', ['status', '--porcelain'], { cwd: tree() });
       expect(existsSync(canary)).toBe(true);
     },
+  );
+
+  itWhereContainmentExists(
+    'runs NO filter defined only in GLOBAL config, and sees the rewrite it normalized (R7-1)',
+    () => {
+      // The repo-local screen cannot see `~/.gitconfig`, but the reuse arm's
+      // `status` resolves the whole stack: a driver defined only there runs
+      // its `clean` on the index refresh — the tree's own untracked
+      // `.gitattributes`, an ordinary tolerated addition, selects it — and a
+      // normalizing driver maps a rewrite back onto the blob, certifying the
+      // mutation clean. The measurement therefore reads no user config at
+      // all. The driver lives in a throwaway HOME because
+      // `GIT_CONFIG_GLOBAL` would not survive `sanitizedGitEnv`. Removing
+      // `NO_USER_CONFIG_ENV` from `statusFilterBlanks` turns this case red.
+      const home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
+      const canary = join(repo, 'global-clean-ran');
+      writeFileSync(
+        join(home, '.gitconfig'),
+        `[filter "evil"]\n\tclean = touch ${canary} && tr A-Z a-z\n`,
+      );
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it'); // the control
+
+      writeFileSync(join(tree(), '.gitattributes'), '* filter=evil\n');
+      // A rewrite the filter normalizes back onto the blob: `tr A-Z a-z`
+      // maps BEFORE to before, so a filtered `status` reports it clean.
+      writeFileSync(join(tree(), 'a.txt'), 'BEFORE\n');
+      const touch = (s: number) => {
+        const t = new Date(Date.now() + s * 1000);
+        utimesSync(join(tree(), 'a.txt'), t, t);
+      };
+      touch(5);
+
+      withHome(home, () => {
+        const second = run({}, build);
+        // The canary did not run, and the rewrite the filter would have
+        // normalized away is SEEN: reading no user config, `status` judges
+        // the bytes on disk, which are not the blob.
+        expect(second.available).toBe(false);
+        expect(second.note).not.toContain('reusing it');
+        expect(second.note).toContain(
+          'no longer holds exactly what this run recorded',
+        );
+        expect(builds).toEqual([tree()]);
+        expect(existsSync(canary)).toBe(false);
+
+        // The premise, checked AFTER: the same refresh WITH the global
+        // config runs the filter, and the rewrite normalizes back onto the
+        // blob — without the blank, this ask certified the mutation clean.
+        touch(10);
+        const premise = spawnSync(
+          'git',
+          ['status', '--porcelain', '--untracked-files=no'],
+          { cwd: tree(), encoding: 'utf8' },
+        );
+        expect(existsSync(canary)).toBe(true);
+        expect(premise.stdout).toBe('');
+      });
+    },
+  );
+
+  itWhereContainmentExists(
+    'settles a tree whose filter lives only in GLOBAL config, so the config-blind measurement can certify it (R7-1)',
+    () => {
+      // The honest half of cutting the user-config scopes from the
+      // measurement spawns: git-lfs installed the default way (the driver in
+      // `~/.gitconfig`, the attributes committed) smudges the checkout, and a
+      // measurement that reads no user config compares the smudged bytes
+      // against the cleaned blob — dirty, forever, unless the index was
+      // settled THROUGH the filter first. The settle's trigger therefore
+      // covers git's fully resolved config, not only the repo-local screen;
+      // restoring the repo-local-only trigger turns this case red (whole-
+      // second racy granularity, as in the repo-local sibling).
+      const rot = 'tr A-Za-z N-ZA-Mn-za-m';
+      const home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
+      writeFileSync(
+        join(home, '.gitconfig'),
+        `[filter "rot"]\n\tclean = ${rot}\n\tsmudge = ${rot}\n`,
+      );
+      withHome(home, () => {
+        writeFileSync(join(repo, '.gitattributes'), 'secret.txt filter=rot\n');
+        writeFileSync(join(repo, 'secret.txt'), 'plain text\n');
+        git(repo, 'add', '.gitattributes', 'secret.txt');
+        git(repo, 'commit', '-qm', 'filtered');
+        baseSha = git(repo, 'rev-parse', 'HEAD');
+        planPath = '';
+        recordReviewWorktreeLeaseMergeBase(repo, 'pr-1', baseSha);
+        // The premise, pinned: the blob really is the cleaned form.
+        expect(git(repo, 'cat-file', '-p', `${baseSha}:secret.txt`)).toBe(
+          'cynva grkg',
+        );
+
+        const builds: string[] = [];
+        const build = (w: string) => {
+          builds.push(w);
+          return okBuild;
+        };
+        const first = run({}, build);
+        expect(first.note).not.toContain('tracked files no longer match');
+        expect(first.available).toBe(true);
+        expect(readFileSync(join(tree(), 'secret.txt'), 'utf8')).toBe(
+          'plain text\n',
+        );
+        expect(run({}, build).note).toContain('reusing it');
+        expect(builds).toEqual([tree()]);
+      });
+    },
+    15_000,
   );
 
   itWhereContainmentExists(

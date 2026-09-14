@@ -407,8 +407,11 @@ function atomicWriteLease(path: string, data: string): void {
  * worktree, not the base tree — and deleting that builder's lock let the next
  * ask in over the tree it was mid-install in. Not even a lock whose holder
  * process is gone: the build's commands run in containers a dead client cannot
- * stop, which go on writing into the tree — the reason `cleanup` leaves it
- * too. A lock ages out. The directory
+ * stop, which go on writing into the tree. `cleanup` is the one path that
+ * releases it, keyed on the tree it guards being gone (`releaseBaseTreeLock`)
+ * — without that, a killed builder's lock outlived its tree and wedged the
+ * next review of the target for the whole staleness window. A lock otherwise
+ * ages out. The directory
  * itself goes only once nothing is left in it. Best-effort, like every removal
  * on the release paths.
  */

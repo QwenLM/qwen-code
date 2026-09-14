@@ -72,6 +72,7 @@ import { baseWorktreePath, REVIEW_TMP_DIR } from './lib/paths.js';
 import {
   filterBlankEnv,
   filterScreenForTree,
+  resolvedContentTransformForTree,
   untrustedGitfile,
   discardWorktree,
   sanitizedGitEnv,
@@ -174,6 +175,22 @@ const GIT_NEUTRALIZE = [
   '-c',
   'core.hooksPath=/dev/null/no-hooks',
 ];
+/**
+ * Cut the user-owned config scopes at the source on a measurement spawn:
+ * the reviewer's global and system config are outside the mount and trusted
+ * as the user's own contract, but the tree's attacker-writable
+ * `.gitattributes` is what SELECTS a driver from them, so a blanked
+ * measurement must not resolve them at all. `GIT_CONFIG_GLOBAL` replaces the
+ * whole global file list (`~/.gitconfig` AND the XDG file) with the null
+ * device; `GIT_CONFIG_NOSYSTEM` skips the system file (`GIT_CONFIG_SYSTEM`
+ * beside it for completeness, against a build that reads it anyway). What
+ * git never reads, no attribute can select.
+ */
+const NO_USER_CONFIG_ENV: NodeJS.ProcessEnv = {
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+  GIT_CONFIG_SYSTEM: process.platform === 'win32' ? 'NUL' : '/dev/null',
+};
 const GIT_MAX_BUFFER = 512 * 1024 * 1024;
 /**
  * A deadline on every spawn here, the way `revParse` carries one in
@@ -277,6 +294,10 @@ function gitOutWith(
  * it, so the refresh reads and runs nothing from it, and refusing on it
  * darkened every CI checkout `actions/checkout` had left an `includeIf` in
  * (see `FilterScreen.dangling` for the measurement).
+ *
+ * The screen is repo-local by design, but the spawn resolves the whole
+ * stack, so the env also cuts the global and system scopes at the source
+ * (`NO_USER_CONFIG_ENV`) — see `statusFilterBlanks` below.
  */
 function unseenConfigNote(baseSha: string, reason: string): string {
   return (
@@ -300,7 +321,19 @@ function statusFilterBlanks(tree: string): NodeJS.ProcessEnv | string {
       'with nothing to blank it'
     );
   }
-  return filterBlankEnv(screen.filters);
+  // The screen sees REPO-LOCAL config only, but the spawn below resolves the
+  // whole stack: a `filter.<driver>.clean` in the reviewer's GLOBAL or system
+  // config is just as executable, and the tree's own attacker-writable
+  // `.gitattributes` is what selects the driver. Those names cannot be
+  // enumerated to this screen's read-to-the-bottom standard — and must not
+  // feed the checkout gate's refuse-on-any-hit list — so instead of blanking
+  // them by name the measurement reads no user config AT ALL: what git never
+  // reads, no attribute can select, and no normalizing global driver can
+  // quietly map a rewrite back onto the indexed blob. The honest half of the
+  // trade is `settleCheckoutIndex`'s: its trigger covers the full stack, so a
+  // filter that lives only in `~/.gitconfig` (git-lfs installed the default
+  // way) still gets its stat-fresh index first.
+  return { ...NO_USER_CONFIG_ENV, ...filterBlankEnv(screen.filters) };
 }
 
 /**
@@ -337,13 +370,28 @@ function statusFilterBlanks(tree: string): NodeJS.ProcessEnv | string {
  * does it see a per-worktree `config.worktree` created mid-wait under the
  * common dir's `worktrees/` — the screen does not list that file while it is
  * absent — which lives host-side, outside the mount, where nothing the
- * reviewed code runs can write. A repository with no filter pays nothing: no
- * wait, no spawn. Best effort: a refresh that does not land leaves the blanked
- * check to refuse, which is the fail-closed answer.
+ * reviewed code runs can write. A repository whose resolved config transforms
+ * nothing pays one extra `git config` read and no wait. Best effort: a
+ * refresh that does not land leaves the blanked check to refuse, which is the
+ * fail-closed answer.
  */
 function settleCheckoutIndex(tree: string, onWindow?: () => void): void {
   const before = filterScreenForTree(tree);
-  if (before === null || before.filters.length === 0) return;
+  if (before === null) return;
+  // The repo-local screen alone cannot answer "did the checkout transform
+  // bytes": a filter defined only in the reviewer's GLOBAL or system config
+  // (git-lfs installed the default way) smudges exactly the same, and the
+  // blanked measurements no longer read those scopes at all — so an
+  // unsettled global-only-filter tree compared smudged bytes against the
+  // cleaned blob and was refused: the A/B lane dead for every repository
+  // whose filter lives in `~/.gitconfig`. The trigger therefore asks git's
+  // own resolved config. The repo-local screen stays as the WINDOW guard
+  // below, because that scope is the one the mount can rewrite during the
+  // wait; global and system config are the user's own, which nothing the
+  // reviewed code runs can write.
+  if (before.filters.length === 0 && !resolvedContentTransformForTree(tree)) {
+    return;
+  }
   const wait = 1000 - (Date.now() % 1000) + 20;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
   onWindow?.();
@@ -1453,9 +1501,11 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     // so its mtime — the whole of the staleness test — was the reviewed
     // code's to backdate, and the lock itself was its to delete; either way
     // two builders entered the critical section together. Nothing mounts
-    // this directory. Releasing the lease keeps it, and so does `cleanup`: a
-    // builder killed with its client can still be writing into the tree from
-    // its container, so the lock only ages out.
+    // this directory. Releasing the lease keeps it — a finalizer can run
+    // while a builder it started is still mid-install — and `cleanup`
+    // releases it only once the tree it guards is gone; otherwise the lock
+    // only ages out, because a builder killed with its client can still be
+    // writing into the tree from its container.
     lock = baseTreeLockPath(worktree);
     identityMs = identity.identity;
     anchoredBaseSha = identity.mergeBaseSha;
@@ -1643,21 +1693,26 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         //
         // `gitOut`'s `-c` pins blank the two FIXED-KEY execution channels,
         // `core.fsmonitor` and `core.hooksPath`. The third is
-        // `filter.<driver>.clean|process`, whose key is not fixed — but
-        // `filterCommandsIn` enumerates the driver names out of the RESOLVED
-        // config, and `statusFilterBlanks` blanks every one of them on this
-        // spawn, refusing only on config it could not read to the bottom.
-        // That is what the sibling `worktreeResidue` does on the identical
-        // `status` refresh. (For one round this arm REFUSED on any filter
-        // instead, and a repository with git-lfs installed `--local` then got
-        // a base tree only on the ask that built it.)
+        // `filter.<driver>.clean|process`, whose key is not fixed — the
+        // repo-local names are enumerated by the screen and blanked on this
+        // spawn by name, while the global and system scopes are not read by
+        // the spawn AT ALL (`NO_USER_CONFIG_ENV`): a driver defined there is
+        // just as executable, the tree's own `.gitattributes` selects it,
+        // and its names cannot be screened to the read-to-the-bottom
+        // standard. The refusal is still only for repo-local config the
+        // screen could not read to the bottom. The repo-local half is what
+        // the sibling `worktreeResidue` does on the identical `status`
+        // refresh. (For one round this arm REFUSED on any filter instead,
+        // and a repository with git-lfs installed `--local` then got a base
+        // tree only on the ask that built it.)
         //
         // Blanking is also what makes the verdict mean anything. A
         // normalizing `clean` filter (LFS, a formatter, RCS keyword
         // expansion) would have `status` judge the FILTERED bytes, so a
         // rewrite whose filtered form maps back to the indexed blob printed
         // nothing; blanked, it judges the bytes on disk. And a filter that is
-        // missing or exits non-zero no longer reaches the check at all.
+        // missing or exits non-zero — a global `filter.lfs.required=true`
+        // with no git-lfs on PATH — no longer reaches the check at all.
         args.onReuseWindow?.();
         const unfenced = unfencedResolutionAncestor(tree);
         if (unfenced !== null) {

@@ -222,6 +222,20 @@ export function baseTreeLockPath(worktree: string): string {
   );
 }
 
+/**
+ * Remove a worktree's base-tree build lock, for the one caller entitled to:
+ * `cleanup`, once it has deleted the tree the lock guards. The lease-release
+ * reclaim deliberately skips locks (a finalizer can run while a builder it
+ * started is still mid-install), so without this a killed builder's lock
+ * stood for its whole staleness window after the tree was already gone, and
+ * every later `base-tree` ask for the target reported "another probe is
+ * building" over a tree the fast path could not reuse. Throws on a removal
+ * that fails; the caller notes and moves on.
+ */
+export function releaseBaseTreeLock(worktree: string): void {
+  rmSync(baseTreeLockPath(worktree), { recursive: true, force: true });
+}
+
 /** The host-side directory holding one review target's base-tree state. */
 function baseTreeStateDir(worktree: string): string {
   return join(
