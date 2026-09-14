@@ -89,7 +89,9 @@ import type {
 
 interface DingTalkRichTextPart {
   type?: string;
+  msgType?: string;
   text?: string;
+  content?: string;
   downloadCode?: string;
   atName?: string;
 }
@@ -112,6 +114,12 @@ interface DingTalkRepliedMsg {
   msgType?: string;
   senderId?: string;
   content?: DingTalkMessageContent;
+}
+
+interface DingTalkQuotedMedia {
+  downloadCode: string;
+  mediaType: 'image' | 'file' | 'audio' | 'video';
+  fileName?: string;
 }
 
 interface DingTalkAtUser {
@@ -150,6 +158,10 @@ function nonEmptyString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function richTextPartType(part: DingTalkRichTextPart): string {
+  return part.type || part.msgType || 'text';
 }
 
 function parseJsonArray(value: unknown): unknown[] | undefined {
@@ -2865,11 +2877,7 @@ export class DingtalkChannel extends ChannelBase {
   private extractQuotedContext(data: DingTalkMessageData): {
     referencedText?: string;
     isReplyToBot: boolean;
-    media?: {
-      downloadCode: string;
-      mediaType: 'image' | 'file' | 'audio' | 'video';
-      fileName?: string;
-    };
+    media: DingTalkQuotedMedia[];
   } {
     // Newer format: text.repliedMsg
     if (data.text?.isReplyMsg && data.text.repliedMsg) {
@@ -2880,20 +2888,30 @@ export class DingtalkChannel extends ChannelBase {
       // Note: DingTalk doesn't include content for interactiveCard replies
       // (bot responses sent via webhook). Only user message quotes have text.
       const text = this.summarizeRepliedContent(replied);
-      const downloadCode = replied.content?.downloadCode;
-      const mediaType = this.mediaTypeFromMsgType(replied.msgType);
+      const media: DingTalkQuotedMedia[] = [];
+      const richText = replied.content?.richText;
+      if (Array.isArray(richText)) {
+        for (const part of richText) {
+          const mediaType = this.mediaTypeFromMsgType(richTextPartType(part));
+          if (part.downloadCode && mediaType) {
+            media.push({ downloadCode: part.downloadCode, mediaType });
+          }
+        }
+      } else {
+        const downloadCode = replied.content?.downloadCode;
+        const mediaType = this.mediaTypeFromMsgType(replied.msgType);
+        if (downloadCode && mediaType) {
+          media.push({
+            downloadCode,
+            mediaType,
+            fileName: replied.content?.fileName,
+          });
+        }
+      }
       return {
         referencedText: text || undefined,
         isReplyToBot,
-        ...(downloadCode && mediaType
-          ? {
-              media: {
-                downloadCode,
-                mediaType,
-                fileName: replied.content?.fileName,
-              },
-            }
-          : {}),
+        media,
       };
     }
 
@@ -2903,10 +2921,10 @@ export class DingtalkChannel extends ChannelBase {
       const isReplyToBot =
         !!data.chatbotUserId && quote.senderId === data.chatbotUserId;
       const text = quote.text?.content?.trim();
-      return { referencedText: text || undefined, isReplyToBot };
+      return { referencedText: text || undefined, isReplyToBot, media: [] };
     }
 
-    return { isReplyToBot: false };
+    return { isReplyToBot: false, media: [] };
   }
 
   /**
@@ -2958,9 +2976,11 @@ export class DingtalkChannel extends ChannelBase {
     if (content?.richText && Array.isArray(content.richText)) {
       const parts: string[] = [];
       for (const part of content.richText) {
-        const partType = part.type || 'text';
-        if (partType === 'text' && part.text) {
-          parts.push(part.text);
+        const partType = richTextPartType(part);
+        const partText =
+          typeof part.text === 'string' ? part.text : part.content;
+        if (partType === 'text' && partText) {
+          parts.push(partText);
         } else if (partType === 'picture') {
           parts.push('[image]');
         } else if (partType === 'at' && part.atName) {
@@ -3123,8 +3143,7 @@ export class DingtalkChannel extends ChannelBase {
    * this message's own media — `(audio)`, `(video)`, `(file: name)`. Only the
    * direct-media call site has one, and only that call may erase it: on the
    * quoted-media path `envelope.text` is the user's own reply, and a reply
-   * that happens to read exactly like a placeholder must survive (a group
-   * `@Bot (audio)` reaches here as exactly `(audio)` after mention removal).
+   * that happens to read exactly like a placeholder must survive.
    */
   private async attachMedia(
     envelope: Envelope,
@@ -3319,27 +3338,15 @@ export class DingtalkChannel extends ChannelBase {
 
       // Extract text and media info from message
       const content = this.extractContent(data);
-      let cleanText = content.text;
-
-      // Strip first @mention (the bot) from text, keep other @mentions intact.
-      // Anchor to start-of-string so @ symbols inside URLs or emails
-      // (e.g. git@host:path) are not accidentally stripped (#7402).
-      if (isMentioned) {
-        cleanText = cleanText.replace(/^\s*@[^\s\p{Cf}]+/u, '').trim();
-      }
 
       // Extract quoted message context
       const quoted = this.extractQuotedContext(data);
 
       const chatId = conversationId || sessionWebhook;
 
-      // After stripping the bot @mention, cleanText may legitimately be empty
-      // (user pinged the bot with no other text). Don't fall back to the
-      // original text in that case — it would re-introduce the @mention.
-      const messageText = isMentioned ? cleanText : cleanText || content.text;
       // Carry mention targets as a structured envelope field (like
       // referencedText) so ChannelBase renders the marker after prompt
-      // sanitization and slash-command parsing sees the body alone.
+      // sanitization.
       const mentionedMemberIds = isGroup ? collectNonBotMentionIds(data) : [];
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
@@ -3352,7 +3359,7 @@ export class DingtalkChannel extends ChannelBase {
         ...(isGroup && conversationTitle
           ? { chatName: conversationTitle }
           : {}),
-        text: messageText,
+        text: content.text,
         ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
@@ -3370,7 +3377,7 @@ export class DingtalkChannel extends ChannelBase {
       }
 
       const processMessage =
-        content.downloadCodes.length > 0 || quoted.media
+        content.downloadCodes.length > 0 || quoted.media.length > 0
           ? this.prepareThenHandleInbound(envelope, async () => {
               // Download media in callback order.
               if (content.downloadCodes.length > 0 && content.mediaType) {
@@ -3384,12 +3391,12 @@ export class DingtalkChannel extends ChannelBase {
                   );
                 }
               }
-              if (quoted.media) {
+              for (const media of quoted.media) {
                 await this.attachMedia(
                   envelope,
-                  quoted.media.downloadCode,
-                  quoted.media.mediaType,
-                  quoted.media.fileName,
+                  media.downloadCode,
+                  media.mediaType,
+                  media.fileName,
                 );
               }
             })

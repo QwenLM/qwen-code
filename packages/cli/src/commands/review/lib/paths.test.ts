@@ -9,6 +9,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
+  assertWritableOutPath,
   repoRelativeOf,
   inertPath,
   lastReviewEffortPath,
@@ -242,4 +243,43 @@ describe('canonicalise walk-up — backslash is a POSIX filename byte', () => {
       }
     },
   );
+});
+
+describe('assertWritableOutPath — the up-front --out ruling', () => {
+  it('refuses a repeated --out, which yargs hands over as an array, with a message that says so', () => {
+    // Not `out.trim is not a function`: that reads as a crash in the
+    // command, and the operator cannot tell it is their argument.
+    expect(() => assertWritableOutPath(['a.json', 'b.json'])).toThrow(
+      TypeError,
+    );
+    expect(() => assertWritableOutPath(['a.json', 'b.json'])).toThrow(
+      '--out must be given once, as a file path',
+    );
+    // `--no-out` arrives as `false`; nothing was given twice, so the message
+    // is the blank value's.
+    for (const shape of [false, true, undefined]) {
+      expect(() => assertWritableOutPath(shape)).toThrow(TypeError);
+      expect(() => assertWritableOutPath(shape)).toThrow(
+        '--out must name a file path',
+      );
+    }
+  });
+
+  it('refuses a blank value, a trailing separator and an existing directory, and admits a file path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'out-path-'));
+    try {
+      expect(() => assertWritableOutPath('  ')).toThrow(
+        '--out must name a file path',
+      );
+      expect(() => assertWritableOutPath(join(dir, 'later') + '/')).toThrow(
+        '--out names a directory, not a file',
+      );
+      expect(() => assertWritableOutPath(dir)).toThrow(
+        '--out names a directory, not a file',
+      );
+      expect(() => assertWritableOutPath(join(dir, 'plan.json'))).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
