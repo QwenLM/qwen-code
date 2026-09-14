@@ -58,8 +58,9 @@ interface FenceState {
  * fence-run-only line with the same character, at least the opener's length,
  * and the opener's exact container prefix; it auto-closes at a container
  * boundary. An unclosed fence consumes the rest of its container only. A line
- * indented 4+ spaces with no container is an indented code block and is never
- * harvested either. Linear in the input — no backreference rescans.
+ * indented 4+ spaces beyond its blockquote-free container is an indented code
+ * block and is never harvested either. Linear in the input — no backreference
+ * rescans.
  *
  * Inline backtick runs are deliberately NOT stripped: a stray backtick is
  * common in chat text, and pairing it with a later one would silently delete
@@ -72,13 +73,24 @@ function scanFenceLines(
 ): FenceState | undefined {
   let fence: FenceState | undefined;
   let listIndent = 0;
-  for (const line of text.split('\n')) {
+  // Line endings are normalized first: CommonMark admits CR and CRLF, and a
+  // fence line terminated by `\r` must still read as a fence line.
+  for (const line of text.replace(/\r\n?/g, '\n').split('\n')) {
     let prefix = '';
     let rest = line;
     const bq = BQ_PREFIX_RE.exec(rest);
     if (bq) {
       prefix = bq[0];
       rest = rest.slice(prefix.length);
+    }
+    const bqPrefix = prefix;
+    if (/^[\t ]*$/.test(rest)) {
+      // A blank line ends nothing: CommonMark keeps a list item open across
+      // it while the following block re-indents, and inside a fence it is
+      // ordinary content. Resetting the container here would tear the fence
+      // in half and re-read its real closer as an opener.
+      if (!fence) onKeptLine?.(line);
+      continue;
     }
     if (listIndent > 0) {
       if (rest.startsWith(' '.repeat(listIndent))) {
@@ -115,8 +127,12 @@ function scanFenceLines(
       fence = { char: open[1]!.charAt(0), length: open[1]!.length, prefix };
       continue;
     }
-    if (leadingSpaces >= INDENTED_CODE_SPACES && prefix === '') {
-      // An indented code block at top level: code, so never harvested.
+    if (leadingSpaces >= INDENTED_CODE_SPACES && bqPrefix === '') {
+      // An indented code block: code, so never harvested. The check keys on
+      // the blockquote prefix only — inside a list the content indent is
+      // already stripped, so 4 further spaces are code there too, while a
+      // blockquoted over-indented line is a lazy paragraph continuation and
+      // its keys are real references.
       continue;
     }
     onKeptLine?.(line);
@@ -216,7 +232,14 @@ export function parseFeishuContent(
       ...result,
       text:
         type === 'file'
-          ? `(file: ${string(body['file_name']) || 'file'})`
+          ? `(file: ${
+              // The placeholder is a single line by contract (the command-turn
+              // placeholder filter is line-based), so a sender-chosen name may
+              // not carry newlines into it. The metadata keeps the raw name.
+              string(body['file_name'])
+                .replace(/[\r\n]+/g, ' ')
+                .trim() || 'file'
+            })`
           : `(${kind})`,
       synthesizedText: true,
     };
@@ -263,6 +286,32 @@ function parsePostContent(
   // Whether any node contributed real (non-placeholder) content: title prose,
   // text/link/mention/code/markdown — anything but an img/media placeholder.
   let hasNonPlaceholderContent = false;
+  // Document position of every referenced key, harvested or legacy-rescued.
+  // The merge sorts on these so attachment order follows the order the
+  // rendered text cites each key; the counter advances per node and per key
+  // so keys share one comparable space with the legacy sweep below.
+  const positions = new Map<string, number>();
+  const resourceById = new Map<string, FeishuResource>();
+  let positionCounter = 0;
+  const addAtPosition = (
+    type: FeishuResource['type'],
+    key: unknown,
+    fileName?: unknown,
+  ) => {
+    if (typeof key === 'string' && key) {
+      const id = `${type}:${key}`;
+      if (!positions.has(id)) {
+        positions.set(id, positionCounter);
+        resourceById.set(id, {
+          type,
+          key,
+          ...(string(fileName) ? { fileName: string(fileName) } : {}),
+        });
+      }
+    }
+    positionCounter += 1;
+    add(type, key, fileName);
+  };
   const title = string(body['title']);
   if (title) {
     lines.push(title);
@@ -272,6 +321,7 @@ function parsePostContent(
     }
   }
   const render = (value: unknown): string => {
+    positionCounter += 1;
     const node = record(value);
     const text = string(node['text']);
     switch (node['tag']) {
@@ -294,10 +344,10 @@ function parsePostContent(
         return name ? `@${name}` : '';
       }
       case 'img':
-        add('image', node['image_key']);
+        addAtPosition('image', node['image_key']);
         return '(image)';
       case 'media':
-        add('video', node['file_key']);
+        addAtPosition('video', node['file_key']);
         return '(video)';
       case 'code_block': {
         // The language tag is user-controlled and interpolated next to the
@@ -324,7 +374,7 @@ function parsePostContent(
         // from fence-stripped prose. Remote URLs are never fetched.
         const prose = stripFencedCode(text);
         for (const match of prose.matchAll(mdImageRe())) {
-          add('image', match[1]);
+          addAtPosition('image', match[1]);
         }
         // Authorship is judged on the RETURNED text (minus image references
         // and at-tags), not on the harvest-stripped variant.
@@ -349,14 +399,15 @@ function parsePostContent(
   }
   // The legacy representation carries image nodes even when Markdown uses
   // syntax outside the simple inline image form above. It mirrors the same
-  // document, so rescued keys are merged at their document position — never
-  // appended after the v2 harvest, which would invert the media order the
-  // text establishes.
+  // document, so rescued keys join the merge at the position the legacy
+  // sweep computes; keys both representations carry keep the v2 citation
+  // position, and the cap applies once over the position-sorted union.
   if (rows === v2 && Array.isArray(body['content'])) {
-    const legacyKeys: Array<{ type: FeishuResource['type']; key: string }> = [];
+    let legacyPos = 0;
     for (const row of body['content']) {
       if (!Array.isArray(row)) continue;
       for (const value of row) {
+        const position = legacyPos++;
         const node = record(value);
         const key =
           node['tag'] === 'img'
@@ -364,34 +415,23 @@ function parsePostContent(
             : node['tag'] === 'media'
               ? node['file_key']
               : undefined;
-        const type = node['tag'] === 'img' ? 'image' : 'video';
-        if (typeof key === 'string' && key) legacyKeys.push({ type, key });
-      }
-    }
-    if (legacyKeys.length) {
-      const harvested = new Map(
-        result.resources.map((r) => [`${r.type}:${r.key}`, r]),
-      );
-      const ordered: FeishuResource[] = [];
-      const seen = new Set<string>();
-      for (const { type, key } of legacyKeys) {
+        if (typeof key !== 'string' || !key) continue;
+        const type: FeishuResource['type'] =
+          node['tag'] === 'img' ? 'image' : 'video';
         const id = `${type}:${key}`;
-        if (seen.has(id)) continue;
-        seen.add(id);
-        const existing = harvested.get(id);
-        if (existing) {
-          ordered.push(existing);
-          harvested.delete(id);
-        } else {
-          ordered.push({ type, key });
-        }
+        if (positions.has(id)) continue;
+        positions.set(id, position);
+        resourceById.set(id, { type, key });
       }
-      // Keys only the v2 render carries (no legacy node) keep harvest order.
-      for (const resource of harvested.values()) ordered.push(resource);
-      const kept = ordered.slice(0, MAX_RESOURCES_PER_MESSAGE);
-      result.droppedResourceCount += ordered.length - kept.length;
-      result.resources = kept;
     }
+    const ordered = [...resourceById.values()].sort(
+      (a, b) =>
+        positions.get(`${a.type}:${a.key}`)! -
+        positions.get(`${b.type}:${b.key}`)!,
+    );
+    const kept = ordered.slice(0, MAX_RESOURCES_PER_MESSAGE);
+    result.resources = kept;
+    result.droppedResourceCount = ordered.length - kept.length;
   }
   result.text = lines.join('\n').trim();
   if (!result.text && result.resources.length) result.text = '(media)';

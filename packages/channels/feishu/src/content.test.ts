@@ -235,6 +235,63 @@ describe('parseFeishuContent (#11554)', () => {
     expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
   });
 
+  it('keeps a list-item fence open across a blank line', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '- Config:\n  ```json\n\n  {"a": 1}\n  ```\nSee ![real](img_REAL)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_REAL' }]);
+  });
+
+  it('closeOpenFence leaves a balanced list-item fence unchanged', () => {
+    const text =
+      '- Config:\n  ```json\n\n  {"a": 1}\n  ```\nSee ![real](img_REAL)';
+    expect(closeOpenFence(text)).toBe(text);
+  });
+
+  it('never harvests an indented code block inside a list item', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '- item\n\n      ![sample](img_fake)\nsee ![real](img_real)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
+  });
+
+  it('reads fence lines through CRLF line endings', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '```\r\n![doc](img_fenced)\r\n```\r\nsee ![real](img_real)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
+  });
+
   it('auto-closes a blockquoted fence at the container boundary', () => {
     const result = parseFeishuContent(
       'post',
@@ -406,7 +463,7 @@ describe('parseFeishuContent (#11554)', () => {
     expect(result.text).toBe('(image)\n(image)');
   });
 
-  it('merges a v2-only key after the legacy-document order', () => {
+  it('keeps the text citation order when merging a legacy-rescued key', () => {
     const result = parseFeishuContent(
       'post',
       JSON.stringify({
@@ -417,11 +474,29 @@ describe('parseFeishuContent (#11554)', () => {
         content_v2: [[{ tag: 'md', text: '![x](img_C) and ![y](img_A)' }]],
       }),
     );
+    // The text cites img_C before img_A, so that order must survive; img_B
+    // is cited nowhere, so its position comes from the legacy sweep alone.
     expect(result.resources.map((r) => r.key)).toEqual([
-      'img_A',
-      'img_B',
       'img_C',
+      'img_B',
+      'img_A',
     ]);
+  });
+
+  it('keeps the text-cited key under the cap, not a legacy-only one', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: Array.from({ length: 8 }, (_, i) => [
+          { tag: 'img', image_key: `img_${i}` },
+        ]),
+        content_v2: [[{ tag: 'md', text: 'FIRST ![f](img_FIRST)' }]],
+      }),
+    );
+    expect(result.resources.map((r) => r.key)).toContain('img_FIRST');
+    expect(result.resources).toHaveLength(8);
+    // The evicted key is one the rendered text never cites.
+    expect(result.droppedResourceCount).toBe(1);
   });
 
   it('dedupes a key carried by both representations', () => {
