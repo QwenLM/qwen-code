@@ -1,7 +1,7 @@
 # 交接：远程 Qwen Code 操作本地 Mac（PR #11799）
 
 > 写给接手的 session 或 agent。按顺序阅读：本文 → 方案 `docs/plans/2026-09-14-remote-computer-use-mac-companion.md` → 真机验证说明 `docs/verification/remote-computer-use/README.md`。
-> 状态（2026-09-14，第二次修订）：只有文档，没有代码。方案已从 v1（中继驱动）改为 v2（中继 node_repl），原因见方案 §1。
+> 状态（2026-09-14，第三次修订）：只有文档，没有代码。方案已从 v1（中继驱动）改为 v2（中继 node_repl），原因见方案 §1；Mac 侧的中继进程定为 `qwen` 子命令，不做独立 app（用户决定，见方案 §3.1）。
 
 ## 1. 现在在哪
 
@@ -28,22 +28,23 @@
 
 - **远程化的对象是 `node_repl`，不是驱动守护进程。** skill 的常规路径是 `ComputerUse.create()` → 驱动以原生库内嵌在 `node_repl` 进程里运行；守护进程和它的 HTTP MCP 是给外部 agent 用的另一条产品线。TCC 授权落在拉起 `node_repl` 的进程身份上。
 - **v1 的方案 B 不成立**：`connect({ socketPath })` 发 `trusted_session_begin`，standalone 守护进程只接受"嵌入宿主连接"（父进程 pid 校验），任何 SDK 客户端都会被拒，与隧道无关。v1 的方案 A 和 C 中继的是原始工具面，会绕过 skill 层。
-- **v2 方案**：Mac 伴侣拉起本地 `node_repl`，主动连远端 `/acp`，按会话 `mcp_register { server: 'node-repl' }`，中继帧。远端 skill 只需把读参考文档的方式改成 `read_file`（它现在让 `node_repl` 读远端路径，Mac 上不存在）。
+- **v2 方案**：Mac 上的 `qwen mac-bridge` 子命令拉起本地 `node_repl`，主动连远端 `/acp`，按会话 `mcp_register { server: 'node-repl' }`，中继帧。远端 skill 只需把读参考文档的方式改成 `read_file`（它现在让 `node_repl` 读远端路径，Mac 上不存在）。
+- **不做独立 app**：子命令从终端启动，TCC 授权记在终端名下，与本地 computer use 一致；本地刹车就是 Ctrl-C。签名 app、菜单栏界面列为可选片3，默认不做。
 - **零件都在 main 上**：`@qwen-code/node-repl-mcp`、`@qwen-code/cua-sdk`、反向工具通道（会话级注册、`alwaysLoadTools`、同名遮蔽设置项）、本地文件桥的客户端实现。
 - **#11548 的位置**：它让 Web Shell 连到远程 daemon，是配对入口最自然的落点，但它没有按会话的配对凭据；它刻意不给跨来源 daemon 挂本地文件桥，computer use 的配对要对齐这条边界。
 - **独立的 bug**：macOS 上驱动经 LaunchServices 拉起时不转发环境变量，HTTP 端点因此无法打开（`cli.rs:1121-1235`）。与本方案无关，值得单独报 issue。
 
 ## 4. 待用户决定（不要自行决定）
 
-1. **伴侣放在哪个宿主里**：`qwen` CLI 子命令（对已装 qwen 的开发者零新增安装）、并入 live-host、并入 desktop-shell，还是独立应用。
-2. **配对凭据的形态**：deep link 还是配对码；是否复用 daemon LAN listener 的配对凭据机制；凭据是否只对单个会话有效。
-3. **片1 原型放在哪里**：`packages/cli` 的子命令，还是独立的包。
-4. **这个方案 PR 何时从草稿转为 ready**；代码 PR 是另开，还是追加到这个 PR（按"不要太碎"的原则判断，建议方案先合、代码另开）。
+已决定（不要再问）：中继进程是 `qwen` 的子命令，放在 `packages/cli`，不做独立 app。
+
+1. **配对凭据的形态**：deep link 还是配对码；是否复用 daemon LAN listener 的配对凭据机制；凭据是否只对单个会话有效。
+2. **这个方案 PR 何时从草稿转为 ready**；代码 PR 是另开，还是追加到这个 PR（按"不要太碎"的原则判断，建议方案先合、代码另开）。
 
 ## 5. 下一步（按顺序）
 
 1. **真机验证方案 §1 的两条事实**（不写代码，十分钟）：让有 Mac 的人按 `docs/verification/remote-computer-use/README.md` 的 A 部分执行，确认 standalone 守护进程拒绝 `connect()`，并测一张全屏截图的 base64 体积。结果写成同目录的 `results.md`，推到本 PR 分支。
-2. **片1：Node 命令行原型伴侣**。起点：
+2. **片1：`qwen mac-bridge` 子命令**。起点：
    - 连接、初始化、注册和重试逻辑：`packages/web-shell/client/local-files/bridge-client.ts`。它跑在浏览器里，Node 版需要换掉 WebSocket 实现和 `navigator.locks`；
    - 帧协议：`packages/cli/src/serve/acp-http/client-mcp-ws.ts`；
    - 会话级注册：`packages/cli/src/serve/acp-http/client-mcp-sender-registry.ts`；
@@ -51,8 +52,8 @@
    - 本地子进程：`npx -y @qwen-code/node-repl-mcp@0.1.4`（stdio），版本跟 `SKILL.md:19` 保持一致；
    - skill 改动：`packages/core/src/skills/bundled/computer-use/SKILL.md` 里读 `references/*.md` 的那段改用 `read_file`；
    - 验收和测量：验证说明的 B 部分；
-   - 放在哪里：先问用户（§4 第 3 点）。
-3. **片2、片3**：见方案 §7。
+   - 放在哪里：`packages/cli` 的子命令（已决定）。
+3. **片2（配对入口）**：见方案 §7。片3 是可选项，默认不做。
 
 ## 6. 操作配方
 

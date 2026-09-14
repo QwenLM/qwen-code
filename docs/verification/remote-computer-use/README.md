@@ -2,7 +2,7 @@
 
 > 关联：PR #11799；方案见 `docs/plans/2026-09-14-remote-computer-use-mac-companion.md`；交接见 `docs/plans/2026-09-14-remote-computer-use-handoff.md`。
 > 本文所有"预期"都来自读代码（`origin/main` @ `c666ec1a0a`），**没有在真机上跑过**。
-> 不需要构建本仓库。A 部分只需要一台 Mac；B 部分还需要一台能从 Mac 连到、装好 Qwen Code 并以 `qwen serve` 运行的 Linux 开发机，以及片1 的原型伴侣。
+> 不需要构建本仓库。A 部分只需要一台 Mac；B 部分还需要一台能从 Mac 连到、装好 Qwen Code 并以 `qwen serve` 运行的 Linux 开发机，以及片1 的 `qwen mac-bridge` 子命令。
 
 ## A. 事实核对（不写代码，约十分钟）
 
@@ -68,7 +68,7 @@ await c.close();
 
 如果 `listApps` / `getApp` / `getState` 的名字不对，按 `node_modules/@qwen-code/cua-sdk/computer-use/index.d.ts` 里的实际 API 调整，目的只是拿到一次带截图的观察并统计 JSON 字节数。注明屏幕是否 Retina 和分辨率。
 
-## B. 片1 原型验收（需要原型伴侣）
+## B. 片1 验收（需要 `qwen mac-bridge` 子命令）
 
 ### B1. 开发机：以 daemon 方式运行，拿到会话
 
@@ -78,11 +78,12 @@ qwen serve            # 记下监听地址和 token
 
 在 Web Shell 里新建一个会话，记下 `sessionId`。
 
-### B2. Mac：启动伴侣
+### B2. Mac：在终端里启动中继
 
 ```bash
-qwen-mac-bridge --daemon <url> --token <token> --session <sessionId>
+qwen mac-bridge --daemon <url> --token <token> --session <sessionId>
 # 预期：打印 initialize 完成、mcp_register 成功、tools/list 被调用 N+1 次
+# 首次运行如弹出辅助功能 / 屏幕录制授权，记下系统设置里列出的应用（预期是终端）
 ```
 
 ### B3. 开发机：工具可见性
@@ -102,29 +103,29 @@ qwen-mac-bridge --daemon <url> --token <token> --session <sessionId>
 - 读参考文档那一步走的是 `read_file` 还是 `node_repl` 里的 `readFile`；后者预期失败（Mac 上没有那个路径），这就是 skill 要改的地方。
 - 任务是否完成；失败的调用和错误文本。
 - 3 次真实 `node_repl` 调用的耗时（qwen 界面上显示的时间即可）。
-- 带截图的那次观察，伴侣日志里的帧大小；是否触发 10 MB 上限。
+- 带截图的那次观察，中继进程日志里的帧大小；是否触发 10 MB 上限。
 
 ### B5. 失败路径
 
-- 关掉伴侣。预期：会话里 `node_repl` 工具消失；模型再调用时得到明确错误，不是一直挂起。记录错误文本和等待时长。
-- 重启伴侣。预期：工具恢复，不需要重启 qwen。
-- Mac 睡眠再唤醒。记录伴侣是否自动重连。
+- 在终端里 Ctrl-C 结束中继。预期：会话里 `node_repl` 工具消失；模型再调用时得到明确错误，不是一直挂起。记录错误文本和等待时长。
+- 重新运行 `qwen mac-bridge`。预期：工具恢复，不需要重启远端 qwen。
+- Mac 睡眠再唤醒。记录中继是否自动重连。
 
 ## 需要回报的内容
 
 写进同一目录下的 `results.md`，推到 PR #11799 的分支（追加提交，不要 force-push），再在 PR 里留一条评论。
 
-| 项                                                 | 结果 |
-| -------------------------------------------------- | ---- |
-| macOS 版本 / 芯片 / 屏幕是否 Retina 及分辨率       |      |
-| A2：`getPlatform()` 输出；授权记在哪个应用名下     |      |
-| A3：`connect()` 的完整错误文本                     |      |
-| A4：带截图观察的 JSON 字节数                       |      |
-| B3：两个会话里 `node_repl` 的可见性                |      |
-| B4：是否出现 bootstrap；读参考文档走的是哪条路     |      |
-| B4：任务是否完成；失败的调用和错误文本             |      |
-| B4：3 次 `node_repl` 调用的耗时；最大帧大小        |      |
-| B5：关掉伴侣后的错误表现和等待时长；重启后是否恢复 |      |
+| 项                                                | 结果 |
+| ------------------------------------------------- | ---- |
+| macOS 版本 / 芯片 / 屏幕是否 Retina 及分辨率      |      |
+| A2：`getPlatform()` 输出；授权记在哪个应用名下    |      |
+| A3：`connect()` 的完整错误文本                    |      |
+| A4：带截图观察的 JSON 字节数                      |      |
+| B3：两个会话里 `node_repl` 的可见性               |      |
+| B4：是否出现 bootstrap；读参考文档走的是哪条路    |      |
+| B4：任务是否完成；失败的调用和错误文本            |      |
+| B4：3 次 `node_repl` 调用的耗时；最大帧大小       |      |
+| B5：Ctrl-C 后的错误表现和等待时长；重启后是否恢复 |      |
 
 ## 本次验证可能推翻的结论
 
