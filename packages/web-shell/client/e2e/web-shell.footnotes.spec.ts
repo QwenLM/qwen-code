@@ -47,6 +47,11 @@ async function openFixture(
     brokenImage?: boolean;
   } = {},
 ) {
+  await page.route('**/workspace/models', async (route) => {
+    if (route.request().method() === 'GET')
+      await route.fulfill({ json: { models: [] } });
+    else await route.fallback();
+  });
   await page.setViewportSize(
     options.narrow
       ? { width: 390, height: 844 }

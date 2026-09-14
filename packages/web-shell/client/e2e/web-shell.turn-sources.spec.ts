@@ -14,6 +14,14 @@ import {
   userTextEvent,
 } from './utils/mockDaemon';
 
+test.beforeEach(async ({ page }) => {
+  await page.route('**/workspace/models', async (route) => {
+    if (route.request().method() === 'GET')
+      await route.fulfill({ json: { models: [] } });
+    else await route.fallback();
+  });
+});
+
 const shared: SessionSource = {
   id: 'a'.repeat(64),
   kind: 'link',
