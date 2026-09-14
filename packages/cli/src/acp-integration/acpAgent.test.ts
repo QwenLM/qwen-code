@@ -1043,6 +1043,7 @@ vi.mock('./session/Session.js', () => {
   // The agent's active-work reporter walks every live Session on a timer, so
   // even tests that never look at reporting need this to exist on instances.
   SessionMock.prototype.collectActiveWorkHolds = () => [];
+  SessionMock.prototype.getBackgroundTurn = () => undefined;
   return {
     Session: SessionMock,
     // Awaited by every session creation before the session is published.
@@ -7364,7 +7365,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
   });
 
-  it('rejects a standalone directory identity replaced during Config relocation', async () => {
+  it('rejects a standalone directory identity replaced during Config relocation', async (ctx) => {
     await withEmptyTrustedFolders(async (directory) => {
       const settings = makeSessionSettings({ mcpServers: {} });
       const { agent, agentPromise, sessionId, innerConfig } =
@@ -7373,6 +7374,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const target = path.join(root, getConversationDirectoryName(sessionId));
       await fs.mkdir(target, { recursive: true, mode: 0o700 });
       const expectation = await managedConversationExpectation(root, sessionId);
+      if (expectation.child.inode === 0) {
+        mockConnectionState.resolve();
+        await agentPromise;
+        ctx.skip();
+        return;
+      }
       innerConfig.getSessionSourceType.mockReturnValue('standalone');
       innerConfig.relocateWorkingDirectory.mockImplementation(async () => {
         const previous = `${expectation.child.canonicalPath}.previous`;
@@ -7973,7 +7980,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'trusted-capability',
     );
     try {
-      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const workspaceCwd = path.resolve('/tmp');
+      await agent.newSession({ cwd: workspaceCwd, mcpServers: [] });
       const input = {
         title: 'Docs',
         locator: { type: 'workspace_file', workspacePath: 'README.md' },
@@ -7982,7 +7990,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sessionId,
         input,
       });
-      innerConfig.getTargetDir.mockReturnValue('/tmp/subdir');
+      innerConfig.getTargetDir.mockReturnValue(
+        path.join(workspaceCwd, 'subdir'),
+      );
       const after = await agent.extMethod('qwen/session/sources/upsert', {
         sessionId,
         input,
@@ -7992,7 +8002,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         change: 'unchanged',
         source: before['source'],
       });
-      expect(after['source']).toMatchObject({ workspaceCwd: '/tmp' });
+      expect(after['source']).toMatchObject({ workspaceCwd });
     } finally {
       mockConnectionState.resolve();
       await agentPromise;

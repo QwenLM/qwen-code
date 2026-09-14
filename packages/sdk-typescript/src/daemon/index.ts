@@ -848,3 +848,6 @@ export type {
   DaemonSessionArtifactStorage,
   SessionMetadataResult,
 } from './types.js';
+
+export { parseDaemonBackgroundTurn } from './types.js';
+export type { DaemonBackgroundTurn } from './types.js';

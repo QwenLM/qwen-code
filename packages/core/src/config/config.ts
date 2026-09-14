@@ -2895,6 +2895,13 @@ export class Config {
   private fastModel?: string;
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
+  /**
+   * Per-session web_search call count. An object that is never reassigned:
+   * derived Configs (`deriveConfig` → `Object.create(base)`) must mutate the
+   * same counter, and `this.count++` on a wrapper would create an own
+   * property that shadows the session-global value.
+   */
+  private readonly webSearchSessionUsage = { calls: 0 };
   private visionModel?: string;
   private compactionModel?: string;
   private imageModel?: string;
@@ -5095,6 +5102,8 @@ export class Config {
       // Skill grants belong to the session that loaded the skill; a resumed
       // session re-arms its own from history during `initialize()`.
       this.permissionManager?.clearSessionAllowRules();
+      // The web search budget belongs to the session, like the grants above.
+      this.webSearchSessionUsage.calls = 0;
     }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
@@ -5640,6 +5649,14 @@ export class Config {
    */
   getWebSearchSettings(): WebSearchSettings | undefined {
     return this.webSearchSettings;
+  }
+
+  /**
+   * Mutable web_search call count for the current session, shared with
+   * derived Configs and reset by {@link startNewSession}.
+   */
+  getWebSearchSessionUsage(): { calls: number } {
+    return this.webSearchSessionUsage;
   }
 
   private resolveFastModelSelector() {
