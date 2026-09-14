@@ -20,6 +20,7 @@ import {
   isOfficialOpenAIEndpoint,
 } from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
+import { MiniMaxOpenAICompatibleProvider } from './provider/minimax.js';
 import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -1034,6 +1035,16 @@ export class ContentGenerationPipeline {
       baseRequest.tools = await OpenAIContentConverter.convertLlmToolsToOpenAI(
         request.config.tools,
         this.contentGeneratorConfig.schemaCompliance ?? 'auto',
+        {
+          // MiniMax answers `400 invalid params, function parameters is empty
+          // (2013)` when a zero-argument tool ships without `parameters`
+          // (#11834), which the always-registered `list_agents` does by
+          // default.
+          keepParameterlessParameters:
+            MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+              this.contentGeneratorConfig,
+            ),
+        },
       );
 
       // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
