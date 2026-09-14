@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   loadExtensionWorkflows,
+  MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS,
   MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES,
 } from './workflow-extension.js';
 
@@ -62,16 +63,13 @@ describe('loadExtensionWorkflows', () => {
     expect(workflows).toEqual([
       {
         name: 'gcp:a-review',
-        stem: 'a-review',
         extensionName: 'gcp',
         extensionDisplayName: 'Google Cloud',
         scriptPath: path.join(root, 'workflows', 'a-review.js'),
         description: 'Runs a-review',
-        whenToUse: 'on review',
       },
       {
         name: 'gcp:b-audit',
-        stem: 'b-audit',
         extensionName: 'gcp',
         extensionDisplayName: 'Google Cloud',
         scriptPath: path.join(root, 'workflows', 'b-audit.js'),
@@ -256,4 +254,70 @@ describe('loadExtensionWorkflows', () => {
       await loadExtensionWorkflows(path.join(base, 'missing'), owner, 'flows'),
     ).toEqual([]);
   });
+
+  it.skipIf(isWindows || process.getuid?.() === 0)(
+    'keeps later declared paths when an earlier one cannot be read',
+    async () => {
+      await write('good/x.js', workflowSource('x'));
+      await fs.mkdir(path.join(root, 'bad'));
+      await fs.chmod(path.join(root, 'bad'), 0o000);
+      try {
+        const names = (
+          await loadExtensionWorkflows(root, owner, ['bad', 'good'])
+        ).map((w) => w.name);
+        expect(names).toEqual(['gcp:x']);
+      } finally {
+        await fs.chmod(path.join(root, 'bad'), 0o755);
+      }
+    },
+  );
+
+  it('shortens an overlong description without splitting a character', async () => {
+    const long = '😀'.repeat(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS + 10);
+    await write(
+      'workflows/long.js',
+      `export const meta = { name: 'long', description: '${long}' };\nreturn 1;\n`,
+    );
+
+    const [workflow] = await loadExtensionWorkflows(root, owner, undefined);
+    const chars = Array.from(workflow.description);
+    expect(chars).toHaveLength(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS);
+    expect(chars.at(-1)).toBe('…');
+    expect(chars.slice(0, -1).every((c) => c === '😀')).toBe(true);
+  });
+
+  it.skipIf(isWindows)(
+    'follows symlinks the way an install copy does when asked to',
+    async () => {
+      await write('shared/linked.js', workflowSource('linked'));
+      await fs.writeFile(
+        path.join(outside, 'external.js'),
+        workflowSource('external'),
+      );
+      await fs.mkdir(path.join(root, 'workflows'));
+      await fs.symlink(
+        path.join(root, 'shared', 'linked.js'),
+        path.join(root, 'workflows', 'linked.js'),
+      );
+      await fs.symlink(
+        path.join(outside, 'external.js'),
+        path.join(root, 'workflows', 'external.js'),
+      );
+
+      expect(await loadExtensionWorkflows(root, owner, undefined)).toEqual([]);
+      const copied = await loadExtensionWorkflows(root, owner, undefined, {
+        followSymlinks: true,
+      });
+      expect(copied.map((w) => w.name)).toEqual(['gcp:external', 'gcp:linked']);
+      expect(copied[1].scriptPath).toBe(
+        path.join(root, 'workflows', 'linked.js'),
+      );
+      // Containment is still checked on the path as spelled.
+      expect(
+        await loadExtensionWorkflows(root, owner, '../outside', {
+          followSymlinks: true,
+        }),
+      ).toEqual([]);
+    },
+  );
 });

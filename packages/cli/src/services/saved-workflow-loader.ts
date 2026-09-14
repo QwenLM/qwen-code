@@ -30,6 +30,7 @@ import type {
   SlashCommandActionReturn,
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
+import { extensionOwnerLabel } from './commandMetadata.js';
 
 const debugLogger = createDebugLogger('SavedWorkflowLoader');
 
@@ -77,13 +78,19 @@ export class SavedWorkflowLoader implements ICommandLoader {
       // `source` carries the distinct workflow identity for display/telemetry.
       kind: CommandKind.FILE,
       source: 'workflow-command',
-      sourceLabel: 'Workflow',
+      // An extension workflow names its owner, which becomes its source badge.
+      sourceLabel: entry.extensionName
+        ? extensionOwnerLabel({
+            name: entry.extensionName,
+            displayName: entry.extensionDisplayName,
+          })
+        : 'Workflow',
       sourceDetail: entry.source, // 'project' | 'user' | 'extension'
-      // Lets `CommandService` rename this command instead of silently
-      // replacing a same-named extension command or skill.
-      ...(entry.source === 'extension' && entry.extensionName
-        ? { extensionName: entry.extensionName }
-        : {}),
+      // Deliberately no `extensionName`: `CommandService` would rename this
+      // command on a collision with the same extension's skill, and the renamed
+      // spelling escapes a `slashCommands.disabled` entry written with the
+      // workflow's documented name. Last loader wins instead, and the shadowing
+      // is logged.
       // Interactive only: the action returns a `{type:'tool'}` dispatch, which
       // the non-interactive command adapter converts to `unsupported`. Listing
       // these in headless / ACP modes would advertise a command that then fails

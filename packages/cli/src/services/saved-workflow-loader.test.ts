@@ -21,6 +21,10 @@ import {
   type SavedWorkflowEntry,
 } from '@qwen-code/qwen-code-core';
 import { SavedWorkflowLoader } from './saved-workflow-loader.js';
+import {
+  extensionOwnerLabel,
+  getCommandSourceBadge,
+} from './commandMetadata.js';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 
 const listMock = vi.mocked(listSavedWorkflows);
@@ -98,12 +102,19 @@ describe('SavedWorkflowLoader', () => {
       description: '[Google Cloud] Audits the project',
       kind: CommandKind.FILE,
       source: 'workflow-command',
-      sourceLabel: 'Workflow',
+      sourceLabel: extensionOwnerLabel({
+        name: 'gcp',
+        displayName: 'Google Cloud',
+      }),
       sourceDetail: 'extension',
-      extensionName: 'gcp',
       supportedModes: ['interactive'],
     });
     expect(extensionCmd.modelInvocable).toBeUndefined();
+    // No extensionName: a rename on collision would escape the denylist.
+    expect('extensionName' in extensionCmd).toBe(false);
+    expect(getCommandSourceBadge(extensionCmd)).toBe(
+      `[${extensionOwnerLabel({ name: 'gcp', displayName: 'Google Cloud' })}]`,
+    );
     expect(await extensionCmd.action!(ctx, '')).toEqual({
       type: 'tool',
       toolName: 'workflow',
@@ -114,6 +125,8 @@ describe('SavedWorkflowLoader', () => {
       'Run the "deep-research" saved workflow (project)',
     );
     expect('extensionName' in projectCmd).toBe(false);
+    expect(projectCmd.sourceLabel).toBe('Workflow');
+    expect(getCommandSourceBadge(projectCmd)).toBeNull();
   });
 
   it('tags an extension workflow with its manifest name when it has no display name', async () => {

@@ -1086,6 +1086,10 @@ function extensionComponentsSummary(extension: Extension): string {
     parts.push(
       t('{{count}} Agents', { count: String(extension.agents.length) }),
     );
+  if (extension.workflows?.length)
+    parts.push(
+      t('{{count}} Workflows', { count: String(extension.workflows.length) }),
+    );
   return parts.length ? parts.join(' · ') : t('None');
 }
 

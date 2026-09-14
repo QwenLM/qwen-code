@@ -348,6 +348,10 @@ describe('WorkflowRunsPage', () => {
     expect(container.textContent).toContain(
       'Provided by an installed extension',
     );
+    const extensionEntry = container.querySelector('[data-scope="extension"]');
+    expect(
+      extensionEntry?.querySelector('[data-slot="badge"]')?.textContent,
+    ).toBe('Extension');
 
     const runButton = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Run deep-review"]',

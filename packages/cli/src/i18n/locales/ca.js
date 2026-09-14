@@ -2382,6 +2382,7 @@ export default {
   'from {{marketplace}}': 'de {{marketplace}}',
   installed: 'instal·lada',
   '{{count}} Agents': '{{count}} agents',
+  '{{count}} Workflows': '{{count}} workflows',
   '{{count}} Commands': '{{count}} ordres',
   '{{count}} MCP': '{{count}} MCP',
   '{{count}} Skills': '{{count}} habilitats',

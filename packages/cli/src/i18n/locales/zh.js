@@ -143,6 +143,7 @@ export default {
   'from {{marketplace}}': '来自 {{marketplace}}',
   installed: '已安装',
   '{{count}} Agents': '{{count}} 个智能体',
+  '{{count}} Workflows': '{{count}} 个工作流',
   '{{count}} Commands': '{{count}} 个命令',
   '{{count}} MCP': '{{count}} 个 MCP',
   '{{count}} Skills': '{{count}} 个技能',

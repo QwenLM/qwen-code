@@ -63,6 +63,10 @@ function componentSummary(ext: Extension): string {
     parts.push(t('{{count}} Commands', { count: String(ext.commands.length) }));
   if (ext.agents?.length)
     parts.push(t('{{count}} Agents', { count: String(ext.agents.length) }));
+  if (ext.workflows?.length)
+    parts.push(
+      t('{{count}} Workflows', { count: String(ext.workflows.length) }),
+    );
   return parts.length ? parts.join(' · ') : t('None');
 }
 

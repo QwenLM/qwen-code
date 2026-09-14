@@ -327,22 +327,34 @@ describe('CommandService', () => {
     expect(syncExtension?.extensionName).toBe('git-helper');
   });
 
-  it('keeps both an extension skill and a same-named extension workflow', async () => {
-    const skill = skillCommand('gcp:audit');
-    const workflow: SlashCommand = {
-      ...createMockCommand('gcp:audit', CommandKind.FILE),
-      source: 'workflow-command',
-      extensionName: 'gcp',
-    };
+  it('lets an extension workflow replace a same-named skill without escaping the denylist', async () => {
+    // Shaped like SavedWorkflowLoader's extension commands: no extensionName,
+    // so no rename to a spelling the operator's denylist does not name.
+    const loaders = () => [
+      new MockCommandLoader([skillCommand('gcp:audit')]),
+      new MockCommandLoader([
+        {
+          ...createMockCommand('gcp:audit', CommandKind.FILE),
+          source: 'workflow-command',
+        },
+      ]),
+    ];
+
     const service = await CommandService.create(
-      [new MockCommandLoader([skill]), new MockCommandLoader([workflow])],
+      loaders(),
       new AbortController().signal,
     );
+    expect(commandNamed(service, 'gcp:audit')?.source).toBe('workflow-command');
+    expect(commandNamed(service, 'gcp.gcp:audit')).toBeUndefined();
 
-    expect(commandNamed(service, 'gcp:audit')?.kind).toBe(CommandKind.SKILL);
-    expect(commandNamed(service, 'gcp.gcp:audit')?.source).toBe(
-      'workflow-command',
+    const disabled = await CommandService.create(
+      loaders(),
+      new AbortController().signal,
+      new Set(['gcp:audit']),
     );
+    expect(
+      disabled.getCommands().filter((cmd) => cmd.name.includes('audit')),
+    ).toEqual([]);
   });
 
   it('should handle user/project command override correctly', async () => {

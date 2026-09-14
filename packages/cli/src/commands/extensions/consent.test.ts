@@ -277,7 +277,6 @@ describe('extensionConsentString', () => {
     const result = extensionConsentString(config, [], [], [], 'QwenCode', [
       {
         name: 'gcp:audit',
-        stem: 'audit',
         extensionName: 'gcp',
         scriptPath: '/ext/gcp/workflows/audit.js',
         description: 'Audits\n\u001b[31mthe project\u001b[0m',
@@ -361,7 +360,6 @@ describe('requestConsentOrFail', () => {
     const extensionConfig: ExtensionConfig = { name: 'gcp', version: '1.0.0' };
     const audit = {
       name: 'gcp:audit',
-      stem: 'audit',
       extensionName: 'gcp',
       scriptPath: '/ext/gcp/workflows/audit.js',
       description: 'Audits the project',

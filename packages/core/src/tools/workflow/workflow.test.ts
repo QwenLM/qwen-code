@@ -2210,6 +2210,48 @@ await agent('scan package.json')
       expect(result.error).toBeDefined();
     });
 
+    it("advises copying an extension's workflow file before changing it", async () => {
+      const { config, storage } = storedConfig();
+      const scriptPath = path.join(
+        storage.getProjectWorkflowsDir(),
+        '..',
+        'extensions',
+        'gcp',
+        'workflows',
+        'audit.js',
+      );
+      await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+      await fs.writeFile(scriptPath, 'throw new Error("boom")', 'utf8');
+      const realScriptPath = await fs.realpath(scriptPath);
+      Object.assign(config, {
+        getActiveExtensions: () => [
+          {
+            name: 'gcp',
+            workflows: [
+              {
+                name: 'gcp:audit',
+                extensionName: 'gcp',
+                scriptPath: realScriptPath,
+                description: 'Audits the project',
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await new WorkflowTool(config)
+        .build({ scriptPath: realScriptPath })
+        .execute(new AbortController().signal);
+      const text = (result.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+
+      expect(text).toContain(
+        "this reads an extension's workflow file; copy it into .qwen/workflows",
+      );
+      expect(text).not.toContain('this reads the saved workflow');
+    });
+
     it('does not advise editing a saved workflow to resume one run', async () => {
       const { config, storage } = storedConfig();
       const scriptPath = path.join(
@@ -2501,7 +2543,6 @@ describe('WorkflowTool — extension workflow labels', () => {
                 workflows: [
                   {
                     name: 'gcp:audit',
-                    stem: 'audit',
                     extensionName: 'gcp',
                     scriptPath,
                     description: 'Audits the project',
@@ -2553,6 +2594,30 @@ describe('WorkflowTool — extension workflow labels', () => {
       );
     },
   );
+
+  it("keeps the saved-workflow label for the user's own script while an extension is active", async () => {
+    const scriptPath = await extensionScript();
+    const ownScript = path.join(
+      dir,
+      'project',
+      '.qwen',
+      'workflows',
+      'deploy.js',
+    );
+    await fs.mkdir(path.dirname(ownScript), { recursive: true });
+    await fs.writeFile(ownScript, 'return 1;\n', 'utf8');
+    const tool = new WorkflowTool(
+      configWithExtensionWorkflow(scriptPath, true),
+    );
+    const invocation = tool.build({ scriptPath: ownScript });
+
+    expect(invocation.getDescription()).toBe('Run saved workflow (deploy.js)');
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as { prompt: string };
+    expect(details.prompt).toContain(`Saved workflow: ${ownScript}`);
+    expect(details.prompt).not.toContain('Extension workflow');
+  });
 
   it('falls back to the saved-workflow label once the extension is inactive', async () => {
     const scriptPath = await extensionScript();

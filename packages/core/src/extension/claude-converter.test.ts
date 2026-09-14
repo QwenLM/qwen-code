@@ -1604,9 +1604,20 @@ describe('convertClaudePluginPackage — workflows', () => {
     vi.mocked(cloneFromGit).mockReset();
   });
 
+  const convertedDirs: string[] = [];
+
   afterEach(() => {
     fs.rmSync(testDir, { recursive: true, force: true });
+    for (const dir of convertedDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
+
+  async function convert(source: string) {
+    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+    convertedDirs.push(result.convertedDir);
+    return result;
+  }
 
   function writePlugin(
     entry: Partial<ClaudeMarketplacePluginConfig> = {},
@@ -1659,7 +1670,7 @@ describe('convertClaudePluginPackage — workflows', () => {
     const source = writePlugin();
     writeFile(source, 'workflows/audit.js');
 
-    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+    const result = await convert(source);
 
     expect(await convertedWorkflows(result)).toEqual(['wf-plugin:audit']);
   });
@@ -1671,7 +1682,7 @@ describe('convertClaudePluginPackage — workflows', () => {
     writeFile(source, 'flows/nested/deeper.js');
     writeFile(source, 'flows/readme.md');
 
-    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+    const result = await convert(source);
 
     expect(result.config.workflows).toEqual(['flows/deploy.js']);
     expect(await convertedWorkflows(result)).toEqual(['wf-plugin:deploy']);
@@ -1681,7 +1692,7 @@ describe('convertClaudePluginPackage — workflows', () => {
     const source = writePlugin({ workflows: './extra/one.js' });
     writeFile(source, 'extra/one.js');
 
-    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+    const result = await convert(source);
 
     expect(result.config.workflows).toEqual(['extra/one.js']);
     expect(await convertedWorkflows(result)).toEqual(['wf-plugin:one']);
@@ -1691,7 +1702,7 @@ describe('convertClaudePluginPackage — workflows', () => {
     const source = writePlugin({ workflows: ['../outside'] });
     writeFile(testDir, 'outside/leak.js');
 
-    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+    const result = await convert(source);
 
     expect(result.config.workflows).toEqual([]);
     expect(await convertedWorkflows(result)).toEqual([]);
@@ -1708,7 +1719,7 @@ describe('convertClaudePluginPackage — workflows', () => {
         path.join(source, 'flows', 'leak.js'),
       );
 
-      const result = await convertClaudePluginPackage(source, 'wf-plugin');
+      const result = await convert(source);
 
       expect(await convertedWorkflows(result)).toEqual(['wf-plugin:real']);
     },
@@ -1722,6 +1733,11 @@ describe('convertClaudePluginPackage — workflows', () => {
     { workflows: './first', expected: ['wf-plugin:child-one'] },
     { workflows: [], expected: [] },
     { workflows: undefined, expected: ['wf-plugin:from-plugin'] },
+    // `null` reads as undeclared, so the plugin's own declaration stands.
+    {
+      workflows: null as unknown as undefined,
+      expected: ['wf-plugin:from-plugin'],
+    },
   ])(
     'merges marketplace workflows $workflows with plugin.json',
     async ({ workflows, expected }) => {
@@ -1748,7 +1764,7 @@ describe('convertClaudePluginPackage — workflows', () => {
         "export const meta = { name: 'child-two', description: 'Second' };\nreturn 2;\n",
       );
 
-      const result = await convertClaudePluginPackage(source, 'wf-plugin');
+      const result = await convert(source);
 
       expect(await convertedWorkflows(result)).toEqual(expected);
     },
@@ -1763,7 +1779,7 @@ describe('convertClaudePluginPackage — workflows', () => {
     writeFile(source, 'first/same.js', first);
     writeFile(source, 'second/same.js', second);
 
-    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+    const result = await convert(source);
 
     expect(result.config.workflows).toEqual([
       'first/same.js',
@@ -1797,7 +1813,7 @@ describe('convertClaudePluginPackage — workflows', () => {
     writeFile(source, 'commands/child.js');
     writeFile(source, 'other/command.md', 'A command');
 
-    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+    const result = await convert(source);
 
     expect(await convertedWorkflows(result)).toEqual(['wf-plugin:child']);
   });
@@ -1806,9 +1822,42 @@ describe('convertClaudePluginPackage — workflows', () => {
     const source = writePlugin({ workflows: [] });
     writeFile(source, 'workflows/default.js');
 
-    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+    const result = await convert(source);
 
     expect(result.config.workflows).toEqual([]);
     expect(await convertedWorkflows(result)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'copies an in-plugin symlink in a declared directory as a regular file',
+    async () => {
+      const source = writePlugin({ workflows: ['./flows'] });
+      writeFile(source, 'shared/linked.js');
+      fs.mkdirSync(path.join(source, 'flows'), { recursive: true });
+      fs.symlinkSync(
+        path.join(source, 'shared', 'linked.js'),
+        path.join(source, 'flows', 'linked.js'),
+      );
+
+      const result = await convert(source);
+
+      expect(result.config.workflows).toEqual(['flows/linked.js']);
+      expect(
+        fs
+          .lstatSync(path.join(result.convertedDir, 'flows', 'linked.js'))
+          .isSymbolicLink(),
+      ).toBe(false);
+      expect(await convertedWorkflows(result)).toEqual(['wf-plugin:linked']);
+    },
+  );
+
+  it('treats a null workflows declaration as undeclared', async () => {
+    const source = writePlugin({ workflows: null as unknown as string[] });
+    writeFile(source, 'workflows/default.js');
+
+    const result = await convert(source);
+
+    expect(result.config.workflows).toBeUndefined();
+    expect(await convertedWorkflows(result)).toEqual(['wf-plugin:default']);
   });
 });

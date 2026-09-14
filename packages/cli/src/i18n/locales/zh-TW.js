@@ -145,6 +145,7 @@ export default {
   'from {{marketplace}}': '來自 {{marketplace}}',
   installed: '已安裝',
   '{{count}} Agents': '{{count}} 個智能體',
+  '{{count}} Workflows': '{{count}} 個工作流程',
   '{{count}} Commands': '{{count}} 個命令',
   '{{count}} MCP': '{{count}} 個 MCP',
   '{{count}} Skills': '{{count}} 個技能',

@@ -389,6 +389,7 @@ describe('extension tests', () => {
             expect.objectContaining({
               name: 'wf-ext:audit',
               description: 'Runs audit',
+              scriptPath: path.join(sourcePath, 'workflows', 'audit.js'),
             }),
           ],
           previousWorkflows: [],
@@ -397,7 +398,54 @@ describe('extension tests', () => {
       expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
         'wf-ext:audit',
       ]);
+      // The installed copy, not the source, is what loads.
+      expect(extension.workflows?.[0]?.scriptPath).toBe(
+        fs.realpathSync(path.join(extension.path, 'workflows', 'audit.js')),
+      );
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'discloses a symlinked workflow that the install copies as a regular file',
+      async () => {
+        const sourcePath = path.join(tempWorkspaceDir, 'linked-source');
+        fs.mkdirSync(path.join(sourcePath, 'workflows'), { recursive: true });
+        fs.mkdirSync(path.join(sourcePath, 'shared'), { recursive: true });
+        fs.writeFileSync(
+          path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'wf-ext', version: '1.0.0' }),
+        );
+        fs.writeFileSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          workflowSource('audit'),
+        );
+        fs.symlinkSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          path.join(sourcePath, 'workflows', 'audit.js'),
+        );
+
+        const requestConsent = vi.fn(async () => {});
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extension = await manager.installExtension(
+          { type: 'local', source: sourcePath },
+          requestConsent,
+        );
+
+        expect(requestConsent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workflows: [expect.objectContaining({ name: 'wf-ext:audit' })],
+          }),
+        );
+        expect(
+          fs
+            .lstatSync(path.join(extension.path, 'workflows', 'audit.js'))
+            .isSymbolicLink(),
+        ).toBe(false);
+        expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+          'wf-ext:audit',
+        ]);
+      },
+    );
 
     it.each([
       'flows',
@@ -688,6 +736,13 @@ describe('extension tests', () => {
         fs.writeFileSync(path.join(sourcePath, component, 'ignored.md'), 'no');
       }
       fs.writeFileSync(path.join(sourcePath, 'QWEN.md'), 'ignored context');
+      // The Agent Plugins v1 schema defines no workflows, so a shipped
+      // workflows/ directory must neither be disclosed nor loaded.
+      fs.mkdirSync(path.join(sourcePath, 'workflows'));
+      fs.writeFileSync(
+        path.join(sourcePath, 'workflows', 'audit.js'),
+        "export const meta = { name: 'audit', description: 'Audit' };\nreturn 1;\n",
+      );
       const sourceContents = new Map(
         [
           'plugin.json',
@@ -733,9 +788,11 @@ describe('extension tests', () => {
           originSource: 'AgentPlugins',
           commands: [],
           subagents: [],
+          workflows: [],
           skills: [expect.objectContaining({ name: 'direct' })],
         }),
       );
+      expect(extension.workflows).toEqual([]);
 
       for (const [file, contents] of sourceContents) {
         expect(fs.readFileSync(path.join(extension.path, file))).toEqual(

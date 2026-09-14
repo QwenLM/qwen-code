@@ -667,7 +667,7 @@ export async function buildQwenExtensionFromPlugin(
     // different directories do not overwrite each other, and the converted
     // manifest lists the exact files. Undeclared, the copied workflows/ stays.
     const workflowPaths =
-      mergedConfig.workflows === undefined
+      mergedConfig.workflows == null
         ? undefined
         : collectWorkflowResources(
             mergedConfig.workflows,
@@ -824,9 +824,11 @@ export async function convertClaudePluginStandalone(
 /**
  * Copies a plugin's declared workflow files into the converted extension at
  * their relative paths and returns that file list for the manifest. Reads one
- * directory level of regular `.js` files, every source confined to the plugin;
- * re-copying restores a workflow file the commands/skills/agents remapping
- * removed.
+ * directory level of `.js` files, every source confined to the plugin: a
+ * symlink is accepted only when its target resolves inside the plugin, like
+ * `collectResources`, and the copy dereferences it, so the converted extension
+ * holds a regular file the workflow loader will read. Re-copying restores a
+ * workflow file the commands/skills/agents remapping removed.
  */
 function collectWorkflowResources(
   resourcePaths: unknown,
@@ -866,9 +868,10 @@ function collectWorkflowResources(
       for (const name of fs.readdirSync(resolvedPath).sort()) {
         if (!name.endsWith('.js')) continue;
         const srcFile = path.join(resolvedPath, name);
-        const fileStat = fs.lstatSync(srcFile);
-        if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
-          debugLogger.debug(`Skipping non-regular workflow file: ${srcFile}`);
+        if (!isRegularFileWithinPlugin(srcFile, pluginRoot)) {
+          debugLogger.debug(
+            `Skipping workflow file that is not a regular file inside the plugin: ${srcFile}`,
+          );
           continue;
         }
         copy(srcFile);
@@ -882,6 +885,27 @@ function collectWorkflowResources(
     }
   }
   return [...collected];
+}
+
+/** True when `filePath` resolves, through any symlink, to a regular file inside the plugin. */
+function isRegularFileWithinPlugin(
+  filePath: string,
+  pluginRoot: string,
+): boolean {
+  try {
+    if (!fs.statSync(filePath).isFile()) return false;
+    const relative = path.relative(
+      fs.realpathSync(pluginRoot),
+      fs.realpathSync(filePath),
+    );
+    return (
+      relative !== '' &&
+      relative.split(path.sep)[0] !== '..' &&
+      !path.isAbsolute(relative)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1037,7 +1061,8 @@ export function mergeClaudeConfigs(
   if (marketplacePlugin.commands) merged.commands = marketplacePlugin.commands;
   if (marketplacePlugin.agents) merged.agents = marketplacePlugin.agents;
   if (marketplacePlugin.skills) merged.skills = marketplacePlugin.skills;
-  if (marketplacePlugin.workflows !== undefined)
+  // `null` reads as undeclared, as it does in the workflow loader.
+  if (marketplacePlugin.workflows != null)
     merged.workflows = marketplacePlugin.workflows;
   if (marketplacePlugin.hooks) merged.hooks = marketplacePlugin.hooks;
   if (marketplacePlugin.mcpServers)

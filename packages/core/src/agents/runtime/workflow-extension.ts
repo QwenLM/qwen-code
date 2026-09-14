@@ -43,25 +43,51 @@ export const EXTENSION_WORKFLOWS_DIR = 'workflows';
  */
 export const MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES = 256 * 1024;
 
+/**
+ * Longest `meta.description` kept from an extension workflow. The text is
+ * third-party and reaches the install consent prompt, the command list and
+ * the approval dialog, where an unbounded value would push the path being
+ * approved out of view.
+ */
+export const MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS = 500;
+
 /** One workflow script an active extension ships (metadata only). */
 export interface ExtensionWorkflowDefinition {
   /** `<extensionName>:<meta.name>` — the slash command name and `workflow()` address. */
   name: string;
-  /** File name without `.js`. */
-  stem: string;
   extensionName: string;
   extensionDisplayName?: string;
-  /** Real path of the `.js` file, resolved when the extension loaded. */
+  /** Path of the `.js` file; a real path unless discovered with `followSymlinks`. */
   scriptPath: string;
-  /** From the statically parsed `export const meta`; the script never ran. */
+  /**
+   * From the statically parsed `export const meta`, shortened to
+   * {@link MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS}; the script never ran.
+   */
   description: string;
-  whenToUse?: string;
+}
+
+export interface LoadExtensionWorkflowsOptions {
+  /**
+   * Describe the tree the way an install copies it: follow symlinks and check
+   * containment on the path as spelled, because the copy replaces each link
+   * with the file it points to. Only install consent sets this, so the prompt
+   * lists what the installed extension will load. Runtime discovery never
+   * does — it reads the tree that actually loads, where links are refused.
+   */
+  followSymlinks?: boolean;
 }
 
 interface WorkflowCandidate {
   candidate: string;
   /** Declared in the manifest (warn when missing) vs. the default directory. */
   explicit: boolean;
+}
+
+interface DiscoveryContext {
+  root: string;
+  owner: { name: string; displayName?: string };
+  found: Map<string, ExtensionWorkflowDefinition>;
+  followSymlinks: boolean;
 }
 
 /**
@@ -71,39 +97,60 @@ interface WorkflowCandidate {
  *   extension's source directory).
  * @param owner The extension's manifest `name` (its stable id) and optional
  *   display name.
- * @param declared The manifest's `workflows` value. `undefined` reads the
- *   default `workflows/` directory; a string or string array reads exactly the
- *   declared directories and `.js` files instead.
+ * @param declared The manifest's `workflows` value. `undefined` or `null`
+ *   reads the default `workflows/` directory; a string or string array reads
+ *   exactly the declared directories and `.js` files instead.
  */
 export async function loadExtensionWorkflows(
   extensionRoot: string,
   owner: { name: string; displayName?: string },
   declared: unknown,
+  options: LoadExtensionWorkflowsOptions = {},
 ): Promise<ExtensionWorkflowDefinition[]> {
-  const found = new Map<string, ExtensionWorkflowDefinition>();
-  try {
-    if (!isValidWorkflowExtensionName(owner.name)) {
-      debugLogger.warn(
-        `skipping workflows of extension "${owner.name}": the name cannot prefix a workflow name`,
-      );
-      return [];
-    }
-    const candidates = declaredWorkflowCandidates(
-      extensionRoot,
-      owner.name,
-      declared,
+  if (!isValidWorkflowExtensionName(owner.name)) {
+    debugLogger.warn(
+      `skipping workflows of extension "${owner.name}": the name cannot prefix a workflow name`,
     );
-    if (candidates.length === 0) return [];
-    const rootReal = await fs.realpath(extensionRoot);
-    for (const candidate of candidates) {
-      await collectCandidate(candidate, rootReal, owner, found);
-    }
+    return [];
+  }
+  const candidates = declaredWorkflowCandidates(
+    extensionRoot,
+    owner.name,
+    declared,
+  );
+  if (candidates.length === 0) return [];
+  const followSymlinks = options.followSymlinks === true;
+  let root: string;
+  try {
+    root = followSymlinks
+      ? path.resolve(extensionRoot)
+      : await fs.realpath(extensionRoot);
   } catch (error) {
     debugLogger.warn(
       `failed to load workflows of extension "${owner.name}": ${error}`,
     );
+    return [];
   }
-  return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const context: DiscoveryContext = {
+    root,
+    owner,
+    found: new Map(),
+    followSymlinks,
+  };
+  for (const candidate of candidates) {
+    // Isolated per declared path: one unreadable directory must not drop the
+    // paths declared after it.
+    try {
+      await collectCandidate(candidate, context);
+    } catch (error) {
+      debugLogger.warn(
+        `skipping workflows path of extension "${owner.name}" that could not be read: ${candidate.candidate}: ${error}`,
+      );
+    }
+  }
+  return [...context.found.values()].sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
 }
 
 function declaredWorkflowCandidates(
@@ -141,7 +188,7 @@ function declaredWorkflowCandidates(
     }
     candidates.push({
       // `${extensionPath}` substitution makes a declared path absolute, so an
-      // absolute path is accepted here; containment is checked on the real path.
+      // absolute path is accepted here; containment is checked below.
       candidate: path.isAbsolute(entry)
         ? entry
         : path.resolve(extensionRoot, entry),
@@ -153,13 +200,14 @@ function declaredWorkflowCandidates(
 
 async function collectCandidate(
   { candidate, explicit }: WorkflowCandidate,
-  rootReal: string,
-  owner: { name: string; displayName?: string },
-  found: Map<string, ExtensionWorkflowDefinition>,
+  context: DiscoveryContext,
 ): Promise<void> {
+  const { owner, followSymlinks } = context;
   let stat;
   try {
-    stat = await fs.lstat(candidate);
+    stat = followSymlinks
+      ? await fs.stat(candidate)
+      : await fs.lstat(candidate);
   } catch {
     if (explicit) {
       debugLogger.warn(
@@ -174,24 +222,26 @@ async function collectCandidate(
     );
     return;
   }
-  const real = await fs.realpath(candidate);
-  if (!isPathWithin(rootReal, real)) {
+  const resolved = followSymlinks
+    ? path.resolve(candidate)
+    : await fs.realpath(candidate);
+  if (!isPathWithin(context.root, resolved)) {
     debugLogger.warn(
       `refusing workflows path of extension "${owner.name}" outside the extension: ${candidate}`,
     );
     return;
   }
   if (stat.isDirectory()) {
-    const names = (await fs.readdir(real))
+    const names = (await fs.readdir(resolved))
       .filter((name) => name.endsWith('.js'))
       .sort();
     for (const name of names) {
-      await collectFile(path.join(real, name), false, owner, found);
+      await collectFile(path.join(resolved, name), false, context);
     }
     return;
   }
   if (stat.isFile()) {
-    await collectFile(real, true, owner, found);
+    await collectFile(resolved, true, context);
     return;
   }
   debugLogger.warn(
@@ -202,9 +252,9 @@ async function collectCandidate(
 async function collectFile(
   filePath: string,
   explicit: boolean,
-  owner: { name: string; displayName?: string },
-  found: Map<string, ExtensionWorkflowDefinition>,
+  context: DiscoveryContext,
 ): Promise<void> {
+  const { owner, found, followSymlinks } = context;
   const fileName = path.basename(filePath);
   if (!fileName.endsWith('.js')) {
     if (explicit) {
@@ -214,7 +264,9 @@ async function collectFile(
     }
     return;
   }
-  const stat = await fs.lstat(filePath).catch(() => null);
+  const stat = await (
+    followSymlinks ? fs.stat(filePath) : fs.lstat(filePath)
+  ).catch(() => null);
   if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
     debugLogger.warn(
       `skipping workflow of extension "${owner.name}" that is not a regular file: ${filePath}`,
@@ -264,11 +316,17 @@ async function collectFile(
   }
   found.set(name, {
     name,
-    stem: fileName.slice(0, -'.js'.length),
     extensionName: owner.name,
     ...(owner.displayName ? { extensionDisplayName: owner.displayName } : {}),
     scriptPath: filePath,
-    description: meta.description,
-    ...(meta.whenToUse ? { whenToUse: meta.whenToUse } : {}),
+    description: clampDescription(meta.description),
   });
+}
+
+/** Shortens by code point, so a surrogate pair is never split. */
+function clampDescription(description: string): string {
+  const chars = Array.from(description);
+  return chars.length > MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS
+    ? `${chars.slice(0, MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS - 1).join('')}…`
+    : description;
 }

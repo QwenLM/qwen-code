@@ -2358,6 +2358,8 @@ export class ExtensionManager {
 
         // Resolve environment variables the way loading does, so consent lists
         // the workflows that will load, without rewriting the saved manifest.
+        // A copied install replaces each symlink with its target, so consent
+        // follows links there; a linked extension loads the source as-is.
         const workflowConfig = resolveEnvVarsInObject({
           name: newExtensionConfig.name,
           displayName: newExtensionConfig.displayName,
@@ -2372,6 +2374,7 @@ export class ExtensionManager {
                 displayName: workflowConfig.displayName,
               },
               workflowConfig.workflows,
+              { followSymlinks: installMetadata.type !== 'link' },
             );
         const previousWorkflows = previous?.workflows ?? [];
 

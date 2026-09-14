@@ -151,6 +151,7 @@ export default {
   'from {{marketplace}}': 'from {{marketplace}}',
   installed: 'installed',
   '{{count}} Agents': '{{count}} Agents',
+  '{{count}} Workflows': '{{count}} Workflows',
   '{{count}} Commands': '{{count}} Commands',
   '{{count}} MCP': '{{count}} MCP',
   '{{count}} Skills': '{{count}} Skills',

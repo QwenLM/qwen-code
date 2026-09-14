@@ -18,6 +18,8 @@ import {
 } from '../../utils/sessionIdContext.js';
 import {
   EXTENSION_WORKFLOW_NAME_PATTERN,
+  findActiveExtensionWorkflowByPath,
+  findActiveExtensionWorkflowByPathCanonical,
   getWorkflowScriptRoots,
   listSavedWorkflows,
   parseExtensionWorkflowName,
@@ -825,6 +827,9 @@ describe('workflow-saved — extension tier', () => {
     await expect(
       resolveSavedWorkflowScript('gcp:audit', inactive),
     ).rejects.toThrow(/no workflow with that name/);
+    expect(
+      (await listSavedWorkflows(inactive)).map((entry) => entry.name),
+    ).not.toContain('gcp:audit');
     await expect(
       resolveSavedWorkflowScript(
         { scriptPath: path.join(extensionRoot, 'workflows', 'audit.js') },
@@ -898,11 +903,65 @@ describe('workflow-saved — extension tier', () => {
       await expect(
         resolveSavedWorkflowScript({ scriptPath }, config),
       ).rejects.toThrow(/outside the workflow script roots/);
+      // The name form reports the refusal too, rather than calling a listed
+      // name missing.
       await expect(
         resolveSavedWorkflowScript('gcp:audit', config),
-      ).rejects.toThrow(/no workflow with that name/);
+      ).rejects.toThrow(
+        /^workflow\('gcp:audit'\): refusing to load a workflow file outside the workflow script roots/,
+      );
     },
   );
+
+  it('carries the owner display name from discovery to the listing', async () => {
+    await writeWorkflow(
+      path.join(extensionRoot, 'workflows'),
+      'audit',
+      meta('audit'),
+    );
+    const workflows = await loadExtensionWorkflows(
+      extensionRoot,
+      { name: 'gcp', displayName: 'Google Cloud' },
+      undefined,
+    );
+
+    const [entry] = await listSavedWorkflows(configWith(workflows));
+
+    expect(entry).toMatchObject({
+      name: 'gcp:audit',
+      extensionName: 'gcp',
+      extensionDisplayName: 'Google Cloud',
+    });
+  });
+
+  it('matches a script path only to the extension workflow at that path', async () => {
+    const extensionScript = path.join(extensionRoot, 'workflows', 'audit.js');
+    await writeWorkflow(path.dirname(extensionScript), 'audit', meta('audit'));
+    const projectScript = path.join(
+      new Storage(projectDir).getProjectWorkflowsDir(),
+      'deploy.js',
+    );
+    await writeWorkflow(path.dirname(projectScript), 'deploy', meta('deploy'));
+    const config = configWith(await loadGcp());
+
+    expect(
+      findActiveExtensionWorkflowByPath(config, extensionScript)?.name,
+    ).toBe('gcp:audit');
+    expect(
+      findActiveExtensionWorkflowByPath(config, projectScript),
+    ).toBeUndefined();
+    expect(
+      (
+        await findActiveExtensionWorkflowByPathCanonical(
+          config,
+          extensionScript,
+        )
+      )?.name,
+    ).toBe('gcp:audit');
+    expect(
+      await findActiveExtensionWorkflowByPathCanonical(config, projectScript),
+    ).toBeUndefined();
+  });
 
   it('keeps unqualified names on the project/user rules', async () => {
     const config = configWith([]);

@@ -163,7 +163,8 @@ const WORKFLOW_PARAM_SCHEMA = {
         'saved-workflow slash command; a tool that generated a script for ' +
         'this run hands you its path the same way. The file must resolve ' +
         'inside a saved-workflow directory (`.qwen/workflows`, ' +
-        '`~/.qwen/workflows`) or the generated-scripts root ' +
+        '`~/.qwen/workflows`), be a workflow file an active extension ' +
+        'ships, or sit under the generated-scripts root ' +
         '(`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the per-project ' +
         'runtime dir, not the project tree) — any other path is refused. ' +
         'Provide exactly ONE of `script` or `scriptPath`. The file is read ' +
@@ -704,9 +705,15 @@ function buildRunTrailer(
     args,
   });
   if (resume && includeResume) {
-    const pathAdvice =
-      entry?.workflowName ||
-      !isGeneratedWorkflowScriptPath(config, handle.scriptPath!)
+    // An extension's file is third-party and an extension update replaces
+    // it, so the copy has to land somewhere the user owns.
+    const pathAdvice = findActiveExtensionWorkflowByPath(
+      config,
+      handle.scriptPath!,
+    )
+      ? "this reads an extension's workflow file; copy it into .qwen/workflows before making a run-specific change"
+      : entry?.workflowName ||
+          !isGeneratedWorkflowScriptPath(config, handle.scriptPath!)
         ? 'this reads the saved workflow; copy it before making a run-specific change'
         : 'edit that generated copy first if the script needs to change';
     const journalAdvice = handle.journalPath

@@ -72,8 +72,6 @@ export interface SavedWorkflowEntry {
   extensionDisplayName?: string;
   /** `meta.description`, parsed when the extension loaded; extension workflows only. */
   description?: string;
-  /** `meta.whenToUse`, when declared; extension workflows only. */
-  whenToUse?: string;
 }
 
 /** A resolved saved workflow with its script source loaded. */
@@ -387,7 +385,6 @@ export async function listSavedWorkflows(
         ? { extensionDisplayName: workflow.extensionDisplayName }
         : {}),
       description: workflow.description,
-      ...(workflow.whenToUse ? { whenToUse: workflow.whenToUse } : {}),
     });
   }
   // Iterate user FIRST then project so project entries overwrite (win).
@@ -481,8 +478,13 @@ export async function resolveSavedWorkflowScript(
           script,
           savedWorkflowName: name,
         };
-      } catch {
-        // Unreadable now (removed, or swapped for a symlink) — not found.
+      } catch (error) {
+        // Listed but unreadable now (removed, or swapped for a symlink since
+        // the extension loaded). Report why: "no workflow with that name"
+        // would list this very name as available.
+        const reason = error instanceof Error ? error.message : String(error);
+        debugLogger.warn(`refusing extension workflow ${name}: ${reason}`);
+        throw new Error(`workflow('${name}'): ${reason}`);
       }
     }
     return notFound();
