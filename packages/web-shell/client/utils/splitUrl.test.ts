@@ -82,8 +82,19 @@ describe('parseSplitSessionIds', () => {
 });
 
 describe('split session persistence (sessionStorage)', () => {
+  // Move the daemon target the way a real navigation does — same tab, same PAGE
+  // origin, only the query changes (history Back/Forward, a bookmark, an
+  // address-bar edit). None of those go through navigateToDaemon.
+  function setDaemonParam(value: string | null) {
+    const url = new URL(window.location.href);
+    if (value === null) url.searchParams.delete('daemon');
+    else url.searchParams.set('daemon', value);
+    window.history.replaceState({}, '', url.toString());
+  }
+
   beforeEach(() => {
     sessionStorage.clear();
+    setDaemonParam(null);
   });
 
   it('round-trips the saved session set', () => {
@@ -106,13 +117,44 @@ describe('split session persistence (sessionStorage)', () => {
     expect(loadSplitSessions()).toEqual([]);
   });
 
+  it('drops the owner tag along with the set on clear', () => {
+    saveSplitSessions(['s1']);
+    clearSplitSessions();
+    expect(
+      sessionStorage.getItem('qwen-webshell-split-sessions-for'),
+    ).toBeNull();
+  });
+
   it('falls back to [] on malformed stored JSON', () => {
+    // Seed the owner tag through the real save path, then corrupt only the ids:
+    // without it the owner guard — not the malformed JSON — is what returns [].
+    saveSplitSessions(['s1']);
     sessionStorage.setItem('qwen-webshell-split-sessions', '{not json');
     expect(loadSplitSessions()).toEqual([]);
   });
 
   it('falls back to [] when the stored value is not an array', () => {
+    saveSplitSessions(['s1']);
     sessionStorage.setItem('qwen-webshell-split-sessions', '"s1"');
+    expect(loadSplitSessions()).toEqual([]);
+  });
+
+  // sessionStorage is partitioned by the PAGE origin, which a `?daemon=` switch
+  // does not change, so one storage is shared by every target this tab visited.
+  it('ignores a set saved for a different daemon target', () => {
+    setDaemonParam('http://dev-box:4170');
+    saveSplitSessions(['d1', 'd2']);
+    expect(loadSplitSessions()).toEqual(['d1', 'd2']);
+    // The operator pressed Back: the target is the page origin again, and these
+    // ids belong to a daemon that 404s on them and then re-saves the survivors.
+    setDaemonParam(null);
+    expect(loadSplitSessions()).toEqual([]);
+  });
+
+  it('does not apply the page-origin set to a remote target either', () => {
+    saveSplitSessions(['p1']);
+    expect(loadSplitSessions()).toEqual(['p1']);
+    setDaemonParam('http://dev-box:4170');
     expect(loadSplitSessions()).toEqual([]);
   });
 });
