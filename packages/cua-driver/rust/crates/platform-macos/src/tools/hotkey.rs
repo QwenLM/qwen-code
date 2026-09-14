@@ -422,7 +422,7 @@ impl Tool for HotkeyTool {
                                         // transitions; ordinary apps also need base flags.
                                         crate::input::keyboard::press_key_bare_global(&key, &m)
                                     } else {
-                                        crate::input::keyboard::press_key_no_auth(pid, &key, &m)
+                                        crate::input::keyboard::press_key_global(&key, &m)
                                     }
                                 },
                             )?;

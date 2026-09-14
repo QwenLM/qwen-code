@@ -193,9 +193,9 @@ function readBrandLogo(
   // Refuse non-regular files before opening: on POSIX, opening a FIFO read-only
   // blocks until a writer connects, which would hang the request. `lstatSync`
   // rather than `statSync` so a symlinked path soft-fails here too.
-  let stat: fs.Stats | undefined;
+  let stat: fs.BigIntStats | undefined;
   try {
-    stat = fs.lstatSync(filePath, { throwIfNoEntry: false });
+    stat = fs.lstatSync(filePath, { bigint: true, throwIfNoEntry: false });
   } catch {
     return { warnings: [`ui.brand.logoPath is not readable: ${filePath}`] };
   }
@@ -220,14 +220,14 @@ function readBrandLogo(
       warnings: [`ui.brand.logoPath must be a regular file: ${filePath}`],
     };
   }
-  if (stat.nlink > 1) {
+  if (stat.nlink > 1n) {
     return {
       warnings: [
         `ui.brand.logoPath must not have multiple hard links (nlink=${stat.nlink}): ${filePath}`,
       ],
     };
   }
-  if (stat.size > MAX_BRAND_LOGO_BYTES) {
+  if (stat.size > BigInt(MAX_BRAND_LOGO_BYTES)) {
     return {
       warnings: [
         `ui.brand.logoPath exceeds ${MAX_BRAND_LOGO_BYTES} bytes: ${filePath}`,
@@ -296,7 +296,7 @@ function readBrandLogo(
  */
 function readRegularFileNoFollow(
   filePath: string,
-  expectedStat: fs.Stats,
+  expectedStat: fs.BigIntStats,
 ):
   | { content: string; reason?: undefined }
   | { content?: undefined; reason: string } {
@@ -312,7 +312,7 @@ function readRegularFileNoFollow(
     fd = fs.openSync(filePath, flags);
     // Re-verify identity on the FD: if anything changed between the lstat above
     // and this open, refuse rather than read whatever the FD now points at.
-    const stat = fs.fstatSync(fd);
+    const stat = fs.fstatSync(fd, { bigint: true });
     if (
       stat.dev !== expectedStat.dev ||
       stat.ino !== expectedStat.ino ||
