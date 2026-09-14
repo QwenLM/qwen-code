@@ -34,6 +34,7 @@ import {
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 import {
+  assertWritableOutPath,
   repoRelativeOf,
   REVIEW_CACHE_DIR,
   REVIEW_TMP_DIR,
@@ -498,12 +499,6 @@ function cachePathFor(target: string, source: string | undefined): string {
 
 function runCaptureLocal(args: CaptureLocalArgs): void {
   const { out, file } = args;
-  // A malformed or too-short --deadline is a usage error, and it must fail
-  // here, before the tree is captured and planned, not at the plan write
-  // after that work is done — both bars, the env-free floor and this
-  // shell's pricing. The same validation runs again inside
-  // `captureDeadline`; it is pure given the environment.
-  validateDeadlineFlag(process.env, args.deadline);
   // DERIVED here when a file review does not name one, rather than recomputed
   // by whoever calls this. `qwen review run` pins the artifact name it polls
   // for from the same repo-relative path put through the same `safeTarget`,
@@ -1468,14 +1463,32 @@ export const captureLocalCommand: CommandModule = {
           'says why.',
       }),
   handler: (argv) => {
-    // plan-diff's contract: a usage error (a TypeError — the malformed
-    // --deadline this command can now throw) exits 2 with one stderr line,
-    // anything else exits 1 — never an uncaught crash banner with a stack
-    // for a repairable invocation.
+    const args = argv as unknown as CaptureLocalArgs;
+    // plan-diff's contract: a usage error (a TypeError) exits 2 and anything
+    // else exits 1, each on one stderr line — a repairable invocation gets no
+    // crash banner. Two rulings run first, before the tree is captured and
+    // planned rather than at the plan write after that work is done: an
+    // --out that is blank, repeated or names a directory (the check
+    // `fetch-diff` and `issue-context` make), and the --deadline ruling, which covers both
+    // bars and runs again inside `captureDeadline` (it is pure given the
+    // environment).
+    //
+    // The one line is for the operator. It cannot say where an internal fault
+    // happened — and a TypeError from a bug is classified as a usage error
+    // here, as in plan-diff — so --debug prints the stack after it. Only
+    // the flag: debug variables in the environment are set for other tools
+    // (and by the dev launcher), and must not change what an operator sees.
     try {
-      runCaptureLocal(argv as unknown as CaptureLocalArgs);
+      assertWritableOutPath(args.out);
+      validateDeadlineFlag(process.env, args.deadline);
+      runCaptureLocal(args);
     } catch (err) {
+      // writeStderrLineSafe, as in plan-diff: a broken stderr must not let
+      // the throw escape the catch and lose the exit classification.
       writeStderrLineSafe(`capture-local: ${(err as Error).message}`);
+      if (argv['debug'] === true && err instanceof Error && err.stack) {
+        writeStderrLineSafe(err.stack);
+      }
       process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },
