@@ -231,12 +231,17 @@ export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
 
 /**
- * Rows above a pending card's expanded confirmation dialog: the transcript
- * rows that stay on screen above it (prompt echo plus the card's own
- * hidden-tail and awaiting rows ≈ 3) plus the dialog's chrome (frame,
- * title, body margins, outcome list, footer ≈ 11).
+ * Rows a pending card's expanded confirmation dialog does not own. Above the
+ * card's description rows: the banner (6), the startup notices a fresh
+ * session shows (≈ 3), the prompt echo with its turn margin (2), and the
+ * card's own hidden-tail and awaiting rows (2). In the dialog itself, around
+ * the body: the frame's border and padding (4), title (1), body margins (2),
+ * question row (1), outcome list (2), footer hint (1) ≈ 11. The sum (≈ 24,
+ * padded to 26 against notice timing) is what an 80-row viewport measured:
+ * at 14 the expanded tail and the outcome list ran off the bottom of the
+ * screen (mem0 e2e regression).
  */
-export const DIALOG_EXPANDED_RESERVE_ROWS = 14;
+export const DIALOG_EXPANDED_RESERVE_ROWS = 26;
 
 /**
  * Measured at a 110-column terminal the card's flex row gives the

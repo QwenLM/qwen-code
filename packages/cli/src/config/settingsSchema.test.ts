@@ -11,6 +11,8 @@ import {
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
   HELD_EXPIRY_OPTIONS,
+  HookEventName,
+  MAX_WEB_SEARCH_TIMEOUT_MS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
@@ -43,6 +45,30 @@ describe('SettingsSchema', () => {
       ]);
       expect(hookProperties?.['prompt']).toMatchObject({ type: 'string' });
       expect(hookProperties?.['model']).toMatchObject({ type: 'string' });
+    });
+
+    it('should declare a hooks setting for every hook event', () => {
+      expect(
+        Object.keys(getSettingsSchema().hooks.properties ?? {}).sort(),
+      ).toEqual([...Object.values(HookEventName)].sort());
+    });
+
+    it('should concatenate every hook event across settings scopes', () => {
+      const hookProperties = getSettingsSchema().hooks.properties ?? {};
+      const eventNames = Object.values(HookEventName);
+
+      expect(
+        Object.fromEntries(
+          eventNames.map((eventName) => [
+            eventName,
+            hookProperties[eventName]?.mergeStrategy,
+          ]),
+        ),
+      ).toEqual(
+        Object.fromEntries(
+          eventNames.map((eventName) => [eventName, MergeStrategy.CONCAT]),
+        ),
+      );
     });
 
     it('should contain all expected top-level settings', () => {
@@ -232,6 +258,21 @@ describe('SettingsSchema', () => {
         getSettingsSchema().tools.properties.sandbox.jsonSchemaOverride,
       ).toEqual({
         anyOf: [{ type: 'boolean' }, { type: 'string' }],
+      });
+    });
+
+    // Bounds mirror resolveWebSearchTimeoutMs: without them the write paths
+    // accept any number and the runtime silently falls back to the default.
+    // The maximum is core's constant so the schema cannot drift from the
+    // runtime contract it documents.
+    it('should bound tools.webSearch.timeoutMs to the runtime contract', () => {
+      expect(
+        getSettingsSchema().tools.properties.webSearch.properties.timeoutMs,
+      ).toMatchObject({
+        type: 'number',
+        minimum: 1,
+        maximum: MAX_WEB_SEARCH_TIMEOUT_MS,
+        showInDialog: true,
       });
     });
 
