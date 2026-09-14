@@ -881,6 +881,18 @@ function isAsyncOperator(command: string, index: number): boolean {
  * the right-hand side of the pipe. Redirection operators and `(` are
  * deliberately absent: bash starts a word there too, but leaving them literal
  * only over-splits, which stays fail-closed, and no reported shape needs them.
+ *
+ * This state is this splitter's alone and it encodes bash's rules. The sibling
+ * `splitCommands` in `../utils/shell-utils.ts` — reached through
+ * `checkCommandPermissions`, so by the shell-confirmation path — has no `#`
+ * state at all and so disagrees on inputs like `echo hi # ; rm -rf /tmp/x`,
+ * and the rule is applied on every platform although cmd.exe has no `#` comment
+ * character. Converging the two splitters, and deciding how a shell-agnostic
+ * splitter learns the reported shell, is tracked in #11882. Three older
+ * `#`-comment rules already live in this package
+ * (`detectCommandSubstitution` in `../utils/shell-utils.ts`,
+ * `findUnquotedCommentStart` and `splitTrailingShellComment` in
+ * `../tools/shell.ts`), so grep the name before trusting one of them.
  */
 const COMMENT_WORD_BOUNDARIES = [' ', '\t', '\n', ';', '&', '|'];
 
@@ -940,6 +952,13 @@ export function splitCompoundCommandSegments(
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
+  // Nesting depth of `${ … }` parameter expansions. bash tokenizes no comment
+  // inside one, so a space-preceded `#` there is literal and the closing `}`
+  // still closes the expansion: `bash -xc 'x=""; echo ${x:- a #b} ; touch m ;
+  // echo SECOND'` traces `+ echo a '#b'`, `+ touch m` and `+ echo SECOND`.
+  // Reading that `#` as a comment swallowed the `;` and folded both commands
+  // into one allow-covered segment.
+  let paramDepth = 0;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -964,21 +983,53 @@ export function splitCompoundCommandSegments(
       continue;
     }
 
+    // Track `${ … }` nesting. Only the `#` branch below consults it, so an
+    // operator inside the expansion is unaffected.
+    if (ch === '$' && command[i + 1] === '{') {
+      paramDepth++;
+      i++; // -1 +1: step onto the `{`
+      continue;
+    }
+    if (ch === '}' && paramDepth > 0) {
+      paramDepth--;
+    }
+
     // A word-initial `#` opens a comment that runs to the end of the physical
     // line, so an operator inside it is not a boundary: bash runs
     // `echo 'a' # comment ; echo B` as a single `echo` (#11815).
+    //
+    // bash tokenizes no comment inside arithmetic and none inside a `${ … }`
+    // expansion, so the `#` there stays literal and the delimiter closing the
+    // construct still closes it. Both depth guards keep a following `;`, `&` or
+    // newline a real boundary; without them the skip ran past the closing `))`
+    // — which also stranded `arithmeticDepth` above zero and muted every later
+    // bare `&` — or past the closing `}`.
     //
     // This scan deliberately ignores `escaped`. A backslash does not continue a
     // line inside a comment — bash really does run the `rm` in `echo hi # foo \`
     // followed by a newline and `rm -rf /` — so honouring the escape would fold
     // that second command into the comment's segment and cost it its own rule
     // check. For the same reason the newline is left for the operator scan
-    // below, and stays a boundary.
-    if (ch === '#' && isCommentStart(command, i)) {
-      while (i < command.length && command[i] !== '\n') {
+    // below, and stays a boundary. An unescaped backtick does end the skip:
+    // bash finds a backtick body's closing delimiter with a raw scan that does
+    // not honour an outer-level `#` (`bash -xc 'echo `date # c` ; echo SECOND'`
+    // traces `++ date`, `+ echo …` and `+ echo SECOND`), so stopping there keeps
+    // the operator after it a boundary. That can only over-split a genuine
+    // comment containing a backtick, which stays fail-closed.
+    if (
+      ch === '#' &&
+      arithmeticDepth === 0 &&
+      paramDepth === 0 &&
+      isCommentStart(command, i)
+    ) {
+      while (
+        i < command.length &&
+        command[i] !== '\n' &&
+        !(command[i] === '`' && precedingBackslashCount(command, i) % 2 === 0)
+      ) {
         i++;
       }
-      i--; // -1 because the loop will i++, landing back on the newline
+      i--; // -1 because the loop will i++, landing back on the delimiter
       continue;
     }
 

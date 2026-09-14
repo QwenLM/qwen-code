@@ -816,6 +816,23 @@ describe('splitCompoundCommand', () => {
     ]);
   });
 
+  // The row above pins nothing about branch *order*: its `#` is preceded by `'`,
+  // which is not a word boundary, so `isCommentStart` returns false there no
+  // matter where the comment block sits. A quoted `#` preceded by a space stays
+  // literal only because the quote check runs first — hoisting the comment block
+  // above `if (inSingle || inDouble) { continue; }` (a reorder that leaves this
+  // whole file green) folds these two into one segment that `Bash(echo *)`
+  // covers, while `bash -xc 'echo "a # b" ; echo DANGER'` runs both commands.
+  it.each([
+    ['echo "a # b" ; rm -rf /tmp/x', 'echo "a # b"'],
+    ["echo 'a # b' ; rm -rf /tmp/x", "echo 'a # b'"],
+  ])(
+    'does not read the space-preceded quoted # in %s as a comment',
+    async (command, head) => {
+      expect(splitCompoundCommand(command)).toEqual([head, 'rm -rf /tmp/x']);
+    },
+  );
+
   // `#` at index 0 is at a word start, so a shebang line is a comment and the
   // newline after it still bounds the real command.
   it('treats a leading # as a comment', async () => {
@@ -842,6 +859,74 @@ describe('splitCompoundCommand', () => {
   it('does not let a trailing backslash extend a comment', async () => {
     expect(splitCompoundCommand('echo hi # foo \\\nrm -rf /tmp/x')).toEqual([
       'echo hi # foo \\',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // A space-preceded `#` inside a `${ … }` parameter expansion is literal: bash
+  // does no comment recognition there, so the `;` stays a real boundary and the
+  // tail runs — `bash -xc 'x=""; echo ${x:- a #b} ; touch m ; echo SECOND'`
+  // traces `+ echo a '#b'`, `+ touch m` and `+ echo SECOND`. Folding the line
+  // here cost the tail its own rule check and hid it from the virtual-op pass.
+  it('does not read a # inside a parameter expansion as a comment', async () => {
+    expect(splitCompoundCommand('echo ${x:- a #b} ; rm -rf /tmp/x')).toEqual([
+      'echo ${x:- a #b}',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // Over-correction guard for the same depth: it is scoped to the expansion.
+  // After the closing `}` the `#` is at a word start again, while bash keeps the
+  // `#` in `${x#pre}` and `${#x}` literal; both split today and must keep doing
+  // so, or the guard would over-split every `#` that follows a `${ … }`.
+  it.each([
+    ['echo ${x} # c ; rm -rf /tmp/x', ['echo ${x} # c ; rm -rf /tmp/x']],
+    ['echo ${x#pre} ; rm -rf /tmp/x', ['echo ${x#pre}', 'rm -rf /tmp/x']],
+    ['echo ${#x} ; rm -rf /tmp/x', ['echo ${#x}', 'rm -rf /tmp/x']],
+  ])(
+    'keeps the # semantics of %s around a parameter expansion',
+    async (command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
+  // bash performs no comment recognition inside `(( … ))` / `$(( … ))`, so the
+  // `#` stays literal and `))` still closes the expansion. Swallowing the `))`
+  // additionally stranded the arithmetic depth at 1, after which no later bare
+  // `&` was a boundary. `bash -xc '(( 1 #c )) ; touch m'` prints an arithmetic
+  // error and still runs the `touch`, and `bash -xc 'echo $(( 1 #c )) & touch
+  // m'` creates the marker in the backgrounded subshell.
+  it('does not read a # inside an arithmetic expansion as a comment', async () => {
+    expect(splitCompoundCommand('echo $(( 1 #c )) & rm -rf /tmp/x')).toEqual([
+      'echo $(( 1 #c ))',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  it('does not read a # inside an arithmetic command as a comment', async () => {
+    expect(splitCompoundCommand('(( 1 #c )) ; rm -rf /tmp/x')).toEqual([
+      '(( 1 #c ))',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // Over-correction guard: a comment must never be able to leave the arithmetic
+  // depth raised, or every later bare `&` stops being a boundary — including on
+  // the following physical line.
+  it('keeps a later & a boundary after a # inside arithmetic', async () => {
+    expect(
+      splitCompoundCommand('echo $(( 1 # c ))\necho a & rm -rf /tmp/x'),
+    ).toEqual(['echo $(( 1 # c ))', 'echo a', 'rm -rf /tmp/x']);
+  });
+
+  // bash finds a backtick body's closing delimiter with a raw scan that does not
+  // honour an outer-level `#`, so the tail really runs: the oracle
+  // `bash -xc 'echo `date # c` ; echo SECOND'` traces `++ date`, `+ echo …` and
+  // `+ echo SECOND`. The comment skip therefore has to stop at the backtick so
+  // the operator after it keeps its own segment and its own rule check.
+  it('does not let a comment swallow a closing backtick', async () => {
+    expect(splitCompoundCommand('echo `date # c` ; rm -rf /tmp/x')).toEqual([
+      'echo `date # c`',
       'rm -rf /tmp/x',
     ]);
   });
@@ -2595,6 +2680,32 @@ describe('PermissionManager', () => {
           command: 'cat <<EOF\n# hi ; rm -rf /\nEOF',
         }),
       ).toBe('ask');
+    });
+
+    // The comment state reads a `#` literal wherever bash does not tokenize a
+    // comment — inside `${ … }`, inside `$(( … ))` / `(( … ))`, and inside a
+    // backtick substitution — so the `;` or `&` after the closing delimiter
+    // stays a real boundary. Folding these lines into one segment let
+    // `Bash(echo *)` cover the tail, turning a configured deny into an allow.
+    it.each([
+      ['a parameter expansion', 'echo ${x:- a #b} ; rm -rf /tmp/x'],
+      ['an arithmetic expansion', 'echo $(( 1 #c )) & rm -rf /tmp/x'],
+      [
+        'an arithmetic command',
+        'echo NPMTEST ; (( failures #c )) ; rm -rf /tmp/x',
+      ],
+      ['a backtick substitution', 'echo `date # c` ; rm -rf /tmp/x'],
+    ])('comment-like # in %s: deny still fires', async (_where, command) => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
+      ).toBe('deny');
     });
   });
 
