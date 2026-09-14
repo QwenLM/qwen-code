@@ -24,6 +24,7 @@ import {
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
   clearLoadedSkillTracking,
+  skillModelInvocationBlock,
 } from './skill-utils.js';
 import { ToolNames } from './tool-names.js';
 import type { ToolRegistry } from './tool-registry.js';
@@ -330,6 +331,35 @@ describe('applySkillSideEffects', () => {
       );
     },
   );
+});
+
+describe('skillModelInvocationBlock', () => {
+  const skill = {
+    name: 'gated-skill',
+    level: 'user',
+    filePath: '/skills/gated-skill/SKILL.md',
+    body: 'Body.',
+  } as unknown as SkillConfig;
+
+  it.each([
+    [{}, undefined],
+    [{ enabled: false }, 'disabled'],
+    [{ hidden: true }, 'hidden'],
+    [{ active: false }, 'inactive'],
+    [{ enabled: false, hidden: true, active: false }, 'disabled'],
+  ] as const)('%o -> %s', (opts, expected) => {
+    const config = {
+      isSkillEnabled: () => ('enabled' in opts ? opts.enabled : true),
+    } as unknown as Config;
+    const skillManager = {
+      isSkillActive: () => ('active' in opts ? opts.active : true),
+    } as unknown as SkillManager;
+    const subject =
+      'hidden' in opts ? { ...skill, disableModelInvocation: true } : skill;
+    expect(skillModelInvocationBlock(config, skillManager, subject)).toBe(
+      expected,
+    );
+  });
 });
 
 describe('collectAvailableSkillEntries memoize cache', () => {

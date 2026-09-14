@@ -5092,6 +5092,9 @@ export class Config {
       if (skillTool && 'clearLoadedSkills' in skillTool) {
         (skillTool as { clearLoadedSkills(): void }).clearLoadedSkills();
       }
+      // Skill grants belong to the session that loaded the skill; a resumed
+      // session re-arms its own from history during `initialize()`.
+      this.permissionManager?.clearSessionAllowRules();
     }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
@@ -6076,6 +6079,10 @@ export class Config {
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
+      // Read by the DashScope metadata gate off this same object, so a
+      // per-model override has to travel with the switch like the cache flags.
+      this.contentGeneratorConfig.enableRequestMetadata =
+        config.enableRequestMetadata;
       this.contentGeneratorConfig.forceGlobalCacheScope =
         config.forceGlobalCacheScope;
       this.contentGeneratorConfig.cacheRetention = config.cacheRetention;
@@ -6103,6 +6110,10 @@ export class Config {
       if ('enableCacheControl' in sources) {
         this.contentGeneratorConfigSources['enableCacheControl'] =
           sources['enableCacheControl'];
+      }
+      if ('enableRequestMetadata' in sources) {
+        this.contentGeneratorConfigSources['enableRequestMetadata'] =
+          sources['enableRequestMetadata'];
       }
       if ('forceGlobalCacheScope' in sources) {
         this.contentGeneratorConfigSources['forceGlobalCacheScope'] =
