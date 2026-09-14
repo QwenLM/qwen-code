@@ -603,8 +603,10 @@ describe('splitCompoundCommand', () => {
   });
 
   // The other half of the rule. `$'…'` is bash's ANSI-C quoting, where the
-  // backslash IS an escape, so `$'a\''` ends at its second quote and the
-  // operator after it still separates two commands. Reading these as plain
+  // backslash IS an escape, so the quote after it belongs to the string and
+  // `$'a\''` only closes at its third quote — which is why the whole token
+  // stays in the first segment below — and the operator after it still
+  // separates two commands. Reading these as plain
   // single quotes swallows the real closing quote instead and glues the line
   // back into one segment — the same bypass, entered from the other side.
   it.each([
@@ -630,6 +632,19 @@ describe('splitCompoundCommand', () => {
     ['echo "$"\'a\\\' ; touch /tmp/x', ['echo "$"\'a\\\'', 'touch /tmp/x']],
   ])('reads %s as a plain single-quoted string', async (command, parts) => {
     expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
+  it('still opens ANSI-C after an even run of backslashes', async () => {
+    // The rule turns on whether the `$` is itself escaped, which is decided by
+    // the parity of the run before it: `\$'` is an escaped dollar and a plain
+    // string, but in `\\$'` the backslashes escape each other, the `$` is live
+    // and the string is ANSI-C. bash prints `\a'` here and runs two commands.
+    // Reading an even run as escaping the `$` would make this a plain string
+    // whose closing quote is then swallowed, which is the bypass itself.
+    expect(splitCompoundCommand("echo \\\\$'a\\'' ; touch /tmp/x")).toEqual([
+      "echo \\\\$'a\\''",
+      'touch /tmp/x',
+    ]);
   });
 
   // A line continuation between the `$` and its quote does not change what the

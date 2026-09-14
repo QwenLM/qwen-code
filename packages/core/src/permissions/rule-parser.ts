@@ -894,8 +894,9 @@ export function splitCompoundCommandSegments(
     // stays inside the quote to the end of the input, and returns the whole
     // line as one segment — so an `echo` allow rule ends up authorising the
     // `rm`. Applying that exception to `$'…'` as well loses the same line the
-    // other way round: there the backslash really does escape, so `$'a\''`
-    // ends at its second quote and the operator after it still splits.
+    // other way round: there the backslash really does escape, so the quote
+    // after it belongs to the string and `$'a\''` only closes at its third
+    // quote — the operator after it is outside any string and still splits.
     if (ch === '\\' && !(inSingle && !inAnsiC)) {
       // A backslash-newline is a line continuation, which bash elides before
       // it decides anything else about the line — so `$\<newline>'…'` still
@@ -903,9 +904,13 @@ export function splitCompoundCommandSegments(
       // Treating it as an ordinary escape instead lost the `$`, read the
       // string as a plain `'…'`, and swallowed its real closing quote, which
       // is the bypass this exception exists to close, re-entered through a
-      // continuation. The newline is consumed here rather than left to the
-      // `escaped` flag because it is itself a `SHELL_OPERATORS` entry: left
-      // unconsumed it would split every `echo a\<newline>b` continuation.
+      // continuation. The pair is consumed here rather than left to the
+      // `escaped` flag because that route returns to the top of the loop,
+      // where `dollarPending` is reset before the newline is skipped, so the
+      // pending `$` is lost; taking both characters here carries it across.
+      // Consuming the newline is what keeps `echo a\<newline>b` whole, and
+      // the `escaped` route would do that much on its own — it is only the
+      // `$` that needs this branch.
       if (command[i + 1] === '\n') {
         dollarPending = ansiCIntroducer;
         i++;
