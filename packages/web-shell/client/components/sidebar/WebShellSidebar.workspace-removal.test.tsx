@@ -24,6 +24,7 @@ const {
   useSessions,
   useChannels,
   listWorkspaceSessions,
+  searchWorkspaceSessions,
   archiveSessionsData,
   unarchiveSessionsData,
   deleteSessionsData,
@@ -51,6 +52,7 @@ const {
     exportSession: vi.fn(),
   });
   const listWorkspaceSessions = vi.fn().mockResolvedValue([]);
+  const searchWorkspaceSessions = vi.fn().mockResolvedValue({ results: [] });
   const archiveSessionsData = vi.fn().mockResolvedValue({
     archived: [],
     alreadyArchived: [],
@@ -148,6 +150,7 @@ const {
         listStandaloneSessionsPage,
         archiveStandaloneSessions: archiveSessionsData,
         unarchiveStandaloneSessions: unarchiveSessionsData,
+        searchWorkspaceSessions,
         workspaceByCwd: vi.fn(() => ({
           listWorkspaceSessions,
           // The header actions poll git; answer as a non-git workspace.
@@ -178,6 +181,7 @@ const {
     useSessions,
     useChannels,
     listWorkspaceSessions,
+    searchWorkspaceSessions,
     archiveSessionsData,
     unarchiveSessionsData,
     deleteSessionsData,
@@ -787,6 +791,8 @@ beforeEach(() => {
   workspace.client.workspaceByCwd.mockReset();
   listWorkspaceSessions.mockReset();
   listWorkspaceSessions.mockResolvedValue([]);
+  searchWorkspaceSessions.mockReset();
+  searchWorkspaceSessions.mockResolvedValue({ results: [] });
   listStandaloneSessionsPage.mockReset();
   listStandaloneSessionsPage.mockResolvedValue({ sessions: [] });
   archiveSessionsData.mockReset();
@@ -4872,6 +4878,71 @@ describe('WebShellSidebar session source switch', () => {
       await archived.unarchiveSession.mock.results.at(-1)?.value;
     });
     expect(archived.unarchiveSession).toHaveBeenCalledWith('bound-chat');
+  });
+
+  it('couples the guards to a task-bound session arriving as a search ghost', async () => {
+    // A workspace with more sessions than one catalog page holds: the bound
+    // chat never lands in the loaded catalog, so it reaches the sidebar only
+    // as a transcript-content hit. The daemon stamps search summaries with
+    // the same boundScheduledTaskId flag the catalog carries, and the ghost
+    // row must honor the same coupling guards.
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        {
+          session: {
+            sessionId: 'ghost-bound',
+            displayName: 'Ghost standup notes',
+            workspaceCwd: '/tmp/project',
+            sourceType: 'default',
+            boundScheduledTaskId: 'task-9',
+          },
+          snippet: 'standup excerpt',
+        },
+        {
+          session: {
+            sessionId: 'ghost-plain',
+            displayName: 'Ghost plain notes',
+            workspaceCwd: '/tmp/project',
+            sourceType: 'default',
+          },
+          snippet: 'plain excerpt',
+        },
+      ],
+    });
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const searchInput = await openSessionSearch();
+    await act(async () => {
+      setInputValue(searchInput, 'standup');
+      await Promise.resolve();
+    });
+    // Past the content-search hook's 300ms debounce plus the mocked fetch.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    expect(container.textContent).toContain('Ghost standup notes');
+
+    // The flagged ghost offers no Archive (archiving silently disables its
+    // task); the unflagged ghost still does.
+    const boundItems = await openSessionMenuItems('Ghost standup notes');
+    expect(boundItems.some((item) => item.includes('Archive'))).toBe(false);
+    const plainItems = await openSessionMenuItems('Ghost plain notes');
+    expect(plainItems.some((item) => item.includes('Archive'))).toBe(true);
+
+    // The delete confirm discloses the coupled task, and cancelling it is a
+    // no-op for both the session and the task.
+    await selectSessionMenuItem('Ghost standup notes', 'Delete');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain(
+      'Its scheduled task will also be deleted and stop running.',
+    );
+    await act(async () => {
+      click(dialogButton('cancel'));
+      await Promise.resolve();
+    });
+    expect(active.deleteSession).not.toHaveBeenCalled();
+    expect(deleteSessionsData).not.toHaveBeenCalled();
   });
 
   it('groups scheduled-task runs under the task title and source icon', async () => {

@@ -825,7 +825,7 @@ export interface BridgeSessionSummary {
    * carries this session's id — the daemon couples the session's
    * archive/delete/restore to that task regardless of the session's own
    * source (an ordinary chat can be a task's fixed session). Persisted
-   * catalog listings only.
+   * catalog listings and transcript-content search hits only.
    */
   boundScheduledTaskId?: string;
   clientCount: number;

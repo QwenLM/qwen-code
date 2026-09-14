@@ -1702,10 +1702,24 @@ export async function searchWorkspaceSessionsForResponse(
       readOptions.signal,
     );
     readOptions.signal?.throwIfAborted();
+    // Stamp the same task-binding flag the catalog listing applies: a hit
+    // the client's loaded catalog page lacks renders as a ghost row whose
+    // archive/delete guards read only this flag.
+    const boundTaskIdBySessionId =
+      await loadBoundScheduledTaskSessionIds(workspaceCwd);
+    readOptions.signal?.throwIfAborted();
     const results: SearchWorkspaceSessionsResult['results'] = [];
     for (const hit of hits) {
       const session = bySessionId.get(hit.sessionId);
-      if (session) results.push({ session, snippet: hit.snippet });
+      if (!session) continue;
+      const boundScheduledTaskId = boundTaskIdBySessionId.get(hit.sessionId);
+      results.push({
+        session:
+          boundScheduledTaskId === undefined
+            ? session
+            : { ...session, boundScheduledTaskId },
+        snippet: hit.snippet,
+      });
     }
     return { results };
   });

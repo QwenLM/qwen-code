@@ -41,6 +41,7 @@ import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
   invalidateWorkspaceSessionListCache,
   listLiveWorkspaceSessionsForResponse,
+  searchWorkspaceSessionsForResponse,
 } from './server/session-list.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import {
@@ -24147,6 +24148,29 @@ describe('createServeApp', () => {
         expect(legacy.get(controllerId)).toBe('task-controller');
         expect(legacy.get(perRunBoundId)).toBe('task-per-run');
         expect(legacy.get(unboundId)).toBeUndefined();
+
+        // …and the transcript-content search path: a hit the client's
+        // loaded catalog page lacks renders as a ghost row whose
+        // task-coupling guards read only this flag, so search summaries
+        // must carry it too.
+        const searchResults = await searchWorkspaceSessionsForResponse(
+          WS_BOUND,
+          'fixed session',
+        );
+        expect(
+          searchResults.results.map((result) => result.session.sessionId),
+        ).toEqual([ordinaryBoundId]);
+        expect(searchResults.results[0]?.session.boundScheduledTaskId).toBe(
+          'task-current',
+        );
+        const plainResults = await searchWorkspaceSessionsForResponse(
+          WS_BOUND,
+          'plain chat',
+        );
+        expect(plainResults.results[0]?.session.sessionId).toBe(unboundId);
+        expect(
+          plainResults.results[0]?.session.boundScheduledTaskId,
+        ).toBeUndefined();
       });
 
       it('includes a legacy fixed-session task controller in the default source filter', async () => {
