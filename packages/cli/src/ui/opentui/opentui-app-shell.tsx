@@ -92,6 +92,7 @@ import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
 import { OpenTuiBanner } from './opentui-header.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
+import { OpenTuiQueuedMessageDisplay } from './queued-message.js';
 import {
   OpenTuiActionConfirmation,
   OpenTuiMcpApprovalDialog,
@@ -177,8 +178,8 @@ export interface OpenTuiAppProps {
   /** Aborts the in-flight turn (Esc while streaming). */
   onInterrupt?: () => void;
   approvalMode?: ApprovalMode;
-  /** Mid-turn queued prompts (composer badge + Esc pop-back). */
-  queueLength?: number;
+  /** Mid-turn queued prompts (queue rows + badge + Esc pop-back). */
+  messageQueue?: readonly string[];
   onPopQueue?: () => string | null;
   /**
    * Scheduler calls parked in `awaiting_approval`. The shell renders the
@@ -240,7 +241,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     isReceivingContent,
     onInterrupt,
     approvalMode,
-    queueLength,
+    messageQueue,
     onPopQueue,
     waitingToolCalls,
     onToolCallSettled,
@@ -249,6 +250,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onPromptSuggestionDismiss,
     onPromptSuggestionAbort,
   } = props;
+
+  const queueLength = messageQueue?.length ?? 0;
 
   const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(
     props.initialDialog ?? null,
@@ -1032,6 +1035,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 streamingCharsRef={streamingCharsRef}
                 isReceivingContent={isReceivingContent}
               />
+              <OpenTuiQueuedMessageDisplay messageQueue={messageQueue ?? []} />
               <OpenTuiInputPrompt
                 onSubmit={(text, imagePaths) => {
                   void onSubmit(text, imagePaths);

@@ -1985,4 +1985,18 @@ describe('OpenTuiApp transcript scroll region', () => {
     expect(region?.textContent).not.toContain('dialog:theme');
     expect(chrome?.textContent).toContain('dialog:theme');
   });
+
+  it('shows queued prompts in the chrome, above the composer itself', async () => {
+    // ink prints them inside the Composer column, so they must share the
+    // non-scrolling rows rather than scroll away with the conversation.
+    renderApp({
+      renderMain: () => <div data-testid="transcript">TRANSCRIPT-ROWS</div>,
+      messageQueue: ['QUEUE_ROW_MARKER'],
+    });
+    await settle();
+    const { region, chrome } = readLayout();
+    expect(chrome?.textContent).toContain('QUEUE_ROW_MARKER');
+    expect(chrome?.textContent).toContain('input-prompt');
+    expect(region?.textContent).not.toContain('QUEUE_ROW_MARKER');
+  });
 });

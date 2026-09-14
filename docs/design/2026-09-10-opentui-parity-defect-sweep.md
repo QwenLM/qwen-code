@@ -869,9 +869,9 @@ test: eleven checkpoints taken while a dialog is parked each shed one row on bot
 sides, from four divergent rows to three, and the rows left there are the
 long-path wrap break recorded under Decision 21. The overall divergent-row count
 goes from 221 ink-only and 265 opentui-only to 210 and 254. The number of
-checkpoints matching byte for byte stays at 22 of 69 — that wrap row is what keeps
-these from joining it, so the freeze closed a row everywhere and flipped no
-verdict.
+checkpoints matching byte for byte stays at twenty-two, of the sixty-nine that
+run scored — that wrap row is what keeps these from joining it, so the freeze
+closed a row everywhere and flipped no verdict.
 
 ## Decision 29 — a call approved behind another approval waits with ink's pending glyph
 
@@ -918,6 +918,45 @@ The same scenario also puts a second divergence on the record, in Follow-ups:
 this renderer appends the open dialog after both waiting cards where ink sets it
 between them.
 
+## Decision 30 — prompts queued mid-turn list as ink's rows above the composer
+
+A prompt submitted while a turn is running was counted here but never shown. Its
+length reached the footer badge, and the composer's up key at the top edge could
+pop a text back for editing, but the texts themselves were readable only by
+draining them — which empties the queue. ink lists them instead, above the
+composer: three at a time, each collapsed to one line, an overflow row when more
+are waiting, and a hint naming the keys, shown the first three times the queue
+fills.
+
+The port is ink's component row for row, hint included. What had blocked it was
+the read rather than the render. The queue lives in a ref so that a turn can
+drain it and put it back within one tick, and a ref is invisible to a render —
+so the ref stays the synchronous source, and the five sites that move it each
+copy it into state besides: the push, the drain, the restore for texts still
+riding when a turn aborts, the pop for editing, and the transcript reset that
+backs `/clear`, resume and branch. That last one is why the rows shed with a
+cleared screen instead of outliving it.
+
+This is the one decision here that no frame can evidence. Both renderers _steer_
+a plain-Enter submission made mid-turn: the text is drained at the next sampling
+boundary and rides into the following model request, so the rows appear and
+vanish inside a single turn. A queue that outlives the turn needs the submission
+deferred until it is idle, and in ink that is Ctrl+Q — which this renderer does
+not bind. The command is named in the key map's priority list, but the resolvers
+that read that list have no production caller, so the keystroke falls through as
+text. The rows are reachable here only for the length of a turn, which is also
+why no scenario in the matrix produces a durable queue on either leg.
+
+Coverage is unit-level across three layers: five component tests (nothing when
+the queue is empty, one row per prompt with whitespace flattened, the three-row
+cap with its overflow row, the hint that stops after the fourth fill, a row cut
+to the terminal width minus ink's indent), the hook's assertions on the queued
+texts at each of those sites plus the reset, and a shell test that fixes the
+placement — rows in the persistent chrome between the loading indicator and the
+composer, not in the scroll region. Nine mutations, one at each of the four
+component behaviours, four of the five mirror sites and the mount, each fail
+their own test and no other.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
@@ -940,11 +979,14 @@ What was verified, and how far the verification reaches:
   above the composer is confirmed row for row against ink, because there the
   content fills the window on both legs. Elsewhere it is not separable in a frame
   comparison from where the reconstruction puts the block.
-- **The quit warning's queued segment is unit-tested only.** No scenario
-  queues a message and then arms the warning. Nor does any scenario produce a
-  durable queue at all: ink's badge survives only as a single transient of its
-  own submit path in the raw stream, and never reaches a captured frame in
-  either leg.
+- **The quit warning's queued segment, and Decision 30's queue rows, are
+  unit-tested only.** No scenario queues a message and then arms the warning.
+  Nor does any scenario produce a durable queue at all: ink's badge survives only
+  as a single transient of its own submit path in the raw stream, and never
+  reaches a captured frame in either leg. A queue that outlives the turn needs
+  the deferral ink puts behind Ctrl+Q; this renderer does not bind that key, and
+  no scenario presses it on either leg — so the texts, like the badge, exist
+  only inside one turn.
 - **The non-shrinkable row prefix and the per-item top margin are verified by
   re-capture only.** The unit-test runtime stubs the renderer's graphics
   surface, so it cannot exercise layout; a test there could only echo the prop
@@ -1075,12 +1117,6 @@ What was verified, and how far the verification reaches:
   sessions, MCP resources and extensions, and draws a category bar to switch
   between them. That is a feature gap rather than a parity defect and belongs
   in its own change.
-- The mid-turn queue is counted here but never shown. Its length reaches the
-  footer badge and the composer's up key at the top edge pops it back for
-  editing, but ink also lists the queued texts above the composer — three at a
-  time, each collapsed to one line, with an overflow row and a hint shown for
-  the first few times the queue fills. Porting that needs a non-destructive
-  snapshot of the queue, which today can only be read by draining it.
 - The shell-crawler diagnostics that print when the search binary is missing
   are now explained. The renderer library replaces the global console with a
   capture stream and folds console output into its own in-renderer console, so
@@ -1130,7 +1166,9 @@ What was verified, and how far the verification reaches:
 - The status-line settings are ignored. ink renders up to two lines produced by
   a user-configured command, on its own refresh interval and with its own colour
   choice; this renderer hardcodes a directory, session, branch and model row.
-- The composer advertises a queue key it does not bind. Its exit key also arms
+- The composer advertises a queue key it does not bind. Decision 30 widened
+  that: the ported hint row prints the key's name on screen, so the dead
+  affordance is now visible rather than merely documented. Its exit key also arms
   the two-press window with a non-empty draft and eats a character doing it,
   where ink declines to arm at all while the buffer holds text.
 - ink answers a typed free-text entry in its question dialog twice for one

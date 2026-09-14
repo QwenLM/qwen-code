@@ -308,7 +308,7 @@ function OpenTuiEntryApp({
       isReceivingContent={live.isReceivingContent}
       onInterrupt={interrupt}
       approvalMode={config.getApprovalMode()}
-      queueLength={live.queueLength}
+      messageQueue={live.messageQueue}
       onPopQueue={live.popQueue}
       waitingToolCalls={live.waitingCalls}
       onToolCallSettled={live.settleWaitingCall}

@@ -107,7 +107,7 @@ vi.mock('./live-turn.js', () => ({
     streamingCharsRef: { current: 0 },
     isReceivingContent: false,
     waitingCalls: [],
-    queueLength: 0,
+    messageQueue: [],
     popQueue: () => null,
     submit: () => {},
     interrupt: () => {},
