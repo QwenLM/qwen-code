@@ -211,6 +211,7 @@ describe('LlmChat', async () => {
       getFileReadCache: vi.fn().mockReturnValue({ clear: vi.fn() }),
       getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
       ensureManagedHarnessRunnable: vi.fn().mockResolvedValue(undefined),
+      getLlmClient: vi.fn(),
     } as unknown as Config;
 
     // Disable 429 simulation for tests
@@ -584,6 +585,39 @@ describe('LlmChat', async () => {
 
       expect(order[0]).toBe('harness');
       expect(order).toContain('model');
+    });
+
+    it('continues on the successor chat after a Harness host rebuild', async () => {
+      const successor = new LlmChat(
+        mockConfig,
+        config,
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      const successorStream = vi
+        .spyOn(successor, 'sendMessageStream')
+        .mockResolvedValue(
+          (async function* () {
+            /* drained successor */
+          })(),
+        );
+      vi.mocked(mockConfig.getLlmClient).mockReturnValue({
+        isInitialized: () => true,
+        getChat: () => successor,
+      } as ReturnType<Config['getLlmClient']>);
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next turn' },
+        'prompt-id-harness-successor',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      expect(successorStream).toHaveBeenCalledOnce();
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
     });
 
     describe('manual plan-exit notices', () => {

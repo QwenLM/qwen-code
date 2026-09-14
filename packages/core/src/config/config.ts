@@ -267,6 +267,7 @@ import {
   SessionService,
   type ResumedSessionData,
 } from '../services/sessionService.js';
+import { buildApiHistoryFromConversation } from '../services/session-api-history.js';
 import type {
   SessionRestoreProjection,
   SessionRuntimeResumeState,
@@ -4961,12 +4962,14 @@ export class Config {
    * checkpoint exists. Legal initial starts submit `before_model` first;
    * opaque or missing continuation is blocked. After a turn-complete safety
    * point the drained handle is replaced so the next turn uses a new
-   * activation; the existing checkpoint is not rewritten.
+   * activation and a new LlmChat rebuilt from the durable log; the existing
+   * checkpoint is not rewritten.
    */
   async ensureManagedHarnessRunnable(): Promise<void> {
     const session = this.managedSession;
     if (session === undefined) return;
     const handle = this.managedHarness;
+    let replacedHost = false;
     if (handle !== undefined) {
       const latest = session.authority.latestCheckpoint;
       const authorization = await session.authority.harnessRunAuthorization();
@@ -4979,10 +4982,17 @@ export class Config {
         await handle.detach();
         await session.replaceActivation();
         this.managedHarness = undefined;
+        replacedHost = true;
       }
     }
     this.managedHarness ??= createManagedHarnessHandle(session);
     await this.managedHarness.ensureRunnable();
+    if (replacedHost && this.llmClient.isInitialized()) {
+      const records = await session.sink.project();
+      await this.llmClient.rebuildChatFromDurableHistory(
+        buildApiHistoryFromConversation({ messages: records }),
+      );
+    }
   }
 
   /** Starts a new session and resets session-scoped services. */

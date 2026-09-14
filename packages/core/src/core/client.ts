@@ -1487,6 +1487,41 @@ export class LlmClient {
     return deduped;
   }
 
+  /**
+   * Replaces the in-memory LlmChat after a turn-complete Harness safety
+   * point. History comes from the durable Session log, not from the drained
+   * object. Does not fire SessionStart, repair orphans, clear the file-read
+   * cache, or release the writer.
+   */
+  async rebuildChatFromDurableHistory(history: Content[]): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+    const previous = this.chat;
+    const chat = new LlmChat(
+      this.config,
+      {
+        systemInstruction: this.getMainSessionSystemInstruction(),
+      },
+      history,
+      this.config.getChatRecordingService(),
+      uiTelemetryService,
+    );
+    chat.enableManualPlanExitNotices();
+    chat.seedResumeTokenCounts(
+      previous.getLastPromptTokenCount(),
+      previous.getLastOutputTokenCount(),
+    );
+    if (this.lastSessionStartContext && this.lastSessionStartSource) {
+      chat.applySessionStartContext(
+        this.lastSessionStartContext,
+        this.lastSessionStartSource,
+      );
+    }
+    this.chat = chat;
+    await this.setTools({ skipHistoryReveal: true });
+  }
+
   async resetChat(): Promise<void> {
     const memBefore = process.memoryUsage();
     const historyLength = this.chat?.getHistoryLength() ?? 0;
@@ -2904,6 +2939,7 @@ export class LlmClient {
     ) {
       await this.config.assertCanStartTurn();
     }
+    await this.config.ensureManagedHarnessRunnable?.();
     const signal = options?.goalSignal
       ? AbortSignal.any([callerSignal, options.goalSignal])
       : callerSignal;

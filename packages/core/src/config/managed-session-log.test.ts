@@ -235,10 +235,19 @@ describe('managed session log activation', () => {
   it('replaces the Harness activation after a turn-complete checkpoint', async () => {
     await withWorkspace(async (activate) => {
       const fixture = await activate({ managedSessionLog: true });
+      const rebuilt: unknown[][] = [];
+      const llmClient = fixture.config.getLlmClient();
+      vi.spyOn(llmClient, 'isInitialized').mockReturnValue(true);
+      vi.spyOn(llmClient, 'rebuildChatFromDurableHistory').mockImplementation(
+        async (history) => {
+          rebuilt.push(history);
+        },
+      );
       const recorder = fixture.config.getChatRecordingService()!;
       recorder.recordUserMessage('first turn');
       await recorder.flush();
       await fixture.config.ensureManagedHarnessRunnable();
+      expect(rebuilt).toHaveLength(0);
       recorder.recordTurnResult({
         promptId: 'turn-1',
         state: 'completed',
@@ -248,7 +257,19 @@ describe('managed session log activation', () => {
       await recorder.flush();
 
       await fixture.config.ensureManagedHarnessRunnable();
+      expect(rebuilt).toHaveLength(1);
+      expect(rebuilt[0]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: 'user',
+            parts: expect.arrayContaining([
+              expect.objectContaining({ text: 'first turn' }),
+            ]),
+          }),
+        ]),
+      );
       await fixture.config.ensureManagedHarnessRunnable();
+      expect(rebuilt).toHaveLength(1);
       recorder.recordUserMessage('second turn');
       await recorder.flush();
 

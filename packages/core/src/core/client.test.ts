@@ -1135,6 +1135,33 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('rebuildChatFromDurableHistory', () => {
+    it('replaces LlmChat from durable history without SessionStart or /clear', async () => {
+      const first = client.getChat();
+      first.setLastPromptTokenCount(42);
+      const startChat = vi.spyOn(client, 'startChat');
+      const clear = mockConfig.getFileReadCache().clear as ReturnType<
+        typeof vi.fn
+      >;
+
+      await client.rebuildChatFromDurableHistory([
+        { role: 'user', parts: [{ text: 'durable turn' }] },
+      ]);
+
+      const second = client.getChat();
+      expect(second).not.toBe(first);
+      expect(second.getHistory()).toEqual([
+        {
+          role: 'user',
+          parts: [{ text: 'durable turn' }],
+        },
+      ]);
+      expect(second.getLastPromptTokenCount()).toBe(42);
+      expect(startChat).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+    });
+  });
+
   describe('startChat — session start profiling', () => {
     beforeEach(() => {
       sessionStartProfilerMocks.createSessionStartProfiler.mockClear();

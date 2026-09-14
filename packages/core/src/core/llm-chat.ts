@@ -2745,6 +2745,30 @@ export class LlmChat {
     options?: LlmChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
+
+    await this.sendPromise;
+
+    // ACP Session and LlmClient both send through this method. A Managed
+    // session must have a runnable Harness checkpoint before any model
+    // request: initial starts submit before_model here; blocked recovery
+    // fails closed instead of running the Agent. After A/D the successor
+    // chat is a new object rebuilt from the log; continue there instead of
+    // mutating this drained instance.
+    await this.config.ensureManagedHarnessRunnable?.();
+    const client = this.config.getLlmClient?.();
+    if (client?.isInitialized()) {
+      const successor = client.getChat();
+      if (successor !== this) {
+        return successor.sendMessageStream(
+          model,
+          params,
+          prompt_id,
+          goalContext,
+          options,
+        );
+      }
+    }
+
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
       ? await this.config
@@ -2774,14 +2798,6 @@ export class LlmChat {
     const requestModalities =
       exactRoute?.contentGeneratorConfig.modalities ??
       this.config.getEffectiveInputModalities();
-
-    await this.sendPromise;
-
-    // ACP Session and LlmClient both send through this method. A Managed
-    // session must have a runnable Harness checkpoint before any model
-    // request: initial starts submit before_model here; blocked recovery
-    // fails closed instead of running the Agent.
-    await this.config.ensureManagedHarnessRunnable?.();
 
     let streamDoneResolver: () => void;
     const streamDonePromise = new Promise<void>((resolve) => {
