@@ -251,6 +251,32 @@ describe('auto memory tree rendering', () => {
     expect(complete.length).toBeGreaterThan(1_200);
   });
 
+  it('names the recorded reason when the tree source is incomplete', () => {
+    // The router is the only incompleteness signal the model receives; it
+    // must name the cause the scan actually recorded instead of reading as
+    // an all-clear that blames scope coverage.
+    const incomplete: MemorySourceStatus = {
+      requestedScopes: ['project', 'user'],
+      searchedScopes: ['project', 'user'],
+      unavailableScopes: [],
+      complete: false,
+      incompleteScopes: [
+        {
+          scope: 'project',
+          reason: 'ref_collision',
+          discovered: 2,
+          returned: 1,
+        },
+      ],
+    };
+
+    const { routerPrompt } = createAutoMemoryTreeSnapshot([], incomplete);
+
+    expect(routerPrompt).toContain('ref_collision');
+    expect(routerPrompt).toContain('2 discovered, 1 returned');
+    expect(routerPrompt).not.toContain('latest complete memory metadata tree');
+  });
+
   it('renders a focused subtree without a second global router', () => {
     const memory = doc('project/focus.md');
     const focused = renderAutoMemoryFocusedSubtree([memory]).prompt;

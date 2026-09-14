@@ -774,9 +774,12 @@ describe('auto-memory relevant recall', () => {
     await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', 'query', {
       config: trusting,
     });
+    // Fourth argument: the recall scan is best-effort per root — one
+    // unlistable repo-local root must not discard the healthy roots.
     expect(scanAllAutoMemoryTopicDocuments).toHaveBeenLastCalledWith(
       '/tmp/project',
       undefined,
+      true,
       true,
     );
 
@@ -787,6 +790,7 @@ describe('auto-memory relevant recall', () => {
       '/tmp/project',
       undefined,
       false,
+      true,
     );
   });
 

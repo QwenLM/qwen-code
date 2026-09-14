@@ -601,12 +601,19 @@ async function scanAutoMemoryDocumentsFromRoot(
   },
 ): Promise<ScannedAutoMemoryDocument[]> {
   const result = await scanAutoMemoryDocumentsFromRootWithStatus(root, opts);
-  if (
-    result.incompleteScopes.some(
-      (incomplete) => incomplete.reason === 'root_read_failed',
-    )
-  ) {
-    throw result.rootError;
+  for (const incomplete of result.incompleteScopes) {
+    if (incomplete.reason === 'root_read_failed') {
+      throw result.rootError;
+    }
+    if (incomplete.reason === 'dir_read_failed') {
+      // A partially walked root must fail loudly here: the index rebuilds
+      // persist the scan as the authoritative MEMORY.md, and forget deletes
+      // on a "no entries matched" answer — a silently truncated scan would
+      // turn one unreadable subdirectory into lost index entries.
+      throw new Error(
+        `memory scan of ${root} is incomplete: a subdirectory could not be read`,
+      );
+    }
   }
   return result.docs;
 }
@@ -777,6 +784,7 @@ export async function scanAllAutoMemoryTopicDocuments(
   projectRoot: string,
   documentCache?: AutoMemoryDocumentCache,
   trustedProject = true,
+  bestEffort = false,
 ): Promise<ScannedAutoMemoryDocument[]> {
   // ponytail: reuse the existing O(n) parsed scan; add a catalog only if
   // measured topic counts make recall scanning too slow.
@@ -795,6 +803,23 @@ export async function scanAllAutoMemoryTopicDocuments(
   // leaving repo-authored memory injectable by the legacy recall path and
   // impossible to forget. Match scanAutoMemorySnapshot: scan nothing.
   if (roots.length === 0) return [];
+  if (bestEffort) {
+    // Recall-facing: per-root tolerant, like the structured snapshot path —
+    // one unlistable root (e.g. a repo-shipped symlinked .qwen/memory) must
+    // not discard the healthy roots' documents.
+    const perRoot = await Promise.all(
+      roots.map((root) =>
+        scanAutoMemoryDocumentsFromRootWithStatus(root, {
+          scope: 'project',
+          uncapped: true,
+          documentCache,
+        }),
+      ),
+    );
+    return dedupeScannedDocuments(
+      sortScannedDocuments(perRoot.flatMap((result) => result.docs)),
+    );
+  }
   const perRoot = await Promise.all(
     roots.map((root) =>
       scanAutoMemoryDocumentsFromRoot(root, {

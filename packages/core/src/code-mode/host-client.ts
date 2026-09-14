@@ -32,8 +32,11 @@ import {
 // oversubscribed runners it dwarfs the guest execution budget.
 const CODE_MODE_HOST_BOOT_TIMEOUT_MS = 30_000;
 // Slack over timeoutMs once the host signals execution start; covers frame
-// I/O and real-time waits the guest CPU budget does not charge.
-const CODE_MODE_HOST_WALL_GRACE_MS = 5000;
+// I/O and real-time waits the guest CPU budget does not charge. The sandbox
+// legalises guest setTimeout delays far beyond any wall slack without
+// charging them to the CPU budget, so sizing this below the waits a script
+// may legitimately accumulate would SIGKILL budget-compliant work.
+const CODE_MODE_HOST_WALL_GRACE_MS = 30_000;
 
 export interface CodeModeExecutionResult {
   output: string;

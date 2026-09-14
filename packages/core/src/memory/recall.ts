@@ -577,6 +577,9 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
           projectRoot,
           options.documentCache,
           options.config?.isTrustedFolder?.() ?? false,
+          // Recall must not lose every scope to one unlistable root; forget
+          // keeps the default strict scan because it deletes on the result.
+          true,
         ),
         scanAllUserAutoMemoryTopicDocuments(options.documentCache).catch(
           (error: unknown) => {

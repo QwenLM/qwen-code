@@ -259,7 +259,12 @@ export interface ScheduleMetadataMigrationParams {
 export interface MetadataMigrationScheduleResult {
   status: 'scheduled' | 'skipped';
   taskId?: string;
-  skippedReason?: 'complete' | 'running' | 'memory_pressure' | 'cancelled';
+  skippedReason?:
+    | 'complete'
+    | 'running'
+    | 'memory_pressure'
+    | 'cancelled'
+    | 'stalled';
   promise?: Promise<MemoryTaskRecord>;
 }
 
@@ -288,6 +293,14 @@ export const DEFAULT_AUTO_DREAM_MIN_HOURS = 24;
 export const DEFAULT_AUTO_DREAM_MIN_SESSIONS = 5;
 
 const DREAM_LOCK_STALE_MS = 60 * 60 * 1000; // 1 hour
+
+// Consecutive non-progressing migration runs (committed nothing while legacy
+// candidates remain) after which a domain stops being rescheduled for the
+// rest of this session: a file the migration agent can never enrich would
+// otherwise spawn a forked agent on every user turn, forever. Progress of a
+// single file resets the count, so a large corpus draining in
+// MAX_FILES_PER_RUN-sized batches never trips the limit.
+const MIGRATION_STALL_LIMIT = 3;
 const SESSION_SCAN_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const activeMigrationDomains = new Set<string>();
 
@@ -578,6 +591,7 @@ export class MemoryManager {
   // The runDream finally block clears the entry on settle.
   private readonly dreamAbortControllers = new Map<string, AbortController>();
   private readonly migrationInFlightByDomain = new Map<string, string>();
+  private readonly migrationStallCountByDomain = new Map<string, number>();
   private readonly migrationAbortControllers = new Map<
     string,
     AbortController
@@ -726,7 +740,9 @@ export class MemoryManager {
 
   private track<T>(taskId: string, promise: Promise<T>): Promise<T> {
     this.inFlight.set(taskId, promise);
-    void promise.finally(() => this.inFlight.delete(taskId));
+    // The .finally() derivative rejects when the tracked promise rejects;
+    // swallow it — the caller's own await/catch handles the rejection.
+    void promise.finally(() => this.inFlight.delete(taskId)).catch(() => {});
     return promise;
   }
 
@@ -763,6 +779,12 @@ export class MemoryManager {
       params.config.getMemoryRecallMode() === 'structured'
     ) {
       return { status: 'skipped', skippedReason: 'complete' };
+    }
+    if (
+      (this.migrationStallCountByDomain.get(domain) ?? 0) >=
+      MIGRATION_STALL_LIMIT
+    ) {
+      return { status: 'skipped', skippedReason: 'stalled' };
     }
     // Register the abort controller (under a reserved id) together with the
     // domain reservation, BEFORE the candidate scan: the scan reads every
@@ -865,8 +887,24 @@ export class MemoryManager {
         );
         return record;
       }
+      if (result.committed > 0 || result.remainingLegacyFiles === 0) {
+        this.migrationStallCountByDomain.delete(domain);
+      } else {
+        this.migrationStallCountByDomain.set(
+          domain,
+          (this.migrationStallCountByDomain.get(domain) ?? 0) + 1,
+        );
+      }
+      const stalled =
+        (this.migrationStallCountByDomain.get(domain) ?? 0) >=
+        MIGRATION_STALL_LIMIT;
       this.update(record, {
-        status: 'completed',
+        status: stalled ? 'failed' : 'completed',
+        ...(stalled
+          ? {
+              error: `Migration stalled: ${result.remainingLegacyFiles} legacy file(s) could not be migrated in ${MIGRATION_STALL_LIMIT} consecutive runs; giving up for this session.`,
+            }
+          : {}),
         progressText: `Migrated ${result.committed} memory file(s).`,
         metadata: { scope: params.scope, ...result },
       });
@@ -874,7 +912,7 @@ export class MemoryManager {
         params.config,
         new MemoryMigrationEvent({
           scope: params.scope,
-          status: 'completed',
+          status: stalled ? 'failed' : 'completed',
           files_scanned: result.filesScanned,
           legacy_files: result.legacyFiles,
           remaining_legacy_files: result.remainingLegacyFiles,
@@ -1355,7 +1393,14 @@ export class MemoryManager {
       debugLogger.warn('Skipping dream: memory pressure too high.');
       return { status: 'skipped', skippedReason: 'memory_pressure' };
     }
+    // A stalled migration (see MIGRATION_STALL_LIMIT) never drains its
+    // candidates; do not let it suppress consolidation forever.
+    const projectMigrationStalled =
+      (this.migrationStallCountByDomain.get(
+        `project:${getAutoMemoryRoot(params.projectRoot)}`,
+      ) ?? 0) >= MIGRATION_STALL_LIMIT;
     if (
+      !projectMigrationStalled &&
       params.config.getMemoryRecallMode() !== 'structured' &&
       (
         await Promise.all(
@@ -1484,7 +1529,12 @@ export class MemoryManager {
     if (this.isUnderMemoryPressure(params.config)) {
       return { status: 'skipped', skippedReason: 'memory_pressure' };
     }
+    const userMigrationStalled =
+      (this.migrationStallCountByDomain.get(
+        `user:${getUserAutoMemoryRoot()}`,
+      ) ?? 0) >= MIGRATION_STALL_LIMIT;
     if (
+      !userMigrationStalled &&
       params.config.getMemoryRecallMode() !== 'structured' &&
       (
         await scanMemoryMetadataMigrationCandidates(
@@ -2070,11 +2120,20 @@ export class MemoryManager {
   ): void {
     for (const { memoryRef, mtimeMs } of bodies) {
       const coverage = this.bodyCoverageInHistory.get(memoryRef);
+      const evicted =
+        coverage?.version === mtimeMs ||
+        this.bodyPresentVersionsInHistory.get(memoryRef) === mtimeMs;
       if (coverage?.version === mtimeMs) {
         this.bodyCoverageInHistory.delete(memoryRef);
       }
       if (this.bodyPresentVersionsInHistory.get(memoryRef) === mtimeMs) {
         this.bodyPresentVersionsInHistory.delete(memoryRef);
+      }
+      // The evicted body is no longer in history, so the per-turn
+      // exhaustion claim for it no longer holds either — a re-fetch must be
+      // allowed to load it again.
+      if (evicted) {
+        this.exhaustedBodyRefsInCurrentTurn.delete(memoryRef);
       }
     }
   }
@@ -2082,6 +2141,7 @@ export class MemoryManager {
   markAllMemoryBodiesEvictedFromHistory(): void {
     this.bodyPresentVersionsInHistory.clear();
     this.bodyCoverageInHistory.clear();
+    this.resetExhaustedBodyRefsForCurrentTurn();
   }
 
   restoreMemoryBodiesPresentInHistory(
@@ -2266,6 +2326,21 @@ export class MemoryManager {
       systemMessage:
         'Managed auto-memory dream skipped: another dream is already running.',
     };
+    // If our own previous release failed, the leaked lock holds this
+    // process's live PID with a fresh mtime, so neither the liveness sweep
+    // nor the staleness window can clear it — and the scheduled path's
+    // force-clean is unreachable right after a manual run (its same_session
+    // / min_hours gates return first). Force-clean it here, mirroring
+    // scheduleDream: best-effort, and only when the leak is ours, so a lock
+    // held by a genuinely running dream still reports 'already running'.
+    if (this.dreamLockReleaseFailed) {
+      await fs
+        .rm(getAutoMemoryConsolidationLockPath(projectRoot), { force: true })
+        .catch(() => {
+          // Best-effort recovery — fall through to the existence check.
+        });
+      this.dreamLockReleaseFailed = false;
+    }
     // Mirror scheduleDream's sweep: acquireDreamLock creates with 'wx', so
     // it fails on ANY existing lock — including one orphaned by a crashed
     // CLI. Sweep by holder liveness first or that lock blocks /dream for

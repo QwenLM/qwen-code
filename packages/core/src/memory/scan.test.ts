@@ -928,6 +928,75 @@ describe('auto-memory topic scanning', () => {
     }
   });
 
+  it('keeps healthy roots in the recall scan when the repo-local root is unlistable', async () => {
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const previousBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'global');
+    clearAutoMemoryRootCache();
+    try {
+      const runtimeFile = path.join(
+        getAutoMemoryRoot(projectRoot),
+        'project',
+        'runtime.md',
+      );
+      await fs.mkdir(path.dirname(runtimeFile), { recursive: true });
+      await fs.writeFile(
+        runtimeFile,
+        '---\ntype: project\nname: Runtime\ndescription: runtime copy\n---\nbody',
+        'utf-8',
+      );
+      // A cloned repo can ship .qwen/memory as a symlink (the shape
+      // listMarkdownFiles calls an attack vector): that one repo-controlled
+      // root must not take the healthy runtime root down with it.
+      const outside = path.join(tempDir, 'outside');
+      await fs.mkdir(outside, { recursive: true });
+      const localRoot = path.join(projectRoot, '.qwen', 'memory');
+      await fs.rm(localRoot, { recursive: true, force: true });
+      await fs.symlink(
+        outside,
+        localRoot,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+
+      // The recall-facing (best-effort) scan keeps the surviving root.
+      await expect(
+        scanAllAutoMemoryTopicDocuments(projectRoot, undefined, true, true),
+      ).resolves.toEqual([
+        expect.objectContaining({ relativePath: 'project/runtime.md' }),
+      ]);
+      // The default strict scan (forget's universe) stays loud.
+      await expect(
+        scanAllAutoMemoryTopicDocuments(projectRoot, undefined, true),
+      ).rejects.toThrow();
+      // The structured snapshot keeps the same doc and reports the failure.
+      const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+        scopes: ['project'],
+      });
+      expect(snapshot.sourceStatus.incompleteScopes).toContainEqual(
+        expect.objectContaining({
+          scope: 'project',
+          reason: 'root_read_failed',
+        }),
+      );
+      expect(snapshot.docs.map((doc) => doc.relativePath)).toEqual([
+        'project/runtime.md',
+      ]);
+    } finally {
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+      if (previousBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBase;
+      }
+      clearAutoMemoryRootCache();
+    }
+  });
+
   it('scans the same project universe for forget as for structured recall', async () => {
     // scanAllAutoMemoryTopicDocuments (the forget universe) and
     // scanAutoMemorySnapshot (the structured-recall universe) must cover the

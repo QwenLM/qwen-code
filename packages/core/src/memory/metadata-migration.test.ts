@@ -699,6 +699,32 @@ describe('memory metadata migration', () => {
     expect(await fs.readFile(candidate!.filePath, 'utf-8')).toBe(original);
   });
 
+  it('splices a head whose keys all parse to null instead of wrapping it into the body', async () => {
+    // `name:` / `description:` (null values) vanish under the lenient parser
+    // but remain a valid YAML mapping under the strict parser the validator
+    // uses — so the file is a migration candidate whose head MUST split as
+    // frontmatter. Otherwise the fresh-frontmatter branch wraps the original
+    // block into the body as literal text and commits the corruption.
+    const original = '---\nname:\ndescription:\n---\nbody text\n';
+    const filePath = await write('project/nulls.md', original);
+
+    const result = await runMemoryMetadataMigration({
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata: async (_config, candidate) => metadata(candidate),
+    });
+
+    expect(result.committed).toBe(1);
+    const updated = await fs.readFile(filePath, 'utf-8');
+    const delimiters = updated.split('\n').filter((line) => line === '---');
+    expect(delimiters).toHaveLength(2);
+    expect(updated).toContain('name: Migrated memory');
+    expect(updated.endsWith('---\nbody text\n')).toBe(true);
+    expect(updated).not.toContain('body text\n---');
+  });
+
   it('preserves hand-maintained comments, anchors, and unknown fields', async () => {
     const original = [
       '---',

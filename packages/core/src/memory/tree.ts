@@ -243,9 +243,24 @@ function sourceWarning(sourceStatus?: MemorySourceStatus): string[] {
   if (!sourceStatus) return [];
   const warnings: string[] = [];
   if (!sourceStatus.complete) {
-    warnings.push(
-      `> Source incomplete: counts cover ${sourceStatus.searchedScopes.join(', ') || 'no'} successfully searched scope(s) only.`,
-    );
+    if (sourceStatus.incompleteScopes.length > 0) {
+      // Name the recorded reason and counts (e.g. "project ref_collision
+      // (2 discovered, 1 returned)"): every character here is charged
+      // against the router leaf budget, so keep it to one line per scope.
+      warnings.push(
+        `> Source incomplete: ${sourceStatus.incompleteScopes
+          .map((item) =>
+            item.discovered === undefined
+              ? `${item.scope} ${item.reason}`
+              : `${item.scope} ${item.reason} (${item.discovered} discovered, ${item.returned} returned)`,
+          )
+          .join('; ')}.`,
+      );
+    } else {
+      warnings.push(
+        `> Source incomplete: counts cover ${sourceStatus.searchedScopes.join(', ') || 'no'} successfully searched scope(s) only.`,
+      );
+    }
   }
   if (sourceStatus.unavailableScopes.length > 0) {
     warnings.push(
@@ -377,7 +392,9 @@ function renderAutoMemoryGlobalRouter(
   const header = [
     '## Complete memory tree',
     '',
-    'This is the latest complete memory metadata tree. It replaces any older complete memory tree in the conversation. Use it to route into the focused subtree or search_memory when metadata is insufficient.',
+    sourceStatus && !sourceStatus.complete
+      ? 'This is the latest memory metadata tree (partially scanned). It replaces any older complete memory tree in the conversation. Use it to route into the focused subtree or search_memory when metadata is insufficient.'
+      : 'This is the latest complete memory metadata tree. It replaces any older complete memory tree in the conversation. Use it to route into the focused subtree or search_memory when metadata is insufficient.',
     ...sourceWarning(sourceStatus),
     '',
   ];

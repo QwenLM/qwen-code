@@ -4653,11 +4653,16 @@ describe('Gemini Client (client.ts)', () => {
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
       expect(
-        mockMemoryManager.reconcileMemoryBodiesPresentInHistory,
-      ).toHaveBeenCalled();
+        mockMemoryManager.markAllMemoryBodiesEvictedFromHistory,
+      ).not.toHaveBeenCalled();
+      expect(
+        mockMemoryManager.markMemoryBodiesEvictedFromHistory,
+      ).not.toHaveBeenCalled();
+      // The never-accepted ToolResult rollback still rewinds memory body
+      // state (present versions and coverage) from history.
       expect(
         mockMemoryManager.restoreMemoryBodiesPresentInHistory,
-      ).not.toHaveBeenCalled();
+      ).toHaveBeenCalled();
     });
 
     it('runs size-only microcompaction on SendMessageType.ToolResult with pending content counted', async () => {
@@ -5000,6 +5005,22 @@ describe('Gemini Client (client.ts)', () => {
         compressFast,
       } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
+      // Delivery state derived from the pre-compression history: the legacy
+      // recall exclusion set and an in-flight prefetch's delivered refs.
+      client['surfacedRelevantAutoMemoryPaths'].add('/memory/deploy.md');
+      const fastDeliveredRefs = new Set(['project:deploy.md']);
+      client['pendingMemoryPrefetch'] = {
+        promise: new Promise(() => {}),
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: true,
+        fastDeliveredRefs,
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
 
       const result = await client.tryCompressChatFast();
 
@@ -5016,6 +5037,12 @@ describe('Gemini Client (client.ts)', () => {
         mockMemoryManager.markMemoryBodiesEvictedFromHistory,
       ).not.toHaveBeenCalled();
       expect(client['forceFullIdeContext']).toBe(true);
+      // The exclusion set and prefetch refs must be dropped with the rest:
+      // keeping them would withhold the evicted memories from every later
+      // recall of this session (and skip their re-delivery on refine).
+      expect(client['surfacedRelevantAutoMemoryPaths'].size).toBe(0);
+      expect(fastDeliveredRefs).toEqual(new Set());
+      expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
     });
 
     it('uses targeted path fallback when fast compression sees an inode miss', async () => {

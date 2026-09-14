@@ -8,14 +8,11 @@ import { createHash } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { parseDocument } from 'yaml';
+import { isMap, parseDocument } from 'yaml';
 import { deriveConfig, type Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
-import {
-  parse as parseYaml,
-  stringify as stringifyYaml,
-} from '../utils/yaml-parser.js';
+import { stringify as stringifyYaml } from '../utils/yaml-parser.js';
 import {
   rebuildAutoMemoryIndexAtRoot,
   rebuildManagedAutoMemoryIndex,
@@ -133,8 +130,12 @@ function splitFrontmatter(filePath: string, content: string): FrontmatterParts {
   if (
     match &&
     (parseAutoMemoryTopicDocument(filePath, content) !== null ||
-      (document?.errors.length === 0 &&
-        Object.keys(parseYaml(match[2])).length > 0))
+      // The same predicate validateStructuredAutoMemoryDocument uses to
+      // classify a head as splicable rather than frontmatter-malformed
+      // (scan.ts): the two must agree exactly, or a candidate whose keys all
+      // parse to null is spliced as if it had no frontmatter and the
+      // original block lands inside the body.
+      (document?.errors.length === 0 && isMap(document.contents)))
   ) {
     return {
       frontmatter: match[2],

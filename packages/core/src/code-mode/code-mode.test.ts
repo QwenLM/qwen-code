@@ -488,6 +488,25 @@ describe('isolated code mode host', () => {
     }
   });
 
+  it('does not kill a budget-compliant script for waiting in guest timers', async () => {
+    // Guest setTimeout waits pause the guest CPU budget (host.ts pauses the
+    // budget while timers are pending) but produce no nested tool
+    // controller, so the post-start wall slack is the only bound on them. An
+    // 8s wait against a 1s CPU budget must resolve: the slack absorbs
+    // real-time waits the sandbox itself legalises.
+    const result = await executeCodeMode(
+      'await new Promise((resolve) => setTimeout(resolve, 8_000)); return "slept";',
+      plan(),
+      runtime(async () => {
+        throw new Error('unused');
+      }),
+      new AbortController().signal,
+      { timeoutMs: 1_000 },
+    );
+
+    expect(result.value).toBe('slept');
+  }, 30_000);
+
   it('calls a deferred MCP-style tool through its normalized JavaScript name', async () => {
     const dispatch = vi.fn(async (name: string) => ({
       callId: 'mcp-call',

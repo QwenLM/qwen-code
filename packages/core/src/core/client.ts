@@ -1447,11 +1447,15 @@ export class LlmClient {
     }
   }
 
-  /** @internal */
-  resetManagedAutoMemoryAfterCompression(): void {
+  private resetManagedAutoMemoryDeliveryState(): void {
     this.lastDeliveredMemoryTreeRevision = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.pendingMemoryPrefetch?.fastDeliveredRefs.clear();
+  }
+
+  /** @internal */
+  resetManagedAutoMemoryAfterCompression(): void {
+    this.resetManagedAutoMemoryDeliveryState();
     this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
     this.config.getMemoryManager().markAllMemoryBodiesEvictedFromHistory();
   }
@@ -3159,9 +3163,13 @@ export class LlmClient {
   }
 
   private restoreMemoryBodyStateFromHistory(): void {
+    // restore (not reconcile): the response carrying any window committed
+    // during this send never reached history, so bodyCoverageInHistory must
+    // be cleared too — reconcile would leave it claiming the model already
+    // holds bytes it never received.
     this.config
       .getMemoryManager()
-      .reconcileMemoryBodiesPresentInHistory(
+      .restoreMemoryBodiesPresentInHistory(
         collectResidentMemoryBodies(this.getHistoryShallow()),
       );
   }
@@ -5569,7 +5577,10 @@ export class LlmClient {
       }
     }
     this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
-    this.lastDeliveredMemoryTreeRevision = undefined;
+    // The fast path rewrites history too, so the delivery state derived from
+    // the old history (legacy recall exclusions, prefetched-body refs) must
+    // be dropped exactly as on the LLM compression path.
+    this.resetManagedAutoMemoryDeliveryState();
     this.forceFullIdeContext = true;
 
     return info;
