@@ -22,6 +22,52 @@ import {
 import { ToolNames } from '../tools/tool-names.js';
 
 describe('execution worker protocol', () => {
+  it.each([undefined, '1'])(
+    'does not claim artifact registration with legacy enable override %s',
+    async (enableOverride) => {
+      vi.stubEnv('QWEN_CODE_ENABLE_ARTIFACT', enableOverride);
+      vi.stubEnv('QWEN_CODE_DISABLE_ARTIFACT', undefined);
+      const workspace = await mkdtemp(join(tmpdir(), 'execution-artifact-'));
+      const environment = createExecutionWorkerEnvironment({
+        workspace,
+        sessionId: 'artifact-test',
+        truncateToolOutputLines: 100,
+        fileReadCacheDisabled: false,
+      });
+      const signal = new AbortController().signal;
+      const file = join(workspace, 'report.html');
+      const content = '<h1>Report</h1>';
+      try {
+        await environment.prepare(
+          {
+            id: 'write',
+            toolName: ToolNames.WRITE_FILE,
+            params: {
+              file_path: file,
+              content,
+              record_as_artifact: true,
+            },
+          },
+          signal,
+        );
+        const result = await environment.execute('write', signal);
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain('Successfully created');
+        expect(result.llmContent).not.toContain(
+          'automatically recorded as a workspace artifact',
+        );
+        expect(result.artifacts).toBeUndefined();
+        expect(await readFile(file, 'utf8')).toBe(content);
+        expect(process.env['QWEN_CODE_ENABLE_ARTIFACT']).toBe(enableOverride);
+        expect(process.env['QWEN_CODE_DISABLE_ARTIFACT']).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+        await environment.dispose();
+        await rm(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('preserves custom ignore rules and the encoding of newly written files', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'execution-config-'));
     const environment = createExecutionWorkerEnvironment({

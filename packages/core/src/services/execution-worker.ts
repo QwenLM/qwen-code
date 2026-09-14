@@ -41,6 +41,8 @@ export function createExecutionWorkerEnvironment(
     usageStatisticsEnabled: false,
     mcpServers: {},
   });
+  // The host does not register worker artifacts, regardless of image env flags.
+  config.isRecordArtifactEnabled = () => false;
   if (options.outputDirectory) {
     config.storage.getProjectTempDir = () => options.outputDirectory!;
     config.storage.getToolResultsDir = () => options.outputDirectory!;

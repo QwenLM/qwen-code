@@ -147,6 +147,15 @@ The explicit tool configuration preserves file filtering, new-file encoding,
 shell timeout and heartbeat settings, output capture limits, and truncation
 settings, including an unset threshold and zero meaning unlimited output.
 
+Automatic session artifact registration is unavailable in container subagents.
+The worker disables it even when an image enables artifacts through environment
+variables or a write requests `record_as_artifact: true`. Files remain in the
+workspace, but the worker does not claim they were registered. The container
+Write tool advertises this limit; the host continues to discard worker artifact
+metadata and does not interpret it as host paths. Ordinary local writes retain
+their existing artifact behavior. A host-validated artifact bridge, including
+child worktree-to-parent session path ownership, is deferred.
+
 File-history checkpoints, host-path IDE diffs and automatic path-triggered
 rule/skill activation are unavailable in container subagents; they must not read
 container-reported paths through the host filesystem. Inline confirmation diffs

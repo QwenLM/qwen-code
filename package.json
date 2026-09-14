@@ -126,6 +126,8 @@
     "LICENSE"
   ],
   "devDependencies": {
+    "@emnapi/core": "1.11.3",
+    "@emnapi/runtime": "1.11.3",
     "@types/chrome": "^0.1.32",
     "@types/jsdom": "^28.0.3",
     "@types/marked": "^5.0.2",

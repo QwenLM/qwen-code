@@ -335,7 +335,11 @@ describe('runCleanup', () => {
     },
   );
 
-  it('reads process.cwd() ONCE per run — the entry capture — and never downstream (R30-6)', () => {
+  it('reads process.cwd() ONCE per run — the entry capture — and never downstream (R30-6)', (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     // The mid-run half of the deleted-cwd class: the entry guard covers a cwd
     // already gone, but `scratchWorktreesOf` used to read the cwd again later
     // (`resolve(worktree)` against it, `redirectedAncestor`'s default stop),

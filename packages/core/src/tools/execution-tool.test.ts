@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config } from '../config/config.js';
 import { LocalExecutionEnvironment } from '../services/local-execution-environment.js';
+import { createExecutionWorkerEnvironment } from '../services/execution-worker.js';
 import { EditTool } from './edit.js';
 import { wrapExecutionTool } from './execution-tool.js';
 import { isModifiableDeclarativeTool } from './modifiable-tool.js';
@@ -42,6 +43,54 @@ describe('execution tool facade', () => {
     await environment.dispose();
     await rm(workspace, { recursive: true, force: true });
   });
+
+  it.each([true, false])(
+    'reports the container artifact limit without changing local registration (%s)',
+    async (artifactEnabled) => {
+      vi.spyOn(config, 'isRecordArtifactEnabled').mockReturnValue(
+        artifactEnabled,
+      );
+      await environment.dispose();
+      environment = createExecutionWorkerEnvironment({
+        workspace,
+        sessionId: 'artifact-test',
+        truncateToolOutputLines: 100,
+        fileReadCacheDisabled: false,
+      });
+      const original = new WriteFileTool(config);
+      const facade = wrapExecutionTool(original, environment, config);
+      const content = '<h1>Report</h1>';
+      const local = await original
+        .build({ file_path: path.join(workspace, 'local.html'), content })
+        .execute(signal);
+      const remoteFile = path.join(workspace, 'remote.html');
+      const remote = await facade
+        .build({ file_path: remoteFile, content })
+        .execute(signal);
+      expect(local.error).toBeUndefined();
+      expect(local.artifacts?.length ?? 0).toBe(artifactEnabled ? 1 : 0);
+      expect(String(local.llmContent).includes('automatically recorded')).toBe(
+        artifactEnabled,
+      );
+      expect(remote.error).toBeUndefined();
+      expect(remote.llmContent).toContain('Successfully created');
+      expect(remote.llmContent).not.toContain('automatically recorded');
+      expect(remote.artifacts).toBeUndefined();
+      expect(await readFile(remoteFile, 'utf8')).toBe(content);
+      expect(facade.description).not.toContain(
+        'automatically registered as session artifacts',
+      );
+      expect(facade.description).toContain(
+        'Automatic session artifact registration is unavailable',
+      );
+      expect(facade.description).toContain('prior-read enforcement');
+      expect(facade.schema.description).toBe(facade.description);
+      expect(facade.schema.parametersJsonSchema).toEqual(
+        original.schema.parametersJsonSchema,
+      );
+      expect(config.isRecordArtifactEnabled()).toBe(artifactEnabled);
+    },
+  );
 
   it('preserves schema and classifier metadata while never calling host build or filesystem', async () => {
     const file = path.join(workspace, 'file.txt');

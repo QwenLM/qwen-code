@@ -14,6 +14,7 @@ import type {
 } from '../services/execution-environment.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { ToolNames } from './tool-names.js';
+import { WRITE_FILE_ARTIFACT_DESCRIPTION } from './write-file.js';
 import {
   isModifiableDeclarativeTool,
   type ModifyContext,
@@ -243,7 +244,12 @@ class ExecutionTool extends DeclarativeTool<object, ToolResult> {
     super(
       original.name,
       original.displayName,
-      original.description,
+      original.name === ToolNames.WRITE_FILE
+        ? original.description.replace(
+            WRITE_FILE_ARTIFACT_DESCRIPTION,
+            'Automatic session artifact registration is unavailable in this container session, including when record_as_artifact is true. Written files remain in the workspace.',
+          )
+        : original.description,
       original.kind,
       original.parameterSchema,
       original.isOutputMarkdown,
@@ -313,7 +319,9 @@ class ExecutionTool extends DeclarativeTool<object, ToolResult> {
   }
 
   override get schema() {
-    return this.original.schema;
+    return this.name === ToolNames.WRITE_FILE
+      ? { ...this.original.schema, description: this.description }
+      : this.original.schema;
   }
   override get maxOutputChars() {
     return this.original.maxOutputChars;

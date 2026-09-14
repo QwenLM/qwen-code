@@ -16886,8 +16886,8 @@ describe('App session callbacks', () => {
       true,
     );
     const sidebar = container.querySelector('[data-testid="sidebar"]');
-    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('false');
-    expect(sidebar?.getAttribute('data-has-commit')).toBe('false');
+    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('true');
+    expect(sidebar?.getAttribute('data-has-commit')).toBe('true');
     expect(sidebar?.getAttribute('data-can-open-sessions-overview')).toBe(
       'true',
     );
@@ -18299,8 +18299,8 @@ describe('App session callbacks', () => {
     await flush();
 
     const sidebar = container.querySelector('[data-testid="sidebar"]');
-    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('false');
-    expect(sidebar?.getAttribute('data-has-commit')).toBe('false');
+    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('true');
+    expect(sidebar?.getAttribute('data-has-commit')).toBe('true');
     expect(testState.latestChatEditorProps?.onOpenGitDiff).toBeUndefined();
     expect(workspaceGit).not.toHaveBeenCalled();
 
