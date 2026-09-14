@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -15,7 +15,7 @@ import {
   validateMemoryBaseUrl,
 } from './config.js';
 
-const dataDir = '/tmp/qwen-memory-config-tests';
+const dataDir = join(tmpdir(), 'qwen-memory-config-tests');
 const resolve = (raw?: unknown) =>
   resolveMemoryConfig(raw, dataDir, join(dataDir, 'config.json'));
 
@@ -51,13 +51,12 @@ describe('memory configuration', () => {
   });
 
   it('resolves relative and tilde paths without requiring the directory to exist', () => {
+    const separateDir = join(tmpdir(), 'separate-memories');
     expect(resolve({ dir: 'saved' }).dir).toBe(join(dataDir, 'saved'));
     expect(resolve({ dir: '~/qwen-memory-config-tests' }).dir).toBe(
       join(homedir(), 'qwen-memory-config-tests'),
     );
-    expect(resolve({ dir: '/tmp/separate-memories' }).dir).toBe(
-      '/tmp/separate-memories',
-    );
+    expect(resolve({ dir: separateDir }).dir).toBe(separateDir);
   });
 
   it.each(['retrieve', 'preload', 'updater', 'observer', 'wm', 'segment'])(

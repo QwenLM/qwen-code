@@ -46,6 +46,13 @@ overrides:
   '@types/react': '^19.2.0'
   '@types/react-dom': '^19.2.0'
   axios: '^1.19.0'
+  # @node-rs/jieba-wasm32-wasi brings in @napi-rs/wasm-runtime, which accepts
+  # ^0.10.3. Unpinned it resolves to 0.10.4, published 2026-09-13, which the
+  # minimumReleaseAge gate rejects until it ages out. The gate is enforced by
+  # pnpm itself, and scripts/tests/package-scripts.test.js keeps
+  # minimumReleaseAgeExclude internal-only, so the age-compliant version is
+  # pinned here rather than exempted there.
+  '@tybys/wasm-util': '0.10.3'
   react-markdown: '^9.0.0'
   # packages/acp-bridge declares no zod, so pnpm is free to satisfy the SDK's
   # `^3.25.0 || ^4.0.0` peer with the highest locked zod while npm serves it

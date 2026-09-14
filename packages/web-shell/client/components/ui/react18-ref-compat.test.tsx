@@ -11,7 +11,12 @@ import { DialogContent, DialogOverlay } from './dialog';
 import { DrawerContent, DrawerOverlay } from './drawer';
 import { DropdownMenuSubTrigger, DropdownMenuTrigger } from './dropdown-menu';
 import { Input } from './input';
-import { PopoverAnchor, PopoverContent, PopoverTrigger } from './popover';
+import {
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+  PopoverTrigger,
+} from './popover';
 import { SelectTrigger } from './select';
 import {
   Table,
@@ -145,6 +150,42 @@ describe('React 18 ref compatibility', () => {
     );
     expect(ref.current).toBeInstanceOf(HTMLDivElement);
 
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards slotted PopoverAnchor and portaled content refs to their DOM elements', () => {
+    const anchorRef =
+      React.createRef<React.ComponentRef<typeof PopoverAnchor>>();
+    const contentRef = React.createRef<HTMLDivElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() =>
+      root.render(
+        <Popover open>
+          <PopoverAnchor asChild ref={anchorRef}>
+            <Button>Context ring</Button>
+          </PopoverAnchor>
+          <PopoverContent ref={contentRef} showArrow>
+            Content
+          </PopoverContent>
+        </Popover>,
+      ),
+    );
+    expect(anchorRef.current).toBe(container.querySelector('button'));
+    expect(contentRef.current).toBe(
+      document.body.querySelector('[data-slot="popover-content"]'),
+    );
+    expect(contentRef.current).toBeInstanceOf(HTMLDivElement);
+    const arrow = contentRef.current!.querySelector('svg')!;
+    expect(arrow.querySelectorAll('path')).toHaveLength(2);
+    expect(arrow.style.transform).toBe(
+      'translateY(var(--floating-arrow-offset))',
+    );
+    expect(contentRef.current!.className).toContain(
+      '[--floating-arrow-offset:-1px]',
+    );
     act(() => root.unmount());
     container.remove();
   });
