@@ -3537,6 +3537,14 @@ const EN: Messages = {
   'channels.editor.secret.clearHint':
     'This credential will be removed when you save.',
   'channels.editor.field.shared.senderPolicy': 'Direct message policy',
+  'channels.editor.field.dws.senderPolicy': 'Sender policy',
+  'channels.editor.field.dws.senderPolicy.description':
+    'Controls which users can start tasks. Group pairing and chat access are checked separately.',
+  'channels.editor.field.dws.dmPolicy': 'Direct message access',
+  'channels.editor.field.dws.dmPolicy.description':
+    'Allow direct messages and document notifications to start tasks, subject to the existing authorization rules.',
+  'channels.editor.field.dws.dmPolicy.option.open': 'Open',
+  'channels.editor.field.dws.dmPolicy.option.disabled': 'Disabled',
   'channels.editor.field.shared.senderPolicy.description':
     'Choose who can start a direct conversation with this Channel.',
   'channels.editor.field.shared.senderPolicy.option.pairing': 'Pairing',
@@ -7095,6 +7103,14 @@ const ZH: Messages = {
   'channels.editor.secret.placeholder': (v) => `请输入${v?.label ?? '密钥'}`,
   'channels.editor.secret.clearHint': '保存后将移除此凭据。',
   'channels.editor.field.shared.senderPolicy': '私聊策略',
+  'channels.editor.field.dws.senderPolicy': '发送者策略',
+  'channels.editor.field.dws.senderPolicy.description':
+    '控制哪些用户可以启动任务。群聊配对和聊天访问分别检查。',
+  'channels.editor.field.dws.dmPolicy': '私聊访问',
+  'channels.editor.field.dws.dmPolicy.description':
+    '允许私聊消息和文档通知启动任务，仍遵守现有授权规则。',
+  'channels.editor.field.dws.dmPolicy.option.open': '开放',
+  'channels.editor.field.dws.dmPolicy.option.disabled': '禁用',
   'channels.editor.field.shared.senderPolicy.description':
     '选择哪些用户可以通过私聊使用此频道。',
   'channels.editor.field.shared.senderPolicy.option.pairing': '配对',
