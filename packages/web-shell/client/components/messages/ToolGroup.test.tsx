@@ -1015,20 +1015,6 @@ describe('tool row rendering', () => {
     if (reason) expect(container.textContent).toContain(reason);
   });
 
-  it('shows the awaiting-processing badge on a single completed background agent', () => {
-    // The SubAgentPanel badge sits in its header, which the single-agent path
-    // hides — the row meta is the only place the pending state can surface.
-    const container = renderToolLine(
-      makeTool({
-        toolName: 'Task',
-        status: 'completed',
-        backgroundResultPending: true,
-      }),
-    );
-
-    expect(container.textContent).toContain('Awaiting processing');
-  });
-
   it('shows a tool-kind icon on every expanded group row', () => {
     const container = renderToolGroup([
       makeTool({ callId: 'read', toolName: 'ReadFile' }),

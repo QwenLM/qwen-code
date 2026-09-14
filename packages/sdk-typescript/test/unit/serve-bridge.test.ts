@@ -447,7 +447,14 @@ describe('serve-bridge', () => {
       expect(fakeStream.activeCollector).toBeNull();
     });
 
-    it('excludes discrete background status chunks from the prompt response', async () => {
+    it.each([
+      {
+        source: 'background_task_completed',
+        qwenDiscreteMessage: true,
+        backgroundTask: { taskId: 'worker', status: 'completed' },
+      },
+      { backgroundTurn: { turnId: 'bg-1' } },
+    ])('excludes background chunks (%j)', async (backgroundMeta) => {
       const { state } = makeMockState({
         defaultSessionId: 'test-session',
         fetchReply: (req) =>
@@ -470,11 +477,7 @@ describe('serve-bridge', () => {
               type: 'text',
               text: 'Background agent "worker" completed.',
             },
-            _meta: {
-              source: 'background_task_completed',
-              qwenDiscreteMessage: true,
-              backgroundTask: { taskId: 'worker', status: 'completed' },
-            },
+            _meta: backgroundMeta,
           },
         },
         {

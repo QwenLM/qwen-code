@@ -75,6 +75,7 @@ export interface DaemonClientLike {
   ): Promise<{
     sessionId: string;
     hasActivePrompt?: boolean;
+    backgroundTurn?: { turnId: string };
     clientId?: string;
   }>;
   listWorkspaceSessions(
@@ -413,6 +414,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
     if (cwd !== undefined) this.sessionCwds.add(cwd);
     const state = this.trackSession(session.sessionId, {
       busy: session.hasActivePrompt === true,
+      backgroundTurnId: session.backgroundTurn?.turnId,
       // The daemon issues the authoritative per-client id on create/attach;
       // every later call for this session must echo it (a self-made id is
       // rejected by the daemon's client registration guard). Older daemons
@@ -484,8 +486,8 @@ export class QwenCodeAdaptor implements BackendAdaptor {
   ): Promise<PromptReceipt> {
     const state = this.trackSession(handle.id);
 
-    // A background-only busy session (busy seeded by an observed background
-    // turn, with no foreground job) can never confirm a steer: the
+    // A background-only busy session (busy seeded by a snapshot or observed
+    // background turn, with no foreground job) can never confirm a steer: the
     // background turn's terminal is dropped by design, so a "joined" job
     // would wait forever. Fall through and queue the handoff as a full
     // prompt behind the background turn instead.
@@ -676,7 +678,9 @@ export class QwenCodeAdaptor implements BackendAdaptor {
 
   private trackSession(
     sessionId: string,
-    seed?: Partial<Pick<SessionState, 'busy' | 'clientId'>>,
+    seed?: Partial<
+      Pick<SessionState, 'busy' | 'clientId' | 'backgroundTurnId'>
+    >,
   ): SessionState {
     let state = this.sessions.get(sessionId);
     if (!state) {
@@ -690,6 +694,9 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       this.sessions.set(sessionId, state);
     } else if (seed?.busy !== undefined) {
       state.busy = seed.busy;
+    }
+    if (seed && 'backgroundTurnId' in seed) {
+      state.backgroundTurnId = seed.backgroundTurnId;
     }
     if (seed?.clientId !== undefined) state.clientId = seed.clientId;
     return state;

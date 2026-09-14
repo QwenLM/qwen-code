@@ -475,6 +475,30 @@ describe('QwenCodeAdaptor.prompt steering', () => {
     return { adaptor, handle };
   }
 
+  it('queues a steer when attaching during a background turn before any SSE frame', async () => {
+    const client = makeClient({
+      createOrAttachSession: vi.fn(async () => ({
+        sessionId: SESSION_ID,
+        clientId: ISSUED_CLIENT_ID,
+        hasActivePrompt: true,
+        backgroundTurn: { turnId: 'bg-1' },
+      })),
+    });
+    const adaptor = makeAdaptor(client);
+    const handle = await adaptor.createSession();
+
+    const receipt = await adaptor.prompt(
+      handle,
+      [{ type: 'text', text: 'do X' }],
+      { steer: true },
+    );
+
+    expect(client.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(client.promptNonBlocking).toHaveBeenCalledOnce();
+    expect(receipt).not.toHaveProperty('joinedActiveTurn');
+    expect(receipt).toMatchObject({ status: 'queued', jobRef: 'p1' });
+  });
+
   it('queues a steer instead of joining a background-only turn', async () => {
     // Attach while only an automatic background turn runs: busy was seeded
     // from the widened hasActivePrompt, and the background drain can never

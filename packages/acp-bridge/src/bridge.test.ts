@@ -40696,7 +40696,7 @@ describe('background notification admission', () => {
           'queue-only-1',
           { queueOnly: true },
         ),
-      ).toEqual({ accepted: false });
+      ).toEqual({ accepted: false, reason: 'session_idle' });
       // Ordinary input and the public rejectIfIdle route queue into the
       // running automatic execution instead of promoting a new prompt.
       expect(
