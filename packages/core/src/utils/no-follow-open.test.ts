@@ -12,7 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import type { Stats } from 'node:fs';
+import type { BigIntStats, Stats } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -46,15 +46,21 @@ const itNoSymlink = process.platform === 'win32' ? it.skip : it;
 
 // Copy a Stats object with identity fields patched, keeping the prototype
 // so isSymbolicLink()/isFile() keep working on the perturbed result.
-function perturbedStats(
-  stats: Stats,
-  patch: Partial<Pick<Stats, 'dev' | 'ino'>>,
-): Stats {
+function perturbedStats<T extends BigIntStats | Stats>(
+  stats: T,
+  patch: Partial<Pick<T, 'dev' | 'ino'>>,
+): T {
   return Object.assign(
     Object.create(Object.getPrototypeOf(stats)),
     stats,
     patch,
   );
+}
+
+function differentIdentity<T extends bigint | number>(value: T): T {
+  return (
+    typeof value === 'bigint' ? (value === 1n ? 2n : 1n) : value === 1 ? 2 : 1
+  ) as T;
 }
 
 // Install a node:fs mock with O_NOFOLLOW removed so the module under test
@@ -205,7 +211,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     mockNoFollowFs((actual) => ({
       fstatSync: ((fd: number) => {
         const stats = actual.fstatSync(fd);
-        return perturbedStats(stats, { ino: stats.ino + 1 });
+        return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
       }) as typeof actual.fstatSync,
       // Pin the rejection-path fd close: without it every sync fallback
       // refusal leaks the raw fd it opened for the identity re-check.
@@ -236,7 +242,73 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     mockNoFollowFs((actual) => ({
       fstatSync: ((fd: number) => {
         const stats = actual.fstatSync(fd);
-        return perturbedStats(stats, { dev: stats.dev + 1 });
+        return perturbedStats(stats, { dev: differentIdentity(stats.dev) });
+      }) as typeof actual.fstatSync,
+    }));
+
+    const { openSyncNoFollow: openSyncFallback } = await import(
+      './no-follow-open.js'
+    );
+    expect(() => openSyncFallback(filePath)).toThrow(
+      expect.objectContaining({ code: 'ELOOP' }),
+    );
+  });
+
+  it('refuses an identity that differs only above 2^53 (NTFS file index)', async () => {
+    // NTFS reports a 64-bit file index and Node rounds it at the JS number
+    // boundary, so these two ids are distinct as bigints yet collapse to the
+    // SAME double. A number-backed comparison therefore waves the swap
+    // through, and `{ bigint: true }` at the stat call sites is the only thing
+    // that keeps the re-check exact on such a volume — this is the case that
+    // makes that conversion observable; every other test here passes with it
+    // removed, because Linux and macOS inodes are small.
+    //
+    // The offsets sit above 2^60, where the double spacing is 256: both round
+    // to 2^60. Offsets of 1 and 2 above 2^53 would NOT collapse — the spacing
+    // there is already 2, so 2^53+2 is exactly representable.
+    //
+    // The mock mirrors what Node really returns for each form of the call: a
+    // BigIntStats carrying the exact id, or a Stats carrying the rounded one.
+    // Asserting ELOOP (not EUNVERIFIABLE) pins the identity-mismatch branch:
+    // core's hasVerifiableInode is `Number(ino) !== 0`, so an id this large is
+    // still verifiable and still reaches the comparison.
+    const dir = makeTempDir();
+    const filePath = join(dir, 'data.txt');
+    writeFileSync(filePath, 'payload');
+
+    const PRE_OPEN_INO = 2n ** 60n + 1n;
+    const SWAPPED_INO = 2n ** 60n + 2n;
+    // Fixture guard: the whole case rests on these two collapsing to one
+    // double while staying distinct as bigints. Without this, editing the
+    // constants could silently degrade the test into a no-op.
+    expect(PRE_OPEN_INO).not.toBe(SWAPPED_INO);
+    expect(Number(PRE_OPEN_INO)).toBe(Number(SWAPPED_INO));
+
+    const wantsBigint = (opts: unknown): boolean =>
+      typeof opts === 'object' &&
+      opts !== null &&
+      (opts as { bigint?: boolean }).bigint === true;
+
+    mockNoFollowFs((actual) => ({
+      lstatSync: ((...args: Parameters<typeof actual.lstatSync>) => {
+        if (wantsBigint(args[1])) {
+          return perturbedStats(actual.lstatSync(args[0], { bigint: true }), {
+            ino: PRE_OPEN_INO,
+          });
+        }
+        return perturbedStats(actual.lstatSync(args[0]), {
+          ino: Number(PRE_OPEN_INO),
+        });
+      }) as typeof actual.lstatSync,
+      fstatSync: ((...args: Parameters<typeof actual.fstatSync>) => {
+        if (wantsBigint(args[1])) {
+          return perturbedStats(actual.fstatSync(args[0], { bigint: true }), {
+            ino: SWAPPED_INO,
+          });
+        }
+        return perturbedStats(actual.fstatSync(args[0]), {
+          ino: Number(SWAPPED_INO),
+        });
       }) as typeof actual.fstatSync,
     }));
 
@@ -268,7 +340,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
         ...actual.promises,
         lstat: (async (p: string) => {
           const stats = await actual.promises.lstat(p);
-          return perturbedStats(stats, { ino: stats.ino + 1 });
+          return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
         }) as typeof actual.promises.lstat,
         open: (async (...args: Parameters<typeof actual.promises.open>) => {
           const handle = await actual.promises.open(...args);
@@ -293,20 +365,22 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
   function mockNoFollowFsWithPerturbedSnapshot(): void {
     let lstatCalls = 0;
     mockNoFollowFs((actual) => {
-      const snapshotStats = (stats: Stats): Stats => {
+      const snapshotStats = <T extends BigIntStats | Stats>(stats: T): T => {
         lstatCalls += 1;
         return lstatCalls === 1
           ? stats
-          : perturbedStats(stats, { ino: stats.ino + 1 });
+          : perturbedStats(stats, { ino: differentIdentity(stats.ino) });
       };
       return {
-        lstatSync: ((p: string) =>
-          snapshotStats(actual.lstatSync(p))) as typeof actual.lstatSync,
+        lstatSync: ((...args: Parameters<typeof actual.lstatSync>) => {
+          const stats = actual.lstatSync(...args);
+          return stats ? snapshotStats(stats) : stats;
+        }) as typeof actual.lstatSync,
         promises: {
           ...actual.promises,
-          lstat: (async (p: string) =>
+          lstat: (async (...args: Parameters<typeof actual.promises.lstat>) =>
             snapshotStats(
-              await actual.promises.lstat(p),
+              await actual.promises.lstat(...args),
             )) as typeof actual.promises.lstat,
         },
       };
@@ -403,7 +477,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     mockNoFollowFs((actual) => ({
       fstatSync: ((fd: number) => {
         const stats = actual.fstatSync(fd);
-        return perturbedStats(stats, { ino: stats.ino + 1 });
+        return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
       }) as typeof actual.fstatSync,
       closeSync: (() => {
         throw Object.assign(new Error('close failed'), { code: 'EBADF' });
@@ -464,7 +538,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
         ...actual.promises,
         lstat: (async (p: string) => {
           const stats = await actual.promises.lstat(p);
-          return perturbedStats(stats, { ino: stats.ino + 1 });
+          return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
         }) as typeof actual.promises.lstat,
         open: (async (...args: Parameters<typeof actual.promises.open>) => {
           const handle = await actual.promises.open(...args);
