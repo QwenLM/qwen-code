@@ -326,7 +326,17 @@ export function navigateToDaemon(raw: string, token?: string): void {
   const previousDaemonOrigin = getDaemonBaseUrl() || window.location.origin;
   if (token !== undefined) persistDaemonToken(token.trim(), daemonOrigin);
   confirmDaemonTarget(daemonOrigin);
-  if (daemonOrigin === previousDaemonOrigin) {
+  // A `?daemon=` that does not resolve still has to be rewritten away. Without
+  // this the gate's "return to local workspaces" escape hatch — which targets
+  // the page origin, and `getDaemonBaseUrl()` reports the page origin for an
+  // unresolvable override — would reload the same invalid URL and loop.
+  const requestedOverride = new URLSearchParams(window.location.search).get(
+    'daemon',
+  );
+  const urlAlreadyNamesTarget =
+    requestedOverride === null ||
+    getAllowedDaemonOrigin(requestedOverride) === daemonOrigin;
+  if (daemonOrigin === previousDaemonOrigin && urlAlreadyNamesTarget) {
     // Reconnecting to the target already in use. `nextUrl` is built for a
     // target CHANGE: it resets the pathname and drops `?workspace=`,
     // `?context=`, `?split=` and the hash, so assigning it would reboot the

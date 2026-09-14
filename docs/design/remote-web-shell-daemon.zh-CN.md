@@ -28,7 +28,7 @@ Web Shell 已经通过同一个 daemon `baseUrl` 发送 workspace、session、�
 
 独立 Web Shell 读取 `daemon` 查询参数，并把该 origin 传给现有的 `DaemonWorkspaceProvider`。现有 SDK 客户端随后把 REST、SSE、文件、session 和终端 WebSocket 流量直接发送到该 daemon。session 导航会保留 `daemon` 参数。
 
-连接前页面始终提供 daemon 地址和可选 token 表单，包括 URL 中目标无效的情况。连接成功后，现有 Daemon 状态概览会显示当前目标和连接状态，并提供相同的切换控件。切换目标时执行完整页面导航，清除 URL 中已选的 session、workspace 和 context，并为新 daemon 创建全新的 SDK client。此过程不会探测或回退到其他 runtime。
+连接前页面始终提供 daemon 地址和可选 token 表单，包括 URL 中目标无效的情况。连接成功后，现有 Daemon 状态概览会显示当前目标和连接状态，并提供相同的切换控件。切换目标时执行完整页面导航，清除 URL 中已选的 session、workspace 和 context，并为新 daemon 创建全新的 SDK client。重连到当前正在使用的目标时改为原地重新加载，因此已选的 session、workspace 和 context 会像普通刷新一样原样保留。此过程不会探测或回退到其他 runtime。
 
 现有侧边栏继续作为 workspace 和 session 管理界面。workspace 注册使用手工输入的绝对路径和 daemon 返回的目录建议；连接远程 daemon 时继续隐藏原生目录选择器。session 发现、对话记录加载、文件引用、终端流量和执行不需要再实现一套远程专用逻辑，因为它们已经统一使用所选 SDK client。
 

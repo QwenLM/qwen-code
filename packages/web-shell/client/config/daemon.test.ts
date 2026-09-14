@@ -348,6 +348,23 @@ describe('navigateToDaemon', () => {
     // The persist half still ran, or the reload would boot the old credential.
     expect(mod.getDaemonToken('http://localhost:5173')).toBe('rotated-token');
   });
+
+  // The gate also renders "Return to local workspaces" for an unresolvable
+  // `?daemon=`, and it targets the page origin — which is exactly what
+  // getDaemonBaseUrl() reports for an override it cannot resolve. Reloading
+  // there would re-load the same invalid URL and the escape hatch would loop,
+  // so this case must still be rewritten.
+  it('rewrites an unresolvable ?daemon= instead of reloading it', async () => {
+    const { assign, reload } = setupPage(
+      'http://localhost:5173/app?daemon=ftp%3A%2F%2Fdaemon.example',
+    );
+    const mod = await import('./daemon');
+    mod.navigateToDaemon('http://localhost:5173');
+    expect(reload).not.toHaveBeenCalled();
+    expect(assign).toHaveBeenCalledTimes(1);
+    const assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('daemon')).toBeNull();
+  });
 });
 
 describe('getDaemonToken', () => {
