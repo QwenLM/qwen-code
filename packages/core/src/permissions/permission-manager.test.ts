@@ -969,6 +969,67 @@ describe('splitCompoundCommand', () => {
     ).toEqual(['echo $(( 1 # c ))', 'echo a', 'rm -rf /tmp/x']);
   });
 
+  // The `)` that closes an arithmetic expansion must not be charged to the
+  // enclosing `$( … )`: arithmetic's `))` is consumed as a pair further down, so
+  // taking the decrement on the first `)` of `$((1))` dropped `commandSubDepth`
+  // one step early. The `}` that follows then met the `commandSubDepth === 0`
+  // conjunct of the `${ … }` guard and closed the expansion while bash is still
+  // inside it, so the literal `#` passed the `paramDepth === 0` gate and its
+  // skip-to-newline swallowed the real `;` — folding the tail into one
+  // allow-covered segment and taking that command's rule check with it.
+  it('does not let an arithmetic ) close the enclosing substitution', async () => {
+    expect(
+      splitCompoundCommandSegments(
+        'echo ${x:-$(echo $((1)) }) #c} ; rm -rf /tmp/x',
+      ),
+    ).toEqual([
+      { command: 'echo ${x:-$(echo $((1)) }) #c}', terminator: ';' },
+      { command: 'rm -rf /tmp/x', terminator: '' },
+    ]);
+  });
+
+  // Same class: a `}` before the substitution's own `)`, two arithmetic
+  // expansions, and a command that would plausibly be denied. Each was 2
+  // segments before the `$((` support and 1 with the unconditional decrement.
+  it.each([
+    [
+      'a brace before the substitution',
+      'echo ${x:-$(echo $((1)) } ) #c} ; rm -rf /tmp/x',
+      ['echo ${x:-$(echo $((1)) } ) #c}', 'rm -rf /tmp/x'],
+    ],
+    [
+      'two arithmetic expansions',
+      'echo ${x:-$(echo $((1)) $((2)) }) #c} ; rm -rf /tmp/x',
+      ['echo ${x:-$(echo $((1)) $((2)) }) #c}', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a non-echo command',
+      'echo ${x:-$(printf pad $((2)) }) #c} ; rm -rf /tmp/x',
+      ['echo ${x:-$(printf pad $((2)) }) #c}', 'rm -rf /tmp/x'],
+    ],
+  ])(
+    'keeps the tail after %s next to an arithmetic expansion',
+    async (_where, command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
+  // Control: the arithmetic depth keeps its own closers, so a substitution that
+  // holds only arithmetic still closes, and grouping parens inside arithmetic
+  // are not mistaken for a substitution's.
+  it.each([
+    [
+      'echo $(echo $((1)) ) ; rm -rf /tmp/x',
+      ['echo $(echo $((1)) )', 'rm -rf /tmp/x'],
+    ],
+    [
+      'echo $(( (1+2) )) ; rm -rf /tmp/x',
+      ['echo $(( (1+2) ))', 'rm -rf /tmp/x'],
+    ],
+  ])('still splits %s', async (command, expected) => {
+    expect(splitCompoundCommand(command)).toEqual(expected);
+  });
+
   // bash finds a backtick body's closing delimiter with a raw scan that does not
   // honour an outer-level `#`, so the tail really runs: the oracle
   // `bash -xc 'echo `date # c` ; echo SECOND'` traces `++ date`, `+ echo …` and

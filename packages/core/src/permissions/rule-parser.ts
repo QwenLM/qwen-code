@@ -1008,7 +1008,16 @@ export function splitCompoundCommandSegments(
       commandSubDepth++;
       continue;
     }
-    if (ch === ')' && commandSubDepth > 0) {
+    // Arithmetic's own closers are consumed below as the `))` pair, so a `)`
+    // reached while `arithmeticDepth` is above zero is never the `)` that
+    // closes a `$( … )`. Charging it here zeroed the depth on the first half of
+    // `$((1))` and left the enclosing substitution counted as already closed:
+    // in `echo ${x:-$(echo $((1)) }) #c} ; rm -rf /tmp/x` the literal `}` then
+    // met the `commandSubDepth === 0` conjunct below, closed `${ … }` while
+    // bash is still inside it, and the word-initial `#` passed the
+    // `paramDepth === 0` gate and swallowed the real `;`, folding the tail into
+    // one allow-covered segment (#11815).
+    if (ch === ')' && arithmeticDepth === 0 && commandSubDepth > 0) {
       commandSubDepth--;
     }
     // An unescaped backtick outside quotes opens or closes a body; quotes and
