@@ -138,6 +138,43 @@ describe('managed session log activation', () => {
     });
   });
 
+  it('submits a before_model checkpoint before a model request, not on open', async () => {
+    await withWorkspace(async (activate) => {
+      const fixture = await activate({ managedSessionLog: true });
+      const recorder = fixture.config.getChatRecordingService()!;
+      recorder.recordUserMessage('summarise the docs');
+      await recorder.flush();
+
+      const before = await transcriptRecords(fixture.transcriptPath);
+      expect(
+        before.some((entry) => {
+          const body = entry['managedSession'] as
+            | Record<string, unknown>
+            | undefined;
+          return body?.['kind'] === 'checkpoint.committed';
+        }),
+      ).toBe(false);
+
+      await fixture.config.ensureManagedHarnessRunnable();
+
+      const after = await transcriptRecords(fixture.transcriptPath);
+      const checkpoints = after.filter((entry) => {
+        const body = entry['managedSession'] as
+          | Record<string, unknown>
+          | undefined;
+        return body?.['kind'] === 'checkpoint.committed';
+      });
+      expect(checkpoints).toHaveLength(1);
+      expect(
+        (checkpoints[0]['managedSession'] as Record<string, unknown>)[
+          'payload'
+        ] as Record<string, unknown>,
+      ).toMatchObject({ boundary: null });
+
+      await fixture.config.closeSessionWriter();
+    });
+  });
+
   it('attributes records to the activation it installed and releases it', async () => {
     await withWorkspace(async (activate) => {
       const fixture = await activate({ managedSessionLog: true });

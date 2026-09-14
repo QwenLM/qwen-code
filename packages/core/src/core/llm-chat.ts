@@ -2777,6 +2777,12 @@ export class LlmChat {
 
     await this.sendPromise;
 
+    // ACP Session and LlmClient both send through this method. A Managed
+    // session must have a runnable Harness checkpoint before any model
+    // request: initial starts submit before_model here; blocked recovery
+    // fails closed instead of running the Agent.
+    await this.config.ensureManagedHarnessRunnable?.();
+
     let streamDoneResolver: () => void;
     const streamDonePromise = new Promise<void>((resolve) => {
       streamDoneResolver = resolve;

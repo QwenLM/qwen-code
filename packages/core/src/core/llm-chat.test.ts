@@ -210,6 +210,7 @@ describe('LlmChat', async () => {
       restorePendingManualPlanExitNotice: vi.fn(),
       getFileReadCache: vi.fn().mockReturnValue({ clear: vi.fn() }),
       getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
+      ensureManagedHarnessRunnable: vi.fn().mockResolvedValue(undefined),
     } as unknown as Config;
 
     // Disable 429 simulation for tests
@@ -532,6 +533,57 @@ describe('LlmChat', async () => {
         'Qwen Code is streaming a model response',
       );
       expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not start the model when the Managed Harness is blocked', async () => {
+      vi.mocked(mockConfig.ensureManagedHarnessRunnable!).mockRejectedValue(
+        new Error('Harness recovery is blocked (opaque_state).'),
+      );
+
+      await expect(
+        chat.sendMessageStream(
+          'test-model',
+          { message: 'test message' },
+          'prompt-id-harness-blocked',
+        ),
+      ).rejects.toThrow(/opaque_state/);
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
+
+    it('establishes the Harness checkpoint before generating content', async () => {
+      const order: string[] = [];
+      vi.mocked(mockConfig.ensureManagedHarnessRunnable!).mockImplementation(
+        async () => {
+          order.push('harness');
+        },
+      );
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => {
+          order.push('model');
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { role: 'model', parts: [{ text: 'ok' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })();
+        },
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test message' },
+        'prompt-id-harness-first',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      expect(order[0]).toBe('harness');
+      expect(order).toContain('model');
     });
 
     describe('manual plan-exit notices', () => {

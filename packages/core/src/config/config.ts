@@ -282,6 +282,10 @@ import {
   openManagedSession,
   type ManagedSession,
 } from '../managed-runtime/managed-session-assembly.js';
+import {
+  createManagedHarnessHandle,
+  type ManagedHarnessHandle,
+} from '../managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
 import type {
   ManagedSessionDurableRef,
@@ -2602,6 +2606,7 @@ export class Config {
   private readonly managedSessionLogEnabled: boolean = false;
   /** Held for its activation, which the close path has to release. */
   private managedSession?: ManagedSession;
+  private managedHarness?: ManagedHarnessHandle;
   private readonly cronEnabled: boolean = true;
   /** Recurring cron max age in days, resolved once at construction
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
@@ -4193,6 +4198,7 @@ export class Config {
         // here.
         recorder.bindManagedSink(managedSession.sink);
         this.managedSession = managedSession;
+        this.managedHarness = undefined;
         this.sessionExecutionEngine = 'managed';
       } else if (executionEngine) {
         await recorder.recordSessionExecutionEngine(executionEngine);
@@ -4947,6 +4953,18 @@ export class Config {
 
   getSessionExecutionEngine(): SessionExecutionEngine | undefined {
     return this.sessionExecutionEngine;
+  }
+
+  /**
+   * A Managed session may not start a model request until a runnable Harness
+   * checkpoint exists. Legal initial starts submit `before_model` first;
+   * opaque or missing continuation is blocked. Legacy sessions are a no-op.
+   */
+  async ensureManagedHarnessRunnable(): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    this.managedHarness ??= createManagedHarnessHandle(session);
+    await this.managedHarness.ensureRunnable();
   }
 
   /** Starts a new session and resets session-scoped services. */
@@ -9869,6 +9887,7 @@ export class Config {
     const managedSession = this.managedSession;
     if (managedSession) {
       this.managedSession = undefined;
+      this.managedHarness = undefined;
       try {
         // `beginClose()` has already stopped the recorder accepting writes, so
         // this is the one point where no further record can arrive to name a
