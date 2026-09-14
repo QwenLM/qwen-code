@@ -12,6 +12,7 @@ import {
 import {
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  BridgeConnectivityError,
   type ChannelPromptImage,
 } from './ChannelAgentBridge.js';
 
@@ -144,6 +145,45 @@ function turnCompleteEvent(sessionId = 'session-1'): DaemonChannelEvent {
 }
 
 describe('DaemonChannelBridge', () => {
+  it('classifies a transport-level daemon failure as BridgeConnectivityError', async () => {
+    const transportError = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('socket hangup'), { code: 'ECONNREFUSED' }),
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockRejectedValue(transportError),
+    });
+
+    await bridge.start();
+    await expect(bridge.loadSession('session-1', '/repo')).rejects.toThrow(
+      BridgeConnectivityError,
+    );
+    await expect(bridge.newSession('/repo')).rejects.toThrow(
+      BridgeConnectivityError,
+    );
+    bridge.stop();
+  });
+
+  it('keeps a shaped daemon response a per-session failure', async () => {
+    const daemonError = Object.assign(new Error('session not found'), {
+      name: 'DaemonHttpError',
+      status: 404,
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockRejectedValue(daemonError),
+    });
+
+    await bridge.start();
+    await expect(bridge.loadSession('session-1', '/repo')).rejects.toThrow(
+      'session not found',
+    );
+    await expect(
+      bridge.loadSession('session-1', '/repo'),
+    ).rejects.not.toThrow(BridgeConnectivityError);
+    bridge.stop();
+  });
+
   it('forwards BTW to the exact daemon session with its abort signal', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -4661,7 +4701,11 @@ describe('DaemonChannelBridge', () => {
           : bridge.loadSession(sessionId, '/repo');
       await Promise.resolve();
       finishFactory(session);
-      queueMicrotask(() => bridge.stop());
+      // The factory classification wrapper adds a hop: let the result
+      // attach before the queued stop so the stop still cancels it.
+      await Promise.resolve();
+      await Promise.resolve();
+      bridge.stop();
 
       await expect(creating).resolves.toBe(sessionId);
       expect(session.cancel).toHaveBeenCalledOnce();

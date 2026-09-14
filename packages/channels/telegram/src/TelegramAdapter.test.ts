@@ -145,7 +145,12 @@ function createChannel(
     { ...config, ...configOverrides },
     {} as ChannelAgentBridge,
     {
-      router: router as never,
+      router: {
+        setChannelRotation: () => {},
+        setSessionActivityChecker: () => {},
+        onSessionRotated: () => () => {},
+        ...(router as Record<string, unknown>),
+      } as never,
     },
   );
 }
@@ -208,6 +213,19 @@ describe('TelegramChannel', () => {
     const channel = createChannel();
 
     expect(channel.supportsProactiveSend()).toBe(true);
+  });
+
+  it('wires configured session rotation into the router', () => {
+    const setChannelRotation = vi.fn();
+    createChannel(
+      { sessionRotation: { maxTurns: 5, maxAgeHours: 2 } },
+      { setChannelRotation },
+    );
+
+    expect(setChannelRotation).toHaveBeenCalledWith('telegram', {
+      maxTurns: 5,
+      maxAgeHours: 2,
+    });
   });
 
   it('clears active typing intervals on disconnect', () => {

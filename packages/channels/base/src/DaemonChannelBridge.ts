@@ -7,6 +7,7 @@ import {
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  BridgeConnectivityError,
   parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
@@ -27,6 +28,45 @@ import {
 import type { SessionScope } from './types.js';
 
 const MAX_RESPONDED_PERMISSION_REQUESTS = 256;
+
+/**
+ * The daemon client talks HTTP: a daemon that is down or unreachable rejects
+ * at the transport level (fetch TypeError, socket error codes), before any
+ * DaemonHttpError-shaped response exists. Only those are whole-bridge
+ * connectivity failures; a shaped daemon response is a per-session outcome.
+ */
+const DAEMON_TRANSPORT_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EHOSTUNREACH',
+  'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+]);
+
+function isDaemonTransportError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth++) {
+    if (!(current instanceof Error)) return false;
+    // A shaped daemon response means the daemon answered — never connectivity.
+    if (current.name === 'DaemonHttpError') return false;
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && DAEMON_TRANSPORT_ERROR_CODES.has(code)) {
+      return true;
+    }
+    // Undici surfaces a dead daemon as TypeError("fetch failed") with the
+    // socket error on its cause; without a cause, the message is the shape.
+    if (current instanceof TypeError && current.message === 'fetch failed') {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}
 
 export interface DaemonChannelEvent {
   id?: number;
@@ -392,6 +432,28 @@ export class DaemonChannelBridge
     return this.lastError;
   }
 
+  /**
+   * Session factory calls reject with a transport-level error when the
+   * daemon itself is unreachable: reclassify those as BridgeConnectivityError
+   * so SessionRouter keeps routes for the next restore instead of pruning
+   * them. A shaped daemon response stays a per-session outcome.
+   */
+  private async callSessionFactory(
+    req: DaemonChannelSessionFactoryRequest,
+  ): Promise<DaemonChannelSessionClient> {
+    try {
+      return await this.options.sessionFactory(req);
+    } catch (error) {
+      if (isDaemonTransportError(error)) {
+        throw new BridgeConnectivityError(
+          'Daemon is unreachable during a channel session request',
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+
   getAvailableCommands(sessionId: string): AvailableCommand[] {
     return this.availableCommandsBySession.get(sessionId) ?? [];
   }
@@ -427,7 +489,7 @@ export class DaemonChannelBridge
       );
     }
     const lifecycleGeneration = this.lifecycleGeneration;
-    const session = await this.options.sessionFactory({
+    const session = await this.callSessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
       sessionScope: this.options.sessionScope ?? 'thread',
@@ -455,7 +517,7 @@ export class DaemonChannelBridge
     bindingToken?: object,
   ): Promise<string> {
     const lifecycleGeneration = this.lifecycleGeneration;
-    const session = await this.options.sessionFactory({
+    const session = await this.callSessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
       sessionId,
@@ -503,7 +565,7 @@ export class DaemonChannelBridge
       );
     }
     const lifecycleGeneration = this.lifecycleGeneration;
-    const session = await this.options.sessionFactory({
+    const session = await this.callSessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
       sessionScope: this.options.sessionScope ?? 'thread',

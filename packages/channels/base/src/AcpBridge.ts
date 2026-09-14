@@ -20,6 +20,7 @@ import {
   CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  BridgeConnectivityError,
   parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
@@ -106,6 +107,9 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       timeout: ReturnType<typeof setTimeout>;
     }
   >();
+  private readonly pendingSessionRequests = new Set<{
+    reject: (error: Error) => void;
+  }>();
 
   constructor(options: AcpBridgeOptions) {
     super();
@@ -157,6 +161,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       );
       // Do not emit sessionDied here: a full ACP process exit is handled by
       // channel start crash recovery, which reloads the persisted sessions.
+      this.rejectPendingSessionRequests();
       this.resolvePendingPermissions();
       this.knownSessionIds.clear();
       this.sessionBindingTokens.clear();
@@ -261,16 +266,22 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     bindingToken?: object,
   ): Promise<string> {
     const conn = this.ensureConnection();
-    await this.registerChannelLoopMcpServer();
-    const response = await conn.newSession({ cwd, mcpServers: [] });
-    await this.applySessionApprovalMode(
-      conn,
-      response.sessionId,
-      options?.approvalMode,
-    );
-    this.knownSessionIds.add(response.sessionId);
-    this.sessionBindingTokens.set(response.sessionId, bindingToken);
-    return response.sessionId;
+    const sessionId = await this.settleOnChildExit(async () => {
+      await this.registerChannelLoopMcpServer();
+      const response = await conn.newSession({ cwd, mcpServers: [] });
+      // Inside the settle window: a child exit mid-setSessionMode must
+      // reject here too, not hang the caller. A failed approval mode still
+      // closes and throws before the session is registered below.
+      await this.applySessionApprovalMode(
+        conn,
+        response.sessionId,
+        options?.approvalMode,
+      );
+      return response.sessionId;
+    });
+    this.knownSessionIds.add(sessionId);
+    this.sessionBindingTokens.set(sessionId, bindingToken);
+    return sessionId;
   }
 
   async loadSession(
@@ -280,13 +291,20 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     bindingToken?: object,
   ): Promise<string> {
     const conn = this.ensureConnection();
-    await this.registerChannelLoopMcpServer();
-    await conn.unstable_resumeSession({
-      sessionId,
-      cwd,
-      mcpServers: [],
+    await this.settleOnChildExit(async () => {
+      await this.registerChannelLoopMcpServer();
+      await conn.unstable_resumeSession({
+        sessionId,
+        cwd,
+        mcpServers: [],
+      });
+      // Same settle-window coverage as newSession.
+      await this.applySessionApprovalMode(
+        conn,
+        sessionId,
+        options?.approvalMode,
+      );
     });
-    await this.applySessionApprovalMode(conn, sessionId, options?.approvalMode);
     this.knownSessionIds.add(sessionId);
     this.sessionBindingTokens.set(sessionId, bindingToken);
     return sessionId;
@@ -328,18 +346,23 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     prompt.push({ type: 'text', text });
 
     try {
-      await conn.prompt({
-        sessionId,
-        prompt: prompt as Array<{ type: 'text'; text: string }>,
-        _meta: {
-          [CHANNEL_PROMPT_META_KEY]: true,
-          ...(options?.displayText !== undefined
-            ? {
-                [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
-              }
-            : {}),
-        },
-      });
+      // Inside the settle window: a child exit mid-prompt rejects here
+      // instead of hanging the turn (and with it the caller's pending-turn
+      // bookkeeping, which gates session rotation).
+      await this.settleOnChildExit(() =>
+        conn.prompt({
+          sessionId,
+          prompt: prompt as Array<{ type: 'text'; text: string }>,
+          _meta: {
+            [CHANNEL_PROMPT_META_KEY]: true,
+            ...(options?.displayText !== undefined
+              ? {
+                  [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+                }
+              : {}),
+          },
+        }),
+      );
     } finally {
       this.off('textChunk', onChunk);
       this.off('slashCommandOutput', onSlashCommandOutput);
@@ -427,6 +450,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   }
 
   stop(): void {
+    this.rejectPendingSessionRequests();
     this.resolvePendingPermissions();
     this.knownSessionIds.clear();
     this.sessionBindingTokens.clear();
@@ -577,9 +601,43 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
   private ensureConnection(): ClientSideConnection {
     if (!this.connection || !this.isConnected) {
-      throw new Error('Not connected to ACP agent');
+      throw new BridgeConnectivityError('Not connected to ACP agent');
     }
     return this.connection;
+  }
+
+  /**
+   * The ACP SDK never settles requests still awaiting a response once the
+   * stream ends, so a child death mid-request would hang the caller forever;
+   * a restore's persist suspension, in particular, would never lift. Reject
+   * those requests when the child exits instead.
+   */
+  private settleOnChildExit<T>(run: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const pending = { reject };
+      this.pendingSessionRequests.add(pending);
+      run().then(
+        (result) => {
+          this.pendingSessionRequests.delete(pending);
+          resolve(result);
+        },
+        (error: unknown) => {
+          this.pendingSessionRequests.delete(pending);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private rejectPendingSessionRequests(): void {
+    for (const pending of this.pendingSessionRequests) {
+      pending.reject(
+        new BridgeConnectivityError(
+          'ACP agent process exited while a session request was in flight',
+        ),
+      );
+    }
+    this.pendingSessionRequests.clear();
   }
 
   private requestPermission(

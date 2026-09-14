@@ -63,6 +63,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `allowedUsers`      | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
 | `sessionScope`      | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                                   |
 | `multiSession`      | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                                      |
+| `sessionRotation`   | No               | Bounds after which a route starts a fresh session: `{ "maxTurns": N, "maxAgeHours": N }`. Unset means a session is reused forever. See [Session Rotation](#session-rotation)                                            |
 | `cwd`               | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
 | `approvalMode`      | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
 | `instructions`      | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
@@ -113,6 +114,32 @@ Named results identify their originating task: direct chats use `[task]`, while 
 One task remains selected to receive the next normal message, but other named tasks may keep running concurrently. `/session new <name>` shares the configured workspace, while `/session new <name> --worktree` creates an isolated checkout for that task under the daemon workspace's `.qwen/worktrees/` directory. The daemon verifies the persisted worktree owner before reopening the task after a restart; a missing, changed, or foreign ownership record fails closed instead of silently moving the task into the shared workspace. Creating or selecting another task does not cancel or retarget earlier work, and late results retain their originating task label. A busy task cannot be closed, but its active prompt can be cancelled with `/session cancel [<name>]` through the existing Channel cancellation behavior. Independently queued turns are not cancelled, but in `collect` dispatch mode any follow-ups buffered behind the cancelled prompt are discarded by that existing behavior. Media preparation is not targeted. Bare permission commands apply only to the selected task, while an explicit request ID can answer an owned inactive task. `/clear`, `/new`, and `/reset` also work on a selected worktree task: the task gets a fresh conversation while its worktree and files are kept. A busy worktree task refuses the reset until its prompt finishes, and a task whose worktree record was damaged reports the failure without touching files. Channel memory remains scoped to the chat rather than to a named task.
 
 This mode is unavailable in standalone `qwen channel start`, with webhooks, with non-zero channel or group `groupHistoryLimit`, or with Channel loops. If an enabled loop already exists for that channel, the daemon worker refuses to start until the loop is disabled.
+
+### Session Rotation
+
+By default a route keeps the same session forever, so a long-lived route — a busy group thread, a `single`-scope channel — accumulates context without bound. Once it grows past the model's context window every later message on that route fails, while the rest of the channel keeps working. `sessionRotation` puts a ceiling on that: when the current session is past its bound, the next message starts a fresh one instead.
+
+```json
+{
+  "channels": {
+    "my-bot": {
+      "type": "dingtalk",
+      "sessionScope": "chat_thread",
+      "sessionRotation": {
+        "maxTurns": 200,
+        "maxAgeHours": 24
+      }
+    }
+  }
+}
+```
+
+- **`maxTurns`** — Rotate once this many messages have started a turn on the current session. Messages that settle without one (a `!` shell command, a dropped loop firing) do not count.
+- **`maxAgeHours`** — Rotate once the current session is older than this.
+
+Set either, both, or neither; whichever bound is hit first rotates. `maxTurns` must be a positive integer and `maxAgeHours` a positive number. Omitting `sessionRotation` keeps the previous behavior of never rotating. In `collect` dispatch mode, messages buffered while a turn runs are coalesced into one turn and count once against `maxTurns`. `sessionRotation` cannot be combined with `multiSession`: named tasks resolve sessions without consulting the rotation gate, so the bound would never fire.
+
+Rotation is a context reset, not a cleanup: the new session starts empty, so the bot no longer remembers the earlier conversation on that route. The channel posts a short notice in the chat or thread whose message triggered the rotation, and the daemon logs the rotated route. With `sessionScope: single`, only the chat whose message triggered the rotation is notified; other chats sharing the session see the reset without a notice. Counters are stored alongside the routes and survive a daemon restart. Sessions that were already routed before you enabled rotation start their clock at the first message after the upgrade. A route that still has a turn running or queued rotates on the next message after it settles instead of mid-turn; under sustained traffic, where every message arrives while a turn is still running or queued, the bound waits for the first pause in traffic. Each message routed during that window extends it, so a continuously saturated route — a webhook receiving events faster than turns complete, or an overrunning loop — rotates only once traffic stops.
 
 ### Channel Memory
 

@@ -99,6 +99,99 @@ describe('parseChannelConfig', () => {
     );
   });
 
+  it('parses sessionRotation bounds', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'telegram',
+      token: 't',
+      sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
+    });
+
+    expect(result['sessionRotation']).toEqual({
+      maxTurns: 200,
+      maxAgeHours: 24,
+    });
+  });
+
+  it('leaves sessionRotation unset when omitted', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'telegram',
+      token: 't',
+    });
+
+    expect(result['sessionRotation']).toBeUndefined();
+  });
+
+  it('throws when a sessionRotation bound is not a positive number', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'telegram',
+        token: 't',
+        sessionRotation: { maxTurns: 0 },
+      }),
+    ).rejects.toThrow('"sessionRotation.maxTurns" must be a positive integer');
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'telegram',
+        token: 't',
+        sessionRotation: { maxAgeHours: -1 },
+      }),
+    ).rejects.toThrow(
+      '"sessionRotation.maxAgeHours" must be a positive number',
+    );
+  });
+
+  it('throws when maxTurns is fractional', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'telegram',
+        token: 't',
+        sessionRotation: { maxTurns: 0.5 },
+      }),
+    ).rejects.toThrow('"sessionRotation.maxTurns" must be a positive integer');
+  });
+
+  it('throws when sessionRotation is not an object', async () => {
+    for (const sessionRotation of ['daily', 200, ['maxTurns']]) {
+      await expect(
+        parseChannelConfig('bot', {
+          type: 'telegram',
+          token: 't',
+          sessionRotation,
+        }),
+      ).rejects.toThrow('"sessionRotation" must be an object');
+    }
+  });
+
+  it('accepts a fractional maxAgeHours', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'telegram',
+      token: 't',
+      sessionRotation: { maxAgeHours: 0.5 },
+    });
+
+    expect(result['sessionRotation']).toEqual({ maxAgeHours: 0.5 });
+  });
+
+  it('throws on unknown sessionRotation keys instead of dropping them', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'telegram',
+        token: 't',
+        sessionRotation: { maxTurn: 200 },
+      }),
+    ).rejects.toThrow('"sessionRotation.maxTurn"');
+  });
+
+  it('treats an explicit null sessionRotation as unset', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'telegram',
+      token: 't',
+      sessionRotation: null,
+    });
+
+    expect(result['sessionRotation']).toBeUndefined();
+  });
+
   it('throws when plugin-required fields are missing', async () => {
     await expect(
       parseChannelConfig('bot', { type: 'telegram' }),
@@ -456,6 +549,22 @@ describe('parseChannelConfig', () => {
         },
       }),
     ).rejects.toThrow('cannot use webhooks when multiSession is enabled');
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        multiSession: true,
+        sessionRotation: { maxTurns: 200 },
+      }),
+    ).rejects.toThrow(
+      'cannot use sessionRotation when multiSession is enabled',
+    );
+    // A bound-less sessionRotation parses to undefined and stays compatible.
+    const withoutBounds = await parseChannelConfig('bot', {
+      type: 'bare',
+      multiSession: true,
+      sessionRotation: {},
+    });
+    expect(withoutBounds.sessionRotation).toBeUndefined();
   });
 
   it('rejects an unknown approvalMode', async () => {

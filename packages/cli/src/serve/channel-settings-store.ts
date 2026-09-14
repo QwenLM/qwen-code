@@ -8,6 +8,10 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ChannelConfigFieldDescriptor } from '@qwen-code/channel-base';
 import {
+  isValidRotationBound,
+  isValidTurnCount,
+} from '@qwen-code/channel-base';
+import {
   getPlugin,
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
@@ -230,6 +234,41 @@ function assertSharedField(
       value,
       new Set(['id', 'displayName', 'description']),
     );
+    return true;
+  }
+  if (key === 'sessionRotation') {
+    // The config parser treats an explicit null as "unset"; agree here so a
+    // hand-cleared settings.json survives a later full-replace upsert.
+    if (value === null) return true;
+    if (!isRecord(value)) {
+      throw invalidConfig(`Channel field "${key}" must be an object.`);
+    }
+    for (const [nestedKey, nestedValue] of Object.entries(value)) {
+      const validBound =
+        nestedKey === 'maxTurns'
+          ? isValidTurnCount(nestedValue)
+          : nestedKey === 'maxAgeHours'
+            ? isValidRotationBound(nestedValue)
+            : false;
+      if (!validBound) {
+        // Match the neighbouring shared-field checks: an unchanged stored
+        // value keeps passing (a later version may have tightened the rule),
+        // so an unrelated upsert is never blocked by a field the user did
+        // not touch. A new or changed bad value is still rejected loudly.
+        if (
+          isRecord(previous) &&
+          Object.hasOwn(previous, nestedKey) &&
+          isDeepStrictEqual(
+            (previous as Record<string, unknown>)[nestedKey],
+            nestedValue,
+          ) &&
+          !containsUnsafeObjectKey(nestedValue)
+        ) {
+          continue;
+        }
+        throw invalidConfig(`Channel field "${key}.${nestedKey}" is invalid.`);
+      }
+    }
     return true;
   }
   if (key === 'memoryScope') {
@@ -528,6 +567,10 @@ export class WorkspaceChannelSettingsStore {
       groupHistoryLimit: nextConfig['groupHistoryLimit'],
       groups: isRecord(nextConfig['groups']) ? nextConfig['groups'] : {},
       webhooks: nextConfig['webhooks'],
+      // assertManagedConfig has already shape-validated this field.
+      sessionRotation: nextConfig['sessionRotation'] as
+        | { maxTurns?: number; maxAgeHours?: number }
+        | undefined,
     });
     if (multiSessionError) throw invalidConfig(multiSessionError);
     let crossFieldError: unknown;

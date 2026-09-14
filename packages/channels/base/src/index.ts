@@ -10,6 +10,7 @@ export {
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
   CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  BridgeConnectivityError,
 } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
@@ -90,7 +91,11 @@ export { DmGate } from './DmGate.js';
 export type { DmCheckResult } from './DmGate.js';
 export { SenderGate } from './SenderGate.js';
 export type { SenderCheckResult } from './SenderGate.js';
-export { SessionRouter } from './SessionRouter.js';
+export {
+  SessionRouter,
+  isValidRotationBound,
+  isValidTurnCount,
+} from './SessionRouter.js';
 export {
   sanitizeSenderName,
   sanitizePromptText,
@@ -147,6 +152,7 @@ export type {
   ObservedChannelContactGraph,
   SanitizedToolCallEvent,
   SenderPolicy,
+  SessionRotationConfig,
   SessionScope,
   SessionTarget,
   UserInputPresentationResult,
