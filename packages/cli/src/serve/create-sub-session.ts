@@ -685,11 +685,19 @@ async function awaitFirstTurn(
     })) {
       if (e.type === 'session_update') {
         const d = e.data as {
-          update?: { sessionUpdate?: string; content?: { text?: string } };
+          update?: {
+            sessionUpdate?: string;
+            content?: { text?: string };
+            _meta?: { source?: string };
+          };
         };
         if (
           d?.update?.sessionUpdate === 'agent_message_chunk' &&
-          typeof d.update.content?.text === 'string'
+          typeof d.update.content?.text === 'string' &&
+          (e.promptId === undefined || e.promptId === promptId) &&
+          d.update._meta?.source !== 'background_task_completed' &&
+          d.update._meta?.source !== 'background_notification' &&
+          d.update._meta?.source !== 'background_notification_turn_started'
         ) {
           appendChunk(d.update.content.text);
         }
