@@ -843,8 +843,13 @@ describe('standalone release packaging', () => {
     const sleepImpl = vi.fn(async () => {});
     const fetchImpl = vi
       .fn()
-      .mockRejectedValueOnce(new Error('socket hang up'))
+      .mockRejectedValueOnce(
+        Object.assign(new Error('fetch failed'), {
+          cause: new Error('socket hang up'),
+        }),
+      )
       .mockResolvedValueOnce(new Response('runtime-bytes'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     try {
       await downloadWithRetry(
@@ -855,9 +860,14 @@ describe('standalone release packaging', () => {
 
       expect(fetchImpl).toHaveBeenCalledTimes(2);
       expect(sleepImpl).toHaveBeenCalledTimes(1);
+      expect(sleepImpl).toHaveBeenCalledWith(5_000);
       expect(fetchImpl.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+      // A real undici failure reads only "fetch failed"; the retry warning
+      // has to surface error.cause or the log carries no actionable detail.
+      expect(warnSpy.mock.calls[0][0]).toContain('socket hang up');
       expect(readFileSync(destination, 'utf8')).toBe('runtime-bytes');
     } finally {
+      warnSpy.mockRestore();
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
@@ -890,6 +900,7 @@ describe('standalone release packaging', () => {
     const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
     const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const sleepImpl = vi.fn(async () => {});
     const fetchImpl = vi.fn(
       async () =>
         new Response('boom', {
@@ -903,13 +914,81 @@ describe('standalone release packaging', () => {
         downloadWithRetry(
           'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
           destination,
-          { fetchImpl, sleepImpl: async () => {} },
+          { fetchImpl, sleepImpl },
         ),
       ).rejects.toThrow(/Failed to download/);
       expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(sleepImpl.mock.calls.map(([ms]) => ms)).toEqual([5_000, 10_000]);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it('re-downloads a checksum list that omits the runtime archives', async () => {
+    const { downloadRuntimeChecksums } = await import(
+      standaloneReleaseScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const checksumsPath = path.join(tmpDir, 'node-SHASUMS256.txt');
+    const shasumsUrl = 'https://nodejs.org/dist/v22.0.0/SHASUMS256.txt';
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('<html>gateway interstitial</html>'))
+      .mockResolvedValueOnce(
+        new Response(`${'a'.repeat(64)}  node-v22.0.0-linux-x64.tar.xz\n`),
+      );
+
+    try {
+      const checksums = await downloadRuntimeChecksums({
+        runtime: 'node',
+        distUrl: 'https://nodejs.org/dist/v22.0.0',
+        checksumsPath,
+        expectedArchives: ['node-v22.0.0-linux-x64.tar.xz'],
+        fetchImpl,
+        sleepImpl: async () => {},
+      });
+
+      expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+        shasumsUrl,
+        shasumsUrl,
+      ]);
+      expect(checksums.get('node-v22.0.0-linux-x64.tar.xz')).toBe(
+        'a'.repeat(64),
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('derives the runtime archive name per flavor', async () => {
+    const { runtimeArchiveName } = await import(standaloneReleaseScriptUrl);
+    const target = {
+      nodeTarget: 'linux-x64',
+      nodeArchiveExtension: 'tar.xz',
+      bunAsset: 'bun-linux-x64',
+    };
+
+    expect(
+      runtimeArchiveName({ ...target, runtime: 'node', nodeVersion: '22.0.0' }),
+    ).toBe('node-v22.0.0-linux-x64.tar.xz');
+    expect(
+      runtimeArchiveName({ ...target, runtime: 'bun', nodeVersion: '22.0.0' }),
+    ).toBe('bun-linux-x64.zip');
+  });
+
+  it('routes every standalone runtime download through the retry wrapper', () => {
+    const releaseScript = readScript('scripts/build-standalone-release.js');
+
+    // The helper's own tests stay green even when the release path stops
+    // calling it, so pin the wiring and the retry constants by source.
+    expect(releaseScript.match(/await downloadWithRetry\(/g)).toHaveLength(2);
+    expect(releaseScript.match(/await downloadFile\(/g)).toHaveLength(1);
+    expect(releaseScript).toContain('const MAX_DOWNLOAD_ATTEMPTS = 3;');
+    expect(releaseScript).toContain(
+      'const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;',
+    );
+    expect(releaseScript).toContain('const DOWNLOAD_TIMEOUT_MS = 120_000;');
+    expect(releaseScript).toContain('AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)');
   });
 
   it('stages the locked clipboard packages for every release target', async () => {

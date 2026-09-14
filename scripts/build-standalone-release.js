@@ -64,7 +64,7 @@ const DEFAULT_RUNTIME = 'node';
 const DEFAULT_BUN_VERSION = '1.3.14';
 const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
 // The runtime downloads are the publish job's least reliable leg: one
-// transient nodejs.org failure aborted the v0.23.4 publish while the
+// transient download failure aborted the v0.23.4 publish while the
 // unchanged re-run passed. Bound each attempt and retry before failing.
 const MAX_DOWNLOAD_ATTEMPTS = 3;
 const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;
@@ -138,14 +138,14 @@ async function main() {
     // checksum list (Node.js SHASUMS256.txt vs Bun's), so fetch one per flavor.
     const checksums = {};
     for (const flavor of flavors) {
-      const checksumsPath = path.join(runtimeDir, `${flavor}-SHASUMS256.txt`);
-      await downloadWithRetry(
-        `${flavor === 'bun' ? bunDistUrl : nodeDistUrl}/SHASUMS256.txt`,
-        checksumsPath,
-      );
-      checksums[flavor] = parseChecksums(
-        fs.readFileSync(checksumsPath, 'utf8'),
-      );
+      checksums[flavor] = await downloadRuntimeChecksums({
+        runtime: flavor,
+        distUrl: flavor === 'bun' ? bunDistUrl : nodeDistUrl,
+        checksumsPath: path.join(runtimeDir, `${flavor}-SHASUMS256.txt`),
+        expectedArchives: RELEASE_TARGETS.map((target) =>
+          runtimeArchiveName({ ...target, runtime: flavor, nodeVersion }),
+        ),
+      });
     }
     const nativeModulesDir = stageClipboardPackages(runtimeDir);
     // Only the bun runtime consumes the staged OpenTUI packages; the classic
@@ -184,6 +184,18 @@ function isMainModule() {
   return process.argv[1] && path.resolve(process.argv[1]) === __filename;
 }
 
+function runtimeArchiveName({
+  runtime,
+  nodeVersion,
+  nodeTarget,
+  nodeArchiveExtension,
+  bunAsset,
+}) {
+  return runtime === 'bun'
+    ? `${bunAsset}.zip`
+    : `node-v${nodeVersion}-${nodeTarget}.${nodeArchiveExtension}`;
+}
+
 async function packageTarget({
   qwenTarget,
   nodeTarget,
@@ -200,15 +212,14 @@ async function packageTarget({
   nativeModulesDir,
   opentuiModulesDir,
 }) {
-  let archiveName;
-  let archiveUrlBase;
-  if (runtime === 'bun') {
-    archiveName = `${bunAsset}.zip`;
-    archiveUrlBase = bunDistUrl;
-  } else {
-    archiveName = `node-v${nodeVersion}-${nodeTarget}.${nodeArchiveExtension}`;
-    archiveUrlBase = nodeDistUrl;
-  }
+  const archiveName = runtimeArchiveName({
+    runtime,
+    nodeVersion,
+    nodeTarget,
+    nodeArchiveExtension,
+    bunAsset,
+  });
+  const archiveUrlBase = runtime === 'bun' ? bunDistUrl : nodeDistUrl;
   const archivePath = path.join(runtimeDir, archiveName);
 
   await downloadWithRetry(`${archiveUrlBase}/${archiveName}`, archivePath, {
@@ -353,14 +364,10 @@ function stageOpenTuiPackages(runtimeDir) {
   return path.join(installDir, 'node_modules');
 }
 
-async function downloadFile(
-  url,
-  destination,
-  { fetchImpl = fetch, timeoutMs = DOWNLOAD_TIMEOUT_MS } = {},
-) {
+async function downloadFile(url, destination, { fetchImpl = fetch } = {}) {
   console.log(`Downloading ${url}`);
   const response = await fetchImpl(url, {
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
   });
   if (!response.ok) {
     fail(
@@ -385,26 +392,60 @@ async function downloadWithRetry(
     verify,
     fetchImpl = fetch,
     sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    maxAttempts = MAX_DOWNLOAD_ATTEMPTS,
   } = {},
 ) {
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+  for (let attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt += 1) {
     try {
       await downloadFile(url, destination, { fetchImpl });
       await verify?.();
       return;
     } catch (error) {
-      if (attempt >= maxAttempts) {
+      if (attempt >= MAX_DOWNLOAD_ATTEMPTS) {
         throw error;
       }
       const delayMs = INITIAL_DOWNLOAD_BACKOFF_MS * 2 ** (attempt - 1);
       const message = error instanceof Error ? error.message : String(error);
+      // A real undici network failure reads only "fetch failed"; the
+      // discriminating detail (ECONNRESET, ENOTFOUND, ...) is on the cause.
+      const cause =
+        error instanceof Error && error.cause instanceof Error
+          ? error.cause.message
+          : undefined;
       console.warn(
-        `Download attempt ${attempt}/${maxAttempts} failed for ${url}: ${message} Retrying in ${delayMs / 1000}s...`,
+        `Download attempt ${attempt}/${MAX_DOWNLOAD_ATTEMPTS} failed for ${url}: ${message}${
+          cause ? ` (cause: ${cause})` : ''
+        }, retrying in ${delayMs / 1000}s...`,
       );
       await sleepImpl(delayMs);
     }
   }
+}
+
+// The checksum list is the one download the archive legs cannot re-fetch, so
+// verify it inside the retry: a corrupt or truncated list is downloaded again
+// instead of poisoning every archive check that shares the parsed map.
+async function downloadRuntimeChecksums({
+  runtime,
+  distUrl,
+  checksumsPath,
+  expectedArchives,
+  fetchImpl,
+  sleepImpl,
+}) {
+  let checksums;
+  await downloadWithRetry(`${distUrl}/SHASUMS256.txt`, checksumsPath, {
+    verify: () => {
+      checksums = parseChecksums(fs.readFileSync(checksumsPath, 'utf8'));
+      for (const archiveName of expectedArchives) {
+        if (!checksums.has(archiveName)) {
+          fail(`${runtime} SHASUMS256.txt does not list ${archiveName}`);
+        }
+      }
+    },
+    fetchImpl,
+    sleepImpl,
+  });
+  return checksums;
 }
 
 function parseChecksums(content) {
@@ -570,8 +611,10 @@ function fail(message) {
 
 export {
   assertStandaloneOutput,
+  downloadRuntimeChecksums,
   downloadWithRetry,
   parseChecksums,
   readClipboardPackageSpecs,
   RELEASE_TARGETS,
+  runtimeArchiveName,
 };
