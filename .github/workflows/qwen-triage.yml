@@ -2590,7 +2590,11 @@ jobs:
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
           set -euo pipefail
-          apt-get install -y --no-install-recommends util-linux
+          # zip pairs with the base image's unzip so the install-script archive
+          # suite runs instead of throwing at collection: its CI-host guard
+          # hard-fails when CI=true and either binary is missing, and
+          # node:22-bookworm ships unzip but not zip.
+          apt-get install -y --no-install-recommends util-linux zip
 
           # Run the global install from RUNNER_TEMP: the persistent workspace
           # still holds the PREVIOUS run's checked-out tree at this point, and
