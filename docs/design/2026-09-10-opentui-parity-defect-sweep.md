@@ -1035,7 +1035,7 @@ the dialog off a repaint timer. That interval shows up in a measurement, not jus
 in the source: over a scenario that parks the caret in the free-text row, the ink
 leg wrote 270 KB in each sixty-second window it sat there, four of the scenario's
 seven settling waits burned their full timeout, and the leg took 251 s where this
-renderer's took 14 s.
+renderer's took 13 s.
 
 Mount semantics differ per field, because ink's do. The question dialog's row is
 mounted by that dialog only while its own option is the selected one, and mounted
@@ -1064,17 +1064,20 @@ legs, with a single question so that neither the tab clamp nor the double-fire
 recorded under Decision 21 can be what produced the frame: six characters
 typed, the caret taken back two cells, one character inserted. Both legs show
 `> abcdXef` at the same column of the same row and both record `abcdXef` as
-the answer. The styled capture pins the cell itself — at the one checkpoint
-where both frames caught ink's cursor visible it sits on the same column over
-the same character on both sides, differing only in the two colours; at the
-two before it ink's cell is simply absent, which is its interval rather than a
-missing cursor. What no scenario reaches is the authentication wizard, as
-before: its four fields' editing rests on the unit suites alone. One
-test-runtime note belongs here because it cost a debugging pass: the DOM
-runtime the field tests use keeps earlier renders of a re-rendered row
-mounted beside the live one, so the probe that reads the cursor cell reads
-the last one. Rendering the same shape through the real renderer over five
-state changes leaves exactly one row, so this is the harness, not the dialog.
+the answer. The styled capture pins the cell itself. At the two checkpoints
+where ink draws it, the cell sits over the same character in the same column on
+both sides and differs only in its two colours. At the checkpoint before those
+the caret rests past the last character, so the cell each leg would draw is a
+trailing blank the capture drops, and neither shows one. At the first, over an
+empty field's placeholder, ink's cell is absent where this renderer's is
+present, which is its interval rather than a missing cursor. What no scenario
+reaches is the authentication wizard, as before: its four fields' editing rests
+on the unit suites alone. One test-runtime note belongs here because it cost a
+debugging pass: the DOM runtime the field tests use keeps earlier renders of a
+re-rendered row mounted beside the live one, so the probe that reads the cursor
+cell reads the last one. Rendering the same shape through the real renderer over
+five state changes leaves exactly one row, so this is the harness, not the
+dialog.
 
 ## Coverage boundary
 
