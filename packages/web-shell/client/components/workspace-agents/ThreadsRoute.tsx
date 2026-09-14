@@ -24,6 +24,8 @@ import {
 import { ThreadView, type ThreadDetailView } from './ThreadView';
 import { ThreadChat } from './ThreadChat';
 import { AgentCreatePage } from '../agents/AgentCreatePage';
+import { Skeleton } from '../ui/skeleton';
+import { Button } from '../ui/button';
 import type {
   RoutingPreviewTarget,
   ThreadSummaryView,
@@ -71,6 +73,12 @@ export interface ThreadsApi {
   postReply(id: string, text: string): Promise<unknown>;
   markDone(id: string): Promise<unknown>;
   cancelRun(threadId: string, runId: string): Promise<unknown>;
+  answerQuestion?(
+    threadId: string,
+    runId: string,
+    requestId: string,
+    answers: Record<string, string>,
+  ): Promise<unknown>;
 }
 
 export function createThreadsHttpApi(
@@ -171,6 +179,11 @@ export function createThreadsHttpApi(
       post(
         `/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/cancel`,
         {},
+      ),
+    answerQuestion: (threadId, runId, requestId, answers) =>
+      post(
+        `/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/question`,
+        { requestId, answers },
       ),
   };
 }
@@ -409,13 +422,43 @@ export function ThreadsRoute({
   }
 
   if (openId && detail?.id !== openId) {
+    if (error) {
+      return (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
+          <p role="alert" className="text-sm text-destructive">
+            无法加载对话：{error}
+          </p>
+          <Button variant="outline" onClick={() => void refresh()}>
+            重试
+          </Button>
+          <Button variant="ghost" onClick={() => openThread()}>
+            返回任务
+          </Button>
+        </div>
+      );
+    }
     return (
-      <div>
-        <button type="button" onClick={() => openThread()}>
-          Back to tasks
-        </button>
-        <p role="status">{error ?? 'Loading task…'}</p>
-      </div>
+      <section
+        aria-busy="true"
+        aria-label="加载对话"
+        className="mx-auto flex w-full max-w-4xl flex-1 flex-col p-6 sm:p-8"
+      >
+        <p role="status" className="sr-only">
+          正在加载对话…
+        </p>
+        <div
+          aria-hidden="true"
+          className="flex flex-1 flex-col justify-end gap-6"
+        >
+          <Skeleton className="h-10 w-2/5 self-end rounded-2xl motion-reduce:animate-none" />
+          <div className="flex flex-col gap-3">
+            <Skeleton className="h-3 w-24 motion-reduce:animate-none" />
+            <Skeleton className="h-4 w-4/5 motion-reduce:animate-none" />
+            <Skeleton className="h-4 w-3/5 motion-reduce:animate-none" />
+            <Skeleton className="mt-1 h-28 w-full rounded-xl motion-reduce:animate-none" />
+          </div>
+        </div>
+      </section>
     );
   }
 
@@ -429,6 +472,12 @@ export function ThreadsRoute({
             </p>
           )}
           <ThreadChat
+            onAnswerQuestion={(runId, requestId, answers) =>
+              mutate(() => {
+                if (!client.answerQuestion) throw new Error('问答接口不可用');
+                return client.answerQuestion(openId, runId, requestId, answers);
+              })
+            }
             key={detail.id}
             activityOnly={activityOnly}
             headerActionsContainer={headerActionsContainer}
