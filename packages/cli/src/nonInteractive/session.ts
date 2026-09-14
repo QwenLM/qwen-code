@@ -62,6 +62,7 @@ interface TaskStartedQueueItem {
 interface TaskNotificationQueueItem {
   displayText: string;
   modelText: string;
+  todoWorkChainId?: string;
   monitorId?: string;
   sdkNotification: {
     task_id: string;
@@ -273,6 +274,7 @@ class Session {
       this.enqueueTaskNotification({
         displayText,
         modelText,
+        todoWorkChainId: meta.todoWorkChainId,
         monitorId: meta.monitorId,
         sdkNotification: {
           task_id: meta.monitorId,
@@ -317,6 +319,7 @@ class Session {
         this.enqueueTaskNotification({
           displayText,
           modelText,
+          todoWorkChainId: meta.todoWorkChainId,
           sdkNotification: {
             task_id: meta.agentId,
             tool_use_id: meta.toolUseId,
@@ -746,6 +749,7 @@ class Session {
           controlService: this.controlService ?? undefined,
           sendMessageType: SendMessageType.Notification,
           notificationDisplayText: combinedDisplayText,
+          todoWorkChainId: batch[0]?.todoWorkChainId,
           captureBackgroundTaskNotifications: false,
           captureBackgroundTaskRegistrations: false,
           captureMonitorNotifications: false,
@@ -808,7 +812,16 @@ class Session {
       if (this.taskNotificationQueue.length === 0) {
         continue;
       }
-      const batch = this.taskNotificationQueue.splice(0);
+      const todoWorkChainId = this.taskNotificationQueue[0]!.todoWorkChainId;
+      let splitIdx = 1;
+      while (
+        splitIdx < this.taskNotificationQueue.length &&
+        this.taskNotificationQueue[splitIdx]!.todoWorkChainId ===
+          todoWorkChainId
+      ) {
+        splitIdx++;
+      }
+      const batch = this.taskNotificationQueue.splice(0, splitIdx);
       try {
         await this.processTaskNotificationBatch(batch);
       } catch (error) {
@@ -970,6 +983,8 @@ class Session {
 
     // Wait for all pending work
     await this.waitForAllPendingWork();
+    this.stopMonitorCallbacks();
+    this.stopBackgroundTaskCallbacks();
     this.abortTaskRegistries();
 
     this.finishShutdown();
@@ -978,12 +993,16 @@ class Session {
   private async drainAndShutdown(): Promise<void> {
     debugLogger.debug('[Session] Draining pending work before shutdown');
 
-    // Abort task registries and stop their callbacks first, then drain anything
-    // already queued so EOF does not remain coupled to background work.
-    this.abortTaskRegistries();
+    // Stop registry callbacks before aborting so cancellation notifications
+    // cannot enqueue a fresh model turn after stdin has closed. Initialization
+    // can install callbacks while the drain waits, so stop them again before
+    // the final abort.
     this.stopMonitorCallbacks();
     this.stopBackgroundTaskCallbacks();
+    this.abortTaskRegistries();
     await this.waitForAllPendingWork();
+    this.stopMonitorCallbacks();
+    this.stopBackgroundTaskCallbacks();
     this.abortTaskRegistries();
 
     this.finishShutdown();

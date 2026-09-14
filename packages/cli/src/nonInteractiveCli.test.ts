@@ -3476,6 +3476,51 @@ describe('runNonInteractive', () => {
     expect(finalize).not.toHaveBeenCalled();
   });
 
+  it('forwards a Todo work chain id on the first notification turn', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '<task-notification>done</task-notification>',
+      'prompt-notification-chain',
+      {
+        adapter,
+        sendMessageType: SendMessageType.Notification,
+        notificationDisplayText: 'Background task completed',
+        todoWorkChainId: 'todo-chain-1',
+        captureBackgroundTaskNotifications: false,
+        captureBackgroundTaskRegistrations: false,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+      },
+    );
+
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+      1,
+      [{ text: '<task-notification>done</task-notification>' }],
+      expect.any(AbortSignal),
+      'prompt-notification-chain',
+      expect.objectContaining({
+        type: SendMessageType.Notification,
+        notificationDisplayText: 'Background task completed',
+        todoWorkChainId: 'todo-chain-1',
+      }),
+    );
+  });
+
   it('should handle a single tool call and respond', async () => {
     setupMetricsMock();
     const toolCallEvent: ServerLlmStreamEvent = {
@@ -7017,6 +7062,56 @@ describe('runNonInteractive', () => {
     expect(endInteractionSpanSpy).toHaveBeenCalledWith('cancelled', {
       promptId: 'prompt-recoverable-interrupt',
     });
+  });
+
+  it('does not hold a caller-owned turn on an earlier Session task', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    mockBackgroundTaskRegistry.hasUnfinalizedTasks.mockReturnValue(true);
+    const turnAbortController = new AbortController();
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        },
+      ]),
+    );
+
+    const runPromise = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'plain follow-up turn',
+      'prompt-session-foreign-task',
+      {
+        adapter,
+        abortController: turnAbortController,
+        recoverableCancellation: true,
+        captureBackgroundTaskNotifications: false,
+        captureBackgroundTaskRegistrations: false,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+      },
+    );
+    const outcome = await Promise.race([
+      runPromise.then((exitCode) => ({ exitCode })),
+      new Promise<'timeout'>((resolve) =>
+        setTimeout(() => resolve('timeout'), 500),
+      ),
+    ]);
+    if (outcome === 'timeout') {
+      turnAbortController.abort(new TurnInterruptedError());
+      await runPromise;
+    }
+
+    expect(outcome).toEqual({ exitCode: 0 });
+    expect(
+      mockBackgroundTaskRegistry.hasUnfinalizedTasks,
+    ).not.toHaveBeenCalled();
+    expect(mockBackgroundTaskRegistry.abortAll).not.toHaveBeenCalled();
   });
 
   it('preserves Session-owned background tasks when interrupted during final holdback', async () => {

@@ -466,6 +466,7 @@ export interface RunNonInteractiveOptions {
   controlService?: ControlService;
   sendMessageType?: SendMessageType;
   notificationDisplayText?: string;
+  todoWorkChainId?: string;
   captureBackgroundTaskNotifications?: boolean;
   captureBackgroundTaskRegistrations?: boolean;
   captureMonitorNotifications?: boolean;
@@ -2541,6 +2542,10 @@ export async function runNonInteractive(
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,
               }),
+            ...(isFirstTurn &&
+              options.todoWorkChainId !== undefined && {
+                todoWorkChainId: options.todoWorkChainId,
+              }),
             ...(goalTurn
               ? {
                   goalPermit: goalTurn.permit,
@@ -3174,8 +3179,28 @@ export async function runNonInteractive(
             // paired with one. Monitors are different: they intentionally
             // continue in the background, so final result emission is not
             // gated on monitor lifetime.
-            if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
+            if (!ownsAdapter) {
+              if (localQueue.length === 0) {
+                // Preserve the final cancellation checkpoint for reusable
+                // sessions without polling the registry-global task set. An
+                // interrupt queued by the just-finished stream gets one event
+                // loop turn to land, but an earlier turn's task cannot hold
+                // this result beyond that checkpoint.
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                if (
+                  !abortController.signal.aborted &&
+                  localQueue.length === 0
+                ) {
+                  break;
+                }
+                continue;
+              }
+            } else if (
+              !registry.hasUnfinalizedTasks() &&
+              localQueue.length === 0
+            ) {
               break;
+            }
             await new Promise((r) => setTimeout(r, 100));
           }
 

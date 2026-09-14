@@ -1076,6 +1076,7 @@ describe('runNonInteractiveStreamJson', () => {
             agentId: string;
             toolUseId?: string;
             status: string;
+            todoWorkChainId?: string;
             stats?: {
               totalTokens: number;
               toolUses: number;
@@ -1117,6 +1118,7 @@ describe('runNonInteractiveStreamJson', () => {
         agentId: 'agent_1',
         toolUseId: 'tool_agent_1',
         status: 'completed',
+        todoWorkChainId: 'todo-chain-1',
         stats: { totalTokens: 12, toolUses: 3, durationMs: 45 },
       });
       await vi.waitFor(() => {
@@ -1168,6 +1170,7 @@ describe('runNonInteractiveStreamJson', () => {
       expect.objectContaining({
         adapter: mockOutputAdapter,
         sendMessageType: SendMessageType.Notification,
+        todoWorkChainId: 'todo-chain-1',
         captureBackgroundTaskNotifications: false,
         captureBackgroundTaskRegistrations: false,
       }),
@@ -1184,6 +1187,70 @@ describe('runNonInteractiveStreamJson', () => {
     expect(
       mockBackgroundTaskRegistry.setRegisterCallback,
     ).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps background notifications from different Todo work chains in separate turns', async () => {
+    let notificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            agentId: string;
+            status: string;
+            todoWorkChainId?: string;
+          },
+        ) => void)
+      | undefined;
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (cb) => {
+        notificationCallback = cb;
+      },
+    );
+
+    runNonInteractiveMock.mockImplementationOnce(async () => {
+      notificationCallback?.('First complete', '<first />', {
+        agentId: 'agent_1',
+        status: 'completed',
+        todoWorkChainId: 'chain-1',
+      });
+      notificationCallback?.('Second complete', '<second />', {
+        agentId: 'agent_2',
+        status: 'completed',
+        todoWorkChainId: 'chain-2',
+      });
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('Start both background tasks');
+      await vi.waitFor(() => {
+        expect(runNonInteractiveMock).toHaveBeenCalledTimes(3);
+      });
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock).toHaveBeenNthCalledWith(
+      2,
+      config,
+      expect.anything(),
+      '<first />',
+      expect.any(String),
+      expect.objectContaining({
+        sendMessageType: SendMessageType.Notification,
+        todoWorkChainId: 'chain-1',
+      }),
+    );
+    expect(runNonInteractiveMock).toHaveBeenNthCalledWith(
+      3,
+      config,
+      expect.anything(),
+      '<second />',
+      expect.any(String),
+      expect.objectContaining({
+        sendMessageType: SendMessageType.Notification,
+        todoWorkChainId: 'chain-2',
+      }),
+    );
   });
 
   it('drops a queued running monitor event after cancellation', async () => {
@@ -1701,6 +1768,105 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops background callbacks before aborting registries on EOF', async () => {
+    let notificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void)
+      | undefined;
+    let emittedCancellation = false;
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (cb) => {
+        notificationCallback = cb;
+      },
+    );
+    mockBackgroundTaskRegistry.abortAll.mockImplementation(() => {
+      if (!notificationCallback || emittedCancellation) return;
+      emittedCancellation = true;
+      notificationCallback('Background task cancelled', '<cancelled />', {
+        agentId: 'agent_eof',
+        status: 'cancelled',
+      });
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('Start background work');
+      await vi.waitFor(() => {
+        expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+      });
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+    expect(mockOutputAdapter.emitSystemMessage).not.toHaveBeenCalledWith(
+      'task_notification',
+      expect.anything(),
+    );
+  });
+
+  it('stops callbacks installed while EOF waits for initialization', async () => {
+    let resolveInitialization: (() => void) | undefined;
+    config = createConfig({
+      initialize: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveInitialization = resolve;
+          }),
+      ),
+    });
+
+    let notificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void)
+      | undefined;
+    let emittedCancellation = false;
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (cb) => {
+        notificationCallback = cb;
+      },
+    );
+    mockBackgroundTaskRegistry.abortAll.mockImplementation(() => {
+      if (!notificationCallback || emittedCancellation) return;
+      emittedCancellation = true;
+      notificationCallback('Background task cancelled', '<cancelled />', {
+        agentId: 'agent_fast_eof',
+        status: 'cancelled',
+      });
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('Initialize and exit');
+    };
+
+    const sessionPromise = runNonInteractiveStreamJson(config, '');
+    await vi.waitFor(() => {
+      expect(resolveInitialization).toBeDefined();
+      expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(1);
+    });
+    resolveInitialization?.();
+    await sessionPromise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+    expect(
+      mockBackgroundTaskRegistry.setNotificationCallback,
+    ).toHaveBeenLastCalledWith(undefined);
+    expect(
+      mockBackgroundTaskRegistry.setRegisterCallback,
+    ).toHaveBeenLastCalledWith(undefined);
+    expect(mockOutputAdapter.emitSystemMessage).not.toHaveBeenCalledWith(
+      'task_notification',
+      expect.anything(),
+    );
   });
 
   it('aborts background registries on stream completion shutdown', async () => {
